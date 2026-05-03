@@ -99,38 +99,38 @@ func TestCompareChains_SlotBattleAtSameLengthAndSlotIsAmbiguous(t *testing.T) {
 		},
 	}
 
+	// cardanoTip's hash (0c54…) is lower than dingoTip's (5c25…), so
+	// the rule-3 tiebreak selects cardanoTip. CompareChains must
+	// return ChainBBetter and IsBetterChain(cardano, dingo) must be
+	// true so the local selector adopts the lower-hash forge
+	// independently of chainsync arrival order.
 	got := chainselection.CompareChains(dingoTip, cardanoTip)
 	require.Equalf(
 		t,
-		chainselection.ChainEqual,
+		chainselection.ChainBBetter,
 		got,
-		"CompareChains returns %d (a real comparator value 1, -1, "+
-			"or 2 would mean a deterministic tie-break exists). "+
-			"Returning ChainEqual (0) at a slot battle means the "+
-			"local chain-selection result depends on which chain "+
-			"happened to be installed first. cardano-node breaks "+
-			"the same pair deterministically; the asymmetry is "+
-			"how the eras-DevNet VRF wedge gets seeded.",
+		"CompareChains at a slot battle must apply the lower-hash "+
+			"tiebreak. Got %d. ChainEqual here is the original gap: "+
+			"the local chain-selection result becomes order-dependent, "+
+			"the locally-forged block is kept, and its VRF output "+
+			"folds into the evolving nonce — seeding the eta0 drift "+
+			"that breaks header verification at the next era boundary.",
 		got,
 	)
 
 	require.Falsef(
 		t,
 		chainselection.IsBetterChain(dingoTip, cardanoTip),
-		"IsBetterChain(dingo, cardano) returned true — that would "+
-			"mean dingo wins this slot battle locally and would "+
-			"refuse the chainsync-driven adoption of cardano's "+
-			"block. Empirically the symptom is the opposite "+
-			"(local_won=false), but the principle holds: any "+
-			"non-deterministic answer here is the bug.",
+		"IsBetterChain(higher-hash, lower-hash) must be false: the "+
+			"higher-hash forge does not win the rule-3 tiebreak.",
 	)
-	require.Falsef(
+	require.Truef(
 		t,
 		chainselection.IsBetterChain(cardanoTip, dingoTip),
-		"IsBetterChain(cardano, dingo) returned true — that would "+
-			"mean dingo's local selector unilaterally adopts "+
-			"cardano's block. Today neither call is true, which is "+
-			"exactly the gap: dingo cannot make a choice on its "+
-			"own and has to wait for chainsync to force one.",
+		"IsBetterChain(lower-hash, higher-hash) must be true so the "+
+			"local selector adopts the lower-hash forge. Returning "+
+			"false re-introduces the original gap where the chains "+
+			"are free to drift between slot battles and chainsync is "+
+			"the only path that ever resolves them.",
 	)
 }

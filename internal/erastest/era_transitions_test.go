@@ -369,44 +369,21 @@ func TestEraTransitions(t *testing.T) {
 			}
 		}
 
-		// We assert only the chain-progression invariant here: the
-		// canonical chain (the relay's view) has at least one block
-		// in every era it traversed, i.e. the era pipeline didn't
-		// stall anywhere.
+		// Two assertions per era on the canonical chain (the relay's
+		// view): that the chain has at least one block, and that the
+		// terminal era — the latest era the run reaches — contains at
+		// least one dingo-issued block.
 		//
-		// We do NOT assert that dingo's vkey appears as the issuer
-		// of any block. The per-era dingo-issued count is determined
-		// by the interaction of three race-prone mechanics:
-		//
-		//   1. Bootstrap forging window. dingo's
-		//      forgeSyncToleranceSlots (100) is wider than the
-		//      testnet's epoch length (75), so the sync gate never
-		//      withholds a forge during the bootstrap epoch — dingo
-		//      forges on a stale local view from slot 1 onwards
-		//      regardless of how far behind upstream it is.
-		//
-		//   2. Chain-selection tie-break. Praos ranks chains by
-		//      block count first (lower-slot tie-break only fires
-		//      at equal length). Whichever side accumulates more
-		//      blocks past a common ancestor first wins the fork
-		//      regardless of slot, and during bootstrap that's
-		//      whichever node started forging earlier.
-		//
-		//   3. Eta0 carry-through. A bootstrap-era chain divergence
-		//      between dingo and cardano-producer leaves the two
-		//      sides computing different evolving nonces over the
-		//      diverged window. The candidate nonce frozen at the
-		//      stability cutoff in any later epoch picks up the
-		//      mismatch, so the eta0 each side uses to verify peer
-		//      headers in the next epoch can disagree, and dingo-
-		//      forged blocks the relay cannot VRF-verify never
-		//      reach the canonical chain at all.
-		//
-		// The per-era dingo-issued counts are still logged for
-		// triage. A genuinely silent dingo across an entire run —
-		// no forges in any of the three streams' debug logs — is a
-		// regression you investigate from the dingo container logs,
-		// not from this assertion.
+		// The terminal-era forge assertion catches eta0 / chain-
+		// divergence regressions that earlier eras can mask. With two
+		// equal-stake pools and f=0.4 over a 75-slot epoch the chance
+		// dingo wins zero leader slots in the terminal era is
+		// (1-0.225)^75 ≈ 1e-8, so this is not a realistic VRF-variance
+		// flake. A run where the relay's chain reaches the terminal
+		// era but contains no dingo-issued blocks means dingo's
+		// forges are not propagating to peers — typically because the
+		// relay's VRF check rejected them, which in turn means dingo's
+		// epoch nonce diverged from cardano-node's somewhere upstream.
 		var erasToCheck []eraCheck
 		if start, ok := cfg.StartingEra(); ok {
 			erasToCheck = append(erasToCheck, eraCheck{
@@ -419,6 +396,7 @@ func TestEraTransitions(t *testing.T) {
 			})
 		}
 
+		terminalEraID := erasToCheck[len(erasToCheck)-1].id
 		for _, era := range erasToCheck {
 			total := totalByEra[era.id]
 			dingo := dingoBlocksByEra[era.id]
@@ -431,6 +409,21 @@ func TestEraTransitions(t *testing.T) {
 				"no blocks at all observed in era %s — chain stalled?",
 				era.name,
 			)
+			if era.id == terminalEraID {
+				require.Greaterf(
+					t, dingo, 0,
+					"no dingo-issued blocks observed in terminal era "+
+						"%s. With two equal-stake pools and f=0.4 over "+
+						"75 slots the probability of zero forges is "+
+						"≈1e-8, so this is a chain-divergence regression: "+
+						"dingo's forges are being VRF-rejected by the "+
+						"relay because dingo's eta0 disagrees with "+
+						"cardano-node's. Investigate the dingo log for "+
+						"VRF verification failures clustered at the "+
+						"era boundary.",
+					era.name,
+				)
+			}
 		}
 	})
 }
