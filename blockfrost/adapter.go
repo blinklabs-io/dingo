@@ -42,6 +42,7 @@ var (
 	ErrBlockNotFound  = errors.New("block not found")
 	ErrEpochNotFound  = errors.New("epoch not found")
 	ErrAssetNotFound  = errors.New("asset not found")
+	ErrDRepNotFound   = errors.New("drep not found")
 )
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
@@ -658,6 +659,64 @@ func (a *NodeAdapter) Asset(
 		InitialMintTxHash: "",
 		MintOrBurnCount:   0,
 		OnchainMetadata:   nil,
+	}, nil
+}
+
+// DRep returns governance DRep information for the requested
+// credential.
+func (a *NodeAdapter) DRep(
+	credential DRepCredential,
+) (DRepInfo, error) {
+	db := a.ledgerState.Database()
+	drep, err := db.GetDrep(credential.Hash, true, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrDrepNotFound) {
+			return DRepInfo{}, fmt.Errorf(
+				"drep %x: %w",
+				credential.Hash,
+				ErrDRepNotFound,
+			)
+		}
+		return DRepInfo{}, fmt.Errorf(
+			"get drep %x: %w",
+			credential.Hash,
+			err,
+		)
+	}
+	power, err := db.GetDRepVotingPower(credential.Hash, nil)
+	if err != nil {
+		return DRepInfo{}, fmt.Errorf(
+			"get drep voting power %x: %w",
+			credential.Hash,
+			err,
+		)
+	}
+
+	registrationEpoch, err := a.ledgerState.SlotToEpoch(drep.AddedSlot)
+	if err != nil {
+		return DRepInfo{}, fmt.Errorf(
+			"get DRep registration epoch for slot %d: %w",
+			drep.AddedSlot,
+			err,
+		)
+	}
+
+	currentEpoch := a.ledgerState.CurrentEpoch()
+	registered := drep.Active
+	active := registered &&
+		(drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch)
+	amount := strconv.FormatUint(power, 10)
+
+	return DRepInfo{
+		DRepID:      credential.ID,
+		Hex:         hex.EncodeToString(credential.Hash),
+		HasScript:   credential.HasScript,
+		Registered:  registered,
+		Epoch:       registrationEpoch.EpochId,
+		Amount:      amount,
+		Active:      active,
+		ActiveEpoch: drep.LastActivityEpoch,
+		LiveStake:   amount,
 	}, nil
 }
 

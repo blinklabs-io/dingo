@@ -97,6 +97,10 @@ type BlockfrostNode interface {
 		policyID string,
 		assetName []byte,
 	) (AssetInfo, error)
+
+	// DRep returns governance DRep information for a parsed
+	// DRep credential.
+	DRep(DRepCredential) (DRepInfo, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -297,4 +301,24 @@ type AssetInfo struct {
 	InitialMintTxHash string
 	MintOrBurnCount   int
 	OnchainMetadata   *any
+}
+
+// DRepCredential holds a parsed governance DRep identifier.
+type DRepCredential struct {
+	ID        string
+	Hash      []byte
+	HasScript bool
+}
+
+// DRepInfo holds DRep data needed by the governance API.
+type DRepInfo struct {
+	DRepID      string
+	Hex         string
+	HasScript   bool
+	Registered  bool
+	Epoch       uint64
+	Amount      string
+	Active      bool
+	ActiveEpoch uint64
+	LiveStake   string
 }
