@@ -11,6 +11,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 - `make test` runs with `-race`.
 - Integration tests in `internal/integration/` load real blocks from `database/immutable/testdata/`.
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never add local ledger/consensus/network mocks — extend the shared library.
+- DevNet (`internal/test/devnet/run-tests.sh`, see `internal/test/devnet/README.md`): use to validate any change that touches consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. Brings up Dingo + cardano-node side by side with `txpump` feeding the mempool, so it surfaces divergence from the reference implementation that unit and conformance tests miss. Run conformance (`internal/test/conformance/`) after every change; run DevNet additionally for consensus-affecting work.
 
 ## Pre-commit
 

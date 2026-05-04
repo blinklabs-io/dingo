@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/internal/devnet"
+	"github.com/blinklabs-io/dingo/internal/test/devnet"
 	"github.com/stretchr/testify/require"
 )
 

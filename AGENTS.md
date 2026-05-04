@@ -24,6 +24,7 @@ make golines
 - No `time.Sleep()` for sync — use `internal/test/testutil/` (`WaitForCondition`, `RequireReceive`, `context.WithTimeout`).
 - Integration tests: `internal/integration/` + `database/immutable/testdata/` (real blocks, slots 0–1.3M).
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never duplicate mocks inside dingo — extend the shared library so every Blink Labs app (dingo, gouroboros, adder, ...) reuses the same test surface.
+- DevNet end-to-end (`internal/test/devnet/run-tests.sh`): validate any change touching consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. Brings up Dingo + cardano-node side by side with `txpump` driving the mempool, so it catches divergence from the reference implementation that unit tests miss. Conformance tests in `internal/test/conformance/` are still mandatory after every change — DevNet is the additional bar for consensus-affecting work.
 
 ## Non-obvious invariants
 

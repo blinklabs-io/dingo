@@ -503,20 +503,21 @@ The DevNet runs a private Cardano network with Dingo and `cardano-node` producin
 
 ### Architecture
 
-The DevNet uses Docker Compose to run 3 containers on a bridge network:
+The DevNet uses Docker Compose to run three Cardano nodes plus a load generator on a bridge network:
 
 | Container | Role | Host Port |
 |-----------|------|-----------|
 | `dingo-producer` | Dingo block producer (pool 1) | 3010 |
 | `cardano-producer` | cardano-node block producer (pool 2) | 3011 |
 | `cardano-relay` | Relay node (no block production) | 3012 |
+| `txpump` | Submits payment transactions into Dingo's mempool | — |
 
-A `configurator` init container generates fresh pool keys and genesis files before nodes start.
+A `configurator` init container generates fresh pool keys and genesis files before nodes start. The `txpump` sidecar comes up after Dingo is healthy and continuously feeds the mempool so block bodies and tx-submission paths are exercised alongside consensus.
 
 ### Prerequisites
 
 - Docker with the Compose plugin (`docker compose`)
-- Go 1.24+
+- Go 1.25+
 
 ### Running the Automated Tests
 
@@ -561,7 +562,9 @@ docker compose -f docker-compose.yml logs -f dingo-producer
 ./stop.sh
 ```
 
-Containers remain running until you stop them. The DevNet parameters (in `testnet.yaml`) use 1-second slots and 1500-slot epochs (~25 minutes per epoch), so you can observe epoch transitions, leader election, and stake snapshot rotation relatively quickly.
+Containers remain running until you stop them. The DevNet parameters (in `testnet.yaml`) use 1-second slots and 500-slot epochs (~8 minutes per epoch) with `activeSlotsCoeff=0.4` and `securityParam (k)=40`, so you can observe epoch transitions, leader election, and stake snapshot rotation relatively quickly.
+
+See [`internal/test/devnet/README.md`](internal/test/devnet/README.md) for full details on the harness, configurator, available test scenarios, and port/address overrides.
 
 ### Local DevNet (Without Docker)
 

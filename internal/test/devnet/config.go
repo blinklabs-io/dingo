@@ -26,8 +26,13 @@ import (
 )
 
 // defaultTestnetYAMLPath is the default path to testnet.yaml, relative
-// to the scenarios test package directory.
-const defaultTestnetYAMLPath = "../../test/devnet/testnet.yaml"
+// to the scenarios test package directory (internal/test/devnet/scenarios/).
+// Tests outside scenarios/ (e.g. in internal/test/devnet/ itself) must
+// override this via the DEVNET_TESTNET_YAML environment variable —
+// typically with t.Setenv("DEVNET_TESTNET_YAML", "./testnet.yaml") —
+// or by passing an explicit path, otherwise LoadDevNetConfig will fail
+// to find the file.
+const defaultTestnetYAMLPath = "../testnet.yaml"
 
 // testnetParams holds the required testnet parameters from document 1.
 type testnetParams struct {
