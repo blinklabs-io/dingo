@@ -1052,12 +1052,7 @@ func (b *Blockfrost) handleTransactionDelegations(
 
 	resp := make([]TransactionDelegationResponse, 0, len(rows))
 	for _, row := range rows {
-		resp = append(resp, TransactionDelegationResponse{
-			Address:     row.Address,
-			PoolID:      row.PoolID,
-			CertIndex:   row.CertIndex,
-			ActiveEpoch: row.ActiveEpoch,
-		})
+		resp = append(resp, TransactionDelegationResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1219,11 +1214,7 @@ func (b *Blockfrost) handleTransactionPoolRetires(
 
 	resp := make([]TransactionPoolRetireResponse, 0, len(rows))
 	for _, row := range rows {
-		resp = append(resp, TransactionPoolRetireResponse{
-			PoolID:        row.PoolID,
-			CertIndex:     row.CertIndex,
-			RetiringEpoch: row.RetiringEpoch,
-		})
+		resp = append(resp, TransactionPoolRetireResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
