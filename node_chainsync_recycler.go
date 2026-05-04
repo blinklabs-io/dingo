@@ -198,6 +198,11 @@ func (n *Node) processChainsyncRecyclerTick(
 							},
 						),
 					)
+					n.realignOtherPeersAfterPlateau(
+						*targetConn,
+						trackedClients,
+						localTipSlot,
+					)
 					delete(recycleAt, connKey)
 					lastRecycled[connKey] = now
 					*lastProgressAt = now
@@ -317,6 +322,53 @@ func (n *Node) processChainsyncRecyclerTick(
 		)
 		delete(recycleAt, connKey)
 		lastRecycled[connKey] = now
+	}
+}
+
+// realignOtherPeersAfterPlateau requests a chainsync resync via the
+// default Stop+Start+Sync path for every ingress-eligible tracked peer
+// other than the one being closed for plateau. Without realignment, a
+// peer that has been streaming RollForwards while the active peer was
+// stuck holds a server-side cursor far past our local tip; the chain
+// selector will promote one of these peers as the next active, and its
+// next RollForward delivers a header beyond the local block tip with
+// no in-memory ancestor history to bridge the gap. The local fork
+// resolver then fails and closes that peer too, cycling through peers
+// until process restart. Realigning candidate peers' cursors to the
+// current local tip lets whichever peer is promoted next deliver
+// headers from local-tip+1 onward.
+func (n *Node) realignOtherPeersAfterPlateau(
+	closedConnId ouroboros.ConnectionId,
+	trackedClients []chainsync.TrackedClient,
+	localTipSlot uint64,
+) {
+	closedKey := closedConnId.String()
+	for _, conn := range trackedClients {
+		if conn.ObservabilityOnly {
+			continue
+		}
+		if conn.ConnId.String() == closedKey {
+			continue
+		}
+		if conn.Cursor.Slot <= localTipSlot {
+			continue
+		}
+		n.config.logger.Info(
+			"realigning peer chainsync cursor after plateau",
+			"connection_id", conn.ConnId.String(),
+			"cursor_slot", conn.Cursor.Slot,
+			"local_tip_slot", localTipSlot,
+		)
+		n.eventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					ConnectionId: conn.ConnId,
+					Reason:       "post_plateau_realign",
+				},
+			),
+		)
 	}
 }
 
