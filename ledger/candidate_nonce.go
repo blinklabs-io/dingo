@@ -23,7 +23,14 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/leios"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -438,15 +445,21 @@ func (ls *LedgerState) nonceStabilityWindow(eraId uint) uint64 {
 // nonceStabilityWindowKMultiplier returns the k multiplier for the
 // given era's randomness-stabilisation formula. The multiplier
 // changes from 3 to 4 at the Babbage→Conway boundary, NOT at the
-// TPraos→Praos boundary (Alonzo→Babbage); Babbage runs Praos but
-// retains the 3k/f window for backwards compatibility. Byron is
-// unsupported (no Praos nonce protocol) and returns ok=false, as do
-// era IDs the table does not know.
+// TPraos→Praos boundary (Alonzo→Babbage): Babbage runs Praos but
+// retains the 3k/f window for backwards compatibility. Each era is
+// enumerated explicitly so adding a new era is a deliberate edit
+// here (a missing era returns ok=false rather than silently
+// inheriting a window). Byron has no Praos nonce protocol and
+// returns ok=false.
 func nonceStabilityWindowKMultiplier(eraId uint) (int64, bool) {
 	switch eraId {
-	case 1, 2, 3, 4, 5: // Shelley, Allegra, Mary, Alonzo, Babbage
+	case shelley.EraIdShelley,
+		allegra.EraIdAllegra,
+		mary.EraIdMary,
+		alonzo.EraIdAlonzo,
+		babbage.EraIdBabbage:
 		return 3, true
-	case 6: // Conway (Praos, 4k/f)
+	case conway.EraIdConway, leios.EraIdLeios:
 		return 4, true
 	default:
 		return 0, false

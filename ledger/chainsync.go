@@ -2704,16 +2704,20 @@ func (ls *LedgerState) calculateEpochNonce(
 	// and evolvingNonce (after all blocks) from the remaining
 	// current-epoch blocks. Each block's VRF output is accumulated
 	// via the Nonce semigroup (⭒) starting from prevEvolvingNonce.
-	// The stability window depends on the protocol family of the
-	// SOURCE epoch (the one being closed), not the era we are
-	// transitioning into: TPraos uses 3k/f, Praos uses 4k/f. At every
-	// era boundary except Alonzo→Babbage the two formulas agree, but
-	// at the TPraos→Praos cutover currentEra has already been
-	// advanced to Babbage by applyHardForkTransition while the source
-	// epoch's blocks are still TPraos. Using currentEra.Id here would
-	// shift the candidate-freeze cutoff and produce an epoch nonce
-	// that diverges from peers, so every header in the new Praos
-	// epoch VRF-fails (#2125 Alonzo→Babbage wedge).
+	// The stability window depends on the SOURCE epoch's era — the
+	// one being closed — not the era we are transitioning into. The
+	// 3k/f window covers Shelley, Allegra, Mary, Alonzo, and Babbage
+	// (Babbage runs Praos but retains the smaller window for
+	// backwards compatibility); 4k/f kicks in at Conway. The two
+	// formulas only disagree at the Babbage→Conway boundary, but the
+	// source-vs-target distinction matters for every transition: by
+	// the time this code runs, applyHardForkTransition has already
+	// advanced currentEra to the new era, so passing currentEra.Id
+	// here would pick the wrong window for the source epoch's blocks
+	// and produce an epoch nonce that diverges from peers. The
+	// observed symptom at Alonzo→Babbage was every header in the new
+	// Praos epoch VRF-failing (#2125); the same shape repeats at
+	// Babbage→Conway when this rule is broken.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		txn,
 		currentEpoch.EraId,
