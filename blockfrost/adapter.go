@@ -1307,7 +1307,7 @@ func (a *NodeAdapter) Transaction(
 		}
 	}
 	if size == 0 {
-		if cborData, err := a.ledgerState.Database().CborCache().ResolveTxCbor(hash); err == nil {
+		if cborData, err := a.ledgerState.Database().CborCache().ResolveTxCbor(nil, hash); err == nil {
 			size = len(cborData)
 		}
 	}
@@ -1380,7 +1380,7 @@ func (a *NodeAdapter) TransactionCBOR(
 			ErrTransactionNotFound,
 		)
 	}
-	txCbor, err := a.ledgerState.Database().CborCache().ResolveTxCbor(hash)
+	txCbor, err := a.ledgerState.Database().CborCache().ResolveTxCbor(nil, hash)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"resolve transaction CBOR %x: %w",
