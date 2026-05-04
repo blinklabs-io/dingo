@@ -344,7 +344,7 @@ type TransactionDelegationResponse struct {
 	Address     string `json:"address"`
 	PoolID      string `json:"pool_id"`
 	CertIndex   int    `json:"cert_index"`
-	ActiveEpoch int    `json:"active_epoch"`
+	ActiveEpoch uint64 `json:"active_epoch"`
 }
 
 // TransactionStakeAddressResponse represents one stake address certificate.
@@ -373,7 +373,7 @@ type TransactionPoolUpdateResponse struct {
 	Metadata      *TransactionPoolMetadataResponse `json:"metadata"`
 	Owners        []string                         `json:"owners"`
 	Relays        []TransactionPoolRelayResponse   `json:"relays"`
-	ActiveEpoch   int                              `json:"active_epoch"`
+	ActiveEpoch   uint64                           `json:"active_epoch"`
 	CertIndex     int                              `json:"cert_index"`
 	FixedCost     string                           `json:"fixed_cost"`
 	MarginCost    float64                          `json:"margin_cost"`
@@ -402,7 +402,7 @@ type TransactionPoolRelayResponse struct {
 type TransactionPoolRetireResponse struct {
 	PoolID        string `json:"pool_id"`
 	CertIndex     int    `json:"cert_index"`
-	RetiringEpoch int    `json:"retiring_epoch"`
+	RetiringEpoch uint64 `json:"retiring_epoch"`
 }
 
 // TransactionRedeemerResponse represents one Plutus redeemer.

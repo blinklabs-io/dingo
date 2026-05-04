@@ -907,10 +907,7 @@ func (b *Blockfrost) handleTransactionMetadata(
 
 	resp := make([]TransactionMetadataResponse, 0, len(rows))
 	for _, row := range rows {
-		resp = append(resp, TransactionMetadataResponse{
-			Label:        row.Label,
-			JSONMetadata: row.JSONMetadata,
-		})
+		resp = append(resp, TransactionMetadataResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1059,7 +1056,7 @@ func (b *Blockfrost) handleTransactionDelegations(
 			Address:     row.Address,
 			PoolID:      row.PoolID,
 			CertIndex:   row.CertIndex,
-			ActiveEpoch: int(row.ActiveEpoch),
+			ActiveEpoch: row.ActiveEpoch,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1090,11 +1087,7 @@ func (b *Blockfrost) handleTransactionStakeAddresses(
 
 	resp := make([]TransactionStakeAddressResponse, 0, len(rows))
 	for _, row := range rows {
-		resp = append(resp, TransactionStakeAddressResponse{
-			Address:      row.Address,
-			CertIndex:    row.CertIndex,
-			Registration: row.Registration,
-		})
+		resp = append(resp, TransactionStakeAddressResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1185,7 +1178,7 @@ func (b *Blockfrost) handleTransactionPoolUpdates(
 	resp := make([]TransactionPoolUpdateResponse, 0, len(rows))
 	for _, row := range rows {
 		resp = append(resp, TransactionPoolUpdateResponse{
-			ActiveEpoch:   int(row.ActiveEpoch),
+			ActiveEpoch:   row.ActiveEpoch,
 			CertIndex:     row.CertIndex,
 			FixedCost:     row.FixedCost,
 			MarginCost:    row.MarginCost,
@@ -1229,7 +1222,7 @@ func (b *Blockfrost) handleTransactionPoolRetires(
 		resp = append(resp, TransactionPoolRetireResponse{
 			PoolID:        row.PoolID,
 			CertIndex:     row.CertIndex,
-			RetiringEpoch: int(row.RetiringEpoch),
+			RetiringEpoch: row.RetiringEpoch,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)

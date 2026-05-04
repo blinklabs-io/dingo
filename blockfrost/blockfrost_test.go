@@ -1157,7 +1157,7 @@ func TestHandleTransactionDelegations(t *testing.T) {
 	require.Len(t, resp, 1)
 	assert.Equal(t, "stake_test1...", resp[0].Address)
 	assert.Equal(t, "pool1...", resp[0].PoolID)
-	assert.Equal(t, 10, resp[0].ActiveEpoch)
+	assert.Equal(t, uint64(10), resp[0].ActiveEpoch)
 }
 
 func TestHandleTransactionStakeAddresses(t *testing.T) {

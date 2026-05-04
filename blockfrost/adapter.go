@@ -1678,10 +1678,10 @@ func (a *NodeAdapter) TransactionMIRs(
 			continue
 		}
 		pot := ""
-		switch lcommon.MirSource(c.Reward.Source) {
-		case lcommon.MirSourceReserves:
+		switch c.Reward.Source {
+		case uint(lcommon.MirSourceReserves):
 			pot = "reserve"
-		case lcommon.MirSourceTreasury:
+		case uint(lcommon.MirSourceTreasury):
 			pot = "treasury"
 		}
 		for credential, amount := range c.Reward.Rewards {
