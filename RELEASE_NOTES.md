@@ -1,6 +1,59 @@
 # Release Notes
 
 
+## v0.39.3 (May 4, 2026)
+
+**Title:** Correct era transitions, Bark metadata, and peer recovery
+
+**Date:** May 4, 2026
+
+**Version:** v0.39.3
+
+Hi folks! Here’s what we shipped in v0.39.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch release focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved **refreshed bundled Cardano network settings:** Synced bundled network settings now include newer peer snapshots, updated guardrails scripts, refreshed topology values, and newer node version expectations for smoother setup.
+* Updated **bundled cardano configs package:** Docker and bundled network settings now use `cardano-configs` `20260430-1` to stay aligned with the refreshed upstream configuration set.
+* Refined **AWS SDK config compatibility:** AWS backed configuration handling now stays aligned with the latest patch level for steadier cloud integration behavior.
+* Modernized **MySQL driver support:** MySQL backed deployments now stay current with `v1.10.0` for ongoing compatibility and maintenance.
+* Refreshed **Google API client support:** Google API integrations now stay current with `v0.277.0` for routine compatibility maintenance.
+* Advanced **AWS S3 SDK maintenance:** S3 backed storage support now includes the latest patch level for steadier ongoing compatibility.
+* Streamlined **devnet contributor workflow:** Contributors can work with the devnet test harness more easily because the end to end test support now lives under `internal/test/devnet` in a clearer shared location.
+* Restored **release history continuity:** Release tracking now includes the v0.39.2 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
+
+### 🔧 Fixes
+
+* Corrected **cross era transition correctness:** Dingo now keeps chain selection, nonce handling, leader schedule checks, slot battle resolution, and protocol parameter reads aligned across Shelley to Conway boundaries so peer validation and block production remain correct through hard fork transitions.
+* Preserved **Bark archive metadata for historical lookups:** Bark backed historical block access now keeps the metadata needed to find archived, tombstoned, or pruned blocks through indexed lookups.
+* Realigned **peer recovery after local tip plateaus:** Nodes now resync peer positions after plateau recovery so plateau triggered peer switching is less likely to stay stuck on misaligned peers.
+
+### 📋 What You Need to Know
+
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are generally sufficient.
+* Highlighted **safer Shelley to Conway transitions:** The most important runtime change is more reliable cross era validation and block production during Shelley to Conway transitions.
+* Summarized **Bark historical metadata availability:** Bark backed historical block access now returns the metadata needed for archived and tombstoned block lookups.
+* Emphasized **safer plateau recovery behavior:** Plateau recovery now realigns peers after a stalled active peer is recycled, which reduces the chance of getting stuck.
+* Reviewed **config and dependency refreshes:** Bundled Cardano configs now use the newer sync set, and several dependencies were updated for compatibility and maintenance.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.39.2 (May 2, 2026)
 
 **Title:** Improve fork recovery and hard fork readiness
