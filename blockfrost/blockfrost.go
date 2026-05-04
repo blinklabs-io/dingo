@@ -139,6 +139,10 @@ func (b *Blockfrost) Start(
 		b.handleTransaction,
 	)
 	mux.HandleFunc(
+		"POST /api/v0/tx/submit",
+		b.handleTransactionSubmit,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/txs/{hash}/cbor",
 		b.handleTransactionCBOR,
 	)

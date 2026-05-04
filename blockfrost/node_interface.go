@@ -94,6 +94,9 @@ type BlockfrostNode interface {
 	// Transaction returns summary details for a transaction hash.
 	Transaction(hash []byte) (TransactionInfo, error)
 
+	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
+	TransactionSubmit(txCbor []byte) (string, error)
+
 	// TransactionCBOR returns raw signed transaction CBOR bytes.
 	TransactionCBOR(hash []byte) ([]byte, error)
 

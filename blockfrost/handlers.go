@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -826,6 +827,73 @@ func (b *Blockfrost) handleTransaction(
 		InvalidBefore:      tx.InvalidBefore,
 		InvalidHereafter:   tx.InvalidHereafter,
 	})
+}
+
+// handleTransactionSubmit handles POST /api/v0/tx/submit and submits raw
+// signed transaction CBOR to the mempool.
+func (b *Blockfrost) handleTransactionSubmit(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Header.Get("Content-Type") != "application/cbor" {
+		writeError(
+			w,
+			http.StatusUnsupportedMediaType,
+			"Unsupported Media Type",
+			"Content-Type must be application/cbor.",
+		)
+		return
+	}
+
+	txCbor, err := io.ReadAll(r.Body)
+	if err != nil {
+		b.logger.Error(
+			"failed to read transaction submit body",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"failed to read transaction body",
+		)
+		return
+	}
+	if len(txCbor) == 0 {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"transaction body is empty",
+		)
+		return
+	}
+
+	hash, err := b.node.TransactionSubmit(txCbor)
+	if err != nil {
+		if errors.Is(err, ErrInvalidTransaction) {
+			writeError(
+				w,
+				http.StatusBadRequest,
+				"Bad Request",
+				"Invalid transaction CBOR.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to submit transaction",
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to submit transaction",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, hash)
 }
 
 // handleTransactionCBOR handles GET /api/v0/txs/{hash}/cbor and returns

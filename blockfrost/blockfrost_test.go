@@ -51,6 +51,7 @@ type mockNode struct {
 	metadataJSON               []MetadataTransactionJSONInfo
 	metadataCBOR               []MetadataTransactionCBORInfo
 	transaction                TransactionInfo
+	transactionSubmitHash      string
 	transactionCBOR            []byte
 	transactionMetadata        []TransactionMetadataInfo
 	transactionMetadataCBOR    []TransactionMetadataCBORInfo
@@ -84,6 +85,7 @@ type mockNode struct {
 	metadataJSONErr            error
 	metadataCBORErr            error
 	transactionErr             error
+	transactionSubmitErr       error
 	transactionCBORErr         error
 	transactionMetadataErr     error
 	transactionMetadataCBORErr error
@@ -208,6 +210,12 @@ func (m *mockNode) Transaction(
 	_ []byte,
 ) (TransactionInfo, error) {
 	return m.transaction, m.transactionErr
+}
+
+func (m *mockNode) TransactionSubmit(
+	_ []byte,
+) (string, error) {
+	return m.transactionSubmitHash, m.transactionSubmitErr
 }
 
 func (m *mockNode) TransactionCBOR(

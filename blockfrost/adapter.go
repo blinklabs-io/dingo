@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -46,26 +47,38 @@ var (
 	ErrEpochNotFound       = errors.New("epoch not found")
 	ErrAssetNotFound       = errors.New("asset not found")
 	ErrDRepNotFound        = errors.New("drep not found")
+	ErrInvalidTransaction  = errors.New("invalid transaction")
+	ErrMempoolUnavailable  = errors.New("mempool unavailable")
 	ErrTransactionNotFound = errors.New("transaction not found")
 )
+
+// TransactionSubmitter accepts raw transaction CBOR for mempool admission.
+type TransactionSubmitter interface {
+	AddTransaction(txType uint, txBytes []byte) error
+}
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
+	submitter   TransactionSubmitter
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
 // given LedgerState for blockchain data.
 func NewNodeAdapter(
 	ls *ledger.LedgerState,
+	submitter TransactionSubmitter,
 ) (*NodeAdapter, error) {
 	if ls == nil {
 		return nil, errors.New(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
-	return &NodeAdapter{ledgerState: ls}, nil
+	return &NodeAdapter{
+		ledgerState: ls,
+		submitter:   submitter,
+	}, nil
 }
 
 // ChainTip returns the current chain tip from the ledger
@@ -1358,6 +1371,35 @@ func (a *NodeAdapter) Transaction(
 		InvalidBefore:      invalidBefore,
 		InvalidHereafter:   invalidHereafter,
 	}, nil
+}
+
+// TransactionSubmit submits raw signed transaction CBOR to the mempool.
+func (a *NodeAdapter) TransactionSubmit(
+	txCbor []byte,
+) (string, error) {
+	if a.submitter == nil {
+		return "", ErrMempoolUnavailable
+	}
+	txType, err := gledger.DetermineTransactionType(txCbor)
+	if err != nil {
+		return "", fmt.Errorf(
+			"determine transaction type: %w: %w",
+			err,
+			ErrInvalidTransaction,
+		)
+	}
+	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	if err != nil {
+		return "", fmt.Errorf(
+			"decode transaction: %w: %w",
+			err,
+			ErrInvalidTransaction,
+		)
+	}
+	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
+		return "", fmt.Errorf("submit transaction to mempool: %w", err)
+	}
+	return tx.Hash().String(), nil
 }
 
 // TransactionCBOR returns raw signed transaction CBOR bytes for the requested
