@@ -1624,6 +1624,7 @@ func (a *NodeAdapter) TransactionStakeAddresses(
 		lcommon.CertificateTypeDeregistration,
 		lcommon.CertificateTypeStakeRegistrationDelegation,
 		lcommon.CertificateTypeStakeVoteRegistrationDelegation,
+		lcommon.CertificateTypeVoteRegistrationDelegation,
 	)
 	if err != nil {
 		return nil, err
@@ -1643,6 +1644,9 @@ func (a *NodeAdapter) TransactionStakeAddresses(
 			stakeCredential = c.StakeCredential
 			registration = true
 		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.VoteRegistrationDelegationCertificate:
 			stakeCredential = c.StakeCredential
 			registration = true
 		case *lcommon.StakeDeregistrationCertificate:
@@ -1915,9 +1919,10 @@ func (a *NodeAdapter) TransactionRedeemers(
 	for _, redeemer := range redeemers {
 		dataHash := lcommon.Blake2b256Hash(redeemer.Data)
 		ret = append(ret, TransactionRedeemerInfo{
-			TxIndex:          int(redeemer.Index),
-			Purpose:          redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
-			ScriptHash:       "", // not stored in DB model
+			TxIndex: int(redeemer.Index),
+			Purpose: redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
+			// TODO: Populate script_hash once redeemer-to-script mapping is stored.
+			ScriptHash:       "",
 			RedeemerDataHash: hex.EncodeToString(dataHash.Bytes()),
 			UnitMem:          strconv.FormatUint(redeemer.ExUnitsMemory, 10),
 			UnitSteps:        strconv.FormatUint(redeemer.ExUnitsCPU, 10),
