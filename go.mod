@@ -26,7 +26,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.1
 	github.com/getsops/sops/v3 v3.12.2
 	github.com/glebarez/sqlite v1.11.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.18.5
 	github.com/orandin/slog-gorm v1.4.0
