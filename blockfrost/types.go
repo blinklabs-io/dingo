@@ -325,7 +325,7 @@ type TransactionInputResponse struct {
 	Address             string                  `json:"address"`
 	TxHash              string                  `json:"tx_hash"`
 	Amount              []AddressAmountResponse `json:"amount"`
-	OutputIndex         float32                 `json:"output_index"`
+	OutputIndex         int                     `json:"output_index"`
 	Collateral          bool                    `json:"collateral"`
 }
 

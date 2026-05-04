@@ -1128,7 +1128,7 @@ func TestHandleTransactionUTXOs(t *testing.T) {
 	assert.Equal(t, "txhash1", resp.Hash)
 	require.Len(t, resp.Inputs, 1)
 	assert.Equal(t, "prevtx", resp.Inputs[0].TxHash)
-	assert.Equal(t, float32(1), resp.Inputs[0].OutputIndex)
+	assert.Equal(t, 1, resp.Inputs[0].OutputIndex)
 	require.NotNil(t, resp.Inputs[0].Reference)
 	assert.True(t, *resp.Inputs[0].Reference)
 	require.Len(t, resp.Outputs, 1)

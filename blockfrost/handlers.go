@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"slices"
 	"strconv"
@@ -835,7 +836,8 @@ func (b *Blockfrost) handleTransactionSubmit(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	if r.Header.Get("Content-Type") != "application/cbor" {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/cbor" {
 		writeError(
 			w,
 			http.StatusUnsupportedMediaType,
@@ -1074,7 +1076,7 @@ func (b *Blockfrost) handleTransactionUTXOs(
 			Address:             input.Address,
 			Amount:              convertAddressAmounts(input.Amount),
 			TxHash:              input.TxHash,
-			OutputIndex:         float32(input.OutputIndex),
+			OutputIndex:         int(input.OutputIndex),
 			DataHash:            input.DataHash,
 			Collateral:          input.Collateral,
 			InlineDatum:         input.InlineDatum,
