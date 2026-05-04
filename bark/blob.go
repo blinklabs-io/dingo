@@ -203,31 +203,46 @@ func (b *BlobStoreBark) GetBlock(
 	slot uint64,
 	hash []byte,
 ) ([]byte, types.BlockMetadata, error) {
-	currentSlot, err := b.config.LedgerState.CurrentSlot()
-	if err != nil {
-		return nil, types.BlockMetadata{},
-			fmt.Errorf("failed to get current slot: %w", err)
+	// Always consult the upstream first so we can pick up the local
+	// BlockMetadata (most importantly the block ID, which the chain
+	// iterator's BlockByIndex path depends on). Upstream reports
+	// ErrBlockTombstoned for archive-only blocks while still returning
+	// the metadata it kept around for exactly this purpose. Fall through
+	// to the archive on ErrBlobKeyNotFound too: blocks pruned before the
+	// tombstone-on-prune fix (or never indexed locally, e.g. snapshot
+	// bootstrap) have no bp entry, but the archive can still serve them.
+	upstreamCbor, upstreamMeta, err := b.upstream.GetBlock(txn, slot, hash)
+	if err == nil {
+		return upstreamCbor, upstreamMeta, nil
 	}
-
-	// If the requested slot is within the security window, the block is
-	// expected to live locally. Defer to upstream — but if upstream reports
-	// the block was tombstoned (rare in-window case, e.g. after a rollback
-	// crosses a previously pruned slot back into the window) fall through
-	// to the archive proxy.
-	securityWindow := b.config.LedgerState.StabilityWindow()
-	if securityWindow > currentSlot ||
-		slot >= currentSlot-securityWindow {
-		cbor, meta, err := b.upstream.GetBlock(txn, slot, hash)
-		if !errors.Is(err, types.ErrBlockTombstoned) {
-			return cbor, meta, err
-		}
+	if !errors.Is(err, types.ErrBlockTombstoned) &&
+		!errors.Is(err, types.ErrBlobKeyNotFound) {
+		return nil, types.BlockMetadata{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(
 		context.Background(), archiveFetchTimeout,
 	)
 	defer cancel()
-	return b.fetchBlockFromArchive(ctx, slot, hash)
+	archiveCbor, archiveMeta, archErr := b.fetchBlockFromArchive(ctx, slot, hash)
+	if archErr != nil {
+		return nil, types.BlockMetadata{}, archErr
+	}
+	// Prefer the local metadata for ID (the archive does not know our
+	// local block IDs), but trust the archive for Type/Height/PrevHash
+	// in case upstream returned a zero metadata struct alongside the
+	// tombstone error.
+	merged := upstreamMeta
+	if merged.Type == 0 {
+		merged.Type = archiveMeta.Type
+	}
+	if merged.Height == 0 {
+		merged.Height = archiveMeta.Height
+	}
+	if len(merged.PrevHash) == 0 {
+		merged.PrevHash = archiveMeta.PrevHash
+	}
+	return archiveCbor, merged, nil
 }
 
 // fetchBlockFromArchive resolves a (slot, hash) block via the bark archive

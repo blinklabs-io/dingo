@@ -635,14 +635,18 @@ func (d *BlobStoreBadger) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	if types.IsBlockTombstone(cborData) {
-		return nil, types.BlockMetadata{},
-			&types.BlockTombstonedError{Slot: slot, Hash: hash}
-	}
+	// Read the metadata key whether or not the bp value is a tombstone.
+	// Tombstoned blocks keep their metadata so a wrapping archive proxy
+	// can populate models.Block.ID from the local node's bi index when
+	// fetching the CBOR remotely.
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataVal, err := badgerTxn.tx.Get(metadataKey)
 	if err != nil {
 		if errors.Is(err, badger.ErrKeyNotFound) {
+			if types.IsBlockTombstone(cborData) {
+				return nil, types.BlockMetadata{},
+					&types.BlockTombstonedError{Slot: slot, Hash: hash}
+			}
 			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
 		}
 		return nil, types.BlockMetadata{}, err
@@ -654,6 +658,10 @@ func (d *BlobStoreBadger) GetBlock(
 	tmpMetadata, err := unmarshalBlockMetadata(metadataBytes)
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
+	}
+	if types.IsBlockTombstone(cborData) {
+		return nil, tmpMetadata,
+			&types.BlockTombstonedError{Slot: slot, Hash: hash}
 	}
 	return cborData, tmpMetadata, nil
 }
@@ -695,16 +703,18 @@ func (d *BlobStoreBadger) DeleteBlock(
 // types.ErrBlockTombstoned for the proxy to intercept.
 //
 // What stays:
+//
 //   - bi<id>: required by BlockByIndex (the chain iterator translates
 //     id→key here; no equivalent index exists in metadata).
+//
 //   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
 //     but on a deep chain that scan is O(N) per call — keeping the index
 //     preserves the fast path.
 //
-// What goes:
-//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
-//     metadata, and no other caller asks for metadata of a tombstoned
-//     block — bark's archive response carries its own.
+//   - bp_metadata: kept so bark can populate models.Block.ID (and the
+//     other small metadata fields) when surfacing a CBOR fetched from
+//     the archive. Without this the chain iterator's BlockByIndex path
+//     gets ID=0 and immediately returns ErrIteratorChainTip.
 func (d *BlobStoreBadger) TombstoneBlock(
 	txn types.Txn,
 	slot uint64,
@@ -715,11 +725,7 @@ func (d *BlobStoreBadger) TombstoneBlock(
 		return err
 	}
 	key := types.BlockBlobKey(slot, hash)
-	if err := badgerTxn.tx.Set(key, types.BlockTombstone()); err != nil {
-		return err
-	}
-	metadataKey := types.BlockBlobMetadataKey(key)
-	return badgerTxn.tx.Delete(metadataKey)
+	return badgerTxn.tx.Set(key, types.BlockTombstone())
 }
 
 // SetUtxo stores a UTxO's CBOR data
