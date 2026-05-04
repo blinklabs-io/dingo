@@ -15,6 +15,8 @@
 package chainselection
 
 import (
+	"bytes"
+
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
@@ -29,13 +31,30 @@ const (
 )
 
 // CompareChains compares two chain tips according to Ouroboros Praos rules:
-// 1. Higher block number wins (longer chain)
-// 2. At equal block number, lower slot wins (denser chain)
+//  1. Higher block number wins (longer chain)
+//  2. At equal block number, lower slot wins (denser chain)
+//  3. At equal block number AND equal slot (a slot battle between two
+//     pools' competing forges), lower block hash wins.
+//
+// Rule 3 is the deterministic tiebreak the chainsync handler needs to
+// pick a side at a slot battle. Without it, two competing forges at
+// the same slot+length collapse to ChainEqual, the handler refuses to
+// switch in either direction, and the local chain permanently keeps
+// whichever block was adopted first. The losing block's VRF output
+// then keeps folding into the local evolving nonce, and the drift
+// compounds across epochs until eta0 disagreement breaks header
+// verification at the next epoch boundary.
+//
+// Block hash is a deterministic function of every input the full
+// Praos select-view comparator (chain length → slot → self-issued →
+// issuer hash → VRF output → opcert counter) considers, so two peers
+// independently applying "lower hash wins" to the same pair of
+// competing tips arrive at the same decision and the chains converge.
 //
 // Returns:
 //   - ChainABetter (1) if tipA represents a better chain
 //   - ChainBBetter (-1) if tipB represents a better chain
-//   - ChainEqual (0) if they are equal
+//   - ChainEqual (0) only when both tips refer to the same block
 func CompareChains(tipA, tipB ochainsync.Tip) ChainComparisonResult {
 	// Rule 1: Higher block number wins (longer chain)
 	if tipA.BlockNumber > tipB.BlockNumber {
@@ -53,7 +72,16 @@ func CompareChains(tipA, tipB ochainsync.Tip) ChainComparisonResult {
 		return ChainBBetter
 	}
 
-	// Chains are equal
+	// Rule 3: At a slot battle (same length, same slot, different
+	// hash), lower hash wins.
+	if cmp := bytes.Compare(tipA.Point.Hash, tipB.Point.Hash); cmp != 0 {
+		if cmp < 0 {
+			return ChainABetter
+		}
+		return ChainBBetter
+	}
+
+	// Tips refer to the same block.
 	return ChainEqual
 }
 

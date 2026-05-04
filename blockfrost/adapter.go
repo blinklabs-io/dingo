@@ -341,9 +341,44 @@ func (a *NodeAdapter) CurrentProtocolParams() (
 func (a *NodeAdapter) EpochProtocolParams(
 	epoch uint64,
 ) (ProtocolParamsInfo, error) {
-	pparamRows, err := a.ledgerState.Database().Metadata().GetPParams(
+	// Resolve the era active at the requested epoch via the epoch
+	// table — the metadata-store GetPParams now requires an era so
+	// the row's era_id matches the chosen decoder. Without this
+	// lookup, picking an era from the row's own era_id would not
+	// disambiguate the rollover-boundary case where two rows exist
+	// at the same epoch with different shapes.
+	//
+	// Both reads run under one read transaction so a rollback or
+	// epoch-rollover commit landing between them can't surface a
+	// row whose era_id disagrees with the era chosen by GetEpoch.
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+	epochRow, err := db.GetEpoch(epoch, txn)
+	if err != nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get epoch %d: %w", epoch, err,
+		)
+	}
+	if epochRow == nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: %w",
+			epoch,
+			ErrEpochNotFound,
+		)
+	}
+	era := eras.GetEraById(epochRow.EraId)
+	if era == nil {
+		return ProtocolParamsInfo{}, fmt.Errorf(
+			"get protocol parameters for epoch %d: unknown era ID %d",
+			epoch,
+			epochRow.EraId,
+		)
+	}
+	pparamRows, err := db.Metadata().GetPParams(
 		epoch,
-		nil,
+		era.Id,
+		txn.Metadata(),
 	)
 	if err != nil {
 		return ProtocolParamsInfo{}, fmt.Errorf(
@@ -360,14 +395,6 @@ func (a *NodeAdapter) EpochProtocolParams(
 		)
 	}
 	pparamRow := pparamRows[0]
-	era := eras.GetEraById(pparamRow.EraId)
-	if era == nil {
-		return ProtocolParamsInfo{}, fmt.Errorf(
-			"get protocol parameters for epoch %d: unknown era ID %d",
-			epoch,
-			pparamRow.EraId,
-		)
-	}
 	pparams, err := era.DecodePParamsFunc(
 		pparamRow.Cbor,
 	)

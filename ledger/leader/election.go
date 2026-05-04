@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -58,6 +59,13 @@ type EpochInfoProvider interface {
 
 	// ActiveSlotCoeff returns the active slot coefficient (f parameter).
 	ActiveSlotCoeff() float64
+
+	// ConsensusModeForEpoch returns the consensus mode (TPraos or
+	// CPraos) governing leader eligibility for the given epoch. The
+	// schedule calculator threads this into VRF input construction
+	// and threshold derivation; passing the wrong mode produces a
+	// leader-slot list that cardano-node will reject.
+	ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode
 }
 
 // ScheduleStore persists computed schedules for later reuse.
@@ -508,6 +516,18 @@ func (e *Election) validatePersistedSchedule(
 		return false, "schedule missing", nil
 	}
 
+	// Reject schedules whose compute path is no longer compatible with the
+	// running build — pre-PR persisted schedules were derived without the
+	// per-era consensus mode and would mis-pick leader slots if reused.
+	// Pre-format-version entries decode to FormatVersion == 0.
+	if schedule.FormatVersion != ScheduleFormatVersion {
+		return false, fmt.Sprintf(
+			"schedule format version mismatch: got %d want %d",
+			schedule.FormatVersion,
+			ScheduleFormatVersion,
+		), nil
+	}
+
 	expectedNonce := e.epochProvider.EpochNonce(epoch)
 	if len(expectedNonce) == 0 {
 		return false, "epoch nonce unavailable", nil
@@ -653,6 +673,8 @@ func (e *Election) computeSchedule(
 		e.epochProvider.SlotsPerEpoch(),
 	)
 
+	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
+
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
@@ -661,6 +683,7 @@ func (e *Election) computeSchedule(
 		poolStake,
 		totalStake,
 		epochNonce,
+		mode,
 	)
 	if e.metrics != nil {
 		e.metrics.vrfEvalDurationSeconds.Observe(time.Since(vrfEvalStart).Seconds())

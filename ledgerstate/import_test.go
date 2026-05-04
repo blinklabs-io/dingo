@@ -334,7 +334,7 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 
 	require.NoError(t, importPParams(context.Background(), cfg))
 
-	pparams, err := db.Metadata().GetPParams(1277, nil)
+	pparams, err := db.Metadata().GetPParams(1277, EraConway, nil)
 	require.NoError(t, err)
 	require.Len(t, pparams, 1)
 	require.Equal(t, uint64(17_700), pparams[0].AddedSlot)

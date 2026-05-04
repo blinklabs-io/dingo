@@ -47,6 +47,20 @@ config_config_json() {
     # .options.mapBackends
     jq "del(.options.mapBackends)" "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"
 
+    # Redirect cardano-node logging to stdout so `docker compose logs -f`
+    # sees it. genesis-cli.py points defaultScribes/setupScribes at a
+    # FileSK under /tmp/testnet/deployment, which is invisible from outside
+    # the container. Also force minSeverity=Info to match the requested
+    # log level (the iohk-monitoring default can be Notice).
+    jq '.minSeverity = "Info"
+        | .defaultScribes = [["StdoutSK", "stdout"]]
+        | .setupScribes = [{
+            "scKind": "StdoutSK",
+            "scName": "stdout",
+            "scFormat": "ScText",
+            "scRotation": null
+          }]' "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"
+
     # .PeerSharing
     if [ "${PEER_SHARING,,}" = "true" ]; then
         jq ".PeerSharing = true" "${CONFIG_JSON}" | write_file "${CONFIG_JSON}"
@@ -113,11 +127,15 @@ EOF
 }
 
 compute_start_time() {
-    # Set system start to now + 30s to give Docker time to start node
-    # containers after the configurator exits.
-    # genesis-cli.py's systemStartDelay (5s) is too short because key
-    # generation takes 30+ seconds, so we override after generation.
-    SYSTEM_START_UNIX=$(( $(date +%s) + 30 ))
+    # Set system start to now + 60s to give Docker time to start node
+    # containers, the relay to come up, and producer→relay handshakes to
+    # complete before the first leader slot fires. With less headroom,
+    # both producers race to forge slot-1 on top of an empty genesis,
+    # spend the early Shelley epoch in fork-resolution churn, and the
+    # locally-forged blocks of the slower-to-stabilize node get rolled
+    # back. genesis-cli.py's systemStartDelay (5s) is too short because
+    # key generation takes 30+ seconds, so we override after generation.
+    SYSTEM_START_UNIX=$(( $(date +%s) + 60 ))
     SYSTEM_START_ISO="$(date -d @${SYSTEM_START_UNIX} -u '+%Y-%m-%dT%H:%M:%SZ')"
 }
 
@@ -159,7 +177,7 @@ config_topology_json "$number_of_pools"
 
 # Override system start time AFTER key generation completes.
 # genesis-cli.py's systemStartDelay (5s) is too short because key generation
-# takes 30+ seconds. Set genesis to now + 30s to give Docker time to start
+# takes 30+ seconds. Set genesis to now + 60s to give Docker time to start
 # the node containers after the configurator exits.
 compute_start_time
 echo "system start: ${SYSTEM_START_ISO} (unix: ${SYSTEM_START_UNIX})"

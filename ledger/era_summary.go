@@ -52,5 +52,5 @@ func (ls *LedgerState) GetPParamsForEpoch(
 	if era.DecodePParamsFunc == nil {
 		return nil, nil
 	}
-	return ls.db.GetPParams(epoch, era.DecodePParamsFunc, nil)
+	return ls.db.GetPParams(epoch, era.Id, era.DecodePParamsFunc, nil)
 }

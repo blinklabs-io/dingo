@@ -1385,6 +1385,7 @@ func processGapBlocks(
 			if !ok {
 				pparams, err := db.GetPParams(
 					epoch.EpochId,
+					eras.ConwayEraDesc.Id,
 					eras.ConwayEraDesc.DecodePParamsFunc,
 					nil,
 				)

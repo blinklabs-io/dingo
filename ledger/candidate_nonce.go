@@ -23,7 +23,14 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/leios"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -377,20 +384,22 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 // (firstSlotNextEpoch - window) do NOT update the candidate nonce; the
 // evolving nonce continues to update.
 //
-// The multiplier of k differs between Praos protocol families:
+// The multiplier of k is era-specific and does NOT split cleanly along
+// TPraos/Praos lines. Babbage runs Praos but uses the smaller 3k/f
+// window for backwards compatibility with the TPraos eras that came
+// before it; the 4k/f window only kicks in starting with Conway:
 //
-//   - TPraos (Shelley/Allegra/Mary/Alonzo): 3k/f, from
-//     cardano-ledger's computeStabilityWindow.
-//   - Praos (Babbage onwards, including Conway): 4k/f, from
-//     cardano-ledger's computeRandomnessStabilisationWindow.
+//   - Shelley/Allegra/Mary/Alonzo (TPraos): 3k/f
+//   - Babbage (Praos, but 3k/f for backwards compatibility): 3k/f
+//   - Conway and onwards (Praos): 4k/f
 //
-// Using 4k/f universally — as this function did before #2125 — shifts
-// the candidate-freeze cutoff in the source epoch and produces an
-// epoch nonce that diverges from cardano-node, breaking VRF
-// verification on every block of the next epoch in TPraos eras. The
-// symptom is most visible at the Shelley→Allegra boundary, where
-// epoch 0's misframed candidate yields a wrong eta0 for epoch 1 and
-// every Allegra header VRF-fails.
+// Using 4k/f for Babbage shifts its candidate-freeze cutoff vs peers
+// and produces an eta0 for the Babbage→Conway transition that does
+// not match peers. The first Conway block this node forges then
+// VRF-fails on every relay, and every peer Conway header VRF-fails
+// locally. Using 4k/f for TPraos eras has the same effect at every
+// TPraos epoch boundary, most visibly at Shelley→Allegra where
+// epoch 0's misframed candidate yields a wrong eta0 for epoch 1.
 //
 // Era IDs follow gouroboros: Byron=0, Shelley=1, Allegra=2, Mary=3,
 // Alonzo=4, Babbage=5, Conway=6. Byron has no Praos randomness
@@ -435,14 +444,22 @@ func (ls *LedgerState) nonceStabilityWindow(eraId uint) uint64 {
 
 // nonceStabilityWindowKMultiplier returns the k multiplier for the
 // given era's randomness-stabilisation formula. The multiplier
-// changes from 3 to 4 at the TPraos→Praos transition (Alonzo→Babbage).
-// Byron is unsupported (no Praos nonce protocol) and returns ok=false,
-// as do era IDs the table does not know.
+// changes from 3 to 4 at the Babbage→Conway boundary, NOT at the
+// TPraos→Praos boundary (Alonzo→Babbage): Babbage runs Praos but
+// retains the 3k/f window for backwards compatibility. Each era is
+// enumerated explicitly so adding a new era is a deliberate edit
+// here (a missing era returns ok=false rather than silently
+// inheriting a window). Byron has no Praos nonce protocol and
+// returns ok=false.
 func nonceStabilityWindowKMultiplier(eraId uint) (int64, bool) {
 	switch eraId {
-	case 1, 2, 3, 4: // Shelley, Allegra, Mary, Alonzo (TPraos)
+	case shelley.EraIdShelley,
+		allegra.EraIdAllegra,
+		mary.EraIdMary,
+		alonzo.EraIdAlonzo,
+		babbage.EraIdBabbage:
 		return 3, true
-	case 5, 6: // Babbage, Conway (Praos)
+	case conway.EraIdConway, leios.EraIdLeios:
 		return 4, true
 	default:
 		return 0, false

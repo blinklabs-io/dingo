@@ -22,37 +22,37 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// GetPParams resolves the protocol-parameters row at epoch <= the
+// supplied epoch whose era_id matches eraId, then decodes it with
+// decodeFunc. The era filter is required because at era boundaries
+// the rollover path writes both an old-era row (post-pparams-update)
+// and a new-era row (transitionToEra) at the same epoch — without
+// the filter, the latest insert wins regardless of shape and the
+// caller's era-specific decoder rejects the CBOR on element count.
 func (d *Database) GetPParams(
 	epoch uint64,
+	eraId uint,
 	decodeFunc func([]byte) (lcommon.ProtocolParameters, error),
 	txn *Txn,
 ) (lcommon.ProtocolParameters, error) {
-	var ret lcommon.ProtocolParameters
-	var err error
+	var (
+		pparams []models.PParams
+		ppErr   error
+	)
 	if txn == nil {
-		pparams, ppErr := d.metadata.GetPParams(epoch, nil)
-		if ppErr != nil {
-			return ret, ppErr
-		}
-		if len(pparams) == 0 {
-			return ret, nil
-		}
-		// pparams is ordered, so grab the first
-		tmpPParams := pparams[0]
-		ret, err = decodeFunc(tmpPParams.Cbor)
+		pparams, ppErr = d.metadata.GetPParams(epoch, eraId, nil)
 	} else {
-		pparams, ppErr := d.metadata.GetPParams(epoch, txn.Metadata())
-		if ppErr != nil {
-			return ret, ppErr
-		}
-		if len(pparams) == 0 {
-			return ret, nil
-		}
-		// pparams is ordered, so grab the first
-		tmpPParams := pparams[0]
-		ret, err = decodeFunc(tmpPParams.Cbor)
+		pparams, ppErr = d.metadata.GetPParams(
+			epoch, eraId, txn.Metadata(),
+		)
 	}
-	return ret, err
+	if ppErr != nil {
+		return nil, ppErr
+	}
+	if len(pparams) == 0 {
+		return nil, nil
+	}
+	return decodeFunc(pparams[0].Cbor)
 }
 
 func (d *Database) SetPParams(

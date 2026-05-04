@@ -46,6 +46,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -3693,6 +3694,7 @@ func (ls *LedgerState) computePParams(
 		var err error
 		pparams, err = ls.db.GetPParams(
 			epoch.EpochId,
+			era.Id,
 			era.DecodePParamsFunc,
 			nil,
 		)
@@ -3731,6 +3733,7 @@ func (ls *LedgerState) computePParams(
 				prevEra.DecodePParamsFunc != nil {
 				prevPP, prevErr := ls.db.GetPParams(
 					ep.EpochId,
+					ep.EraId,
 					prevEra.DecodePParamsFunc,
 					nil,
 				)
@@ -4230,6 +4233,95 @@ func (ls *LedgerState) CurrentEpoch() uint64 {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.currentEpoch.EpochId
+}
+
+// ConsensusModeForEpoch returns the Praos consensus variant that
+// governs leader eligibility for the given epoch. Shelley/Allegra/
+// Mary/Alonzo run TPraos; Babbage/Conway run CPraos. Anything else
+// (including Byron and unknown eras) defaults to CPraos, matching
+// how block production paths fall back today.
+//
+// Resolution order, mirroring how the leader-election caller can be
+// computing the schedule for the current epoch or pre-computing the
+// next one across a scheduled hard fork:
+//
+//  1. Look up the epoch's stored EraId in epochCache (set by the
+//     epoch rollover when the epoch is created).
+//  2. If we don't have that epoch yet (precompute path) and a hard
+//     fork has been confirmed via HardForkInitiation, transitionInfo
+//     pins the first epoch of the next era; advance once when the
+//     target epoch is at or past that boundary.
+//  3. Otherwise forecast the era forward from the current era using
+//     the schedule's TriggerAtEpoch trigger (TestXHardForkAtEpoch
+//     overrides surface here too), advancing once per scheduled
+//     boundary at-or-before the target epoch.
+//  4. Fall back to the current era if nothing applies.
+func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMode {
+	ls.RLock()
+	cache := ls.epochCache
+	currentEra := ls.currentEra
+	currentEpoch := ls.currentEpoch
+	transitionInfo := ls.transitionInfo
+	ls.RUnlock()
+
+	for _, e := range cache {
+		if e.EpochId == epoch {
+			return consensusModeForEraID(e.EraId)
+		}
+	}
+
+	if epoch <= currentEpoch.EpochId {
+		return consensusModeForEraID(currentEra.Id)
+	}
+
+	// HardForkInitiation path: if a confirmed transition pins the next
+	// era's first epoch, advance one era for any target epoch at or
+	// past it. The shape walk below only handles TriggerAtEpoch (the
+	// TestXHardForkAtEpoch override), so without this branch the
+	// precompute would stay on the current era's mode through any
+	// stable HFI boundary.
+	if transitionInfo.State == hardfork.TransitionKnown &&
+		epoch >= transitionInfo.KnownEpoch {
+		nextID := currentEra.Id + 1
+		if int(nextID) < len(eras.Eras) {
+			return consensusModeForEraID(nextID)
+		}
+	}
+
+	shape := ls.eraShape()
+	eraID := currentEra.Id
+	for {
+		entry, ok := shape.EraForID(eraID)
+		if !ok || entry.NextEraTrigger.Kind != hardfork.TriggerAtEpoch {
+			break
+		}
+		if entry.NextEraTrigger.Epoch > epoch {
+			break
+		}
+		nextID := eraID + 1
+		if int(nextID) >= len(eras.Eras) {
+			break
+		}
+		eraID = nextID
+	}
+	return consensusModeForEraID(eraID)
+}
+
+// consensusModeForEraID maps an era ID to its Praos consensus variant.
+// Shelley/Allegra/Mary/Alonzo are TPraos; Babbage onwards are CPraos.
+// Byron and any future-unknown id default to CPraos — the conservative
+// choice for a forward-looking unknown era and a no-op for Byron, which
+// has no Praos leader election.
+func consensusModeForEraID(eraID uint) consensus.ConsensusMode {
+	switch eraID {
+	case ledger.EraIdShelley,
+		ledger.EraIdAllegra,
+		ledger.EraIdMary,
+		ledger.EraIdAlonzo:
+		return consensus.ConsensusModeTPraos
+	default:
+		return consensus.ConsensusModeCPraos
+	}
 }
 
 // NextEpochNonceReadyEpoch reports the upcoming epoch when the current

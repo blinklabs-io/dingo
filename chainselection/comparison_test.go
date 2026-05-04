@@ -78,13 +78,29 @@ func TestCompareChains(t *testing.T) {
 			expected: ChainBBetter,
 		},
 		{
-			name: "equal chains",
+			// Same length, same slot, different hashes: a slot
+			// battle. Lower-hash tiebreak (rule 3) selects tipA.
+			name: "slot battle resolves by lower hash",
 			tipA: ochainsync.Tip{
 				Point:       ocommon.Point{Slot: 100, Hash: []byte("a")},
 				BlockNumber: 50,
 			},
 			tipB: ochainsync.Tip{
 				Point:       ocommon.Point{Slot: 100, Hash: []byte("b")},
+				BlockNumber: 50,
+			},
+			expected: ChainABetter,
+		},
+		{
+			// Same length, same slot, identical hash: the same
+			// block, so genuinely equal.
+			name: "identical tips compare equal",
+			tipA: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100, Hash: []byte("a")},
+				BlockNumber: 50,
+			},
+			tipB: ochainsync.Tip{
+				Point:       ocommon.Point{Slot: 100, Hash: []byte("a")},
 				BlockNumber: 50,
 			},
 			expected: ChainEqual,

@@ -1475,7 +1475,20 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
 			localTip := ls.chain.Tip()
-			if e.Point.Slot <= localTip.Point.Slot {
+			// A header strictly behind the local tip is genuinely
+			// stale and can be dropped. A header AT the same slot
+			// as the local tip with a different hash is a slot
+			// battle — both pools forged at the same slot — and
+			// must fall through to the fork-resolution path so
+			// chainselection's tiebreak picks a side. Treating
+			// equal-slot mismatches as stale here drops the peer's
+			// forge before tryResolveFork ever sees it, locks
+			// dingo onto whichever block it adopted first, and
+			// diverges the chain from peers that resolved the
+			// same battle the other way; that drift then folds
+			// into the evolving nonce and breaks header
+			// verification at the next epoch boundary.
+			if e.Point.Slot < localTip.Point.Slot {
 				ls.config.Logger.Debug(
 					"ignoring stale roll forward behind local tip",
 					"component", "ledger",
@@ -1682,9 +1695,17 @@ func (ls *LedgerState) tryResolveFork(
 	e ChainsyncEvent,
 	notFitErr chain.BlockNotFitChainTipError,
 ) (bool, error) {
-	// Only resolve forks when the peer is ahead of us.
+	// Only resolve forks when the peer's chain is genuinely better than
+	// ours per Praos rules (longer wins; at equal length, lower slot wins).
+	// A bare slot comparison would force a rollback whenever the peer's tip
+	// happens to land on a later slot — even when the two chains have the
+	// same block count and our local tip is at the lower (denser) slot, in
+	// which case Praos says we should keep ours. With two block producers
+	// this misorders fork resolution: every locally-forged block forks at
+	// the same length as the peer's, the peer's later-slot tip wins the
+	// gate here, and the local block is rolled back.
 	localTip := ls.chain.Tip()
-	if e.Tip.Point.Slot <= localTip.Point.Slot {
+	if !chainselection.IsBetterChain(e.Tip, localTip) {
 		return false, nil
 	}
 
@@ -2683,12 +2704,23 @@ func (ls *LedgerState) calculateEpochNonce(
 	// and evolvingNonce (after all blocks) from the remaining
 	// current-epoch blocks. Each block's VRF output is accumulated
 	// via the Nonce semigroup (⭒) starting from prevEvolvingNonce.
-	// Pass currentEra.Id so the candidate-freeze cutoff uses the
-	// correct stability window for the source epoch's protocol family
-	// (3k/f for TPraos, 4k/f for Praos). See #2125.
+	// The stability window depends on the SOURCE epoch's era — the
+	// one being closed — not the era we are transitioning into. The
+	// 3k/f window covers Shelley, Allegra, Mary, Alonzo, and Babbage
+	// (Babbage runs Praos but retains the smaller window for
+	// backwards compatibility); 4k/f kicks in at Conway. The two
+	// formulas only disagree at the Babbage→Conway boundary, but the
+	// source-vs-target distinction matters for every transition: by
+	// the time this code runs, applyHardForkTransition has already
+	// advanced currentEra to the new era, so passing currentEra.Id
+	// here would pick the wrong window for the source epoch's blocks
+	// and produce an epoch nonce that diverges from peers. The
+	// observed symptom at Alonzo→Babbage was every header in the new
+	// Praos epoch VRF-failing (#2125); the same shape repeats at
+	// Babbage→Conway when this rule is broken.
 	candidateNonce, evolvingNonce, err := ls.computeCandidateNonce(
 		txn,
-		currentEra.Id,
+		currentEpoch.EraId,
 		prevEvolvingNonce,
 		prevCandidateNonce,
 		computeStartSlot,

@@ -262,9 +262,18 @@ type MetadataStore interface {
 	// GetActiveDreps retrieves all active DReps.
 	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
-	// GetPParams retrieves protocol parameters for a given epoch.
+	// GetPParams retrieves the latest protocol-parameters row at
+	// epoch <= the supplied epoch whose stored era_id matches the
+	// supplied era. The era filter is required: at era boundaries the
+	// rollover path writes both an old-era row (post-pparams-update)
+	// and a new-era row (transitionToEra) at the same epoch, and an
+	// unfiltered query collapses them to whichever was inserted last
+	// — which is the new-era shape. Callers commit to a specific
+	// era's struct decoder, so the row's era_id must match the chosen
+	// decoder for the CBOR to decode.
 	GetPParams(
 		uint64, // epoch
+		uint, // eraId
 		types.Txn,
 	) ([]models.PParams, error)
 

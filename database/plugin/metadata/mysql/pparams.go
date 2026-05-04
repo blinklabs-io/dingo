@@ -19,10 +19,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// GetPParams returns a list of protocol parameters for a given epoch. If there are no pparams
-// for the specified epoch, it will return the most recent pparams before the specified epoch
+// GetPParams returns the latest protocol-parameters row at epoch <=
+// the supplied epoch whose era_id matches the supplied era.
 func (d *MetadataStoreMysql) GetPParams(
 	epoch uint64,
+	eraId uint,
 	txn types.Txn,
 ) ([]models.PParams, error) {
 	ret := []models.PParams{}
@@ -30,7 +31,7 @@ func (d *MetadataStoreMysql) GetPParams(
 	if err != nil {
 		return ret, err
 	}
-	result := db.Where("epoch <= ?", epoch).
+	result := db.Where("epoch <= ? AND era_id = ?", epoch, eraId).
 		Order("epoch DESC, id DESC").
 		Limit(1).
 		Find(&ret)

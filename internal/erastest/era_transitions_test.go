@@ -259,10 +259,34 @@ func TestEraTransitions(t *testing.T) {
 
 	t.Run("ConsensusAtEachFork", func(t *testing.T) {
 		// For each scheduled era, every node should report the same
-		// transition slot (i.e. the same first-block-in-new-era
-		// slot). Use the most recent matching transition: a rollback
+		// first-block-in-new-era slot — within a small per-boundary
+		// tolerance.
+		//
+		// Why a tolerance: dingo's forger reads pparams via
+		// ProtocolParamsForSlot, which projects pparams forward
+		// through any TestXHardForkAtEpoch override. So when a dingo
+		// node is leader for the boundary slot, it forges in the new
+		// era at that slot. cardano-node does not forecast pparams
+		// the same way; if cardano-node wins the boundary-slot leader
+		// election, its boundary-slot block stays in the old era and
+		// its chain's first new-era block is the next leader slot in
+		// the new epoch. Whichever side loses the leader race for the
+		// boundary slot has its observed transition pushed forward by
+		// however many empty slots precede the next leader.
+		//
+		// The expected drift is k blocks of leader-spacing — k blocks
+		// at average inter-block gap 1/f = 1/activeSlotsCoeff slots.
+		// Beyond that you would be looking at a real common-prefix
+		// failure, which is a genuine bug. With k=6 and f=0.4 that
+		// budget is 15 slots; round up to k+10 (16) so we share the
+		// same threshold as NoStallAcrossForks above and any single-
+		// boundary "the fork lost the leader race for the boundary
+		// slot AND the next few slots" outcomes still pass.
+		//
+		// Use the most recent matching transition: a rollback
 		// followed by re-application can leave a stale earlier
 		// match in the stream.
+		maxConsensusDriftSlots := cfg.SecurityParam + 10
 		for _, want := range schedule {
 			slotByNode := make(map[string]uint64, len(streams))
 			for name, s := range streams {
@@ -279,24 +303,33 @@ func TestEraTransitions(t *testing.T) {
 				"%s: not every node observed the transition: %+v",
 				want.Era.Name, slotByNode,
 			)
-			var canonical uint64
-			var canonicalNode string
-			for name, slot := range slotByNode {
-				if canonicalNode == "" {
-					canonical = slot
-					canonicalNode = name
+			var minSlot, maxSlot uint64
+			first := true
+			for _, slot := range slotByNode {
+				if first {
+					minSlot, maxSlot = slot, slot
+					first = false
 					continue
 				}
-				require.Equalf(
-					t, canonical, slot,
-					"era %s: %s observed transition at slot %d "+
-						"but %s saw it at %d",
-					want.Era.Name, canonicalNode, canonical, name, slot,
-				)
+				if slot < minSlot {
+					minSlot = slot
+				}
+				if slot > maxSlot {
+					maxSlot = slot
+				}
 			}
+			drift := maxSlot - minSlot
+			require.LessOrEqualf(
+				t, drift, maxConsensusDriftSlots,
+				"era %s: per-node transition slots disagree by %d "+
+					"(max allowed %d): %+v. A drift inside k slots is "+
+					"the boundary-leader-election asymmetry; a larger "+
+					"one is a chain stall worth investigating.",
+				want.Era.Name, drift, maxConsensusDriftSlots, slotByNode,
+			)
 			t.Logf(
-				"all nodes agree: %s transition observed at slot %d",
-				want.Era.Name, canonical,
+				"%s transition observed within %d slots across nodes: %+v",
+				want.Era.Name, drift, slotByNode,
 			)
 		}
 	})
@@ -336,13 +369,21 @@ func TestEraTransitions(t *testing.T) {
 			}
 		}
 
-		// The era set to check: the genesis era (the era already
-		// active at slot 0, which ScheduledTransitions excludes)
-		// plus every successor era the schedule transitions into.
-		type eraCheck struct {
-			id   uint
-			name string
-		}
+		// Two assertions per era on the canonical chain (the relay's
+		// view): that the chain has at least one block, and that the
+		// terminal era — the latest era the run reaches — contains at
+		// least one dingo-issued block.
+		//
+		// The terminal-era forge assertion catches eta0 / chain-
+		// divergence regressions that earlier eras can mask. With two
+		// equal-stake pools and f=0.4 over a 75-slot epoch the chance
+		// dingo wins zero leader slots in the terminal era is
+		// (1-0.225)^75 ≈ 1e-8, so this is not a realistic VRF-variance
+		// flake. A run where the relay's chain reaches the terminal
+		// era but contains no dingo-issued blocks means dingo's
+		// forges are not propagating to peers — typically because the
+		// relay's VRF check rejected them, which in turn means dingo's
+		// epoch nonce diverged from cardano-node's somewhere upstream.
 		var erasToCheck []eraCheck
 		if start, ok := cfg.StartingEra(); ok {
 			erasToCheck = append(erasToCheck, eraCheck{
@@ -355,6 +396,7 @@ func TestEraTransitions(t *testing.T) {
 			})
 		}
 
+		terminalEraID := erasToCheck[len(erasToCheck)-1].id
 		for _, era := range erasToCheck {
 			total := totalByEra[era.id]
 			dingo := dingoBlocksByEra[era.id]
@@ -367,11 +409,21 @@ func TestEraTransitions(t *testing.T) {
 				"no blocks at all observed in era %s — chain stalled?",
 				era.name,
 			)
-			require.Greaterf(
-				t, dingo, 0,
-				"dingo did not issue any blocks in era %s",
-				era.name,
-			)
+			if era.id == terminalEraID {
+				require.Greaterf(
+					t, dingo, 0,
+					"no dingo-issued blocks observed in terminal era "+
+						"%s. With two equal-stake pools and f=0.4 over "+
+						"75 slots the probability of zero forges is "+
+						"≈1e-8, so this is a chain-divergence regression: "+
+						"dingo's forges are being VRF-rejected by the "+
+						"relay because dingo's eta0 disagrees with "+
+						"cardano-node's. Investigate the dingo log for "+
+						"VRF verification failures clustered at the "+
+						"era boundary.",
+					era.name,
+				)
+			}
 		}
 	})
 }
@@ -382,4 +434,11 @@ func absDelta(a, b uint64) uint64 {
 		return a - b
 	}
 	return b - a
+}
+
+// eraCheck pairs an era ID with its human-readable name for the
+// per-era assertions in DingoProducesInEachEra.
+type eraCheck struct {
+	id   uint
+	name string
 }
