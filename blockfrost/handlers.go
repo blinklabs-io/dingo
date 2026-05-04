@@ -38,6 +38,7 @@ const (
 	// Hex encodes each byte as two characters, so a 28-byte credential
 	// hash is represented by 56 hex characters.
 	drepCredentialHexLen = drepCredentialHashLen * 2
+	maxTxBodySize        = 64 * 1024
 )
 
 // writeJSON writes a JSON response with the given status
@@ -847,8 +848,19 @@ func (b *Blockfrost) handleTransactionSubmit(
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxTxBodySize)
 	txCbor, err := io.ReadAll(r.Body)
 	if err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeError(
+				w,
+				http.StatusRequestEntityTooLarge,
+				"Request Entity Too Large",
+				"transaction body exceeds maximum allowed size",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to read transaction submit body",
 			"error", err,
