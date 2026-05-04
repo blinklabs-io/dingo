@@ -1,6 +1,51 @@
 # Release Notes
 
 
+## v0.39.2 (May 2, 2026)
+
+**Title:** Improve fork recovery and hard fork readiness
+
+**Date:** May 2, 2026
+
+**Version:** v0.39.2
+
+Hi folks! Here’s what we shipped in v0.39.2.
+
+### ✨ What's New
+
+* Added **hard fork validation plumbing:** Dingo now includes early validation infrastructure for scheduled era transitions and hard fork behavior, which improves confidence before future network changes take effect.
+
+### 💪 Improvements
+
+* Improved **era transition protocol version handling:** Dingo now advances scheduled era transitions with the right protocol version, which makes era changes more reliable and reduces the chance of stalling at a fork boundary.
+* Refined **slot aware post fork protocol handling:** Dingo now selects the right protocol rules for the slot it is forging, which reduces the chance of producing era incompatible boundary blocks during scheduled forks.
+
+### 🔧 Fixes
+
+* Restored **safer at tip fork recovery:** Dingo now backs out more effectively from repeated validation failures at tip, which gives chain selection more room to escape a bad fork instead of getting trapped on the same failing path.
+* Corrected **VRF nonce handling at epoch boundaries:** Dingo now carries forward the right nonce values across epoch boundaries, which keeps leader checks and boundary validation aligned with the active chain.
+
+### 📋 What You Need to Know
+
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are generally sufficient.
+* Highlighted **safer tip recovery behavior:** Nodes are less likely to remain stuck on the same failing fork after a tip validation problem.
+* Emphasized **safer era transitions and hard forks:** Scheduled era changes now progress more reliably, with lower risk of stalls or boundary blocks that do not match the active era.
+* Summarized **corrected nonce behavior at epoch boundaries:** Epoch boundary validation and leader related behavior now stay aligned with the correct nonce progression.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.39.1 (May 1, 2026)
 
 **Title:** Safer pruning, rollback recovery, and snapshot nonces
