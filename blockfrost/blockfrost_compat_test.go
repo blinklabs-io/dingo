@@ -335,6 +335,52 @@ func TestCompatMetadataTransactionCBORResponse(t *testing.T) {
 	assert.Equal(t, cborMetadata, *theirs.Metadata)
 }
 
+func TestCompatTransactionResponse(t *testing.T) {
+	invalidBefore := "100"
+	invalidHereafter := "200"
+	ours := TransactionResponse{
+		Hash:             "txhash1",
+		Block:            "blockhash1",
+		Slot:             123,
+		BlockHeight:      45,
+		BlockTime:        1700000000,
+		Index:            2,
+		OutputAmount:     []AddressAmountResponse{{Unit: "lovelace", Quantity: "5000"}},
+		Fees:             "170000",
+		Deposit:          "0",
+		Size:             512,
+		UtxoCount:        3,
+		StakeCertCount:   1,
+		DelegationCount:  1,
+		RedeemerCount:    2,
+		ValidContract:    true,
+		InvalidBefore:    &invalidBefore,
+		InvalidHereafter: &invalidHereafter,
+	}
+
+	data, err := json.Marshal(ours)
+	require.NoError(t, err)
+
+	var theirs bfgo.TransactionContent
+	err = json.Unmarshal(data, &theirs)
+	require.NoError(t, err)
+
+	assert.Equal(t, "txhash1", theirs.Hash)
+	assert.Equal(t, "blockhash1", theirs.Block)
+	assert.Equal(t, 123, theirs.Slot)
+	assert.Equal(t, 45, theirs.BlockHeight)
+	assert.Equal(t, 1700000000, theirs.BlockTime)
+	assert.Equal(t, 2, theirs.Index)
+	assert.Equal(t, "170000", theirs.Fees)
+	require.Len(t, theirs.OutputAmount, 1)
+	assert.Equal(t, "lovelace", theirs.OutputAmount[0].Unit)
+	assert.Equal(t, "5000", theirs.OutputAmount[0].Quantity)
+	require.NotNil(t, theirs.InvalidBefore)
+	assert.Equal(t, "100", *theirs.InvalidBefore)
+	require.NotNil(t, theirs.InvalidHereafter)
+	assert.Equal(t, "200", *theirs.InvalidHereafter)
+}
+
 func TestCompatAddressUTXOResponse(t *testing.T) {
 	dataHash := "datumhash1"
 	inlineDatum := "d8799f"

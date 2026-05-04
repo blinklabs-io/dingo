@@ -766,6 +766,551 @@ func (b *Blockfrost) handleMetadataTransactionsCBOR(
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleTransaction handles GET /api/v0/txs/{hash} and returns
+// transaction summary details.
+func (b *Blockfrost) handleTransaction(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	tx, err := b.node.Transaction(hash)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested transaction could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get transaction",
+			"hash", r.PathValue("hash"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, TransactionResponse{
+		Hash:               tx.Hash,
+		Block:              tx.Block,
+		Slot:               tx.Slot,
+		BlockHeight:        tx.BlockHeight,
+		BlockTime:          tx.BlockTime,
+		Index:              int(tx.Index),
+		OutputAmount:       convertAddressAmounts(tx.OutputAmount),
+		Fees:               tx.Fees,
+		Deposit:            tx.Deposit,
+		Size:               tx.Size,
+		UtxoCount:          tx.UtxoCount,
+		WithdrawalCount:    tx.WithdrawalCount,
+		MirCertCount:       tx.MirCertCount,
+		DelegationCount:    tx.DelegationCount,
+		StakeCertCount:     tx.StakeCertCount,
+		PoolUpdateCount:    tx.PoolUpdateCount,
+		PoolRetireCount:    tx.PoolRetireCount,
+		AssetMintBurnCount: tx.AssetMintBurnCount,
+		RedeemerCount:      tx.RedeemerCount,
+		ValidContract:      tx.ValidContract,
+		InvalidBefore:      tx.InvalidBefore,
+		InvalidHereafter:   tx.InvalidHereafter,
+	})
+}
+
+// handleTransactionCBOR handles GET /api/v0/txs/{hash}/cbor and returns
+// the raw signed transaction CBOR as a hex string.
+func (b *Blockfrost) handleTransactionCBOR(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	txCbor, err := b.node.TransactionCBOR(hash)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested transaction could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get transaction CBOR",
+			"hash", r.PathValue("hash"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction CBOR",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, TransactionCBORResponse{
+		CBOR: hex.EncodeToString(txCbor),
+	})
+}
+
+// handleTransactionMetadata handles GET /api/v0/txs/{hash}/metadata and
+// returns transaction metadata labels as JSON values.
+func (b *Blockfrost) handleTransactionMetadata(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionMetadata(hash)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested transaction could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get transaction metadata",
+			"hash", r.PathValue("hash"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction metadata",
+		)
+		return
+	}
+
+	resp := make([]TransactionMetadataResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionMetadataResponse{
+			Label:        row.Label,
+			JSONMetadata: row.JSONMetadata,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionMetadataCBOR handles GET /api/v0/txs/{hash}/metadata/cbor
+// and returns transaction metadata labels as CBOR values.
+func (b *Blockfrost) handleTransactionMetadataCBOR(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionMetadataCBOR(hash)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested transaction could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get transaction metadata CBOR",
+			"hash", r.PathValue("hash"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction metadata CBOR",
+		)
+		return
+	}
+
+	resp := make([]TransactionMetadataCBORResponse, 0, len(rows))
+	for _, row := range rows {
+		metadata := row.CBORMetadata
+		resp = append(resp, TransactionMetadataCBORResponse{
+			Label:        row.Label,
+			CborMetadata: &metadata,
+			Metadata:     metadata,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionUTXOs handles GET /api/v0/txs/{hash}/utxos and returns
+// transaction inputs and outputs.
+func (b *Blockfrost) handleTransactionUTXOs(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	utxos, err := b.node.TransactionUTXOs(hash)
+	if err != nil {
+		if errors.Is(err, ErrTransactionNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested transaction could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get transaction UTxOs",
+			"hash", r.PathValue("hash"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve transaction UTxOs",
+		)
+		return
+	}
+
+	resp := TransactionUTXOsResponse{
+		Hash:    utxos.Hash,
+		Inputs:  make([]TransactionInputResponse, 0, len(utxos.Inputs)),
+		Outputs: make([]TransactionOutputResponse, 0, len(utxos.Outputs)),
+	}
+	for _, input := range utxos.Inputs {
+		resp.Inputs = append(resp.Inputs, TransactionInputResponse{
+			Address:             input.Address,
+			Amount:              convertAddressAmounts(input.Amount),
+			TxHash:              input.TxHash,
+			OutputIndex:         float32(input.OutputIndex),
+			DataHash:            input.DataHash,
+			Collateral:          input.Collateral,
+			InlineDatum:         input.InlineDatum,
+			ReferenceScriptHash: input.ReferenceScriptHash,
+			Reference:           input.Reference,
+		})
+	}
+	for _, output := range utxos.Outputs {
+		resp.Outputs = append(resp.Outputs, TransactionOutputResponse{
+			Address:             output.Address,
+			Amount:              convertAddressAmounts(output.Amount),
+			OutputIndex:         int(output.OutputIndex),
+			DataHash:            output.DataHash,
+			InlineDatum:         output.InlineDatum,
+			ReferenceScriptHash: output.ReferenceScriptHash,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionDelegations handles GET /api/v0/txs/{hash}/delegations and
+// returns delegation certificates in the transaction.
+func (b *Blockfrost) handleTransactionDelegations(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionDelegations(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction delegations",
+			"failed to retrieve transaction delegations",
+		)
+		return
+	}
+
+	resp := make([]TransactionDelegationResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionDelegationResponse{
+			Address:     row.Address,
+			PoolID:      row.PoolID,
+			CertIndex:   row.CertIndex,
+			ActiveEpoch: int(row.ActiveEpoch),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionStakeAddresses handles GET /api/v0/txs/{hash}/stakes and
+// returns stake registration/deregistration certificates in the transaction.
+func (b *Blockfrost) handleTransactionStakeAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionStakeAddresses(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction stake addresses",
+			"failed to retrieve transaction stake addresses",
+		)
+		return
+	}
+
+	resp := make([]TransactionStakeAddressResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionStakeAddressResponse{
+			Address:      row.Address,
+			CertIndex:    row.CertIndex,
+			Registration: row.Registration,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionWithdrawals handles GET /api/v0/txs/{hash}/withdrawals
+// and returns reward withdrawals in the transaction.
+func (b *Blockfrost) handleTransactionWithdrawals(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionWithdrawals(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction withdrawals",
+			"failed to retrieve transaction withdrawals",
+		)
+		return
+	}
+
+	resp := make([]TransactionWithdrawalResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionWithdrawalResponse(row))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionMIRs handles GET /api/v0/txs/{hash}/mirs and returns MIR
+// certificates in the transaction.
+func (b *Blockfrost) handleTransactionMIRs(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionMIRs(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction MIR certificates",
+			"failed to retrieve transaction MIR certificates",
+		)
+		return
+	}
+
+	resp := make([]TransactionMIRResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionMIRResponse(row))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionPoolUpdates handles GET /api/v0/txs/{hash}/pool_updates
+// and returns pool registration certificates in the transaction.
+func (b *Blockfrost) handleTransactionPoolUpdates(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionPoolUpdates(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction pool updates",
+			"failed to retrieve transaction pool updates",
+		)
+		return
+	}
+
+	resp := make([]TransactionPoolUpdateResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionPoolUpdateResponse{
+			ActiveEpoch:   int(row.ActiveEpoch),
+			CertIndex:     row.CertIndex,
+			FixedCost:     row.FixedCost,
+			MarginCost:    row.MarginCost,
+			Owners:        row.Owners,
+			Pledge:        row.Pledge,
+			PoolID:        row.PoolID,
+			Relays:        transactionPoolRelayResponses(row.Relays),
+			RewardAccount: row.RewardAccount,
+			VrfKey:        row.VrfKey,
+			Metadata:      transactionPoolMetadataResponse(row.Metadata),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionPoolRetires handles GET /api/v0/txs/{hash}/pool_retires
+// and returns pool retirement certificates in the transaction.
+func (b *Blockfrost) handleTransactionPoolRetires(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionPoolRetires(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction pool retires",
+			"failed to retrieve transaction pool retires",
+		)
+		return
+	}
+
+	resp := make([]TransactionPoolRetireResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionPoolRetireResponse{
+			PoolID:        row.PoolID,
+			CertIndex:     row.CertIndex,
+			RetiringEpoch: int(row.RetiringEpoch),
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionRedeemers handles GET /api/v0/txs/{hash}/redeemers and
+// returns Plutus redeemers in the transaction.
+func (b *Blockfrost) handleTransactionRedeemers(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionRedeemers(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction redeemers",
+			"failed to retrieve transaction redeemers",
+		)
+		return
+	}
+
+	resp := make([]TransactionRedeemerResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionRedeemerResponse(row))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (b *Blockfrost) writeTransactionEndpointError(
+	w http.ResponseWriter,
+	r *http.Request,
+	err error,
+	logMessage string,
+	clientMessage string,
+) {
+	if errors.Is(err, ErrTransactionNotFound) {
+		writeError(
+			w,
+			http.StatusNotFound,
+			"Not Found",
+			"The requested transaction could not be found.",
+		)
+		return
+	}
+	b.logger.Error(
+		logMessage,
+		"hash", r.PathValue("hash"),
+		"error", err,
+	)
+	writeError(
+		w,
+		http.StatusInternalServerError,
+		"Internal Server Error",
+		clientMessage,
+	)
+}
+
+func parseTransactionHashOrWriteError(
+	w http.ResponseWriter,
+	r *http.Request,
+) ([]byte, bool) {
+	hash, err := hex.DecodeString(r.PathValue("hash"))
+	if err != nil || len(hash) != 32 {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid transaction hash.",
+		)
+		return nil, false
+	}
+	return hash, true
+}
+
 func parsePaginationOrWriteError(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -910,6 +1455,41 @@ func convertAddressAmounts(
 		ret = append(ret, AddressAmountResponse(amount))
 	}
 	return ret
+}
+
+func transactionPoolMetadataResponse(
+	metadata *TransactionPoolMetadataInfo,
+) *TransactionPoolMetadataResponse {
+	if metadata == nil {
+		return nil
+	}
+	return &TransactionPoolMetadataResponse{
+		Hash: metadata.Hash,
+		URL:  metadata.URL,
+	}
+}
+
+func transactionPoolRelayResponses(
+	relays []TransactionPoolRelayInfo,
+) []TransactionPoolRelayResponse {
+	ret := make([]TransactionPoolRelayResponse, 0, len(relays))
+	for _, relay := range relays {
+		ret = append(ret, TransactionPoolRelayResponse{
+			DNS:    optionalResponseString(relay.DNS),
+			DNSSrv: optionalResponseString(relay.DNSSrv),
+			IPv4:   optionalResponseString(relay.IPv4),
+			IPv6:   optionalResponseString(relay.IPv6),
+			Port:   relay.Port,
+		})
+	}
+	return ret
+}
+
+func optionalResponseString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
 
 func assetNameASCII(

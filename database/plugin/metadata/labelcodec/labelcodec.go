@@ -83,6 +83,14 @@ func RawValues(
 	return json.RawMessage(jsonValue), append([]byte(nil), rawValue...), nil
 }
 
+// EntriesFromCBOR returns all metadata labels from encoded transaction
+// metadata, ordered by label.
+func EntriesFromCBOR(
+	metadataCbor []byte,
+) ([]Entry, error) {
+	return extractFromCbor(metadataCbor)
+}
+
 func extractFromCbor(
 	metadataCbor []byte,
 ) ([]Entry, error) {
