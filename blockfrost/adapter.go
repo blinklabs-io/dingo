@@ -1509,16 +1509,32 @@ func (a *NodeAdapter) TransactionUTXOs(
 	txReferenceInputs := slices.Clone(tx.ReferenceInputs)
 	slices.SortFunc(txReferenceInputs, compareUtxoRefs)
 
+	inputCbor, err := a.transactionInputCbor(
+		txInputs,
+		txCollateral,
+		txReferenceInputs,
+	)
+	if err != nil {
+		return TransactionUTXOsInfo{}, fmt.Errorf(
+			"resolve transaction input CBOR for %x: %w",
+			hash,
+			err,
+		)
+	}
+
 	inputs := make([]TransactionInputInfo, 0, len(txInputs)+len(txCollateral)+len(txReferenceInputs))
 	normalReference := false
 	for _, input := range txInputs {
+		input.Cbor = inputCbor[utxoRef(input)]
 		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, &normalReference))
 	}
 	for _, input := range txCollateral {
+		input.Cbor = inputCbor[utxoRef(input)]
 		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, true, &normalReference))
 	}
 	referenceInput := true
 	for _, input := range txReferenceInputs {
+		input.Cbor = inputCbor[utxoRef(input)]
 		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, &referenceInput))
 	}
 
@@ -1527,6 +1543,36 @@ func (a *NodeAdapter) TransactionUTXOs(
 		Inputs:  inputs,
 		Outputs: outputs,
 	}, nil
+}
+
+func (a *NodeAdapter) transactionInputCbor(
+	inputGroups ...[]models.Utxo,
+) (map[database.UtxoRef][]byte, error) {
+	seen := map[database.UtxoRef]struct{}{}
+	refs := []database.UtxoRef{}
+	for _, inputs := range inputGroups {
+		for _, input := range inputs {
+			ref := utxoRef(input)
+			if _, ok := seen[ref]; ok {
+				continue
+			}
+			seen[ref] = struct{}{}
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return map[database.UtxoRef][]byte{}, nil
+	}
+	return a.ledgerState.Database().CborCache().ResolveUtxoCborBatch(refs)
+}
+
+func utxoRef(utxo models.Utxo) database.UtxoRef {
+	var txID [32]byte
+	copy(txID[:], utxo.TxId)
+	return database.UtxoRef{
+		TxId:      txID,
+		OutputIdx: utxo.OutputIdx,
+	}
 }
 
 // TransactionDelegations returns delegation certificates in the requested
@@ -2138,6 +2184,13 @@ func compareUtxoRefs(a, b models.Utxo) int {
 func (a *NodeAdapter) addressFromUtxo(
 	utxo models.Utxo,
 ) string {
+	if len(utxo.Cbor) > 0 {
+		output, err := utxo.Decode()
+		if err == nil {
+			return output.Address().String()
+		}
+	}
+
 	networkID := a.networkID()
 	switch {
 	case len(utxo.PaymentKey) == lcommon.AddressHashSize &&
