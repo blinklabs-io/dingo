@@ -411,6 +411,114 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 	}
 }
 
+func TestProcessChainsyncRecyclerTickRealignsOtherPeersOnPlateau(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(
+		event.ChainsyncResyncEventType,
+	)
+
+	stalledConn := newNodeTestConnId(4001)
+	candidateConn := newNodeTestConnId(4002)
+	farBehindConn := newNodeTestConnId(4003)
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{
+			MaxClients:   3,
+			StallTimeout: time.Hour,
+		},
+	)
+	require.True(t, state.AddClientConnId(stalledConn))
+	require.True(t, state.AddClientConnId(candidateConn))
+	require.True(t, state.AddClientConnId(farBehindConn))
+	state.SetClientConnId(stalledConn)
+	// Stalled active peer reported a tip past local tip.
+	stalledPoint := ocommon.NewPoint(120, []byte("stalled"))
+	stalledTip := ochainsync.Tip{Point: stalledPoint, BlockNumber: 60}
+	state.UpdateClientTip(stalledConn, stalledPoint, stalledTip)
+	// Candidate peer's chainsync cursor has advanced past local tip
+	// (we only marked it deduped while the active peer was the sole
+	// publisher); without realignment its next RollForward delivers a
+	// header beyond the local block tip and the fork resolver fails.
+	candidatePoint := ocommon.NewPoint(150, []byte("candidate"))
+	candidateTip := ochainsync.Tip{Point: candidatePoint, BlockNumber: 75}
+	state.UpdateClientTip(candidateConn, candidatePoint, candidateTip)
+	// A peer whose cursor sits at-or-below local tip does not need
+	// realigning; it can deliver headers from local-tip+1 directly.
+	farBehindPoint := ocommon.NewPoint(80, []byte("behind"))
+	farBehindTip := ochainsync.Tip{Point: farBehindPoint, BlockNumber: 40}
+	state.UpdateClientTip(farBehindConn, farBehindPoint, farBehindTip)
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	selector.UpdatePeerTip(stalledConn, stalledTip, nil)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+		eventBus:       bus,
+	}
+
+	now := time.Now()
+	lastProgressSlot := uint64(100)
+	lastProgressAt := now.Add(-5 * time.Minute)
+	recycleAt := make(map[string]time.Time)
+	lastRecycled := make(map[string]time.Time)
+
+	n.processChainsyncRecyclerTick(
+		now,
+		100,
+		chainsync.Config{
+			MaxClients:   3,
+			StallTimeout: time.Hour,
+		},
+		recycleAt,
+		lastRecycled,
+		&lastProgressSlot,
+		&lastProgressAt,
+		4*time.Minute,
+		time.Second,
+		2*time.Minute,
+	)
+
+	gotPlateauForStalled := false
+	gotRealignForCandidate := false
+	timeout := time.After(200 * time.Millisecond)
+	for !gotPlateauForStalled || !gotRealignForCandidate {
+		select {
+		case evt := <-resyncCh:
+			resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
+			require.True(t, ok)
+			switch {
+			case resyncEvt.Reason == "local_tip_plateau" &&
+				resyncEvt.ConnectionId == stalledConn:
+				gotPlateauForStalled = true
+			case resyncEvt.Reason == "post_plateau_realign" &&
+				resyncEvt.ConnectionId == candidateConn:
+				gotRealignForCandidate = true
+			case resyncEvt.Reason == "post_plateau_realign" &&
+				resyncEvt.ConnectionId == farBehindConn:
+				t.Fatalf(
+					"unexpected realign for peer at-or-below local tip: %+v",
+					resyncEvt,
+				)
+			default:
+				t.Fatalf("unexpected resync event: %+v", resyncEvt)
+			}
+		case <-timeout:
+			t.Fatalf(
+				"missing resync events: plateau=%v realign=%v",
+				gotPlateauForStalled, gotRealignForCandidate,
+			)
+		}
+	}
+}
+
 func TestRunStallCheckerTickRecoversAndAllowsFutureTicks(t *testing.T) {
 	n := &Node{
 		config: Config{
