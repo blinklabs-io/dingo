@@ -2131,6 +2131,16 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 	// Clear Outputs on tmpTx so the upsert doesn't try to create them.
 	tmpTx.Outputs = nil
 
+	// Explicitly track whether the transaction already existed before this call.
+	// GORM v1.31.1 always populates tmpTx.ID via PostgreSQL RETURNING even on
+	// the conflict path, so needsIdFetch cannot reliably detect retries here.
+	var txExistedBefore bool
+	{
+		var cnt int64
+		db.Model(&models.Transaction{}).Where("hash = ?", txHash).Count(&cnt)
+		txExistedBefore = cnt > 0
+	}
+
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}},
 		DoUpdates: clause.AssignmentColumns(
@@ -2335,7 +2345,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 	// ------------------------------------------------------------------ //
 	if d.storageMode == types.StorageModeAPI {
 		// On retry: schedule deletion of previously flushed rows for this tx.
-		if needsIdFetch {
+		if txExistedBefore {
 			local.AddDeleteTxID(tmpTx.ID)
 		}
 

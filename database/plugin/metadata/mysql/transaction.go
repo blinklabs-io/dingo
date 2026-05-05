@@ -3255,7 +3255,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				}
 				caseStmt := strings.Join(whenClauses, " ")
 				query := fmt.Sprintf(
-					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN (?)",
+					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN ?",
 					caseStmt,
 				)
 				values = append(values, ids)

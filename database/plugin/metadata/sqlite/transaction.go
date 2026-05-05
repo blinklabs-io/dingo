@@ -2375,137 +2375,113 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 	// 3. Collateral / reference-input marker UPDATEs (immediate)         //
 	//    These update UTxOs that already exist from prior blocks.        //
 	// ------------------------------------------------------------------ //
-	if d.storageMode == types.StorageModeAPI {
-		// Fetch input UTxOs for address-indexing below.
-		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
-		for _, input := range tx.Inputs() {
-			inputRefs = append(inputRefs, UtxoRef{
+	if len(tx.Collateral()) > 0 {
+		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
+		for _, input := range tx.Collateral() {
+			collateralRefs = append(collateralRefs, UtxoRef{
 				TxId:      input.Id().Bytes(),
 				OutputIdx: input.Index(),
 			})
 		}
-		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
+		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to batch fetch input UTXOs (batched): %w",
+				"failed to batch fetch collateral UTXOs (batched): %w",
 				err,
 			)
 		}
-		for _, input := range tx.Inputs() {
-			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
-			if u := inputUtxos[key]; u != nil {
-				tmpTx.Inputs = append(tmpTx.Inputs, *u)
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.Collateral() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			if collateralUtxos[key] == nil {
+				continue
+			}
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.Collateral = append(tmpTx.Collateral, *collateralUtxos[key])
+		}
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
+				return fmt.Errorf(
+					"batch update collateral (batched): %w",
+					r.Error,
+				)
 			}
 		}
+	}
 
-		if len(tx.Collateral()) > 0 {
-			collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
-			for _, input := range tx.Collateral() {
-				collateralRefs = append(collateralRefs, UtxoRef{
-					TxId:      input.Id().Bytes(),
-					OutputIdx: input.Index(),
-				})
-			}
-			collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to batch fetch collateral UTXOs (batched): %w",
-					err,
-				)
-			}
-			var caseClauses []string
-			var whereConditions []string
-			var caseArgs []any
-			var whereArgs []any
-			for _, input := range tx.Collateral() {
-				inTxId := input.Id().Bytes()
-				inIdx := input.Index()
-				key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-				if collateralUtxos[key] == nil {
-					continue
-				}
-				caseClauses = append(
-					caseClauses,
-					"WHEN tx_id = ? AND output_idx = ? THEN ?",
-				)
-				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-				whereConditions = append(
-					whereConditions,
-					"(tx_id = ? AND output_idx = ?)",
-				)
-				whereArgs = append(whereArgs, inTxId, inIdx)
-				tmpTx.Collateral = append(tmpTx.Collateral, *collateralUtxos[key])
-			}
-			if len(caseClauses) > 0 {
-				args := append(caseArgs, whereArgs...)
-				sql := fmt.Sprintf(
-					"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-					strings.Join(caseClauses, " "),
-					strings.Join(whereConditions, " OR "),
-				)
-				if r := db.Exec(sql, args...); r.Error != nil {
-					return fmt.Errorf(
-						"batch update collateral (batched): %w",
-						r.Error,
-					)
-				}
-			}
+	if len(tx.ReferenceInputs()) > 0 {
+		var refInputRefs []UtxoRef
+		for _, input := range tx.ReferenceInputs() {
+			refInputRefs = append(refInputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
 		}
-
-		if len(tx.ReferenceInputs()) > 0 {
-			var refInputRefs []UtxoRef
-			for _, input := range tx.ReferenceInputs() {
-				refInputRefs = append(refInputRefs, UtxoRef{
-					TxId:      input.Id().Bytes(),
-					OutputIdx: input.Index(),
-				})
+		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to batch fetch reference input UTXOs (batched): %w",
+				err,
+			)
+		}
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.ReferenceInputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			if refInputUtxos[key] == nil {
+				continue
 			}
-			refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
-			if err != nil {
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.ReferenceInputs = append(
+				tmpTx.ReferenceInputs,
+				*refInputUtxos[key],
+			)
+		}
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
 				return fmt.Errorf(
-					"failed to batch fetch reference input UTXOs (batched): %w",
-					err,
+					"batch update reference inputs (batched): %w",
+					r.Error,
 				)
-			}
-			var caseClauses []string
-			var whereConditions []string
-			var caseArgs []any
-			var whereArgs []any
-			for _, input := range tx.ReferenceInputs() {
-				inTxId := input.Id().Bytes()
-				inIdx := input.Index()
-				key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-				if refInputUtxos[key] == nil {
-					continue
-				}
-				caseClauses = append(
-					caseClauses,
-					"WHEN tx_id = ? AND output_idx = ? THEN ?",
-				)
-				caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-				whereConditions = append(
-					whereConditions,
-					"(tx_id = ? AND output_idx = ?)",
-				)
-				whereArgs = append(whereArgs, inTxId, inIdx)
-				tmpTx.ReferenceInputs = append(
-					tmpTx.ReferenceInputs,
-					*refInputUtxos[key],
-				)
-			}
-			if len(caseClauses) > 0 {
-				args := append(caseArgs, whereArgs...)
-				sql := fmt.Sprintf(
-					"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-					strings.Join(caseClauses, " "),
-					strings.Join(whereConditions, " OR "),
-				)
-				if r := db.Exec(sql, args...); r.Error != nil {
-					return fmt.Errorf(
-						"batch update reference inputs (batched): %w",
-						r.Error,
-					)
-				}
 			}
 		}
 	}
@@ -2539,6 +2515,28 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		// On retry: schedule deletion of previously flushed rows for this tx.
 		if needsIdFetch {
 			local.AddDeleteTxID(tmpTx.ID)
+		}
+
+		// Fetch input UTxOs for address-indexing below.
+		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
+		for _, input := range tx.Inputs() {
+			inputRefs = append(inputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to batch fetch input UTXOs (batched): %w",
+				err,
+			)
+		}
+		for _, input := range tx.Inputs() {
+			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+			if u := inputUtxos[key]; u != nil {
+				tmpTx.Inputs = append(tmpTx.Inputs, *u)
+			}
 		}
 
 		// Address-transaction index.
