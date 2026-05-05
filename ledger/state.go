@@ -497,7 +497,14 @@ type LedgerState struct {
 	// closed.Load() and Add(1) in handleEventChainUpdate.
 	rollbackMu sync.Mutex
 	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG        sync.WaitGroup
+	rollbackWG sync.WaitGroup
+	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
+	// prevent Add-after-Wait panics from the TOCTOU race between
+	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
+	replayMu sync.Mutex
+	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
+	// Close can drain them before the database is closed (issue #2107).
+	replayWG          sync.WaitGroup
 	validationEnabled bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
@@ -986,6 +993,24 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 	ls.rollbackMu.Unlock()
+
+	// Drain in-flight replayBufferedHeadersAsync goroutines so they
+	// finish issuing DB reads before the owner closes the database
+	// (#2107). Hold replayMu so no new goroutine can Add(1) between our
+	// closed flag and this Wait. The closed flag set above prevents
+	// new goroutines from being spawned, so the Wait is bounded by the
+	// in-flight workers; we wait unconditionally because returning
+	// while replay goroutines are still issuing DB reads would
+	// reintroduce the panic this fix is meant to prevent.
+	ls.config.Logger.Info("waiting for in-flight header replay goroutines")
+	replayStart := time.Now()
+	ls.replayMu.Lock()
+	ls.replayWG.Wait()
+	ls.replayMu.Unlock()
+	ls.config.Logger.Info(
+		"header replay goroutines finished",
+		"elapsed", time.Since(replayStart).Round(time.Millisecond),
+	)
 
 	// Stop slot clock
 	if ls.slotClock != nil {
