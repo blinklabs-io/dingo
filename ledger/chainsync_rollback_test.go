@@ -224,7 +224,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 			Point:        fixture.ancestorTip.Point,
 		},
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrRollbackLoopDetected)
 
 	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)

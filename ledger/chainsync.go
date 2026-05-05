@@ -114,8 +114,19 @@ const (
 	// Chainsync re-sync reasons
 	resyncReasonRollbackAhead    = "rollback point ahead of local tip"
 	resyncReasonRollbackNotFound = "rollback point not found"
+	resyncReasonRollbackLoop     = "rollback loop detected"
 
 	maxPeerHeaderHistoryPerConn = 256
+)
+
+var (
+	// ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
+	// the same peer repeatedly requests a rollback to the same slot within the
+	// rollback loop detection window. The rollback is skipped to break the loop,
+	// and the caller should trigger a chainsync re-sync to recover.
+	ErrRollbackLoopDetected = errors.New(
+		"rollback loop detected: same slot rolled back too many times within window",
+	)
 )
 
 type peerHeaderRecord struct {
@@ -152,6 +163,27 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	}
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
+			if errors.Is(err, ErrRollbackLoopDetected) {
+				// The rollback was skipped to break a pathological
+				// loop. Trigger a chainsync re-sync so the peer
+				// can negotiate a fresh intersection rather than
+				// continuing to send the same rollback point.
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				if ls.config.EventBus != nil {
+					ls.config.EventBus.Publish(
+						event.ChainsyncResyncEventType,
+						event.NewEvent(
+							event.ChainsyncResyncEventType,
+							event.ChainsyncResyncEvent{
+								ConnectionId: e.ConnectionId,
+								Reason:       resyncReasonRollbackLoop,
+							},
+						),
+					)
+				}
+				return
+			}
 			ls.config.Logger.Error(
 				"failed to handle rollback",
 				"component", "ledger",
@@ -1098,7 +1130,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"count", slotCount,
 				"window", rollbackLoopWindow,
 			)
-			return nil
+			return ErrRollbackLoopDetected
 		}
 	}
 
