@@ -270,6 +270,22 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			err,
 		)
 	}
+	// Roll back the ledger metadata state to the rewind point. Without
+	// this, the chain is pruned to rewindPoint but the UTxO database
+	// still reflects the failing block's post-apply state — consumed
+	// inputs stay consumed, created outputs stay created. When peers
+	// re-deliver the block we just rewound past, ledger validation
+	// looks up its inputs, finds them already marked consumed, and
+	// returns "rule 22 bad input(s) ... rule 24 value not conserved
+	// (consumed 0)" again, looping the recovery indefinitely until
+	// process restart. RewindPrimaryChainToPoint by design only touches
+	// the chain blob — the matching ledger rollback must be explicit.
+	if err := ls.rollback(rewindPoint); err != nil {
+		return false, fmt.Errorf(
+			"rollback ledger state after validation failure: %w",
+			err,
+		)
+	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
