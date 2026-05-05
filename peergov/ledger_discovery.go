@@ -212,6 +212,7 @@ func (p *PeerGovernor) addLedgerPeer(address string) bool {
 	p.mu.Lock()
 
 	// Check deny list
+	//if p.isDeniedLocked(normalized) || p.isDeniedLocked(p.normalizeAddress(address)) {
 	if p.isDeniedLocked(normalized) {
 		p.mu.Unlock()
 		return false

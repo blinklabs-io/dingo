@@ -32,6 +32,8 @@ const defaultMinPeerListCap = 200
 // the peer list has reached its hard capacity limit.
 var ErrPeerListFull = errors.New("peer list at capacity")
 
+var lookupIP = net.LookupIP
+
 // maxPeerListSize returns the hard cap for the total number of peers.
 // This prevents unbounded growth between reconciliation cycles.
 // The cap is max(2 * TargetNumberOfKnownPeers, defaultMinPeerListCap).
@@ -92,6 +94,7 @@ func (p *PeerGovernor) AddPeer(
 ) error {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
+	// hostnameNormalized := p.normalizeAddress(address)
 
 	// Reject non-routable IPs early — topology peers bypass this check
 	// so operators can use private addresses for local relays. Inbound
@@ -111,6 +114,7 @@ func (p *PeerGovernor) AddPeer(
 
 	p.mu.Lock()
 	// Check deny list before adding
+	// if p.isDeniedLocked(normalized) || p.isDeniedLocked(hostnameNormalized) {
 	if p.isDeniedLocked(normalized) {
 		p.config.Logger.Debug(
 			"not adding denied peer",
@@ -121,6 +125,15 @@ func (p *PeerGovernor) AddPeer(
 	}
 	// Check if already exists (use normalized address for deduplication)
 	for _, peer := range p.peers {
+		// if peer == nil {
+		// 	continue
+		// }
+		// if peer.NormalizedAddress == normalized ||
+		// 	peer.NormalizedAddress == hostnameNormalized ||
+		// 	p.normalizeAddress(peer.Address) == hostnameNormalized {
+		// 	p.mu.Unlock()
+		// 	return nil
+		// }
 		if peer != nil && peer.NormalizedAddress == normalized {
 			p.mu.Unlock()
 			return nil
@@ -232,8 +245,14 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	}
 
 	// It's a hostname - try to resolve it
-	ips, err := net.LookupIP(host)
+	ips, err := lookupIP(host)
 	if err != nil || len(ips) == 0 {
+		// p.config.Logger.Warn(
+		// 	"failed to resolve peer hostname",
+		// 	"address", address,
+		// 	"host", host,
+		// 	"error", err,
+		// )
 		// Can't resolve, just lowercase the hostname
 		return net.JoinHostPort(strings.ToLower(host), port)
 	}
