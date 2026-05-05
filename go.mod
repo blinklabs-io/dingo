@@ -16,7 +16,7 @@ require (
 	github.com/aws/smithy-go v1.25.1
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.166.1
+	github.com/blinklabs-io/gouroboros v0.167.0
 	github.com/blinklabs-io/ouroboros-mock v0.10.0
 	github.com/blinklabs-io/plutigo v0.1.9
 	github.com/blockfrost/blockfrost-go v0.4.0
@@ -34,7 +34,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
-	github.com/utxorpc/go-codegen v0.18.1
+	github.com/utxorpc/go-codegen v0.19.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0

@@ -150,7 +150,7 @@ func TestBuildShape_OK(t *testing.T) {
 		"Mary":    {4, 4},
 		"Alonzo":  {5, 6},
 		"Babbage": {7, 8},
-		"Conway":  {9, 10},
+		"Conway":  {9, 11},
 	}
 	for _, e := range shape.Eras {
 		w, ok := want[e.EraName]
@@ -169,7 +169,7 @@ func TestBuildShape_EraForVersionAgreesWithEraTable(t *testing.T) {
 	shape, err := eras.BuildShape(cfg)
 	require.NoError(t, err)
 
-	for v := uint(0); v <= 10; v++ {
+	for v := uint(0); v <= 11; v++ {
 		gotShape, found := shape.EraForVersion(v)
 		require.True(t, found, "version %d should resolve via Shape", v)
 		gotEra, found := eras.EraForVersion(v)
