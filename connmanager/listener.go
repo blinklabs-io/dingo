@@ -262,6 +262,23 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
+			// N2N path: when source-port reuse is in use, force RST
+			// on close so the 4-tuple does not get stuck in TIME_WAIT
+			// and block a subsequent outbound dial to the same peer
+			// with EADDRNOTAVAIL on the matching local-listen-port
+			// 4-tuple.
+			if c.config.OutboundSourcePort > 0 {
+				if lingerErr := enableTCPLingerZero(conn); lingerErr != nil {
+					c.config.Logger.Warn(
+						fmt.Sprintf(
+							"listener: failed to enable SO_LINGER 0 on accepted connection from %s: %s",
+							conn.RemoteAddr(),
+							lingerErr,
+						),
+					)
+				}
+			}
+
 			// N2N path: reserve an inbound slot before further processing
 			if !c.tryReserveInboundSlot() {
 				c.config.Logger.Warn(
