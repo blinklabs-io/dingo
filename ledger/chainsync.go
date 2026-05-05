@@ -119,14 +119,12 @@ const (
 	maxPeerHeaderHistoryPerConn = 256
 )
 
-var (
-	// ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
-	// the same peer repeatedly requests a rollback to the same slot within the
-	// rollback loop detection window. The rollback is skipped to break the loop,
-	// and the caller should trigger a chainsync re-sync to recover.
-	ErrRollbackLoopDetected = errors.New(
-		"rollback loop detected: same slot rolled back too many times within window",
-	)
+// ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
+// the same peer repeatedly requests a rollback to the same slot within the
+// rollback loop detection window. The rollback is skipped to break the loop,
+// and the caller should trigger a chainsync re-sync to recover.
+var ErrRollbackLoopDetected = errors.New(
+	"rollback loop detected: same slot rolled back too many times within window",
 )
 
 type peerHeaderRecord struct {
