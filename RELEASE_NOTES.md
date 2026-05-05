@@ -1,6 +1,20 @@
 # Release Notes
 
 
+## v0.40.0 (May 5, 2026)
+
+**Title:** Governance DRep APIs and safer rollback recovery
+
+**Date:** May 5, 2026
+
+**Version:** v0.40.0
+
+Hi folks! Here’s what we shipped in v0.40.0.
+
+### ✨ What's New
+
+* Added **Blockfrost compatible governance DRep lookups:** Blockfrost compatible services can now look up governance DReps by hex or bech32 identifier and retrieve registration, voting power, and activity details.
+
 ## v0.39.3 (May 4, 2026)
 
 **Title:** Correct era transitions, Bark metadata, and peer recovery
