@@ -1,19 +1,11 @@
 # Release Notes
 
 
-## v0.40.0 (May 5, 2026)
+### 💪 Improvements
 
-**Title:** Governance DRep APIs and safer rollback recovery
-
-**Date:** May 5, 2026
-
-**Version:** v0.40.0
-
-Hi folks! Here’s what we shipped in v0.40.0.
-
-### ✨ What's New
-
-* Added **Blockfrost compatible governance DRep lookups:** Blockfrost compatible services can now look up governance DReps by hex or bech32 identifier and retrieve registration, voting power, and activity details.
+* Improved **newer Blockfrost client compatibility:** Blockfrost backed integrations now stay aligned with the newer `blockfrost-go` client release for smoother API compatibility.
+* Refreshed **protocol and UTxO RPC compatibility:** Core protocol and UTxO RPC support now stay aligned with newer upstream releases, including Conway version 11 expectations, for steadier interoperability.
+* Restored **release history continuity:** Release tracking now includes the v0.39.3 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
 
 ## v0.39.3 (May 4, 2026)
 
