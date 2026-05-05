@@ -453,8 +453,10 @@ func (m *Mempool) processChainEvents() {
 	if m.eventBus == nil {
 		return
 	}
-	chainUpdateSubId, chainUpdateChan := m.eventBus.Subscribe(
+	// Sized for catch-up bursts (one event per block). See #2106.
+	chainUpdateSubId, chainUpdateChan := m.eventBus.SubscribeWithBuffer(
 		chain.ChainUpdateEventType,
+		event.EventQueueSize,
 	)
 	defer func() {
 		m.eventBus.Unsubscribe(chain.ChainUpdateEventType, chainUpdateSubId)
