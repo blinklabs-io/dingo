@@ -1,6 +1,55 @@
 # Release Notes
 
 
+## v0.40.0 (May 5, 2026)
+
+**Title:** Governance DRep APIs and safer rollback recovery
+
+**Date:** May 5, 2026
+
+**Version:** v0.40.0
+
+Hi folks! Here’s what we shipped in v0.40.0.
+
+### ✨ What's New
+
+* Added **Blockfrost compatible governance DRep lookups:** Blockfrost compatible services can now look up governance DReps by hex or bech32 identifier and retrieve registration, voting power, and activity details.
+
+### 💪 Improvements
+
+* Improved **newer Blockfrost client compatibility:** Blockfrost backed integrations now stay aligned with the newer `blockfrost-go` client release for smoother API compatibility.
+* Refreshed **protocol and UTxO RPC compatibility:** Core protocol and UTxO RPC support now stay aligned with newer upstream releases, including Conway version 11 expectations, for steadier interoperability.
+* Restored **release history continuity:** Release tracking now includes the v0.39.3 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
+
+### 🔧 Fixes
+
+* Corrected **rollback loop recovery:** Nodes now force a fresh chainsync resync when the same rollback repeats, which helps recovery move forward instead of circling on the same point.
+* Stabilized **shutdown during catch up:** Nodes now finish in flight replay work before closing storage, which prevents `DB Closed` shutdown failures during catch up.
+* Realigned **ledger state after rollbacks:** Rollback recovery now rewinds ledger state together with the chain, which prevents repeated validation failures after peers resend the same blocks.
+* Enabled **faster source port reuse:** TCP reconnects now reuse configured source ports more reliably, which reduces reconnect failures after connection churn.
+
+### 📋 What You Need to Know
+
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are generally sufficient.
+* Highlighted **new governance DRep lookups:** Blockfrost compatible API users can now look up governance DReps through the new endpoint.
+* Summarized **safer rollback and resync recovery:** Rollback handling now detects loops, rewinds state correctly, and resyncs more cleanly after recovery problems.
+* Emphasized **steadier shutdowns and reconnects:** Catch up shutdowns and source port reuse now behave more reliably, which reduces avoidable interruptions.
+* Reviewed **dependency and release history updates:** Blockfrost, protocol, and UTxO RPC dependencies were refreshed, and release history now includes the v0.39.3 notes entry.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.39.3 (May 4, 2026)
 
 **Title:** Correct era transitions, Bark metadata, and peer recovery
