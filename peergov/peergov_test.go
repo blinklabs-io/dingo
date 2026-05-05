@@ -15,11 +15,13 @@
 package peergov
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1235,6 +1237,75 @@ func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
 	assert.Equal(t, "44.0.0.1:3002", peers[0].Address)
+}
+
+func TestPeerGovernor_AddPeer_DedupesHostnameAfterDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "relay.example.com:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	})
+
+	err := pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
+
+	require.NoError(t, err)
+	assert.Len(t, pg.peers, 1)
+}
+
+func TestPeerGovernor_DenyPeer_BlocksHostnameAfterDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: time.Hour,
+	})
+
+	lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("44.0.0.1")}, nil
+	}
+	pg.DenyPeer("relay.example.com:3001", 0)
+
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	err := pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
+
+	require.NoError(t, err)
+	assert.Empty(t, pg.peers)
+	assert.True(t, pg.IsDenied("relay.example.com:3001"))
+}
+
+func TestPeerGovernor_ResolveAddress_LogsDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	var buf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+
+	normalized := pg.resolveAddress("relay.example.com:3001")
+
+	assert.Equal(t, "relay.example.com:3001", normalized)
+	assert.True(
+		t,
+		strings.Contains(buf.String(), "failed to resolve peer hostname"),
+		"expected DNS resolution failure to be logged",
+	)
 }
 
 func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {
