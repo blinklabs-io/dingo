@@ -727,14 +727,14 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	normalized := p.resolveAddress(address)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	// if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-	// 	p.denyList[p.peers[idx].NormalizedAddress] = time.Now().Add(duration)
-	// 	p.denyList[p.normalizeAddress(p.peers[idx].Address)] = time.Now().
-	// 		Add(duration)
-	//} else {
-	p.denyList[normalized] = time.Now().Add(duration)
-	// 	p.denyList[p.normalizeAddress(address)] = time.Now().Add(duration)
-	// }
+	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
+		p.denyList[p.peers[idx].NormalizedAddress] = time.Now().Add(duration)
+		p.denyList[p.normalizeAddress(p.peers[idx].Address)] = time.Now().
+			Add(duration)
+	} else {
+		p.denyList[normalized] = time.Now().Add(duration)
+		p.denyList[p.normalizeAddress(address)] = time.Now().Add(duration)
+	}
 	p.config.Logger.Debug(
 		"peer added to deny list",
 		"address", address,
@@ -748,18 +748,17 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 func (p *PeerGovernor) IsDenied(address string) bool {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
-	// hostnameNormalized := p.normalizeAddress(address)
+	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.isDeniedLocked(normalized)
-	// if p.isDeniedLocked(normalized) || p.isDeniedLocked(hostnameNormalized) {
-	// 	return true
-	// }
-	// if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-	// 	return p.isDeniedLocked(p.peers[idx].NormalizedAddress) ||
-	// 		p.isDeniedLocked(p.normalizeAddress(p.peers[idx].Address))
-	// }
-	// return false
+	if p.isDeniedLocked(normalized) || p.isDeniedLocked(hostnameNormalized) {
+		return true
+	}
+	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
+		return p.isDeniedLocked(p.peers[idx].NormalizedAddress) ||
+			p.isDeniedLocked(p.normalizeAddress(p.peers[idx].Address))
+	}
+	return false
 }
 
 // isDeniedLocked checks if a peer is on the deny list.

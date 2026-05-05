@@ -94,7 +94,7 @@ func (p *PeerGovernor) AddPeer(
 ) error {
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
-	// hostnameNormalized := p.normalizeAddress(address)
+	hostnameNormalized := p.normalizeAddress(address)
 
 	// Reject non-routable IPs early — topology peers bypass this check
 	// so operators can use private addresses for local relays. Inbound
@@ -114,8 +114,7 @@ func (p *PeerGovernor) AddPeer(
 
 	p.mu.Lock()
 	// Check deny list before adding
-	// if p.isDeniedLocked(normalized) || p.isDeniedLocked(hostnameNormalized) {
-	if p.isDeniedLocked(normalized) {
+	if p.isDeniedLocked(normalized) || p.isDeniedLocked(hostnameNormalized) {
 		p.config.Logger.Debug(
 			"not adding denied peer",
 			"address", address,
@@ -125,16 +124,12 @@ func (p *PeerGovernor) AddPeer(
 	}
 	// Check if already exists (use normalized address for deduplication)
 	for _, peer := range p.peers {
-		// if peer == nil {
-		// 	continue
-		// }
-		// if peer.NormalizedAddress == normalized ||
-		// 	peer.NormalizedAddress == hostnameNormalized ||
-		// 	p.normalizeAddress(peer.Address) == hostnameNormalized {
-		// 	p.mu.Unlock()
-		// 	return nil
-		// }
-		if peer != nil && peer.NormalizedAddress == normalized {
+		if peer == nil {
+			continue
+		}
+		if peer.NormalizedAddress == normalized ||
+			peer.NormalizedAddress == hostnameNormalized ||
+			p.normalizeAddress(peer.Address) == hostnameNormalized {
 			p.mu.Unlock()
 			return nil
 		}
@@ -247,12 +242,12 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	// It's a hostname - try to resolve it
 	ips, err := lookupIP(host)
 	if err != nil || len(ips) == 0 {
-		// p.config.Logger.Warn(
-		// 	"failed to resolve peer hostname",
-		// 	"address", address,
-		// 	"host", host,
-		// 	"error", err,
-		// )
+		p.config.Logger.Warn(
+			"failed to resolve peer hostname",
+			"address", address,
+			"host", host,
+			"error", err,
+		)
 		// Can't resolve, just lowercase the hostname
 		return net.JoinHostPort(strings.ToLower(host), port)
 	}
