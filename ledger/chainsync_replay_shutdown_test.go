@@ -56,23 +56,36 @@ func TestCloseWaitsForInFlightReplay(t *testing.T) {
 	ls.chainsyncMutex.Lock()
 	ls.replayBufferedHeadersAsync(fixture.connId)
 
-	// Confirm a worker really did start and is now waiting on the lock.
-	// (The goroutine ran replayWG.Add(1) synchronously before launching.)
+	// (The goroutine ran replayWG.Add(1) synchronously before launching,
+	// so the wait group counter is non-zero from this point.)
 	closeReturned := make(chan error, 1)
 	go func() {
 		closeReturned <- ls.Close()
 	}()
 
-	// Close must not return while the worker is still in flight.
+	// Wait until Close has set closed=true and is therefore committed
+	// to draining the replay worker before it can return.
+	deadline := time.Now().Add(2 * time.Second)
+	for !ls.closed.Load() {
+		if time.Now().After(deadline) {
+			ls.chainsyncMutex.Unlock()
+			t.Fatal("Close did not set ls.closed within 2s")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// With closed=true and the worker blocked on chainsyncMutex, Close
+	// must not return: doing so would close the DB while the worker is
+	// still alive (the original #2107 panic).
 	select {
 	case err := <-closeReturned:
 		ls.chainsyncMutex.Unlock()
 		t.Fatalf("Close returned (err=%v) before replay drained", err)
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	// Releasing the mutex lets the worker observe ls.closed=true and exit
-	// without issuing any DB reads.
+	// without issuing any DB reads; Close can then finish draining.
 	ls.chainsyncMutex.Unlock()
 
 	select {

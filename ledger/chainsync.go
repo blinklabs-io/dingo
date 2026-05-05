@@ -935,12 +935,17 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 func (ls *LedgerState) replayBufferedHeadersAsync(
 	connId ouroboros.ConnectionId,
 ) {
-	// Bail out if Close has already started so we never spawn a worker
-	// that issues DB reads after phase 3 closes the database (#2107).
+	// Hold replayMu so Close cannot start Wait between our closed check
+	// and Add(1); otherwise Wait could observe a zero counter and the
+	// subsequent Add(1) would panic with "WaitGroup misuse: Add called
+	// concurrently with Wait" (#2107).
+	ls.replayMu.Lock()
 	if ls.closed.Load() {
+		ls.replayMu.Unlock()
 		return
 	}
 	ls.replayWG.Add(1)
+	ls.replayMu.Unlock()
 	go func() {
 		defer ls.replayWG.Done()
 		ls.chainsyncMutex.Lock()
