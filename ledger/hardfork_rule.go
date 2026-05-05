@@ -41,10 +41,24 @@ import (
 //     not currently registered as an active DRep. Pseudo-DRep
 //     delegations (AlwaysAbstain, AlwaysNoConfidence) are preserved.
 //
+// Intentional no-op cases (rules activate at the boundary, no state
+// rewrite required):
+//
+//   - major == 11 (vanRossem, intra-era within Conway):
+//     ProtocolVersionVanRossem gates three transaction-validation rules
+//     in gouroboros — UtxoValidateDisjointRefInputs (with a PlutusV1/V2
+//     skip), PoolValidateVrfKeyUniqueness, and
+//     UtxoValidateCCVotingRestrictions. They activate automatically
+//     through conway.UtxoValidationRules once pparams.Major reaches 11.
+//     PoolValidateVrfKeyUniqueness reads existing pool registrations
+//     live via LedgerState.IsVrfKeyInUse, so no boundary index needs
+//     to be populated.
+//
 // Cases known but not yet required (no era defined in dingo yet):
 //
-//   - major == 11 (Dijkstra): populate per-pool VRF key hashes. Stubbed
-//     until the Dijkstra era lands in gouroboros + dingo's era table.
+//   - major == 12 (Dijkstra): full ledger era after Conway, distinct
+//     from vanRossem. Stubbed until cardano-ledger publishes stable
+//     Dijkstra specs and gouroboros + dingo grow a Dijkstra era table.
 //
 // Any future major-version bump that lands without a case here is a
 // no-op, matching the Haskell rule's `otherwise = id` branch.
