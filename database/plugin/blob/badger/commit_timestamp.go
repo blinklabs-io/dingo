@@ -16,6 +16,7 @@ package badger
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -32,6 +33,13 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 
 	val, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
+		// Treat a missing key the same as the metadata stores treat a
+		// missing row: no timestamp written yet, return 0. Returning
+		// an error here turned a fresh blob into a fatal open failure
+		// whenever metadata had any non-zero timestamp.
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, nil
+		}
 		return 0, fmt.Errorf("failed to read commit timestamp: %w", err)
 	}
 	if len(val) == 8 {
