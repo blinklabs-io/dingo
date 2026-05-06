@@ -1319,11 +1319,6 @@ func (a *NodeAdapter) Transaction(
 			assetMintBurnCount += len(mint.Assets(policy))
 		}
 	}
-	if size == 0 {
-		if cborData, err := a.ledgerState.Database().CborCache().ResolveTxCbor(nil, hash); err == nil {
-			size = len(cborData)
-		}
-	}
 
 	var invalidBefore *string
 	if v := decodedTx.ValidityIntervalStart(); v != 0 {
