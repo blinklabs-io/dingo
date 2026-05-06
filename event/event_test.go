@@ -381,10 +381,10 @@ func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
 	eb := event.NewEventBus(nil, nil)
 	defer eb.Stop()
 
-	// Subscribe but never consume events.
-	_, subCh := eb.Subscribe(testEvtType)
+	// Subscribe with the high-burst buffer; never consume events.
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, event.EventQueueSize)
 
-	// Fill the buffer (EventQueueSize = 1000)
+	// Fill the buffer (EventQueueSize)
 	for i := range event.EventQueueSize {
 		eb.Publish(testEvtType, event.NewEvent(testEvtType, i))
 	}
@@ -418,4 +418,46 @@ func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
 			t.Fatal("expected buffered event not received")
 		}
 	}
+}
+
+// TestSubscribeUsesSmallDefaultBuffer is the regression test for #2106.
+// Subscribe / SubscribeFunc must allocate the small default buffer; only
+// callers that explicitly opt in via the *WithBuffer variants should pay
+// the EventQueueSize allocation. Verified by capacity, since cap on a
+// receive-only channel reports the underlying buffer size.
+func TestSubscribeUsesSmallDefaultBuffer(t *testing.T) {
+	const testEvtType event.EventType = "test.default.buffer"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	_, defaultCh := eb.Subscribe(testEvtType)
+	require.Equal(
+		t,
+		event.DefaultSubscriberBuffer,
+		cap(defaultCh),
+		"Subscribe must default to the small per-subscriber buffer",
+	)
+	require.Less(
+		t,
+		event.DefaultSubscriberBuffer,
+		event.EventQueueSize,
+		"DefaultSubscriberBuffer must stay below EventQueueSize",
+	)
+
+	_, burstCh := eb.SubscribeWithBuffer(testEvtType, event.EventQueueSize)
+	require.Equal(
+		t,
+		event.EventQueueSize,
+		cap(burstCh),
+		"SubscribeWithBuffer must honor the requested buffer size",
+	)
+
+	// Non-positive buffer falls back to the default.
+	_, fallbackCh := eb.SubscribeWithBuffer(testEvtType, 0)
+	require.Equal(
+		t,
+		event.DefaultSubscriberBuffer,
+		cap(fallbackCh),
+		"non-positive buffer must fall back to DefaultSubscriberBuffer",
+	)
 }

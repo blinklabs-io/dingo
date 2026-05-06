@@ -650,22 +650,27 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.config.Logger.Info("database worker pool disabled")
 	}
 
-	// Setup event handlers
+	// Setup event handlers. The chainsync/blockfetch/chain-update streams
+	// can burst at bulk-sync rates (#1556 / #1914), so they opt into the
+	// large EventQueueSize buffer. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			ChainsyncEventType,
+			event.EventQueueSize,
 			ls.handleEventChainsync,
 		)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
 		)
-		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
+		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			BlockfetchEventType,
+			event.EventQueueSize,
 			ls.handleEventBlockfetch,
 		)
-		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			chain.ChainUpdateEventType,
+			event.EventQueueSize,
 			ls.handleEventChainUpdate,
 		)
 		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(
