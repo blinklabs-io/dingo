@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMarshalBlockMetadataRoundTrip(t *testing.T) {
@@ -85,4 +86,31 @@ func TestUnmarshalBlockMetadataLegacyCbor(t *testing.T) {
 	if !bytes.Equal(decoded.PrevHash, expected.PrevHash) {
 		t.Fatalf("expected PrevHash %x, got %x", expected.PrevHash, decoded.PrevHash)
 	}
+}
+
+// It reproduces the shutdown race where a transaction created before BlobStoreBadger.Close()
+// is later used to create an iterator. Badger panics with "DB Closed" in
+// that case; the blob store should return an error iterator instead.
+func TestBlobStoreBadger_NewIteratorAfterCloseDoesNotPanic(t *testing.T) {
+	// Create a Badger blob store.
+	store, err := New()
+	require.NoError(t, err)
+
+	// Create a transaction from that store.
+	txn := store.NewTransaction(false)
+
+	// Close the store.
+	require.NoError(t, store.Close())
+
+	// Try to create an iterator using the old transaction and expect no panic.
+	var iter types.BlobIterator
+	require.NotPanics(t, func() {
+		iter = store.NewIterator(txn, types.BlobIteratorOptions{
+			Prefix: []byte("x"),
+		})
+	})
+
+	// Expect an iterator object and to contain an error.
+	require.NotNil(t, iter)
+	require.Error(t, iter.Err())
 }
