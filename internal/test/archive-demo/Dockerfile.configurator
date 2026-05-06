@@ -1,0 +1,38 @@
+# Antithesis configurator for ARM64/AMD64.
+#
+# Builds from cardano-foundation/testnet-generation-tool to generate
+# unique pool keys and genesis files for DevNet testing.
+#
+# Based on: https://github.com/cardano-foundation/antithesis
+
+# Pin to same version used in docker-compose.yml
+FROM ghcr.io/blinklabs-io/cardano-node:10.5.4
+
+USER root
+
+RUN apt update && \
+    apt install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        tar \
+        tree \
+        python3 \
+        python3-pip \
+        jq
+
+RUN python3 -m pip install --break-system-packages uv
+
+RUN install --directory --owner=root --group=root --mode=0755 /usr/local/src/cardano-node
+
+WORKDIR /usr/local/src
+# Pin to v0.1.0 (abab0b3ce616928cae4ea5c36a41654ec068e2e4)
+RUN git clone --branch v0.1.0 --depth 1 https://github.com/cardano-foundation/testnet-generation-tool.git
+
+WORKDIR /usr/local/src/testnet-generation-tool
+RUN uv sync && mkdir -p cardano-node && ln -sf /usr/local/bin ./cardano-node/bin
+
+COPY configurator.sh /
+RUN chmod 0755 /configurator.sh
+
+ENTRYPOINT ["/configurator.sh"]
