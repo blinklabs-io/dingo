@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -335,4 +336,65 @@ func TestFlushBatch_Idempotent(t *testing.T) {
 		store.DB().Model(&models.Utxo{}).Count(&utxoCount).Error,
 	)
 	assert.Equal(t, int64(1), utxoCount)
+}
+
+// TestSetTransactionBatched_AccumulatesCorrectly verifies that
+// SetTransactionBatched writes the transaction record to the DB immediately
+// (so it can be queried) and routes key witnesses and address-transaction rows
+// to the accumulator rather than the database.
+// A subsequent FlushBatch call must materialise those rows correctly.
+func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
+	store := setupTestDBWithMode(t, "api")
+
+	// ------------------------------------------------------------------ //
+	// Build a mock transaction with one VKey witness.                    //
+	// (uses the same helper pattern as TestStorageMode_APIStoresWitnesses)//
+	// ------------------------------------------------------------------ //
+	tx := newTestWitnessTransaction(
+		"batched_test_hash_1234567890123456789012345678901234567890",
+	)
+	point := ocommon.Point{
+		Hash: []byte("block_hash_batched_12345678901234"),
+		Slot: 999,
+	}
+	acc := NewBatchAccumulator()
+
+	require.NoError(
+		t,
+		store.SetTransactionBatched(tx, point, 0, nil, acc, nil),
+	)
+
+	// ------------------------------------------------------------------ //
+	// 1. Transaction record must exist in the DB immediately.             //
+	// ------------------------------------------------------------------ //
+	var txCount int64
+	require.NoError(
+		t,
+		store.DB().Model(&models.Transaction{}).Count(&txCount).Error,
+	)
+	assert.Equal(t, int64(1), txCount, "transaction record must be written immediately")
+
+	// ------------------------------------------------------------------ //
+	// 2. Key witness must be in the accumulator, NOT yet in the DB.      //
+	// ------------------------------------------------------------------ //
+	assert.Len(t, acc.KeyWitnesses, 1, "one vkey witness expected in accumulator")
+	assert.Equal(t, models.KeyWitnessTypeVkey, acc.KeyWitnesses[0].Type)
+
+	var witnessCount int64
+	require.NoError(
+		t,
+		store.DB().Model(&models.KeyWitness{}).Count(&witnessCount).Error,
+	)
+	assert.Equal(t, int64(0), witnessCount, "witness must not yet be flushed to DB")
+
+	// ------------------------------------------------------------------ //
+	// 3. FlushBatch must write the deferred rows to the DB.              //
+	// ------------------------------------------------------------------ //
+	require.NoError(t, store.FlushBatch(acc, nil))
+
+	require.NoError(
+		t,
+		store.DB().Model(&models.KeyWitness{}).Count(&witnessCount).Error,
+	)
+	assert.Equal(t, int64(1), witnessCount, "witness must be present after flush")
 }
