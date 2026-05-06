@@ -48,10 +48,12 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 	// transaction so the blob write txn below has a single, simple commit
 	// scope. A UTxO consumed between this read and the blob write is
 	// handled below: GetUtxo will return ErrBlobKeyNotFound and the entry
-	// is skipped.
+	// is skipped. Release the read txn as soon as liveUtxos is
+	// materialized so the connection is freed before the blob write txn
+	// and block operations run.
 	mdTxn := d.MetadataTxn(false)
-	defer mdTxn.Release()
 	liveUtxos, err := d.metadata.GetLiveUtxosBySlot(slot, mdTxn.Metadata())
+	mdTxn.Release()
 	if err != nil {
 		return 0, fmt.Errorf(
 			"prune block (slot=%d): list live utxos: %w",
@@ -137,7 +139,7 @@ func (d *Database) materializeUtxo(
 	// offset is the authoritative source. If they disagree, the UTxO
 	// is backed by a different block — leave it alone.
 	if offset.BlockSlot != slot || !bytes.Equal(offset.BlockHash[:], hash) {
-		d.logger.Warn(
+		d.logger.Error(
 			"prune block: utxo offset references unexpected block; skipping",
 			"slot", slot,
 			"hash", hex.EncodeToString(hash),
