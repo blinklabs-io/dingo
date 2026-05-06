@@ -27,10 +27,6 @@ func connIdKey(c ouroboros.ConnectionId) string {
 	return c.String()
 }
 
-// DefaultMaxTxSubmissionsPerSecond is the default maximum number of
-// transaction submissions accepted per peer per second.
-const DefaultMaxTxSubmissionsPerSecond = 30
-
 // tokenBucket implements a simple token bucket rate limiter.
 // Tokens are replenished at a fixed rate up to a maximum burst.
 type tokenBucket struct {
