@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -1002,6 +1003,28 @@ func TestHandleTransactionNotFound(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "Not Found", resp.Error)
+}
+
+func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: ErrMempoolUnavailable,
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, "Service Unavailable", resp.Error)
+	assert.Equal(t, "mempool unavailable", resp.Message)
 }
 
 func TestHandleTransactionCBOR(t *testing.T) {

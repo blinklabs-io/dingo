@@ -894,6 +894,15 @@ func (b *Blockfrost) handleTransactionSubmit(
 			)
 			return
 		}
+		if errors.Is(err, ErrMempoolUnavailable) {
+			writeError(
+				w,
+				http.StatusServiceUnavailable,
+				"Service Unavailable",
+				"mempool unavailable",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to submit transaction",
 			"error", err,
