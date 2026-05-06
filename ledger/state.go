@@ -1972,7 +1972,10 @@ func (ls *LedgerState) IsAtTip() bool {
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.
 func (ls *LedgerState) calculateStabilityWindow() uint64 {
-	return ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	ls.RLock()
+	eraId := ls.currentEra.Id
+	ls.RUnlock()
+	return ls.calculateStabilityWindowForEra(eraId)
 }
 
 // calculateStabilityWindowForEra calculates the stability window for the given era.
@@ -2126,8 +2129,6 @@ func (ls *LedgerState) SecurityParam() int {
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
 // It is safe to call from multiple goroutines.
 func (ls *LedgerState) StabilityWindow() uint64 {
-	ls.RLock()
-	defer ls.RUnlock()
 	return ls.calculateStabilityWindow()
 }
 

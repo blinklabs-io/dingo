@@ -68,10 +68,8 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	require.NoError(t, err)
 }
 
-// It reproduces the race where block processing updates currentEra while
-// calculateStabilityWindow reads currentEra.Id without taking ls.RLock().
-// This test is expected to fail under go test -race until the reader is
-// synchronized with the writer.
+// It verifies that calculating the stability window is synchronized with
+// concurrent currentEra updates from block processing.
 func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	ls := &LedgerState{
 		currentEra: eras.ShelleyEraDesc,
