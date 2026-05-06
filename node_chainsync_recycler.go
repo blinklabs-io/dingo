@@ -181,31 +181,53 @@ func (n *Node) processChainsyncRecyclerTick(
 					effectiveCooldown,
 					effectivePlateau,
 				) {
-					n.config.logger.Warn(
-						"local tip plateau detected, resyncing chainsync client",
-						"connection_id", connKey,
-						"local_tip_slot", localTipSlot,
-						"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-						"plateau_duration", now.Sub(*lastProgressAt),
-					)
-					n.eventBus.Publish(
-						event.ChainsyncResyncEventType,
-						event.NewEvent(
+					// Never disconnect the only eligible peer over
+					// a plateau. Plateau is a local-progress signal,
+					// not a peer-health signal: closing the only
+					// upstream forces a reconnect to the same remote
+					// on a fresh source port, which cannot recover a
+					// locally-pinned tip and amplifies disruption
+					// when the remote RSTs the reconnect. Mirrors the
+					// stalled-recycle guard below.
+					if eligibleCount <= 1 {
+						n.config.logger.Warn(
+							"local tip plateau detected but no spare eligible peer, skipping resync",
+							"connection_id", connKey,
+							"local_tip_slot", localTipSlot,
+							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+							"plateau_duration", now.Sub(*lastProgressAt),
+							"eligible_peer_count", eligibleCount,
+						)
+						// Throttle the warning to plateau cadence
+						// instead of every tick.
+						*lastProgressAt = now
+					} else {
+						n.config.logger.Warn(
+							"local tip plateau detected, resyncing chainsync client",
+							"connection_id", connKey,
+							"local_tip_slot", localTipSlot,
+							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+							"plateau_duration", now.Sub(*lastProgressAt),
+						)
+						n.eventBus.Publish(
 							event.ChainsyncResyncEventType,
-							event.ChainsyncResyncEvent{
-								ConnectionId: *targetConn,
-								Reason:       "local_tip_plateau",
-							},
-						),
-					)
-					n.realignOtherPeersAfterPlateau(
-						*targetConn,
-						trackedClients,
-						localTipSlot,
-					)
-					delete(recycleAt, connKey)
-					lastRecycled[connKey] = now
-					*lastProgressAt = now
+							event.NewEvent(
+								event.ChainsyncResyncEventType,
+								event.ChainsyncResyncEvent{
+									ConnectionId: *targetConn,
+									Reason:       "local_tip_plateau",
+								},
+							),
+						)
+						n.realignOtherPeersAfterPlateau(
+							*targetConn,
+							trackedClients,
+							localTipSlot,
+						)
+						delete(recycleAt, connKey)
+						lastRecycled[connKey] = now
+						*lastProgressAt = now
+					}
 				}
 			}
 		}
