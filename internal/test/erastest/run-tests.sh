@@ -128,7 +128,7 @@ go test \
   -v \
   -timeout "${TEST_TIMEOUT}" \
   ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
-  ./internal/erastest/...
+  ./internal/test/erastest/...
 TEST_EXIT=$?
 set -e
 

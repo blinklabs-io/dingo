@@ -33,7 +33,7 @@ import (
 // every assertion is a compile-time symbol lookup or a constant
 // comparison. A run can be performed in isolation with
 //
-//	go test -tags erastest -run TestPV11Readiness ./internal/erastest/
+//	go test -tags erastest -run TestPV11Readiness ./internal/test/erastest/
 //
 // without docker-compose. The boundary-time no-op behavior of
 // applyIntraEraHardForkRule(11) is covered by
