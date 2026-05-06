@@ -1332,7 +1332,11 @@ func (a *NodeAdapter) Transaction(
 	}
 
 	counts := transactionCertificateCounts(tx.Certificates)
-	outputAmount := aggregateTransactionOutputAmount(tx.Outputs)
+	outputs := tx.Outputs
+	if !tx.Valid && tx.CollateralReturn != nil {
+		outputs = []models.Utxo{*tx.CollateralReturn}
+	}
+	outputAmount := aggregateTransactionOutputAmount(outputs)
 	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
 	if err != nil {
 		return TransactionInfo{}, fmt.Errorf(
