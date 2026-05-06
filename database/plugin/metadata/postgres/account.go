@@ -49,6 +49,35 @@ func (d *MetadataStorePostgres) GetAccount(
 	return ret, nil
 }
 
+// GetAccounts fetches multiple accounts in one IN-list query, keyed by
+// string(StakingKey). Stake keys with no matching row are omitted.
+func (d *MetadataStorePostgres) GetAccounts(
+	stakeKeys [][]byte,
+	includeInactive bool,
+	txn types.Txn,
+) (map[string]*models.Account, error) {
+	ret := make(map[string]*models.Account, len(stakeKeys))
+	if len(stakeKeys) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where("staking_key IN ?", stakeKeys)
+	if !includeInactive {
+		query = query.Where("active = ?", true)
+	}
+	var rows []*models.Account
+	if result := query.Find(&rows); result.Error != nil {
+		return nil, result.Error
+	}
+	for _, row := range rows {
+		ret[string(row.StakingKey)] = row
+	}
+	return ret, nil
+}
+
 // AddAccountReward credits a registered reward account.
 func (d *MetadataStorePostgres) AddAccountReward(
 	stakeKey []byte,
