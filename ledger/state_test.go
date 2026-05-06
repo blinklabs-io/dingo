@@ -68,6 +68,54 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	require.NoError(t, err)
 }
 
+func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentEra = eras.BabbageEraDesc
+			} else {
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.Unlock()
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = ls.calculateStabilityWindow()
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	testCases := []struct {
