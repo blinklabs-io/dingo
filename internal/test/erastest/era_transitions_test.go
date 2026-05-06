@@ -56,15 +56,11 @@ const dingoColdKeyPath = "/configs/keys/cold.vkey"
 // loadConfig is a test helper that ensures ERASTEST_TESTNET_YAML points
 // at the eras testnet.yaml. The eras run-tests.sh sets it; if a
 // developer runs the test directly without that env var, fall back to
-// the relative path from this test package.
+// the testnet.yaml that lives alongside this test package.
 func loadConfig(t *testing.T) *Config {
 	t.Helper()
 	if os.Getenv("ERASTEST_TESTNET_YAML") == "" {
-		// internal/erastest → repo root → eras testnet.yaml
-		t.Setenv(
-			"ERASTEST_TESTNET_YAML",
-			"../test/erastest/testnet.yaml",
-		)
+		t.Setenv("ERASTEST_TESTNET_YAML", "testnet.yaml")
 	}
 	cfg, err := LoadConfig()
 	require.NoError(t, err, "load eras testnet.yaml")
