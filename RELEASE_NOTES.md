@@ -1,6 +1,21 @@
 # Release Notes
 
 
+## v0.41.0 (May 6, 2026)
+
+**Title:** Batched metadata writes, leaner memory use, and safer node behavior
+
+**Date:** May 6, 2026
+
+**Version:** v0.41.0
+
+Hi folks! Here’s what we shipped in v0.41.0.
+
+### ✨ What's New
+
+* Added **batched metadata persistence across supported databases:** Metadata transaction data can now flush in batches across `sqlite`, MySQL, and Postgres backends, which makes high volume metadata persistence easier to manage.
+* Expanded **archive node demonstration coverage:** Teams can now run an archive node demonstration with MinIO backed archive storage, a pruning node, helper scripts, and validation coverage for the full flow.
+
 ## v0.40.0 (May 5, 2026)
 
 **Title:** Governance DRep APIs and safer rollback recovery
