@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -349,7 +350,80 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 		event.ChainsyncResyncEventType,
 	)
 
-	connId := newNodeTestConnId(2)
+	activeConn := newNodeTestConnId(2)
+	secondConn := newNodeTestConnId(2001)
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{
+			MaxClients:   2,
+			StallTimeout: time.Hour,
+		},
+	)
+	require.True(t, state.AddClientConnId(activeConn))
+	require.True(t, state.AddClientConnId(secondConn))
+	state.SetClientConnId(activeConn)
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	selector.UpdatePeerTip(activeConn, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
+		BlockNumber: 60,
+	}, nil)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+		eventBus:       bus,
+	}
+
+	now := time.Now()
+	lastProgressSlot := uint64(100)
+	lastProgressAt := now.Add(-5 * time.Minute)
+	recycleAt := make(map[string]time.Time)
+	lastRecycled := make(map[string]time.Time)
+
+	n.processChainsyncRecyclerTick(
+		now,
+		100,
+		chainsync.Config{
+			MaxClients:   2,
+			StallTimeout: time.Hour,
+		},
+		recycleAt,
+		lastRecycled,
+		&lastProgressSlot,
+		&lastProgressAt,
+		4*time.Minute,
+		time.Second,
+		2*time.Minute,
+	)
+
+	select {
+	case evt := <-resyncCh:
+		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		assert.Equal(t, activeConn, resyncEvt.ConnectionId)
+		assert.Equal(t, "local_tip_plateau", resyncEvt.Reason)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected plateau resync event")
+	}
+}
+
+func TestProcessChainsyncRecyclerTickSkipsPlateauOnlyPeer(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(
+		event.ChainsyncResyncEventType,
+	)
+
+	connId := newNodeTestConnId(3)
 	state := chainsync.NewStateWithConfig(
 		bus,
 		nil,
@@ -380,7 +454,8 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 
 	now := time.Now()
 	lastProgressSlot := uint64(100)
-	lastProgressAt := now.Add(-5 * time.Minute)
+	originalProgress := now.Add(-5 * time.Minute)
+	lastProgressAt := originalProgress
 	recycleAt := make(map[string]time.Time)
 	lastRecycled := make(map[string]time.Time)
 
@@ -400,15 +475,24 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 		2*time.Minute,
 	)
 
-	select {
-	case evt := <-resyncCh:
-		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
-		require.True(t, ok)
-		assert.Equal(t, connId, resyncEvt.ConnectionId)
-		assert.Equal(t, "local_tip_plateau", resyncEvt.Reason)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected plateau resync event")
-	}
+	// No plateau resync event should be emitted when the only
+	// eligible peer would be the disconnect target. Disconnecting
+	// a single-relay BP's only upstream over a plateau cannot
+	// recover a locally-pinned tip and amplifies disruption.
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		50*time.Millisecond,
+		"plateau action should be suppressed for only eligible peer",
+	)
+
+	// lastProgressAt should be reset so the suppression warning
+	// is throttled to plateau cadence rather than every tick.
+	assert.True(
+		t,
+		lastProgressAt.After(originalProgress),
+		"lastProgressAt should be reset after suppressed plateau",
+	)
 }
 
 func TestProcessChainsyncRecyclerTickRealignsOtherPeersOnPlateau(t *testing.T) {
