@@ -16,6 +16,7 @@ package gcs
 
 import (
 	"encoding/json"
+	"errors"
 	"math/big"
 	"time"
 
@@ -34,6 +35,12 @@ func (b *BlobStoreGCS) GetCommitTimestamp() (int64, error) {
 
 	r, err := b.Get(txn, []byte(commitTimestampBlobKey))
 	if err != nil {
+		// A missing key means no timestamp has been written yet —
+		// return 0 to mirror the metadata stores' missing-row
+		// behavior so a fresh blob does not look like a corrupt one.
+		if errors.Is(err, types.ErrBlobKeyNotFound) {
+			return 0, nil
+		}
 		return 0, err
 	}
 

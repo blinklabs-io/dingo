@@ -70,6 +70,22 @@ func ensureDB(
 	}
 	newDB, err := database.New(dbConfig)
 	if err != nil {
+		// Bootstrap paths (load / mithril sync) tolerate a recoverable
+		// commit-timestamp mismatch: the import work that follows
+		// writes through full transactions which heal the timestamps.
+		// Returning the error here would leave the user unable to
+		// re-run a load / re-bootstrap from a previous interrupted
+		// import.
+		var cte database.CommitTimestampError
+		if errors.As(err, &cte) && newDB != nil {
+			logger.Warn(
+				"opened database with commit timestamp mismatch; "+
+					"continuing — import will heal it",
+				"metadata_timestamp", cte.MetadataTimestamp,
+				"blob_timestamp", cte.BlobTimestamp,
+			)
+			return newDB, func() { newDB.Close() }, nil
+		}
 		return nil, nil, fmt.Errorf("creating database: %w", err)
 	}
 	return newDB, func() { newDB.Close() }, nil

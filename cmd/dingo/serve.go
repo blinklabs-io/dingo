@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,7 +77,20 @@ func checkSyncState(
 		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		// A commit-timestamp mismatch is recoverable downstream in
+		// node.Run. We only need to read sync_status here, which
+		// works on the partially-initialised db handle returned with
+		// the error.
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+		logger.Warn(
+			"sync state check observed commit timestamp mismatch; "+
+				"deferring recovery to node startup",
+			"metadata_timestamp", cte.MetadataTimestamp,
+			"blob_timestamp", cte.BlobTimestamp,
+		)
 	}
 	defer db.Close()
 
@@ -137,7 +151,21 @@ func resumeBackfill(
 		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		// Backfill writes through full transactions which heal a
+		// commit-timestamp mismatch as it makes progress, and
+		// node.Run will run a full recovery pass afterwards. So a
+		// recoverable mismatch should not block the resume.
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+		logger.Warn(
+			"backfill observed commit timestamp mismatch; "+
+				"continuing — backfill writes will heal it",
+			"component", "backfill",
+			"metadata_timestamp", cte.MetadataTimestamp,
+			"blob_timestamp", cte.BlobTimestamp,
+		)
 	}
 	defer db.Close()
 

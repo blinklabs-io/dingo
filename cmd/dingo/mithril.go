@@ -343,7 +343,23 @@ func runMithrilSync(
 		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		// Tolerate a recoverable commit-timestamp mismatch carried
+		// over from a previously interrupted run. The mithril import
+		// writes blocks and ledger state through full transactions
+		// that update both stores' timestamps in lockstep, so the
+		// mismatch heals as soon as we make forward progress.
+		var cte database.CommitTimestampError
+		if errors.As(err, &cte) && db != nil {
+			logger.Warn(
+				"opened database with commit timestamp mismatch; "+
+					"continuing mithril sync — import will heal it",
+				"component", "mithril",
+				"metadata_timestamp", cte.MetadataTimestamp,
+				"blob_timestamp", cte.BlobTimestamp,
+			)
+		} else {
+			return fmt.Errorf("opening database: %w", err)
+		}
 	}
 	defer db.Close()
 
