@@ -379,13 +379,13 @@ func NewMempool(config MempoolConfig) *Mempool {
 	)
 	m.metrics.txsEvicted = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_txsEvictedNum_int",
+			Name: "dingo_metrics_txsEvictedNum_int",
 			Help: "total transactions evicted from mempool",
 		},
 	)
 	m.metrics.txsExpired = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_txsExpiredNum_int",
+			Name: "dingo_metrics_txsExpiredNum_int",
 			Help: "total transactions expired from mempool by TTL",
 		},
 	)

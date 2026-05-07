@@ -478,7 +478,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -582,7 +582,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -2150,7 +2150,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"hot\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_peerSelection_peers_by_source{state=\"hot\",network=\"$network\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} {{source}} hot",
           "range": true,
           "refId": "A"
@@ -2160,7 +2160,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"warm\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_peerSelection_peers_by_source{state=\"warm\",network=\"$network\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} {{source}} warm",
           "range": true,
           "refId": "B"
@@ -2170,7 +2170,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_peerSelection_peers_by_source{state=\"cold\",network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_peerSelection_peers_by_source{state=\"cold\",network=\"$network\",instance=~\"$instance\"}",
           "legendFormat": "{{alias}} {{source}} cold",
           "range": true,
           "refId": "C"

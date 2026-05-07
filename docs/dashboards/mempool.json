@@ -478,7 +478,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -582,7 +582,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -956,7 +956,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{alias}}",
           "refId": "A"
@@ -1010,7 +1010,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_txsExpiredNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_txsExpiredNum_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{alias}}",
           "refId": "A"
@@ -1329,7 +1329,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "expr": "rate(dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
           "legendFormat": "{{alias}} evict/min",
           "range": true,
           "refId": "C"
@@ -1339,7 +1339,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(cardano_node_metrics_txsExpiredNum_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
+          "expr": "rate(dingo_metrics_txsExpiredNum_int{network=\"$network\",instance=~\"$instance\"}[5m]) * 60",
           "legendFormat": "{{alias}} expire/min",
           "range": true,
           "refId": "D"
@@ -2068,7 +2068,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(cardano_node_metrics_txsEvictedNum_int{network=~\"$network\"}[$__rate_interval])",
+          "expr": "rate(dingo_metrics_txsEvictedNum_int{network=~\"$network\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "evicted",
@@ -2081,7 +2081,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "rate(cardano_node_metrics_txsExpiredNum_int{network=~\"$network\"}[$__rate_interval])",
+          "expr": "rate(dingo_metrics_txsExpiredNum_int{network=~\"$network\"}[$__rate_interval])",
           "format": "time_series",
           "instant": false,
           "legendFormat": "expired",
