@@ -258,6 +258,32 @@ func TestValidateGenesisHashEmpty(t *testing.T) {
 	assert.Equal(t, expectedHash, hash)
 }
 
+func TestCardanoNodeConfigPeerSharing(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want *bool
+	}{
+		{name: "absent", body: `{}`, want: nil},
+		{name: "true", body: `{"PeerSharing": true}`, want: ptrBool(true)},
+		{name: "false", body: `{"PeerSharing": false}`, want: ptrBool(false)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := NewCardanoNodeConfigFromReader(
+				bytes.NewReader([]byte(tc.body)),
+			)
+			require.NoError(t, err)
+			if tc.want == nil {
+				assert.Nil(t, cfg.PeerSharing)
+				return
+			}
+			require.NotNil(t, cfg.PeerSharing)
+			assert.Equal(t, *tc.want, *cfg.PeerSharing)
+		})
+	}
+}
+
 func TestGenesisHashMismatchFromFile(t *testing.T) {
 	// Config with wrong Byron genesis hash should fail to load
 	cfgBytes := []byte(`{

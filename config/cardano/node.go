@@ -75,6 +75,12 @@ type CardanoNodeConfig struct {
 	TargetNumberOfEstablishedPeers int  `yaml:"TargetNumberOfEstablishedPeers"`
 	TargetNumberOfActivePeers      int  `yaml:"TargetNumberOfActivePeers"`
 	EnableP2P                      bool `yaml:"EnableP2P"`
+
+	// PeerSharing in cardano-node config.json. Pointer distinguishes
+	// "field absent" (nil) from "explicitly false". Only consulted as
+	// a fallback default for non-block-producing nodes when the
+	// Dingo-native peerSharing value is unset.
+	PeerSharing *bool `yaml:"PeerSharing"`
 }
 
 const (
