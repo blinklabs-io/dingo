@@ -1305,8 +1305,20 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if ancestorPoint == nil || !pointMatches(*ancestorPoint, point) {
 			continue
 		}
+		// Anything at or below the chain's current header tip is already
+		// applied. Without this guard, a forkPath entry whose hash equals
+		// the header tip causes AddBlockHeader to fail the prev-hash
+		// check (header tip's prev != header tip), which aborts recovery
+		// and breaks the chainsync session permanently. Use the larger
+		// of the rollback point and the live header tip so concurrent
+		// progress past `point` does not regress recovery.
+		cutoffSlot := point.Slot
+		if tipSlot := ls.chain.HeaderTip().Point.Slot; tipSlot > cutoffSlot {
+			cutoffSlot = tipSlot
+		}
+		added := 0
 		for _, evt := range forkPath {
-			if evt.Point.Slot <= point.Slot {
+			if evt.Point.Slot <= cutoffSlot {
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
@@ -1314,8 +1326,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				ls.headerPipelineConnId = ouroboros.ConnectionId{}
 				return 0, err
 			}
+			added++
 		}
-		if ls.chain.HeaderCount() == 0 {
+		if added == 0 {
 			continue
 		}
 		ls.headerPipelineConnId = connId

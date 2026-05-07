@@ -786,6 +786,74 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
 }
 
+// Reproduces a chainsync recovery hang seen during multi-pool DevNet
+// runs. After a slot battle the chain has already extended past `point`
+// with the very block that peer history hands back as the only forkPath
+// entry. The recovery loop must skip events whose slot is at or below
+// the chain's header tip; otherwise AddBlockHeader rejects the duplicate
+// with BlockNotFitChainTipError, clearQueuedHeaders fires, and the
+// chainsync session never re-converges with the peer.
+func TestRecoverPeerHeaderHistoryFromPointSkipsHeadersAlreadyAtChainTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	advancedHash := testHashBytes("recovery-already-at-tip")
+	advancedSlot := fixture.currentTip.Point.Slot + 1
+	advancedBlockNumber := fixture.currentTip.BlockNumber + 1
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        advancedSlot,
+				Hash:        advancedHash,
+				BlockNumber: advancedBlockNumber,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
+	require.Equal(
+		t,
+		advancedSlot,
+		fixture.ls.chain.HeaderTip().Point.Slot,
+		"chain header tip must reflect the post-rollback advance",
+	)
+
+	advancedHeader := mockHeader{
+		hash:        lcommon.NewBlake2b256(advancedHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: advancedBlockNumber,
+		slot:        advancedSlot,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			advancedHeader.slot,
+			advancedHeader.hash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advancedHeader.slot,
+				advancedHeader.hash.Bytes(),
+			),
+			BlockNumber: advancedHeader.blockNumber,
+		},
+		BlockHeader: advancedHeader,
+	})
+
+	fixture.ls.chainsyncMutex.Lock()
+	headerCount, err := fixture.ls.recoverPeerHeaderHistoryFromPointLocked(
+		fixture.connId,
+		fixture.currentTip.Point,
+	)
+	fixture.ls.chainsyncMutex.Unlock()
+
+	require.NoError(t, err)
+	assert.Zero(t, headerCount)
+}
+
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	t *testing.T,
 ) {
