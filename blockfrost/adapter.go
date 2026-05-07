@@ -1476,6 +1476,9 @@ func (a *NodeAdapter) TransactionUTXOs(
 
 	decodedOutputs := decodedTx.Outputs()
 	txOutputs := slices.Clone(tx.Outputs)
+	if !tx.Valid && tx.CollateralReturn != nil {
+		txOutputs = []models.Utxo{*tx.CollateralReturn}
+	}
 	slices.SortFunc(txOutputs, func(a, b models.Utxo) int {
 		return cmp.Compare(a.OutputIdx, b.OutputIdx)
 	})
