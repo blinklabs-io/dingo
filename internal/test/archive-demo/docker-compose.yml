@@ -21,7 +21,7 @@
 #   configurator     - one-shot, generates pool keys and genesis files
 #   minio            - S3-compatible blob storage
 #   minio-init       - one-shot, creates the "dingo-archive" bucket
-#   cardano-producer - sole block producer (cardano-node 10.5.4)
+#   cardano-producer - sole block producer (cardano-node 11.0.1)
 #   dingo-archive    - non-producer; S3 blob plugin + Bark server :3002
 #   dingo-pruning    - non-producer; Badger blob plugin + Bark client
 #                      pointed at dingo-archive
@@ -90,7 +90,7 @@ services:
         ipv4_address: 172.21.0.14
 
   cardano-producer:
-    image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
     container_name: archivedemo-cardano-producer
     depends_on:
       configurator:

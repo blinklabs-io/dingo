@@ -25,7 +25,7 @@
 #
 # Variables (set via environment or .env file):
 #   IMAGE_TAG              — dingo image tag        (default: main)
-#   CARDANO_NODE_VERSION   — cardano-node image tag  (default: 10.5.4)
+#   CARDANO_NODE_VERSION   — cardano-node image tag  (default: 11.0.1)
 #   INTERNAL_NETWORK       — isolate network from host (default: false)
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ x-cardano-node-command: &cardano-node-command
   - "3001"
 
 x-cardano-node: &cardano-node
-  image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-10.5.4}
+  image: ghcr.io/blinklabs-io/cardano-node:${CARDANO_NODE_VERSION:-11.0.1}
   init: true
   command: *cardano-node-command
   environment: &cn-env

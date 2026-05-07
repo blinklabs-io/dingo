@@ -6,7 +6,7 @@
 # Based on: https://github.com/cardano-foundation/antithesis
 
 # Pin to same version used in docker-compose.yml
-FROM ghcr.io/blinklabs-io/cardano-node:10.5.4
+FROM ghcr.io/blinklabs-io/cardano-node:11.0.1
 
 USER root
 
