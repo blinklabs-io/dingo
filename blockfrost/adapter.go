@@ -2404,7 +2404,10 @@ func (a *NodeAdapter) transactionDeposit(
 func (a *NodeAdapter) protocolParamsForSlot(
 	slot uint64,
 ) (lcommon.ProtocolParameters, error) {
-	epoch, err := a.ledgerState.Database().GetEpochBySlot(slot, nil)
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+	epoch, err := db.GetEpochBySlot(slot, txn)
 	if err != nil {
 		return nil, err
 	}
@@ -2419,11 +2422,11 @@ func (a *NodeAdapter) protocolParamsForSlot(
 	if era == nil {
 		return nil, fmt.Errorf("unknown era ID %d", epoch.EraId)
 	}
-	pparams, err := a.ledgerState.Database().GetPParams(
+	pparams, err := db.GetPParams(
 		epoch.EpochId,
 		era.Id,
 		era.DecodePParamsFunc,
-		nil,
+		txn,
 	)
 	if err != nil {
 		return nil, err
