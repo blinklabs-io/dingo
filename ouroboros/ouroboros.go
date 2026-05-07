@@ -52,16 +52,17 @@ import (
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 type Ouroboros struct {
-	ConnManager      *connmanager.ConnectionManager
-	PeerGov          *peergov.PeerGovernor
-	ChainsyncState   *chainsync.State
-	EventBus         *event.EventBus
-	Mempool          *mempool.Mempool
-	LedgerState      *ledger.LedgerState
-	config           OuroborosConfig
-	metrics          *blockfetchMetrics
-	blockFetchStarts map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex  sync.Mutex
+	ConnManager       *connmanager.ConnectionManager
+	PeerGov           *peergov.PeerGovernor
+	ChainsyncState    *chainsync.State
+	EventBus          *event.EventBus
+	Mempool           *mempool.Mempool
+	LedgerState       *ledger.LedgerState
+	config            OuroborosConfig
+	blockfetchMetrics *blockfetchMetrics
+	protocolMetrics   *protocolMetrics
+	blockFetchStarts  map[ouroboros.ConnectionId]time.Time
+	blockFetchMutex   sync.Mutex
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -138,39 +139,40 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		)
 	}
 	if cfg.PromRegistry != nil {
-		o.initMetrics()
+		o.initBlockfetchMetrics()
+		o.initProtocolMetrics()
 	}
 	return o
 }
 
-func (o *Ouroboros) initMetrics() {
+func (o *Ouroboros) initBlockfetchMetrics() {
 	promautoFactory := promauto.With(o.config.PromRegistry)
-	o.metrics = &blockfetchMetrics{}
-	o.metrics.servedBlockCount = promautoFactory.NewCounter(
+	o.blockfetchMetrics = &blockfetchMetrics{}
+	o.blockfetchMetrics.servedBlockCount = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
 			Name: "cardano_node_metrics_served_block_count_int",
 			Help: "total blocks served to clients",
 		},
 	)
-	o.metrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	o.blockfetchMetrics.blockDelay = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockfetchclient_blockdelay_s",
 		Help: "delay in seconds for the most recent block fetch",
 	})
-	o.metrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
+	o.blockfetchMetrics.lateBlocks = promautoFactory.NewCounter(prometheus.CounterOpts{
 		Name: "cardano_node_metrics_blockfetchclient_lateblocks",
 		Help: "blocks that took more than 5 seconds to fetch",
 	})
-	o.metrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	o.blockfetchMetrics.blockDelayCdfOne = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne",
 		Help: "percentage of blocks fetched in less than 1 second",
 	})
-	o.metrics.blockDelayCdfThree = promautoFactory.NewGauge(
+	o.blockfetchMetrics.blockDelayCdfThree = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfThree",
 			Help: "percentage of blocks fetched in less than 3 seconds",
 		},
 	)
-	o.metrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
+	o.blockfetchMetrics.blockDelayCdfFive = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_blockfetchclient_blockdelay_cdfFive",
 		Help: "percentage of blocks fetched in less than 5 seconds",
 	})

@@ -58,14 +58,20 @@ type blockfetchConnection interface {
 
 func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
-		blockfetch.WithRequestRangeFunc(o.blockfetchServerRequestRange),
+		blockfetch.WithRequestRangeFunc(
+			o.instrumentBlockfetchRequestRange(o.blockfetchServerRequestRange),
+		),
 	}
 }
 
 func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
-		blockfetch.WithBlockFunc(o.blockfetchClientBlock),
-		blockfetch.WithBatchDoneFunc(o.blockfetchClientBatchDone),
+		blockfetch.WithBlockFunc(
+			o.instrumentBlockfetchBlock(o.blockfetchClientBlock),
+		),
+		blockfetch.WithBatchDoneFunc(
+			o.instrumentBlockfetchBatchDone(o.blockfetchClientBatchDone),
+		),
 		blockfetch.WithBatchStartTimeout(60 * time.Second),
 		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
@@ -227,8 +233,8 @@ Loop:
 				)
 				return fmt.Errorf("blockfetch Block failed: %w", err)
 			}
-			if o.metrics != nil {
-				o.metrics.servedBlockCount.Inc()
+			if o.blockfetchMetrics != nil {
+				o.blockfetchMetrics.servedBlockCount.Inc()
 			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
 			if next.Block.Slot == end.Slot {
@@ -358,7 +364,7 @@ func (o *Ouroboros) blockfetchClientBlock(
 		// During catch-up all blocks are naturally "late" relative to
 		// wall-clock time, which permanently poisons the CDF.
 		atTip := o.LedgerState != nil && o.LedgerState.IsAtTip()
-		if atTip && o.metrics != nil {
+		if atTip && o.blockfetchMetrics != nil {
 			// Calculate block delay as wallclock time minus block slot time (cardano-node compatible)
 			var delaySeconds float64
 			if blockSlotTime, err := o.LedgerState.SlotToTime(block.SlotNumber()); err == nil {
@@ -367,34 +373,34 @@ func (o *Ouroboros) blockfetchClientBlock(
 				delaySeconds = fetchDuration.Seconds()
 			}
 
-			o.metrics.blockDelay.Set(delaySeconds)
-			total := atomic.AddInt64(&o.metrics.totalBlocksFetched, 1)
+			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
+			total := atomic.AddInt64(&o.blockfetchMetrics.totalBlocksFetched, 1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.
 			if delaySeconds < 1.0 {
-				atomic.AddInt64(&o.metrics.blocksUnder1s, 1)
+				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder1s, 1)
 			}
 			if delaySeconds < 3.0 {
-				atomic.AddInt64(&o.metrics.blocksUnder3s, 1)
+				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder3s, 1)
 			}
 			if delaySeconds < 5.0 {
-				atomic.AddInt64(&o.metrics.blocksUnder5s, 1)
+				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder5s, 1)
 			} else {
-				o.metrics.lateBlocks.Inc()
+				o.blockfetchMetrics.lateBlocks.Inc()
 			}
 			if total == 1 ||
 				total%blockfetchMetricsCdfUpdateInterval == 0 ||
 				delaySeconds >= 5.0 {
-				under1 := atomic.LoadInt64(&o.metrics.blocksUnder1s)
-				under3 := atomic.LoadInt64(&o.metrics.blocksUnder3s)
-				under5 := atomic.LoadInt64(&o.metrics.blocksUnder5s)
-				o.metrics.blockDelayCdfOne.Set(
+				under1 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder1s)
+				under3 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder3s)
+				under5 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder5s)
+				o.blockfetchMetrics.blockDelayCdfOne.Set(
 					float64(under1) / float64(total) * 100,
 				)
-				o.metrics.blockDelayCdfThree.Set(
+				o.blockfetchMetrics.blockDelayCdfThree.Set(
 					float64(under3) / float64(total) * 100,
 				)
-				o.metrics.blockDelayCdfFive.Set(
+				o.blockfetchMetrics.blockDelayCdfFive.Set(
 					float64(under5) / float64(total) * 100,
 				)
 			}
@@ -449,4 +455,51 @@ func (o *Ouroboros) blockfetchClientBatchDone(
 		)
 	}
 	return nil
+}
+
+// instrumentBlockfetchRequestRange wraps the RequestRange callback. Note
+// that blockfetchServerRequestRange validates the request synchronously
+// then launches block delivery in a goroutine. The metric outcome label
+// reflects only the synchronous validation result; failures during async
+// streaming (iterator errors, Block, BatchDone) close the connection via
+// reportBlockfetchServerAsyncError and are not visible here.
+func (o *Ouroboros) instrumentBlockfetchRequestRange(
+	fn func(blockfetch.CallbackContext, ocommon.Point, ocommon.Point) error,
+) func(blockfetch.CallbackContext, ocommon.Point, ocommon.Point) error {
+	return func(
+		ctx blockfetch.CallbackContext,
+		start ocommon.Point,
+		end ocommon.Point,
+	) error {
+		startTime := time.Now()
+		err := fn(ctx, start, end)
+		o.recordProtocolMessage("blockfetch", err, time.Since(startTime))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentBlockfetchBlock(
+	fn func(blockfetch.CallbackContext, uint, gledger.Block) error,
+) func(blockfetch.CallbackContext, uint, gledger.Block) error {
+	return func(
+		ctx blockfetch.CallbackContext,
+		blockType uint,
+		block gledger.Block,
+	) error {
+		start := time.Now()
+		err := fn(ctx, blockType, block)
+		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentBlockfetchBatchDone(
+	fn func(blockfetch.CallbackContext) error,
+) func(blockfetch.CallbackContext) error {
+	return func(ctx blockfetch.CallbackContext) error {
+		start := time.Now()
+		err := fn(ctx)
+		o.recordProtocolMessage("blockfetch", err, time.Since(start))
+		return err
+	}
 }

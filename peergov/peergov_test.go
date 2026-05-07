@@ -508,6 +508,152 @@ func TestPeerGovernor_Metrics(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(pg.metrics.activePeers))
 }
 
+func TestPeerGovernor_RecordPeerStateChange(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: reg,
+	})
+
+	// Cold -> Warm = promotion.
+	pg.recordPeerStateChange(PeerStateCold, PeerStateWarm)
+	// Warm -> Hot = promotion.
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateHot)
+	// Hot -> Warm = demotion.
+	pg.recordPeerStateChange(PeerStateHot, PeerStateWarm)
+	// Warm -> Cold = demotion.
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateCold)
+	// Same-state = no-op.
+	pg.recordPeerStateChange(PeerStateHot, PeerStateHot)
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("cold", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("warm", "cold"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: reg,
+		MinHotPeers:  1,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateWarm
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_GossipChurnDemotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		PromRegistry:       reg,
+		GossipChurnPercent: 0.50,
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address: "gossip1:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.9,
+		},
+		{
+			Address: "gossip2:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.2,
+		},
+	}
+
+	pg.gossipChurn()
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "cold"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_ReconcileDemotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: reg,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateHot
+	pg.peers[0].Connection = nil
+	pg.peers[0].LastActivity = time.Now().Add(-15 * time.Minute)
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+}
+
 func TestPeerGovernor_PeerSharing(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()

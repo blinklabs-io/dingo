@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -22,16 +24,82 @@ import (
 
 func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
 	return []oleiosfetch.LeiosFetchOptionFunc{
-		oleiosfetch.WithBlockRequestFunc(o.leiosfetchServerBlockRequest),
-		oleiosfetch.WithBlockTxsRequestFunc(o.leiosfetchServerBlockTxsRequest),
-		oleiosfetch.WithVotesRequestFunc(o.leiosfetchServerVotesRequest),
-		oleiosfetch.WithBlockRangeRequestFunc(o.leiosfetchServerBlockRangeRequest),
+		oleiosfetch.WithBlockRequestFunc(
+			o.instrumentLeiosfetchBlockRequest(o.leiosfetchServerBlockRequest),
+		),
+		oleiosfetch.WithBlockTxsRequestFunc(
+			o.instrumentLeiosfetchBlockTxsRequest(o.leiosfetchServerBlockTxsRequest),
+		),
+		oleiosfetch.WithVotesRequestFunc(
+			o.instrumentLeiosfetchVotesRequest(o.leiosfetchServerVotesRequest),
+		),
+		oleiosfetch.WithBlockRangeRequestFunc(
+			o.instrumentLeiosfetchBlockRangeRequest(o.leiosfetchServerBlockRangeRequest),
+		),
 	}
 }
 
 func (o *Ouroboros) leiosfetchClientConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
 	return []oleiosfetch.LeiosFetchOptionFunc{
 		// NOTE: this is purposely empty
+	}
+}
+
+func (o *Ouroboros) instrumentLeiosfetchBlockRequest(
+	fn func(oleiosfetch.CallbackContext, ocommon.Point) (protocol.Message, error),
+) func(oleiosfetch.CallbackContext, ocommon.Point) (protocol.Message, error) {
+	return func(
+		ctx oleiosfetch.CallbackContext,
+		point ocommon.Point,
+	) (protocol.Message, error) {
+		start := time.Now()
+		msg, err := fn(ctx, point)
+		o.recordProtocolMessage("leiosfetch", err, time.Since(start))
+		return msg, err
+	}
+}
+
+func (o *Ouroboros) instrumentLeiosfetchBlockTxsRequest(
+	fn func(oleiosfetch.CallbackContext, ocommon.Point, map[uint16]uint64) (protocol.Message, error),
+) func(oleiosfetch.CallbackContext, ocommon.Point, map[uint16]uint64) (protocol.Message, error) {
+	return func(
+		ctx oleiosfetch.CallbackContext,
+		point ocommon.Point,
+		txBitmap map[uint16]uint64,
+	) (protocol.Message, error) {
+		start := time.Now()
+		msg, err := fn(ctx, point, txBitmap)
+		o.recordProtocolMessage("leiosfetch", err, time.Since(start))
+		return msg, err
+	}
+}
+
+func (o *Ouroboros) instrumentLeiosfetchVotesRequest(
+	fn func(oleiosfetch.CallbackContext, []oleiosfetch.MsgVotesRequestVoteId) (protocol.Message, error),
+) func(oleiosfetch.CallbackContext, []oleiosfetch.MsgVotesRequestVoteId) (protocol.Message, error) {
+	return func(
+		ctx oleiosfetch.CallbackContext,
+		voteIds []oleiosfetch.MsgVotesRequestVoteId,
+	) (protocol.Message, error) {
+		start := time.Now()
+		msg, err := fn(ctx, voteIds)
+		o.recordProtocolMessage("leiosfetch", err, time.Since(start))
+		return msg, err
+	}
+}
+
+func (o *Ouroboros) instrumentLeiosfetchBlockRangeRequest(
+	fn func(oleiosfetch.CallbackContext, ocommon.Point, ocommon.Point) error,
+) func(oleiosfetch.CallbackContext, ocommon.Point, ocommon.Point) error {
+	return func(
+		ctx oleiosfetch.CallbackContext,
+		start ocommon.Point,
+		end ocommon.Point,
+	) error {
+		startTime := time.Now()
+		err := fn(ctx, start, end)
+		o.recordProtocolMessage("leiosfetch", err, time.Since(startTime))
+		return err
 	}
 }
 

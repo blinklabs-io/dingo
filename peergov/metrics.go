@@ -58,6 +58,9 @@ type peerGovernorMetrics struct {
 	inboundLifecycle       *prometheus.CounterVec
 	inboundHotQuotaUsage   prometheus.Gauge
 	inboundWarmOccupancy   prometheus.Gauge
+	// Temperature observability
+	peerPromotions *prometheus.CounterVec // transitions toward hot, labels: from, to
+	peerDemotions  *prometheus.CounterVec // transitions toward cold, labels: from, to
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -231,6 +234,62 @@ func (p *PeerGovernor) initMetrics() {
 		Name: "dingo_metrics_peerSelection_InboundWarmTargetOccupancy",
 		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
 	})
+	p.metrics.peerPromotions = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_peer_promotion_total",
+			Help: "total peer state transitions toward hot",
+		},
+		[]string{"from", "to"},
+	)
+	p.metrics.peerDemotions = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_peer_demotion_total",
+			Help: "total peer state transitions toward cold",
+		},
+		[]string{"from", "to"},
+	)
+	// Pre-populate every reachable transition with zero so Prometheus
+	// exports the series from startup. Without this, rate()/increase()
+	// alerts would have no data until the first event of each kind.
+	p.metrics.peerPromotions.WithLabelValues("cold", "warm").Add(0)
+	p.metrics.peerPromotions.WithLabelValues("cold", "hot").Add(0)
+	p.metrics.peerPromotions.WithLabelValues("warm", "hot").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("hot", "warm").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("hot", "cold").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("warm", "cold").Add(0)
+}
+
+// peerStateLabel maps a PeerState to its Prometheus temperature label.
+func peerStateLabel(state PeerState) string {
+	switch state {
+	case PeerStateCold:
+		return "cold"
+	case PeerStateWarm:
+		return "warm"
+	case PeerStateHot:
+		return "hot"
+	}
+	return "unknown"
+}
+
+// recordPeerStateChange increments the appropriate transition counter
+// when a peer moves between cold/warm/hot. No-op when from == to or
+// metrics aren't initialized.
+func (p *PeerGovernor) recordPeerStateChange(from, to PeerState) {
+	if p.metrics == nil || p.metrics.peerPromotions == nil || p.metrics.peerDemotions == nil {
+		return
+	}
+	if from == to {
+		return
+	}
+	fromLabel := peerStateLabel(from)
+	toLabel := peerStateLabel(to)
+	// Promotion = toward hot (Cold<Warm<Hot in PeerState ordering).
+	if to > from {
+		p.metrics.peerPromotions.WithLabelValues(fromLabel, toLabel).Inc()
+	} else {
+		p.metrics.peerDemotions.WithLabelValues(fromLabel, toLabel).Inc()
+	}
 }
 
 func (p *PeerGovernor) recordInboundLifecycle(stage string) {
