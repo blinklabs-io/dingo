@@ -3194,6 +3194,16 @@ func (ls *LedgerState) ledgerProcessBlock(
 			)
 		}
 	}
+	// Reject blocks whose header protocol major version runs more than
+	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
+	// per cardano-ledger PR 5785.
+	if shouldValidate {
+		if err := ls.validateBlockHeaderProtocolVersion(
+			block.Header(), pparams,
+		); err != nil {
+			return nil, err
+		}
+	}
 	// Process transactions
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
