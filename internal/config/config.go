@@ -294,10 +294,11 @@ type Config struct {
 	MeshPort uint `yaml:"meshPort" envconfig:"DINGO_MESH_PORT"`
 
 	// PeerSharing enables the peer sharing protocol, allowing this node
-	// to advertise known peers to other nodes on request. Defaults to
-	// false; should remain disabled on block producers to avoid leaking
-	// topology information.
-	PeerSharing bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
+	// to advertise known peers to other nodes on request. Pointer
+	// distinguishes "operator did not set this" (nil) from "explicitly
+	// false". On a block producer the resolved default is false unless
+	// this field is explicitly set to true.
+	PeerSharing *bool `yaml:"peerSharing" envconfig:"DINGO_PEER_SHARING"`
 
 	// Storage mode: "core" (default) or "api".
 	// "core" stores only consensus data
