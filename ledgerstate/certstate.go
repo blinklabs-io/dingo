@@ -1414,12 +1414,31 @@ type ParsedGovProposal struct {
 	ExpiresAfter uint64
 }
 
+// ParsedGovActionId holds a decoded GovActionId (txHash + index).
+type ParsedGovActionId struct {
+	TxHash      []byte // 32 bytes
+	ActionIndex uint32
+}
+
+// ParsedPrevGovActionIds holds the per-purpose chain roots from
+// cgsProposals's GovRelation (the first element of the proposals
+// container). Each pointer is non-nil when the corresponding
+// purpose has an enacted predecessor (SJust); nil means SNothing
+// (no enacted predecessor for that purpose).
+type ParsedPrevGovActionIds struct {
+	PParamUpdate *ParsedGovActionId
+	HardFork     *ParsedGovActionId
+	Committee    *ParsedGovActionId
+	Constitution *ParsedGovActionId
+}
+
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution    *ParsedConstitution
-	Committee       []ParsedCommitteeMember
-	CommitteeQuorum *cbor.Rat
-	Proposals       []ParsedGovProposal
+	Constitution     *ParsedConstitution
+	Committee        []ParsedCommitteeMember
+	CommitteeQuorum  *cbor.Rat
+	Proposals        []ParsedGovProposal
+	PrevGovActionIds *ParsedPrevGovActionIds
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1487,13 +1506,14 @@ func ParseGovState(
 	result.CommitteeQuorum = quorum
 
 	// Parse proposals (field 0) — best-effort
-	proposals, err := parseProposals(fields[0])
+	proposals, prevIds, err := parseProposals(fields[0])
 	if err != nil {
 		warnings = append(warnings, fmt.Errorf(
 			"parsing proposals: %w", err,
 		))
 	}
 	result.Proposals = proposals
+	result.PrevGovActionIds = prevIds
 
 	return result, errors.Join(warnings...)
 }
@@ -1691,27 +1711,34 @@ func parseCommittee(data []byte) (
 //
 //	[roots, omap]
 //
-// where roots are previous governance action IDs and omap
-// is a flat array of GovActionState values (keys are derived
-// from the values via HasOKey during decoding).
+// where roots is a GovRelation StrictMaybe — a 4-element array of
+// per-purpose previous governance action IDs in the order
+// [PParamUpdate, HardFork, Committee, Constitution] — and omap is
+// a flat array of GovActionState values (keys are derived from the
+// values via HasOKey during decoding).
 //
 // Each GovActionState = [govActionId, committeeVotes,
 // drepVotes, spoVotes, proposalProcedure, proposedIn,
 // expiresAfter].
+//
+// Returns the proposals slice and the parsed per-purpose roots
+// (nil when all SNothing). Errors decoding the roots are surfaced
+// as warnings on the joined error so callers can still consume the
+// proposal list.
 func parseProposals(data []byte) (
-	[]ParsedGovProposal, error,
+	[]ParsedGovProposal, *ParsedPrevGovActionIds, error,
 ) {
 	container, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding proposals container: %w", err,
 		)
 	}
 	if len(container) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(container) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"proposals container has %d elements, "+
 				"expected 0 or at least 2",
 			len(container),
@@ -1724,7 +1751,7 @@ func parseProposals(data []byte) (
 
 	items, err := decodeRawArray(proposalSeq)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding proposals OMap: %w", err,
 		)
 	}
@@ -1742,8 +1769,171 @@ func parseProposals(data []byte) (
 		}
 	}
 
-	// Return parsed proposals even if some failed
-	return proposals, errors.Join(propErrs...)
+	// Parse per-purpose roots (the GovRelation). A failure to
+	// decode roots is independently fatal to the chained-proposal
+	// ratification path on a Mithril-bootstrapped node, but we
+	// still want the proposals list to be returned so the rest of
+	// the import can complete. Surface the error as a warning.
+	prevIds, rootsErr := parseProposalsRoots(container[0])
+	if rootsErr != nil {
+		propErrs = append(propErrs, fmt.Errorf(
+			"decoding proposals roots: %w", rootsErr,
+		))
+	}
+
+	return proposals, prevIds, errors.Join(propErrs...)
+}
+
+// parseProposalsRoots decodes the GovRelation StrictMaybe at the
+// head of a Proposals CBOR container. The canonical encoding is a
+// 4-element array of StrictMaybe (GovPurposeId p era) values, in
+// the order [PParamUpdate, HardFork, Committee, Constitution].
+// StrictMaybe encodes as a 0- or 1-element array; SJust wraps a
+// GovActionId = [txHash, actionIndex].
+//
+// A 0-element top-level array (degenerate "no roots" form some
+// historical encoders emit) is accepted as all SNothing. Returns
+// nil when every purpose is SNothing.
+func parseProposalsRoots(data []byte) (
+	*ParsedPrevGovActionIds, error,
+) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovRelation: %w", err,
+		)
+	}
+	if len(fields) == 0 {
+		// Degenerate "all SNothing" encoding: nothing to seed.
+		return nil, nil
+	}
+	if len(fields) != 4 {
+		return nil, fmt.Errorf(
+			"GovRelation has %d elements, expected 4",
+			len(fields),
+		)
+	}
+
+	pp, err := parseStrictMaybeGovActionId(fields[0])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding pparam-update root: %w", err,
+		)
+	}
+	hf, err := parseStrictMaybeGovActionId(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding hard-fork root: %w", err,
+		)
+	}
+	cm, err := parseStrictMaybeGovActionId(fields[2])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding committee root: %w", err,
+		)
+	}
+	cn, err := parseStrictMaybeGovActionId(fields[3])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding constitution root: %w", err,
+		)
+	}
+
+	if pp == nil && hf == nil && cm == nil && cn == nil {
+		return nil, nil
+	}
+	return &ParsedPrevGovActionIds{
+		PParamUpdate: pp,
+		HardFork:     hf,
+		Committee:    cm,
+		Constitution: cn,
+	}, nil
+}
+
+// parseStrictMaybeGovActionId decodes a StrictMaybe (GovPurposeId p
+// era) field. SNothing is the empty array; SJust wraps the inner
+// GovActionId = [txHash, actionIndex]. Returns nil for SNothing.
+//
+// Tolerates a CBOR null (0xf6) emitted by some historical encoders
+// in lieu of an empty array, and tolerates a directly-encoded
+// GovActionId (without the 1-element wrapper) so a non-canonical
+// encoder cannot silently drop a root.
+func parseStrictMaybeGovActionId(data []byte) (
+	*ParsedGovActionId, error,
+) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data) == 1 && data[0] == 0xf6 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding StrictMaybe: %w", err,
+		)
+	}
+	switch len(fields) {
+	case 0:
+		return nil, nil
+	case 1:
+		// SJust [GovActionId]
+		return parseGovActionId(fields[0])
+	case 2:
+		// Directly-encoded GovActionId = [txHash, actionIndex].
+		// Some encoders skip the SJust wrapper; accept this shape
+		// rather than dropping the root.
+		return parseGovActionIdFromFields(fields)
+	default:
+		return nil, fmt.Errorf(
+			"StrictMaybe has %d elements, expected 0, 1, or 2",
+			len(fields),
+		)
+	}
+}
+
+// parseGovActionId decodes a CBOR-encoded GovActionId =
+// [txHash, actionIndex].
+func parseGovActionId(data []byte) (*ParsedGovActionId, error) {
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId: %w", err,
+		)
+	}
+	return parseGovActionIdFromFields(fields)
+}
+
+func parseGovActionIdFromFields(fields [][]byte) (
+	*ParsedGovActionId, error,
+) {
+	if len(fields) < 2 {
+		return nil, fmt.Errorf(
+			"GovActionId has %d elements, expected 2",
+			len(fields),
+		)
+	}
+	id := &ParsedGovActionId{}
+	if _, err := cbor.Decode(fields[0], &id.TxHash); err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId txHash: %w", err,
+		)
+	}
+	if len(id.TxHash) != 32 {
+		return nil, fmt.Errorf(
+			"GovActionId txHash has %d bytes, expected 32",
+			len(id.TxHash),
+		)
+	}
+	if _, err := cbor.Decode(fields[1], &id.ActionIndex); err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId index: %w", err,
+		)
+	}
+	return id, nil
 }
 
 // parseGovActionState decodes a single GovActionState.
