@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -1341,7 +1342,7 @@ func (a *NodeAdapter) Transaction(
 		len(tx.Collateral) +
 		len(tx.ReferenceInputs) +
 		len(tx.Outputs)
-	if tx.CollateralReturn != nil {
+	if tx.CollateralReturn != nil && !tx.Valid {
 		utxoCount++
 	}
 	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
@@ -1389,9 +1390,9 @@ func (a *NodeAdapter) TransactionSubmit(
 	txType, err := gledger.DetermineTransactionType(txCbor)
 	if err != nil {
 		return "", fmt.Errorf(
-			"determine transaction type: %w: %w",
-			err,
+			"%w: determine transaction type: %w",
 			ErrInvalidTransaction,
+			err,
 		)
 	}
 	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
@@ -1403,7 +1404,11 @@ func (a *NodeAdapter) TransactionSubmit(
 		)
 	}
 	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
-		return "", fmt.Errorf("submit transaction to mempool: %w", err)
+		var mempoolFull *mempool.MempoolFullError
+		if errors.As(err, &mempoolFull) {
+			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolUnavailable)
+		}
+		return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrInvalidTransaction)
 	}
 	return tx.Hash().String(), nil
 }
@@ -1522,16 +1527,28 @@ func (a *NodeAdapter) TransactionUTXOs(
 	inputs := make([]TransactionInputInfo, 0, len(txInputs)+len(txCollateral)+len(txReferenceInputs))
 	for _, input := range txInputs {
 		input.Cbor = inputCbor[utxoRef(input)]
-		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, nil))
+		info, err := a.transactionInputInfoFromUtxo(input, false, nil)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
 	}
 	for _, input := range txCollateral {
 		input.Cbor = inputCbor[utxoRef(input)]
-		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, true, nil))
+		info, err := a.transactionInputInfoFromUtxo(input, true, nil)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve collateral address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
 	}
 	referenceInput := true
 	for _, input := range txReferenceInputs {
 		input.Cbor = inputCbor[utxoRef(input)]
-		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, &referenceInput))
+		info, err := a.transactionInputInfoFromUtxo(input, false, &referenceInput)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve reference input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
 	}
 
 	return TransactionUTXOsInfo{
@@ -2159,9 +2176,13 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 	utxo models.Utxo,
 	collateral bool,
 	reference *bool,
-) TransactionInputInfo {
+) (TransactionInputInfo, error) {
+	addr, err := a.addressFromUtxo(utxo)
+	if err != nil {
+		return TransactionInputInfo{}, err
+	}
 	return TransactionInputInfo{
-		Address:             a.addressFromUtxo(utxo),
+		Address:             addr,
 		Amount:              addressAmountsFromUtxo(utxo),
 		TxHash:              hex.EncodeToString(utxo.TxId),
 		OutputIndex:         utxo.OutputIdx,
@@ -2170,7 +2191,7 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 		InlineDatum:         optionalHexString(utxo.Datum),
 		ReferenceScriptHash: nil,
 		Reference:           reference,
-	}
+	}, nil
 }
 
 func compareUtxoRefs(a, b models.Utxo) int {
@@ -2182,11 +2203,11 @@ func compareUtxoRefs(a, b models.Utxo) int {
 
 func (a *NodeAdapter) addressFromUtxo(
 	utxo models.Utxo,
-) string {
+) (string, error) {
 	if len(utxo.Cbor) > 0 {
 		output, err := utxo.Decode()
 		if err == nil {
-			return output.Address().String()
+			return output.Address().String(), nil
 		}
 	}
 
@@ -2201,7 +2222,7 @@ func (a *NodeAdapter) addressFromUtxo(
 			utxo.StakingKey,
 		)
 		if err == nil {
-			return addr.String()
+			return addr.String(), nil
 		}
 	case len(utxo.PaymentKey) == lcommon.AddressHashSize:
 		addr, err := lcommon.NewAddressFromParts(
@@ -2211,11 +2232,10 @@ func (a *NodeAdapter) addressFromUtxo(
 			nil,
 		)
 		if err == nil {
-			return addr.String()
+			return addr.String(), nil
 		}
 	}
-	// Script payment addresses are not stored in the DB model; returns "".
-	return ""
+	return "", fmt.Errorf("address not resolvable for utxo %x:%d: CBOR unavailable and no payment key hash stored", utxo.TxId, utxo.OutputIdx)
 }
 
 func (a *NodeAdapter) networkID() uint8 {
