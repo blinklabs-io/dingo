@@ -28,6 +28,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -1998,6 +1999,35 @@ func importGovState(
 		)
 	}
 
+	// Seed per-purpose chain roots from cgsPrevGovActionIds. Without
+	// these synthetic enacted rows, the next chained proposal that
+	// references a parent enacted before the snapshot would be
+	// rejected by validateParentChain (currentRoot is nil) and
+	// silently expire — see issue #2195. Genesis-synced nodes get
+	// these rows from the normal enactment path; Mithril snapshots
+	// don't surface them otherwise.
+	if govState.PrevGovActionIds != nil {
+		seeded, err := seedPrevGovActionIds(
+			cfg,
+			store,
+			govState,
+			currentEpochSlot,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"seeding per-purpose governance roots: %w",
+				err,
+			)
+		}
+		if seeded > 0 {
+			cfg.Logger.Info(
+				"seeded per-purpose governance chain roots",
+				"component", "ledgerstate",
+				"count", seeded,
+			)
+		}
+	}
+
 	progress(ImportProgress{
 		Stage:       "governance",
 		Percent:     100,
@@ -2006,6 +2036,162 @@ func importGovState(
 
 	return nil
 }
+
+// seedPrevGovActionIds writes synthetic enacted GovernanceProposal
+// rows for each per-purpose root recorded in the snapshot's
+// cgsPrevGovActionIds. These rows do not represent the full
+// proposal payload (anchor, deposit, return address are placeholders)
+// — they exist solely so GetLastEnactedGovernanceProposal returns a
+// non-nil root for the purpose, allowing chained children whose
+// parent is the on-chain enacted action to pass validateParentChain.
+//
+// AddedSlot is set to 0 so a normal rollback (which deletes rows
+// with added_slot > slot) cannot remove the seeded root. The
+// Mithril trust boundary blocks rollbacks past the snapshot anyway,
+// but slot 0 is a defense-in-depth choice.
+//
+// EnactedSlot/EnactedEpoch are set to the snapshot's current epoch
+// anchor so a later real enactment (which writes its own row with
+// a higher enacted slot/epoch) sorts above this synthetic row in
+// GetLastEnactedGovernanceProposal's ORDER BY.
+func seedPrevGovActionIds(
+	cfg ImportConfig,
+	store metadata.MetadataStore,
+	govState *ParsedGovState,
+	currentEpochSlot uint64,
+) (int, error) {
+	prev := govState.PrevGovActionIds
+	if prev == nil {
+		return 0, nil
+	}
+
+	// Committee root action_type heuristic: when the committee is
+	// absent (no members and no quorum), the most recent enacted
+	// committee-purpose action was a NoConfidence; otherwise an
+	// UpdateCommittee. The action_type matters because epoch.go
+	// reads committeeNoConfidenceState off the committee root to
+	// pick CommitteeNoConfidence vs CommitteeNormal thresholds.
+	committeeNoConfidence := len(govState.Committee) == 0 &&
+		govState.CommitteeQuorum == nil
+
+	type seed struct {
+		id         *ParsedGovActionId
+		actionType uint8
+	}
+	seeds := []seed{
+		{
+			id:         prev.PParamUpdate,
+			actionType: govActionTypeParameterChange,
+		},
+		{
+			id:         prev.HardFork,
+			actionType: govActionTypeHardForkInitiation,
+		},
+		{
+			id:         prev.Committee,
+			actionType: committeeRootActionType(committeeNoConfidence),
+		},
+		{
+			id:         prev.Constitution,
+			actionType: govActionTypeNewConstitution,
+		},
+	}
+
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	count := 0
+	for _, s := range seeds {
+		if s.id == nil {
+			continue
+		}
+		// Defense-in-depth: an active proposal with the same
+		// (txHash, actionIndex) would collide with the unique
+		// index. Active proposals are pre-enactment, so a row
+		// matching a root cannot exist; skip if it does to avoid
+		// clobbering the live row's anchor/deposit data.
+		existing, err := store.GetGovernanceProposal(
+			s.id.TxHash, s.id.ActionIndex, metaTxn,
+		)
+		if err != nil && !errors.Is(
+			err, models.ErrGovernanceProposalNotFound,
+		) {
+			return count, fmt.Errorf(
+				"checking existing proposal for root %s#%d: %w",
+				hex.EncodeToString(s.id.TxHash),
+				s.id.ActionIndex,
+				err,
+			)
+		}
+		if existing != nil {
+			cfg.Logger.Warn(
+				"per-purpose root already exists in proposals; skipping seed",
+				"component", "ledgerstate",
+				"tx_hash", hex.EncodeToString(s.id.TxHash),
+				"action_index", s.id.ActionIndex,
+				"existing_action_type", existing.ActionType,
+			)
+			continue
+		}
+
+		enactedEpoch := cfg.State.Epoch
+		enactedSlot := currentEpochSlot
+		row := &models.GovernanceProposal{
+			TxHash:        s.id.TxHash,
+			ActionIndex:   s.id.ActionIndex,
+			ActionType:    s.actionType,
+			ProposedEpoch: 0,
+			ExpiresEpoch:  0,
+			EnactedEpoch:  &enactedEpoch,
+			EnactedSlot:   &enactedSlot,
+			Deposit:       0,
+			ReturnAddress: make([]byte, 29),
+			AnchorURL:     "",
+			AnchorHash:    make([]byte, 32),
+			AddedSlot:     0,
+		}
+		if err := store.SetGovernanceProposal(row, metaTxn); err != nil {
+			return count, fmt.Errorf(
+				"seeding root %s#%d (action_type %d): %w",
+				hex.EncodeToString(s.id.TxHash),
+				s.id.ActionIndex,
+				s.actionType,
+				err,
+			)
+		}
+		count++
+	}
+
+	if count == 0 {
+		return 0, nil
+	}
+	if err := txn.Commit(); err != nil {
+		return count, fmt.Errorf(
+			"committing seeded roots: %w", err,
+		)
+	}
+	return count, nil
+}
+
+func committeeRootActionType(noConfidence bool) uint8 {
+	if noConfidence {
+		return govActionTypeNoConfidence
+	}
+	return govActionTypeUpdateCommittee
+}
+
+// Action type discriminators used when seeding synthetic per-purpose
+// chain roots. Kept as untyped uint8 constants so this file does not
+// need to depend on the gouroboros lcommon package — these match the
+// CIP-1694 GovActionType wire values.
+const (
+	govActionTypeParameterChange    uint8 = 0
+	govActionTypeHardForkInitiation uint8 = 1
+	govActionTypeNoConfidence       uint8 = 3
+	govActionTypeUpdateCommittee    uint8 = 4
+	govActionTypeNewConstitution    uint8 = 5
+)
 
 func snapshotEpochAnchorSlot(
 	cfg ImportConfig,
