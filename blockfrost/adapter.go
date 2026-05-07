@@ -1337,6 +1337,13 @@ func (a *NodeAdapter) Transaction(
 		outputs = []models.Utxo{*tx.CollateralReturn}
 	}
 	outputAmount := aggregateTransactionOutputAmount(outputs)
+	utxoCount := len(tx.Inputs) +
+		len(tx.Collateral) +
+		len(tx.ReferenceInputs) +
+		len(tx.Outputs)
+	if tx.CollateralReturn != nil {
+		utxoCount++
+	}
 	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
 	if err != nil {
 		return TransactionInfo{}, fmt.Errorf(
@@ -1357,7 +1364,7 @@ func (a *NodeAdapter) Transaction(
 		Fees:               strconv.FormatUint(uint64(tx.Fee), 10),
 		Deposit:            strconv.FormatUint(deposit, 10),
 		Size:               size,
-		UtxoCount:          len(tx.Inputs) + len(tx.Outputs),
+		UtxoCount:          utxoCount,
 		WithdrawalCount:    withdrawalCount,
 		MirCertCount:       counts.mirCerts,
 		DelegationCount:    counts.delegations,
