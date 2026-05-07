@@ -6,7 +6,7 @@ shows the S3 blob plugin and Bark proxy working end to end.
 
 ## Stack
 
-- `cardano-producer` - sole block producer (cardano-node 10.5.4)
+- `cardano-producer` - sole block producer (cardano-node 11.0.1)
 - `dingo-archive` - Dingo with `blobPlugin: s3`, Bark server on port 3003
 - `dingo-pruning` - Dingo with `blobPlugin: badger`,
   `barkBaseUrl` pointing at `dingo-archive`,

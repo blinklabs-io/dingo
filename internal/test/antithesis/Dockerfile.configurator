@@ -4,7 +4,7 @@
 # unique pool keys and genesis files for Antithesis testing.
 
 # Pin to same version used in docker-compose.yaml
-FROM ghcr.io/blinklabs-io/cardano-node:10.5.4
+FROM ghcr.io/blinklabs-io/cardano-node:11.0.1
 
 ARG UV_VERSION=0.11.2
 ARG TESTNET_GENERATION_TOOL_VERSION=v0.1.0
