@@ -1,8 +1,8 @@
 module github.com/blinklabs-io/dingo
 
-go 1.25.7
+go 1.26.0
 
-toolchain go1.25.8
+toolchain go1.26.1
 
 require (
 	cloud.google.com/go/storage v1.62.1
@@ -12,6 +12,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/aws/aws-sdk-go-v2 v1.41.7
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.16
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.100.1
 	github.com/aws/smithy-go v1.25.1
 	github.com/blinklabs-io/bark v0.0.2
@@ -91,7 +92,6 @@ require (
 	github.com/ProtonMail/go-crypto v1.3.0 // indirect
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.10 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.16 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.23 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/s3/manager v1.22.2 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.23 // indirect
