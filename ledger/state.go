@@ -1396,6 +1396,21 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	// Rolling back to the point we already sit at is a no-op. Skip
+	// it entirely so we don't publish a "local ledger rollback"
+	// resync event for a rollback that didn't move the ledger. That
+	// event drives RecoverAfterLocalRollback, which on a single-peer
+	// block producer wedges the chain in a per-cycle replay loop
+	// when the peer rolls back to a point already covered by queued
+	// headers extended via tryResolveFork's "fork extends from
+	// current tip" branch (issue #2177).
+	ls.RLock()
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+		return nil
+	}
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
