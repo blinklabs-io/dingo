@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -1942,6 +1943,34 @@ func importGovState(
 
 	// Import governance proposals
 	if len(govState.Proposals) > 0 {
+		// Snapshot bootstrap close-the-1-epoch-lag heuristic. Canon
+		// nodes mark a HFI ratified at boundary N-1 -> N and enact at
+		// boundary N -> N+1. The snapshot at epoch N reflects the
+		// ratification (in cgsDRepPulsingState's DRComplete result)
+		// but we don't parse that field, so without intervention our
+		// local node would re-ratify at boundary N -> N+1 and only
+		// enact at N+1 -> N+2 — putting us one epoch behind canon
+		// for the protocol-version bump. As a block producer that is
+		// the difference between forging vN+ blocks alongside canon
+		// and forging vN- blocks that risk rejection on TX-validation
+		// rule mismatches gated by the new version.
+		//
+		// Heuristic: when there is exactly one active HFI whose
+		// parent equals the snapshot's per-purpose HardFork root,
+		// mark it ratified at the snapshot's epoch so ENACT picks
+		// it up at the next boundary tick. Skips silently when the
+		// match is ambiguous (0 or >1 candidates) — the lag returns
+		// in those cases but correctness is preserved.
+		ratifiedHFI := findRatifiedHFICandidate(govState)
+		if ratifiedHFI != nil {
+			cfg.Logger.Info(
+				"marking active HFI as ratified at snapshot epoch (close 1-epoch lag)",
+				"component", "ledgerstate",
+				"tx_hash", hex.EncodeToString(ratifiedHFI.TxHash),
+				"action_index", ratifiedHFI.ActionIndex,
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
@@ -1959,18 +1988,33 @@ func importGovState(
 					cfg,
 					prop.ProposedIn,
 				)
+				var ratifiedEpoch *uint64
+				var ratifiedSlot *uint64
+				if ratifiedHFI != nil &&
+					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
+					prop.ActionIndex == ratifiedHFI.ActionIndex {
+					re := cfg.State.Epoch
+					rs := currentEpochSlot
+					ratifiedEpoch = &re
+					ratifiedSlot = &rs
+				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
-						TxHash:        prop.TxHash,
-						ActionIndex:   prop.ActionIndex,
-						ActionType:    prop.ActionType,
-						ProposedEpoch: prop.ProposedIn,
-						ExpiresEpoch:  prop.ExpiresAfter,
-						Deposit:       prop.Deposit,
-						ReturnAddress: prop.ReturnAddr,
-						AnchorURL:     prop.AnchorURL,
-						AnchorHash:    prop.AnchorHash,
-						AddedSlot:     proposedSlot,
+						TxHash:          prop.TxHash,
+						ActionIndex:     prop.ActionIndex,
+						ActionType:      prop.ActionType,
+						ProposedEpoch:   prop.ProposedIn,
+						ExpiresEpoch:    prop.ExpiresAfter,
+						Deposit:         prop.Deposit,
+						ReturnAddress:   prop.ReturnAddr,
+						AnchorURL:       prop.AnchorURL,
+						AnchorHash:      prop.AnchorHash,
+						ParentTxHash:    prop.ParentTxHash,
+						ParentActionIdx: prop.ParentActionIdx,
+						GovActionCbor:   prop.GovActionCbor,
+						RatifiedEpoch:   ratifiedEpoch,
+						RatifiedSlot:    ratifiedSlot,
+						AddedSlot:       proposedSlot,
 					},
 					metaTxn,
 				); err != nil {
@@ -2172,6 +2216,52 @@ func seedPrevGovActionIds(
 		)
 	}
 	return count, nil
+}
+
+// findRatifiedHFICandidate returns the unique active HFI proposal whose
+// parent equals the snapshot's per-purpose HardFork root, or nil if no
+// such proposal exists or more than one matches.
+//
+// The snapshot's PrevGovActionIds.HardFork is the action ID of the most
+// recently enacted HFI before the snapshot. An active proposal whose
+// parent equals that root is the next link in the chain — by canon's
+// ratify ordering, when more than one such candidate exists at most one
+// can be canonically ratified per epoch boundary (priority ties broken
+// by submission order/IDs), and we cannot tell which without parsing
+// cgsDRepPulsingState. Returning nil in the ambiguous case preserves
+// correctness at the cost of a 1-epoch enactment lag for that boundary.
+func findRatifiedHFICandidate(
+	govState *ParsedGovState,
+) *ParsedGovProposal {
+	if govState == nil ||
+		govState.PrevGovActionIds == nil ||
+		govState.PrevGovActionIds.HardFork == nil {
+		return nil
+	}
+	root := govState.PrevGovActionIds.HardFork
+	var candidate *ParsedGovProposal
+	matches := 0
+	for i := range govState.Proposals {
+		p := &govState.Proposals[i]
+		if p.ActionType != govActionTypeHardForkInitiation {
+			continue
+		}
+		if p.ParentTxHash == nil || p.ParentActionIdx == nil {
+			continue
+		}
+		if !bytes.Equal(p.ParentTxHash, root.TxHash) {
+			continue
+		}
+		if *p.ParentActionIdx != root.ActionIndex {
+			continue
+		}
+		matches++
+		candidate = p
+	}
+	if matches != 1 {
+		return nil
+	}
+	return candidate
 }
 
 func committeeRootActionType(noConfidence bool) uint8 {
