@@ -1,5 +1,59 @@
 # Release Notes
 
+## v0.41.0 (May 6, 2026)
+
+**Title:** Batched metadata writes, leaner memory use, and safer node behavior
+
+**Date:** May 6, 2026
+
+**Version:** v0.41.0
+
+Hi folks! Here’s what we shipped in v0.41.0.
+
+### ✨ What's New
+
+* Added **batched metadata persistence across supported databases:** Metadata transaction data can now flush in batches across sqlite, MySQL, and Postgres backends, which makes high-volume metadata persistence easier to manage.
+* Expanded **archive node demonstration tooling:** Teams can now run an archive node demonstration with MinIO-backed archive storage, a pruning node, helper scripts, and an end-to-end runnable flow.
+
+### 💪 Improvements
+
+* Improved **leaner default subscriber buffering:** Default subscriber buffers are now much smaller, while high-burst consumers keep large queues where needed, which reduces idle memory use.
+* Refined **era test harness organization:** The era test harness now lives in a clearer shared location, which makes validation work easier to follow.
+* Enhanced **Conway and PV11 readiness confidence:** Readiness coverage now checks Conway and PV11 behavior more clearly, which improves validation confidence.
+* Cleaned **stale rate limit maintenance:** The project now drops an outdated rate-limit constant, which keeps maintenance cleaner without changing runtime behavior.
+* Restored **release history continuity:** RELEASE_NOTES.md now includes the v0.40.0 entry, which keeps recent release history easier to scan.
+* Strengthened **archive node validation coverage:** The archive node demonstration now checks the full runnable flow more thoroughly, which makes the operational demo easier to trust.
+
+### 🔧 Fixes
+
+* Fixed **safer Mithril startup around recoverable metadata gaps:** Missing blob commit-timestamp keys now resolve as empty values, and recoverable mismatches no longer block Mithril or related startup paths.
+* Corrected **iterator handling after storage closes:** Iterator creation now returns an error after Badger closes, which prevents a shutdown panic.
+* Synchronized **stability window reads during era changes:** Stability-window reads now stay aligned with concurrent era updates, which avoids race-driven failures.
+* Released **pruning locks earlier:** Pruning now releases the metadata and prune lock sooner, which reduces contention and improves diagnostics.
+* Preserved **eligible peer continuity during local tip plateaus:** Nodes no longer disconnect their only eligible peer when a local tip plateau appears.
+* Unified **peer identity handling across DNS fallbacks:** Hostname and IP variants now stay consistent for deduplication, deny lists, and DNS-failure logging.
+
+### 📋 What You Need to Know
+
+* Clarified **batched metadata persistence availability:** Batched metadata persistence is now available across sqlite, MySQL, and Postgres backends.
+* Highlighted **lower idle heap usage:** Idle heap usage should be lower because default event subscriber buffers are smaller.
+* Emphasized **safer startup and shutdown paths:** Mithril startup and shutdown behavior is safer around recoverable database edge cases.
+* Summarized **more robust sync and peer management:** Sync and peer-management behavior is safer because plateau recovery and DNS-fallback peer handling are more robust.
+* Reviewed **archive demo and release history updates:** The project now includes an archive-node demonstration plus refreshed release history coverage.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.40.0 (May 5, 2026)
 
