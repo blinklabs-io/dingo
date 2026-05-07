@@ -2149,6 +2149,9 @@ func transactionCertificatesByType(
 			Index:       certIndex,
 		})
 	}
+	slices.SortFunc(ret, func(a, b transactionCertificate) int {
+		return cmp.Compare(a.Index, b.Index)
+	})
 	return ret, nil
 }
 
