@@ -338,7 +338,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "expr": "increase(cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}[1h])",
+      "expr": "increase(dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}[1h])",
       "instant": true,
       "legendFormat": "",
       "range": false,
@@ -442,7 +442,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+      "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
       "legendFormat": "",
       "range": false,

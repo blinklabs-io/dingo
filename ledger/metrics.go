@@ -73,7 +73,7 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 	})
 	m.blockForgingLatency = promautoFactory.NewHistogram(
 		prometheus.HistogramOpts{
-			Name:    "cardano_node_metrics_blockForgingLatency_seconds",
+			Name:    "dingo_metrics_blockForgingLatency_seconds",
 			Help:    "latency of block forging from slot start to block completion",
 			Buckets: prometheus.ExponentialBuckets(0.001, 2, 15), // 1ms to ~16s
 		},

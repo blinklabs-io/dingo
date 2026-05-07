@@ -478,7 +478,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -582,7 +582,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "",
           "range": false,
@@ -1123,7 +1123,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "cardano_node_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
+          "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
           "instant": true,
           "legendFormat": "{{alias}}",
           "refId": "A"
@@ -1718,7 +1718,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, rate(cardano_node_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.5, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p50",
           "range": true,
           "refId": "A"
@@ -1728,7 +1728,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, rate(cardano_node_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.95, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p95",
           "range": true,
           "refId": "B"
@@ -1738,7 +1738,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.99, rate(cardano_node_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.99, rate(dingo_metrics_blockForgingLatency_seconds_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p99",
           "range": true,
           "refId": "C"
@@ -2336,7 +2336,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, rate(cardano_node_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.5, rate(dingo_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p50 bytes",
           "range": true,
           "refId": "A"
@@ -2346,7 +2346,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, rate(cardano_node_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.95, rate(dingo_metrics_forgedBlockSize_bytes_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p95 bytes",
           "range": true,
           "refId": "B"
@@ -2436,7 +2436,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.5, rate(cardano_node_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.5, rate(dingo_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p50 tx",
           "range": true,
           "refId": "A"
@@ -2446,7 +2446,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "histogram_quantile(0.95, rate(cardano_node_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
+          "expr": "histogram_quantile(0.95, rate(dingo_metrics_forgedBlockTxCount_int_bucket{network=\"$network\",instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{alias}} p95 tx",
           "range": true,
           "refId": "B"
