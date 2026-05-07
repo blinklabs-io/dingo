@@ -1520,14 +1520,13 @@ func (a *NodeAdapter) TransactionUTXOs(
 	}
 
 	inputs := make([]TransactionInputInfo, 0, len(txInputs)+len(txCollateral)+len(txReferenceInputs))
-	normalReference := false
 	for _, input := range txInputs {
 		input.Cbor = inputCbor[utxoRef(input)]
-		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, &normalReference))
+		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, false, nil))
 	}
 	for _, input := range txCollateral {
 		input.Cbor = inputCbor[utxoRef(input)]
-		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, true, &normalReference))
+		inputs = append(inputs, a.transactionInputInfoFromUtxo(input, true, nil))
 	}
 	referenceInput := true
 	for _, input := range txReferenceInputs {
