@@ -524,13 +524,27 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 ) (any, error) {
 	delegations := make(map[olocalstatequery.StakeCredential]ledger.Blake2b224)
 	rewards := make(map[olocalstatequery.StakeCredential]uint64)
+	if len(creds) == 0 {
+		return []any{[]any{delegations, rewards}}, nil
+	}
+	stakeKeys := make([][]byte, 0, len(creds))
+	seen := make(map[string]struct{}, len(creds))
 	for _, cred := range creds {
-		account, err := ls.db.GetAccount(cred.Bytes[:], false, nil)
-		if err != nil {
-			if errors.Is(err, models.ErrAccountNotFound) {
-				continue
-			}
-			return nil, err
+		key := string(cred.Bytes[:])
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		stakeKeys = append(stakeKeys, cred.Bytes[:])
+	}
+	accounts, err := ls.db.GetAccounts(stakeKeys, false, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, cred := range creds {
+		account, ok := accounts[string(cred.Bytes[:])]
+		if !ok {
+			continue
 		}
 		rewards[cred] = uint64(account.Reward)
 		if len(account.Pool) > 0 {

@@ -213,6 +213,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Account, error)
 
+	// GetAccounts retrieves multiple accounts by stake key in a single query,
+	// optionally including inactive accounts. The returned map is keyed by
+	// string(StakingKey); stake keys with no matching row are omitted. An
+	// empty input returns an empty (non-nil) map and no error.
+	GetAccounts(
+		[][]byte, // stakeKeys
+		bool, // includeInactive
+		types.Txn,
+	) (map[string]*models.Account, error)
+
 	// AddAccountReward credits a reward account by stake credential.
 	AddAccountReward(
 		[]byte, // stakeKey
