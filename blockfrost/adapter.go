@@ -1413,27 +1413,15 @@ func (a *NodeAdapter) TransactionSubmit(
 func (a *NodeAdapter) TransactionCBOR(
 	hash []byte,
 ) ([]byte, error) {
-	tx, err := a.ledgerState.TransactionByHash(hash)
+	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"get transaction by hash %x: %w",
-			hash,
-			err,
-		)
+		return nil, err
 	}
-	if tx == nil {
+	txCbor := decodedTx.Cbor()
+	if len(txCbor) == 0 {
 		return nil, fmt.Errorf(
-			"transaction %x: %w",
+			"transaction %x CBOR unavailable",
 			hash,
-			ErrTransactionNotFound,
-		)
-	}
-	txCbor, err := a.ledgerState.Database().CborCache().ResolveTxCbor(nil, hash)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"resolve transaction CBOR %x: %w",
-			hash,
-			err,
 		)
 	}
 	return txCbor, nil
