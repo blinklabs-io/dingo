@@ -41,7 +41,7 @@ Hi folks! Here’s what we shipped in v0.42.0.
 * Clarified **faster stake account queries:** Batched account lookups now improve delegation and reward account queries for stake-key-heavy workloads.
 * Highlighted **faster and smoother catch-up behavior:** Catch-up behavior is faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
 * Emphasized **safer governance continuity after Mithril bootstrap:** Mithril-bootstrapped nodes should see safer governance continuity because governance roots, parent action links, and ratification timing are now preserved more accurately after snapshot import.
-* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or any affected metrics must update alerts, dashboards, and monitoring queries for the Dingo-owned Prometheus metric families that moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names:
+* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or any affected metrics must update alerts, dashboards, and monitoring queries for the Dingo-owned metric families that moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names:
   * `cardano_node_metrics_txsEvictedNum_int` -> `dingo_metrics_txsEvictedNum_int`
   * `cardano_node_metrics_txsExpiredNum_int` -> `dingo_metrics_txsExpiredNum_int`
   * `cardano_node_metrics_slotBattlesTotal_int` -> `dingo_metrics_slotBattlesTotal_int`
