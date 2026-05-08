@@ -1,5 +1,99 @@
 # Release Notes
 
+## v0.42.0 (May 8, 2026)
+
+**Title:** Batch stake account lookups for faster delegation queries
+
+**Date:** May 8, 2026
+
+**Version:** v0.42.0
+
+Hi folks! Here’s what we shipped in v0.42.0.
+
+### ✨ What's New
+
+* Added **batch stake account lookups for faster delegation queries:** Stake-key-heavy delegation and reward account requests now return more smoothly because Dingo can load many stake accounts in one pass.
+
+### 💪 Improvements
+
+* Improved **catch-up checks that no longer stall sync work:** Catch-up runs now stay smoother because hard-fork readiness checks evaluate in the background instead of pausing the main sync path.
+* Refined **larger deep catch-up block batches:** Nodes now pull much larger block batches during deep catch-up, which helps long syncs move forward faster with less stop-and-go behavior.
+* Enhanced **quieter inbound listener logging:** Routine inbound connection handling now produces calmer logs, which makes real connection problems easier to spot.
+* Updated **test environments aligned with cardano-node 11.0.1:** Validation and demo environments now track `cardano-node` `11.0.1`, which keeps operational testing closer to current network expectations.
+* Modernized **project alignment with Go 1.26.x:** Build, test, and release workflows now align on Go `1.26.x`, which keeps maintenance and contributor environments current.
+* Strengthened **Mithril bootstrap rollover coverage:** Regression coverage now checks Mithril bootstrap and candidate nonce rollover paths more thoroughly, which improves confidence around snapshot recovery.
+* Restored **release history continuity:** `RELEASE_NOTES.md` now includes the v0.41.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Fixed **governance imports that now preserve proposal history:** Mithril-bootstrapped nodes now keep parent action links, full proposal details, and ratified hard-fork timing so governance stays aligned after snapshot startup.
+* Corrected **archive demo teardown that no longer hangs on pruning shutdown:** The archive demonstration now cleans up pruning data with the right permissions, which makes teardown finish reliably.
+* Stabilized **clearer Bark and UTxO RPC startup failures:** Bark and UTxO RPC now return deterministic startup errors for TLS and port-binding problems, which makes failed launches easier to diagnose.
+* Preserved **Mithril governance roots across snapshot startup:** Mithril bootstrap now seeds governance roots so chained governance proposals keep progressing instead of silently expiring after startup.
+* Hardened **safer peer-sharing defaults by node role:** Block producers now keep peer sharing off by default, while non-block producers fall back to `cardano-node` behavior when the setting is unset.
+* Prevented **rollback recovery from replaying applied headers:** Chainsync rollback recovery now skips headers the node already applied, which prevents recovery from wedging after rollback scenarios.
+* Repaired **benchmark runs that no longer leave stray cloud paths in the worktree:** Benchmark tests now keep temporary cloud-backend metadata out of the worktree, which leaves local checkouts cleaner.
+* Eliminated **pinned-tip rollback loops during no-op rollbacks:** No-op rollbacks at the current tip no longer trigger repeated local resync loops, which keeps chainsync from wedging at a pinned tip.
+* Renamed **Dingo-owned metrics under the dingo_metrics prefix:** Dingo-owned metric families moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names, bundled dashboards now use the new names, and operators who use any affected metrics must update alerts, dashboards, and monitoring queries.
+
+### 📋 What You Need to Know
+
+* Clarified **faster stake account queries:** Batched account lookups now improve delegation and reward account queries for stake-key-heavy workloads.
+* Highlighted **faster and smoother catch-up behavior:** Catch-up behavior is faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
+* Emphasized **safer governance continuity after Mithril bootstrap:** Mithril-bootstrapped nodes should see safer governance continuity because governance roots, parent action links, and ratification timing are now preserved more accurately after snapshot import.
+* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or any affected metrics must update alerts, dashboards, and monitoring queries for the Dingo-owned metric families that moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names:
+  * `cardano_node_metrics_txsEvictedNum_int` -> `dingo_metrics_txsEvictedNum_int`
+  * `cardano_node_metrics_txsExpiredNum_int` -> `dingo_metrics_txsExpiredNum_int`
+  * `cardano_node_metrics_slotBattlesTotal_int` -> `dingo_metrics_slotBattlesTotal_int`
+  * `cardano_node_metrics_blockForgingLatency_seconds` -> `dingo_metrics_blockForgingLatency_seconds`
+  * `cardano_node_metrics_forgedBlockSize_bytes` -> `dingo_metrics_forgedBlockSize_bytes`
+  * `cardano_node_metrics_forgedBlockTxCount_int` -> `dingo_metrics_forgedBlockTxCount_int`
+  * `cardano_node_metrics_leader_slot_checks_total` -> `dingo_metrics_leader_slot_checks_total`
+  * `cardano_node_metrics_leader_slot_won_total` -> `dingo_metrics_leader_slot_won_total`
+  * `cardano_node_metrics_leader_slot_not_won_total` -> `dingo_metrics_leader_slot_not_won_total`
+  * `cardano_node_metrics_leader_vrf_eval_duration_seconds` -> `dingo_metrics_leader_vrf_eval_duration_seconds`
+  * `cardano_node_metrics_leader_stake_lookup_duration_seconds` -> `dingo_metrics_leader_stake_lookup_duration_seconds`
+  * `cardano_node_metrics_leader_last_epoch_slots_checked_int` -> `dingo_metrics_leader_last_epoch_slots_checked_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_won_int` -> `dingo_metrics_leader_last_epoch_slots_won_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_not_won_int` -> `dingo_metrics_leader_last_epoch_slots_not_won_int`
+  * `cardano_node_metrics_leader_last_evaluated_epoch_int` -> `dingo_metrics_leader_last_evaluated_epoch_int`
+  * `cardano_node_metrics_stake_snapshot_capture_duration_seconds` -> `dingo_metrics_stake_snapshot_capture_duration_seconds`
+  * `cardano_node_metrics_stake_snapshot_capture_success_total` -> `dingo_metrics_stake_snapshot_capture_success_total`
+  * `cardano_node_metrics_stake_snapshot_capture_failure_total` -> `dingo_metrics_stake_snapshot_capture_failure_total`
+  * `cardano_node_metrics_stake_snapshot_pool_count_int` -> `dingo_metrics_stake_snapshot_pool_count_int`
+  * `cardano_node_metrics_stake_snapshot_total_active_stake_lovelace` -> `dingo_metrics_stake_snapshot_total_active_stake_lovelace`
+  * `cardano_node_metrics_stake_snapshot_last_successful_epoch_int` -> `dingo_metrics_stake_snapshot_last_successful_epoch_int`
+  * `cardano_node_metrics_peerSelection_peers_by_source` -> `dingo_metrics_peerSelection_peers_by_source`
+  * `cardano_node_metrics_peerSelection_churn_demotions_by_source` -> `dingo_metrics_peerSelection_churn_demotions_by_source`
+  * `cardano_node_metrics_peerSelection_churn_promotions_by_source` -> `dingo_metrics_peerSelection_churn_promotions_by_source`
+  * `cardano_node_metrics_peerSelection_InboundWarmTarget` -> `dingo_metrics_peerSelection_InboundWarmTarget`
+  * `cardano_node_metrics_peerSelection_InboundHotQuota` -> `dingo_metrics_peerSelection_InboundHotQuota`
+  * `cardano_node_metrics_peerSelection_InboundWarmHeld` -> `dingo_metrics_peerSelection_InboundWarmHeld`
+  * `cardano_node_metrics_peerSelection_InboundHotHeld` -> `dingo_metrics_peerSelection_InboundHotHeld`
+  * `cardano_node_metrics_peerSelection_InboundPruned` -> `dingo_metrics_peerSelection_InboundPruned`
+  * `cardano_node_metrics_peerSelection_InboundArrivalsTotal` -> `dingo_metrics_peerSelection_InboundArrivalsTotal`
+  * `cardano_node_metrics_peerSelection_InboundTopologyMatched` -> `dingo_metrics_peerSelection_InboundTopologyMatched`
+  * `cardano_node_metrics_peerSelection_InboundDuplexHeld` -> `dingo_metrics_peerSelection_InboundDuplexHeld`
+  * `cardano_node_metrics_peerSelection_InboundPrunedByReason` -> `dingo_metrics_peerSelection_InboundPrunedByReason`
+  * `cardano_node_metrics_peerSelection_InboundLifecycleTotal` -> `dingo_metrics_peerSelection_InboundLifecycleTotal`
+  * `cardano_node_metrics_peerSelection_InboundHotQuotaUsage` -> `dingo_metrics_peerSelection_InboundHotQuotaUsage`
+  * `cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy` -> `dingo_metrics_peerSelection_InboundWarmTargetOccupancy`
+* Summarized **refreshed tooling, validation, and release tracking:** Tooling, validation, and release tracking were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, archive-demo reliability improvements, and the restored v0.41.0 release-history entry.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.41.0 (May 6, 2026)
 
 **Title:** Batched metadata writes, leaner memory use, and safer node behavior
