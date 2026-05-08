@@ -71,6 +71,7 @@ func (p *PeerGovernor) gossipChurn() {
 		}
 		oldSource := peer.Source
 		oldConn := clonePeerConnection(peer.Connection)
+		p.recordPeerStateChange(peer.State, targetState)
 		peer.State = targetState
 
 		// Close connection when demoting to cold
@@ -206,6 +207,7 @@ func (p *PeerGovernor) publicRootChurn() {
 	demoted := 0
 	for i := 0; i < len(hotPublicRoots) && demoted < churnCount; i++ {
 		peer := hotPublicRoots[i]
+		p.recordPeerStateChange(peer.State, PeerStateWarm)
 		peer.State = PeerStateWarm // Public roots demote to warm, not cold
 		demoted++
 		// Update group counts after demotion
@@ -306,6 +308,7 @@ func (p *PeerGovernor) promoteWarmNonRootPeersLocked(count int) []pendingEvent {
 			continue // Skip peers without active connections
 		}
 		if peer.PerformanceScore >= p.config.MinScoreThreshold {
+			p.recordPeerStateChange(peer.State, PeerStateHot)
 			peer.State = PeerStateHot
 			peer.LastActivity = time.Now()
 			promoted++
@@ -405,6 +408,7 @@ func (p *PeerGovernor) promoteFromWarmPublicRootsLocked(
 			continue // Skip peers without active connections
 		}
 		if peer.PerformanceScore >= p.config.MinScoreThreshold {
+			p.recordPeerStateChange(peer.State, PeerStateHot)
 			peer.State = PeerStateHot
 			peer.LastActivity = time.Now()
 			promoted++

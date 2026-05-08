@@ -26,13 +26,17 @@ import (
 
 func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
-		oleiosnotify.WithRequestNextFunc(o.leiosnotifyServerRequestNext),
+		oleiosnotify.WithRequestNextFunc(
+			o.instrumentLeiosnotifyRequestNext(o.leiosnotifyServerRequestNext),
+		),
 	}
 }
 
 func (o *Ouroboros) leiosnotifyClientConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
-		oleiosnotify.WithNotificationFunc(o.leiosnotifyClientNotification),
+		oleiosnotify.WithNotificationFunc(
+			o.instrumentLeiosnotifyNotification(o.leiosnotifyClientNotification),
+		),
 		// Disable the Busy-state timeout. LeiosNotify is a push-based
 		// notification protocol where the server only sends when it has
 		// something to announce. Idle waits of arbitrary length are
@@ -54,6 +58,28 @@ func (o *Ouroboros) leiosnotifyClientStart(connId ouroboros.ConnectionId) error 
 		return err
 	}
 	return nil
+}
+
+func (o *Ouroboros) instrumentLeiosnotifyNotification(
+	fn func(oleiosnotify.CallbackContext, protocol.Message) error,
+) func(oleiosnotify.CallbackContext, protocol.Message) error {
+	return func(ctx oleiosnotify.CallbackContext, msg protocol.Message) error {
+		start := time.Now()
+		err := fn(ctx, msg)
+		o.recordProtocolMessage("leiosnotify", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentLeiosnotifyRequestNext(
+	fn func(oleiosnotify.CallbackContext) (protocol.Message, error),
+) func(oleiosnotify.CallbackContext) (protocol.Message, error) {
+	return func(ctx oleiosnotify.CallbackContext) (protocol.Message, error) {
+		start := time.Now()
+		msg, err := fn(ctx)
+		o.recordProtocolMessage("leiosnotify", err, time.Since(start))
+		return msg, err
+	}
 }
 
 func (o *Ouroboros) leiosnotifyClientNotification(

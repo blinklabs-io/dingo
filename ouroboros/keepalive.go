@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"time"
+
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
@@ -22,7 +24,20 @@ import (
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
 	return []okeepalive.KeepAliveOptionFunc{
-		okeepalive.WithKeepAliveResponseFunc(o.keepaliveClientResponse),
+		okeepalive.WithKeepAliveResponseFunc(
+			o.instrumentKeepaliveResponse(o.keepaliveClientResponse),
+		),
+	}
+}
+
+func (o *Ouroboros) instrumentKeepaliveResponse(
+	fn func(okeepalive.CallbackContext, uint16) error,
+) func(okeepalive.CallbackContext, uint16) error {
+	return func(ctx okeepalive.CallbackContext, cookie uint16) error {
+		start := time.Now()
+		err := fn(ctx, cookie)
+		o.recordProtocolMessage("keepalive", err, time.Since(start))
+		return err
 	}
 }
 

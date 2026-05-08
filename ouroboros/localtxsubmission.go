@@ -16,13 +16,30 @@ package ouroboros
 
 import (
 	"fmt"
+	"time"
 
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
 func (o *Ouroboros) localtxsubmissionServerConnOpts() []olocaltxsubmission.LocalTxSubmissionOptionFunc {
 	return []olocaltxsubmission.LocalTxSubmissionOptionFunc{
-		olocaltxsubmission.WithSubmitTxFunc(o.localtxsubmissionServerSubmitTx),
+		olocaltxsubmission.WithSubmitTxFunc(
+			o.instrumentLocaltxsubmissionSubmitTx(o.localtxsubmissionServerSubmitTx),
+		),
+	}
+}
+
+func (o *Ouroboros) instrumentLocaltxsubmissionSubmitTx(
+	fn func(olocaltxsubmission.CallbackContext, olocaltxsubmission.MsgSubmitTxTransaction) error,
+) func(olocaltxsubmission.CallbackContext, olocaltxsubmission.MsgSubmitTxTransaction) error {
+	return func(
+		ctx olocaltxsubmission.CallbackContext,
+		tx olocaltxsubmission.MsgSubmitTxTransaction,
+	) error {
+		start := time.Now()
+		err := fn(ctx, tx)
+		o.recordProtocolMessage("localtxsubmission", err, time.Since(start))
+		return err
 	}
 }
 

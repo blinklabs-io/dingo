@@ -15,6 +15,8 @@
 package ouroboros
 
 import (
+	"time"
+
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 )
 
@@ -24,7 +26,20 @@ const (
 
 func (o *Ouroboros) localtxmonitorServerConnOpts() []olocaltxmonitor.LocalTxMonitorOptionFunc {
 	return []olocaltxmonitor.LocalTxMonitorOptionFunc{
-		olocaltxmonitor.WithGetMempoolFunc(o.localtxmonitorServerGetMempool),
+		olocaltxmonitor.WithGetMempoolFunc(
+			o.instrumentLocaltxmonitorGetMempool(o.localtxmonitorServerGetMempool),
+		),
+	}
+}
+
+func (o *Ouroboros) instrumentLocaltxmonitorGetMempool(
+	fn func(olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error),
+) func(olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
+	return func(ctx olocaltxmonitor.CallbackContext) (uint64, uint32, []olocaltxmonitor.TxAndEraId, error) {
+		start := time.Now()
+		slot, capacity, txs, err := fn(ctx)
+		o.recordProtocolMessage("localtxmonitor", err, time.Since(start))
+		return slot, capacity, txs, err
 	}
 }
 

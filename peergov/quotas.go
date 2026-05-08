@@ -203,6 +203,7 @@ func (p *PeerGovernor) enforceTopologyQuota(currentCount int) []pendingEvent {
 	demoted := 0
 	for i := 0; i < len(candidates) && demoted < excess; i++ {
 		peer := candidates[i]
+		p.recordPeerStateChange(peer.State, PeerStateWarm)
 		peer.State = PeerStateWarm // Demote to warm, not cold
 		demoted++
 		p.config.Logger.Debug(
@@ -295,6 +296,7 @@ func (p *PeerGovernor) enforceGroupValency() []pendingEvent {
 		demoted := 0
 		for i := 0; i < len(candidates) && demoted < excess; i++ {
 			peer := candidates[i]
+			p.recordPeerStateChange(peer.State, PeerStateWarm)
 			peer.State = PeerStateWarm
 			demoted++
 			p.config.Logger.Debug(
@@ -352,6 +354,7 @@ func (p *PeerGovernor) enforceSourceQuota(
 	demoted := 0
 	for i := 0; i < len(candidates) && demoted < excess; i++ {
 		peer := candidates[i]
+		p.recordPeerStateChange(peer.State, PeerStateWarm)
 		peer.State = PeerStateWarm
 		demoted++
 		p.config.Logger.Debug(

@@ -15,14 +15,62 @@
 package ouroboros
 
 import (
+	"time"
+
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 func (o *Ouroboros) localstatequeryServerConnOpts() []olocalstatequery.LocalStateQueryOptionFunc {
 	return []olocalstatequery.LocalStateQueryOptionFunc{
-		olocalstatequery.WithAcquireFunc(o.localstatequeryServerAcquire),
-		olocalstatequery.WithQueryFunc(o.localstatequeryServerQuery),
-		olocalstatequery.WithReleaseFunc(o.localstatequeryServerRelease),
+		olocalstatequery.WithAcquireFunc(
+			o.instrumentLocalstatequeryAcquire(o.localstatequeryServerAcquire),
+		),
+		olocalstatequery.WithQueryFunc(
+			o.instrumentLocalstatequeryQuery(o.localstatequeryServerQuery),
+		),
+		olocalstatequery.WithReleaseFunc(
+			o.instrumentLocalstatequeryRelease(o.localstatequeryServerRelease),
+		),
+	}
+}
+
+func (o *Ouroboros) instrumentLocalstatequeryAcquire(
+	fn func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error,
+) func(olocalstatequery.CallbackContext, olocalstatequery.AcquireTarget, bool) error {
+	return func(
+		ctx olocalstatequery.CallbackContext,
+		acquireTarget olocalstatequery.AcquireTarget,
+		reAcquire bool,
+	) error {
+		start := time.Now()
+		err := fn(ctx, acquireTarget, reAcquire)
+		o.recordProtocolMessage("localstatequery", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentLocalstatequeryQuery(
+	fn func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error),
+) func(olocalstatequery.CallbackContext, olocalstatequery.QueryWrapper) (any, error) {
+	return func(
+		ctx olocalstatequery.CallbackContext,
+		query olocalstatequery.QueryWrapper,
+	) (any, error) {
+		start := time.Now()
+		result, err := fn(ctx, query)
+		o.recordProtocolMessage("localstatequery", err, time.Since(start))
+		return result, err
+	}
+}
+
+func (o *Ouroboros) instrumentLocalstatequeryRelease(
+	fn func(olocalstatequery.CallbackContext) error,
+) func(olocalstatequery.CallbackContext) error {
+	return func(ctx olocalstatequery.CallbackContext) error {
+		start := time.Now()
+		err := fn(ctx)
+		o.recordProtocolMessage("localstatequery", err, time.Since(start))
+		return err
 	}
 }
 

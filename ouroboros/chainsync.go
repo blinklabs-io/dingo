@@ -44,8 +44,12 @@ const (
 
 func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithFindIntersectFunc(o.chainsyncServerFindIntersect),
-		ochainsync.WithRequestNextFunc(o.chainsyncServerRequestNext),
+		ochainsync.WithFindIntersectFunc(
+			o.instrumentChainsyncFindIntersect(o.chainsyncServerFindIntersect),
+		),
+		ochainsync.WithRequestNextFunc(
+			o.instrumentChainsyncRequestNext(o.chainsyncServerRequestNext),
+		),
 		// Increase intersect timeout from the 10s default. Downstream
 		// peers may send FindIntersect with many points during initial
 		// sync, and processing can be slow under load.
@@ -60,8 +64,12 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
-		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
+		ochainsync.WithRollForwardFunc(
+			o.instrumentChainsyncRollForward(o.chainsyncClientRollForward),
+		),
+		ochainsync.WithRollBackwardFunc(
+			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
+		),
 		// Pipeline enough headers to keep one blockfetch batch (500
 		// blocks) ready while the previous batch processes. A depth
 		// of 10 is sufficient; higher values flood the header queue
@@ -1091,4 +1099,65 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			}
 		},
 	)
+}
+
+func (o *Ouroboros) instrumentChainsyncFindIntersect(
+	fn func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error),
+) func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
+	return func(
+		ctx ochainsync.CallbackContext,
+		points []ocommon.Point,
+	) (ocommon.Point, ochainsync.Tip, error) {
+		start := time.Now()
+		p, t, err := fn(ctx, points)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return p, t, err
+	}
+}
+
+// instrumentChainsyncRequestNext wraps the RequestNext callback. Note
+// that chainsyncServerRequestNext does some synchronous work (initial
+// rollback, AddClient bookkeeping) then dispatches the Next-block fetch
+// to a goroutine. The metric outcome reflects only the synchronous path;
+// errors during async block delivery are logged but not surfaced here.
+func (o *Ouroboros) instrumentChainsyncRequestNext(
+	fn func(ochainsync.CallbackContext) error,
+) func(ochainsync.CallbackContext) error {
+	return func(ctx ochainsync.CallbackContext) error {
+		start := time.Now()
+		err := fn(ctx)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentChainsyncRollBackward(
+	fn func(ochainsync.CallbackContext, ocommon.Point, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, ocommon.Point, ochainsync.Tip) error {
+	return func(
+		ctx ochainsync.CallbackContext,
+		point ocommon.Point,
+		tip ochainsync.Tip,
+	) error {
+		start := time.Now()
+		err := fn(ctx, point, tip)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentChainsyncRollForward(
+	fn func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error {
+	return func(
+		ctx ochainsync.CallbackContext,
+		blockType uint,
+		blockData any,
+		tip ochainsync.Tip,
+	) error {
+		start := time.Now()
+		err := fn(ctx, blockType, blockData, tip)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
 }

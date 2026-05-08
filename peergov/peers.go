@@ -407,6 +407,7 @@ func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
 	defer p.mu.Unlock()
 	peerIdx := p.peerIndexByConnId(connId)
 	if peerIdx != -1 && p.peers[peerIdx] != nil {
+		p.recordPeerStateChange(p.peers[peerIdx].State, PeerStateHot)
 		p.peers[peerIdx].State = PeerStateHot
 		p.peers[peerIdx].LastActivity = time.Now()
 		p.updatePeerMetrics()
