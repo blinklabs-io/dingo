@@ -441,6 +441,9 @@ type LedgerState struct {
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
 	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch                   uint64                     // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration                  atomic.Uint64              // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight           atomic.Bool                // guard against overlapping async HFI tallies
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -1778,6 +1781,12 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// state.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	ls.reconstructTransitionInfo()
+	// Reopen the once-per-epoch gate so rollback can re-derive
+	// transitionInfo immediately, and bump the generation counter so
+	// any in-flight tally from before the rollback drops its result
+	// instead of committing stale data.
+	ls.hfiEvalDoneEpoch = 0
+	ls.hfiEvalGeneration.Add(1)
 	ls.evaluateHardForkInitiationStability()
 	// If rolling back behind the Mithril trust boundary, clear it.
 	// A rollback inside the gap means replacement blocks on the new
@@ -3655,7 +3664,6 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	if ls.transitionInfo.State == hardfork.TransitionKnown {
 		return
 	}
-	expectedTargetEpoch := ls.currentEpoch.EpochId + 1
 	epochEndSlot, addErr := checkedSlotAdd(
 		ls.currentEpoch.StartSlot,
 		uint64(ls.currentEpoch.LengthInSlots),
@@ -3676,47 +3684,102 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	if ls.currentTip.Point.Slot < votingDeadline {
 		return
 	}
+	// Once-per-epoch gate: post-deadline, the inputs to ratification
+	// (DRep voting power, SPO voting power, CC votes) are frozen —
+	// the pre-epoch stake snapshot fixes voting weights and votes
+	// after the deadline don't count toward this epoch's outcome. So
+	// one tally per epoch is the entire correctness budget; running
+	// it more often only wastes CPU on the SQLite DRep cascade
+	// (~94% of total CPU during catchup on preview, where the
+	// post-deadline window can span many hours). hfiEvalDoneEpoch is
+	// reset to 0 in rollback() to reopen the gate when chain history
+	// changes.
+	if ls.hfiEvalDoneEpoch == ls.currentEpoch.EpochId {
+		return
+	}
+	if !ls.hfiStabilityEvalInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	ls.hfiEvalDoneEpoch = ls.currentEpoch.EpochId
+	gen := ls.hfiEvalGeneration.Load()
+	// Snapshot inputs while we hold the caller's write lock, then run
+	// the heavy DB call without it. Reacquiring the lock only to write
+	// transitionInfo keeps the per-block path off the SQLite query —
+	// otherwise the tally would run inline under ls.Lock() and stall
+	// the chainsync pipeline (rollback / new-block apply / read-side
+	// chainsync server FindIntersect requests all wait on the same
+	// RWMutex), adding multi-second pauses to every block on the
+	// catchup path. The snapshot/apply pattern matches the rollback()
+	// comment that calls this out as the intended approach for this
+	// exact contention concern.
+	snapshotEpoch := ls.currentEpoch.EpochId
+	snapshotPParams := ls.currentPParams
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-	result, err := governance.EvaluateRatifiableHardForkInitiation(
-		governance.StabilityCheckInputs{
-			DB:            ls.db,
-			Logger:        ls.config.Logger,
-			CurrentEpoch:  ls.currentEpoch.EpochId,
-			PParams:       ls.currentPParams,
-			ConwayGenesis: conwayGenesis,
-		},
-	)
-	if err != nil {
-		ls.config.Logger.Warn(
-			"hardfork-initiation stability check failed",
-			"error", err,
-			"component", "ledger",
+	db := ls.db
+	logger := ls.config.Logger
+	go func() {
+		defer ls.hfiStabilityEvalInFlight.Store(false)
+		result, err := governance.EvaluateRatifiableHardForkInitiation(
+			governance.StabilityCheckInputs{
+				DB:            db,
+				Logger:        logger,
+				CurrentEpoch:  snapshotEpoch,
+				PParams:       snapshotPParams,
+				ConwayGenesis: conwayGenesis,
+			},
 		)
-		return
-	}
-	if result == nil {
-		return
-	}
-	// A ratifiable HardForkInitiation is only an era transition if its
-	// target ProtocolVersion crosses an era boundary. An intra-era
-	// pparams bump (e.g. Plomin's pv9 → pv10, both Conway) ratifies
-	// through the same governance path but doesn't end the era;
-	// surfacing it as TransitionKnown would mislead clients into
-	// thinking the era ends at the next boundary. Filter using the
-	// same era-mapping rule the boundary-time IsHardForkTransition
-	// applies, so mid-epoch detection and boundary dispatch agree.
-	currentVer, err := GetProtocolVersion(ls.currentPParams)
-	if err != nil {
-		return
-	}
-	targetVer := ProtocolVersion{
-		Major: result.NewMajor,
-		Minor: result.NewMinor,
-	}
-	if !IsHardForkTransition(currentVer, targetVer) {
-		return
-	}
-	ls.transitionInfo = hardfork.NewTransitionKnown(expectedTargetEpoch)
+		if err != nil {
+			logger.Warn(
+				"hardfork-initiation stability check failed",
+				"error", err,
+				"component", "ledger",
+			)
+			return
+		}
+		if result == nil {
+			return
+		}
+		// A ratifiable HardForkInitiation is only an era transition
+		// if its target ProtocolVersion crosses an era boundary. An
+		// intra-era pparams bump (e.g. Plomin's pv9 → pv10, both
+		// Conway) ratifies through the same governance path but
+		// doesn't end the era; surfacing it as TransitionKnown would
+		// mislead clients. Use the snapshotted PParams so the
+		// version comparison reflects the state we computed against.
+		currentVer, verErr := GetProtocolVersion(snapshotPParams)
+		if verErr != nil {
+			return
+		}
+		targetVer := ProtocolVersion{
+			Major: result.NewMajor,
+			Minor: result.NewMinor,
+		}
+		if !IsHardForkTransition(currentVer, targetVer) {
+			return
+		}
+		ls.Lock()
+		defer ls.Unlock()
+		// Generation guard: a rollback that landed while the tally
+		// was running invalidated our snapshot. Drop the result
+		// rather than commit stale data — rollback's own call to
+		// evaluateHardForkInitiationStability will spawn a fresh
+		// tally against the post-rollback state.
+		if ls.hfiEvalGeneration.Load() != gen {
+			return
+		}
+		// A higher-priority source (TestX override or pparams-bump
+		// detection) may have set TransitionKnown while the tally
+		// was running; don't overwrite.
+		if ls.transitionInfo.State == hardfork.TransitionKnown {
+			return
+		}
+		// Re-derive the target epoch from the current state at
+		// commit time so an epoch rollover that landed during the
+		// tally doesn't pin TransitionKnown to a stale epoch id.
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			ls.currentEpoch.EpochId + 1,
+		)
+	}()
 }
 
 // computePParams loads protocol parameters for the given epoch/era
