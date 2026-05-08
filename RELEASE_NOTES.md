@@ -1,5 +1,22 @@
 # Release Notes
 
+## v0.42.0 (May 8, 2026)
+
+**Title:** Faster catch-up sync, safer Mithril governance bootstrap, and clearer operations
+
+**Date:** May 8, 2026
+
+**Version:** v0.42.0
+
+Hi folks! Here’s what we shipped in v0.42.0.
+
+### ✨ What's New
+
+* Added **batch stake account lookups for faster delegation queries:** Stake-key-heavy delegation and reward account requests now return more smoothly because Dingo can load many stake accounts in one pass.
+
+### 💪 Improvements
+
+
 ## v0.41.0 (May 6, 2026)
 
 **Title:** Batched metadata writes, leaner memory use, and safer node behavior
