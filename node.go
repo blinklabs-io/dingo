@@ -854,6 +854,13 @@ func (n *Node) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("block producer startup validation failed: %w", err)
 		}
+		// Cross-check loaded credentials against ledger state. Mismatch
+		// against on-chain pool registration is fatal; "not yet
+		// registered" is a warning so operators can stage credentials
+		// before submitting the registration cert.
+		if err := n.validateBlockProducerLedger(creds); err != nil {
+			return fmt.Errorf("block producer credentials failed ledger check: %w", err)
+		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx, creds); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)

@@ -21,10 +21,13 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/kes"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -563,4 +566,299 @@ func TestUpdateKESPeriodBeforeOpCertStart(t *testing.T) {
 	err := pc.UpdateKESPeriod(700)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "before opcert start period")
+}
+
+func TestValidateKESPeriod_HappyPath(t *testing.T) {
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 5, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
+	// 250 slots elapsed → KES period 2; opcert period 1 is within
+	// [2, 1+5).
+	now := systemStart.Add(250 * time.Second)
+	if err := pc.ValidateKESPeriod(g, now); err != nil {
+		t.Errorf("ValidateKESPeriod: %v", err)
+	}
+}
+
+func TestValidateKESPeriod_AtStart(t *testing.T) {
+	// Edge case: opcert KESPeriod equals current period (just rotated
+	// into use). Should pass.
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 5, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 2}}
+	now := systemStart.Add(250 * time.Second)
+	if err := pc.ValidateKESPeriod(g, now); err != nil {
+		t.Errorf("ValidateKESPeriod: %v", err)
+	}
+}
+
+func TestValidateKESPeriod_InFuture(t *testing.T) {
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 5, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 10}}
+	// 50 slots elapsed → current period 0; opcert period 10 is in the
+	// future.
+	now := systemStart.Add(50 * time.Second)
+	err := pc.ValidateKESPeriod(g, now)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "future") {
+		t.Errorf("expected 'future' in error, got: %v", err)
+	}
+}
+
+func TestValidateKESPeriod_Expired(t *testing.T) {
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 3, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
+	// Period 1 + max evolutions 3 = expires once current >= 4. At slot
+	// 500 → current period 5, which is past expiry.
+	now := systemStart.Add(500 * time.Second)
+	err := pc.ValidateKESPeriod(g, now)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "expired") {
+		t.Errorf("expected 'expired' in error, got: %v", err)
+	}
+}
+
+func TestValidateKESPeriod_ExpiryBoundaryExclusive(t *testing.T) {
+	// current == start + maxEvolutions counts as expired (the half-open
+	// interval [start, start+max)).
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 3, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
+	// 400 slots → current period 4. start (1) + max (3) = 4 → expired.
+	now := systemStart.Add(400 * time.Second)
+	err := pc.ValidateKESPeriod(g, now)
+	if err == nil {
+		t.Fatal("expected expired error at exact boundary")
+	}
+}
+
+func TestValidateKESPeriod_BeforeSystemStart(t *testing.T) {
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 5, time.Second, systemStart)
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
+	if err := pc.ValidateKESPeriod(g, systemStart.Add(-time.Hour)); err != nil {
+		t.Errorf("ValidateKESPeriod: %v", err)
+	}
+}
+
+func TestValidateKESPeriod_NoOpCert(t *testing.T) {
+	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	g := synthGenesis(100, 5, time.Second, systemStart)
+	pc := &PoolCredentials{}
+	err := pc.ValidateKESPeriod(g, systemStart)
+	if err == nil {
+		t.Fatal("expected error when opcert not loaded")
+	}
+}
+
+func TestValidateKESPeriod_NilGenesis(t *testing.T) {
+	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
+	err := pc.ValidateKESPeriod(nil, time.Now())
+	if err == nil {
+		t.Fatal("expected error for nil genesis")
+	}
+}
+
+// fakeLedgerView is a test stub for the LedgerView interface.
+type fakeLedgerView struct {
+	registered bool
+	regVRFHash [32]byte
+	regErr     error
+	seqFound   bool
+	latestSeq  uint64
+	seqErr     error
+	gotPoolID  [28]byte
+	calledPool bool
+	calledSeq  bool
+}
+
+func (f *fakeLedgerView) PoolRegistrationVRFKeyHash(p [28]byte) ([32]byte, bool, error) {
+	f.calledPool = true
+	f.gotPoolID = p
+	return f.regVRFHash, f.registered, f.regErr
+}
+
+func (f *fakeLedgerView) LatestOpCertSequence(p [28]byte) (uint64, bool, error) {
+	f.calledSeq = true
+	return f.latestSeq, f.seqFound, f.seqErr
+}
+
+func newCredsForLedger(t *testing.T) *PoolCredentials {
+	t.Helper()
+	pc := &PoolCredentials{
+		vrfVKey: bytes32(0xAA),
+		opCert:  &OpCert{IssueNumber: 0},
+	}
+	pc.poolID = lcommon.PoolId(lcommon.Blake2b224Hash([]byte("test-cold-vkey")))
+	return pc
+}
+
+func TestValidateAgainstLedger_PoolNotRegistered(t *testing.T) {
+	pc := newCredsForLedger(t)
+	view := &fakeLedgerView{registered: false}
+	registered, matched, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Errorf("ValidateAgainstLedger: %v", err)
+	}
+	if registered || matched {
+		t.Errorf("expected registered=false, matched=false; got %v %v", registered, matched)
+	}
+	if !view.calledPool {
+		t.Error("expected PoolRegistrationVRFKeyHash to be called")
+	}
+	if view.calledSeq {
+		t.Error("opcert sequence lookup should be skipped when pool not registered")
+	}
+	var poolBytes [28]byte
+	copy(poolBytes[:], pc.poolID[:])
+	if view.gotPoolID != poolBytes {
+		t.Errorf("LedgerView received wrong pool id %x, want %x", view.gotPoolID, poolBytes)
+	}
+}
+
+func TestValidateAgainstLedger_VRFMatch(t *testing.T) {
+	pc := newCredsForLedger(t)
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+	}
+	registered, matched, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Fatalf("ValidateAgainstLedger: %v", err)
+	}
+	if !registered || !matched {
+		t.Errorf("expected registered=true, matched=true; got %v %v", registered, matched)
+	}
+}
+
+func TestValidateAgainstLedger_VRFMismatch(t *testing.T) {
+	pc := newCredsForLedger(t)
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(bytes32(0xDD)),
+	}
+	_, _, err := pc.ValidateAgainstLedger(view)
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+	if !strings.Contains(err.Error(), "VRF key hash mismatch") {
+		t.Errorf("expected mismatch in error, got: %v", err)
+	}
+}
+
+func TestValidateAgainstLedger_SeedOnlySkipsCheck(t *testing.T) {
+	// seed-only VRF skey leaves vrfVKey nil — we cannot derive the hash
+	// to compare, so the VRF check must be skipped without erroring.
+	pc := newCredsForLedger(t)
+	pc.vrfVKey = nil
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash([]byte("anything")),
+	}
+	registered, matched, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Errorf("ValidateAgainstLedger: %v", err)
+	}
+	if !registered {
+		t.Error("expected registered=true")
+	}
+	if matched {
+		t.Error("expected matched=false (no VRF pubkey)")
+	}
+}
+
+func TestValidateAgainstLedger_StaleOpCert(t *testing.T) {
+	pc := newCredsForLedger(t)
+	pc.opCert.IssueNumber = 3
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+		seqFound:   true,
+		latestSeq:  5,
+	}
+	_, _, err := pc.ValidateAgainstLedger(view)
+	if err == nil {
+		t.Fatal("expected stale-counter error")
+	}
+	if !strings.Contains(err.Error(), "stale") {
+		t.Errorf("expected stale in error, got: %v", err)
+	}
+}
+
+func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
+	// Equal counter is fine; ahead-of-ledger is fine (the ledger may
+	// just not have observed our latest opcert yet).
+	cases := []struct {
+		name       string
+		ourSeq     uint64
+		ledgerSeq  uint64
+	}{
+		{"equal", 5, 5},
+		{"ahead", 6, 5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := newCredsForLedger(t)
+			pc.opCert.IssueNumber = tc.ourSeq
+			view := &fakeLedgerView{
+				registered: true,
+				regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+				seqFound:   true,
+				latestSeq:  tc.ledgerSeq,
+			}
+			if _, _, err := pc.ValidateAgainstLedger(view); err != nil {
+				t.Errorf("ValidateAgainstLedger: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateAgainstLedger_CounterTrackingNotImplemented(t *testing.T) {
+	// LedgerView returning seqFound=false from LatestOpCertSequence
+	// represents the current state where on-chain opcert tracking is
+	// not yet wired up. Must not block startup.
+	pc := newCredsForLedger(t)
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: lcommon.Blake2b256Hash(pc.vrfVKey),
+		seqFound:   false,
+	}
+	registered, matched, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Errorf("ValidateAgainstLedger: %v", err)
+	}
+	if !registered || !matched {
+		t.Errorf("expected registered=true, matched=true; got %v %v", registered, matched)
+	}
+}
+
+func TestValidateAgainstLedger_NilView(t *testing.T) {
+	pc := newCredsForLedger(t)
+	_, _, err := pc.ValidateAgainstLedger(nil)
+	if err == nil {
+		t.Fatal("expected nil-view error")
+	}
+}
+
+func TestValidateAgainstLedger_NoOpCert(t *testing.T) {
+	pc := &PoolCredentials{vrfVKey: bytes32(0xAA)}
+	view := &fakeLedgerView{}
+	_, _, err := pc.ValidateAgainstLedger(view)
+	if err == nil {
+		t.Fatal("expected error when opcert not loaded")
+	}
+}
+
+func bytes32(seed byte) []byte {
+	b := make([]byte, 32)
+	for i := range b {
+		b[i] = seed + byte(i)
+	}
+	return b
 }

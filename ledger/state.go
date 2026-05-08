@@ -939,6 +939,46 @@ func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
 }
 
+// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on the
+// most recent active pool registration certificate for the given pool.
+// found is false when the pool has no on-chain registration yet — that
+// is informational, not an error condition, since operators commonly
+// stage credentials before the registration certificate is on chain.
+//
+// Used by the block-producer credential check at startup to confirm the
+// loaded VRF key matches what the chain has on file.
+func (ls *LedgerState) PoolRegistrationVRFKeyHash(
+	poolID [28]byte,
+) (vrfHash [32]byte, found bool, err error) {
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	pool, err := ls.db.GetPool(pkh, false, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return [32]byte{}, false, nil
+		}
+		return [32]byte{}, false, err
+	}
+	if pool == nil || len(pool.VrfKeyHash) != 32 {
+		return [32]byte{}, false, nil
+	}
+	copy(vrfHash[:], pool.VrfKeyHash)
+	return vrfHash, true, nil
+}
+
+// LatestOpCertSequence returns the highest operational-certificate
+// IssueNumber observed on chain for the given pool. found is always
+// false today: the chain stores opcerts in block headers but Dingo does
+// not yet aggregate the highest sequence per pool. This method exists
+// so the credential cross-check at startup can call into it; once
+// counter tracking lands the implementation will fill in without any
+// caller change.
+func (ls *LedgerState) LatestOpCertSequence(
+	poolID [28]byte,
+) (sequence uint64, found bool, err error) {
+	_ = poolID
+	return 0, false, nil
+}
+
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
 func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
