@@ -676,7 +676,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	var (
 		processedBlocks int
 		processedTxs    int
-		// batchBlockCount tracks blocks accumulated since the last flush.
+		// It tracks blocks accumulated since the last flush
 		batchBlockCount int
 		// committedSlot is the latest slot durably committed by a batch.
 		committedSlot = cp.LastSlot
@@ -690,12 +690,14 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if batchBlockCount == 0 {
 			return nil
 		}
-		if err := b.db.FlushBatch(acc, batchTxn); err != nil {
+		oldTxn := batchTxn
+		if err := b.db.FlushBatch(acc, oldTxn); err != nil {
 			return err
 		}
-		if err := batchTxn.Commit(); err != nil {
+		if err := oldTxn.Commit(); err != nil {
 			return err
 		}
+		oldTxn.Release()
 		committedSlot = cp.LastSlot
 		acc.Reset()
 		batchTxn = b.db.Transaction(true)

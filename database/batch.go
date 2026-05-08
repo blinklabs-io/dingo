@@ -209,6 +209,7 @@ func (d *Database) SetTransactionBatched(
 		if err := txn.Commit(); err != nil {
 			return err
 		}
+		acc.Reset()
 	}
 
 	return nil
