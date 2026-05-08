@@ -69,14 +69,28 @@ func TestDesiredBlockfetchBatchHeaders(t *testing.T) {
 			gapSlots:   128,
 			gapBlocks:  32,
 			maxHeaders: 16,
-			want:       4,
+			want:       8,
+		},
+		{
+			name:       "very large block gap scales up",
+			gapSlots:   2048,
+			gapBlocks:  512,
+			maxHeaders: 256,
+			want:       128,
+		},
+		{
+			name:       "deep catchup uses large batch",
+			gapSlots:   8192,
+			gapBlocks:  2048,
+			maxHeaders: 500,
+			want:       256,
 		},
 		{
 			name:       "overflow-sized block gap stays bounded",
 			gapSlots:   128,
 			gapBlocks:  math.MaxUint64,
 			maxHeaders: 16,
-			want:       8,
+			want:       16,
 		},
 	}
 

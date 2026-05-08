@@ -823,8 +823,16 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 		},
 	}
 
+	// gapBlocks > 1000 puts the runway in the deepest catchup bucket
+	// (minHeaders = 256), so we send enough headers to cross that
+	// threshold and trigger exactly one batch. Headers added past the
+	// trigger queue against the in-flight batch (the test's
+	// BlockfetchRequestRangeFunc mock never completes), so requestCount
+	// stays at 1 — that's the "scales up but doesn't re-fire while
+	// in-flight" guarantee this test pins.
+	const totalHeaders = 260
 	prevHash := lcommon.NewBlake2b256(nil)
-	for i := 1; i <= 20; i++ {
+	for i := 1; i <= totalHeaders; i++ {
 		headerHash := lcommon.NewBlake2b256(fmt.Appendf(nil, "hdr-%d", i))
 		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: connId,
@@ -843,12 +851,13 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 		require.NoError(t, err)
 		prevHash = headerHash
 		if i == 7 {
-			assert.Equal(t, 0, requestCount)
+			assert.Equal(t, 0, requestCount,
+				"no batch before runway accumulates")
 		}
 	}
 
 	assert.Equal(t, 1, requestCount)
-	assert.Equal(t, 20, ls.chain.HeaderCount())
+	assert.Equal(t, totalHeaders, ls.chain.HeaderCount())
 }
 
 func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(

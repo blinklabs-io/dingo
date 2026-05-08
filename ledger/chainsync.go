@@ -49,12 +49,17 @@ const (
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
 
-	// When we're still meaningfully behind tip, wait for a small header runway
-	// before starting blockfetch. This avoids repeated one-block fetch loops
-	// near a fork boundary where peers may not yet serve the first announced
-	// block body.
+	// When we're still meaningfully behind tip, wait for a header runway
+	// before starting blockfetch so each batch amortises peer round-trip
+	// and protocol overhead over many blocks instead of trickling 1-8
+	// blocks per request. The cap was 64 historically (a fork-boundary
+	// safety value) — too small for catchup, where the chain can fall
+	// thousands of blocks behind and we want to fetch hundreds-per-batch.
+	// `desiredBlockfetchBatchHeaders` scales up to this cap based on the
+	// observed block-gap; near tip it falls back to small batches for
+	// low latency.
 	blockfetchMinBatchHeadersWhenBehind = 8
-	blockfetchMaxBatchHeadersWhenBehind = 64
+	blockfetchMaxBatchHeadersWhenBehind = 500
 	blockfetchMinBatchGapSlots          = 64
 
 	// Number of received blockfetch blocks to buffer before committing them.
@@ -796,12 +801,24 @@ func desiredBlockfetchBatchHeaders(
 		}
 		return min(1, maxHeaders)
 	}
+	// Scale the header runway with the size of the catchup gap. A node
+	// that's hundreds of blocks behind benefits from batching close to
+	// the blockfetch protocol limit (500), while near-tip cases keep
+	// small batches for low latency. The previous values (max 8 when
+	// gapBlocks > 64) starved the blockfetch pipeline during catchup —
+	// every blockfetch round-trip carried only a handful of blocks even
+	// though `chain.HeaderRange(blockfetchBatchSize)` is willing to span
+	// up to 500.
 	var minHeaders int
 	switch {
+	case gapBlocks > 1000:
+		minHeaders = 256
+	case gapBlocks > 256:
+		minHeaders = 128
 	case gapBlocks > 64:
-		minHeaders = 8
+		minHeaders = 32
 	case gapBlocks > 16:
-		minHeaders = 4
+		minHeaders = 8
 	case gapBlocks > 4:
 		minHeaders = 2
 	default:
