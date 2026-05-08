@@ -22,10 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/blinklabs-io/bursa"
 	"github.com/blinklabs-io/gouroboros/kes"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
@@ -391,4 +393,122 @@ func (pc *PoolCredentials) PeriodsRemaining(currentPeriod uint64) uint64 {
 		return 0
 	}
 	return expiryPeriod - currentPeriod
+}
+
+// ValidateKESPeriod checks that the loaded operational certificate's KES
+// period is plausible at wall-clock time `now`, given the chain's Shelley
+// genesis. A non-nil result means the node should refuse to start: either
+// the opcert claims a period that hasn't started yet (rotated key staged
+// too early, or wrong network) or the opcert has expired and needs to be
+// rotated.
+//
+// The protocol-level expiry uses MaxKESEvolutions from genesis rather
+// than the raw 2^depth ceiling, so this matches the chain's view of when
+// an opcert stops being valid.
+func (pc *PoolCredentials) ValidateKESPeriod(
+	genesis *shelley.ShelleyGenesis,
+	now time.Time,
+) error {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	if pc.opCert == nil {
+		return errors.New("operational certificate not loaded")
+	}
+	if genesis == nil {
+		return errors.New("shelley genesis is required")
+	}
+	current, err := CurrentKESPeriod(genesis, now)
+	if err != nil {
+		return err
+	}
+	if pc.opCert.KESPeriod > current {
+		return fmt.Errorf(
+			"opcert KES period %d is in the future (current %d)",
+			pc.opCert.KESPeriod, current,
+		)
+	}
+	maxEvolutions := uint64(genesis.MaxKESEvolutions) // #nosec G115
+	if maxEvolutions > 0 &&
+		current >= pc.opCert.KESPeriod+maxEvolutions {
+		return fmt.Errorf(
+			"opcert KES period %d has expired (current %d, max evolutions %d); rotate the operational certificate",
+			pc.opCert.KESPeriod, current, maxEvolutions,
+		)
+	}
+	return nil
+}
+
+// LedgerView is the subset of ledger state the post-startup credential
+// cross-check needs. The forging package depends on it as a small
+// interface so the package itself stays free of a ledger dependency, and
+// tests can drive the logic with a fake.
+type LedgerView interface {
+	// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on
+	// the most recent active pool registration certificate for poolID.
+	// found is false when the pool has no on-chain registration yet.
+	PoolRegistrationVRFKeyHash(poolID [28]byte) (vrfKeyHash [32]byte, found bool, err error)
+	// LatestOpCertSequence returns the highest opcert IssueNumber
+	// observed on chain for poolID. found is false when on-chain
+	// counter tracking is not implemented or this pool has never
+	// minted a block.
+	LatestOpCertSequence(poolID [28]byte) (sequence uint64, found bool, err error)
+}
+
+// ValidateAgainstLedger cross-checks the loaded credentials against
+// ledger state once it is available. It is best-effort: a missing pool
+// registration is not fatal because operators commonly stage their keys
+// before submitting the registration certificate.
+//
+// Three return values describe the outcome:
+//   - registered: true if the pool registration was found on chain.
+//   - vrfMatched: true if registered AND the on-chain VRF key hash
+//     matched our loaded VRF verification key. False otherwise (also
+//     false when registered is false or the VRF verification key is
+//     unavailable, e.g. for a seed-only VRF skey).
+//   - err: a non-nil error means the node should refuse to start. Used
+//     for VRF mismatch and stale opcert counter.
+func (pc *PoolCredentials) ValidateAgainstLedger(
+	view LedgerView,
+) (registered, vrfMatched bool, err error) {
+	pc.mu.RLock()
+	defer pc.mu.RUnlock()
+
+	if view == nil {
+		return false, false, errors.New("ledger view is nil")
+	}
+	if pc.opCert == nil {
+		return false, false, errors.New("operational certificate not loaded")
+	}
+	var poolID [28]byte
+	copy(poolID[:], pc.poolID[:])
+
+	regVRF, found, err := view.PoolRegistrationVRFKeyHash(poolID)
+	if err != nil {
+		return false, false, fmt.Errorf("pool registration lookup: %w", err)
+	}
+	if !found {
+		return false, false, nil
+	}
+	if pc.vrfVKey != nil {
+		ourVRF := lcommon.Blake2b256Hash(pc.vrfVKey)
+		if ourVRF != regVRF {
+			return true, false, fmt.Errorf(
+				"VRF key hash mismatch: pool registration has %x but loaded VRF key hashes to %x",
+				regVRF, ourVRF,
+			)
+		}
+		vrfMatched = true
+	}
+	latestSeq, seqFound, err := view.LatestOpCertSequence(poolID)
+	if err != nil {
+		return true, vrfMatched, fmt.Errorf("opcert sequence lookup: %w", err)
+	}
+	if seqFound && pc.opCert.IssueNumber < latestSeq {
+		return true, vrfMatched, fmt.Errorf(
+			"opcert sequence %d is stale: ledger has observed %d for this pool",
+			pc.opCert.IssueNumber, latestSeq,
+		)
+	}
+	return true, vrfMatched, nil
 }

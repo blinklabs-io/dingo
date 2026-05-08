@@ -44,12 +44,97 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 	if err := creds.ValidateOpCert(); err != nil {
 		return nil, fmt.Errorf("validate operational certificate: %w", err)
 	}
+	// KES-period plausibility requires a Shelley genesis. Block producer
+	// mode without one is unsafe — a node with no genesis cannot tell
+	// whether the opcert is current — so refuse to start.
+	if n.config.cardanoNodeConfig == nil {
+		return nil, errors.New(
+			"block producer mode requires Cardano node config with Shelley genesis",
+		)
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return nil, errors.New(
+			"block producer mode requires Shelley genesis information",
+		)
+	}
+	if err := creds.ValidateKESPeriod(genesis, time.Now()); err != nil {
+		return nil, fmt.Errorf("validate KES period: %w", err)
+	}
+	currentPeriod, err := forging.CurrentKESPeriod(genesis, time.Now())
+	if err != nil {
+		return nil, fmt.Errorf("compute current KES period: %w", err)
+	}
+	opCert := creds.GetOpCert()
 	n.config.logger.Info(
 		"block producer credentials validated",
+		"component", "node",
 		"pool_id", creds.GetPoolID().String(),
+		"current_kes_period", currentPeriod,
+		"opcert_kes_period", opCert.KESPeriod,
+		"opcert_counter", opCert.IssueNumber,
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
+}
+
+// blockProducerLedgerView adapts ledger.LedgerState to
+// forging.LedgerView. The interface lives in the forging package so the
+// credential check can stay free of a ledger import; the concrete
+// adapter belongs here in package dingo where both types are visible.
+type blockProducerLedgerView struct {
+	ls *ledger.LedgerState
+}
+
+func (v blockProducerLedgerView) PoolRegistrationVRFKeyHash(
+	poolID [28]byte,
+) ([32]byte, bool, error) {
+	return v.ls.PoolRegistrationVRFKeyHash(poolID)
+}
+
+func (v blockProducerLedgerView) LatestOpCertSequence(
+	poolID [28]byte,
+) (uint64, bool, error) {
+	return v.ls.LatestOpCertSequence(poolID)
+}
+
+// validateBlockProducerLedger runs the ledger-aware cross-check against
+// the loaded credentials. Must be called after the ledger has started so
+// pool registrations can be queried. A pool that is not yet registered
+// is logged as a warning and the node is allowed to continue.
+func (n *Node) validateBlockProducerLedger(
+	creds *forging.PoolCredentials,
+) error {
+	if creds == nil {
+		return errors.New("nil pool credentials")
+	}
+	view := blockProducerLedgerView{ls: n.ledgerState}
+	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
+	if err != nil {
+		return err
+	}
+	poolID := creds.GetPoolID().String()
+	switch {
+	case !registered:
+		n.config.logger.Warn(
+			"block producer pool not yet registered on chain; node will continue",
+			"component", "node",
+			"pool_id", poolID,
+		)
+	case vrfMatched:
+		n.config.logger.Info(
+			"block producer pool registration verified on chain",
+			"component", "node",
+			"pool_id", poolID,
+		)
+	default:
+		n.config.logger.Warn(
+			"block producer VRF cross-check skipped (seed-only VRF key)",
+			"component", "node",
+			"pool_id", poolID,
+		)
+	}
+	return nil
 }
 
 // initBlockForger initializes the block forger for production mode.
