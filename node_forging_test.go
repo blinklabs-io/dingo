@@ -98,22 +98,13 @@ func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
 	}
 }
 
-func TestValidateBlockProducerStartup_FutureKESPeriod(t *testing.T) {
-	// SystemStart in the far future means the wall-clock-derived current
-	// KES period is 0, so the devnet opcert (KESPeriod=0) should still
-	// be fine — but if we artificially mark the opcert period as 5,
-	// validation should reject it as in the future.
-	//
-	// We can't directly mutate the opcert returned by LoadFromFiles
-	// from outside the forging package, so instead we use a SystemStart
-	// that puts current=0 and rely on a different scenario: we use the
-	// expired path by setting maxKESEvolutions=0 and pushing SystemStart
-	// far enough in the past that current >> opcert period.
+func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
+	// systemStart a year in the past with slotsPerKESPeriod=10 means
+	// many KES periods have elapsed; maxKESEvolutions=1 makes anything
+	// past period 1 expired, so the devnet opcert (KESPeriod=0) is well
+	// outside its validity window and validation must reject it.
 	vrf, kes, opcert := devnetCredPaths()
 	cfg := &cardano.CardanoNodeConfig{}
-	// systemStart far in the past, slotsPerKESPeriod=10, so after years
-	// many KES periods have elapsed; maxKESEvolutions=1 makes anything
-	// past period 1 expired. devnet opcert KESPeriod=0 → expired.
 	systemStart := time.Now().Add(-365 * 24 * time.Hour)
 	if err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
 		"systemStart": "` + systemStart.UTC().Format(time.RFC3339Nano) + `",

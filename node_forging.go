@@ -58,10 +58,11 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 			"block producer mode requires Shelley genesis information",
 		)
 	}
-	if err := creds.ValidateKESPeriod(genesis, time.Now()); err != nil {
+	now := time.Now()
+	if err := creds.ValidateKESPeriod(genesis, now); err != nil {
 		return nil, fmt.Errorf("validate KES period: %w", err)
 	}
-	currentPeriod, err := forging.CurrentKESPeriod(genesis, time.Now())
+	currentPeriod, err := forging.CurrentKESPeriod(genesis, now)
 	if err != nil {
 		return nil, fmt.Errorf("compute current KES period: %w", err)
 	}
