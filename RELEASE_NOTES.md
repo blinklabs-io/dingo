@@ -34,7 +34,7 @@ Hi folks! Here’s what we shipped in v0.42.0.
 * Prevented **rollback recovery from replaying applied headers:** Chainsync rollback recovery now skips headers the node already applied, which prevents recovery from wedging after rollback scenarios.
 * Repaired **benchmark runs that no longer leave stray cloud paths in the worktree:** Benchmark tests now keep temporary cloud-backend metadata out of the worktree, which leaves local checkouts cleaner.
 * Eliminated **pinned-tip rollback loops during no-op rollbacks:** No-op rollbacks at the current tip no longer trigger repeated local resync loops, which keeps chainsync from wedging at a pinned tip.
-* Renamed **Dingo-owned metrics under the dingo_metrics prefix:** Dingo-owned Prometheus metrics now use the `dingo_metrics_*` prefix, and the bundled dashboards track the new names.
+* Renamed **Dingo-owned metrics under the dingo_metrics prefix:** Dingo-owned Prometheus metric families moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names, bundled dashboards now use the new names, and operators who use any affected metrics must update alerts, dashboards, and monitoring queries.
 
 ### 📋 What You Need to Know
 
