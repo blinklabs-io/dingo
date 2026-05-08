@@ -166,20 +166,13 @@ func stopPruning(t *testing.T) {
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "docker compose stop dingo-pruning: %s", out)
 
-	// Wait for badger to release its lock file rather than sleeping a
-	// fixed interval.
 	pruningDir := os.Getenv("ARCHIVEDEMO_PRUNING_DATA_DIR")
 	require.NotEmpty(t, pruningDir, "ARCHIVEDEMO_PRUNING_DATA_DIR must be set")
-	lockFile := filepath.Join(pruningDir, "blob", "LOCK")
-	testutil.WaitForCondition(t, func() bool {
-		_, statErr := os.Stat(lockFile)
-		return os.IsNotExist(statErr)
-	}, 30*time.Second, "badger lock file was not released after stopping dingo-pruning")
 
 	// The dingo container runs as uid 100, so files it created in the
 	// bind-mounted data dir aren't readable to the host user that will
-	// run inspect-blob. Spin a one-shot busybox container as root to
-	// open the perms back up.
+	// run inspect-blob or stat Badger's lock file. Spin a one-shot
+	// busybox container as root to open the perms back up.
 	chmodCtx, chmodCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer chmodCancel()
 	chmod := exec.CommandContext(chmodCtx, "docker", "run", "--rm",
@@ -189,6 +182,14 @@ func stopPruning(t *testing.T) {
 	)
 	chmodOut, err := chmod.CombinedOutput()
 	require.NoError(t, err, "chmod bind mount: %s", chmodOut)
+
+	// Wait for badger to release its lock file rather than sleeping a
+	// fixed interval.
+	lockFile := filepath.Join(pruningDir, "blob", "LOCK")
+	testutil.WaitForCondition(t, func() bool {
+		_, statErr := os.Stat(lockFile)
+		return os.IsNotExist(statErr)
+	}, 30*time.Second, "badger lock file was not released after stopping dingo-pruning")
 }
 
 func composeFile(t *testing.T) string {
