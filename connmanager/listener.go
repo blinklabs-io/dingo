@@ -271,7 +271,7 @@ func (c *ConnectionManager) startListener(
 				if lingerErr := enableTCPLingerZero(conn); lingerErr != nil {
 					c.config.Logger.Warn(
 						fmt.Sprintf(
-							"listener: failed to enable SO_LINGER 0 on accepted connection from %s: %s",
+							"listener: failed to enable SO_LINGER 0 on inbound connection from %s: %s",
 							conn.RemoteAddr(),
 							lingerErr,
 						),
@@ -322,12 +322,6 @@ func (c *ConnectionManager) startListener(
 				c.releaseInboundSlot()
 				continue
 			}
-			c.config.Logger.Info(
-				fmt.Sprintf(
-					"listener: accepted connection from %s",
-					conn.RemoteAddr(),
-				),
-			)
 			// Setup Ouroboros connection
 			connOpts := append(
 				defaultConnOpts,
@@ -335,9 +329,9 @@ func (c *ConnectionManager) startListener(
 			)
 			oConn, err := ouroboros.NewConnection(connOpts...)
 			if err != nil {
-				c.config.Logger.Error(
+				c.config.Logger.Info(
 					fmt.Sprintf(
-						"listener: failed to setup connection from %s: %s",
+						"listener: inbound connection from %s failed: %s",
 						conn.RemoteAddr(),
 						err,
 					),
@@ -348,6 +342,12 @@ func (c *ConnectionManager) startListener(
 				c.releaseInboundSlot()
 				continue
 			}
+			c.config.Logger.Info(
+				fmt.Sprintf(
+					"listener: inbound connection from %s",
+					conn.RemoteAddr(),
+				),
+			)
 			// Consume the reserved slot and add to connection manager.
 			// The reservation is released because AddConnection will
 			// add the actual connection entry to the map.
