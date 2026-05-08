@@ -41,7 +41,43 @@ Hi folks! Here’s what we shipped in v0.42.0.
 * Clarified **faster stake account queries:** Batched account lookups now improve delegation and reward account queries for stake-key-heavy workloads.
 * Highlighted **faster and smoother catch-up behavior:** Catch-up behavior is faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
 * Emphasized **safer governance continuity after Mithril bootstrap:** Mithril-bootstrapped nodes should see safer governance continuity because governance roots, parent action links, and ratification timing are now preserved more accurately after snapshot import.
-* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or custom monitoring should review startup validation, block-producer peer-sharing defaults, and the `dingo_metrics_*` metric rename in any alerts or dashboards.
+* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or any affected metrics must update alerts, dashboards, and monitoring queries for the Dingo-owned Prometheus metric families that moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names:
+  * `cardano_node_metrics_txsEvictedNum_int` -> `dingo_metrics_txsEvictedNum_int`
+  * `cardano_node_metrics_txsExpiredNum_int` -> `dingo_metrics_txsExpiredNum_int`
+  * `cardano_node_metrics_slotBattlesTotal_int` -> `dingo_metrics_slotBattlesTotal_int`
+  * `cardano_node_metrics_blockForgingLatency_seconds` -> `dingo_metrics_blockForgingLatency_seconds`
+  * `cardano_node_metrics_forgedBlockSize_bytes` -> `dingo_metrics_forgedBlockSize_bytes`
+  * `cardano_node_metrics_forgedBlockTxCount_int` -> `dingo_metrics_forgedBlockTxCount_int`
+  * `cardano_node_metrics_leader_slot_checks_total` -> `dingo_metrics_leader_slot_checks_total`
+  * `cardano_node_metrics_leader_slot_won_total` -> `dingo_metrics_leader_slot_won_total`
+  * `cardano_node_metrics_leader_slot_not_won_total` -> `dingo_metrics_leader_slot_not_won_total`
+  * `cardano_node_metrics_leader_vrf_eval_duration_seconds` -> `dingo_metrics_leader_vrf_eval_duration_seconds`
+  * `cardano_node_metrics_leader_stake_lookup_duration_seconds` -> `dingo_metrics_leader_stake_lookup_duration_seconds`
+  * `cardano_node_metrics_leader_last_epoch_slots_checked_int` -> `dingo_metrics_leader_last_epoch_slots_checked_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_won_int` -> `dingo_metrics_leader_last_epoch_slots_won_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_not_won_int` -> `dingo_metrics_leader_last_epoch_slots_not_won_int`
+  * `cardano_node_metrics_leader_last_evaluated_epoch_int` -> `dingo_metrics_leader_last_evaluated_epoch_int`
+  * `cardano_node_metrics_stake_snapshot_capture_duration_seconds` -> `dingo_metrics_stake_snapshot_capture_duration_seconds`
+  * `cardano_node_metrics_stake_snapshot_capture_success_total` -> `dingo_metrics_stake_snapshot_capture_success_total`
+  * `cardano_node_metrics_stake_snapshot_capture_failure_total` -> `dingo_metrics_stake_snapshot_capture_failure_total`
+  * `cardano_node_metrics_stake_snapshot_pool_count_int` -> `dingo_metrics_stake_snapshot_pool_count_int`
+  * `cardano_node_metrics_stake_snapshot_total_active_stake_lovelace` -> `dingo_metrics_stake_snapshot_total_active_stake_lovelace`
+  * `cardano_node_metrics_stake_snapshot_last_successful_epoch_int` -> `dingo_metrics_stake_snapshot_last_successful_epoch_int`
+  * `cardano_node_metrics_peerSelection_peers_by_source` -> `dingo_metrics_peerSelection_peers_by_source`
+  * `cardano_node_metrics_peerSelection_churn_demotions_by_source` -> `dingo_metrics_peerSelection_churn_demotions_by_source`
+  * `cardano_node_metrics_peerSelection_churn_promotions_by_source` -> `dingo_metrics_peerSelection_churn_promotions_by_source`
+  * `cardano_node_metrics_peerSelection_InboundWarmTarget` -> `dingo_metrics_peerSelection_InboundWarmTarget`
+  * `cardano_node_metrics_peerSelection_InboundHotQuota` -> `dingo_metrics_peerSelection_InboundHotQuota`
+  * `cardano_node_metrics_peerSelection_InboundWarmHeld` -> `dingo_metrics_peerSelection_InboundWarmHeld`
+  * `cardano_node_metrics_peerSelection_InboundHotHeld` -> `dingo_metrics_peerSelection_InboundHotHeld`
+  * `cardano_node_metrics_peerSelection_InboundPruned` -> `dingo_metrics_peerSelection_InboundPruned`
+  * `cardano_node_metrics_peerSelection_InboundArrivalsTotal` -> `dingo_metrics_peerSelection_InboundArrivalsTotal`
+  * `cardano_node_metrics_peerSelection_InboundTopologyMatched` -> `dingo_metrics_peerSelection_InboundTopologyMatched`
+  * `cardano_node_metrics_peerSelection_InboundDuplexHeld` -> `dingo_metrics_peerSelection_InboundDuplexHeld`
+  * `cardano_node_metrics_peerSelection_InboundPrunedByReason` -> `dingo_metrics_peerSelection_InboundPrunedByReason`
+  * `cardano_node_metrics_peerSelection_InboundLifecycleTotal` -> `dingo_metrics_peerSelection_InboundLifecycleTotal`
+  * `cardano_node_metrics_peerSelection_InboundHotQuotaUsage` -> `dingo_metrics_peerSelection_InboundHotQuotaUsage`
+  * `cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy` -> `dingo_metrics_peerSelection_InboundWarmTargetOccupancy`
 * Summarized **refreshed tooling, validation, and release tracking:** Tooling, validation, and release tracking were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, archive-demo reliability improvements, and the restored v0.41.0 release-history entry.
 
 ### Recommended Network Compatibility ⚠️
