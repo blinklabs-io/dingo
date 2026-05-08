@@ -26,6 +26,18 @@ Hi folks! Here’s what we shipped in v0.42.0.
 
 ### 🔧 Fixes
 
+* Fixed **governance imports that now preserve proposal history:** Mithril-bootstrapped nodes now keep parent action links, full proposal details, and ratified hard-fork timing so governance stays aligned after snapshot startup.
+* Corrected **archive demo teardown that no longer hangs on pruning shutdown:** The archive demonstration now cleans up pruning data with the right permissions, which makes teardown finish reliably.
+* Stabilized **clearer Bark and UTxO RPC startup failures:** Bark and UTxO RPC now return deterministic startup errors for TLS and port-binding problems, which makes failed launches easier to diagnose.
+* Preserved **Mithril governance roots across snapshot startup:** Mithril bootstrap now seeds governance roots so chained governance proposals keep progressing instead of silently expiring after startup.
+* Hardened **safer peer-sharing defaults by node role:** Block producers now keep peer sharing off by default, while non-block producers fall back to `cardano-node` behavior when the setting is unset.
+* Prevented **rollback recovery from replaying applied headers:** Chainsync rollback recovery now skips headers the node already applied, which prevents recovery from wedging after rollback scenarios.
+* Repaired **benchmark runs that no longer leave stray cloud paths in the worktree:** Benchmark tests now keep temporary cloud-backend metadata out of the worktree, which leaves local checkouts cleaner.
+* Eliminated **pinned-tip rollback loops during no-op rollbacks:** No-op rollbacks at the current tip no longer trigger repeated local resync loops, which keeps chainsync from wedging at a pinned tip.
+* Renamed **Dingo-owned metrics under the dingo_metrics prefix:** Dingo-owned Prometheus metrics now use the `dingo_metrics_*` prefix, and the bundled dashboards track the new names.
+
+### 📋 What You Need to Know
+
 
 ## v0.41.0 (May 6, 2026)
 
