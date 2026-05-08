@@ -79,6 +79,9 @@ func (d *Database) FlushBatch(
 	var metadataTxn types.Txn
 	if txn != nil {
 		metadataTxn = txn.Metadata()
+		if metadataTxn == nil {
+			return types.ErrNilTxn
+		}
 	}
 	switch store := d.metadata.(type) {
 	case *sqlite.MetadataStoreSqlite:
@@ -182,8 +185,12 @@ func (d *Database) SetTransactionBatched(
 	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
 		return err
 	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return types.ErrNilTxn
+	}
 	if err := d.setTransactionMetadataBatched(
-		tx, point, idx, certDeposits, acc, txn.Metadata(),
+		tx, point, idx, certDeposits, acc, metadataTxn,
 	); err != nil {
 		return fmt.Errorf("set transaction metadata: %w", err)
 	}
