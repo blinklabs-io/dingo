@@ -39,7 +39,7 @@ Hi folks! Here’s what we shipped in v0.42.0.
 ### 📋 What You Need to Know
 
 * Clarified **faster stake account queries:** Batched account lookups now improve delegation and reward account queries for stake-key-heavy workloads.
-* Highlighted **faster and smoother catch-up behavior:** Catch-up behavior should be faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
+* Highlighted **faster and smoother catch-up behavior:** Catch-up behavior is faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
 * Emphasized **safer governance continuity after Mithril bootstrap:** Mithril-bootstrapped nodes should see safer governance continuity because governance roots, parent action links, and ratification timing are now preserved more accurately after snapshot import.
 * Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or custom monitoring should review startup validation, block-producer peer-sharing defaults, and the `dingo_metrics_*` metric rename in any alerts or dashboards.
 * Summarized **refreshed tooling, validation, and release tracking:** Tooling, validation, and release tracking were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, archive-demo reliability improvements, and the restored v0.41.0 release-history entry.
