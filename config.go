@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/internal/blockproducer"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -41,6 +43,9 @@ type Config struct {
 	network                  string
 	tlsCertFilePath          string
 	tlsKeyFilePath           string
+	vrfKeyFilePath           string
+	kesKeyFilePath           string
+	opCertFilePath           string
 	intersectPoints          []ocommon.Point
 	listeners                []ListenerConfig
 	mempoolCapacity          int64
@@ -53,6 +58,7 @@ type Config struct {
 	tracing                  bool
 	tracingStdout            bool
 	devMode                  bool
+	blockProducer            bool
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 }
@@ -105,6 +111,56 @@ func (n *Node) configValidate() error {
 			)
 		}
 	}
+	if err := n.loadBlockProducerCredentials(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadBlockProducerCredentials parses and validates the operator credential
+// files when block producer mode is enabled. This runs at startup so that a
+// misconfigured node fails before it can attempt to forge.
+func (n *Node) loadBlockProducerCredentials() error {
+	if !n.config.blockProducer {
+		return nil
+	}
+	if n.config.vrfKeyFilePath == "" ||
+		n.config.kesKeyFilePath == "" ||
+		n.config.opCertFilePath == "" {
+		return errors.New(
+			"block producer mode requires vrfKeyFile, kesKeyFile, and opCertFile",
+		)
+	}
+	if n.config.cardanoNodeConfig == nil {
+		return errors.New(
+			"block producer mode requires Cardano node config with Shelley genesis",
+		)
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return errors.New(
+			"block producer mode requires Shelley genesis information",
+		)
+	}
+	creds, err := blockproducer.Load(
+		n.config.vrfKeyFilePath,
+		n.config.kesKeyFilePath,
+		n.config.opCertFilePath,
+	)
+	if err != nil {
+		return fmt.Errorf("invalid block producer credentials: %w", err)
+	}
+	if err := creds.Validate(genesis, time.Now()); err != nil {
+		return fmt.Errorf("block producer credentials failed validation: %w", err)
+	}
+	n.blockProducerCreds = creds
+	n.config.logger.Info(
+		"block producer credentials loaded",
+		"component", "node",
+		"pool_id", hex.EncodeToString(creds.PoolID[:]),
+		"kes_period", creds.OpCert.KESPeriod,
+		"opcert_counter", creds.OpCert.SequenceNumber,
+	)
 	return nil
 }
 
@@ -285,5 +341,20 @@ func WithDatabaseWorkerPoolConfig(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.DatabaseWorkerPoolConfig = cfg
+	}
+}
+
+// WithBlockProducer enables block producer mode and sets the operator
+// credential file paths. The files are loaded and validated by Node.New;
+// invalid or missing credentials cause Node.New to fail.
+func WithBlockProducer(
+	enabled bool,
+	vrfKeyFilePath, kesKeyFilePath, opCertFilePath string,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.blockProducer = enabled
+		c.vrfKeyFilePath = vrfKeyFilePath
+		c.kesKeyFilePath = kesKeyFilePath
+		c.opCertFilePath = opCertFilePath
 	}
 }

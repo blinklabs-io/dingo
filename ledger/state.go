@@ -425,6 +425,50 @@ func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
 }
 
+// PoolRegistrationVRFKeyHash returns the VRF key hash recorded in the most
+// recent active pool registration certificate for the given pool. found is
+// false when the pool has no active registration on this chain.
+func (ls *LedgerState) PoolRegistrationVRFKeyHash(
+	poolID [28]byte,
+) (vrfHash [32]byte, found bool, err error) {
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	pool, err := ls.db.GetPool(pkh, false, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return [32]byte{}, false, nil
+		}
+		return [32]byte{}, false, err
+	}
+	if len(pool.Registration) == 0 {
+		return [32]byte{}, false, nil
+	}
+	var latest *models.PoolRegistration
+	var latestSlot uint64
+	for i := range pool.Registration {
+		reg := &pool.Registration[i]
+		if latest == nil || reg.AddedSlot >= latestSlot {
+			latestSlot = reg.AddedSlot
+			latest = reg
+		}
+	}
+	if latest == nil || len(latest.VrfKeyHash) != 32 {
+		return [32]byte{}, false, nil
+	}
+	copy(vrfHash[:], latest.VrfKeyHash)
+	return vrfHash, true, nil
+}
+
+// LatestOpCertSequence returns the highest operational-certificate sequence
+// number observed on chain for the given pool. Tracking is not yet
+// implemented, so found is always false; the call site is in place so that
+// when counter tracking lands the credential check picks it up automatically.
+func (ls *LedgerState) LatestOpCertSequence(
+	poolID [28]byte,
+) (sequence uint64, found bool, err error) {
+	_ = poolID
+	return 0, false, nil
+}
+
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
 func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)

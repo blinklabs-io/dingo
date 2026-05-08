@@ -133,6 +133,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithDevMode(cfg.DevMode),
+			dingo.WithBlockProducer(
+				cfg.BlockProducer,
+				cfg.VrfKeyFilePath,
+				cfg.KesKeyFilePath,
+				cfg.OpCertFilePath,
+			),
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),

@@ -217,6 +217,14 @@ func main() {
 		Int("db-workers", 5, "database worker pool worker count")
 	rootCmd.PersistentFlags().
 		Int("db-queue-size", 50, "database worker pool task queue size")
+	rootCmd.PersistentFlags().
+		Bool("block-producer", false, "run as a block producer; requires --vrf-key-file, --kes-key-file, and --op-cert-file")
+	rootCmd.PersistentFlags().
+		String("vrf-key-file", "", "path to VRF signing key file (block producer mode)")
+	rootCmd.PersistentFlags().
+		String("kes-key-file", "", "path to KES signing key file (block producer mode)")
+	rootCmd.PersistentFlags().
+		String("op-cert-file", "", "path to operational certificate file (block producer mode)")
 
 	// Add plugin-specific flags
 	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
@@ -257,6 +265,28 @@ func main() {
 		if cmd.Root().PersistentFlags().Changed("db-queue-size") {
 			if queueSize, err := cmd.Root().PersistentFlags().GetInt("db-queue-size"); err == nil {
 				cfg.DatabaseQueueSize = queueSize
+			}
+		}
+
+		// Override block producer config if flags are provided
+		if cmd.Root().PersistentFlags().Changed("block-producer") {
+			if v, err := cmd.Root().PersistentFlags().GetBool("block-producer"); err == nil {
+				cfg.BlockProducer = v
+			}
+		}
+		if cmd.Root().PersistentFlags().Changed("vrf-key-file") {
+			if v, err := cmd.Root().PersistentFlags().GetString("vrf-key-file"); err == nil {
+				cfg.VrfKeyFilePath = v
+			}
+		}
+		if cmd.Root().PersistentFlags().Changed("kes-key-file") {
+			if v, err := cmd.Root().PersistentFlags().GetString("kes-key-file"); err == nil {
+				cfg.KesKeyFilePath = v
+			}
+		}
+		if cmd.Root().PersistentFlags().Changed("op-cert-file") {
+			if v, err := cmd.Root().PersistentFlags().GetString("op-cert-file"); err == nil {
+				cfg.OpCertFilePath = v
 			}
 		}
 

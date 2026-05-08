@@ -104,3 +104,29 @@ devMode: false
 
 # Validate historical blocks during ledger processing (default: false)
 validateHistorical: false
+
+# Enable block producer mode (default: false). When enabled, the operator
+# credential paths below must be set; the node loads and validates them at
+# startup and will refuse to start if they are missing or malformed.
+#
+# Can be overridden with the BLOCK_PRODUCER environment variable or the
+# --block-producer command-line flag.
+blockProducer: false
+
+# Path to the VRF signing key file (cardano-cli TextEnvelope format).
+#
+# Can be overridden with the VRF_KEY_FILE_PATH environment variable or the
+# --vrf-key-file command-line flag.
+vrfKeyFilePath: ""
+
+# Path to the KES signing key file (cardano-cli TextEnvelope format).
+#
+# Can be overridden with the KES_KEY_FILE_PATH environment variable or the
+# --kes-key-file command-line flag.
+kesKeyFilePath: ""
+
+# Path to the operational certificate file (cardano-cli TextEnvelope format).
+#
+# Can be overridden with the OP_CERT_FILE_PATH environment variable or the
+# --op-cert-file command-line flag.
+opCertFilePath: ""

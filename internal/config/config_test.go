@@ -275,6 +275,64 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	}
 }
 
+func TestLoad_BlockProducerYAML(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+network: "preview"
+blockProducer: true
+vrfKeyFilePath: "/etc/dingo/vrf.skey"
+kesKeyFilePath: "/etc/dingo/kes.skey"
+opCertFilePath: "/etc/dingo/op.cert"
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-bp.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.BlockProducer {
+		t.Error("expected BlockProducer to be true")
+	}
+	if cfg.VrfKeyFilePath != "/etc/dingo/vrf.skey" {
+		t.Errorf("VrfKeyFilePath = %q", cfg.VrfKeyFilePath)
+	}
+	if cfg.KesKeyFilePath != "/etc/dingo/kes.skey" {
+		t.Errorf("KesKeyFilePath = %q", cfg.KesKeyFilePath)
+	}
+	if cfg.OpCertFilePath != "/etc/dingo/op.cert" {
+		t.Errorf("OpCertFilePath = %q", cfg.OpCertFilePath)
+	}
+}
+
+func TestLoad_BlockProducerEnv(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("CARDANO_BLOCK_PRODUCER", "true")
+	t.Setenv("CARDANO_VRF_KEY_FILE_PATH", "/env/vrf.skey")
+	t.Setenv("CARDANO_KES_KEY_FILE_PATH", "/env/kes.skey")
+	t.Setenv("CARDANO_OP_CERT_FILE_PATH", "/env/op.cert")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.BlockProducer {
+		t.Error("expected BlockProducer to be true from env")
+	}
+	if cfg.VrfKeyFilePath != "/env/vrf.skey" {
+		t.Errorf("VrfKeyFilePath = %q", cfg.VrfKeyFilePath)
+	}
+	if cfg.KesKeyFilePath != "/env/kes.skey" {
+		t.Errorf("KesKeyFilePath = %q", cfg.KesKeyFilePath)
+	}
+	if cfg.OpCertFilePath != "/env/op.cert" {
+		t.Errorf("OpCertFilePath = %q", cfg.OpCertFilePath)
+	}
+}
+
 func TestLoad_DatabaseSection(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `

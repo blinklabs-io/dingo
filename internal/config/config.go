@@ -93,6 +93,12 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	// Block producer credentials. When BlockProducer is true the node loads
+	// and validates these files at startup; otherwise they are ignored.
+	BlockProducer  bool   `yaml:"blockProducer"   envconfig:"BLOCK_PRODUCER"`
+	VrfKeyFilePath string `yaml:"vrfKeyFilePath"  envconfig:"VRF_KEY_FILE_PATH"`
+	KesKeyFilePath string `yaml:"kesKeyFilePath"  envconfig:"KES_KEY_FILE_PATH"`
+	OpCertFilePath string `yaml:"opCertFilePath"  envconfig:"OP_CERT_FILE_PATH"`
 }
 
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {

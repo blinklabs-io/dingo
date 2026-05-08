@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/blockproducer"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
@@ -34,21 +36,22 @@ import (
 )
 
 type Node struct {
-	connManager    *connmanager.ConnectionManager
-	peerGov        *peergov.PeerGovernor
-	chainsyncState *chainsync.State
-	eventBus       *event.EventBus
-	mempool        *mempool.Mempool
-	chainManager   *chain.ChainManager
-	db             *database.Database
-	ledgerState    *ledger.LedgerState
-	utxorpc        *utxorpc.Utxorpc
-	ouroboros      *ouroborosPkg.Ouroboros
-	shutdownFuncs  []func(context.Context) error
-	config         Config
-	ctx            context.Context
-	cancel         context.CancelFunc
-	shutdownOnce   sync.Once
+	connManager        *connmanager.ConnectionManager
+	peerGov            *peergov.PeerGovernor
+	chainsyncState     *chainsync.State
+	eventBus           *event.EventBus
+	mempool            *mempool.Mempool
+	chainManager       *chain.ChainManager
+	db                 *database.Database
+	ledgerState        *ledger.LedgerState
+	utxorpc            *utxorpc.Utxorpc
+	ouroboros          *ouroborosPkg.Ouroboros
+	blockProducerCreds *blockproducer.Credentials
+	shutdownFuncs      []func(context.Context) error
+	config             Config
+	ctx                context.Context
+	cancel             context.CancelFunc
+	shutdownOnce       sync.Once
 }
 
 func New(cfg Config) (*Node, error) {
@@ -154,6 +157,12 @@ func (n *Node) Run(ctx context.Context) error {
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
+	// Cross-check block producer credentials against ledger state once it's
+	// available. A pool that isn't yet registered on chain is acceptable; a
+	// VRF or sequence-number mismatch is fatal.
+	if err := n.validateBlockProducerLedger(); err != nil {
+		return fmt.Errorf("block producer credentials failed ledger check: %w", err)
+	}
 	// Initialize mempool
 	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity: n.config.mempoolCapacity,
@@ -232,6 +241,57 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Wait for shutdown signal
 	<-n.ctx.Done()
+	return nil
+}
+
+// blockProducerLedgerView adapts LedgerState to the LedgerView interface
+// expected by the blockproducer credential check.
+type blockProducerLedgerView struct {
+	ls *ledger.LedgerState
+}
+
+func (v blockProducerLedgerView) PoolRegistrationVRFKeyHash(
+	poolID [28]byte,
+) ([32]byte, bool, error) {
+	return v.ls.PoolRegistrationVRFKeyHash(poolID)
+}
+
+func (v blockProducerLedgerView) LatestOpCertSequence(
+	poolID [28]byte,
+) (uint64, bool, error) {
+	return v.ls.LatestOpCertSequence(poolID)
+}
+
+func (n *Node) validateBlockProducerLedger() error {
+	if n.blockProducerCreds == nil {
+		return nil
+	}
+	view := blockProducerLedgerView{ls: n.ledgerState}
+	registered, vrfMatched, err := n.blockProducerCreds.ValidateAgainstLedger(view)
+	if err != nil {
+		return err
+	}
+	if !registered {
+		n.config.logger.Warn(
+			"block producer pool not yet registered on ledger; will continue starting",
+			"component", "node",
+			"pool_id", hex.EncodeToString(n.blockProducerCreds.PoolID[:]),
+		)
+		return nil
+	}
+	if vrfMatched {
+		n.config.logger.Info(
+			"block producer pool registration verified",
+			"component", "node",
+			"pool_id", hex.EncodeToString(n.blockProducerCreds.PoolID[:]),
+		)
+	} else {
+		n.config.logger.Warn(
+			"block producer VRF verification skipped (seed-only key)",
+			"component", "node",
+			"pool_id", hex.EncodeToString(n.blockProducerCreds.PoolID[:]),
+		)
+	}
 	return nil
 }
 
