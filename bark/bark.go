@@ -16,10 +16,12 @@ package bark
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -175,48 +177,54 @@ func (b *Bark) Start(ctx context.Context) error {
 	return nil
 }
 
+// startServer starts the HTTP server with deterministic error
+// detection. It validates TLS configuration, binds the listening
+// socket and pre-loads any TLS keypair synchronously so port and
+// certificate errors surface before returning, then serves in a
+// background goroutine.
 func (b *Bark) startServer(server *http.Server) error {
-	startErr := make(chan error, 1)
+	if (b.config.TlsCertFilePath != "") != (b.config.TlsKeyFilePath != "") {
+		return errors.New(
+			"failed to start bark gRPC server: both tls cert and key must be specified",
+		)
+	}
+	useTLS := b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != ""
+	serverType := "non-TLS"
+	if useTLS {
+		serverType = "TLS"
+		if _, err := tls.LoadX509KeyPair(
+			b.config.TlsCertFilePath,
+			b.config.TlsKeyFilePath,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to load TLS keypair for bark gRPC %s server: %w",
+				serverType, err,
+			)
+		}
+	}
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return fmt.Errorf("failed to start bark gRPC %s server: %w",
+			serverType, err)
+	}
 	go func() {
-		var err error
-
-		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath == "" ||
-			b.config.TlsCertFilePath == "" && b.config.TlsKeyFilePath != "" {
-			err = errors.New("both tls cert and key must be specified")
+		var serveErr error
+		if useTLS {
+			serveErr = server.ServeTLS(
+				ln,
+				b.config.TlsCertFilePath,
+				b.config.TlsKeyFilePath,
+			)
+		} else {
+			serveErr = server.Serve(ln)
 		}
-
-		if err == nil {
-			if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
-				err = server.ListenAndServeTLS(
-					b.config.TlsCertFilePath,
-					b.config.TlsKeyFilePath,
-				)
-			} else {
-				err = server.ListenAndServe()
-			}
-		}
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			select {
-			case startErr <- err:
-			default:
-				b.config.Logger.Error(
-					"bark gRPC server error",
-					"error", err)
-			}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			b.config.Logger.Error(
+				"bark gRPC server error",
+				"error", serveErr,
+			)
 		}
 	}()
-
-	select {
-	case err := <-startErr:
-		serverType := "non-TLS"
-		if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
-			serverType = "TLS"
-		}
-		return fmt.Errorf("failed to start bark gRPC %s server: %w", serverType, err)
-	case <-time.After(100 * time.Millisecond):
-		// Assume startup succeeded if no error within 100ms
-	}
-
 	return nil
 }
 
