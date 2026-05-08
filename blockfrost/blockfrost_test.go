@@ -1027,6 +1027,76 @@ func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
 	assert.Equal(t, "mempool unavailable", resp.Message)
 }
 
+func TestHandleTransactionSubmitErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		nodeErr     error
+		wantStatus  int
+		wantError   string
+		wantMessage string
+	}{
+		{
+			name:        "unsupported content type",
+			contentType: "application/json",
+			body:        "\x84\x00",
+			wantStatus:  http.StatusUnsupportedMediaType,
+			wantError:   "Unsupported Media Type",
+			wantMessage: "Content-Type must be application/cbor.",
+		},
+		{
+			name:        "oversized body",
+			contentType: "application/cbor",
+			body:        strings.Repeat("x", maxTxBodySize+1),
+			wantStatus:  http.StatusRequestEntityTooLarge,
+			wantError:   "Request Entity Too Large",
+			wantMessage: "transaction body exceeds maximum allowed size",
+		},
+		{
+			name:        "empty body",
+			contentType: "application/cbor",
+			body:        "",
+			wantStatus:  http.StatusBadRequest,
+			wantError:   "Bad Request",
+			wantMessage: "transaction body is empty",
+		},
+		{
+			name:        "invalid cbor",
+			contentType: "application/cbor",
+			body:        "not-cbor",
+			nodeErr:     ErrInvalidTransaction,
+			wantStatus:  http.StatusBadRequest,
+			wantError:   "Bad Request",
+			wantMessage: "Invalid transaction CBOR.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newTestBlockfrost(&mockNode{
+				transactionSubmitErr: tt.nodeErr,
+			})
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v0/tx/submit",
+				strings.NewReader(tt.body),
+			)
+			req.Header.Set("Content-Type", tt.contentType)
+			w := httptest.NewRecorder()
+			b.handleTransactionSubmit(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantError, resp.Error)
+			assert.Equal(t, tt.wantMessage, resp.Message)
+		})
+	}
+}
+
 func TestHandleTransactionCBOR(t *testing.T) {
 	b := newTestBlockfrost(&mockNode{
 		transactionCBOR: []byte{0x84, 0x01, 0x02, 0xf5, 0xf6},
@@ -1048,6 +1118,125 @@ func TestHandleTransactionCBOR(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "840102f5f6", resp.CBOR)
+}
+
+func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name      string
+		path      string
+		configure func(*mockNode)
+		handler   func(*Blockfrost, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "cbor",
+			path: "/api/v0/txs/" + hash + "/cbor",
+			configure: func(m *mockNode) {
+				m.transactionCBORErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionCBOR,
+		},
+		{
+			name: "metadata",
+			path: "/api/v0/txs/" + hash + "/metadata",
+			configure: func(m *mockNode) {
+				m.transactionMetadataErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMetadata,
+		},
+		{
+			name: "metadata cbor",
+			path: "/api/v0/txs/" + hash + "/metadata/cbor",
+			configure: func(m *mockNode) {
+				m.transactionMetadataCBORErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMetadataCBOR,
+		},
+		{
+			name: "utxos",
+			path: "/api/v0/txs/" + hash + "/utxos",
+			configure: func(m *mockNode) {
+				m.transactionUTXOsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionUTXOs,
+		},
+		{
+			name: "delegations",
+			path: "/api/v0/txs/" + hash + "/delegations",
+			configure: func(m *mockNode) {
+				m.transactionDelegationsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionDelegations,
+		},
+		{
+			name: "stakes",
+			path: "/api/v0/txs/" + hash + "/stakes",
+			configure: func(m *mockNode) {
+				m.transactionStakesErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionStakeAddresses,
+		},
+		{
+			name: "withdrawals",
+			path: "/api/v0/txs/" + hash + "/withdrawals",
+			configure: func(m *mockNode) {
+				m.transactionWithdrawalsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionWithdrawals,
+		},
+		{
+			name: "mirs",
+			path: "/api/v0/txs/" + hash + "/mirs",
+			configure: func(m *mockNode) {
+				m.transactionMIRsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMIRs,
+		},
+		{
+			name: "pool updates",
+			path: "/api/v0/txs/" + hash + "/pool_updates",
+			configure: func(m *mockNode) {
+				m.transactionPoolUpdatesErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionPoolUpdates,
+		},
+		{
+			name: "pool retires",
+			path: "/api/v0/txs/" + hash + "/pool_retires",
+			configure: func(m *mockNode) {
+				m.transactionPoolRetiresErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionPoolRetires,
+		},
+		{
+			name: "redeemers",
+			path: "/api/v0/txs/" + hash + "/redeemers",
+			configure: func(m *mockNode) {
+				m.transactionRedeemersErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionRedeemers,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockNode{}
+			tt.configure(mock)
+			b := newTestBlockfrost(mock)
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.SetPathValue("hash", hash)
+			w := httptest.NewRecorder()
+			tt.handler(b, w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			assert.Equal(t, "Not Found", resp.Error)
+			assert.Equal(t, "The requested transaction could not be found.", resp.Message)
+		})
+	}
 }
 
 func TestHandleTransactionMetadata(t *testing.T) {
