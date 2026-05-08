@@ -41,6 +41,20 @@ Hi folks! Here’s what we shipped in v0.42.0.
 
 ## v0.41.0 (May 6, 2026)
 
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 **Title:** Batched metadata writes, leaner memory use, and safer node behavior
 
 **Date:** May 6, 2026
