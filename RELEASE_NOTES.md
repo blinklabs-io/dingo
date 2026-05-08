@@ -2,7 +2,7 @@
 
 ## v0.42.0 (May 8, 2026)
 
-**Title:** Faster catch-up sync, safer Mithril governance bootstrap, and clearer operations
+**Title:** Batch stake account lookups for faster delegation queries
 
 **Date:** May 8, 2026
 
