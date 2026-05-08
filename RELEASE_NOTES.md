@@ -16,6 +16,16 @@ Hi folks! Here’s what we shipped in v0.42.0.
 
 ### 💪 Improvements
 
+* Improved **catch-up checks that no longer stall sync work:** Catch-up runs now stay smoother because hard-fork readiness checks evaluate in the background instead of pausing the main sync path.
+* Refined **larger deep catch-up block batches:** Nodes now pull much larger block batches during deep catch-up, which helps long syncs move forward faster with less stop-and-go behavior.
+* Enhanced **quieter inbound listener logging:** Routine inbound connection handling now produces calmer logs, which makes real connection problems easier to spot.
+* Updated **test environments aligned with cardano-node 11.0.1:** Validation and demo environments now track `cardano-node` `11.0.1`, which keeps operational testing closer to current network expectations.
+* Modernized **project alignment with Go 1.26.x:** Build, test, and release workflows now align on Go `1.26.x`, which keeps maintenance and contributor environments current.
+* Strengthened **Mithril bootstrap rollover coverage:** Regression coverage now checks Mithril bootstrap and candidate nonce rollover paths more thoroughly, which improves confidence around snapshot recovery.
+* Restored **release history continuity:** `RELEASE_NOTES.md` now includes the v0.41.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
 
 ## v0.41.0 (May 6, 2026)
 
