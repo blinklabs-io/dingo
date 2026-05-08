@@ -16,6 +16,7 @@ package database
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
@@ -109,7 +110,7 @@ func (d *Database) SetTransactionBatched(
 	txn *Txn,
 ) error {
 	if acc == nil {
-		return fmt.Errorf("batch accumulator must not be nil")
+		return errors.New("batch accumulator must not be nil")
 	}
 	owned := false
 	if txn == nil {
