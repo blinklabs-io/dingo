@@ -1412,6 +1412,25 @@ type ParsedGovProposal struct {
 	AnchorHash   []byte
 	ProposedIn   uint64
 	ExpiresAfter uint64
+	// ParentTxHash is the parent gov-action's tx hash for chained action
+	// types (ParameterChange, HardForkInitiation, NoConfidence,
+	// UpdateCommittee, NewConstitution). Nil for unchained actions
+	// (TreasuryWithdrawals, InfoAction) and for chained actions with no
+	// prior enacted predecessor (SNothing in cardano-ledger terms).
+	ParentTxHash []byte
+	// ParentActionIdx is the action index that pairs with ParentTxHash.
+	// nil iff ParentTxHash is nil; otherwise points to the parent's
+	// uint32 index.
+	ParentActionIdx *uint32
+	// GovActionCbor is the raw CBOR bytes of the gov action body (the
+	// govAction element inside the ProposalProcedure). Persisted on
+	// import so the enactment path (ledger/governance/enact.go) can
+	// decode the action's payload (e.g. HardForkInitiation's protocol
+	// version, ParameterChange's pparam delta) at the boundary tick
+	// that enacts a previously-ratified proposal. Without it, ENACT
+	// fails to decode and aborts the entire boundary tick, halting
+	// the chain at the first enactment after a Mithril boot.
+	GovActionCbor []byte
 }
 
 // ParsedGovActionId holds a decoded GovActionId (txHash + index).
@@ -2029,6 +2048,14 @@ func parseGovActionState(
 		)
 	}
 
+	// Persist the raw gov action CBOR. EnactProposal decodes this
+	// payload at the enactment tick to read action-specific fields
+	// (HardForkInitiation's protocol version, ParameterChange's
+	// pparam delta, etc). Snapshot-imported proposals must carry it
+	// or the first enactment after a Mithril bootstrap aborts the
+	// whole boundary txn with "decode gov action: ...".
+	prop.GovActionCbor = append([]byte(nil), procedure[2]...)
+
 	// govAction = [actionType, ...] - extract actionType
 	govAction, err := decodeRawArray(procedure[2])
 	if err != nil {
@@ -2047,6 +2074,42 @@ func parseGovActionState(
 		return nil, fmt.Errorf(
 			"decoding govAction type: %w", err,
 		)
+	}
+
+	// Parent gov-action ID. Chained actions (ParameterChange=0,
+	// HardForkInitiation=1, NoConfidence=3, UpdateCommittee=4,
+	// NewConstitution=5) carry the parent at govAction[1] as
+	// StrictMaybe(GovActionId); SNothing means no prior enacted
+	// predecessor. TreasuryWithdrawals=2 and InfoAction=6 have no
+	// parent. Without this, validateParentChain rejects every
+	// chained child of a pre-snapshot enactment as if the parent
+	// were missing, and chained proposals silently expire instead of
+	// ratifying. See issue #2195.
+	switch prop.ActionType {
+	case 0, 1, 3, 4, 5:
+		if len(govAction) < 2 {
+			return nil, fmt.Errorf(
+				"decoding parent gov action id "+
+					"for action type %d: missing parent field",
+				prop.ActionType,
+			)
+		}
+		parentId, parentErr := parseStrictMaybeGovActionId(
+			govAction[1],
+		)
+		if parentErr != nil {
+			return nil, fmt.Errorf(
+				"decoding parent gov action id "+
+					"for action type %d: %w",
+				prop.ActionType,
+				parentErr,
+			)
+		}
+		if parentId != nil {
+			prop.ParentTxHash = parentId.TxHash
+			idx := parentId.ActionIndex
+			prop.ParentActionIdx = &idx
+		}
 	}
 
 	// anchor = [url, hash] — best-effort: proposals are still
