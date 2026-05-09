@@ -1414,6 +1414,32 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#FF9900",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [10, 10]
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              }
+            ]
           }
         ]
       },
@@ -1437,10 +1463,20 @@
           "legendFormat": "{{instance}}",
           "range": true,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "floor((time() - max(dingo_shelley_start_time{network=\"$network\"})) % max(dingo_epoch_length_slots{network=\"$network\"}))",
+          "legendFormat": "Reference (wall clock)",
+          "range": true,
+          "refId": "B"
         }
       ],
       "transparent": true,
-      "description": "Progress through the current epoch expressed as slot number."
+      "description": "Progress through the current epoch expressed as slot number. The orange dashed line shows the expected slot based on wall-clock time — if node slots fall below the reference, the node is stalling."
     },
     {
       "type": "stat",
