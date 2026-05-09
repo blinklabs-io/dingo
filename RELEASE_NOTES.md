@@ -1,5 +1,23 @@
 # Release Notes
 
+## v0.43.0 (May 9, 2026)
+
+**Title:** Safer block-producer startup, deeper observability, and easier dashboard imports
+
+**Date:** May 9, 2026
+
+**Version:** v0.43.0
+
+Hi folks! Here’s what we shipped in v0.43.0.
+
+### ✨ What's New
+
+* Added **validate block-producer credentials before startup completes:** Block producers now catch mismatched, missing, future, or expired forging credentials early, so startup stops before the node runs with unusable settings.
+* Expanded **surface protocol and peer observability metrics:** Operators can now track mini-protocol activity and peer temperature changes more clearly, which makes it easier to spot unhealthy network behavior.
+* Introduced **prompt for the Prometheus datasource during dashboard imports:** Bundled Grafana dashboards now ask for the right Prometheus datasource during import, which makes dashboard setup smoother across different Grafana environments.
+
+### 💪 Improvements
+
 ## v0.42.0 (May 8, 2026)
 
 **Title:** Batch stake account lookups for faster delegation queries
