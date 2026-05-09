@@ -29,6 +29,25 @@ Hi folks! Here’s what we shipped in v0.43.0.
 
 ### 📋 What You Need to Know
 
+* Clarified **fail-fast block-producer startup checks:** Block-producer startup now validates VRF, KES, and operational certificate inputs against Shelley genesis data and available ledger state, so misconfigured or expired credentials stop the node early instead of failing later.
+* Highlighted **broader observability and easier dashboard imports:** Operators now get new protocol and peer observability metrics, and bundled dashboards are easier to import because Grafana prompts for the Prometheus datasource.
+* Emphasized **safer rollback recovery and block-hash lookups:** Rollback recovery and block-hash lookups now behave more safely on forked chains and very large databases because stale iterators restart cleanly and expensive fallback scans stop quickly.
+* Summarized **dependency and release tracking updates:** Maintenance tracking now includes the `gouroboros` `0.168.0` update, and release history continuity is refreshed through the added v0.42.0 entry.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.42.0 (May 8, 2026)
 
 **Title:** Batch stake account lookups for faster delegation queries
