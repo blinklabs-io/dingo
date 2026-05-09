@@ -28,7 +28,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -39,7 +39,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_slotNum_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -50,7 +50,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_epoch_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -61,7 +61,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_slotInEpoch_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -72,7 +72,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "time() - cardano_node_metrics_nodeStartTime_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -83,7 +83,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_density_real{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -94,7 +94,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_forks_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -105,7 +105,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_forging_enabled{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -116,7 +116,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_info{instance=~\"$instance\"}",
       "instant": true,
@@ -127,7 +127,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_peerSelection_hot{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -138,7 +138,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_peerSelection_warm{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -149,7 +149,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_peerSelection_cold{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -160,7 +160,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_connectionManager_incomingConns{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -171,7 +171,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_connectionManager_outgoingConns{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -182,7 +182,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_peerSelection_KnownPeers{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -193,7 +193,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_txsInMempool_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -204,7 +204,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_mempoolBytes_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -215,7 +215,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_tip_gap_slots{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -226,7 +226,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_currentKESPeriod_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -237,7 +237,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_remainingKESPeriods_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -248,7 +248,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "process_open_fds{instance=~\"$instance\"}",
       "instant": true,
@@ -259,7 +259,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_goroutines{instance=~\"$instance\"}",
       "instant": true,
@@ -270,7 +270,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_Forge_forged_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -281,7 +281,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[2m]) * 100",
       "instant": true,
@@ -292,7 +292,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_memstats_sys_bytes{instance=~\"$instance\"}",
       "instant": true,
@@ -303,7 +303,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "(process_resident_memory_bytes{instance=~\"$instance\"} - go_memstats_sys_bytes{instance=~\"$instance\"})",
       "instant": true,
@@ -314,7 +314,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_memstats_heap_inuse_bytes{instance=~\"$instance\"}",
       "instant": true,
@@ -325,7 +325,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "increase(cardano_node_metrics_blockfetchclient_lateblocks{network=\"$network\",instance=~\"$instance\"}[1h])",
       "instant": true,
@@ -336,7 +336,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "increase(dingo_metrics_txsEvictedNum_int{network=\"$network\",instance=~\"$instance\"}[1h])",
       "instant": true,
@@ -347,7 +347,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "process_resident_memory_bytes{instance=~\"$instance\"}",
       "instant": true,
@@ -358,7 +358,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_memstats_heap_alloc_bytes{instance=~\"$instance\"}",
       "instant": true,
@@ -369,7 +369,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_gc_duration_seconds{instance=~\"$instance\",quantile=\"1\"}",
       "instant": true,
@@ -380,7 +380,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_peerSelection_EstablishedPeers{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -389,7 +389,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_txsProcessedNum_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -398,7 +398,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_connectionManager_duplexConns{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -407,7 +407,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_forge_tip_gap_slots{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -418,7 +418,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_build_info{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -429,7 +429,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[15s])",
       "instant": false,
@@ -440,7 +440,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_metrics_slotBattlesTotal_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -451,7 +451,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_Forge_adopted_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -462,7 +462,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "increase(cardano_node_metrics_Forge_could_not_forge_int{network=\"$network\",instance=~\"$instance\"}[1h])",
       "instant": true,
@@ -473,7 +473,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "last_over_time(cardano_node_metrics_blockfetchclient_blockdelay_s{network=\"$network\",instance=~\"$instance\"}[30s])",
       "instant": true,
@@ -484,7 +484,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_blockfetchclient_blockdelay_cdfOne{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -495,7 +495,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_mempoolBytes_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": false,
@@ -506,7 +506,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "cardano_node_metrics_blockNum_int{network=\"$network\",instance=~\"$instance\"}",
       "instant": false,
@@ -517,7 +517,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_utxo_hot_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_utxo_hot_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
       "instant": true,
@@ -528,7 +528,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_epoch_length_slots{network=\"$network\",instance=~\"$instance\"}",
       "instant": true,
@@ -539,7 +539,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "go_sched_gomaxprocs_threads{instance=~\"$instance\"}",
       "instant": true,
@@ -550,7 +550,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_database_size_bytes{store=\"blob\",network=\"$network\",instance=~\"$instance\"} or dingo_database_size_bytes{store=\"blob\",job=~\".*dingo.*\",instance=~\"$instance\"}",
       "instant": true,
@@ -561,7 +561,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "dingo_database_size_bytes{store=\"metadata\",network=\"$network\",instance=~\"$instance\"} or dingo_database_size_bytes{store=\"metadata\",job=~\".*dingo.*\",instance=~\"$instance\"}",
       "instant": true,
@@ -572,7 +572,7 @@
     {
       "datasource": {
         "type": "prometheus",
-        "uid": "prometheus"
+        "uid": "${DS_PROMETHEUS}"
       },
       "expr": "rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) / (rate(dingo_cbor_cache_block_lru_hits_total{network=\"$network\",instance=~\"$instance\"}[5m]) + rate(dingo_cbor_cache_block_lru_misses_total{network=\"$network\",instance=~\"$instance\"}[5m]))",
       "instant": true,
@@ -583,7 +583,7 @@
   ],
   "datasource": {
     "type": "prometheus",
-    "uid": "prometheus"
+    "uid": "${DS_PROMETHEUS}"
   },
   "options": {
     "renderMode": "data",
