@@ -61,6 +61,8 @@ type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	isValid      bool
 	metadata     lcommon.TransactionMetadatum
+	outputs      []lcommon.TransactionOutput
+	produced     []lcommon.Utxo
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -104,11 +106,11 @@ func (m *mockTransaction) CollateralReturn() lcommon.TransactionOutput {
 }
 
 func (m *mockTransaction) Produced() []lcommon.Utxo {
-	return nil
+	return m.produced
 }
 
 func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
-	return nil
+	return m.outputs
 }
 
 func (m *mockTransaction) Inputs() []lcommon.TransactionInput {

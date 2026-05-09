@@ -250,16 +250,126 @@ func batchCreate[T any](db *gorm.DB, items []T) error {
 }
 
 func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
+	return createUtxosWithAssets(db, items)
+}
+
+func createUtxosWithAssets(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
+	}
+	utxos := make([]models.Utxo, len(items))
+	assetsByUtxo := make(map[string][]models.Asset, len(items))
+	hasAssets := false
+	for i := range items {
+		utxos[i] = items[i]
+		utxos[i].Assets = nil
+		if len(items[i].Assets) == 0 {
+			continue
+		}
+		hasAssets = true
+		key := utxoUniqueKey(items[i].TxId, items[i].OutputIdx)
+		assetsByUtxo[key] = append(assetsByUtxo[key], items[i].Assets...)
 	}
 	if result := db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
+	}).CreateInBatches(utxos, batchChunkRows); result.Error != nil {
+		return result.Error
+	}
+	if !hasAssets {
+		return nil
+	}
+	utxoIDs, err := fetchUtxoIDs(db, items)
+	if err != nil {
+		return err
+	}
+	assetByKey := make(map[string]models.Asset)
+	assetKeys := make([]string, 0)
+	for i := range items {
+		utxoKey := utxoUniqueKey(items[i].TxId, items[i].OutputIdx)
+		utxoID, ok := utxoIDs[utxoKey]
+		if !ok {
+			return fmt.Errorf(
+				"missing utxo id for tx_id %x output_idx %d",
+				items[i].TxId,
+				items[i].OutputIdx,
+			)
+		}
+		for _, asset := range assetsByUtxo[utxoKey] {
+			asset.ID = 0
+			asset.UtxoID = utxoID
+			assetKey := utxoAssetUniqueKey(asset)
+			if _, ok := assetByKey[assetKey]; !ok {
+				assetKeys = append(assetKeys, assetKey)
+			}
+			assetByKey[assetKey] = asset
+		}
+	}
+	assets := make([]models.Asset, 0, len(assetKeys))
+	for _, key := range assetKeys {
+		assets = append(assets, assetByKey[key])
+	}
+	if len(assets) == 0 {
+		return nil
+	}
+	if result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "name"},
+			{Name: "policy_id"},
+			{Name: "utxo_id"},
+		},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"name_hex", "fingerprint", "amount"},
+		),
+	}).CreateInBatches(assets, batchChunkRows); result.Error != nil {
 		return result.Error
 	}
 	return nil
+}
+
+type utxoIDRow struct {
+	TxId      []byte `gorm:"column:tx_id"`
+	ID        uint   `gorm:"column:id"`
+	OutputIdx uint32 `gorm:"column:output_idx"`
+}
+
+func fetchUtxoIDs(
+	db *gorm.DB,
+	items []models.Utxo,
+) (map[string]uint, error) {
+	ids := make(map[string]uint, len(items))
+	for i := 0; i < len(items); i += batchChunkRows {
+		end := min(i+batchChunkRows, len(items))
+		chunk := items[i:end]
+		whereConditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, item := range chunk {
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			args = append(args, item.TxId, item.OutputIdx)
+		}
+		var rows []utxoIDRow
+		if result := db.Model(&models.Utxo{}).
+			Select("id, tx_id, output_idx").
+			Where(strings.Join(whereConditions, " OR "), args...).
+			Find(&rows); result.Error != nil {
+			return nil, result.Error
+		}
+		for _, row := range rows {
+			ids[utxoUniqueKey(row.TxId, row.OutputIdx)] = row.ID
+		}
+	}
+	return ids, nil
+}
+
+func utxoUniqueKey(txID []byte, outputIdx uint32) string {
+	return fmt.Sprintf("%x:%d", txID, outputIdx)
+}
+
+func utxoAssetUniqueKey(asset models.Asset) string {
+	return fmt.Sprintf("%d:%x:%x", asset.UtxoID, asset.PolicyId, asset.Name)
 }
 
 func batchCreateScripts(db *gorm.DB, items []models.Script) error {
