@@ -3072,5 +3072,15 @@
       "id": 203,
       "description": "Block forge rate and served block rate over time."
     }
+  ],
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
   ]
 }

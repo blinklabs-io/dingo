@@ -1432,7 +1432,10 @@
                 "id": "custom.lineStyle",
                 "value": {
                   "fill": "dash",
-                  "dash": [10, 10]
+                  "dash": [
+                    10,
+                    10
+                  ]
                 }
               },
               {
@@ -1476,7 +1479,7 @@
         }
       ],
       "transparent": true,
-      "description": "Progress through the current epoch expressed as slot number. The orange dashed line shows the expected slot based on wall-clock time — if node slots fall below the reference, the node is stalling."
+      "description": "Progress through the current epoch expressed as slot number. The orange dashed line shows the expected slot based on wall-clock time \u2014 if node slots fall below the reference, the node is stalling."
     },
     {
       "type": "stat",
@@ -3043,6 +3046,16 @@
       ],
       "transparent": true,
       "description": "Number of live heap objects and memory used by the GC subsystem."
+    }
+  ],
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
     }
   ]
 }
