@@ -253,13 +253,7 @@ func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return importUtxosWithDB(db, items)
 }
 
 func batchCreateScripts(db *gorm.DB, items []models.Script) error {

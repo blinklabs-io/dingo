@@ -4155,6 +4155,22 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 	for len(points) < count && len(nextHash) > 0 {
 		block, err := database.BlockByHash(ls.db, nextHash)
 		if err != nil {
+			// Tolerate missing blocks: a block lacking a hash
+			// index entry can be reported NotFound by the
+			// time-bounded BlockByHash scan fallback added in
+			// this PR. Returning the error here would leave us
+			// unable to send any intersect points to peers,
+			// which breaks both inbound chainsync (peers can't
+			// sync from us) and our own outbound chainsync setup
+			// (we ship MsgFindIntersect with these points).
+			// Stopping the walk returns whatever we collected
+			// so far — chainsync negotiation handles a short
+			// candidate list, and the next chain extension or
+			// rollback will refill the recent window with
+			// fully-indexed blocks.
+			if errors.Is(err, models.ErrBlockNotFound) {
+				break
+			}
 			return nil, err
 		}
 		points = append(
