@@ -846,23 +846,20 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
 	}
 	if len(tmpTx.Outputs) > 0 {
-		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(&tmpTx.Outputs)
-		if result.Error != nil {
-			return fmt.Errorf("create utxo outputs for tx %x: %w", txHash, result.Error)
+		if err := d.ImportUtxos(tmpTx.Outputs, txn); err != nil {
+			return fmt.Errorf("create utxo outputs for tx %x: %w", txHash, err)
 		}
 	}
 	// Create CollateralReturn UTxO if present
 	// Uses CollateralReturnForTxID (not TransactionID) to distinguish from regular outputs
 	if tmpTx.CollateralReturn != nil {
+		tmpTx.CollateralReturn.ID = 0
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
-		if result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-			DoNothing: true,
-		}).Create(tmpTx.CollateralReturn); result.Error != nil {
-			return fmt.Errorf("create collateral return utxo: %w", result.Error)
+		if err := d.ImportUtxos(
+			[]models.Utxo{*tmpTx.CollateralReturn},
+			txn,
+		); err != nil {
+			return fmt.Errorf("create collateral return utxo: %w", err)
 		}
 	}
 

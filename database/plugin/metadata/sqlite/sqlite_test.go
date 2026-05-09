@@ -61,6 +61,13 @@ type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	isValid      bool
 	metadata     lcommon.TransactionMetadatum
+	produced     []lcommon.Utxo
+	inputs       []lcommon.TransactionInput
+	consumed     []lcommon.TransactionInput
+	collateral   []lcommon.TransactionInput
+	refInputs    []lcommon.TransactionInput
+	outputs      []lcommon.TransactionOutput
+	collReturn   lcommon.TransactionOutput
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -100,23 +107,23 @@ func (m *mockTransaction) RawAuxiliaryData() []byte {
 }
 
 func (m *mockTransaction) CollateralReturn() lcommon.TransactionOutput {
-	return nil
+	return m.collReturn
 }
 
 func (m *mockTransaction) Produced() []lcommon.Utxo {
-	return nil
+	return m.produced
 }
 
 func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
-	return nil
+	return m.outputs
 }
 
 func (m *mockTransaction) Inputs() []lcommon.TransactionInput {
-	return nil
+	return m.inputs
 }
 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
-	return nil
+	return m.collateral
 }
 
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
@@ -140,7 +147,7 @@ func (m *mockTransaction) Cbor() []byte {
 }
 
 func (m *mockTransaction) Consumed() []lcommon.TransactionInput {
-	return nil
+	return m.consumed
 }
 
 func (m *mockTransaction) Witnesses() lcommon.TransactionWitnessSet {
@@ -152,7 +159,7 @@ func (m *mockTransaction) ValidityIntervalStart() uint64 {
 }
 
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
-	return nil
+	return m.refInputs
 }
 
 func (m *mockTransaction) TotalCollateral() *big.Int {

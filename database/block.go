@@ -17,10 +17,13 @@ package database
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -30,6 +33,11 @@ import (
 
 const (
 	BlockInitialIndex uint64 = 1
+)
+
+var (
+	blockByHashScanDeadline               = 100 * time.Millisecond
+	blockByHashScanDeadlineExceededWarned atomic.Bool
 )
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
@@ -308,7 +316,21 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if err == nil && len(blockKey) > 0 {
 		return blockByKey(txn, blockKey)
 	}
-	// Fallback to sequential scan for blocks written before the index existed
+	// Fallback to sequential scan for blocks written before the index
+	// existed. Time-bounded: a Mithril-bootstrapped node carries
+	// millions of blob entries and chainsync intersect-point lookups
+	// (buildDefaultChainsyncIntersectPoints → RecentChainPoints →
+	// BlockByHash) call this per peer connection. An unbounded scan
+	// can pin one CPU per ongoing inbound chainsync handshake; with
+	// peer-sharing or a busy listener the node wedges and stops both
+	// chain extension and block production. Treating the hash as not
+	// found after the deadline lets fork recovery and intersect-point
+	// callers fall back to alternative paths (PeerHeaderLookupFunc,
+	// chainsync resync), which is fast. The narrow correctness loss
+	// is for blocks present in the blob store but missing a hash
+	// index entry — those should be backfilled offline rather than
+	// served via per-lookup scan.
+	scanDeadline := time.Now().Add(blockByHashScanDeadline)
 	iterOpts := types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobKeyPrefix),
 	}
@@ -318,6 +340,16 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	}
 	defer it.Close()
 	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+		if time.Now().After(scanDeadline) {
+			if blockByHashScanDeadlineExceededWarned.CompareAndSwap(false, true) {
+				txn.DB().logger.Warn(
+					"block hash fallback scan deadline exceeded; returning not found",
+					"deadline", blockByHashScanDeadline.String(),
+					"hash", hex.EncodeToString(hash),
+				)
+			}
+			return models.Block{}, models.ErrBlockNotFound
+		}
 		item := it.Item()
 		if item == nil {
 			continue
