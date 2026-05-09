@@ -3154,6 +3154,22 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					completeReadResult()
 					return errRestartLedgerPipeline
 				}
+				// A stale chain iterator delivers a fork block whose prev-hash
+				// doesn't match our current tip. This happens when a concurrent
+				// rollback moved the chain behind the iterator's position: the
+				// iterator skips the first fork block and reads one that extends
+				// a branch we are no longer on. Restarting the pipeline creates
+				// a fresh iterator from the (already rolled-back) currentTip,
+				// which will walk all fork blocks in order.
+				if errors.Is(err, errStaleChainIterator) {
+					ls.config.Logger.Debug(
+						"stale chain iterator detected, restarting pipeline to resync",
+						"component", "ledger",
+						"error", err,
+					)
+					completeReadResult()
+					return errRestartLedgerPipeline
+				}
 				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
 			}
@@ -3251,7 +3267,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 			expectedPrevHash,
 		) {
 			return nil, fmt.Errorf(
-				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				"%w: block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				errStaleChainIterator,
 				block.Hash().String(),
 				block.PrevHash().String(),
 				expectedPrevHash,

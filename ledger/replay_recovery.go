@@ -36,6 +36,14 @@ var errHaltLedgerPipeline = errors.New(
 	"halt ledger pipeline after persistent tx validation failure",
 )
 
+// errStaleChainIterator is returned by ledgerProcessBlock when a block's
+// prev-hash doesn't match the current ledger tip. This signals that the
+// chain iterator has been made stale by a concurrent rollback: the iterator's
+// nextBlockIndex skipped ahead past the first new fork block and is now
+// returning a block that extends a branch we are no longer on. The ledger
+// pipeline must restart so its iterator rewinds to the current tip.
+var errStaleChainIterator = errors.New("block does not fit chain tip: stale iterator after rollback")
+
 type txValidationError struct {
 	BlockPoint ocommon.Point
 	TxHash     []byte
