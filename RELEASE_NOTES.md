@@ -18,6 +18,17 @@ Hi folks! Here’s what we shipped in v0.43.0.
 
 ### 💪 Improvements
 
+* Improved **show epoch progress against wall-clock time in dashboards:** Operators can now compare current epoch slot progress with a wall-clock reference line, which makes slot stalls easier to notice.
+* Refined **track compatibility with gouroboros 0.168.0:** Protocol compatibility now stays aligned with the newer `gouroboros` `0.168.0` release for steadier maintenance and integration tracking.
+* Enhanced **keep release history current through v0.42.0:** `RELEASE_NOTES.md` now includes the v0.42.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Updated **time-bound expensive block-hash fallback lookups:** Large databases and fork recovery paths now avoid long hash lookup stalls because fallback scans stop quickly and move on to safer recovery paths.
+* Modernized **restart ledger recovery after stale rollback iterators:** Rollback recovery now restarts cleanly when an iterator points at stale chain data, which helps forked chains continue without getting stuck on the wrong branch.
+
+### 📋 What You Need to Know
+
 ## v0.42.0 (May 8, 2026)
 
 **Title:** Batch stake account lookups for faster delegation queries
