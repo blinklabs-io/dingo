@@ -49,6 +49,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	syncStatusInProgress = "in_progress"
+	syncStatusBackfill   = "backfill"
+)
+
 func mithrilCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mithril",
@@ -365,7 +370,7 @@ func runMithrilSync(
 
 	// Mark sync as in-progress so `dingo serve` can detect an
 	// incomplete sync and refuse to start.
-	if err := db.SetSyncState("sync_status", "in_progress", nil); err != nil {
+	if err := db.SetSyncState("sync_status", syncStatusInProgress, nil); err != nil {
 		return fmt.Errorf("marking sync in-progress: %w", err)
 	}
 
@@ -376,15 +381,7 @@ func runMithrilSync(
 	// Pre-seeding the checkpoint here ensures NeedsBackfill() returns
 	// the correct answer at any interruption point.
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
-		now := time.Now()
-		if err := db.Metadata().SetBackfillCheckpoint(
-			&models.BackfillCheckpoint{
-				Phase:     node.BackfillPhase,
-				StartedAt: now,
-				UpdatedAt: now,
-			},
-			nil,
-		); err != nil {
+		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
 			return fmt.Errorf(
 				"marking backfill in-progress: %w", err,
 			)
@@ -653,6 +650,15 @@ func runMithrilSync(
 		)
 	}
 
+	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+		if err := updateMithrilReadyState(
+			db, logger, loadResult, ledgerStateSlot,
+			syncStatusBackfill, false,
+		); err != nil {
+			return err
+		}
+	}
+
 	// Backfill historical metadata if storage mode is API.
 	// This replays all stored blocks to populate transaction
 	// records needed for API queries (Blockfrost, UTxO RPC).
@@ -662,15 +668,44 @@ func runMithrilSync(
 			"component", "mithril",
 		)
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		bf.DisableNonceComputation()
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)
 		}
 	}
 
-	// Set the metadata tip to the latest block in the blob store.
-	// After gap blocks are stored, this should match the ledger
-	// state tip, giving the node a consistent starting point.
-	recentBlocks, err = database.BlocksRecent(db, 1)
+	if err := updateMithrilReadyState(
+		db, logger, loadResult, ledgerStateSlot,
+		"", true,
+	); err != nil {
+		return err
+	}
+	syncComplete = true
+
+	// Clean up temporary files after a successful complete load.
+	if cfg.Mithril.CleanupAfterLoad {
+		result.Cleanup(logger)
+	}
+
+	logger.Info(
+		"Mithril bootstrap complete",
+		"component", "mithril",
+		"epoch", result.Snapshot.Beacon.Epoch,
+		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
+	)
+
+	return nil
+}
+
+func updateMithrilReadyState(
+	db *database.Database,
+	logger *slog.Logger,
+	loadResult *node.LoadBlobsResult,
+	ledgerStateSlot uint64,
+	syncStatus string,
+	clearSyncState bool,
+) error {
+	recentBlocks, err := database.BlocksRecent(db, 1)
 	if err != nil {
 		return fmt.Errorf("reading final chain tip: %w", err)
 	}
@@ -710,14 +745,20 @@ func runMithrilSync(
 		trustBoundarySlot = recentBlocks[0].Slot
 	}
 
-	// Clean up ephemeral sync state and record the Mithril trust
-	// boundary atomically. Both must succeed together: if cleanup
-	// succeeds but the boundary write fails, dingo serve would
-	// start without the trust boundary and hit the replay bug.
 	txn := db.MetadataTxn(true)
 	if err := txn.Do(func(txn *database.Txn) error {
-		if err := db.ClearSyncState(txn); err != nil {
-			return fmt.Errorf("cleaning up sync state: %w", err)
+		if clearSyncState {
+			if err := db.ClearSyncState(txn); err != nil {
+				return fmt.Errorf("cleaning up sync state: %w", err)
+			}
+		} else if syncStatus != "" {
+			if err := db.SetSyncState(
+				"sync_status", syncStatus, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"recording sync status: %w", err,
+				)
+			}
 		}
 		if err := db.SetSyncState(
 			"mithril_ledger_slot",
@@ -732,20 +773,38 @@ func runMithrilSync(
 	}); err != nil {
 		return err
 	}
-	syncComplete = true
+	return nil
+}
 
-	// Clean up temporary files after a successful complete load.
-	if cfg.Mithril.CleanupAfterLoad {
-		result.Cleanup(logger)
+func ensureMithrilBackfillCheckpoint(db *database.Database) error {
+	cp, err := db.Metadata().GetBackfillCheckpoint(
+		node.BackfillPhase, nil,
+	)
+	if err != nil {
+		return fmt.Errorf("reading backfill checkpoint: %w", err)
 	}
 
-	logger.Info(
-		"Mithril bootstrap complete",
-		"component", "mithril",
-		"epoch", result.Snapshot.Beacon.Epoch,
-		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
-	)
+	if cp != nil && !cp.Completed {
+		return nil
+	}
 
+	now := time.Now()
+	if cp == nil {
+		cp = &models.BackfillCheckpoint{
+			Phase:     node.BackfillPhase,
+			LastSlot:  0,
+			StartedAt: now,
+			UpdatedAt: now,
+			Completed: false,
+		}
+	} else {
+		cp.Completed = false
+		cp.UpdatedAt = now
+	}
+
+	if err := db.Metadata().SetBackfillCheckpoint(cp, nil); err != nil {
+		return fmt.Errorf("setting backfill checkpoint: %w", err)
+	}
 	return nil
 }
 

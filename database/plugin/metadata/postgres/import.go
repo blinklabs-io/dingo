@@ -46,7 +46,13 @@ func (d *MetadataStorePostgres) ImportUtxos(
 	if err != nil {
 		return fmt.Errorf("import utxos: %w", err)
 	}
+	return importUtxosWithDB(db, utxos)
+}
 
+func importUtxosWithDB(
+	db *gorm.DB,
+	utxos []models.Utxo,
+) error {
 	// Collect assets from UTxOs before insert. We work on a
 	// local copy of each UTxO so the caller's slice is not
 	// mutated (Assets remains intact after this call).
@@ -98,6 +104,14 @@ func (d *MetadataStorePostgres) ImportUtxos(
 		assets := make([]models.Asset, 0, len(pending))
 		for _, p := range pending {
 			p.asset.UtxoID = stripped[p.utxoIdx].ID
+			p.asset.ID = 0
+			if p.asset.UtxoID == 0 {
+				return fmt.Errorf(
+					"missing UTxO ID for asset on %x#%d",
+					stripped[p.utxoIdx].TxId,
+					stripped[p.utxoIdx].OutputIdx,
+				)
+			}
 			assets = append(assets, p.asset)
 		}
 		for i := 0; i < len(assets); i += importAssetBatchSize {

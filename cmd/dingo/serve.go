@@ -98,7 +98,7 @@ func checkSyncState(
 	if err != nil {
 		return fmt.Errorf("checking sync state: %w", err)
 	}
-	if val == "" {
+	if val == "" || val == syncStatusBackfill {
 		return nil
 	}
 	return fmt.Errorf(
@@ -170,12 +170,13 @@ func resumeBackfill(
 	defer db.Close()
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
+	bf.DisableNonceComputation()
 	needed, err := bf.NeedsBackfill()
 	if err != nil {
 		return fmt.Errorf("checking backfill state: %w", err)
 	}
 	if !needed {
-		return nil
+		return clearBackfillSyncStatus(db)
 	}
 
 	// Enable bulk-load optimizations for the backfill
@@ -188,6 +189,23 @@ func resumeBackfill(
 	)
 	if err := bf.Run(ctx); err != nil {
 		return fmt.Errorf("backfill: %w", err)
+	}
+	if err := clearBackfillSyncStatus(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func clearBackfillSyncStatus(db *database.Database) error {
+	status, err := db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return fmt.Errorf("reading sync status: %w", err)
+	}
+	if status != syncStatusBackfill {
+		return nil
+	}
+	if err := db.DeleteSyncState("sync_status", nil); err != nil {
+		return fmt.Errorf("clearing backfill sync status: %w", err)
 	}
 	return nil
 }

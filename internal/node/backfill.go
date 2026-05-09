@@ -70,6 +70,14 @@ func NewBackfill(
 	}
 }
 
+// DisableNonceComputation skips historical block nonce reconstruction.
+// Mithril imports already seed the ledger-state tip nonce needed for
+// live sync; API metadata backfill does not need per-block historical
+// nonce rows.
+func (b *Backfill) DisableNonceComputation() {
+	b.computeNonces = false
+}
+
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
 func (b *Backfill) NeedsBackfill() (bool, error) {
 	cp, err := b.db.Metadata().GetBackfillCheckpoint(

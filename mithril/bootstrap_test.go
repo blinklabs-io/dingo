@@ -175,6 +175,70 @@ func TestBootstrap(t *testing.T) {
 	require.True(t, hasChunkFiles(result.ImmutableDir))
 }
 
+func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
+	archiveData := createChunkArchive(t)
+	digest := "newdigest1234567890abcdef"
+	snapshots := []SnapshotListItem{
+		{
+			SnapshotBase: SnapshotBase{
+				Digest:    digest,
+				Network:   "preprod",
+				Size:      int64(len(archiveData)),
+				Locations: []string{},
+			},
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc(
+		"/artifact/snapshots",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			require.NoError(t, json.NewEncoder(w).Encode(snapshots))
+		},
+	)
+	mux.HandleFunc(
+		"/download/snapshot.tar.zst",
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(archiveData)
+		},
+	)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	snapshots[0].Locations = []string{
+		server.URL + "/download/snapshot.tar.zst",
+	}
+	downloadDir := t.TempDir()
+	staleImmutableDir := filepath.Join(
+		downloadDir,
+		"immutable",
+		"immutable",
+	)
+	require.NoError(t, os.MkdirAll(staleImmutableDir, 0o750))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(staleImmutableDir, "00000.chunk"),
+			[]byte("stale chunk"),
+			0o640,
+		),
+	)
+
+	result, err := Bootstrap(context.Background(), BootstrapConfig{
+		Network:       "preprod",
+		AggregatorURL: server.URL,
+		DownloadDir:   downloadDir,
+	})
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		filepath.Join(downloadDir, "immutable-"+digest),
+		result.ExtractDir,
+	)
+	require.NotEqual(t, staleImmutableDir, result.ImmutableDir)
+	require.True(t, hasChunkFiles(result.ImmutableDir))
+}
+
 func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 	snapshots := []SnapshotListItem{
 		{
