@@ -1,5 +1,53 @@
 # Release Notes
 
+## v0.43.0 (May 9, 2026)
+
+**Title:** Safer block-producer startup, deeper observability, and easier dashboard imports
+
+**Date:** May 9, 2026
+
+**Version:** v0.43.0
+
+Hi folks! Here’s what we shipped in v0.43.0.
+
+### ✨ What's New
+
+* Added **catch block-producer credential problems during startup:** Block producers now stop early when forging credentials are missing, mismatched, expired, or not yet valid, which prevents later surprises after launch.
+* Expanded **track protocol activity and peer state changes:** Operators can now see clearer network behavior signals, which makes it easier to spot unhealthy connections and shifting peer conditions.
+* Introduced **prompt for the Prometheus datasource during dashboard imports:** Bundled Grafana dashboards now ask for the right Prometheus datasource during import, which makes dashboard setup smoother across different Grafana environments.
+
+### 💪 Improvements
+
+* Improved **show epoch progress against wall-clock time in dashboards:** Operators can now compare current epoch slot progress with a wall-clock reference line, which makes slot stalls easier to notice.
+* Refined **track compatibility with gouroboros 0.168.0:** Protocol compatibility now stays aligned with the newer `gouroboros` `0.168.0` release for steadier maintenance and integration tracking.
+* Enhanced **keep release history current through v0.42.0:** `RELEASE_NOTES.md` now includes the v0.42.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Updated **limit slow fallback block lookups in large databases:** Large databases and fork recovery paths now avoid long lookup stalls because fallback scans stop quickly and move on to safer recovery paths.
+* Modernized **restart ledger recovery after stale rollback iterators:** Rollback recovery now restarts cleanly when an iterator points at stale chain data, which helps forked chains continue without getting stuck on the wrong branch.
+
+### 📋 What You Need to Know
+
+* Clarified **fail-fast forging startup checks:** Block-producer startup now validates VRF, KES, and operational certificate inputs against Shelley genesis data and available ledger state, so misconfigured or expired credentials stop the node early instead of failing later.
+* Highlighted **broader observability and easier dashboard imports:** Operators now get new protocol and peer observability metrics, and bundled dashboards are easier to import because Grafana prompts for the Prometheus datasource.
+* Emphasized **safer rollback recovery and block-hash lookups:** Rollback recovery and block-hash lookups now behave more safely on forked chains and very large databases because stale iterators restart cleanly and expensive fallback scans stop quickly.
+* Summarized **dependency and release tracking updates:** Maintenance tracking now includes the `gouroboros` `0.168.0` update, and release history continuity is refreshed through the added v0.42.0 entry.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.42.0 (May 8, 2026)
 
 **Title:** Batch stake account lookups for faster delegation queries
