@@ -19,58 +19,24 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
-	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
-// BatchAccumulator wraps the concrete accumulator used by the active
-// metadata plugin.
-type BatchAccumulator struct {
-	sqlite   *sqlite.BatchAccumulator
-	postgres *postgres.BatchAccumulator
-	mysql    *mysql.BatchAccumulator
-}
+// BatchAccumulator is an opaque accumulator owned by the active metadata
+// plugin.
+type BatchAccumulator = types.MetadataBatchAccumulator
 
 // NewBatchAccumulator creates an accumulator for the configured metadata
 // plugin.
-func (d *Database) NewBatchAccumulator() (*BatchAccumulator, error) {
-	switch d.metadata.(type) {
-	case *sqlite.MetadataStoreSqlite:
-		return &BatchAccumulator{sqlite: sqlite.NewBatchAccumulator()}, nil
-	case *postgres.MetadataStorePostgres:
-		return &BatchAccumulator{postgres: postgres.NewBatchAccumulator()}, nil
-	case *mysql.MetadataStoreMysql:
-		return &BatchAccumulator{mysql: mysql.NewBatchAccumulator()}, nil
-	default:
-		return nil, fmt.Errorf(
-			"batch accumulator unsupported for metadata store %T",
-			d.metadata,
-		)
-	}
-}
-
-// Reset clears all accumulated rows while reusing backing storage.
-func (b *BatchAccumulator) Reset() {
-	if b == nil {
-		return
-	}
-	switch {
-	case b.sqlite != nil:
-		b.sqlite.Reset()
-	case b.postgres != nil:
-		b.postgres.Reset()
-	case b.mysql != nil:
-		b.mysql.Reset()
-	}
+func (d *Database) NewBatchAccumulator() BatchAccumulator {
+	return d.metadata.NewBatchAccumulator()
 }
 
 // FlushBatch writes accumulated metadata rows for the active metadata plugin.
 func (d *Database) FlushBatch(
-	acc *BatchAccumulator,
+	acc BatchAccumulator,
 	txn *Txn,
 ) error {
 	if acc == nil {
@@ -83,19 +49,7 @@ func (d *Database) FlushBatch(
 			return types.ErrNilTxn
 		}
 	}
-	switch store := d.metadata.(type) {
-	case *sqlite.MetadataStoreSqlite:
-		return store.FlushBatch(acc.sqlite, metadataTxn)
-	case *postgres.MetadataStorePostgres:
-		return store.FlushBatch(acc.postgres, metadataTxn)
-	case *mysql.MetadataStoreMysql:
-		return store.FlushBatch(acc.mysql, metadataTxn)
-	default:
-		return fmt.Errorf(
-			"flush batch unsupported for metadata store %T",
-			d.metadata,
-		)
-	}
+	return d.metadata.FlushBatch(acc, metadataTxn)
 }
 
 // SetTransactionBatched stores transaction blob offsets and immediate
@@ -109,7 +63,7 @@ func (d *Database) SetTransactionBatched(
 	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
-	acc *BatchAccumulator,
+	acc BatchAccumulator,
 	txn *Txn,
 ) error {
 	if acc == nil {
@@ -189,7 +143,7 @@ func (d *Database) SetTransactionBatched(
 	if metadataTxn == nil {
 		return types.ErrNilTxn
 	}
-	if err := d.setTransactionMetadataBatched(
+	if err := d.metadata.SetTransactionBatched(
 		tx, point, idx, certDeposits, acc, metadataTxn,
 	); err != nil {
 		return fmt.Errorf("set transaction metadata: %w", err)
@@ -220,33 +174,4 @@ func (d *Database) SetTransactionBatched(
 	}
 
 	return nil
-}
-
-func (d *Database) setTransactionMetadataBatched(
-	tx lcommon.Transaction,
-	point ocommon.Point,
-	idx uint32,
-	certDeposits map[int]uint64,
-	acc *BatchAccumulator,
-	txn types.Txn,
-) error {
-	switch store := d.metadata.(type) {
-	case *sqlite.MetadataStoreSqlite:
-		return store.SetTransactionBatched(
-			tx, point, idx, certDeposits, acc.sqlite, txn,
-		)
-	case *postgres.MetadataStorePostgres:
-		return store.SetTransactionBatched(
-			tx, point, idx, certDeposits, acc.postgres, txn,
-		)
-	case *mysql.MetadataStoreMysql:
-		return store.SetTransactionBatched(
-			tx, point, idx, certDeposits, acc.mysql, txn,
-		)
-	default:
-		return fmt.Errorf(
-			"batched transaction unsupported for metadata store %T",
-			d.metadata,
-		)
-	}
 }

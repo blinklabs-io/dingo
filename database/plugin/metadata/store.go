@@ -478,6 +478,27 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
+	// for batched transaction ingestion.
+	NewBatchAccumulator() types.MetadataBatchAccumulator
+
+	// FlushBatch writes accumulated batched metadata rows.
+	FlushBatch(
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
+
+	// SetTransactionBatched stores transaction metadata while accumulating
+	// batchable rows into the provided accumulator for a later FlushBatch.
+	SetTransactionBatched(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		map[int]uint64, // certDeposits
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
+
 	// SetGapBlockTransaction stores a transaction record and its
 	// produced outputs without looking up or consuming input UTxOs.
 	// This is used for mithril gap blocks where the snapshot's UTxO

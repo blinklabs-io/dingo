@@ -260,6 +260,12 @@ type Txn interface {
 	Rollback() error
 }
 
+// MetadataBatchAccumulator is an opaque plugin-owned accumulator used by
+// metadata stores that support batched transaction ingestion.
+type MetadataBatchAccumulator interface {
+	Reset()
+}
+
 // BlockMetadata contains metadata for a block stored in blob.
 // IMPORTANT: Field order must remain [ID, Type, Height, PrevHash] because
 // cbor.StructAsArray encodes/decodes by position. Changing the order would

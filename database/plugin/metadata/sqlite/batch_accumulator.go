@@ -16,7 +16,6 @@ package sqlite
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -25,7 +24,9 @@ import (
 )
 
 const (
-	batchChunkRows = 100
+	// Keep generic bulk inserts well below SQLite's variable limit while
+	// avoiding excessive statement counts for address/witness rows.
+	batchChunkRows = 500
 )
 
 // utxoSpend captures the information needed to mark a UTxO as spent.
@@ -56,6 +57,11 @@ type BatchAccumulator struct {
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{}
+}
+
+// NewBatchAccumulator creates an accumulator for this metadata store.
+func (d *MetadataStoreSqlite) NewBatchAccumulator() types.MetadataBatchAccumulator {
+	return NewBatchAccumulator()
 }
 
 // AddKeyWitness appends a key witness record to the batch.
@@ -144,9 +150,13 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStoreSqlite) FlushBatch(
-	batch *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf("sqlite FlushBatch: wrong accumulator type %T", acc)
+	}
 	if batch == nil {
 		return nil
 	}
@@ -291,53 +301,18 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 	for i := 0; i < len(spends); i += batchChunkRows {
 		end := min(i+batchChunkRows, len(spends))
 		chunk := spends[i:end]
-		var deletedSlotCases []string
-		var spentAtCases []string
-		var whereConditions []string
-		var deletedSlotArgs []any
-		var spentAtArgs []any
-		var whereArgs []any
 		for _, spend := range chunk {
-			deletedSlotCases = append(
-				deletedSlotCases,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			deletedSlotArgs = append(
-				deletedSlotArgs,
-				spend.TxId,
-				spend.OutputIdx,
+			if result := db.Exec(
+				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
+					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL "+
+					"AND tx_id = ? AND output_idx = ?",
 				spend.Slot,
-			)
-
-			spentAtCases = append(
-				spentAtCases,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			spentAtArgs = append(
-				spentAtArgs,
+				spend.SpentByTxHash,
 				spend.TxId,
 				spend.OutputIdx,
-				spend.SpentByTxHash,
-			)
-
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
-		}
-		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
-		args = append(args, deletedSlotArgs...)
-		args = append(args, spentAtArgs...)
-		args = append(args, whereArgs...)
-		sql := fmt.Sprintf(
-			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND (%s)",
-			strings.Join(deletedSlotCases, " "),
-			strings.Join(spentAtCases, " "),
-			strings.Join(whereConditions, " OR "),
-		)
-		if result := db.Exec(sql, args...); result.Error != nil {
-			return result.Error
+			); result.Error != nil {
+				return result.Error
+			}
 		}
 	}
 	return nil

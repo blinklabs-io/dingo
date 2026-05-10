@@ -660,13 +660,12 @@ func (b *Backfill) Run(ctx context.Context) error {
 	it := b.db.BlocksFromSlot(startSlot)
 	defer it.Close()
 
-	// Keep one batch accumulator and transaction open across multiple
-	// blocks so metadata writes can be flushed in bulk.
-	acc, err := b.db.NewBatchAccumulator()
-	if err != nil {
-		return fmt.Errorf("creating backfill batch accumulator: %w", err)
-	}
-	batchTxn := b.db.Transaction(true)
+	// Keep one batch accumulator across multiple blocks so metadata
+	// writes can be flushed in bulk. The DB transaction is opened
+	// lazily after a block is read and released after each flush so
+	// checkpoint/final writes can use the base DB connection.
+	acc := b.db.NewBatchAccumulator()
+	var batchTxn *database.Txn
 	defer func() {
 		if batchTxn != nil {
 			batchTxn.Release()
@@ -684,11 +683,28 @@ func (b *Backfill) Run(ctx context.Context) error {
 		startTime     = time.Now()
 	)
 
+	ensureBatchTxn := func() {
+		if batchTxn == nil {
+			batchTxn = b.db.Transaction(true)
+		}
+	}
+	rollbackBatch := func() {
+		if batchTxn != nil {
+			_ = batchTxn.Rollback()
+			batchTxn.Release()
+			batchTxn = nil
+		}
+		acc.Reset()
+		batchBlockCount = 0
+	}
 	// flushBatch writes deferred rows, commits the active transaction,
-	// and starts the next batch window.
+	// and releases the current batch window.
 	flushBatch := func() error {
 		if batchBlockCount == 0 {
 			return nil
+		}
+		if batchTxn == nil {
+			return errors.New("missing backfill batch transaction")
 		}
 		oldTxn := batchTxn
 		if err := b.db.FlushBatch(acc, oldTxn); err != nil {
@@ -700,13 +716,14 @@ func (b *Backfill) Run(ctx context.Context) error {
 		oldTxn.Release()
 		committedSlot = cp.LastSlot
 		acc.Reset()
-		batchTxn = b.db.Transaction(true)
+		batchTxn = nil
 		batchBlockCount = 0
 		return nil
 	}
 	// saveCommittedCheckpoint avoids advancing resume state past rows
 	// that are still buffered in the current uncommitted batch.
 	saveCommittedCheckpoint := func() {
+		rollbackBatch()
 		currentSlot := cp.LastSlot
 		cp.LastSlot = committedSlot
 		b.saveCheckpoint(cp)
@@ -736,6 +753,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if blk == nil {
 			break // iteration complete
 		}
+		ensureBatchTxn()
 
 		epochId, eraId := b.slotToEpoch(blk.Slot)
 
@@ -775,7 +793,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			// Compute and store block nonce
 			if nErr := b.computeBlockNonce(
 				parsedBlock, point, eraId,
-				isNewEpoch, nil,
+				isNewEpoch, batchTxn,
 			); nErr != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -880,7 +898,7 @@ func (b *Backfill) processBlockTxsBatched(
 	eraId uint,
 	pp lcommon.ProtocolParameters,
 	offsets *database.BlockIngestionResult,
-	acc *database.BatchAccumulator,
+	acc database.BatchAccumulator,
 	txn *database.Txn,
 ) error {
 	for i, tx := range txs {
