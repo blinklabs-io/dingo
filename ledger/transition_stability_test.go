@@ -27,9 +27,9 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -353,4 +353,3 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(t *testin
 	got := awaitTransitionInfo(t, ls, hardfork.TransitionKnown)
 	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch)
 }
-

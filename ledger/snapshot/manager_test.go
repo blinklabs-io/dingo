@@ -190,4 +190,3 @@ func TestCaptureGenesisSnapshot_SmallEpoch(t *testing.T) {
 			"epoch %d must have a snapshot", epoch)
 	}
 }
-

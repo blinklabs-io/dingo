@@ -764,6 +764,7 @@ func (n *Node) Run(ctx context.Context) error {
 		)
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
+			n.mempool,
 		)
 		if err != nil {
 			return fmt.Errorf(

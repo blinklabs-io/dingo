@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,44 +34,72 @@ func intPtr(v int) *int {
 
 // mockNode implements BlockfrostNode for testing.
 type mockNode struct {
-	chainTip               ChainTipInfo
-	block                  BlockInfo
-	blockByID              BlockInfo
-	txHashes               []string
-	epoch                  EpochInfo
-	params                 ProtocolParamsInfo
-	epochParams            ProtocolParamsInfo
-	network                NetworkInfo
-	networkEras            []NetworkEraInfo
-	genesis                GenesisInfo
-	pools                  []PoolExtendedInfo
-	asset                  AssetInfo
-	drep                   DRepInfo
-	addressUTXOs           []AddressUTXOInfo
-	addressTransactions    []AddressTransactionInfo
-	metadataJSON           []MetadataTransactionJSONInfo
-	metadataCBOR           []MetadataTransactionCBORInfo
-	addressUTXOsTotal      int
-	addressTxsTotal        int
-	metadataJSONTotal      int
-	metadataCBORTotal      int
-	chainTipErr            error
-	blockErr               error
-	blockByIDErr           error
-	txHashesErr            error
-	epochErr               error
-	paramsErr              error
-	epochParamsErr         error
-	networkErr             error
-	networkErasErr         error
-	genesisErr             error
-	poolsErr               error
-	assetErr               error
-	drepErr                error
-	addressUTXOsErr        error
-	addressTransactionsErr error
-	metadataJSONErr        error
-	metadataCBORErr        error
+	chainTip                      ChainTipInfo
+	block                         BlockInfo
+	blockByID                     BlockInfo
+	txHashes                      []string
+	epoch                         EpochInfo
+	params                        ProtocolParamsInfo
+	epochParams                   ProtocolParamsInfo
+	network                       NetworkInfo
+	networkEras                   []NetworkEraInfo
+	genesis                       GenesisInfo
+	pools                         []PoolExtendedInfo
+	asset                         AssetInfo
+	drep                          DRepInfo
+	addressUTXOs                  []AddressUTXOInfo
+	addressTransactions           []AddressTransactionInfo
+	metadataJSON                  []MetadataTransactionJSONInfo
+	metadataCBOR                  []MetadataTransactionCBORInfo
+	transaction                   TransactionInfo
+	transactionSubmitHash         string
+	transactionCBOR               []byte
+	transactionMetadata           []TransactionMetadataInfo
+	transactionMetadataCBOR       []TransactionMetadataCBORInfo
+	transactionUTXOs              TransactionUTXOsInfo
+	transactionDelegations        []TransactionDelegationInfo
+	transactionStakes             []TransactionStakeAddressInfo
+	transactionWithdrawals        []TransactionWithdrawalInfo
+	transactionMIRs               []TransactionMIRInfo
+	transactionPoolUpdates        []TransactionPoolUpdateInfo
+	transactionPoolRetires        []TransactionPoolRetireInfo
+	transactionRedeemers          []TransactionRedeemerInfo
+	transactionRequiredSigners    []TransactionRequiredSignerInfo
+	addressUTXOsTotal             int
+	addressTxsTotal               int
+	metadataJSONTotal             int
+	metadataCBORTotal             int
+	chainTipErr                   error
+	blockErr                      error
+	blockByIDErr                  error
+	txHashesErr                   error
+	epochErr                      error
+	paramsErr                     error
+	epochParamsErr                error
+	networkErr                    error
+	networkErasErr                error
+	genesisErr                    error
+	poolsErr                      error
+	assetErr                      error
+	drepErr                       error
+	addressUTXOsErr               error
+	addressTransactionsErr        error
+	metadataJSONErr               error
+	metadataCBORErr               error
+	transactionErr                error
+	transactionSubmitErr          error
+	transactionCBORErr            error
+	transactionMetadataErr        error
+	transactionMetadataCBORErr    error
+	transactionUTXOsErr           error
+	transactionDelegationsErr     error
+	transactionStakesErr          error
+	transactionWithdrawalsErr     error
+	transactionMIRsErr            error
+	transactionPoolUpdatesErr     error
+	transactionPoolRetiresErr     error
+	transactionRedeemersErr       error
+	transactionRequiredSignersErr error
 }
 
 func (m *mockNode) ChainTip() (
@@ -178,6 +207,90 @@ func (m *mockNode) MetadataTransactionsCBOR(
 	_ PaginationParams,
 ) ([]MetadataTransactionCBORInfo, int, error) {
 	return m.metadataCBOR, m.metadataCBORTotal, m.metadataCBORErr
+}
+
+func (m *mockNode) Transaction(
+	_ []byte,
+) (TransactionInfo, error) {
+	return m.transaction, m.transactionErr
+}
+
+func (m *mockNode) TransactionSubmit(
+	_ []byte,
+) (string, error) {
+	return m.transactionSubmitHash, m.transactionSubmitErr
+}
+
+func (m *mockNode) TransactionCBOR(
+	_ []byte,
+) ([]byte, error) {
+	return m.transactionCBOR, m.transactionCBORErr
+}
+
+func (m *mockNode) TransactionMetadata(
+	_ []byte,
+) ([]TransactionMetadataInfo, error) {
+	return m.transactionMetadata, m.transactionMetadataErr
+}
+
+func (m *mockNode) TransactionMetadataCBOR(
+	_ []byte,
+) ([]TransactionMetadataCBORInfo, error) {
+	return m.transactionMetadataCBOR, m.transactionMetadataCBORErr
+}
+
+func (m *mockNode) TransactionUTXOs(
+	_ []byte,
+) (TransactionUTXOsInfo, error) {
+	return m.transactionUTXOs, m.transactionUTXOsErr
+}
+
+func (m *mockNode) TransactionDelegations(
+	_ []byte,
+) ([]TransactionDelegationInfo, error) {
+	return m.transactionDelegations, m.transactionDelegationsErr
+}
+
+func (m *mockNode) TransactionStakeAddresses(
+	_ []byte,
+) ([]TransactionStakeAddressInfo, error) {
+	return m.transactionStakes, m.transactionStakesErr
+}
+
+func (m *mockNode) TransactionWithdrawals(
+	_ []byte,
+) ([]TransactionWithdrawalInfo, error) {
+	return m.transactionWithdrawals, m.transactionWithdrawalsErr
+}
+
+func (m *mockNode) TransactionMIRs(
+	_ []byte,
+) ([]TransactionMIRInfo, error) {
+	return m.transactionMIRs, m.transactionMIRsErr
+}
+
+func (m *mockNode) TransactionPoolUpdates(
+	_ []byte,
+) ([]TransactionPoolUpdateInfo, error) {
+	return m.transactionPoolUpdates, m.transactionPoolUpdatesErr
+}
+
+func (m *mockNode) TransactionPoolRetires(
+	_ []byte,
+) ([]TransactionPoolRetireInfo, error) {
+	return m.transactionPoolRetires, m.transactionPoolRetiresErr
+}
+
+func (m *mockNode) TransactionRedeemers(
+	_ []byte,
+) ([]TransactionRedeemerInfo, error) {
+	return m.transactionRedeemers, m.transactionRedeemersErr
+}
+
+func (m *mockNode) TransactionRequiredSigners(
+	_ []byte,
+) ([]TransactionRequiredSignerInfo, error) {
+	return m.transactionRequiredSigners, m.transactionRequiredSignersErr
 }
 
 func newTestBlockfrost(
@@ -798,6 +911,534 @@ func TestHandleLatestBlockTxsEmpty(t *testing.T) {
 	// Should return empty array, not null
 	assert.NotNil(t, resp)
 	assert.Empty(t, resp)
+}
+
+func TestHandleTransaction(t *testing.T) {
+	invalidBefore := "100"
+	invalidHereafter := "200"
+	mock := &mockNode{
+		transaction: TransactionInfo{
+			Hash:             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+			Block:            "blockhash1",
+			Slot:             123,
+			BlockHeight:      45,
+			BlockTime:        1700000000,
+			Index:            2,
+			OutputAmount:     []AddressAmountInfo{{Unit: "lovelace", Quantity: "5000"}},
+			Fees:             "170000",
+			Deposit:          "0",
+			Size:             512,
+			UtxoCount:        3,
+			StakeCertCount:   1,
+			DelegationCount:  1,
+			RedeemerCount:    2,
+			ValidContract:    true,
+			InvalidBefore:    &invalidBefore,
+			InvalidHereafter: &invalidHereafter,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransaction(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp TransactionResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, mock.transaction.Hash, resp.Hash)
+	assert.Equal(t, "blockhash1", resp.Block)
+	assert.Equal(t, uint64(123), resp.Slot)
+	assert.Equal(t, uint64(45), resp.BlockHeight)
+	assert.Equal(t, int64(1700000000), resp.BlockTime)
+	assert.Equal(t, 2, resp.Index)
+	assert.Equal(t, "170000", resp.Fees)
+	require.Len(t, resp.OutputAmount, 1)
+	assert.Equal(t, "lovelace", resp.OutputAmount[0].Unit)
+	assert.Equal(t, "5000", resp.OutputAmount[0].Quantity)
+	require.NotNil(t, resp.InvalidBefore)
+	assert.Equal(t, "100", *resp.InvalidBefore)
+	require.NotNil(t, resp.InvalidHereafter)
+	assert.Equal(t, "200", *resp.InvalidHereafter)
+}
+
+func TestHandleTransactionInvalidHash(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/not-a-hash",
+		nil,
+	)
+	req.SetPathValue("hash", "not-a-hash")
+	w := httptest.NewRecorder()
+	b.handleTransaction(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "Invalid transaction hash.", resp.Message)
+}
+
+func TestHandleTransactionNotFound(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionErr: ErrTransactionNotFound,
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransaction(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "Not Found", resp.Error)
+}
+
+func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: ErrMempoolUnavailable,
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	assert.Equal(t, "Service Unavailable", resp.Error)
+	assert.Equal(t, "mempool unavailable", resp.Message)
+}
+
+func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: ErrMempoolFull,
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, 425, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 425, resp.StatusCode)
+	assert.Equal(t, "Mempool Full", resp.Error)
+	assert.Equal(t, "mempool is full, try again later", resp.Message)
+}
+
+func TestHandleTransactionSubmitErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		nodeErr     error
+		wantStatus  int
+		wantError   string
+		wantMessage string
+	}{
+		{
+			name:        "unsupported content type",
+			contentType: "application/json",
+			body:        "\x84\x00",
+			wantStatus:  http.StatusUnsupportedMediaType,
+			wantError:   "Unsupported Media Type",
+			wantMessage: "Content-Type must be application/cbor.",
+		},
+		{
+			name:        "oversized body",
+			contentType: "application/cbor",
+			body:        strings.Repeat("x", maxTxBodySize+1),
+			wantStatus:  http.StatusRequestEntityTooLarge,
+			wantError:   "Request Entity Too Large",
+			wantMessage: "transaction body exceeds maximum allowed size",
+		},
+		{
+			name:        "empty body",
+			contentType: "application/cbor",
+			body:        "",
+			wantStatus:  http.StatusBadRequest,
+			wantError:   "Bad Request",
+			wantMessage: "transaction body is empty",
+		},
+		{
+			name:        "invalid cbor",
+			contentType: "application/cbor",
+			body:        "not-cbor",
+			nodeErr:     ErrInvalidTransaction,
+			wantStatus:  http.StatusBadRequest,
+			wantError:   "Bad Request",
+			wantMessage: "Invalid transaction CBOR.",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newTestBlockfrost(&mockNode{
+				transactionSubmitErr: tt.nodeErr,
+			})
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v0/tx/submit",
+				strings.NewReader(tt.body),
+			)
+			req.Header.Set("Content-Type", tt.contentType)
+			w := httptest.NewRecorder()
+			b.handleTransactionSubmit(w, req)
+
+			assert.Equal(t, tt.wantStatus, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, tt.wantError, resp.Error)
+			assert.Equal(t, tt.wantMessage, resp.Message)
+		})
+	}
+}
+
+func TestHandleTransactionCBOR(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionCBOR: []byte{0x84, 0x01, 0x02, 0xf5, 0xf6},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/cbor",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionCBOR(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp TransactionCBORResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "840102f5f6", resp.CBOR)
+}
+
+func TestHandleTransactionSubEndpointNotFound(t *testing.T) {
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tests := []struct {
+		name      string
+		path      string
+		configure func(*mockNode)
+		handler   func(*Blockfrost, http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "cbor",
+			path: "/api/v0/txs/" + hash + "/cbor",
+			configure: func(m *mockNode) {
+				m.transactionCBORErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionCBOR,
+		},
+		{
+			name: "metadata",
+			path: "/api/v0/txs/" + hash + "/metadata",
+			configure: func(m *mockNode) {
+				m.transactionMetadataErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMetadata,
+		},
+		{
+			name: "metadata cbor",
+			path: "/api/v0/txs/" + hash + "/metadata/cbor",
+			configure: func(m *mockNode) {
+				m.transactionMetadataCBORErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMetadataCBOR,
+		},
+		{
+			name: "utxos",
+			path: "/api/v0/txs/" + hash + "/utxos",
+			configure: func(m *mockNode) {
+				m.transactionUTXOsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionUTXOs,
+		},
+		{
+			name: "delegations",
+			path: "/api/v0/txs/" + hash + "/delegations",
+			configure: func(m *mockNode) {
+				m.transactionDelegationsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionDelegations,
+		},
+		{
+			name: "stakes",
+			path: "/api/v0/txs/" + hash + "/stakes",
+			configure: func(m *mockNode) {
+				m.transactionStakesErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionStakeAddresses,
+		},
+		{
+			name: "withdrawals",
+			path: "/api/v0/txs/" + hash + "/withdrawals",
+			configure: func(m *mockNode) {
+				m.transactionWithdrawalsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionWithdrawals,
+		},
+		{
+			name: "mirs",
+			path: "/api/v0/txs/" + hash + "/mirs",
+			configure: func(m *mockNode) {
+				m.transactionMIRsErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionMIRs,
+		},
+		{
+			name: "pool updates",
+			path: "/api/v0/txs/" + hash + "/pool_updates",
+			configure: func(m *mockNode) {
+				m.transactionPoolUpdatesErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionPoolUpdates,
+		},
+		{
+			name: "pool retires",
+			path: "/api/v0/txs/" + hash + "/pool_retires",
+			configure: func(m *mockNode) {
+				m.transactionPoolRetiresErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionPoolRetires,
+		},
+		{
+			name: "redeemers",
+			path: "/api/v0/txs/" + hash + "/redeemers",
+			configure: func(m *mockNode) {
+				m.transactionRedeemersErr = ErrTransactionNotFound
+			},
+			handler: (*Blockfrost).handleTransactionRedeemers,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mock := &mockNode{}
+			tt.configure(mock)
+			b := newTestBlockfrost(mock)
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.SetPathValue("hash", hash)
+			w := httptest.NewRecorder()
+			tt.handler(b, w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			assert.Equal(t, "Not Found", resp.Error)
+			assert.Equal(t, "The requested transaction could not be found.", resp.Message)
+		})
+	}
+}
+
+func TestHandleTransactionMetadata(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionMetadata: []TransactionMetadataInfo{
+			{
+				Label:        "721",
+				JSONMetadata: json.RawMessage(`{"name":"nft-one"}`),
+			},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/metadata",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionMetadata(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []TransactionMetadataResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "721", resp[0].Label)
+	assert.JSONEq(t, `{"name":"nft-one"}`, string(resp[0].JSONMetadata))
+}
+
+func TestHandleTransactionMetadataCBOR(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionMetadataCBOR: []TransactionMetadataCBORInfo{
+			{Label: "721", CBORMetadata: "a1646e616d65636e6674"},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/metadata/cbor",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionMetadataCBOR(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []TransactionMetadataCBORResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "721", resp[0].Label)
+	assert.Equal(t, "a1646e616d65636e6674", resp[0].Metadata)
+	require.NotNil(t, resp[0].CborMetadata)
+	assert.Equal(t, resp[0].Metadata, *resp[0].CborMetadata)
+}
+
+func TestHandleTransactionUTXOs(t *testing.T) {
+	ref := true
+	b := newTestBlockfrost(&mockNode{
+		transactionUTXOs: TransactionUTXOsInfo{
+			Hash: "txhash1",
+			Inputs: []TransactionInputInfo{
+				{
+					Address:     "addr_test1input",
+					TxHash:      "prevtx",
+					OutputIndex: 1,
+					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "10"}},
+					Reference:   &ref,
+				},
+			},
+			Outputs: []TransactionOutputInfo{
+				{
+					Address:     "addr_test1output",
+					OutputIndex: 0,
+					Amount:      []AddressAmountInfo{{Unit: "lovelace", Quantity: "5"}},
+				},
+			},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/utxos",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionUTXOs(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp TransactionUTXOsResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "txhash1", resp.Hash)
+	require.Len(t, resp.Inputs, 1)
+	assert.Equal(t, "prevtx", resp.Inputs[0].TxHash)
+	assert.Equal(t, 1, resp.Inputs[0].OutputIndex)
+	require.NotNil(t, resp.Inputs[0].Reference)
+	assert.True(t, *resp.Inputs[0].Reference)
+	require.Len(t, resp.Outputs, 1)
+	assert.Equal(t, "addr_test1output", resp.Outputs[0].Address)
+}
+
+func TestHandleTransactionDelegations(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionDelegations: []TransactionDelegationInfo{
+			{
+				Address:     "stake_test1...",
+				PoolID:      "pool1...",
+				CertIndex:   2,
+				ActiveEpoch: 10,
+			},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/delegations",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionDelegations(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []TransactionDelegationResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "stake_test1...", resp[0].Address)
+	assert.Equal(t, "pool1...", resp[0].PoolID)
+	assert.Equal(t, uint64(10), resp[0].ActiveEpoch)
+}
+
+func TestHandleTransactionStakeAddresses(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionStakes: []TransactionStakeAddressInfo{
+			{
+				Address:      "stake_test1...",
+				CertIndex:    1,
+				Registration: true,
+			},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/stakes",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionStakeAddresses(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []TransactionStakeAddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "stake_test1...", resp[0].Address)
+	assert.True(t, resp[0].Registration)
 }
 
 func TestHandleLatestEpoch(t *testing.T) {
