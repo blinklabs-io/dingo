@@ -130,6 +130,9 @@ type BlockfrostNode interface {
 	// TransactionRedeemers returns Plutus redeemers in a transaction.
 	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
 
+	// TransactionRequiredSigners returns required signing key hashes in a transaction.
+	TransactionRequiredSigners(hash []byte) ([]TransactionRequiredSignerInfo, error)
+
 	// Asset returns native asset information for a
 	// concatenated hex asset ID ({policy_id}{asset_name}).
 	Asset(
@@ -392,9 +395,11 @@ type TransactionOutputInfo struct {
 	ReferenceScriptHash *string
 	InlineDatum         *string
 	DataHash            *string
+	ConsumedByTx        *string
 	Address             string
 	Amount              []AddressAmountInfo
 	OutputIndex         uint32
+	Collateral          bool
 }
 
 // TransactionDelegationInfo holds one delegation certificate.
@@ -472,6 +477,11 @@ type TransactionRedeemerInfo struct {
 	UnitMem          string
 	UnitSteps        string
 	Fee              string
+}
+
+// TransactionRequiredSignerInfo holds one required signing key hash.
+type TransactionRequiredSignerInfo struct {
+	WitnessHash string
 }
 
 // AssetInfo holds native asset data needed by the API.

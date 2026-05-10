@@ -64,6 +64,7 @@ type mockNode struct {
 	transactionPoolUpdates     []TransactionPoolUpdateInfo
 	transactionPoolRetires     []TransactionPoolRetireInfo
 	transactionRedeemers       []TransactionRedeemerInfo
+	transactionRequiredSigners []TransactionRequiredSignerInfo
 	addressUTXOsTotal          int
 	addressTxsTotal            int
 	metadataJSONTotal          int
@@ -98,6 +99,7 @@ type mockNode struct {
 	transactionPoolUpdatesErr  error
 	transactionPoolRetiresErr  error
 	transactionRedeemersErr    error
+	transactionRequiredSignersErr error
 }
 
 func (m *mockNode) ChainTip() (
@@ -283,6 +285,12 @@ func (m *mockNode) TransactionRedeemers(
 	_ []byte,
 ) ([]TransactionRedeemerInfo, error) {
 	return m.transactionRedeemers, m.transactionRedeemersErr
+}
+
+func (m *mockNode) TransactionRequiredSigners(
+	_ []byte,
+) ([]TransactionRequiredSignerInfo, error) {
+	return m.transactionRequiredSigners, m.transactionRequiredSignersErr
 }
 
 func newTestBlockfrost(
@@ -1025,6 +1033,28 @@ func TestHandleTransactionSubmitMempoolUnavailable(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	assert.Equal(t, "Service Unavailable", resp.Error)
 	assert.Equal(t, "mempool unavailable", resp.Message)
+}
+
+func TestHandleTransactionSubmitMempoolFull(t *testing.T) {
+	b := newTestBlockfrost(&mockNode{
+		transactionSubmitErr: ErrMempoolFull,
+	})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v0/tx/submit",
+		strings.NewReader("\x84\x00"),
+	)
+	req.Header.Set("Content-Type", "application/cbor")
+	w := httptest.NewRecorder()
+	b.handleTransactionSubmit(w, req)
+
+	assert.Equal(t, 425, w.Code)
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, 425, resp.StatusCode)
+	assert.Equal(t, "Mempool Full", resp.Error)
+	assert.Equal(t, "mempool is full, try again later", resp.Message)
 }
 
 func TestHandleTransactionSubmitErrors(t *testing.T) {

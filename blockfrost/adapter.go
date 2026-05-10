@@ -50,6 +50,7 @@ var (
 	ErrDRepNotFound        = errors.New("drep not found")
 	ErrInvalidTransaction  = errors.New("invalid transaction")
 	ErrMempoolUnavailable  = errors.New("mempool unavailable")
+	ErrMempoolFull         = errors.New("mempool full")
 	ErrTransactionNotFound = errors.New("transaction not found")
 )
 
@@ -1406,7 +1407,7 @@ func (a *NodeAdapter) TransactionSubmit(
 	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
 		var mempoolFull *mempool.MempoolFullError
 		if errors.As(err, &mempoolFull) {
-			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolUnavailable)
+			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolFull)
 		}
 		return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrInvalidTransaction)
 	}
@@ -1481,8 +1482,10 @@ func (a *NodeAdapter) TransactionUTXOs(
 
 	decodedOutputs := decodedTx.Outputs()
 	txOutputs := slices.Clone(tx.Outputs)
+	isCollateralReturn := false
 	if !tx.Valid && tx.CollateralReturn != nil {
 		txOutputs = []models.Utxo{*tx.CollateralReturn}
+		isCollateralReturn = true
 	}
 	slices.SortFunc(txOutputs, func(a, b models.Utxo) int {
 		return cmp.Compare(a.OutputIdx, b.OutputIdx)
@@ -1501,6 +1504,7 @@ func (a *NodeAdapter) TransactionUTXOs(
 			DataHash:            optionalHexString(output.DatumHash),
 			InlineDatum:         optionalHexString(output.Datum),
 			ReferenceScriptHash: nil,
+			Collateral:          isCollateralReturn,
 		})
 	}
 
@@ -1986,6 +1990,25 @@ func (a *NodeAdapter) TransactionRedeemers(
 			UnitMem:          strconv.FormatUint(redeemer.ExUnitsMemory, 10),
 			UnitSteps:        strconv.FormatUint(redeemer.ExUnitsCPU, 10),
 			Fee:              "0",
+		})
+	}
+	return ret, nil
+}
+
+// TransactionRequiredSigners returns the required signers (extra signing key
+// hashes) declared in the requested transaction.
+func (a *NodeAdapter) TransactionRequiredSigners(
+	hash []byte,
+) ([]TransactionRequiredSignerInfo, error) {
+	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	signers := decodedTx.RequiredSigners()
+	ret := make([]TransactionRequiredSignerInfo, 0, len(signers))
+	for _, signer := range signers {
+		ret = append(ret, TransactionRequiredSignerInfo{
+			WitnessHash: hex.EncodeToString(signer.Bytes()),
 		})
 	}
 	return ret, nil

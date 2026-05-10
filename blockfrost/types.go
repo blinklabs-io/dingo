@@ -334,9 +334,11 @@ type TransactionOutputResponse struct {
 	ReferenceScriptHash *string                 `json:"reference_script_hash"`
 	InlineDatum         *string                 `json:"inline_datum"`
 	DataHash            *string                 `json:"data_hash"`
+	ConsumedByTx        *string                 `json:"consumed_by_tx"`
 	Address             string                  `json:"address"`
 	Amount              []AddressAmountResponse `json:"amount"`
 	OutputIndex         int                     `json:"output_index"`
+	Collateral          bool                    `json:"collateral"`
 }
 
 // TransactionDelegationResponse represents one delegation certificate.
@@ -414,4 +416,9 @@ type TransactionRedeemerResponse struct {
 	UnitMem          string `json:"unit_mem"`
 	UnitSteps        string `json:"unit_steps"`
 	Fee              string `json:"fee"`
+}
+
+// TransactionRequiredSignerResponse represents one required signing key hash.
+type TransactionRequiredSignerResponse struct {
+	WitnessHash string `json:"witness_hash"`
 }

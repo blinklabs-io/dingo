@@ -903,6 +903,15 @@ func (b *Blockfrost) handleTransactionSubmit(
 			)
 			return
 		}
+		if errors.Is(err, ErrMempoolFull) {
+			writeError(
+				w,
+				425,
+				"Mempool Full",
+				"mempool is full, try again later",
+			)
+			return
+		}
 		b.logger.Error(
 			"failed to submit transaction",
 			"error", err,
@@ -1113,6 +1122,8 @@ func (b *Blockfrost) handleTransactionUTXOs(
 			DataHash:            output.DataHash,
 			InlineDatum:         output.InlineDatum,
 			ReferenceScriptHash: output.ReferenceScriptHash,
+			Collateral:          output.Collateral,
+			ConsumedByTx:        output.ConsumedByTx,
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -1336,6 +1347,36 @@ func (b *Blockfrost) handleTransactionRedeemers(
 	resp := make([]TransactionRedeemerResponse, 0, len(rows))
 	for _, row := range rows {
 		resp = append(resp, TransactionRedeemerResponse(row))
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleTransactionRequiredSigners handles GET /api/v0/txs/{hash}/required_signers
+// and returns the required signing key hashes in the transaction.
+func (b *Blockfrost) handleTransactionRequiredSigners(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	hash, ok := parseTransactionHashOrWriteError(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := b.node.TransactionRequiredSigners(hash)
+	if err != nil {
+		b.writeTransactionEndpointError(
+			w,
+			r,
+			err,
+			"failed to get transaction required signers",
+			"failed to retrieve transaction required signers",
+		)
+		return
+	}
+
+	resp := make([]TransactionRequiredSignerResponse, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, TransactionRequiredSignerResponse(row))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

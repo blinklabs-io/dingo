@@ -186,6 +186,10 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/txs/{hash}/redeemers",
 		b.handleTransactionRedeemers,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/required_signers",
+		b.handleTransactionRequiredSigners,
+	)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
