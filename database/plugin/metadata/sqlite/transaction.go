@@ -656,7 +656,9 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 		tmpTx.Outputs = append(tmpTx.Outputs, m)
 	}
 	outputsToCreate := tmpTx.Outputs
+	collateralReturnToCreate := tmpTx.CollateralReturn
 	tmpTx.Outputs = nil
+	tmpTx.CollateralReturn = nil
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}},
 		DoUpdates: clause.AssignmentColumns(
@@ -664,6 +666,7 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 		),
 	}).Create(tmpTx)
 	tmpTx.Outputs = outputsToCreate
+	tmpTx.CollateralReturn = collateralReturnToCreate
 	if result.Error != nil {
 		return fmt.Errorf(
 			"create gap block transaction at slot %d: %w",
@@ -766,7 +769,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	// Store outputs in a separate slice for explicit creation later
 	// GORM's Create with OnConflict doesn't properly handle associations
 	outputsToCreate := tmpTx.Outputs
+	collateralReturnToCreate := tmpTx.CollateralReturn
 	tmpTx.Outputs = nil
+	tmpTx.CollateralReturn = nil
 
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
@@ -778,6 +783,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 	// Restore outputs for later explicit creation
 	tmpTx.Outputs = outputsToCreate
+	tmpTx.CollateralReturn = collateralReturnToCreate
 
 	if result.Error != nil {
 		return fmt.Errorf(

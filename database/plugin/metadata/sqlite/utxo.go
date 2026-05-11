@@ -120,7 +120,6 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		// Without parens, SQL operator precedence (AND > OR) causes deleted_slot=0
 		// to only apply to the first condition.
 		query := db.Where("deleted_slot = 0").
-			Preload("Assets").
 			Where("("+strings.Join(conditions, " OR ")+")", args...)
 		if queryResult := query.Find(&utxos); queryResult.Error != nil {
 			return nil, queryResult.Error

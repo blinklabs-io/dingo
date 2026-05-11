@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
 
@@ -200,6 +201,123 @@ func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {
 
 func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
+}
+
+type mockTransactionInput struct {
+	hash  lcommon.Blake2b256
+	index uint32
+}
+
+func (m mockTransactionInput) Id() lcommon.Blake2b256 {
+	return m.hash
+}
+
+func (m mockTransactionInput) Index() uint32 {
+	return m.index
+}
+
+func (m mockTransactionInput) String() string {
+	return m.hash.String()
+}
+
+func (m mockTransactionInput) Utxorpc() (*cardano.TxInput, error) {
+	return nil, nil
+}
+
+func (m mockTransactionInput) ToPlutusData() data.PlutusData {
+	return nil
+}
+
+type mockTransactionOutput struct {
+	amount *big.Int
+}
+
+func (m *mockTransactionOutput) Address() lcommon.Address {
+	return lcommon.Address{}
+}
+
+func (m *mockTransactionOutput) Amount() *big.Int {
+	return m.amount
+}
+
+func (m *mockTransactionOutput) Assets() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput] {
+	return nil
+}
+
+func (m *mockTransactionOutput) Datum() *lcommon.Datum {
+	return nil
+}
+
+func (m *mockTransactionOutput) DatumHash() *lcommon.Blake2b256 {
+	return nil
+}
+
+func (m *mockTransactionOutput) Cbor() []byte {
+	return nil
+}
+
+func (m *mockTransactionOutput) Utxorpc() (*cardano.TxOutput, error) {
+	return nil, nil
+}
+
+func (m *mockTransactionOutput) ScriptRef() lcommon.Script {
+	return nil
+}
+
+func (m *mockTransactionOutput) ToPlutusData() data.PlutusData {
+	return nil
+}
+
+func (m *mockTransactionOutput) String() string {
+	return ""
+}
+
+func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
+	sqliteStore := setupTestDB(t)
+
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x4f
+	var blockHash []byte = bytes.Repeat([]byte{0xf8}, 32)
+	collateralReturn := &mockTransactionOutput{
+		amount: big.NewInt(7_000_000),
+	}
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: false,
+		produced: []lcommon.Utxo{
+			{
+				Id: mockTransactionInput{
+					hash:  txHash,
+					index: 1,
+				},
+				Output: collateralReturn,
+			},
+		},
+		collReturn: collateralReturn,
+	}
+	point := ocommon.NewPoint(1556770, blockHash)
+
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+
+	var txModel models.Transaction
+	requireNoError(sqliteStore.DB().
+		Where("hash = ?", txHash.Bytes()).
+		Take(&txModel).Error)
+	var count int64
+	requireNoError(sqliteStore.DB().
+		Model(&models.Utxo{}).
+		Where("collateral_return_for_tx_id = ?", txModel.ID).
+		Count(&count).Error)
+	if count != 1 {
+		t.Fatalf("expected one collateral return UTxO, got %d", count)
+	}
 }
 
 func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {

@@ -199,6 +199,132 @@ func TestComputeAndApplyPParamUpdates_QuorumMet(
 	require.NotNil(t, stored)
 }
 
+func TestComputeAndApplyPParamUpdates_NilTxnCommitsWrite(
+	t *testing.T,
+) {
+	config := &Config{DataDir: ""}
+	db, err := New(config)
+	require.NoError(t, err)
+	defer db.Close()
+
+	minFeeA := uint(100)
+	updateCbor, err := cbor.Encode(
+		&shelley.ShelleyProtocolParameterUpdate{
+			MinFeeA: &minFeeA,
+		},
+	)
+	require.NoError(t, err)
+	for i := range 5 {
+		require.NoError(t, db.SetPParamUpdate(
+			[]byte{byte(i)}, updateCbor, uint64(300+i), 4, nil,
+		))
+	}
+
+	currentPParams := &shelley.ShelleyProtocolParameters{
+		MinFeeA: 44,
+	}
+	decodeFunc := func(data []byte) (any, error) {
+		var update shelley.ShelleyProtocolParameterUpdate
+		_, err := cbor.Decode(data, &update)
+		return update, err
+	}
+	updateFunc := func(
+		current lcommon.ProtocolParameters,
+		update any,
+	) (lcommon.ProtocolParameters, error) {
+		tmp := *current.(*shelley.ShelleyProtocolParameters)
+		tmp.MinFeeA = *update.(shelley.ShelleyProtocolParameterUpdate).MinFeeA
+		return &tmp, nil
+	}
+
+	result, err := db.ComputeAndApplyPParamUpdates(
+		400, 4, 2, 5,
+		currentPParams,
+		decodeFunc, updateFunc,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint(100), result.(*shelley.ShelleyProtocolParameters).MinFeeA)
+
+	stored, err := db.GetPParams(
+		4,
+		2,
+		func(data []byte) (lcommon.ProtocolParameters, error) {
+			var params shelley.ShelleyProtocolParameters
+			_, err := cbor.Decode(data, &params)
+			return &params, err
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, uint(100), stored.(*shelley.ShelleyProtocolParameters).MinFeeA)
+}
+
+func TestApplyPParamUpdates_NilTxnCommitsWrite(t *testing.T) {
+	config := &Config{DataDir: ""}
+	db, err := New(config)
+	require.NoError(t, err)
+	defer db.Close()
+
+	minFeeA := uint(100)
+	updateCbor, err := cbor.Encode(
+		&shelley.ShelleyProtocolParameterUpdate{
+			MinFeeA: &minFeeA,
+		},
+	)
+	require.NoError(t, err)
+	for i := range 5 {
+		require.NoError(t, db.SetPParamUpdate(
+			[]byte{byte(i)}, updateCbor, uint64(300+i), 4, nil,
+		))
+	}
+
+	currentPParams := lcommon.ProtocolParameters(
+		&shelley.ShelleyProtocolParameters{
+			MinFeeA: 44,
+		},
+	)
+	decodeFunc := func(data []byte) (any, error) {
+		var update shelley.ShelleyProtocolParameterUpdate
+		_, err := cbor.Decode(data, &update)
+		return update, err
+	}
+	updateFunc := func(
+		current lcommon.ProtocolParameters,
+		update any,
+	) (lcommon.ProtocolParameters, error) {
+		tmp := *current.(*shelley.ShelleyProtocolParameters)
+		tmp.MinFeeA = *update.(shelley.ShelleyProtocolParameterUpdate).MinFeeA
+		return &tmp, nil
+	}
+
+	require.NoError(t, db.ApplyPParamUpdates(
+		400, 4, 2, 5,
+		&currentPParams,
+		decodeFunc, updateFunc,
+		nil,
+	))
+	require.Equal(
+		t, uint(100),
+		currentPParams.(*shelley.ShelleyProtocolParameters).MinFeeA,
+	)
+
+	stored, err := db.GetPParams(
+		4,
+		2,
+		func(data []byte) (lcommon.ProtocolParameters, error) {
+			var params shelley.ShelleyProtocolParameters
+			_, err := cbor.Decode(data, &params)
+			return &params, err
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, uint(100), stored.(*shelley.ShelleyProtocolParameters).MinFeeA)
+}
+
 func TestComputeAndApplyPParamUpdates_FiltersEpoch(
 	t *testing.T,
 ) {

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -42,6 +43,8 @@ import (
 const (
 	loadBlockBatchSize  = 50
 	progressLogInterval = 10 * time.Second
+
+	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
 
 func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
@@ -459,22 +462,42 @@ func copyBlocksRawWithCallback(
 			"immutable_tip_slot", immutableTip.Slot,
 		)
 		if callback != nil && db != nil {
-			blocksBackfilled, err := backfillRawBlockCallbacks(
-				ctx,
-				imm,
+			complete, err := immutableUtxoOffsetsComplete(
 				db,
-				callback,
+				immutableTip.Slot,
 			)
 			if err != nil {
-				return 0, immutableTip.Slot, fmt.Errorf(
-					"backfill immutable raw block callback state: %w",
-					err,
+				return 0, immutableTip.Slot, err
+			}
+			if complete {
+				logger.Info(
+					"immutable raw block callback state already backfilled",
+					"immutable_tip_slot", immutableTip.Slot,
+				)
+			} else {
+				blocksBackfilled, err := backfillRawBlockCallbacks(
+					ctx,
+					imm,
+					db,
+					callback,
+				)
+				if err != nil {
+					return 0, immutableTip.Slot, fmt.Errorf(
+						"backfill immutable raw block callback state: %w",
+						err,
+					)
+				}
+				if err := markImmutableUtxoOffsetsComplete(
+					db,
+					immutableTip.Slot,
+				); err != nil {
+					return 0, immutableTip.Slot, err
+				}
+				logger.Info(
+					"backfilled immutable raw block callback state",
+					"blocks_backfilled", blocksBackfilled,
 				)
 			}
-			logger.Info(
-				"backfilled immutable raw block callback state",
-				"blocks_backfilled", blocksBackfilled,
-			)
 		}
 		return 0, immutableTip.Slot, nil
 	}
@@ -556,7 +579,60 @@ func copyBlocksRawWithCallback(
 		"finished copying blocks from immutable DB",
 		"blocks_copied", blocksCopied,
 	)
+	if callback != nil && db != nil && blocksCopied > 0 {
+		if err := markImmutableUtxoOffsetsComplete(
+			db,
+			immutableTip.Slot,
+		); err != nil {
+			return blocksCopied, immutableTip.Slot, err
+		}
+	}
 	return blocksCopied, immutableTip.Slot, nil
+}
+
+func immutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) (bool, error) {
+	val, err := db.GetSyncState(
+		immutableUtxoOffsetsSyncStateKey,
+		nil,
+	)
+	if err != nil {
+		return false, fmt.Errorf(
+			"checking immutable UTxO offset state: %w",
+			err,
+		)
+	}
+	if val == "" {
+		return false, nil
+	}
+	slot, err := strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		return false, fmt.Errorf(
+			"parsing immutable UTxO offset state %q: %w",
+			val,
+			err,
+		)
+	}
+	return slot >= immutableTipSlot, nil
+}
+
+func markImmutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) error {
+	if err := db.SetSyncState(
+		immutableUtxoOffsetsSyncStateKey,
+		strconv.FormatUint(immutableTipSlot, 10),
+		nil,
+	); err != nil {
+		return fmt.Errorf(
+			"marking immutable UTxO offset state complete: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 func backfillRawBlockCallbacks(

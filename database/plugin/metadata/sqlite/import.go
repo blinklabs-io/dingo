@@ -117,6 +117,9 @@ func importUtxosWithDB(
 			}
 			assets = append(assets, p.asset)
 		}
+		if len(assets) == 0 {
+			return nil
+		}
 		for i := 0; i < len(assets); i += importAssetBatchSize {
 			end := min(i+importAssetBatchSize, len(assets))
 			batch := assets[i:end]
