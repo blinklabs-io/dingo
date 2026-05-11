@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -3661,6 +3662,16 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 	_ types.Txn,
 ) error {
 	return errors.New("genesis staking not implemented for mysql")
+}
+
+// SetGenesisGovernance is not implemented for the MySQL metadata plugin.
+func (d *MetadataStoreMysql) SetGenesisGovernance(
+	_ conway.ConwayGenesisInitialDReps,
+	_ conway.ConwayGenesisDelegs,
+	_ []byte,
+	_ types.Txn,
+) error {
+	return errors.New("genesis governance not implemented for mysql")
 }
 
 // DeleteAddressTransactionsAfterSlot removes address-transaction mapping records

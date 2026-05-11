@@ -2582,6 +2582,32 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 		}
 
+		// Load Conway genesis bootstrap data (initial DReps and
+		// stake/vote delegations). The conway-genesis.json may declare
+		// pre-existing DReps and delegations for test networks; mainnet
+		// has none.
+		conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
+		if conwayGenesis != nil &&
+			(len(conwayGenesis.InitialDReps) > 0 ||
+				len(conwayGenesis.Delegs) > 0) {
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"loading genesis governance: %d initial dreps, %d delegations",
+					len(conwayGenesis.InitialDReps),
+					len(conwayGenesis.Delegs),
+				),
+				"component", "ledger",
+			)
+			if err := ls.db.SetGenesisGovernance(
+				conwayGenesis.InitialDReps,
+				conwayGenesis.Delegs,
+				genesisHash[:],
+				txn,
+			); err != nil {
+				return fmt.Errorf("set genesis governance: %w", err)
+			}
+		}
+
 		return nil
 	})
 	return err
