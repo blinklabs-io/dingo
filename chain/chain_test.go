@@ -1496,3 +1496,110 @@ func TestChainFork(t *testing.T) {
 		testBlockIdx++
 	}
 }
+
+// TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork exercises the
+// reconcile path on a non-primary chain when the primary chain has
+// rolled back past the fork point.
+//
+// Setup:
+//   - Primary chain has 6 blocks (block numbers 1..6, slots 0..100).
+//   - Non-primary chain forks at primary block 3 and extends with three
+//     divergent blocks F4', F5', F6' (block numbers 4..6, slots 60..100).
+//   - Primary rolls back to block 2 (drops blocks 3..6, depth 4 with K=5).
+//
+// Expectation: iterating the non-primary chain from origin returns
+// primary blocks 1..3 followed by F4', F5', F6'. Reconcile must walk
+// back from the in-memory fork blocks through the rolled-back ancestor
+// retained in the LRU cache to re-anchor the fork against the shorter
+// primary chain.
+func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// K=5 allows rollback depth 4 (primary tip 6 -> rollback to 2).
+	mustSetLedger(t, cm, 5)
+	primaryChain := cm.PrimaryChain()
+
+	var origin common.Blake2b256
+	primaryBlocks := generateTestChain(t, 1, origin, 0, 20, 6)
+	for i, b := range primaryBlocks {
+		if err := primaryChain.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock primary[%d]: %s", i, err)
+		}
+	}
+
+	const forkIdx = 2 // primary block 3 (0-based index 2)
+	forkPoint := ocommon.Point{
+		Slot: primaryBlocks[forkIdx].SlotNumber(),
+		Hash: primaryBlocks[forkIdx].Hash().Bytes(),
+	}
+	forkChain, err := cm.NewChainFromIntersect(
+		[]ocommon.Point{forkPoint},
+	)
+	if err != nil {
+		t.Fatalf("NewChainFromIntersect: %s", err)
+	}
+
+	forkBlocks := generateTestChain(
+		t,
+		uint64(forkIdx+2), // block number 4
+		primaryBlocks[forkIdx].Hash(),
+		primaryBlocks[forkIdx].SlotNumber()+20,
+		20,
+		3,
+	)
+	for i, b := range forkBlocks {
+		if err := forkChain.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock fork[%d]: %s", i, err)
+		}
+	}
+
+	rollbackPoint := ocommon.Point{
+		Slot: primaryBlocks[1].SlotNumber(),
+		Hash: primaryBlocks[1].Hash().Bytes(),
+	}
+	if err := primaryChain.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("Rollback primary: %s", err)
+	}
+
+	iter, err := forkChain.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %s", err)
+	}
+	expected := append(
+		[]ledger.Block{},
+		primaryBlocks[0],
+		primaryBlocks[1],
+		primaryBlocks[2],
+	)
+	expected = append(expected, forkBlocks...)
+	for i, want := range expected {
+		next, err := iter.Next(false)
+		if err != nil {
+			t.Fatalf("iter.Next at idx %d: %s", i, err)
+		}
+		if next == nil {
+			t.Fatalf("iter.Next at idx %d returned nil", i)
+		}
+		if next.Rollback {
+			t.Fatalf("iter.Next at idx %d unexpected rollback", i)
+		}
+		if next.Block.Number != want.BlockNumber() {
+			t.Fatalf(
+				"idx %d block number: got %d, want %d",
+				i, next.Block.Number, want.BlockNumber(),
+			)
+		}
+		if !bytes.Equal(next.Block.Hash, want.Hash().Bytes()) {
+			t.Fatalf(
+				"idx %d block hash: got %x, want %x",
+				i, next.Block.Hash, want.Hash().Bytes(),
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf("expected ErrIteratorChainTip at fork tip, got: %v", err)
+	}
+}
