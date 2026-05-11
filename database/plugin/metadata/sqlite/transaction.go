@@ -3952,6 +3952,12 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 		}
 		account.AddedSlot = 0
 
+		// Delegation history tables have no unique constraint that covers
+		// (staking_key, added_slot), so we use FirstOrCreate to keep the
+		// slot-0 row idempotent across retries (e.g., resumed Mithril
+		// bootstrap). Each staking key contributes at most one genesis
+		// delegation row of a given type, so matching on staking_key +
+		// added_slot is sufficient.
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
 			account.Pool = delegatee.PoolId[:]
@@ -3960,13 +3966,18 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 					"save genesis stake delegatee account: %w", err,
 				)
 			}
-			if err := saveCertRecord(&models.StakeDelegation{
+			var existing models.StakeDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeDelegation{
 				StakingKey:  stakeKey,
 				PoolKeyHash: delegatee.PoolId[:],
 				AddedSlot:   0,
-			}, db); err != nil {
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
 				return fmt.Errorf(
-					"create genesis stake delegation: %w", err,
+					"create genesis stake delegation: %w", result.Error,
 				)
 			}
 		case conway.ConwayGenesisDelegateeTypeVote:
@@ -3977,14 +3988,19 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 					"save genesis vote delegatee account: %w", err,
 				)
 			}
-			if err := saveCertRecord(&models.VoteDelegation{
+			var existing models.VoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.VoteDelegation{
 				StakingKey: stakeKey,
 				Drep:       drepCredential,
 				DrepType:   drepType,
 				AddedSlot:  0,
-			}, db); err != nil {
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
 				return fmt.Errorf(
-					"create genesis vote delegation: %w", err,
+					"create genesis vote delegation: %w", result.Error,
 				)
 			}
 		case conway.ConwayGenesisDelegateeTypeStakeVote:
@@ -3996,15 +4012,20 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 					"save genesis stake/vote delegatee account: %w", err,
 				)
 			}
-			if err := saveCertRecord(&models.StakeVoteDelegation{
+			var existing models.StakeVoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeVoteDelegation{
 				StakingKey:  stakeKey,
 				PoolKeyHash: delegatee.PoolId[:],
 				Drep:        drepCredential,
 				DrepType:    drepType,
 				AddedSlot:   0,
-			}, db); err != nil {
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
 				return fmt.Errorf(
-					"create genesis stake/vote delegation: %w", err,
+					"create genesis stake/vote delegation: %w", result.Error,
 				)
 			}
 		default:

@@ -175,6 +175,53 @@ func TestSqliteSetGenesisGovernance(t *testing.T) {
 	assert.Equal(t, models.DrepTypeAlwaysAbstain, stakeVoteRow.DrepType)
 }
 
+func TestSqliteSetGenesisGovernanceIdempotent(t *testing.T) {
+	store := setupTestStore(t)
+
+	drepCred := makeCred(0x55)
+	stakeCred := makeCred(0x66)
+	poolA := makePoolId(0x77)
+
+	initialDReps := conway.ConwayGenesisInitialDReps{
+		drepCred: conway.ConwayGenesisDRepState{
+			Expiry:  100,
+			Deposit: 500_000_000,
+		},
+	}
+	delegs := conway.ConwayGenesisDelegs{
+		stakeCred: conway.ConwayGenesisDelegatee{
+			Type:   conway.ConwayGenesisDelegateeTypeStake,
+			PoolId: poolA,
+		},
+	}
+
+	// Run twice — simulates a retry after partial genesis bootstrap.
+	require.NoError(t,
+		store.SetGenesisGovernance(initialDReps, delegs, nil, nil),
+	)
+	require.NoError(t,
+		store.SetGenesisGovernance(initialDReps, delegs, nil, nil),
+	)
+
+	var drepCount, regCount, accountCount, delegCount int64
+	require.NoError(t,
+		store.DB().Model(&models.Drep{}).Count(&drepCount).Error,
+	)
+	require.NoError(t,
+		store.DB().Model(&models.RegistrationDrep{}).Count(&regCount).Error,
+	)
+	require.NoError(t,
+		store.DB().Model(&models.Account{}).Count(&accountCount).Error,
+	)
+	require.NoError(t,
+		store.DB().Model(&models.StakeDelegation{}).Count(&delegCount).Error,
+	)
+	assert.Equal(t, int64(1), drepCount)
+	assert.Equal(t, int64(1), regCount)
+	assert.Equal(t, int64(1), accountCount)
+	assert.Equal(t, int64(1), delegCount)
+}
+
 func TestSqliteSetGenesisGovernanceEmpty(t *testing.T) {
 	store := setupTestStore(t)
 	require.NoError(t, store.SetGenesisGovernance(
