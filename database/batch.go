@@ -65,15 +65,21 @@ func (d *Database) SetTransactionBatched(
 	offsets *BlockIngestionResult,
 	acc BatchAccumulator,
 	txn *Txn,
-) error {
+) (retErr error) {
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
 	}
 	owned := false
+	accDirty := false
 	if txn == nil {
 		txn = d.Transaction(true)
 		owned = true
-		defer txn.Rollback() //nolint:errcheck
+		defer func() {
+			if retErr != nil && accDirty {
+				acc.Reset()
+			}
+			_ = txn.Rollback()
+		}()
 	}
 
 	blob := txn.DB().Blob()
@@ -143,6 +149,7 @@ func (d *Database) SetTransactionBatched(
 	if metadataTxn == nil {
 		return types.ErrNilTxn
 	}
+	accDirty = owned
 	if err := d.metadata.SetTransactionBatched(
 		tx, point, idx, certDeposits, acc, metadataTxn,
 	); err != nil {
