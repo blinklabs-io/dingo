@@ -25,7 +25,7 @@ import (
 // TestBlockByHashTxn_UnknownHashIsHardMiss verifies that looking up an
 // unknown hash returns ErrBlockNotFound without exercising the legacy
 // iterator-fallback prefix scan. This is the regression guard for
-// blinklabs-io/dingo#2105 — fork-resolution probes one ancestor per
+// blinklabs-io/dingo#2105, fork-resolution probes one ancestor per
 // peer per depth, and pre-fix every miss ran a full block-blob prefix
 // scan, dominating catch-up CPU.
 func TestBlockByHashTxn_UnknownHashIsHardMiss(t *testing.T) {

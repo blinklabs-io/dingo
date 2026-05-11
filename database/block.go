@@ -35,11 +35,11 @@ const (
 // blockByHashCounters tracks how often BlockByHashTxn hits the O(1)
 // hash-index path versus the (now hard-miss) fallback path. The counters
 // are package-level atomics so callers can read them without holding a
-// txn — fork-resolution probes one ancestor per peer per depth, and a
+// txn, fork-resolution probes one ancestor per peer per depth, and a
 // non-trivial false-fallback rate is the load-only signal the operator
 // needs to justify a hash-index back-fill.
 //
-// See blinklabs-io/dingo#2105 — the iterator fallback was the second
+// See blinklabs-io/dingo#2105, the iterator fallback was the second
 // largest CPU consumer (11.2% cum, 370 MB/min churn) on preview catch-up
 // because it ran a full block-blob prefix scan per missing-index probe.
 var (
@@ -49,7 +49,7 @@ var (
 
 // BlockByHashStats returns the cumulative hit/miss counts for the
 // hash-index fast path used by BlockByHashTxn. Misses are treated as
-// ErrBlockNotFound — a non-zero miss count on a fully-indexed DB is a
+// ErrBlockNotFound, a non-zero miss count on a fully-indexed DB is a
 // signal to back-fill the index for blocks ingested before #1915.
 func BlockByHashStats() (hits, misses uint64) {
 	return blockByHashIndexHits.Load(), blockByHashIndexMisses.Load()
@@ -333,7 +333,7 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	}
 	// O(1) hash-index lookup. The index has been written for every block
 	// since #1915, so a miss on a healthy DB means either (a) the hash is
-	// genuinely unknown (the common fork-resolution case — peer probes an
+	// genuinely unknown (the common fork-resolution case, peer probes an
 	// ancestor we have not seen) or (b) the block pre-dates the index and
 	// needs a back-fill. Treating both as ErrBlockNotFound keeps the path
 	// allocation-free; the previous iterator fallback ran a full block-
@@ -346,7 +346,7 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return blockByKey(txn, blockKey)
 	}
 	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
-		// Surface real backend errors (I/O, closed DB, etc) — don't
+		// Surface real backend errors (I/O, closed DB, etc), don't
 		// hide them behind ErrBlockNotFound.
 		return models.Block{}, err
 	}
