@@ -78,6 +78,54 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
+// UpdatePoolOpCertSequence records an observed operational-certificate
+// sequence for a pool and updates the pool's denormalized maximum.
+func (d *Database) UpdatePoolOpCertSequence(
+	pkh lcommon.PoolKeyHash,
+	sequence uint64,
+	slot uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.MetadataTxn(true)
+		owned = true
+		defer func() {
+			if owned {
+				txn.Rollback() //nolint:errcheck
+			}
+		}()
+	}
+	if err := d.metadata.UpdatePoolOpCertSequence(
+		pkh,
+		sequence,
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return err
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return fmt.Errorf("commit transaction: %w", err)
+		}
+		owned = false
+	}
+	return nil
+}
+
+// LatestPoolOpCertSequence returns the highest observed operational-certificate
+// sequence for a pool.
+func (d *Database) LatestPoolOpCertSequence(
+	pkh lcommon.PoolKeyHash,
+	txn *Txn,
+) (uint64, bool, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.LatestPoolOpCertSequence(pkh, txn.Metadata())
+}
+
 // GetPools returns pools by key hash.
 func (d *Database) GetPools(
 	pkhs []lcommon.PoolKeyHash,

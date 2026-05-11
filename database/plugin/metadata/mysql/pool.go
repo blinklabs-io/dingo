@@ -117,6 +117,61 @@ func (d *MetadataStoreMysql) GetPool(
 	return ret, nil
 }
 
+func (d *MetadataStoreMysql) UpdatePoolOpCertSequence(
+	pkh lcommon.PoolKeyHash,
+	sequence uint64,
+	slot uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if err := db.
+		Where(
+			"pool_key_hash = ? AND slot = ?",
+			pkh.Bytes(),
+			slot,
+		).
+		Assign("sequence", sequence).
+		FirstOrCreate(&models.PoolOpCertSequence{
+			PoolKeyHash: pkh.Bytes(),
+			Slot:        slot,
+		}).Error; err != nil {
+		return err
+	}
+	return db.Model(&models.Pool{}).
+		Where(
+			"pool_key_hash = ? AND latest_op_cert_sequence < ?",
+			pkh.Bytes(),
+			sequence,
+		).
+		Update("latest_op_cert_sequence", sequence).
+		Error
+}
+
+func (d *MetadataStoreMysql) LatestPoolOpCertSequence(
+	pkh lcommon.PoolKeyHash,
+	txn types.Txn,
+) (uint64, bool, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, false, err
+	}
+	var ret struct {
+		Sequence uint64
+		Count    int64
+	}
+	err = db.Model(&models.PoolOpCertSequence{}).
+		Select("COALESCE(MAX(sequence), 0) AS sequence, COUNT(*) AS count").
+		Where("pool_key_hash = ?", pkh.Bytes()).
+		Scan(&ret).Error
+	if err != nil {
+		return 0, false, err
+	}
+	return ret.Sequence, ret.Count > 0, nil
+}
+
 // GetPools gets pools by key hash.
 func (d *MetadataStoreMysql) GetPools(
 	pkhs []lcommon.PoolKeyHash,
@@ -541,6 +596,13 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 		return err
 	}
 
+	if result := db.Where(
+		"slot > ?",
+		slot,
+	).Delete(&models.PoolOpCertSequence{}); result.Error != nil {
+		return result.Error
+	}
+
 	// Phase 1: Delete pools with no registrations at or before the rollback slot
 	// MySQL doesn't allow referencing the target table in a subquery of DELETE,
 	// so we fetch the IDs first, then delete by those IDs.
@@ -580,7 +642,7 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 	}
 
 	if len(poolsToRestore) == 0 {
-		return nil
+		return restorePoolOpCertSequences(db)
 	}
 
 	// Extract pool IDs for batch fetching
@@ -621,7 +683,18 @@ func (d *MetadataStoreMysql) RestorePoolStateAtSlot(
 		}
 	}
 
-	return nil
+	return restorePoolOpCertSequences(db)
+}
+
+func restorePoolOpCertSequences(db *gorm.DB) error {
+	return db.Session(&gorm.Session{AllowGlobalUpdate: true}).
+		Model(&models.Pool{}).
+		Update(
+			"latest_op_cert_sequence",
+			gorm.Expr(
+				"(SELECT COALESCE(MAX(sequence), 0) FROM pool_opcert_sequence WHERE pool_opcert_sequence.pool_key_hash = pool.pool_key_hash)",
+			),
+		).Error
 }
 
 // GetActivePoolKeyHashes retrieves the key hashes of all currently active pools.

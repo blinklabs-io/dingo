@@ -139,6 +139,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash,
+		uint64, // sequence
+		uint64, // slot
+		types.Txn,
+	) error
+
+	LatestPoolOpCertSequence(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (uint64, bool, error)
+
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
 		[]lcommon.PoolKeyHash,
