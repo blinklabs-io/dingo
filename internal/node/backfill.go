@@ -873,6 +873,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	// Flush the final partial batch (may be < backfillBatchSize blocks).
 	if err := flushBatch(); err != nil {
+		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
 
