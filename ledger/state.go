@@ -60,6 +60,8 @@ import (
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
+	ledgerIntersectDenseCount    = 32
+	firstBlockIndex              = 1
 )
 
 type metadataDbReader interface {
@@ -4151,36 +4153,78 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 		return nil, nil
 	}
 	points := make([]ocommon.Point, 0, count)
-	nextHash := append([]byte(nil), currentTip.Point.Hash...)
-	for len(points) < count && len(nextHash) > 0 {
-		block, err := database.BlockByHash(ls.db, nextHash)
-		if err != nil {
-			// Tolerate missing blocks: a block lacking a hash
-			// index entry can be reported NotFound by the
-			// time-bounded BlockByHash scan fallback added in
-			// this PR. Returning the error here would leave us
-			// unable to send any intersect points to peers,
-			// which breaks both inbound chainsync (peers can't
-			// sync from us) and our own outbound chainsync setup
-			// (we ship MsgFindIntersect with these points).
-			// Stopping the walk returns whatever we collected
-			// so far — chainsync negotiation handles a short
-			// candidate list, and the next chain extension or
-			// rollback will refill the recent window with
-			// fully-indexed blocks.
-			if errors.Is(err, models.ErrBlockNotFound) {
-				break
-			}
-			return nil, err
+	seen := make(map[string]struct{}, count)
+	appendBlock := func(block models.Block) bool {
+		if len(points) >= count {
+			return false
+		}
+		key := fmt.Sprintf("%d:%x", block.Slot, block.Hash)
+		if _, ok := seen[key]; ok {
+			return true
 		}
 		points = append(
 			points,
 			ocommon.NewPoint(block.Slot, block.Hash),
 		)
-		if len(block.PrevHash) == 0 {
+		seen[key] = struct{}{}
+		return true
+	}
+	appendBlockByIndex := func(blockIndex uint64) bool {
+		if len(points) >= count {
+			return false
+		}
+		block, err := ls.db.BlockByIndex(blockIndex, nil)
+		if err != nil {
+			return false
+		}
+		return appendBlock(block)
+	}
+	tipBlock, err := database.BlockByHash(ls.db, currentTip.Point.Hash)
+	if err != nil {
+		// Tolerate missing blocks: a block lacking a hash
+		// index entry can be reported NotFound by the
+		// time-bounded BlockByHash scan fallback added in
+		// this PR. Returning the error here would leave us
+		// unable to send any intersect points to peers,
+		// which breaks both inbound chainsync (peers can't
+		// sync from us) and our own outbound chainsync setup
+		// (we ship MsgFindIntersect with these points).
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return points, nil
+		}
+		return nil, err
+	}
+	appendBlock(tipBlock)
+	denseStartIndex := tipBlock.ID
+	if denseStartIndex > firstBlockIndex {
+		denseStartIndex--
+	} else {
+		denseStartIndex = 0
+	}
+	denseCount := min(count, ledgerIntersectDenseCount)
+	for idx := denseStartIndex; idx >= firstBlockIndex && len(points) < denseCount; idx-- {
+		if !appendBlockByIndex(idx) {
 			break
 		}
-		nextHash = append(nextHash[:0], block.PrevHash...)
+		if idx == firstBlockIndex {
+			break
+		}
+	}
+	if len(points) >= count {
+		return points, nil
+	}
+	if tipBlock.ID > firstBlockIndex {
+		for offset := uint64(denseCount); len(points) < count; offset *= 2 {
+			if offset == 0 || offset >= tipBlock.ID {
+				break
+			}
+			if !appendBlockByIndex(tipBlock.ID - offset) {
+				break
+			}
+		}
+	}
+	if len(points) < count {
+		_ = appendBlockByIndex(firstBlockIndex)
 	}
 	return points, nil
 }
