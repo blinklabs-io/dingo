@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -344,7 +345,7 @@ func (d *MetadataStoreSqlite) checkUnmatchedUtxoSpend(
 				"input-utxo-not-found",
 				"input UTxO not found",
 				"hash",
-				fmt.Sprintf("%x", spend.TxId),
+				hex.EncodeToString(spend.TxId),
 				"index",
 				spend.OutputIdx,
 			)
