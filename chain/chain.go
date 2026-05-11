@@ -1257,13 +1257,17 @@ func (c *Chain) reconcile() error {
 		if err != nil {
 			return err
 		}
-		// Lookup same block index on primary chain
+		// Lookup same block index on primary chain. When the primary
+		// has rolled back past tmpBlock's old index the lookup misses;
+		// treat tmpBlock as non-common and keep walking back via its
+		// PrevHash rather than aborting reconcile.
 		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID)
-		if err != nil {
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
 		// Update last common block index and return when we find a matching block on the primary chain
-		if tmpBlock.Slot == primaryBlock.Slot &&
+		if err == nil &&
+			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
 			c.lastCommonBlockIndex = tmpBlock.ID
 			break

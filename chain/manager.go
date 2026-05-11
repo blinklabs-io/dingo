@@ -268,10 +268,23 @@ func (cm *ChainManager) blockByPoint(
 func (cm *ChainManager) blockByHash(
 	blockHash []byte,
 ) (models.Block, error) {
-	cm.mutex.RLock()
-	defer cm.mutex.RUnlock()
-	// Check in-memory cache
+	// Check in-memory cache (block cache has its own locking).
 	if blk, ok := cm.blockCache.Get(blockHash); ok {
+		return blk, nil
+	}
+	// Fall through to database. Reconcile of a non-primary chain
+	// walks back via prev-hash, and the ancestor it lands on may
+	// still be present on the primary chain (so not in the cache,
+	// which only holds rolled-back primary blocks and ephemeral
+	// non-primary blocks).
+	if cm.db != nil {
+		blk, err := database.BlockByHash(cm.db, blockHash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return models.Block{}, models.ErrBlockNotFound
+			}
+			return models.Block{}, err
+		}
 		return blk, nil
 	}
 	return models.Block{}, models.ErrBlockNotFound
