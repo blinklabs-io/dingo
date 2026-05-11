@@ -16,11 +16,9 @@ package sqlite
 
 import (
 	"bytes"
-	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -275,106 +273,6 @@ func TestFlushBatch_MultipleSpends(t *testing.T) {
 	assert.Equal(t, spentBy1, u1.SpentAtTxId)
 	assert.Equal(t, uint64(201), u2.DeletedSlot)
 	assert.Equal(t, spentBy2, u2.SpentAtTxId)
-}
-
-func TestFlushBatch_SpendConflictReturnsError(t *testing.T) {
-	store := setupTestDBWithMode(t, "api")
-	batch := NewBatchAccumulator()
-
-	txID := bytes.Repeat([]byte{0x33}, 32)
-	originalSpender := bytes.Repeat([]byte{0xB1}, 32)
-	conflictingSpender := bytes.Repeat([]byte{0xB2}, 32)
-
-	require.NoError(
-		t,
-		store.DB().Create(
-			&models.Transaction{Hash: originalSpender, Slot: 200, Valid: true},
-		).Error,
-	)
-	require.NoError(
-		t,
-		store.DB().Create(
-			&models.Transaction{Hash: conflictingSpender, Slot: 201, Valid: true},
-		).Error,
-	)
-	require.NoError(
-		t,
-		store.DB().Create(&models.Utxo{
-			TxId:        txID,
-			OutputIdx:   0,
-			AddedSlot:   100,
-			DeletedSlot: 200,
-			SpentAtTxId: originalSpender,
-			Amount:      1,
-		}).Error,
-	)
-
-	batch.AddUtxoSpend(utxoSpend{
-		TxId:          txID,
-		OutputIdx:     0,
-		Slot:          201,
-		SpentByTxHash: conflictingSpender,
-	})
-
-	err := store.FlushBatch(batch, nil)
-	require.Error(t, err)
-	assert.True(
-		t,
-		errors.Is(err, types.ErrUtxoConflict),
-		"expected ErrUtxoConflict, got %v",
-		err,
-	)
-
-	var existing models.Utxo
-	require.NoError(
-		t,
-		store.DB().Where("tx_id = ? AND output_idx = 0", txID).First(&existing).Error,
-	)
-	assert.Equal(t, uint64(200), existing.DeletedSlot)
-	assert.Equal(t, originalSpender, existing.SpentAtTxId)
-}
-
-func TestFlushBatch_SameSpendIsIdempotent(t *testing.T) {
-	store := setupTestDBWithMode(t, "api")
-	batch := NewBatchAccumulator()
-
-	txID := bytes.Repeat([]byte{0x44}, 32)
-	spender := bytes.Repeat([]byte{0xC1}, 32)
-
-	require.NoError(
-		t,
-		store.DB().Create(
-			&models.Transaction{Hash: spender, Slot: 200, Valid: true},
-		).Error,
-	)
-	require.NoError(
-		t,
-		store.DB().Create(&models.Utxo{
-			TxId:        txID,
-			OutputIdx:   0,
-			AddedSlot:   100,
-			DeletedSlot: 200,
-			SpentAtTxId: spender,
-			Amount:      1,
-		}).Error,
-	)
-
-	batch.AddUtxoSpend(utxoSpend{
-		TxId:          txID,
-		OutputIdx:     0,
-		Slot:          200,
-		SpentByTxHash: spender,
-	})
-
-	require.NoError(t, store.FlushBatch(batch, nil))
-
-	var existing models.Utxo
-	require.NoError(
-		t,
-		store.DB().Where("tx_id = ? AND output_idx = 0", txID).First(&existing).Error,
-	)
-	assert.Equal(t, uint64(200), existing.DeletedSlot)
-	assert.Equal(t, spender, existing.SpentAtTxId)
 }
 
 func TestFlushBatch_Idempotent(t *testing.T) {

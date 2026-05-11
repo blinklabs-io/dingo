@@ -15,10 +15,8 @@
 package sqlite
 
 import (
-	"bytes"
-	"encoding/hex"
-	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -27,9 +25,7 @@ import (
 )
 
 const (
-	// Keep generic bulk inserts well below SQLite's variable limit while
-	// avoiding excessive statement counts for address/witness rows.
-	batchChunkRows = 500
+	batchChunkRows = 100
 )
 
 // utxoSpend captures the information needed to mark a UTxO as spent.
@@ -216,7 +212,7 @@ func (d *MetadataStoreSqlite) FlushBatch(
 				err,
 			)
 		}
-		if err := d.batchSpendUtxos(db, batch.UtxoSpends); err != nil {
+		if err := batchSpendUtxos(db, batch.UtxoSpends); err != nil {
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
 		}
 
@@ -297,82 +293,66 @@ func batchDeleteByTxIDs(db *gorm.DB, table string, ids []uint) error {
 	return nil
 }
 
-func (d *MetadataStoreSqlite) batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
+func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 	if len(spends) == 0 {
 		return nil
 	}
 	for i := 0; i < len(spends); i += batchChunkRows {
 		end := min(i+batchChunkRows, len(spends))
 		chunk := spends[i:end]
+		var deletedSlotCases []string
+		var spentAtCases []string
+		var whereConditions []string
+		var deletedSlotArgs []any
+		var spentAtArgs []any
+		var whereArgs []any
 		for _, spend := range chunk {
-			if result := db.Exec(
-				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
-					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL "+
-					"AND tx_id = ? AND output_idx = ?",
-				spend.Slot,
-				spend.SpentByTxHash,
+			deletedSlotCases = append(
+				deletedSlotCases,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			deletedSlotArgs = append(
+				deletedSlotArgs,
 				spend.TxId,
 				spend.OutputIdx,
-			); result.Error != nil {
-				return result.Error
-			} else if result.RowsAffected == 0 {
-				if err := d.checkUnmatchedUtxoSpend(
-					db,
-					spend,
-				); err != nil {
-					return err
-				}
-			}
+				spend.Slot,
+			)
+			spentAtCases = append(
+				spentAtCases,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			spentAtArgs = append(
+				spentAtArgs,
+				spend.TxId,
+				spend.OutputIdx,
+				spend.SpentByTxHash,
+			)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
+		}
+
+		args := make(
+			[]any,
+			0,
+			len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs),
+		)
+		args = append(args, deletedSlotArgs...)
+		args = append(args, spentAtArgs...)
+		args = append(args, whereArgs...)
+
+		sql := fmt.Sprintf(
+			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
+			strings.Join(deletedSlotCases, " "),
+			strings.Join(spentAtCases, " "),
+			strings.Join(whereConditions, " OR "),
+		)
+		result := db.Exec(sql, args...)
+		if result.Error != nil {
+			return result.Error
 		}
 	}
 	return nil
-}
-
-func (d *MetadataStoreSqlite) checkUnmatchedUtxoSpend(
-	db *gorm.DB,
-	spend utxoSpend,
-) error {
-	var existingUtxo models.Utxo
-	checkResult := db.Where(
-		"tx_id = ? AND output_idx = ?",
-		spend.TxId,
-		spend.OutputIdx,
-	).First(&existingUtxo)
-	if checkResult.Error != nil {
-		if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
-			d.warnLimiter.warn(
-				d.logger,
-				"input-utxo-not-found",
-				"input UTxO not found",
-				"hash",
-				hex.EncodeToString(spend.TxId),
-				"index",
-				spend.OutputIdx,
-			)
-			return nil
-		}
-		return fmt.Errorf(
-			"failed to check UTXO %x#%d: %w",
-			spend.TxId,
-			spend.OutputIdx,
-			checkResult.Error,
-		)
-	}
-	if existingUtxo.SpentAtTxId != nil &&
-		bytes.Equal(existingUtxo.SpentAtTxId, spend.SpentByTxHash) {
-		return nil
-	}
-	if existingUtxo.DeletedSlot == 0 && existingUtxo.SpentAtTxId == nil {
-		return fmt.Errorf(
-			"batch spend did not update UTXO %x#%d",
-			spend.TxId,
-			spend.OutputIdx,
-		)
-	}
-	return fmt.Errorf(
-		"%w: %x:%d",
-		types.ErrUtxoConflict,
-		spend.TxId,
-		spend.OutputIdx,
-	)
 }

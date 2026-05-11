@@ -675,7 +675,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	var (
 		processedBlocks int
 		processedTxs    int
-		// It tracks blocks accumulated since the last flush
+		// batchBlockCount tracks blocks accumulated since the last flush.
 		batchBlockCount int
 		// committedSlot is the latest slot durably committed by a batch.
 		committedSlot = cp.LastSlot
@@ -853,9 +853,17 @@ func (b *Backfill) Run(ctx context.Context) error {
 		}
 
 		if processedBlocks%1000 == 0 {
-			// Periodic checkpoints must not pass the last committed
-			// batch boundary.
-			saveCommittedCheckpoint()
+			// Periodic checkpoints must only record durable progress.
+			// Flush any partial batch first so checkpoint safety does
+			// not depend on backfillBatchSize dividing 1000.
+			if err := flushBatch(); err != nil {
+				saveCommittedCheckpoint()
+				return fmt.Errorf(
+					"flushing backfill batch before checkpoint: %w",
+					err,
+				)
+			}
+			b.saveCheckpoint(cp)
 		}
 		b.maybeLogProgress(
 			cp, processedBlocks, processedTxs,
@@ -863,7 +871,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		)
 	}
 
-	// Flushes the last batch and may be fewer than 100 blocks.
+	// Flush the final partial batch (may be < backfillBatchSize blocks).
 	if err := flushBatch(); err != nil {
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}

@@ -70,12 +70,14 @@ func (d *Database) SetTransactionBatched(
 		return errors.New("batch accumulator must not be nil")
 	}
 	owned := false
-	accDirty := false
 	if txn == nil {
 		txn = d.Transaction(true)
 		owned = true
 		defer func() {
-			if retErr != nil && accDirty {
+			if txn == nil {
+				return
+			}
+			if retErr != nil {
 				acc.Reset()
 			}
 			_ = txn.Rollback()
@@ -149,7 +151,6 @@ func (d *Database) SetTransactionBatched(
 	if metadataTxn == nil {
 		return types.ErrNilTxn
 	}
-	accDirty = owned
 	if err := d.metadata.SetTransactionBatched(
 		tx, point, idx, certDeposits, acc, metadataTxn,
 	); err != nil {
@@ -177,6 +178,7 @@ func (d *Database) SetTransactionBatched(
 		if err := txn.Commit(); err != nil {
 			return err
 		}
+		txn = nil
 		acc.Reset()
 	}
 
