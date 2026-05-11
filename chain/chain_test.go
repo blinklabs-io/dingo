@@ -1932,3 +1932,86 @@ func TestChainMultipleNonPrimaryChainsIndependentRollback(t *testing.T) {
 	checkSequence("forkA after rollback", forkA, expectedAAfter)
 	checkSequence("forkB unaffected", forkB, expectedB)
 }
+
+// TestChainReconcileEmptyForkPreservesOrphanedTip exercises the
+// reconcile path on a non-primary chain that has *no* divergent blocks
+// of its own when the primary chain rolls back past the fork point.
+//
+// Setup:
+//   - Primary chain has 6 blocks (P1..P6).
+//   - A non-primary chain forks at P3 but no blocks are added to it.
+//   - Primary rolls back to P2.
+//
+// Even though the fork chain has no in-memory blocks, its tip is still
+// P3. After the primary rolls back past P3, reconcile must re-anchor
+// lastCommonBlockIndex to P2 while preserving P3 as the fork's
+// in-memory tip; otherwise iteration silently truncates at P2.
+func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, 5)
+	primaryChain := cm.PrimaryChain()
+
+	var origin common.Blake2b256
+	primaryBlocks := generateTestChain(t, 1, origin, 0, 20, 6)
+	for i, b := range primaryBlocks {
+		if err := primaryChain.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock primary[%d]: %s", i, err)
+		}
+	}
+
+	// Fork at primary block 3, no divergent blocks added.
+	forkPoint := ocommon.Point{
+		Slot: primaryBlocks[2].SlotNumber(),
+		Hash: primaryBlocks[2].Hash().Bytes(),
+	}
+	forkChain, err := cm.NewChainFromIntersect(
+		[]ocommon.Point{forkPoint},
+	)
+	if err != nil {
+		t.Fatalf("NewChainFromIntersect: %s", err)
+	}
+
+	rbPrimary := ocommon.Point{
+		Slot: primaryBlocks[1].SlotNumber(),
+		Hash: primaryBlocks[1].Hash().Bytes(),
+	}
+	if err := primaryChain.Rollback(rbPrimary); err != nil {
+		t.Fatalf("Rollback primary: %s", err)
+	}
+
+	iter, err := forkChain.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %s", err)
+	}
+	expected := []ledger.Block{
+		primaryBlocks[0], primaryBlocks[1], primaryBlocks[2],
+	}
+	for i, want := range expected {
+		next, err := iter.Next(false)
+		if err != nil {
+			t.Fatalf("iter.Next idx %d: %s", i, err)
+		}
+		if next == nil || next.Rollback {
+			t.Fatalf("iter.Next idx %d unexpected: %+v", i, next)
+		}
+		if next.Block.Number != want.BlockNumber() {
+			t.Fatalf(
+				"idx %d block number: got %d want %d",
+				i, next.Block.Number, want.BlockNumber(),
+			)
+		}
+		if !bytes.Equal(next.Block.Hash, want.Hash().Bytes()) {
+			t.Fatalf(
+				"idx %d block hash: got %x want %x",
+				i, next.Block.Hash, want.Hash().Bytes(),
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
+	}
+}
