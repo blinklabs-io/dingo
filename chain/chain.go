@@ -1232,8 +1232,18 @@ func (c *Chain) reconcile() error {
 	}
 	// Determine prev-hash from earliest known good block
 	knownPoint := c.currentTip.Point
+	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	// Accumulate blocks locally to avoid O(K²) prepending
+	newBlocks := make([]ocommon.Point, 0, securityParam)
 	if len(c.blocks) > 0 {
 		knownPoint = c.blocks[0]
+	} else {
+		// No in-memory blocks: the chain's current tip is itself the
+		// earliest known good block. Seed newBlocks so the tip is
+		// preserved after we re-anchor lastCommonBlockIndex against
+		// the primary; otherwise iteration past the new common point
+		// would silently truncate at it.
+		newBlocks = append(newBlocks, knownPoint)
 	}
 	knownBlock, err := c.manager.blockByPoint(knownPoint, nil)
 	if err != nil {
@@ -1244,9 +1254,6 @@ func (c *Chain) reconcile() error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
-	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
-	// Accumulate blocks locally to avoid O(K²) prepending
-	newBlocks := make([]ocommon.Point, 0, securityParam)
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -1257,13 +1264,17 @@ func (c *Chain) reconcile() error {
 		if err != nil {
 			return err
 		}
-		// Lookup same block index on primary chain
+		// Lookup same block index on primary chain. When the primary
+		// has rolled back past tmpBlock's old index the lookup misses;
+		// treat tmpBlock as non-common and keep walking back via its
+		// PrevHash rather than aborting reconcile.
 		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID)
-		if err != nil {
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
 		// Update last common block index and return when we find a matching block on the primary chain
-		if tmpBlock.Slot == primaryBlock.Slot &&
+		if err == nil &&
+			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
 			c.lastCommonBlockIndex = tmpBlock.ID
 			break
