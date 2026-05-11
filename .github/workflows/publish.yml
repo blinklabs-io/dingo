@@ -425,9 +425,10 @@ jobs:
             }
 
       # This updates the documentation on pkg.go.dev and the latest version available via the Go module proxy
-      - name: Pull new module version
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
+      ### TODO: this is broken
+      #- name: Pull new module version
+      #  if: startsWith(github.ref, 'refs/tags/')
+      #  uses: andrewslotin/go-proxy-pull-action@e5aea3b8b3478fc5b76befda4390513868ed2dc8 # v1.4.0 https://github.com/andrewslotin/go-proxy-pull-action/releases/tag/v1.4.0
 
   npm-release:
     runs-on: ubuntu-latest
