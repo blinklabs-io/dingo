@@ -12,23 +12,23 @@ Hi folks! Here’s what we shipped in v0.44.0.
 
 ### ✨ What's New
 
-* Added **expand Blockfrost transaction API coverage:** Blockfrost compatible services can now look up transaction details, metadata, UTxOs, certificates, redeemers, required signers, and signed CBOR, and they can also submit transactions with clearer submit responses.
+* Added **expand Blockfrost transaction access:** Blockfrost compatible services can now look up transaction details, metadata, UTxOs, certificates, redeemers, required signers, and signed CBOR, and they can also submit transactions with clearer submit responses.
 
 ### 💪 Improvements
 
 * Improved **preserve Mithril backfill progress across interruptions:** Mithril bootstrap now keeps more recovery state and resumes metadata backfill more safely, which helps interrupted runs continue without losing important progress.
-* Refined **allow more time for full devnet validation runs:** Devnet validation now has a longer default timeout, which reduces avoidable failures during full environment checks.
-* Enhanced **recover forked chains more safely across multiple chain states:** Chain reconciliation now handles more rollback and fork combinations without dropping useful chain history, which makes recovery steadier after difficult fork scenarios.
-* Updated **refresh cardano-cli compatibility:** Operational tooling now stays aligned with the newer `cardano-cli` release for smoother maintenance.
-* Modernized **refresh CBOR library compatibility:** Data handling now stays aligned with the newer CBOR library release for steadier compatibility maintenance.
-* Strengthened **refresh secrets-management compatibility:** Encrypted configuration and secrets handling now stay aligned with the newer `sops` release for steadier maintenance.
-* Advanced **refresh compression library compatibility:** Compression support now stays aligned with the newer `klauspost/compress` release for routine compatibility maintenance.
-* Polished **refresh low-level system library compatibility:** System level compatibility now stays aligned with the newer `golang.org/x/sys` release for steadier maintenance.
-* Restored **keep release history continuous through v0.43.0:** `RELEASE_NOTES.md` now includes the v0.43.0 entry, which keeps recent release history easier to follow.
+* Refined **give full devnet validation more time:** Devnet validation now has a longer default timeout, which reduces avoidable failures during full environment checks.
+* Enhanced **recover forked chains across more rollback paths:** Chain reconciliation now handles more rollback and fork combinations without dropping useful chain history, which makes recovery steadier after difficult fork scenarios.
+* Updated **align operational tooling with newer cardano-cli support:** Operational tooling now stays aligned with the newer `cardano-cli` release for smoother maintenance.
+* Modernized **align data handling with newer CBOR support:** Data handling now stays aligned with the newer CBOR library release for steadier compatibility maintenance.
+* Strengthened **align secrets handling with newer sops support:** Encrypted configuration and secrets handling now stay aligned with the newer `sops` release for steadier maintenance.
+* Advanced **align compression support with newer library updates:** Compression support now stays aligned with the newer `klauspost/compress` release for routine compatibility maintenance.
+* Polished **align system support with newer platform updates:** System level compatibility now stays aligned with the newer `golang.org/x/sys` release for steadier maintenance.
+* Restored **keep release history current through v0.43.0:** `RELEASE_NOTES.md` now includes the v0.43.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
-* Fixed **return better intersect points on sparse ledger history:** Chains can now find safer meeting points even when recent ledger history is sparse, which helps sync and recovery continue more reliably.
+* Fixed **return safer intersect points from sparse ledger history:** Chains can now find safer meeting points even when recent ledger history is sparse, which helps sync and recovery continue more reliably.
 
 ### 📋 What You Need to Know
 
