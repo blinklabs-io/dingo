@@ -3244,3 +3244,48 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"plain epoch rollover must not change transitionInfo")
 }
+
+func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	var poolID [28]byte
+	for i := range poolID {
+		poolID[i] = byte(i + 1)
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, uint64(0), sequence)
+
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 10, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 7, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 30, nil))
+
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(7), sequence)
+
+	require.NoError(t, db.RestorePoolStateAtSlot(15, nil))
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(3), sequence)
+}

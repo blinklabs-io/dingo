@@ -78,8 +78,8 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
-// UpdatePoolOpCertSequence records an observed operational-certificate
-// sequence for a pool and updates the pool's denormalized maximum.
+// UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
+// and updates the pool's denormalized maximum.
 func (d *Database) UpdatePoolOpCertSequence(
 	pkh lcommon.PoolKeyHash,
 	sequence uint64,
@@ -113,8 +113,8 @@ func (d *Database) UpdatePoolOpCertSequence(
 	return nil
 }
 
-// LatestPoolOpCertSequence returns the highest observed operational-certificate
-// sequence for a pool.
+// LatestPoolOpCertSequence returns the highest observed op-cert sequence for
+// a pool.
 func (d *Database) LatestPoolOpCertSequence(
 	pkh lcommon.PoolKeyHash,
 	txn *Txn,
