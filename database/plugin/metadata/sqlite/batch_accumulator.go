@@ -317,6 +317,7 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 				spend.OutputIdx,
 				spend.Slot,
 			)
+
 			spentAtCases = append(
 				spentAtCases,
 				"WHEN tx_id = ? AND output_idx = ? THEN ?",
@@ -327,6 +328,7 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 				spend.OutputIdx,
 				spend.SpentByTxHash,
 			)
+
 			whereConditions = append(
 				whereConditions,
 				"(tx_id = ? AND output_idx = ?)",
@@ -334,23 +336,17 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
 		}
 
-		args := make(
-			[]any,
-			0,
-			len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs),
-		)
+		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
 		args = append(args, deletedSlotArgs...)
 		args = append(args, spentAtArgs...)
 		args = append(args, whereArgs...)
-
 		sql := fmt.Sprintf(
-			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
+			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND (%s)",
 			strings.Join(deletedSlotCases, " "),
 			strings.Join(spentAtCases, " "),
 			strings.Join(whereConditions, " OR "),
 		)
-		result := db.Exec(sql, args...)
-		if result.Error != nil {
+		if result := db.Exec(sql, args...); result.Error != nil {
 			return result.Error
 		}
 	}
