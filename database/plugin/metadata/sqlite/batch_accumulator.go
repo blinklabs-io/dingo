@@ -15,6 +15,8 @@
 package sqlite
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -213,7 +215,7 @@ func (d *MetadataStoreSqlite) FlushBatch(
 				err,
 			)
 		}
-		if err := batchSpendUtxos(db, batch.UtxoSpends); err != nil {
+		if err := d.batchSpendUtxos(db, batch.UtxoSpends); err != nil {
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
 		}
 
@@ -294,7 +296,7 @@ func batchDeleteByTxIDs(db *gorm.DB, table string, ids []uint) error {
 	return nil
 }
 
-func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
+func (d *MetadataStoreSqlite) batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 	if len(spends) == 0 {
 		return nil
 	}
@@ -312,8 +314,64 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 				spend.OutputIdx,
 			); result.Error != nil {
 				return result.Error
+			} else if result.RowsAffected == 0 {
+				if err := d.checkUnmatchedUtxoSpend(
+					db,
+					spend,
+				); err != nil {
+					return err
+				}
 			}
 		}
 	}
 	return nil
+}
+
+func (d *MetadataStoreSqlite) checkUnmatchedUtxoSpend(
+	db *gorm.DB,
+	spend utxoSpend,
+) error {
+	var existingUtxo models.Utxo
+	checkResult := db.Where(
+		"tx_id = ? AND output_idx = ?",
+		spend.TxId,
+		spend.OutputIdx,
+	).First(&existingUtxo)
+	if checkResult.Error != nil {
+		if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
+			d.warnLimiter.warn(
+				d.logger,
+				"input-utxo-not-found",
+				"input UTxO not found",
+				"hash",
+				fmt.Sprintf("%x", spend.TxId),
+				"index",
+				spend.OutputIdx,
+			)
+			return nil
+		}
+		return fmt.Errorf(
+			"failed to check UTXO %x#%d: %w",
+			spend.TxId,
+			spend.OutputIdx,
+			checkResult.Error,
+		)
+	}
+	if existingUtxo.SpentAtTxId != nil &&
+		bytes.Equal(existingUtxo.SpentAtTxId, spend.SpentByTxHash) {
+		return nil
+	}
+	if existingUtxo.DeletedSlot == 0 && existingUtxo.SpentAtTxId == nil {
+		return fmt.Errorf(
+			"batch spend did not update UTXO %x#%d",
+			spend.TxId,
+			spend.OutputIdx,
+		)
+	}
+	return fmt.Errorf(
+		"%w: %x:%d",
+		types.ErrUtxoConflict,
+		spend.TxId,
+		spend.OutputIdx,
+	)
 }
