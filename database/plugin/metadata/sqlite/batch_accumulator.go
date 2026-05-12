@@ -58,6 +58,11 @@ func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{}
 }
 
+// NewBatchAccumulator creates an accumulator for this metadata store.
+func (d *MetadataStoreSqlite) NewBatchAccumulator() types.MetadataBatchAccumulator {
+	return NewBatchAccumulator()
+}
+
 // AddKeyWitness appends a key witness record to the batch.
 func (b *BatchAccumulator) AddKeyWitness(kw models.KeyWitness) {
 	b.KeyWitnesses = append(b.KeyWitnesses, kw)
@@ -144,9 +149,13 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStoreSqlite) FlushBatch(
-	batch *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf("sqlite FlushBatch: wrong accumulator type %T", acc)
+	}
 	if batch == nil {
 		return nil
 	}
@@ -326,6 +335,7 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 			)
 			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
 		}
+
 		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
 		args = append(args, deletedSlotArgs...)
 		args = append(args, spentAtArgs...)

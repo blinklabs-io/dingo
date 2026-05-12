@@ -2063,10 +2063,17 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	point ocommon.Point,
 	idx uint32,
 	certDeposits map[int]uint64,
-	acc *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
-	if acc == nil {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"SetTransactionBatched: wrong accumulator type %T",
+			acc,
+		)
+	}
+	if batch == nil {
 		return errors.New("SetTransactionBatched: acc must not be nil")
 	}
 	local := NewBatchAccumulator()
@@ -2498,10 +2505,34 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				)
 			}
 			if len(unifiedIDs) > 0 {
+				poolRegistrationIDs := []uint{}
+				if result := db.Model(&models.PoolRegistration{}).
+					Where("certificate_id IN ?", unifiedIDs).
+					Pluck("id", &poolRegistrationIDs); result.Error != nil {
+					return fmt.Errorf(
+						"query existing pool registrations (batched): %w",
+						result.Error,
+					)
+				}
+				if len(poolRegistrationIDs) > 0 {
+					if result := db.Table("pool_registration_owner").
+						Where("pool_registration_id IN ?", poolRegistrationIDs).
+						Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing pool_registration_owner records (batched): %w",
+							result.Error,
+						)
+					}
+					if result := db.Table("pool_registration_relay").
+						Where("pool_registration_id IN ?", poolRegistrationIDs).
+						Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing pool_registration_relay records (batched): %w",
+							result.Error,
+						)
+					}
+				}
 				tables := []string{
-					// Child tables must be deleted before parent tables (FK constraints).
-					"pool_registration_owner",
-					"pool_registration_relay",
 					"stake_registration", "pool_registration", "pool_retirement",
 					"auth_committee_hot", "resign_committee_cold",
 					"deregistration", "stake_delegation",
@@ -3275,7 +3306,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 		}
 	}
 
-	acc.MergeFrom(local)
+	batch.MergeFrom(local)
 	return nil
 }
 

@@ -55,6 +55,11 @@ func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{}
 }
 
+// NewBatchAccumulator creates an accumulator for this metadata store.
+func (d *MetadataStorePostgres) NewBatchAccumulator() types.MetadataBatchAccumulator {
+	return NewBatchAccumulator()
+}
+
 // AddKeyWitness appends a key witness record to the batch.
 func (b *BatchAccumulator) AddKeyWitness(kw models.KeyWitness) {
 	b.KeyWitnesses = append(b.KeyWitnesses, kw)
@@ -141,9 +146,13 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStorePostgres) FlushBatch(
-	batch *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf("postgres FlushBatch: wrong accumulator type %T", acc)
+	}
 	if batch == nil {
 		return nil
 	}
