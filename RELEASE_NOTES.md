@@ -16,9 +16,9 @@ Hi folks! Here’s what we shipped in v0.45.0.
 
 ### 💪 Improvements
 
-* Improved **verify PV11 readiness on a live multi-node path:** Release validation now checks Conway to PV11 progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
+* Improved **verify upcoming protocol-step readiness on a live multi-node path:** Release validation now checks the Conway to vanRossem progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
 * Refined **expand fuzz-driven regression coverage across core behaviors:** More parsing, storage, networking, and configuration paths now receive broader stress coverage, which helps surface edge cases before they reach operators and integrators.
-* Enhanced **keep publish workflows moving while module indexing catches up:** Release publishing now avoids a broken module-proxy pull step, which keeps releases moving even when module proxy and `pkg.go.dev` refreshes take longer to appear.
+* Enhanced **keep publish workflows moving while package indexing catches up:** Release publishing now avoids a broken package refresh step, which keeps releases moving even when package index updates take longer to appear.
 * Updated **keep release history current through v0.44.0:** `RELEASE_NOTES.md` now includes the v0.44.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
@@ -32,7 +32,7 @@ Hi folks! Here’s what we shipped in v0.45.0.
 * Clarified **backfill batching and safer replay progress:** Historical replay now batches more backfill work and keeps checkpoint progress safer, which helps long catch-up runs resume more smoothly after interruptions.
 * Highlighted **safer ledger validation, rollback handling, and sparse recovery:** Ledger validation now rejects headers that jump too far ahead, rollback handling no longer pushes past the known ledger tip, and sparse intersect recovery finds safer restart points more reliably.
 * Emphasized **stronger PV11 and fuzz regression coverage:** Release validation now exercises PV11 crossing behavior more directly, and broader stress coverage checks more parsing, storage, networking, and configuration paths for regressions.
-* Summarized **publish maintenance and release-history updates:** Release publishing keeps moving even while module proxy and `pkg.go.dev` refreshes may lag because the proxy pull remains disabled, and release history now includes the v0.44.0 entry.
+* Summarized **publish maintenance and package-index timing:** Release publishing keeps moving even while package index refreshes may lag because the refresh pull remains disabled.
 
 ### Recommended Network Compatibility ⚠️
 
