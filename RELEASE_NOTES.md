@@ -1,5 +1,21 @@
 # Release Notes
 
+## v0.45.0 (May 12, 2026)
+
+**Title:** Batched backfill, ledger safety fixes, and stronger PV11 readiness
+
+**Date:** May 12, 2026
+
+**Version:** v0.45.0
+
+Hi folks! Here’s what we shipped in v0.45.0.
+
+### ✨ What's New
+
+* Added **batch historical backfill work for smoother replay progress:** Historical metadata replay now writes work in larger batches, which helps long backfills move forward more smoothly and keeps checkpoint recovery safer when replay resumes.
+
+### 💪 Improvements
+
 ## v0.44.0 (May 11, 2026)
 
 **Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
