@@ -3470,9 +3470,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	}
 	if seqNum, ok := opCertSequenceNumber(block); ok {
 		issuerVkey := block.IssuerVkey()
-		poolKeyHash := lcommon.PoolKeyHash(
-			lcommon.NewBlake2b224(issuerVkey[:]),
-		)
+		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
 		if err := ls.db.UpdatePoolOpCertSequence(
 			poolKeyHash,
 			uint64(seqNum),
