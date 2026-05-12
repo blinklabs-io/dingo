@@ -133,7 +133,7 @@ func (d *MetadataStoreMysql) UpdatePoolOpCertSequence(
 			pkh.Bytes(),
 			slot,
 		).
-		Assign("sequence", sequence).
+		Assign(map[string]any{"sequence": sequence}).
 		FirstOrCreate(&models.PoolOpCertSequence{
 			PoolKeyHash: pkh.Bytes(),
 			Slot:        slot,
