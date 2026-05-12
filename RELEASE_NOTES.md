@@ -1,5 +1,56 @@
 # Release Notes
 
+## v0.44.0 (May 11, 2026)
+
+**Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
+
+**Date:** May 11, 2026
+
+**Version:** v0.44.0
+
+Hi folks! Here’s what we shipped in v0.44.0.
+
+### ✨ What's New
+
+* Added **expand Blockfrost transaction access:** Blockfrost compatible services can now look up transaction details, metadata, UTxOs, certificates, redeemers, required signers, and signed CBOR, and they can also submit transactions with clearer submit responses.
+
+### 💪 Improvements
+
+* Improved **preserve Mithril backfill progress across interruptions:** Mithril bootstrap now keeps more recovery state and resumes metadata backfill more safely, which helps interrupted runs continue without losing important progress.
+* Refined **give full devnet validation more time:** Devnet validation now has a longer default timeout, which reduces avoidable failures during full environment checks.
+* Enhanced **recover forked chains across more rollback paths:** Chain reconciliation now handles more rollback and fork combinations without dropping useful chain history, which makes recovery steadier after difficult fork scenarios.
+* Updated **align operational tooling with newer cardano-cli support:** Operational tooling now stays aligned with the newer `cardano-cli` release for smoother maintenance.
+* Modernized **align data handling with newer CBOR support:** Data handling now stays aligned with the newer CBOR library release for steadier compatibility maintenance.
+* Strengthened **align secrets handling with newer sops support:** Encrypted configuration and secrets handling now stay aligned with the newer `sops` release for steadier maintenance.
+* Advanced **align compression support with newer library updates:** Compression support now stays aligned with the newer `klauspost/compress` release for routine compatibility maintenance.
+* Polished **align system support with newer platform updates:** System level compatibility now stays aligned with the newer `golang.org/x/sys` release for steadier maintenance.
+* Restored **keep release history current through v0.43.0:** `RELEASE_NOTES.md` now includes the v0.43.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Fixed **return safer intersect points from sparse ledger history:** Chains can now find safer meeting points even when recent ledger history is sparse, which helps sync and recovery continue more reliably.
+
+### 📋 What You Need to Know
+
+* Clarified **broader Blockfrost transaction coverage and submit handling:** Blockfrost compatible integrations can now use transaction detail and submit endpoints with clearer coverage across metadata, UTxOs, certificates, redeemers, required signers, signed CBOR, and submit outcomes.
+* Highlighted **safer Mithril backfill and resume handling:** Mithril bootstrap now preserves more recovery state and resumes metadata backfill more safely, which lowers the chance of losing progress after an interrupted run.
+* Emphasized **safer fork and intersect recovery behavior:** Chain recovery now handles sparse intersect points and more fork reconciliation scenarios more safely, which helps nodes recover from difficult rollback paths with less risk of getting stuck.
+* Summarized **maintenance, validation, dependency, and release history updates:** Validation timing, dependency compatibility, and release tracking were refreshed to keep operations and maintenance steadier around this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.43.0 (May 9, 2026)
 
 **Title:** Safer block-producer startup, deeper observability, and easier dashboard imports
