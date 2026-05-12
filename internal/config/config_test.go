@@ -24,7 +24,9 @@ import (
 
 func resetGlobalConfig() {
 	globalConfig = &Config{
-		MempoolCapacity:             1048576,
+		// MempoolCapacity left as the zero sentinel; LoadConfig fills
+		// it in from RunMode after CLI/env/YAML processing.
+		MempoolCapacity:             0,
 		EvictionWatermark:           0.90,
 		RejectionWatermark:          0.95,
 		BindAddr:                    "0.0.0.0",
@@ -867,5 +869,56 @@ func TestLoad_StorageModeDefault(t *testing.T) {
 
 	if cfg.StorageMode != "" {
 		t.Errorf("expected StorageMode default to be empty, got %q", cfg.StorageMode)
+	}
+}
+
+// TestLoad_MempoolCapacityMode covers MempoolCapacity defaulting based
+// on RunMode and the priority of an explicit YAML override.
+func TestLoad_MempoolCapacityMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		yaml     string
+		expected int64
+	}{
+		{
+			name:     "praos serve default",
+			yaml:     "runMode: \"serve\"\n",
+			expected: DefaultMempoolCapacityPraos,
+		},
+		{
+			name:     "leios default raises to 25 MiB",
+			yaml:     "runMode: \"leios\"\n",
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "explicit value wins under leios",
+			yaml:     "runMode: \"leios\"\nmempoolCapacity: 5242880\n",
+			expected: 5242880,
+		},
+		{
+			name:     "explicit value wins under serve",
+			yaml:     "runMode: \"serve\"\nmempoolCapacity: 5242880\n",
+			expected: 5242880,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetGlobalConfig()
+			tmpDir := t.TempDir()
+			tmpFile := filepath.Join(tmpDir, "test-mempool-mode.yaml")
+			if err := os.WriteFile(tmpFile, []byte(tc.yaml), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(tmpFile)
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.MempoolCapacity != tc.expected {
+				t.Errorf(
+					"MempoolCapacity: got %d, want %d",
+					cfg.MempoolCapacity, tc.expected,
+				)
+			}
+		})
 	}
 }
