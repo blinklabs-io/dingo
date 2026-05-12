@@ -16,6 +16,13 @@ Hi folks! Here’s what we shipped in v0.45.0.
 
 ### 💪 Improvements
 
+* Improved **verify PV11 readiness on a live multi-node path:** Release validation now checks Conway to PV11 progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
+* Refined **expand fuzz-driven regression coverage across core behaviors:** More parsing, storage, networking, and configuration paths now receive broader stress coverage, which helps surface edge cases before they reach operators and integrators.
+* Enhanced **keep publish workflows moving while module indexing catches up:** Release publishing now avoids a broken module-proxy pull step, which keeps releases moving even when module proxy and `pkg.go.dev` refreshes take longer to appear.
+* Updated **keep release history current through v0.44.0:** `RELEASE_NOTES.md` now includes the v0.44.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
 ## v0.44.0 (May 11, 2026)
 
 **Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
