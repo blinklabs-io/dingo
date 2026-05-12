@@ -235,9 +235,11 @@ intersectTip: false
 # Default: 1048576 (1 MiB) for Praos modes (runMode "serve" / "load" / "dev")
 # Default: 26214400 (25 MiB) when runMode is "leios", since Leios sustains
 # much higher tx throughput across several pipelines and a 1 MiB cap would
-# bottleneck the protocol itself. An explicit value here overrides both.
+# bottleneck the protocol itself.
+# Leave commented to let the mode-derived default apply; uncomment and
+# edit to override.
 # CLI: --mempool-capacity
-mempoolCapacity: 1048576
+# mempoolCapacity: 1048576
 
 # Forging tolerances (0 = defaults)
 # forgeSyncToleranceSlots controls how far the local chain can lag the upstream
