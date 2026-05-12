@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -61,4 +62,53 @@ func TestIntersectPointsKeepsCurrentTipFallback(t *testing.T) {
 	require.Equal(t, pendingTip.Hash, points[0].Hash)
 	require.Equal(t, persistedBlock.Slot, points[1].Slot)
 	require.Equal(t, persistedBlock.Hash, points[1].Hash)
+}
+
+func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
+	db, err := database.New(&database.Config{
+		DataDir:        t.TempDir(),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	var prevHash []byte
+	for slot := uint64(1); slot <= 40; slot++ {
+		hash := bytes.Repeat([]byte{byte(slot)}, 32)
+		require.NoError(t, db.BlockCreate(models.Block{
+			ID:       slot,
+			Slot:     slot,
+			Hash:     hash,
+			Number:   slot,
+			Type:     1,
+			PrevHash: prevHash,
+			Cbor:     []byte{0x80},
+		}, nil))
+		prevHash = hash
+	}
+
+	cm, err := NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return db.Blob().Delete(
+			txn.Blob(),
+			dbtypes.BlockBlobIndexKey(39),
+		)
+	}))
+
+	points := c.IntersectPoints(40)
+	require.GreaterOrEqual(t, len(points), intersectDensePointCount)
+
+	pointSlots := make(map[uint64]struct{}, len(points))
+	for _, point := range points {
+		pointSlots[point.Slot] = struct{}{}
+	}
+	_, hasMissingIndexSlot := pointSlots[39]
+	require.False(t, hasMissingIndexSlot)
+	_, hasPreviousDenseSlot := pointSlots[38]
+	require.True(t, hasPreviousDenseSlot)
 }
