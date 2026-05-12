@@ -4154,41 +4154,38 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 	}
 	points := make([]ocommon.Point, 0, count)
 	seen := make(map[string]struct{}, count)
-	appendBlock := func(block models.Block) bool {
+	appendBlock := func(block models.Block) {
 		if len(points) >= count {
-			return false
+			return
 		}
 		key := fmt.Sprintf("%d:%x", block.Slot, block.Hash)
 		if _, ok := seen[key]; ok {
-			return true
+			return
 		}
 		points = append(
 			points,
 			ocommon.NewPoint(block.Slot, block.Hash),
 		)
 		seen[key] = struct{}{}
-		return true
 	}
-	appendBlockByIndex := func(blockIndex uint64) bool {
+	appendBlockByIndex := func(blockIndex uint64) {
 		if len(points) >= count {
-			return false
+			return
 		}
 		block, err := ls.db.BlockByIndex(blockIndex, nil)
 		if err != nil {
-			return false
+			return
 		}
-		return appendBlock(block)
+		appendBlock(block)
 	}
-	tipBlock, err := database.BlockByHash(ls.db, currentTip.Point.Hash)
+	tipBlock, err := database.BlockByPoint(ls.db, currentTip.Point)
 	if err != nil {
-		// Tolerate missing blocks: a block lacking a hash
-		// index entry can be reported NotFound by the
-		// time-bounded BlockByHash scan fallback added in
-		// this PR. Returning the error here would leave us
-		// unable to send any intersect points to peers,
-		// which breaks both inbound chainsync (peers can't
-		// sync from us) and our own outbound chainsync setup
-		// (we ship MsgFindIntersect with these points).
+		// Tolerate a missing authoritative tip: returning the
+		// error here would leave us unable to send any intersect
+		// points to peers, which breaks both inbound chainsync
+		// (peers can't sync from us) and our own outbound
+		// chainsync setup (we ship MsgFindIntersect with these
+		// points).
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return points, nil
 		}
@@ -4203,9 +4200,7 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 	}
 	denseCount := min(count, ledgerIntersectDenseCount)
 	for idx := denseStartIndex; idx >= firstBlockIndex && len(points) < denseCount; idx-- {
-		if !appendBlockByIndex(idx) {
-			break
-		}
+		appendBlockByIndex(idx)
 		if idx == firstBlockIndex {
 			break
 		}
@@ -4218,13 +4213,11 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 			if offset == 0 || offset >= tipBlock.ID {
 				break
 			}
-			if !appendBlockByIndex(tipBlock.ID - offset) {
-				break
-			}
+			appendBlockByIndex(tipBlock.ID - offset)
 		}
 	}
 	if len(points) < count {
-		_ = appendBlockByIndex(firstBlockIndex)
+		appendBlockByIndex(firstBlockIndex)
 	}
 	return points, nil
 }

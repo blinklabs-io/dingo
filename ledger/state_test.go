@@ -2434,6 +2434,57 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 	}
 }
 
+func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 40)
+	for slot := uint64(1); slot <= 40; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append(
+				[]byte(nil),
+				blocks[len(blocks)-1].Hash...,
+			)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	blockBlobIndexKey := dbtypes.BlockBlobIndexKey(39)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		indexBytes, err := db.Blob().Get(txn.Blob(), blockBlobIndexKey)
+		require.NoError(t, err)
+		require.NotNil(t, indexBytes)
+		return db.Blob().Delete(
+			txn.Blob(),
+			blockBlobIndexKey,
+		)
+	}))
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(points), ledgerIntersectDenseCount)
+
+	pointSlots := make(map[uint64]struct{}, len(points))
+	for _, point := range points {
+		pointSlots[point.Slot] = struct{}{}
+	}
+	_, hasMissingIndexSlot := pointSlots[39]
+	assert.False(t, hasMissingIndexSlot)
+	_, hasPreviousDenseSlot := pointSlots[38]
+	assert.True(t, hasPreviousDenseSlot)
+}
+
 func TestDensityWindow(t *testing.T) {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
