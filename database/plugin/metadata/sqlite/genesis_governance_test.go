@@ -459,3 +459,147 @@ func TestSqliteRollbackPreservesGenesisStakeVoteAccount(t *testing.T) {
 		"DRep must be restored to genesis value")
 	assert.Equal(t, models.DrepTypeAddrKeyHash, restored.DrepType)
 }
+
+// TestCertRecordIsMoreRecentBlockIndex verifies that the in-memory
+// recency comparator on certRecord and drepCertRecord breaks same-slot
+// ties by block_index BEFORE cert_index. This matters because
+// cert_index resets per transaction: at the same slot, two certs from
+// different txs can both have cert_index=0; only block_index
+// distinguishes them. (See CLAUDE.md: "Order certificates using
+// added_slot DESC, block_index DESC, cert_index DESC".)
+func TestCertRecordIsMoreRecentBlockIndex(t *testing.T) {
+	// Same slot, different block_index, same cert_index — the higher
+	// block_index must win.
+	earlier := certRecord{addedSlot: 100, blockIndex: 0, certIndex: 0}
+	later := certRecord{addedSlot: 100, blockIndex: 1, certIndex: 0}
+	assert.True(t, later.isMoreRecent(earlier),
+		"higher block_index must beat lower at same slot")
+	assert.False(t, earlier.isMoreRecent(later),
+		"lower block_index must lose to higher at same slot")
+
+	// block_index ranks above cert_index: a row with lower block_index
+	// but higher cert_index is still older than one with higher
+	// block_index. This is the precise failure case the reviewer
+	// flagged.
+	loBlkHiCert := certRecord{addedSlot: 100, blockIndex: 0, certIndex: 99}
+	hiBlkLoCert := certRecord{addedSlot: 100, blockIndex: 1, certIndex: 0}
+	assert.True(t, hiBlkLoCert.isMoreRecent(loBlkHiCert),
+		"block_index outranks cert_index when slots match")
+
+	// Same slot AND same block_index: cert_index breaks the tie.
+	c0 := certRecord{addedSlot: 100, blockIndex: 5, certIndex: 0}
+	c1 := certRecord{addedSlot: 100, blockIndex: 5, certIndex: 1}
+	assert.True(t, c1.isMoreRecent(c0))
+
+	// Same exact key: not more recent than self.
+	assert.False(t, c0.isMoreRecent(c0))
+
+	// drepCertRecord uses the same ordering.
+	drepEarlier := drepCertRecord{addedSlot: 100, blockIndex: 0, certIndex: 0}
+	drepLater := drepCertRecord{addedSlot: 100, blockIndex: 1, certIndex: 0}
+	assert.True(t, drepLater.isMoreRecent(drepEarlier))
+	assert.False(t, drepEarlier.isMoreRecent(drepLater))
+}
+
+// TestRollbackPicksLatestByBlockIndexAtSameSlot is an end-to-end check
+// that RestoreAccountStateAtSlot picks the correct VoteDelegation when
+// two of them land at the same slot in different transactions. The
+// later transaction (higher block_index) must win; with the previous
+// ordering (slot, cert_index) both certs tied on cert_index=0 and the
+// outcome was non-deterministic.
+func TestRollbackPicksLatestByBlockIndexAtSameSlot(t *testing.T) {
+	store := setupTestStore(t)
+
+	stakeKey := bytes.Repeat([]byte{0x91}, 28)
+	drepEarly := bytes.Repeat([]byte{0x92}, 28)
+	drepLate := bytes.Repeat([]byte{0x93}, 28)
+	drepCurrent := bytes.Repeat([]byte{0x94}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeKey,
+		Drep:       drepCurrent,
+		DrepType:   models.DrepTypeAddrKeyHash,
+		AddedSlot:  300,
+		Active:     true,
+	}).Error)
+
+	// Registration so the account survives Phase 1 of restore.
+	require.NoError(t, createTestTransaction(store.DB(), 200, 50))
+	regCert := models.Certificate{
+		TransactionID: 200,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+		Slot:          50,
+	}
+	require.NoError(t, store.DB().Create(&regCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     50,
+		CertificateID: regCert.ID,
+	}).Error)
+
+	// Two VoteDelegation certs at the SAME slot 100, different txs.
+	// tx 201 has block_index=0; tx 202 has block_index=1. Both certs
+	// are the first in their respective tx (cert_index=0). The cert
+	// from tx 202 must win because of the higher block_index. We
+	// insert tx 202's cert first (lower certs.id) so a buggy query
+	// that doesn't tiebreak by block_index would deterministically
+	// pick the wrong one (tx 201, inserted later, higher certs.id).
+	require.NoError(t,
+		store.DB().Exec(
+			`INSERT INTO "transaction" (id, hash, slot, valid, type, block_index)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			201, []byte("tx201"), 100, true, 0, 0,
+		).Error,
+	)
+	require.NoError(t,
+		store.DB().Exec(
+			`INSERT INTO "transaction" (id, hash, slot, valid, type, block_index)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			202, []byte("tx202"), 100, true, 0, 1,
+		).Error,
+	)
+	// tx 202's cert (later block_index, correct answer) — insert FIRST
+	// so it gets the LOWER certs.id, while the WRONG answer gets the
+	// higher certs.id (typical SQL "last wins" tiebreak).
+	certLate := models.Certificate{
+		TransactionID: 202,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeVoteDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&certLate).Error)
+	require.NoError(t, store.DB().Create(&models.VoteDelegation{
+		StakingKey:    stakeKey,
+		Drep:          drepLate,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     100,
+		CertificateID: certLate.ID,
+	}).Error)
+	certEarly := models.Certificate{
+		TransactionID: 201,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeVoteDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&certEarly).Error)
+	require.NoError(t, store.DB().Create(&models.VoteDelegation{
+		StakingKey:    stakeKey,
+		Drep:          drepEarly,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		AddedSlot:     100,
+		CertificateID: certEarly.ID,
+	}).Error)
+
+	// Roll back to slot 200 — both slot-100 certs are valid history,
+	// the slot-300 state is undone. Expected DRep: drepLate (higher
+	// block_index).
+	require.NoError(t, store.RestoreAccountStateAtSlot(200, nil))
+
+	restored, err := store.GetAccount(stakeKey, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, restored)
+	assert.Equal(t, drepLate, restored.Drep,
+		"latest VoteDelegation at slot 100 must be the one in the tx "+
+			"with higher block_index (tx 202), not tx 201")
+}

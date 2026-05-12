@@ -25,24 +25,28 @@ import (
 )
 
 // drepCertRecord holds certificate data for batch processing during DRep restoration.
-// Includes cert_index for same-slot disambiguation.
+// On-chain ordering is (added_slot DESC, block_index DESC, cert_index DESC)
+// because cert_index resets per tx, so block_index is required to
+// disambiguate across txs in the same block.
 type drepCertRecord struct {
 	addedSlot  uint64
+	blockIndex uint32
 	certIndex  uint32
 	anchorURL  string
 	anchorHash []byte
 }
 
 // isMoreRecent checks if this certificate is more recent than the other.
-// When slots are equal, cert_index determines order (higher = later in transaction).
+// Ordering follows (added_slot, block_index, cert_index): block_index
+// orders txs within a block, cert_index orders certs within a tx.
 func (r drepCertRecord) isMoreRecent(other drepCertRecord) bool {
-	if r.addedSlot > other.addedSlot {
-		return true
+	if r.addedSlot != other.addedSlot {
+		return r.addedSlot > other.addedSlot
 	}
-	if r.addedSlot == other.addedSlot && r.certIndex > other.certIndex {
-		return true
+	if r.blockIndex != other.blockIndex {
+		return r.blockIndex > other.blockIndex
 	}
-	return false
+	return r.certIndex > other.certIndex
 }
 
 // drepCertCache holds batch-fetched certificate data for all DReps being restored.
@@ -88,21 +92,25 @@ func batchFetchDrepCerts(
 		end := min(start+sqliteBindVarLimit, len(credentials))
 		credChunk := credentials[start:end]
 
-		// Fetch registration certificates with cert_index
+		// Fetch registration certificates with block_index + cert_index.
+		// LEFT JOIN certs so genesis registration_drep rows (no certs
+		// row, certificate_id=0) still surface; cert_index/block_index
+		// default to 0, which is safe because slot 0 precedes every
+		// real cert. block_index orders txs within a block; cert_index
+		// orders certs within a tx.
 		type regResult struct {
 			DrepCredential []byte
 			AddedSlot      uint64
+			BlockIndex     uint32
 			CertIndex      uint32
 			AnchorURL      string `gorm:"column:anchor_url"`
 			AnchorHash     []byte
 		}
 		var regRecords []regResult
-		// LEFT JOIN so genesis registration_drep rows (no certs row,
-		// certificate_id=0) still surface; cert_index defaults to 0,
-		// which is safe because slot 0 precedes every real cert.
 		if err := db.Table("registration_drep").
-			Select("registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, COALESCE(certs.cert_index, 0) AS cert_index").
+			Select(`registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index`).
 			Joins("LEFT JOIN certs ON certs.id = registration_drep.certificate_id").
+			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("drep_credential IN ? AND registration_drep.added_slot <= ?", credChunk, slot).
 			Find(&regRecords).Error; err != nil {
 			return nil, err
@@ -111,6 +119,7 @@ func batchFetchDrepCerts(
 			key := string(r.DrepCredential)
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
 				certIndex:  r.CertIndex,
 				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
@@ -121,16 +130,18 @@ func batchFetchDrepCerts(
 			}
 		}
 
-		// Fetch deregistration certificates with cert_index
+		// Fetch deregistration certificates with block_index + cert_index.
 		type deregResult struct {
 			DrepCredential []byte
 			AddedSlot      uint64
+			BlockIndex     uint32
 			CertIndex      uint32
 		}
 		var deregRecords []deregResult
 		if err := db.Table("deregistration_drep").
-			Select("deregistration_drep.drep_credential, deregistration_drep.added_slot, certs.cert_index").
+			Select(`deregistration_drep.drep_credential, deregistration_drep.added_slot, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
 			Joins("INNER JOIN certs ON certs.id = deregistration_drep.certificate_id").
+			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("drep_credential IN ? AND deregistration_drep.added_slot <= ?", credChunk, slot).
 			Find(&deregRecords).Error; err != nil {
 			return nil, err
@@ -138,8 +149,9 @@ func batchFetchDrepCerts(
 		for _, r := range deregRecords {
 			key := string(r.DrepCredential)
 			rec := drepCertRecord{
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			}
 			if !cache.hasDereg[key] ||
 				rec.isMoreRecent(cache.deregistration[key]) {
@@ -148,18 +160,20 @@ func batchFetchDrepCerts(
 			}
 		}
 
-		// Fetch update certificates with cert_index
+		// Fetch update certificates with block_index + cert_index.
 		type updateResult struct {
 			Credential []byte
 			AddedSlot  uint64
+			BlockIndex uint32
 			CertIndex  uint32
 			AnchorURL  string `gorm:"column:anchor_url"`
 			AnchorHash []byte
 		}
 		var updateRecords []updateResult
 		if err := db.Table("update_drep").
-			Select("update_drep.credential, update_drep.added_slot, update_drep.anchor_url, update_drep.anchor_hash, certs.cert_index").
+			Select(`update_drep.credential, update_drep.added_slot, update_drep.anchor_url, update_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
 			Joins("INNER JOIN certs ON certs.id = update_drep.certificate_id").
+			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("credential IN ? AND update_drep.added_slot <= ?", credChunk, slot).
 			Find(&updateRecords).Error; err != nil {
 			return nil, err
@@ -168,6 +182,7 @@ func batchFetchDrepCerts(
 			key := string(r.Credential)
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
 				certIndex:  r.CertIndex,
 				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
