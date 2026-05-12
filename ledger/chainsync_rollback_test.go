@@ -278,6 +278,109 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	aheadHash := testHashBytes("raw-chain-ahead-of-ledger")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 10,
+			Hash:        aheadHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.Equal(
+		t,
+		fixture.currentTip.Point.Slot+10,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+
+	// Simulate the raw primary chain being well ahead of the metadata
+	// ledger apply loop during historical catch-up.
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+	preRollbackSeq := fixture.ls.lastLocalRollbackSeq
+
+	forkHash := testHashBytes("ahead-raw-chain-fork")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 2,
+		slot:        fixture.currentTip.Point.Slot + 20,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.NoError(t, err)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, preRollbackSeq, fixture.ls.lastLocalRollbackSeq)
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	select {
+	case resync := <-resyncCh:
+		t.Fatalf("expected no local rollback resync event, got: %#v", resync)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 

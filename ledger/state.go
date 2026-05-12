@@ -1456,6 +1456,17 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
 		return nil
 	}
+	if point.Slot > currentTip.Point.Slot {
+		ls.config.Logger.Debug(
+			"rollback point ahead of ledger tip, skipping metadata rollback",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"ledger_tip_slot", currentTip.Point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+		)
+		return nil
+	}
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
