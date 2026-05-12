@@ -380,16 +380,21 @@ func batchFetchRegistration(
 		CertIndex  uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so synthetic genesis Registration rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.staking_key, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM registration t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
@@ -501,16 +506,21 @@ func batchFetchStakeDelegation(
 		CertIndex   uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis stake_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.staking_key, t.pool_key_hash, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
@@ -548,16 +558,21 @@ func batchFetchVoteDelegation(
 		CertIndex  uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis vote_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM vote_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
@@ -597,16 +612,21 @@ func batchFetchStakeVoteDelegation(
 		CertIndex   uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis stake_vote_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_vote_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)

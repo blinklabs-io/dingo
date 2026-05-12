@@ -3952,6 +3952,27 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 		}
 		account.AddedSlot = 0
 
+		// Conway genesis delegations implicitly register the staking
+		// credential at slot 0 (no on-chain certificate, no deposit).
+		// We materialize this as a synthetic Registration row so the
+		// rollback path (RestoreAccountStateAtSlot) recognizes the
+		// account as "existed at genesis" via its standard hasReg
+		// check; without it, rolling back past a later on-chain cert
+		// would delete a genesis-rooted account.
+		var existingReg models.Registration
+		regResult := db.Where(
+			"staking_key = ? AND added_slot = ?",
+			stakeKey, uint64(0),
+		).Attrs(models.Registration{
+			StakingKey: stakeKey,
+			AddedSlot:  0,
+		}).FirstOrCreate(&existingReg)
+		if regResult.Error != nil {
+			return fmt.Errorf(
+				"create genesis registration: %w", regResult.Error,
+			)
+		}
+
 		// Delegation history tables have no unique constraint that covers
 		// (staking_key, added_slot), so we use FirstOrCreate to keep the
 		// slot-0 row idempotent across retries (e.g., resumed Mithril

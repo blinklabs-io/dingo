@@ -97,9 +97,12 @@ func batchFetchDrepCerts(
 			AnchorHash     []byte
 		}
 		var regRecords []regResult
+		// LEFT JOIN so genesis registration_drep rows (no certs row,
+		// certificate_id=0) still surface; cert_index defaults to 0,
+		// which is safe because slot 0 precedes every real cert.
 		if err := db.Table("registration_drep").
-			Select("registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, certs.cert_index").
-			Joins("INNER JOIN certs ON certs.id = registration_drep.certificate_id").
+			Select("registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, COALESCE(certs.cert_index, 0) AS cert_index").
+			Joins("LEFT JOIN certs ON certs.id = registration_drep.certificate_id").
 			Where("drep_credential IN ? AND registration_drep.added_slot <= ?", credChunk, slot).
 			Find(&regRecords).Error; err != nil {
 			return nil, err
