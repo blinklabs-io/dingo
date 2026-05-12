@@ -976,7 +976,13 @@ func (ls *LedgerState) LatestOpCertSequence(
 ) (sequence uint64, found bool, err error) {
 	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
 	pool, err := ls.db.GetPool(pkh, false, nil)
-	if err != nil || pool == nil {
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if pool == nil {
 		return 0, false, nil
 	}
 	return ls.db.LatestPoolOpCertSequence(pkh, nil)
