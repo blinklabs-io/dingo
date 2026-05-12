@@ -1,0 +1,54 @@
+# Copyright 2026 Blink Labs Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Compose override that flips internal/test/erastest's DevNet from the
+# default Shelley→Conway era-traversal scenario into a Conway-vanRossem
+# (PV11) bootstrap scenario.
+#
+# Apply with run-tests-vanrossem.sh, or manually:
+#
+#   docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.vanrossem.yml \
+#     up -d
+#
+# What it changes:
+#   - configurator mounts testnet-vanrossem.yaml at /testnet.yaml
+#     instead of testnet.yaml. docker compose merges volume entries by
+#     container path, so the override's source wins for /testnet.yaml.
+#   - cardano-producer additionally mounts the utxo-keys volume so the
+#     HFI driver running inside it (via docker exec + cardano-cli) can
+#     sign payment / stake / governance txs with the genesis-utxo
+#     spending keys. Read-only mount; the driver never mutates the
+#     keys.
+#
+# The base docker-compose.yml already uses cardano-node:11.0.1 for both
+# producer and relay (and Dockerfile.configurator's FROM matches), so no
+# image overrides are needed here — every service inherits the
+# vanRossem-aware binary from the base file.
+
+services:
+  configurator:
+    volumes:
+      - ./testnet-vanrossem.yaml:/testnet.yaml
+
+  cardano-producer:
+    volumes:
+      - utxo-keys:/utxo-keys:ro
+      # The HFI driver needs to sign a Yes-vote tx as SPO 1 (dingo's
+      # pool), which requires pool 1's cold.skey. cardano-producer
+      # already has pool 2's keys at /configs/keys; mount pool 1's
+      # configs read-only at a sibling path so cardano-cli can read
+      # the cold.skey without ever mutating the dingo-owned volume.
+      - p1-configs:/p1-configs:ro

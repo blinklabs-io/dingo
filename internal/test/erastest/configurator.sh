@@ -87,6 +87,24 @@ config_config_json() {
     esac
 }
 
+config_conway_genesis() {
+    # Strip the configurator's default 7-member script-hash committee.
+    # testnet-generation-tool seeds conway-genesis.committee.members
+    # with seven scriptHash entries (minSize=7, threshold=2/3) for which
+    # we have no signing material, so any HFI gov-action ratification
+    # under that committee is unmeetable. Drop to a NoCommittee state
+    # (empty members, minSize=0, threshold 0/1) so cardano-ledger Conway
+    # gov rules grant CC approval automatically and the vanrossem test
+    # driver only has to clear the SPO + DRep thresholds. The eras
+    # testnet does not exercise governance, so this clearing has no
+    # observable effect on its assertions.
+    CONWAY_GENESIS_JSON=$1/configs/conway-genesis.json
+    jq '.committee.members = {} |
+        .committee.threshold = {numerator: 0, denominator: 1} |
+        .committeeMinSize = 0' \
+        "${CONWAY_GENESIS_JSON}" | write_file "${CONWAY_GENESIS_JSON}"
+}
+
 config_topology_json() {
     # Generate a ring topology, where pool_n is connected to pool_{n-1} and pool_{n+1}
 
@@ -164,7 +182,15 @@ find /tmp/testnet -type f -name 'topology.json' -exec rm -f '{}' ';'
 
 mkdir -p /configs
 cp -r /tmp/testnet/pools/* /configs
-cp -r /tmp/testnet/utxos/* /configs
+
+# testnet-generation-tool drops the genesis-utxo Shelley payment / stake /
+# genesis spending keys under /tmp/testnet/utxos/keys/. The docker-compose
+# definition mounts an "utxo-keys" volume at /configs/utxo-keys for these,
+# so route the keys there explicitly — a `cp -r /tmp/testnet/utxos/* /configs`
+# silently misses the mount because it lands the files at /configs/keys (a
+# local in-container path that vanishes with the configurator container).
+mkdir -p /configs/utxo-keys
+cp -r /tmp/testnet/utxos/keys/* /configs/utxo-keys/
 
 echo "removing /configs/keys"; rm -rf /configs/keys
 
@@ -186,6 +212,7 @@ for pool in $pools; do
   echo "pool: $pool"
   set_start_time "$pool"
   config_config_json "$pool"
+  config_conway_genesis "$pool"
 done
 
 # Test-only credentials: make config + genesis files world-readable so any
