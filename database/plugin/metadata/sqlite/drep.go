@@ -311,24 +311,26 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 		}
 
 		// Determine the correct state by processing certificates in order.
-		// Start with registration state (DRep is active with registration's anchor data)
+		// Start with registration state (DRep is active with registration's
+		// anchor data) and track the latest event as a drepCertRecord so
+		// cross-type comparisons go through isMoreRecent — i.e., use the
+		// full (added_slot, block_index, cert_index) ordering. Without
+		// block_index, a same-slot deregistration in a later tx could lose
+		// to a registration in an earlier tx (both with cert_index=0).
 		active := true
 		anchorURL := lastReg.anchorURL
 		anchorHash := lastReg.anchorHash
-		latestSlot := lastReg.addedSlot
-		latestCertIndex := lastReg.certIndex
+		latest := lastReg
 		latestWasDereg := false
 
-		// Apply deregistration if it's more recent than registration
+		// Apply deregistration if it's more recent than the current latest.
 		if cache.hasDereg[key] {
 			lastDereg := cache.deregistration[key]
-			if lastDereg.addedSlot > latestSlot ||
-				(lastDereg.addedSlot == latestSlot && lastDereg.certIndex > latestCertIndex) {
+			if lastDereg.isMoreRecent(latest) {
 				active = false
-				latestSlot = lastDereg.addedSlot
-				latestCertIndex = lastDereg.certIndex
 				anchorURL = ""
 				anchorHash = nil
+				latest = lastDereg
 				latestWasDereg = true
 			}
 		}
@@ -340,25 +342,37 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 		// to become active again. Therefore, we skip updates when latestWasDereg is true.
 		if cache.hasUpdate[key] && !latestWasDereg {
 			lastUpdate := cache.update[key]
-			if lastUpdate.addedSlot > latestSlot ||
-				(lastUpdate.addedSlot == latestSlot && lastUpdate.certIndex > latestCertIndex) {
+			if lastUpdate.isMoreRecent(latest) {
 				anchorURL = lastUpdate.anchorURL
 				anchorHash = lastUpdate.anchorHash
-				latestSlot = lastUpdate.addedSlot
+				latest = lastUpdate
 			}
 		}
 
-		// Update the DRep record with the restored state.
-		// Reset LastActivityEpoch and ExpiryEpoch to 0 since we cannot
-		// reliably reconstruct these values from certificate data alone
-		// during rollback. They will be recalculated as new activity occurs.
+		// Activity/expiry can't be reliably reconstructed from cert
+		// history alone (voting activity is tracked elsewhere and bumps
+		// expiry_epoch). For on-chain registrations, reset to 0 so they
+		// are re-seeded by subsequent activity. For genesis-rooted
+		// DReps (most-recent registration at slot 0), preserve the
+		// existing values — they were set from the Conway genesis
+		// config at bootstrap, and zeroing them would silently turn
+		// the DRep into a "never-expiring" one (drepActiveAtEpoch
+		// treats expiry_epoch=0 as unbounded), inflating governance
+		// tallies.
+		expiryEpoch := uint64(0)
+		lastActivityEpoch := uint64(0)
+		if lastReg.addedSlot == 0 {
+			expiryEpoch = drep.ExpiryEpoch
+			lastActivityEpoch = drep.LastActivityEpoch
+		}
+
 		if result := db.Model(&drep).Updates(map[string]any{
 			"active":              active,
 			"anchor_url":          anchorURL,
 			"anchor_hash":         anchorHash,
-			"added_slot":          latestSlot,
-			"last_activity_epoch": 0,
-			"expiry_epoch":        0,
+			"added_slot":          latest.addedSlot,
+			"last_activity_epoch": lastActivityEpoch,
+			"expiry_epoch":        expiryEpoch,
 		}); result.Error != nil {
 			return result.Error
 		}

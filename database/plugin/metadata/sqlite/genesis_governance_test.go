@@ -284,7 +284,8 @@ func TestSqliteRollbackPreservesGenesisDrep(t *testing.T) {
 		nil,
 	))
 
-	// On-chain UpdateDrep at slot 300 mutates Drep.added_slot.
+	// On-chain UpdateDrep at slot 300 mutates Drep.added_slot, and
+	// simulated voting activity bumps last_activity_epoch.
 	require.NoError(t, createTestTransaction(store.DB(), 100, 300))
 	updateCert := models.Certificate{
 		TransactionID: 100,
@@ -304,9 +305,10 @@ func TestSqliteRollbackPreservesGenesisDrep(t *testing.T) {
 		store.DB().Model(&models.Drep{}).
 			Where("credential = ?", drepCred.Credential[:]).
 			Updates(map[string]any{
-				"anchor_url":  "https://example.com/updated",
-				"anchor_hash": bytes.Repeat([]byte{0x99}, 32),
-				"added_slot":  uint64(300),
+				"anchor_url":          "https://example.com/updated",
+				"anchor_hash":         bytes.Repeat([]byte{0x99}, 32),
+				"added_slot":          uint64(300),
+				"last_activity_epoch": uint64(10),
 			}).Error,
 	)
 
@@ -318,6 +320,145 @@ func TestSqliteRollbackPreservesGenesisDrep(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, restored, "genesis DRep must survive rollback")
 	assert.True(t, restored.Active)
+	// ExpiryEpoch came from the Conway genesis config and must NOT be
+	// reset to 0 by rollback. drepActiveAtEpoch treats expiry_epoch=0
+	// as "never expires" — zeroing the genesis value would silently
+	// turn the DRep into an immortal one and inflate governance
+	// tallies after recovery.
+	assert.Equal(t, uint64(500), restored.ExpiryEpoch,
+		"genesis-configured ExpiryEpoch must be preserved on rollback")
+	assert.Equal(t, uint64(10), restored.LastActivityEpoch,
+		"genesis-rooted LastActivityEpoch must be preserved on rollback")
+}
+
+// TestSqliteRollbackResetsExpiryForOnChainDrep verifies that the
+// rollback path still resets ExpiryEpoch to 0 for purely on-chain
+// DReps (no genesis row), preserving the existing behavior where
+// expiry/activity is re-seeded by subsequent governance events. Only
+// genesis-rooted DReps (slot-0 registration) get their values
+// preserved.
+func TestSqliteRollbackResetsExpiryForOnChainDrep(t *testing.T) {
+	store := setupTestStore(t)
+
+	drepCred := bytes.Repeat([]byte{0xa1}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Drep{
+		Credential:        drepCred,
+		AddedSlot:         300,
+		ExpiryEpoch:       100,
+		LastActivityEpoch: 50,
+		Active:            true,
+	}).Error)
+
+	// On-chain registration at slot 100.
+	require.NoError(t, createTestTransaction(store.DB(), 300, 100))
+	regCert := models.Certificate{
+		TransactionID: 300,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeRegistrationDrep),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&regCert).Error)
+	require.NoError(t, store.DB().Create(&models.RegistrationDrep{
+		DrepCredential: drepCred,
+		AddedSlot:      100,
+		CertificateID:  regCert.ID,
+	}).Error)
+
+	require.NoError(t, store.RestoreDrepStateAtSlot(200, nil))
+
+	restored, err := store.GetDrep(drepCred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, restored)
+	// Non-genesis DRep: expiry/activity reset as documented.
+	assert.Equal(t, uint64(0), restored.ExpiryEpoch)
+	assert.Equal(t, uint64(0), restored.LastActivityEpoch)
+}
+
+// TestSqliteRollbackDrepCrossTypeBlockIndex verifies that the
+// cross-type comparison inside RestoreDrepStateAtSlot uses the full
+// (added_slot, block_index, cert_index) ordering. Same-slot
+// registration and deregistration certs in different txs both have
+// cert_index=0; only block_index disambiguates which wins. Before the
+// fix, the cross-type comparison used (added_slot, cert_index) only:
+// a same-slot deregistration with higher block_index would tie on
+// cert_index, fail the strict-greater check, and lose to the
+// registration (which the loop starts with as the default winner) —
+// silently keeping the DRep active when it should have been
+// deregistered.
+func TestSqliteRollbackDrepCrossTypeBlockIndex(t *testing.T) {
+	store := setupTestStore(t)
+
+	drepCred := bytes.Repeat([]byte{0xb1}, 28)
+
+	// Current DRep state (post-rollback the rollback path will rewrite
+	// this).
+	require.NoError(t, store.DB().Create(&models.Drep{
+		Credential: drepCred,
+		AnchorURL:  "to-be-replaced",
+		AddedSlot:  300,
+		Active:     true,
+	}).Error)
+
+	// Two txs in the same block at slot 100. tx 401 has block_index=0,
+	// tx 402 has block_index=1.
+	require.NoError(t,
+		store.DB().Exec(
+			`INSERT INTO "transaction" (id, hash, slot, valid, type, block_index)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			401, []byte("dtx401"), 100, true, 0, 0,
+		).Error,
+	)
+	require.NoError(t,
+		store.DB().Exec(
+			`INSERT INTO "transaction" (id, hash, slot, valid, type, block_index)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			402, []byte("dtx402"), 100, true, 0, 1,
+		).Error,
+	)
+	// Registration in tx 401 (block_index=0) — comes BEFORE the
+	// deregistration in block order. Deregistration in tx 402
+	// (block_index=1) is the correct winner. The buggy cross-type
+	// comparison ignores block_index and keeps the registration as
+	// "latest" because both certs have cert_index=0 and the comparator
+	// requires a STRICT > on cert_index to swap.
+	regCert := models.Certificate{
+		TransactionID: 401,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeRegistrationDrep),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&regCert).Error)
+	require.NoError(t, store.DB().Create(&models.RegistrationDrep{
+		DrepCredential: drepCred,
+		AnchorURL:      "https://example.com/reg",
+		AddedSlot:      100,
+		CertificateID:  regCert.ID,
+	}).Error)
+	deregCert := models.Certificate{
+		TransactionID: 402,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeDeregistrationDrep),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&deregCert).Error)
+	require.NoError(t, store.DB().Create(&models.DeregistrationDrep{
+		DrepCredential: drepCred,
+		AddedSlot:      100,
+		CertificateID:  deregCert.ID,
+	}).Error)
+
+	require.NoError(t, store.RestoreDrepStateAtSlot(200, nil))
+
+	restored, err := store.GetDrep(drepCred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, restored)
+	// Deregistration is in the tx with higher block_index, so it wins.
+	// DRep must be inactive with cleared anchor.
+	assert.False(t, restored.Active,
+		"deregistration in higher-block_index tx must beat registration in lower-block_index tx at same slot")
+	assert.Equal(t, "", restored.AnchorURL,
+		"anchor must be cleared because deregistration wins")
 }
 
 // TestSqliteRollbackPreservesGenesisVoteOnlyAccount verifies that an
