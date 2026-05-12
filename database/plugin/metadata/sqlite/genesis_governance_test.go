@@ -454,11 +454,15 @@ func TestSqliteRollbackDrepCrossTypeBlockIndex(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, restored)
 	// Deregistration is in the tx with higher block_index, so it wins.
-	// DRep must be inactive with cleared anchor.
+	// DRep must be inactive with cleared anchor, and AddedSlot must
+	// reflect the winning cert's slot (pins down that latest.addedSlot
+	// is what gets persisted out of the cross-type comparison).
 	assert.False(t, restored.Active,
 		"deregistration in higher-block_index tx must beat registration in lower-block_index tx at same slot")
 	assert.Equal(t, "", restored.AnchorURL,
 		"anchor must be cleared because deregistration wins")
+	assert.Equal(t, uint64(100), restored.AddedSlot,
+		"AddedSlot must be set to the winning cert's slot")
 }
 
 // TestSqliteRollbackPreservesGenesisVoteOnlyAccount verifies that an
