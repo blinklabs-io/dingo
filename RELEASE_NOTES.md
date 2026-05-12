@@ -23,6 +23,31 @@ Hi folks! Here’s what we shipped in v0.45.0.
 
 ### 🔧 Fixes
 
+* Fixed **recover sparse chain intersections more reliably after missing history gaps:** Synchronization can now fall back to safer recent chain points more consistently, which helps recovery continue when recent ledger history is incomplete.
+* Corrected **reject headers that run ahead of safe ledger rules:** Ledger validation now stops headers that claim a protocol step too far beyond the active rules, which reduces the risk of unsafe acceptance during version transitions.
+* Strengthened **skip rollback work that moves past the known ledger tip:** Recovery now avoids applying rollbacks that run ahead of recorded ledger progress, which keeps replay and catch-up behavior safer when metadata trails the raw chain.
+
+### 📋 What You Need to Know
+
+* Clarified **backfill batching and safer replay progress:** Historical replay now batches more backfill work and keeps checkpoint progress safer, which helps long catch-up runs resume more smoothly after interruptions.
+* Highlighted **safer ledger validation, rollback handling, and sparse recovery:** Ledger validation now rejects headers that jump too far ahead, rollback handling no longer pushes past the known ledger tip, and sparse intersect recovery finds safer restart points more reliably.
+* Emphasized **stronger PV11 and fuzz regression coverage:** Release validation now exercises PV11 crossing behavior more directly, and broader stress coverage checks more parsing, storage, networking, and configuration paths for regressions.
+* Summarized **publish maintenance and release-history updates:** Release publishing keeps moving even while module proxy and `pkg.go.dev` refreshes may lag because the proxy pull remains disabled, and release history now includes the v0.44.0 entry.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.44.0 (May 11, 2026)
 
 **Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
