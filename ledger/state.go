@@ -4202,7 +4202,7 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-func (ls *LedgerState) chainTipMatchesLedgerTip() bool {
+func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 	if ls.chain == nil {
 		return false
 	}
@@ -4210,6 +4210,9 @@ func (ls *LedgerState) chainTipMatchesLedgerTip() bool {
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot > ledgerTip.Point.Slot {
+		return true
+	}
 	return chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash)
 }
@@ -4316,7 +4319,7 @@ func (ls *LedgerState) IntersectPoints(
 	if count <= 0 {
 		return nil, nil
 	}
-	if ls.chain != nil && ls.chainTipMatchesLedgerTip() {
+	if ls.primaryChainTipAtOrAheadOfLedgerTip() {
 		points := ls.chain.IntersectPoints(count)
 		if len(points) > 0 {
 			return points, nil
