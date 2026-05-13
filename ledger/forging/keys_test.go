@@ -795,9 +795,9 @@ func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 	// Equal counter is fine; ahead-of-ledger is fine (the ledger may
 	// just not have observed our latest opcert yet).
 	cases := []struct {
-		name       string
-		ourSeq     uint64
-		ledgerSeq  uint64
+		name      string
+		ourSeq    uint64
+		ledgerSeq uint64
 	}{
 		{"equal", 5, 5},
 		{"ahead", 6, 5},
@@ -819,10 +819,9 @@ func TestValidateAgainstLedger_OpCertEqualOrAhead(t *testing.T) {
 	}
 }
 
-func TestValidateAgainstLedger_CounterTrackingNotImplemented(t *testing.T) {
-	// LedgerView returning seqFound=false from LatestOpCertSequence
-	// represents the current state where on-chain opcert tracking is
-	// not yet wired up. Must not block startup.
+func TestValidateAgainstLedger_NoObservedOpCertSequence(t *testing.T) {
+	// A registered pool may not have produced a block yet, so the ledger
+	// can have no observed opcert sequence. Must not block startup.
 	pc := newCredsForLedger(t)
 	view := &fakeLedgerView{
 		registered: true,

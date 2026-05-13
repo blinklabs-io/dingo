@@ -48,9 +48,13 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -971,18 +975,21 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	return vrfHash, true, nil
 }
 
-// LatestOpCertSequence returns the highest operational-certificate
-// IssueNumber observed on chain for the given pool. found is always
-// false today: the chain stores opcerts in block headers but Dingo does
-// not yet aggregate the highest sequence per pool. This method exists
-// so the credential cross-check at startup can call into it; once
-// counter tracking lands the implementation will fill in without any
-// caller change.
 func (ls *LedgerState) LatestOpCertSequence(
 	poolID [28]byte,
 ) (sequence uint64, found bool, err error) {
-	_ = poolID
-	return 0, false, nil
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	pool, err := ls.db.GetPool(pkh, false, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if pool == nil {
+		return 0, false, nil
+	}
+	return ls.db.LatestPoolOpCertSequence(pkh, nil)
 }
 
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
@@ -3465,7 +3472,41 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
+	if seqNum, ok := opCertSequenceNumber(block); ok {
+		issuerVkey := block.IssuerVkey()
+		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+		if err := ls.db.UpdatePoolOpCertSequence(
+			poolKeyHash,
+			uint64(seqNum),
+			point.Slot,
+			txn,
+		); err != nil {
+			if delta != nil {
+				delta.Release()
+			}
+			return nil, err
+		}
+	}
 	return delta, nil
+}
+
+func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
+	switch header := block.Header().(type) {
+	case *shelley.ShelleyBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *allegra.AllegraBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *mary.MaryBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *alonzo.AlonzoBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *babbage.BabbageBlockHeader:
+		return header.Body.OpCert.SequenceNumber, true
+	case *conway.ConwayBlockHeader:
+		return header.Body.OpCert.SequenceNumber, true
+	default:
+		return 0, false
+	}
 }
 
 // densityEntry records a block's slot and block number for the chain density

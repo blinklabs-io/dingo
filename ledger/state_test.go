@@ -3244,3 +3244,107 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"plain epoch rollover must not change transitionInfo")
 }
+
+func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	var poolID [28]byte
+	for i := range poolID {
+		poolID[i] = byte(i + 1)
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, uint64(0), sequence)
+
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 10, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 7, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 30, nil))
+
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(7), sequence)
+
+	require.NoError(t, db.RestorePoolStateAtSlot(15, nil))
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(3), sequence)
+}
+
+func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	var issuerVkey lcommon.IssuerVkey
+	for i := range issuerVkey {
+		issuerVkey[i] = byte(i + 1)
+	}
+	pkh := lcommon.PoolKeyHash(issuerVkey.Hash())
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	block := &babbage.BabbageBlock{
+		BlockHeader: &babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				Slot:       10,
+				IssuerVkey: issuerVkey,
+				OpCert: babbage.BabbageOpCert{
+					SequenceNumber: 4,
+				},
+			},
+		},
+	}
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: 10},
+			block,
+			false,
+			nil,
+			nil,
+			eras.BabbageEraDesc,
+			nil,
+			nil,
+		)
+		return err
+	}))
+
+	var poolID [28]byte
+	copy(poolID[:], pkh.Bytes())
+	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(4), sequence)
+}

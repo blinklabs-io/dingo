@@ -25,10 +25,11 @@ var ErrPoolNotFound = errors.New("pool not found")
 
 // Error 1170 (42000): BLOB/TEXT column 'staking_key' used in key specification without a key length
 type Pool struct {
-	Margin        *types.Rat
-	PoolKeyHash   []byte `gorm:"uniqueIndex;size:28"`
-	VrfKeyHash    []byte
-	RewardAccount []byte
+	Margin               *types.Rat
+	PoolKeyHash          []byte `gorm:"uniqueIndex;size:28"`
+	VrfKeyHash           []byte
+	RewardAccount        []byte
+	LatestOpCertSequence uint64
 	// Owners and Relays are query-only associations (no CASCADE).
 	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
 	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
@@ -43,6 +44,17 @@ type Pool struct {
 
 func (p *Pool) TableName() string {
 	return "pool"
+}
+
+type PoolOpCertSequence struct {
+	PoolKeyHash []byte `gorm:"uniqueIndex:idx_pool_opcert_sequence_pool_slot;size:28"`
+	ID          uint   `gorm:"primarykey"`
+	Slot        uint64 `gorm:"uniqueIndex:idx_pool_opcert_sequence_pool_slot;index"`
+	Sequence    uint64
+}
+
+func (PoolOpCertSequence) TableName() string {
+	return "pool_opcert_sequence"
 }
 
 type PoolRegistration struct {
