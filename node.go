@@ -367,10 +367,9 @@ func (n *Node) Run(ctx context.Context) error {
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
-		n.config.logger.Warn(
-			"failed to capture genesis snapshot",
-			"error", err,
-		)
+		if err := n.handleGenesisSnapshotError(err); err != nil {
+			return err
+		}
 	}
 	if err := n.snapshotMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
