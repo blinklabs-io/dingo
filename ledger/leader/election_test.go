@@ -17,6 +17,7 @@ package leader
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -96,6 +97,10 @@ type mockEpochProvider struct {
 	slotsPerEpoch   uint64
 	activeSlotCoeff float64
 	nextEpochReady  atomic.Uint64
+	// epochForSlot, when set, overrides EpochForSlot's default fixed
+	// division so tests can model variable epoch lengths or simulate
+	// past-horizon errors.
+	epochForSlot func(slot uint64) (uint64, error)
 }
 
 func newMockEpochProvider() *mockEpochProvider {
@@ -133,6 +138,16 @@ func (m *mockEpochProvider) NextEpochNonceReadyEpoch() (uint64, bool) {
 
 func (m *mockEpochProvider) SlotsPerEpoch() uint64 {
 	return m.slotsPerEpoch
+}
+
+func (m *mockEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
+	if m.epochForSlot != nil {
+		return m.epochForSlot(slot)
+	}
+	if m.slotsPerEpoch == 0 {
+		return 0, errors.New("slotsPerEpoch unset")
+	}
+	return slot / m.slotsPerEpoch, nil
 }
 
 func (m *mockEpochProvider) ActiveSlotCoeff() float64 {
@@ -612,6 +627,139 @@ func TestElectionNextLeaderSlot(t *testing.T) {
 	assert.True(t, found, "should find a leader slot in the epoch")
 	assert.GreaterOrEqual(t, slot, epochStart,
 		"leader slot should be at or after epoch start")
+}
+
+// TestElectionShouldProduceBlock_UsesEpochForSlot pins that slot→epoch
+// lookup goes through EpochInfoProvider.EpochForSlot rather than fixed
+// division, so a network with non-uniform epoch lengths or non-zero
+// epoch starts still selects the correct cached schedule.
+func TestElectionShouldProduceBlock_UsesEpochForSlot(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	stakeProvider := newMockStakeProvider()
+	epochProvider := newMockEpochProvider()
+
+	// A network where epoch 10 doesn't start at slot 10*slotsPerEpoch.
+	// Slot 5_000 lands in epoch 10; slot 5_100 lands in epoch 11. Fixed
+	// division (slot/10 = 500 / 510) would land both in the wrong epoch.
+	const (
+		targetEpoch uint64 = 10
+		nextEpoch   uint64 = 11
+		inEpoch10   uint64 = 5_000
+		inEpoch11   uint64 = 5_100
+	)
+	epochProvider.epochForSlot = func(slot uint64) (uint64, error) {
+		switch {
+		case slot >= inEpoch11:
+			return nextEpoch, nil
+		case slot >= inEpoch10:
+			return targetEpoch, nil
+		default:
+			return 0, errors.New("before any known epoch")
+		}
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		stakeProvider,
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	// Seed the cache with a schedule for epoch 10 listing inEpoch10 as a
+	// leader slot, without going through async compute.
+	sched := NewSchedule(
+		targetEpoch, poolId, 1, 1, electionTestNonce,
+	)
+	sched.AddLeaderSlot(inEpoch10)
+	election.mu.Lock()
+	election.schedules = map[uint64]*Schedule{targetEpoch: sched}
+	election.mu.Unlock()
+
+	assert.True(t, election.ShouldProduceBlock(inEpoch10),
+		"slot resolving to epoch 10 must hit the cached schedule")
+	assert.False(t, election.ShouldProduceBlock(inEpoch11),
+		"slot resolving to epoch 11 must miss the cached schedule")
+}
+
+// TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError pins
+// the safe-default: when EpochForSlot can't resolve (slot outside the
+// known range), the producer declines rather than running with an
+// incorrect epoch index. The compute path is not engaged because we
+// don't know which epoch's schedule to request.
+func TestElectionShouldProduceBlock_ReturnsFalseOnEpochResolveError(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	epochProvider := newMockEpochProvider()
+	epochProvider.epochForSlot = func(uint64) (uint64, error) {
+		return 0, errors.New("past horizon")
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		newMockStakeProvider(),
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+
+	assert.False(t, election.ShouldProduceBlock(999_999),
+		"unresolvable slot must not produce")
+}
+
+// TestElectionNextLeaderSlot_UsesEpochForSlot pins that NextLeaderSlot
+// queries EpochForSlot rather than fixed division when picking which
+// epoch's cached schedule to scan.
+func TestElectionNextLeaderSlot_UsesEpochForSlot(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	epochProvider := newMockEpochProvider()
+	const (
+		targetEpoch uint64 = 10
+		epochStart  uint64 = 5_000
+		leaderSlot  uint64 = 5_020
+	)
+	epochProvider.epochForSlot = func(slot uint64) (uint64, error) {
+		if slot < epochStart {
+			return 0, errors.New("before epoch start")
+		}
+		return targetEpoch, nil
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	defer eventBus.Stop()
+
+	election := NewElection(
+		poolId,
+		electionTestVRFSeed,
+		newMockStakeProvider(),
+		epochProvider,
+		eventBus,
+		slog.Default(),
+	)
+	sched := NewSchedule(
+		targetEpoch, poolId, 1, 1, electionTestNonce,
+	)
+	sched.AddLeaderSlot(leaderSlot)
+	election.mu.Lock()
+	election.schedules = map[uint64]*Schedule{targetEpoch: sched}
+	election.mu.Unlock()
+
+	got, found := election.NextLeaderSlot(epochStart)
+	assert.True(t, found, "leader slot in resolved epoch must be found")
+	assert.Equal(t, leaderSlot, got)
+
+	// Unresolvable slot: helper returns 0,false rather than scanning the
+	// wrong epoch's schedule.
+	got, found = election.NextLeaderSlot(0)
+	assert.False(t, found, "unresolvable slot must yield no result")
+	assert.Equal(t, uint64(0), got)
 }
 
 func TestElectionEpochTransition(t *testing.T) {

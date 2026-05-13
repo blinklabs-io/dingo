@@ -57,6 +57,13 @@ type EpochInfoProvider interface {
 	// SlotsPerEpoch returns the number of slots in an epoch.
 	SlotsPerEpoch() uint64
 
+	// EpochForSlot returns the epoch containing slot, resolved against
+	// the ledger hard-fork summary so era boundaries and variable epoch
+	// lengths are respected. Returns an error when slot falls outside
+	// the known epoch range (the caller treats that as "schedule
+	// unknown" and declines to produce).
+	EpochForSlot(slot uint64) (uint64, error)
+
 	// ActiveSlotCoeff returns the active slot coefficient (f parameter).
 	ActiveSlotCoeff() float64
 
@@ -764,11 +771,16 @@ func (e *Election) queueScheduleCompute(epoch uint64) {
 // schedule for the slot's epoch. If no schedule is cached, it requests a
 // background computation and returns false.
 func (e *Election) ShouldProduceBlock(slot uint64) bool {
-	slotsPerEpoch := e.epochProvider.SlotsPerEpoch()
-	if slotsPerEpoch == 0 {
+	slotEpoch, err := e.epochProvider.EpochForSlot(slot)
+	if err != nil {
+		e.logger.Debug(
+			"slot outside known epoch range; declining production",
+			"component", "leader",
+			"slot", slot,
+			"error", err,
+		)
 		return false
 	}
-	slotEpoch := slot / slotsPerEpoch
 
 	e.mu.RLock()
 	var schedule *Schedule
@@ -836,12 +848,10 @@ func (e *Election) NextLeaderSlot(fromSlot uint64) (uint64, bool) {
 		return 0, false
 	}
 
-	slotsPerEpoch := e.epochProvider.SlotsPerEpoch()
-	if slotsPerEpoch == 0 {
+	epoch, err := e.epochProvider.EpochForSlot(fromSlot)
+	if err != nil {
 		return 0, false
 	}
-
-	epoch := fromSlot / slotsPerEpoch
 	schedule := e.schedules[epoch]
 	if schedule != nil {
 		for _, slot := range schedule.LeaderSlots {
