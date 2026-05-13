@@ -1,5 +1,60 @@
 # Release Notes
 
+## v0.46.0 (May 13, 2026)
+
+**Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
+
+**Date:** May 13, 2026
+
+**Version:** v0.46.0
+
+Hi folks! Here’s what we shipped in v0.46.0.
+
+### ✨ What's New
+
+* Added **expand Blockfrost stake-account coverage:** Blockfrost compatible services can now return stake-account details, associated addresses, delegation history, registration history, and reward history through stake-address endpoints.
+* Introduced **surface chain block-proposed events:** Locally forged blocks now move through a dedicated proposal path before the chain accepts them, which gives operators clearer behavior around block adoption.
+* Expanded **track the highest observed pool certificate sequence:** Block producers can now compare the newest observed pool certificate sequence during startup, which makes stale certificate problems easier to catch before they cause trouble.
+
+### 💪 Improvements
+
+* Improved **raise the default Leios mempool capacity:** Leios mode now starts with a larger default mempool capacity, which gives transaction-heavy runs more room before the queue fills.
+* Refined **reduce SQLite batch allocation churn:** SQLite metadata backfill now reuses batch storage more efficiently, which helps sustained indexing work run more smoothly.
+* Enhanced **quiet routine NoBlocks log noise:** Routine blockfetch responses that return no blocks now stay at debug level, which keeps normal logs easier to scan for real issues.
+* Updated **strengthen chain-iterator regression coverage:** Regression checks now cover more iterator ordering, rollback, and waiting paths, which increases confidence in chain recovery behavior.
+* Clarified **explain Mithril API-mode backfill behavior more clearly:** API mode guidance now states that historical metadata backfill runs after Mithril snapshot import, which makes full-history expectations easier to understand.
+* Modernized **keep release history continuous through v0.45.0:** `RELEASE_NOTES.md` now carries forward the v0.45.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Fixed **align Praos chain selection with cardano-node behavior:** Equal-height chain choices now follow cardano-node tie breaking more closely, which helps nodes converge more reliably during competing forges.
+* Corrected **refresh connections after unrecoverable chainsync failures:** Nodes now drop affected chainsync connections and start fresh after K-related or unrecoverable recovery failures, which gives sync recovery a cleaner restart path.
+* Strengthened **use safer chain intersects across snapshot gaps:** Recovery now prefers better chain intersect points across snapshot gaps, which helps sync continue more reliably when history is incomplete.
+* Stabilized **restore account history in deterministic order:** Account recovery now uses block order as well as certificate order, which keeps restored account state consistent when multiple transactions share a slot.
+* Hardened **initialize ledger metrics earlier:** Ledger metrics now exist as soon as ledger state starts, which avoids failures in paths that read metrics before full startup completes.
+* Repaired **propagate rollback recovery errors correctly:** Rollback recovery now returns ancestor lookup and rollback errors directly, which makes serious recovery failures easier to detect and handle.
+
+### 📋 What You Need to Know
+
+* Clarified **broader Blockfrost stake-account API coverage:** Blockfrost compatible services now cover stake-account details, address listings, delegation history, registration history, and reward history through stake-address endpoints.
+* Highlighted **cardano-node aligned Praos tie breaking and safer fresh sync recovery:** Equal-height Praos decisions now follow cardano-node behavior more closely, and unrecoverable chainsync failures now restart from fresh connections more aggressively.
+* Emphasized **larger Leios mempool defaults and stronger startup checks:** Leios mode now uses a larger default mempool, and pool certificate tracking gives block producers a clearer startup check for stale certificate counters.
+* Summarized **operational polish and release-history maintenance:** Logging, SQLite batching, regression coverage, Mithril API-mode guidance, and release-history continuity all received updates that make operations easier to follow.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.45.0 (May 12, 2026)
 
 **Title:** Batched backfill, ledger safety fixes, and stronger PV11 readiness
