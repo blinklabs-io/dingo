@@ -81,6 +81,8 @@ const (
 	DefaultRejectionWatermark          = 0.95
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
+	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 )
 
 // ErrPluginListRequested is returned when the user requests to list
@@ -390,7 +392,10 @@ func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 }
 
 var globalConfig = &Config{
-	MempoolCapacity:      1048576,
+	// MempoolCapacity is left as the zero sentinel; LoadConfig fills
+	// it in based on RunMode (Praos vs Leios) after CLI/env/YAML have
+	// been merged.
+	MempoolCapacity:      0,
 	EvictionWatermark:    DefaultEvictionWatermark,
 	RejectionWatermark:   DefaultRejectionWatermark,
 	BindAddr:             "0.0.0.0",
@@ -613,6 +618,17 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	if globalConfig.RunMode == "" {
 		globalConfig.RunMode = RunModeServe
+	}
+
+	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
+	// already been merged at this point; an explicit non-zero setting
+	// from any of those layers wins per existing config priority.
+	if globalConfig.MempoolCapacity == 0 {
+		if globalConfig.RunMode == RunModeLeios {
+			globalConfig.MempoolCapacity = DefaultMempoolCapacityLeios
+		} else {
+			globalConfig.MempoolCapacity = DefaultMempoolCapacityPraos
+		}
 	}
 
 	// Validate block producer configuration
