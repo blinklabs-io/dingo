@@ -249,19 +249,18 @@ This imports:
 - Protocol parameters, governance state, treasury/reserves
 - Complete epoch history for slot-to-time calculations
 
-What is NOT included: Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot. These are not needed for consensus, block production, or serving blocks to peers. New blocks processed after bootstrap will have full metadata.
+Individual transaction records, certificate history, witness/script/datum storage, and governance vote records for blocks before the snapshot are not stored by the snapshot itself. In `core` mode these are not needed — consensus, block production, and serving blocks to peers work without them, and new blocks processed after bootstrap will have full metadata. In `api` mode, `dingo mithril sync` automatically runs a backfill step after loading the snapshot to populate this historical data, so API servers (Blockfrost, UTxO RPC, Mesh) have complete records from genesis.
 
 Performance (preview network, ~4M blocks):
 
-| Phase | Time |
-|-------|------|
-| Download snapshot (~2.6 GB) | ~1-2 min |
-| Extract + download ancillary | ~1 min |
-| Import ledger state (UTxOs, accounts, pools, DReps, epochs) | ~12 min |
-| Load blocks into blob store | ~36 min |
-| Total | ~50 min |
-
-For indexers and API nodes that need full historical data (transaction lookups, certificate queries, datum/script resolution), configure the storage mode to `api` and `dingo mithril sync` will automatically backfill historical metadata after loading the snapshot.
+| Phase | core mode | api mode |
+|-------|-----------|----------|
+| Download snapshot (~2.6 GB) | ~1-2 min | ~1-2 min |
+| Extract + download ancillary | ~1 min | ~1 min |
+| Import ledger state (UTxOs, accounts, pools, DReps, epochs) | ~12 min | ~12 min |
+| Load blocks into blob store | ~36 min | ~36 min |
+| Backfill historical metadata | — | ~varies |
+| Total | ~50 min | ~50 min + backfill |
 
 ### Disk Space Requirements
 
