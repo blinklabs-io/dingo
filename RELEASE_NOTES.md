@@ -1,5 +1,53 @@
 # Release Notes
 
+## v0.45.0 (May 12, 2026)
+
+**Title:** Batched backfill, ledger safety fixes, and stronger PV11 readiness
+
+**Date:** May 12, 2026
+
+**Version:** v0.45.0
+
+Hi folks! Here’s what we shipped in v0.45.0.
+
+### ✨ What's New
+
+* Added **batch historical backfill work for smoother replay progress:** Historical metadata replay now writes work in larger batches, which helps long backfills move forward more smoothly and keeps checkpoint recovery safer when replay resumes.
+
+### 💪 Improvements
+
+* Improved **verify upcoming protocol-step readiness on a live multi-node path:** Release validation now checks the Conway to vanRossem progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
+* Refined **expand fuzz-driven regression coverage across core behaviors:** More parsing, storage, networking, and configuration paths now receive broader stress coverage, which helps surface edge cases before they reach operators and integrators.
+* Enhanced **keep publish workflows moving while package indexing catches up:** Release publishing now avoids a broken package refresh step, which keeps releases moving even when package index updates take longer to appear.
+* Updated **keep release history current through v0.44.0:** `RELEASE_NOTES.md` now includes the v0.44.0 entry, which keeps recent release history easier to follow.
+
+### 🔧 Fixes
+
+* Fixed **recover sparse chain intersections more reliably after missing history gaps:** Synchronization can now fall back to safer recent chain points more consistently, which helps recovery continue when recent ledger history is incomplete.
+* Corrected **reject headers that run ahead of safe ledger rules:** Ledger validation now stops headers that claim a protocol step too far beyond the active rules, which reduces the risk of unsafe acceptance during version transitions.
+* Strengthened **skip rollback work that moves past the known ledger tip:** Recovery now avoids applying rollbacks that run ahead of recorded ledger progress, which keeps replay and catch-up behavior safer when metadata trails the raw chain.
+
+### 📋 What You Need to Know
+
+* Clarified **backfill batching and safer replay progress:** Historical replay now batches more backfill work and keeps checkpoint progress safer, which helps long catch-up runs resume more smoothly after interruptions.
+* Highlighted **safer ledger validation, rollback handling, and sparse recovery:** Ledger validation now rejects headers that jump too far ahead, rollback handling no longer pushes past the known ledger tip, and sparse intersect recovery finds safer restart points more reliably.
+* Emphasized **stronger PV11 and fuzz regression coverage:** Release validation now exercises PV11 crossing behavior more directly, and broader stress coverage checks more parsing, storage, networking, and configuration paths for regressions.
+* Summarized **publish maintenance and package-index timing:** Release publishing keeps moving even while package index refreshes may lag because the refresh pull remains disabled.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.44.0 (May 11, 2026)
 
 **Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
