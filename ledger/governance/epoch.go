@@ -203,7 +203,7 @@ func ProcessEpoch(
 	}
 
 	// Active set changes as we ratify; snapshot once.
-	activeDRepCount, err := countActiveDReps(in)
+	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.NewEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
 	}
@@ -415,21 +415,21 @@ func stakeEpochFor(newEpoch uint64) uint64 {
 	return 0
 }
 
-// countActiveDReps returns the number of DReps eligible to vote in the
-// current tick. AlwaysAbstain / AlwaysNoConfidence virtual DReps are
-// not included.
-//
-// countActiveDRepsAtEpoch in stability.go is the parallel for the
-// mid-epoch ratifiability check — it takes plain inputs instead of
-// EpochInput. Behaviour changes here must mirror there.
-func countActiveDReps(in *EpochInput) (int, error) {
-	dreps, err := in.DB.GetActiveDreps(in.Txn)
+// countActiveDReps returns the number of credential-backed DReps
+// eligible to vote in currentEpoch. AlwaysAbstain / AlwaysNoConfidence
+// virtual DReps are not counted.
+func countActiveDReps(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+) (int, error) {
+	dreps, err := db.GetActiveDreps(txn)
 	if err != nil {
 		return 0, err
 	}
 	active := 0
 	for _, drep := range dreps {
-		if drepActiveAtEpoch(drep, in.NewEpoch) {
+		if drepActiveAtEpoch(drep, currentEpoch) {
 			active++
 		}
 	}

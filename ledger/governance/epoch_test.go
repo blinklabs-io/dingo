@@ -107,7 +107,7 @@ func TestCountActiveDRepsFiltersExpiredDReps(t *testing.T) {
 		},
 	}).Error)
 
-	count, err := countActiveDReps(&EpochInput{DB: db, NewEpoch: 10})
+	count, err := countActiveDReps(db, nil, 10)
 	require.NoError(t, err)
 	assert.Equal(t, 2, count)
 }

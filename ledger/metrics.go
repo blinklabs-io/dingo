@@ -35,6 +35,10 @@ type stateMetrics struct {
 	shelleyStartTime    prometheus.Gauge
 	epochLengthSlots    prometheus.Gauge
 	shadowGateDecisions *prometheus.CounterVec
+	// Incremented when a stored governance proposal's CBOR fails to
+	// decode during the mid-epoch ratifiability check, so the failures
+	// surface as a metric instead of just log volume.
+	governanceProposalDecodeFailures prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -121,5 +125,11 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 			Help: "shadow blockfetch gate decisions, by path and cutoff source",
 		},
 		[]string{"path", "cutoff"},
+	)
+	m.governanceProposalDecodeFailures = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_governance_proposal_decode_failures_total",
+			Help: "stored governance proposals whose CBOR failed to decode during ratifiability checks",
+		},
 	)
 }

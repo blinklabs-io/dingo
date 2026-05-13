@@ -3850,16 +3850,19 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
 	db := ls.db
 	logger := ls.config.Logger
+	decodeFailures := ls.metrics.governanceProposalDecodeFailures
 	go func() {
 		defer ls.hfiStabilityEvalInFlight.Store(false)
 		result, err := governance.EvaluateRatifiableHardForkInitiation(
-			governance.StabilityCheckInputs{
-				DB:            db,
-				Logger:        logger,
-				CurrentEpoch:  snapshotEpoch,
-				PParams:       snapshotPParams,
-				ConwayGenesis: conwayGenesis,
-			},
+			governance.NewStabilityCheckInputs(
+				db,
+				nil,
+				logger,
+				snapshotEpoch,
+				snapshotPParams,
+				conwayGenesis,
+				decodeFailures.Inc,
+			),
 		)
 		if err != nil {
 			logger.Warn(
