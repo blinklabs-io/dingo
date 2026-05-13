@@ -716,7 +716,7 @@ func (ls *LedgerState) findPeerForkPath(
 	}
 	for depth := 0; depth < maxPeerHeaderHistoryPerConn &&
 		len(prevHash) > 0; depth++ {
-		ancestorBlock, err := database.BlockByHash(ls.db, prevHash)
+		ancestorBlock, err := ls.blockByHash(prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(
 				ancestorBlock.Slot,
@@ -764,6 +764,13 @@ func (ls *LedgerState) findPeerForkPath(
 		prevHash = append(prevHash[:0], record.prevHash...)
 	}
 	return nil, nil, nil
+}
+
+func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
+	if ls.lookupBlockByHash != nil {
+		return ls.lookupBlockByHash(hash)
+	}
+	return database.BlockByHash(ls.db, hash)
 }
 
 func connIdKey(connId ouroboros.ConnectionId) string {
@@ -1922,7 +1929,7 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		return true, nil
 	}
-	ancestorBlock, err := database.BlockByHash(ls.db, ancestorPoint.Hash)
+	ancestorBlock, err := ls.blockByHash(ancestorPoint.Hash)
 	if err != nil {
 		return false, fmt.Errorf(
 			"failed to reload common ancestor block %s: %w",
@@ -2020,6 +2027,7 @@ func (ls *LedgerState) tryResolveFork(
 					),
 				)
 			}
+			return true, nil
 		} else {
 			ls.config.Logger.Error(
 				"failed to roll back to common ancestor",
@@ -2027,8 +2035,11 @@ func (ls *LedgerState) tryResolveFork(
 				"error", err,
 				"ancestor_slot", ancestorBlock.Slot,
 			)
+			return false, fmt.Errorf(
+				"failed to roll back to common ancestor: %w",
+				err,
+			)
 		}
-		return false, nil
 	}
 
 	// Mark state as rollback so the next block header event logs

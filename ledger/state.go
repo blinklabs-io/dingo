@@ -533,6 +533,8 @@ type LedgerState struct {
 	headerMismatchCount  int // consecutive header mismatch count
 	bufferedHeaderEvents map[string][]ChainsyncEvent
 	peerHeaderHistory    map[string]*peerHeaderChain
+	// Test hook for fork ancestor lookups.
+	lookupBlockByHash func([]byte) (models.Block, error)
 }
 
 // EraTransitionResult holds computed state from an era transition
