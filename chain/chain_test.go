@@ -22,6 +22,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -34,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func decodeHex(hexData string) []byte {
@@ -2011,6 +2013,206 @@ func TestChainReconcileEmptyForkPreservesOrphanedTip(t *testing.T) {
 			)
 		}
 	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
+	}
+}
+
+// TestIteratorNonInclusiveStartPoint verifies that an iterator created with
+// inclusive=false skips the start block and begins at the block after it.
+func TestIteratorNonInclusiveStartPoint(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for _, b := range testBlocks {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	// Start from testBlocks[2] (index 2, block number 3) non-inclusive.
+	// The iterator should deliver testBlocks[3..5] only.
+	startBlock := testBlocks[2]
+	startPoint := ocommon.Point{
+		Slot: startBlock.SlotNumber(),
+		Hash: startBlock.Hash().Bytes(),
+	}
+	iter, err := c.FromPoint(startPoint, false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+
+	for i, want := range testBlocks[3:] {
+		next, err := iter.Next(false)
+		if err != nil {
+			t.Fatalf("Next idx %d: %v", i, err)
+		}
+		if next == nil || next.Rollback {
+			t.Fatalf("Next idx %d unexpected result: %+v", i, next)
+		}
+		if next.Block.Number != want.MockBlockNumber {
+			t.Fatalf(
+				"idx %d: got block number %d, want %d",
+				i, next.Block.Number, want.MockBlockNumber,
+			)
+		}
+	}
+	// Should now be at tip.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
+		t.Fatalf("expected ErrIteratorChainTip after last block, got: %v", err)
+	}
+}
+
+// TestIteratorBlockingNextDeliversBlock verifies that Next(blocking=true) blocks
+// when the iterator is at tip and unblocks with the new block once a block is
+// added to the chain.
+func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	// Seed a few blocks so there is a non-trivial chain.
+	for _, b := range testBlocks[:3] {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	// Drain to tip.
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks[:3] {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("draining: %v", err)
+		}
+	}
+
+	// Start a goroutine that blocks on Next(true).
+	type result struct {
+		r   *chain.ChainIteratorResult
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		r, err := iter.Next(true)
+		ch <- result{r, err}
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		ch,
+		50*time.Millisecond,
+		"blocking Next returned before a block was added",
+	)
+
+	want := testBlocks[3]
+	if err := c.AddBlock(want, nil); err != nil {
+		t.Fatalf("AddBlock: %v", err)
+	}
+
+	got := testutil.RequireReceive(
+		t,
+		ch,
+		5*time.Second,
+		"blocking Next should unblock after block was added",
+	)
+	if got.err != nil {
+		t.Fatalf("blocking Next returned error: %v", got.err)
+	}
+	if got.r == nil || got.r.Rollback {
+		t.Fatalf("unexpected result from blocking Next: %+v", got.r)
+	}
+	if got.r.Block.Number != want.MockBlockNumber {
+		t.Fatalf(
+			"blocking Next: got block number %d, want %d",
+			got.r.Block.Number, want.MockBlockNumber,
+		)
+	}
+}
+
+// TestIteratorPostRollbackBlockDelivery verifies that after an iterator receives
+// a rollback signal, subsequent Next() calls deliver blocks after the rollback
+// point.
+func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	c := cm.PrimaryChain()
+	for _, b := range testBlocks {
+		if err := c.AddBlock(b, nil); err != nil {
+			t.Fatalf("AddBlock: %v", err)
+		}
+	}
+
+	// Create an iterator and drain to tip.
+	iter, err := c.FromPoint(ocommon.NewPointOrigin(), false)
+	if err != nil {
+		t.Fatalf("FromPoint: %v", err)
+	}
+	defer iter.Cancel()
+	for range testBlocks {
+		if _, err := iter.Next(false); err != nil {
+			t.Fatalf("draining: %v", err)
+		}
+	}
+
+	// Roll back to testBlocks[1] (block number 2).
+	rollbackTarget := testBlocks[1]
+	rollbackPoint := ocommon.Point{
+		Slot: rollbackTarget.SlotNumber(),
+		Hash: rollbackTarget.Hash().Bytes(),
+	}
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	// The iterator must first return the rollback signal.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("Next (rollback signal): %v", err)
+	}
+	if next == nil || !next.Rollback {
+		t.Fatalf("expected rollback result, got: %+v", next)
+	}
+	if next.Point.Slot != rollbackPoint.Slot ||
+		!bytes.Equal(next.Point.Hash, rollbackPoint.Hash) {
+		t.Fatalf(
+			"rollback point mismatch: got %d.%x, want %d.%x",
+			next.Point.Slot, next.Point.Hash,
+			rollbackPoint.Slot, rollbackPoint.Hash,
+		)
+	}
+
+	// After the rollback signal the chain is at testBlocks[1].
+	// Add testBlocks[2] back onto the chain.
+	if err := c.AddBlock(testBlocks[2], nil); err != nil {
+		t.Fatalf("AddBlock after rollback: %v", err)
+	}
+
+	// The iterator should now deliver testBlocks[2].
+	next, err = iter.Next(false)
+	if err != nil {
+		t.Fatalf("Next after rollback: %v", err)
+	}
+	if next == nil || next.Rollback {
+		t.Fatalf("expected block result after rollback, got: %+v", next)
+	}
+	if next.Block.Number != testBlocks[2].MockBlockNumber {
+		t.Fatalf(
+			"post-rollback block: got number %d, want %d",
+			next.Block.Number, testBlocks[2].MockBlockNumber,
+		)
+	}
+
+	// Should be at tip again.
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainTip) {
 		t.Fatalf("expected ErrIteratorChainTip, got: %v", err)
 	}
