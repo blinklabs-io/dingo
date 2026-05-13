@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -276,6 +278,89 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ancestorLookupErr := errors.New("ancestor lookup failed")
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, ancestorLookupErr
+	}
+
+	forkHash := testHashBytes("lookup-error-fork-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(testHashBytes("lookup-error-ancestor")),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+
+	require.False(t, resolved)
+	require.ErrorIs(t, err, ancestorLookupErr)
+	require.NotErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupError(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ancestorLookupErr := errors.New("ancestor lookup failed")
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, ancestorLookupErr
+	}
+	fixture.ls.headerMismatchCount = 7
+
+	forkHash := testHashBytes("handler-lookup-error-fork-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(testHashBytes("handler-lookup-error-ancestor")),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ancestorLookupErr)
+	require.NotErrorIs(t, err, models.ErrBlockNotFound)
+	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
 }
 
 func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
