@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -39,7 +40,6 @@ func safeAddUint64(a, b uint64) uint64 {
 const (
 	defaultEvaluationInterval = 10 * time.Second
 	defaultStaleTipThreshold  = 60 * time.Second
-	defaultMinSwitchBlockDiff = 2
 
 	// DefaultMaxTrackedPeers is the maximum number of peers tracked by
 	// the ChainSelector. When a new peer is added and the limit is reached,
@@ -80,7 +80,6 @@ type ChainSelectorConfig struct {
 	EventBus           *event.EventBus
 	EvaluationInterval time.Duration
 	StaleTipThreshold  time.Duration
-	MinSwitchBlockDiff uint64
 	SecurityParam      uint64
 	GenesisMode        bool
 	GenesisWindowSlots uint64
@@ -89,13 +88,13 @@ type ChainSelectorConfig struct {
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
 	// BlockfetchLatency returns the EWMA first-block latency for a
-	// connection and whether any samples exist. Used as a tiebreaker
-	// when two peers share the same SelectionTip and VRF output.
+	// connection and whether any samples exist. Used only to choose a
+	// peer when two peers advertise the exact same selected block.
 	BlockfetchLatency func(ouroboros.ConnectionId) (time.Duration, bool)
 }
 
 // ChainSelector tracks chain tips from multiple peers and selects the best
-// chain according to Ouroboros Praos rules.
+// chain using the active mode's comparison rules.
 type ChainSelector struct {
 	config            ChainSelectorConfig
 	securityParam     uint64
@@ -123,9 +122,6 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	}
 	if cfg.StaleTipThreshold == 0 {
 		cfg.StaleTipThreshold = defaultStaleTipThreshold
-	}
-	if cfg.MinSwitchBlockDiff == 0 {
-		cfg.MinSwitchBlockDiff = defaultMinSwitchBlockDiff
 	}
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
@@ -256,6 +252,26 @@ func (cs *ChainSelector) updatePeerTipObserved(
 	observedTip ochainsync.Tip,
 	vrfOutput []byte,
 ) bool {
+	return cs.updatePeerTipObservedPraosView(
+		connId,
+		tip,
+		observedTip,
+		vrfOutput,
+		PraosTiebreakerViewFromTip(
+			observedTip,
+			vrfOutput,
+			PraosTiebreakerConfigUnknown(),
+		),
+	)
+}
+
+func (cs *ChainSelector) updatePeerTipObservedPraosView(
+	connId ouroboros.ConnectionId,
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+	praosView PraosTiebreakerView,
+) bool {
 	if cs.config.ConnectionLive != nil &&
 		!cs.config.ConnectionLive(connId) {
 		cs.config.Logger.Debug(
@@ -337,10 +353,11 @@ func (cs *ChainSelector) updatePeerTipObserved(
 		}
 
 		if peerTip, exists := cs.peerTips[connId]; exists {
-			peerTip.UpdateTipWithObserved(
+			peerTip.UpdateTipWithObservedPraosView(
 				tip,
 				observedTip,
 				vrfOutput,
+				praosView,
 			)
 			peerTip.recordObservedSlot(
 				observedTip.Point.Slot,
@@ -361,8 +378,14 @@ func (cs *ChainSelector) updatePeerTipObserved(
 					return
 				}
 			}
-			peerTip := NewPeerChainTip(connId, tip, vrfOutput)
-			peerTip.ObservedTip = observedTip
+			peerTip := &PeerChainTip{
+				ConnectionId: connId,
+				Tip:          tip,
+				ObservedTip:  observedTip,
+				VRFOutput:    vrfOutput,
+				PraosView:    praosView,
+				LastUpdated:  time.Now(),
+			}
 			peerTip.recordObservedSlot(
 				observedTip.Point.Slot,
 				cs.genesisWindowSlotsLocked(),
@@ -384,30 +407,12 @@ func (cs *ChainSelector) updatePeerTipObserved(
 			shouldEvaluate = true
 		} else if cs.bestPeerConn != nil {
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
-				if cs.mode == SelectionModeGenesis {
-					shouldEvaluate = cs.comparePeerTips(
-						connId,
-						cs.peerTips[connId],
-						*cs.bestPeerConn,
-						bestPeerTip,
-					) == ChainABetter
-				} else {
-					comparison := CompareChains(
-						cs.peerTips[connId].SelectionTip(),
-						bestPeerTip.SelectionTip(),
-					)
-					if comparison == ChainABetter {
-						shouldEvaluate = true
-					} else if comparison == ChainEqual &&
-						cs.comparePeerTips(
-							connId,
-							cs.peerTips[connId],
-							*cs.bestPeerConn,
-							bestPeerTip,
-						) == ChainABetter {
-						shouldEvaluate = true
-					}
-				}
+				shouldEvaluate = cs.comparePeerTips(
+					connId,
+					cs.peerTips[connId],
+					*cs.bestPeerConn,
+					bestPeerTip,
+				) == ChainABetter
 			}
 		} else {
 			// No best peer yet, trigger evaluation
@@ -653,6 +658,7 @@ func (cs *ChainSelector) GetPeerTip(
 		tipCopy.VRFOutput = make([]byte, len(pt.VRFOutput))
 		copy(tipCopy.VRFOutput, pt.VRFOutput)
 	}
+	tipCopy.PraosView = clonePraosTiebreakerView(pt.PraosView)
 	if len(pt.observedSlots) > 0 {
 		tipCopy.observedSlots = make([]uint64, len(pt.observedSlots))
 		copy(tipCopy.observedSlots, pt.observedSlots)
@@ -674,6 +680,7 @@ func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainT
 			tipCopy.VRFOutput = make([]byte, len(v.VRFOutput))
 			copy(tipCopy.VRFOutput, v.VRFOutput)
 		}
+		tipCopy.PraosView = clonePraosTiebreakerView(v.PraosView)
 		if len(v.observedSlots) > 0 {
 			tipCopy.observedSlots = make([]uint64, len(v.observedSlots))
 			copy(tipCopy.observedSlots, v.observedSlots)
@@ -888,14 +895,23 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 	connIdB ouroboros.ConnectionId,
 	peerTipB *PeerChainTip,
 ) ChainComparisonResult {
-	comparison := CompareChains(
-		peerTipA.SelectionTip(),
-		peerTipB.SelectionTip(),
+	tipA := peerTipA.SelectionTip()
+	tipB := peerTipB.SelectionTip()
+	comparison := ComparePraosTips(
+		tipA,
+		tipB,
+		peerTipA.PraosView,
+		peerTipB.PraosView,
 	)
 	switch comparison {
 	case ChainABetter, ChainBBetter, ChainComparisonUnknown:
 		return comparison
 	case ChainEqual:
+		if !sameSelectionTip(tipA, tipB) {
+			return ChainEqual
+		}
+		// The chains are the same block. The remaining checks choose a
+		// peer transport for that block, not a different chain.
 		priorityA := cs.connectionPriority(connIdA)
 		priorityB := cs.connectionPriority(connIdB)
 		if priorityA > priorityB {
@@ -903,15 +919,6 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 		}
 		if priorityB > priorityA {
 			return ChainBBetter
-		}
-		vrfComparison := CompareVRFOutputs(
-			peerTipA.VRFOutput,
-			peerTipB.VRFOutput,
-		)
-		switch vrfComparison {
-		case ChainABetter, ChainBBetter:
-			return vrfComparison
-		case ChainEqual, ChainComparisonUnknown:
 		}
 		// Latency tiebreaker: prefer the peer with lower blockfetch
 		// EWMA when VRF and SelectionTip are equal. Only fires when
@@ -939,6 +946,12 @@ func (cs *ChainSelector) comparePeerTipsPraos(
 	default:
 		return ChainComparisonUnknown
 	}
+}
+
+func sameSelectionTip(a, b ochainsync.Tip) bool {
+	return a.BlockNumber == b.BlockNumber &&
+		a.Point.Slot == b.Point.Slot &&
+		bytes.Equal(a.Point.Hash, b.Point.Hash)
 }
 
 func (cs *ChainSelector) handlePeerEligibilityChangedEvent(evt event.Event) {
@@ -1009,42 +1022,27 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 			if !ok {
 				return false, nil, nil
 			}
-			if CompareChains(
+			if ComparePraosTips(
 				newPeerTip.SelectionTip(),
 				previousPeerTip.SelectionTip(),
+				newPeerTip.PraosView,
+				previousPeerTip.PraosView,
 			) == ChainEqual {
 				// When two peers have delivered the same observed frontier,
-				// keep following the incumbent. The first peer to deliver the
-				// fitting header already won on latency; switching on source
-				// priority or VRF alone just creates churn near tip.
+				// or the reference implementation's equal-length Praos
+				// tiebreaker is not armed, keep following the incumbent.
 				newBest = previousBest
-			} else if
-			// Preserve the incumbent only when it still wins the same
-			// full comparison used during normal best-peer selection.
-			cs.comparePeerTips(
-				*previousBest,
-				previousPeerTip,
-				*newBest,
-				newPeerTip,
-			) == ChainABetter {
-				newBest = previousBest
-			} else if newPeerTip.SelectionTip().BlockNumber >
-				previousPeerTip.SelectionTip().BlockNumber &&
-				!IsSignificantlyBetter(
-					newPeerTip.SelectionTip(),
-					previousPeerTip.SelectionTip(),
-					cs.config.MinSwitchBlockDiff,
-				) {
-				// Suppress switches where the challenger is only marginally
-				// ahead in SelectionTip (observed frontier, which includes
-				// in-flight headers from RollForward). The original guard used
-				// Tip.BlockNumber (the peer's claimed remote tip), which can be
-				// ahead of ObservedTip when a peer advertises N+1 in a
-				// RollForward tip claim before actually delivering the N+1
-				// header. That caused both peers to show Tip.BlockNumber=N+1
-				// while only one had SelectionTip=N+1, making the `>` guard
-				// fail and allowing a switch for a 1-block observed lead.
-				newBest = previousBest
+			} else {
+				// Preserve the incumbent only when it still wins the same
+				// full comparison used during normal best-peer selection.
+				if cs.comparePeerTips(
+					*previousBest,
+					previousPeerTip,
+					*newBest,
+					newPeerTip,
+				) == ChainABetter {
+					newBest = previousBest
+				}
 			}
 		}
 	}
@@ -1075,7 +1073,17 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 				}
 			}
 			// Compute comparison result and block difference
-			comparisonResult := CompareChains(newTip, previousTip)
+			comparisonResult := ChainComparisonUnknown
+			if previousBest != nil {
+				if previousPeerTip, ok := cs.peerTips[*previousBest]; ok {
+					comparisonResult = cs.comparePeerTips(
+						*newBest,
+						newPeerTip,
+						*previousBest,
+						previousPeerTip,
+					)
+				}
+			}
 			blockDiff := safeBlockDiff(
 				newTip.BlockNumber,
 				previousTip.BlockNumber,
@@ -1143,11 +1151,12 @@ func (cs *ChainSelector) HandlePeerTipUpdateEvent(evt event.Event) {
 		)
 		return
 	}
-	cs.updatePeerTipObserved(
+	cs.updatePeerTipObservedPraosView(
 		e.ConnectionId,
 		e.Tip,
 		e.ObservedTip,
 		e.VRFOutput,
+		e.PraosView,
 	)
 }
 

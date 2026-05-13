@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package chainselection implements Ouroboros Praos multi-peer chain
-// selection. It tracks the tip reported by each connected peer and picks
-// the best candidate chain to follow using the standard Praos rules:
-// longer chain wins, then density within the security window, then VRF
-// tie-break.
+// Package chainselection implements multi-peer chain selection. It tracks the
+// tip reported by each connected peer and, for Shelley-family headers, uses the
+// Praos select view projected from the observed header: longer chain first,
+// then the reference implementation's equal-length opcert/VRF tiebreaker when
+// it is armed.
 //
 // Genesis selection mode can be enabled at startup to prefer observed
 // density during bootstrap before automatically falling back to Praos once

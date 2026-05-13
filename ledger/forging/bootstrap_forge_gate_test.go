@@ -91,9 +91,8 @@ func TestForgeSyncToleranceLargerThanShortTestnetEpoch(t *testing.T) {
 // TestChainSelectionPrefersLongerChainOverLowerSlot is the chainselection
 // half of the Shelley=0 mechanism. Once the forge gate has waved
 // dingo's leader slots through during bootstrap (above), the surviving
-// blocks are picked by Praos chain selection. The rule is "longer
-// chain wins; at equal length, lower slot wins" — so a dingo local
-// chain whose forge count lags cardano-producer's loses every fork
+// blocks are picked by Praos chain selection. Longer chain wins, so a dingo
+// local chain whose forge count lags cardano-producer's loses every fork
 // resolution regardless of how low its tip slot is.
 //
 // Concretely: dingo joins late, forges one block at slot 5; chainsync
@@ -121,16 +120,25 @@ func TestChainSelectionPrefersLongerChainOverLowerSlot(t *testing.T) {
 
 	require.Truef(
 		t,
-		chainselection.IsBetterChain(cardanoIncomingTip, dingoLocalTip),
+		chainselection.ComparePraosTips(
+			cardanoIncomingTip,
+			dingoLocalTip,
+			chainselection.PraosTiebreakerView{},
+			chainselection.PraosTiebreakerView{},
+		) == chainselection.ChainABetter,
 		"cardano's longer (block_number=3) chain must beat dingo's "+
 			"local (block_number=1) chain even though dingo's tip "+
-			"slot is lower (%d < %d). The lower-slot tie-breaker "+
-			"only fires at EQUAL block count.",
+			"slot is lower (%d < %d).",
 		dingoLocalTip.Point.Slot, cardanoIncomingTip.Point.Slot,
 	)
 	require.Falsef(
 		t,
-		chainselection.IsBetterChain(dingoLocalTip, cardanoIncomingTip),
+		chainselection.ComparePraosTips(
+			dingoLocalTip,
+			cardanoIncomingTip,
+			chainselection.PraosTiebreakerView{},
+			chainselection.PraosTiebreakerView{},
+		) == chainselection.ChainABetter,
 		"dingo's local chain at lower slot but fewer blocks must "+
 			"NOT win against cardano's longer chain. If it did, "+
 			"dingo would entrench a forked solo-extension chain "+

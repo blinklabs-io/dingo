@@ -215,6 +215,39 @@ func (h *TestHarness) WaitForNodeSlot(
 	)
 }
 
+// WaitForNodeBlockAbove polls a specific endpoint until it reports a chain
+// tip above minBlock, or the timeout expires. This waits for selected-chain
+// growth without assuming the block number will be greater at an arbitrary
+// slot boundary; competing producers may validly trigger rollbacks first.
+func (h *TestHarness) WaitForNodeBlockAbove(
+	endpoint NodeEndpoint,
+	minBlock uint64,
+	timeout time.Duration,
+) ChainTip {
+	h.t.Helper()
+	var lastTip ChainTip
+	require.Eventually(h.t, func() bool {
+		tip, err := h.GetChainTip(endpoint)
+		if err != nil {
+			h.t.Logf(
+				"WaitForNodeBlockAbove: error querying %s: %v",
+				endpoint.Name, err,
+			)
+			return false
+		}
+		lastTip = tip
+		h.t.Logf(
+			"WaitForNodeBlockAbove: %s at slot %d, block %d",
+			endpoint.Name, tip.SlotNumber, tip.BlockNumber,
+		)
+		return tip.BlockNumber > minBlock
+	}, timeout, 2*time.Second,
+		"%s did not advance beyond block %d within %s",
+		endpoint.Name, minBlock, timeout,
+	)
+	return lastTip
+}
+
 // VerifyChainConsensus polls all nodes until their chain tips are within
 // slotTolerance of each other, or the timeout expires. This accounts for
 // propagation delays and temporary divergence during catch-up.

@@ -51,7 +51,8 @@ import (
 // before incrementing headerMismatchCount or invoking tryResolveFork.
 // Asserting that headerMismatchCount becomes 1 demonstrates the
 // header took the not-stale branch and reached the fork-resolution
-// gate where chainselection can pick the rule-3 lower-hash winner.
+// gate where chainselection can apply the reference implementation's
+// Praos select-view rules.
 func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 	t *testing.T,
 ) {
@@ -118,10 +119,10 @@ func TestHandleEventChainsyncBlockHeaderRoutesSlotBattleToForkResolution(
 	//     peer's competing header → chain.Tip() moves off the
 	//     original currentTip; chainsyncState flips to
 	//     RollbackChainsyncState.
-	//   - declines via IsBetterChain (peer not better under the
-	//     rule-3 lower-hash tiebreak) → headerMismatchCount stays at
-	//     1 because nothing in tryResolveFork's success branches
-	//     reset it.
+	//   - declines because the reference implementation's Praos
+	//     equal-length tiebreaker is not armed for this peer/header
+	//     pair -> headerMismatchCount stays at 1 because nothing in
+	//     tryResolveFork's success branches reset it.
 	//
 	// The stale-drop early return takes neither path: chain stays
 	// put, chainsyncState stays SyncingChainsyncState, AND

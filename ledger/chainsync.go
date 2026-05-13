@@ -1293,6 +1293,109 @@ func pointMatches(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
+func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
+	if e.BlockHeader == nil {
+		return e.Tip
+	}
+	return ochainsync.Tip{
+		Point:       e.Point,
+		BlockNumber: e.BlockHeader.BlockNumber(),
+	}
+}
+
+func (ls *LedgerState) localTipPraosView(
+	localTip ochainsync.Tip,
+) chainselection.PraosTiebreakerView {
+	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
+		return chainselection.PraosTiebreakerView{}
+	}
+	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"local tip Praos view unavailable: block lookup failed",
+				"component", "ledger",
+				"slot", localTip.Point.Slot,
+				"hash", hex.EncodeToString(localTip.Point.Hash),
+				"error", err,
+			)
+		}
+		return chainselection.PraosTiebreakerView{}
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"local tip Praos view unavailable: block decode failed",
+				"component", "ledger",
+				"slot", localTip.Point.Slot,
+				"hash", hex.EncodeToString(localTip.Point.Hash),
+				"error", err,
+			)
+		}
+		return chainselection.PraosTiebreakerView{}
+	}
+	if decoded == nil {
+		return chainselection.PraosTiebreakerView{}
+	}
+	view, _ := chainselection.GetPraosTiebreakerView(decoded.Header())
+	return view
+}
+
+func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) chainselection.ChainComparisonResult {
+	observedTip := observedHeaderTip(e)
+	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
+		observedTip = e.Tip
+	}
+
+	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
+	result := chainselection.ComparePraosTips(
+		observedTip,
+		localTip,
+		incomingView,
+		ls.localTipPraosView(localTip),
+	)
+	if result != chainselection.ChainEqual {
+		return result
+	}
+
+	// If the peer has advertised a further tip than the header just delivered,
+	// use that only when block number alone decides the comparison. We do not
+	// have the advertised tip's Praos select view until its header arrives.
+	if e.Tip.BlockNumber > observedTip.BlockNumber {
+		switch {
+		case e.Tip.BlockNumber > localTip.BlockNumber:
+			return chainselection.ChainABetter
+		case e.Tip.BlockNumber < localTip.BlockNumber:
+			return chainselection.ChainBBetter
+		}
+	}
+	return result
+}
+
+func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) bool {
+	observedTip := observedHeaderTip(e)
+	if observedTip.BlockNumber > localTip.BlockNumber {
+		return true
+	}
+	if observedTip.BlockNumber < localTip.BlockNumber {
+		return false
+	}
+	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
+	return chainselection.ComparePraosTips(
+		observedTip,
+		localTip,
+		incomingView,
+		ls.localTipPraosView(localTip),
+	) == chainselection.ChainABetter
+}
+
 type LocalRollbackRecoveryResult struct {
 	Recovered           bool
 	SkipConnectionClose bool
@@ -1554,20 +1657,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
 			localTip := ls.chain.Tip()
-			// A header strictly behind the local tip is genuinely
-			// stale and can be dropped. A header AT the same slot
-			// as the local tip with a different hash is a slot
-			// battle — both pools forged at the same slot — and
-			// must fall through to the fork-resolution path so
-			// chainselection's tiebreak picks a side. Treating
-			// equal-slot mismatches as stale here drops the peer's
-			// forge before tryResolveFork ever sees it, locks
-			// dingo onto whichever block it adopted first, and
-			// diverges the chain from peers that resolved the
-			// same battle the other way; that drift then folds
-			// into the evolving nonce and breaks header
-			// verification at the next epoch boundary.
-			if e.Point.Slot < localTip.Point.Slot {
+			// A header behind the local tip is stale only if the
+			// Praos comparison also says it cannot beat the local
+			// tip. At equal block number, cardano-node resolves the
+			// fork by Praos select view, even when the winning
+			// header is at an earlier slot. Without both select
+			// views, keep the old stale behavior for earlier-slot
+			// headers and let a future observed header prove the
+			// advertised tip.
+			if e.Point.Slot < localTip.Point.Slot &&
+				!ls.earlierHeaderCanBeatLocalTip(
+					e,
+					localTip,
+				) {
 				ls.config.Logger.Debug(
 					"ignoring stale roll forward behind local tip",
 					"component", "ledger",
@@ -1775,16 +1877,13 @@ func (ls *LedgerState) tryResolveFork(
 	notFitErr chain.BlockNotFitChainTipError,
 ) (bool, error) {
 	// Only resolve forks when the peer's chain is genuinely better than
-	// ours per Praos rules (longer wins; at equal length, lower slot wins).
-	// A bare slot comparison would force a rollback whenever the peer's tip
-	// happens to land on a later slot — even when the two chains have the
-	// same block count and our local tip is at the lower (denser) slot, in
-	// which case Praos says we should keep ours. With two block producers
-	// this misorders fork resolution: every locally-forged block forks at
-	// the same length as the peer's, the peer's later-slot tip wins the
-	// gate here, and the local block is rolled back.
+	// ours per Praos rules. Longer chains win first; at equal length,
+	// cardano-node uses the Praos VRF tiebreaker, not a lower-slot rule.
 	localTip := ls.chain.Tip()
-	if !chainselection.IsBetterChain(e.Tip, localTip) {
+	if ls.compareIncomingHeaderToLocalTip(
+		e,
+		localTip,
+	) != chainselection.ChainABetter {
 		return false, nil
 	}
 

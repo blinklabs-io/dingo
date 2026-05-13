@@ -19,6 +19,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -747,8 +748,29 @@ func TestValidateAgainstLedger_VRFMismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected mismatch error")
 	}
+	if !errors.Is(err, ErrVRFKeyHashMismatch) {
+		t.Errorf("expected ErrVRFKeyHashMismatch, got: %v", err)
+	}
 	if !strings.Contains(err.Error(), "VRF key hash mismatch") {
 		t.Errorf("expected mismatch in error, got: %v", err)
+	}
+}
+
+func TestValidateAgainstLedger_ZeroVRFHashIsUnknown(t *testing.T) {
+	pc := newCredsForLedger(t)
+	view := &fakeLedgerView{
+		registered: true,
+		regVRFHash: [32]byte{},
+	}
+	registered, matched, err := pc.ValidateAgainstLedger(view)
+	if err != nil {
+		t.Errorf("ValidateAgainstLedger: %v", err)
+	}
+	if registered || matched {
+		t.Errorf("expected registered=false, matched=false; got %v %v", registered, matched)
+	}
+	if view.calledSeq {
+		t.Error("opcert sequence lookup should be skipped when VRF hash is unknown")
 	}
 }
 

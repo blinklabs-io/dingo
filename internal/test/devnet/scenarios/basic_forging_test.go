@@ -31,7 +31,7 @@ import (
 //  1. Connects to all 3 nodes (dingo-producer, cardano-producer, cardano-relay)
 //  2. Waits for Dingo to advance past genesis (bootstrap grace period)
 //  3. Waits for the chain to advance 10 slots beyond the current tip
-//  4. Verifies that Dingo forged at least one block (chain tip advances)
+//  4. Verifies that Dingo's selected chain advances
 //  5. Verifies that all nodes agree on the chain tip within tolerance
 func TestBasicBlockForging(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
@@ -84,15 +84,19 @@ func TestBasicBlockForging(t *testing.T) {
 	h.WaitForNodeSlot(dingoEndpoint, targetSlot, slotTimeout)
 	t.Logf("Dingo has reached slot %d", targetSlot)
 
-	// Step 5: Verify Dingo forged at least one block
-	dingoTip, err := h.GetChainTip(dingoEndpoint)
-	require.NoError(t, err, "failed to get Dingo chain tip after wait")
-	t.Logf(
-		"Dingo tip after wait: slot=%d block=%d",
-		dingoTip.SlotNumber, dingoTip.BlockNumber,
+	// Step 5: Verify Dingo's selected chain advances. Valid Praos
+	// tiebreaks may roll back an early local block and leave the selected
+	// chain at the same block height at the target slot, so wait for
+	// eventual height growth instead of sampling once.
+	growthTimeout := cfg.ExpectedBlockTime() * 20
+	dingoTip := h.WaitForNodeBlockAbove(
+		dingoEndpoint,
+		initialTip.BlockNumber,
+		growthTimeout,
 	)
-	require.Greater(t, dingoTip.BlockNumber, initialTip.BlockNumber,
-		"Dingo producer should have forged at least one block",
+	t.Logf(
+		"Dingo tip after growth: slot=%d block=%d",
+		dingoTip.SlotNumber, dingoTip.BlockNumber,
 	)
 
 	// Step 6: Verify all nodes converge within 3*securityParam slots.
@@ -108,7 +112,7 @@ func TestBasicBlockForging(t *testing.T) {
 }
 
 // TestDingoChainAdvances is a simpler test that just verifies
-// the Dingo node's chain is advancing (forging blocks).
+// the Dingo node's selected chain is advancing.
 func TestDingoChainAdvances(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
@@ -136,14 +140,19 @@ func TestDingoChainAdvances(t *testing.T) {
 		cfg.ExpectedBlockTime()*5
 	h.WaitForNodeSlot(dingoEndpoint, targetSlot, slotTimeout)
 
-	// Verify chain advanced
-	newTip, err := h.GetChainTip(dingoEndpoint)
-	require.NoError(t, err, "failed to get new tip")
+	// Verify selected-chain height advances. Do not require the block
+	// number to be greater at a single target slot: Praos selection
+	// compatible with the reference implementation can roll back an early
+	// block in favor of an equal-height lower-VRF competitor before the
+	// chain grows again.
+	growthTimeout := cfg.ExpectedBlockTime() * 20
+	newTip := h.WaitForNodeBlockAbove(
+		dingoEndpoint,
+		initialTip.BlockNumber,
+		growthTimeout,
+	)
 	require.Greater(t, newTip.SlotNumber, initialTip.SlotNumber,
 		"Dingo chain should have advanced",
-	)
-	require.Greater(t, newTip.BlockNumber, initialTip.BlockNumber,
-		"Dingo should have forged new blocks",
 	)
 
 	t.Logf(

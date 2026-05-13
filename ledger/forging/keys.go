@@ -31,6 +31,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/vrf"
 )
 
+var ErrVRFKeyHashMismatch = errors.New("VRF key hash mismatch")
+
 // PoolCredentials holds the cryptographic keys required for block production.
 // All keys are loaded using Bursa from standard cardano-cli format files.
 // Fields are unexported to enforce thread-safe access via the mutex.
@@ -466,8 +468,9 @@ type LedgerView interface {
 //     matched our loaded VRF verification key. False otherwise (also
 //     false when registered is false or the VRF verification key is
 //     unavailable, e.g. for a seed-only VRF skey).
-//   - err: a non-nil error means the node should refuse to start. Used
-//     for VRF mismatch and stale opcert counter.
+//   - err: a non-nil error means the ledger view disagrees with the
+//     loaded credentials. Normal networks refuse startup for these;
+//     devnet callers may choose to warn on ErrVRFKeyHashMismatch.
 func (pc *PoolCredentials) ValidateAgainstLedger(
 	view LedgerView,
 ) (registered, vrfMatched bool, err error) {
@@ -490,11 +493,18 @@ func (pc *PoolCredentials) ValidateAgainstLedger(
 	if !found {
 		return false, false, nil
 	}
+	if regVRF == ([32]byte{}) {
+		// Fresh devnets and partially bootstrapped ledgers can expose a
+		// placeholder pool row before a trustworthy VRF hash is available.
+		// Treat that like "not registered yet" so startup can continue.
+		return false, false, nil
+	}
 	if pc.vrfVKey != nil {
 		ourVRF := lcommon.Blake2b256Hash(pc.vrfVKey)
 		if ourVRF != regVRF {
 			return true, false, fmt.Errorf(
-				"VRF key hash mismatch: pool registration has %x but loaded VRF key hashes to %x",
+				"%w: pool registration has %x but loaded VRF key hashes to %x",
+				ErrVRFKeyHashMismatch,
 				regVRF, ourVRF,
 			)
 		}

@@ -24,10 +24,133 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
 
 // VRFOutputSize is the expected size of a VRF output in bytes.
 const VRFOutputSize = 64
+
+const praosRestrictedTiebreakerMaxSlotDistance = 5
+
+// PraosTiebreakerFlavor matches ouroboros-consensus' VRFTiebreakerFlavor.
+type PraosTiebreakerFlavor uint8
+
+const (
+	PraosTiebreakerUnknown PraosTiebreakerFlavor = iota
+	PraosTiebreakerUnrestricted
+	PraosTiebreakerRestricted
+)
+
+// PraosTiebreakerConfig is the chain-order config projected from the current
+// Shelley-family block config. The reference implementation uses unrestricted
+// VRF before Conway and restricted VRF with max distance 5 from Conway onward.
+type PraosTiebreakerConfig struct {
+	Flavor          PraosTiebreakerFlavor
+	MaxSlotDistance uint64
+}
+
+// PraosTiebreakerView mirrors ouroboros-consensus' PraosTiebreakerView for
+// equal-length chain selection.
+type PraosTiebreakerView struct {
+	Slot              uint64
+	Issuer            []byte
+	IssueNo           uint64
+	TieBreakVRF       []byte
+	TiebreakerConfig  PraosTiebreakerConfig
+	hasIssuerAndIssue bool
+}
+
+func PraosTiebreakerConfigBeforeConway() PraosTiebreakerConfig {
+	return PraosTiebreakerConfig{
+		Flavor: PraosTiebreakerUnrestricted,
+	}
+}
+
+func PraosTiebreakerConfigConway() PraosTiebreakerConfig {
+	return PraosTiebreakerConfig{
+		Flavor:          PraosTiebreakerRestricted,
+		MaxSlotDistance: praosRestrictedTiebreakerMaxSlotDistance,
+	}
+}
+
+func PraosTiebreakerConfigUnknown() PraosTiebreakerConfig {
+	return PraosTiebreakerConfig{}
+}
+
+func (c PraosTiebreakerConfig) known() bool {
+	return c.Flavor == PraosTiebreakerUnrestricted ||
+		c.Flavor == PraosTiebreakerRestricted
+}
+
+func (v PraosTiebreakerView) hasIssuerIssueNo() bool {
+	return v.hasIssuerAndIssue && len(v.Issuer) > 0
+}
+
+// PraosTiebreakerViewFromTip builds a partial view when only a chainsync tip
+// and VRF are available. The issuer/opcert rule cannot be applied to partial
+// views.
+func PraosTiebreakerViewFromTip(
+	tip ochainsync.Tip,
+	vrfOutput []byte,
+	config PraosTiebreakerConfig,
+) PraosTiebreakerView {
+	return PraosTiebreakerView{
+		Slot:             tip.Point.Slot,
+		TieBreakVRF:      cloneBytes(vrfOutput),
+		TiebreakerConfig: config,
+	}
+}
+
+// GetPraosTiebreakerView extracts the Praos select-view fields from a
+// Shelley-family header.
+func GetPraosTiebreakerView(
+	header ledger.BlockHeader,
+) (PraosTiebreakerView, bool) {
+	if header == nil {
+		return PraosTiebreakerView{}, false
+	}
+	issueNo, ok := headerIssueNo(header)
+	if !ok {
+		return PraosTiebreakerView{}, false
+	}
+	issuer := header.IssuerVkey()
+	return PraosTiebreakerView{
+		Slot:              header.SlotNumber(),
+		Issuer:            cloneBytes(issuer[:]),
+		IssueNo:           issueNo,
+		TieBreakVRF:       cloneBytes(GetVRFOutput(header)),
+		TiebreakerConfig:  praosTiebreakerConfigForHeader(header),
+		hasIssuerAndIssue: true,
+	}, true
+}
+
+func headerIssueNo(header ledger.BlockHeader) (uint64, bool) {
+	switch h := header.(type) {
+	case *shelley.ShelleyBlockHeader:
+		return uint64(h.Body.OpCertSequenceNumber), true
+	case *allegra.AllegraBlockHeader:
+		return uint64(h.Body.OpCertSequenceNumber), true
+	case *mary.MaryBlockHeader:
+		return uint64(h.Body.OpCertSequenceNumber), true
+	case *alonzo.AlonzoBlockHeader:
+		return uint64(h.Body.OpCertSequenceNumber), true
+	case *babbage.BabbageBlockHeader:
+		return uint64(h.Body.OpCert.SequenceNumber), true
+	case *conway.ConwayBlockHeader:
+		return uint64(h.Body.OpCert.SequenceNumber), true
+	default:
+		return 0, false
+	}
+}
+
+func praosTiebreakerConfigForHeader(
+	header ledger.BlockHeader,
+) PraosTiebreakerConfig {
+	if header.Era().Id >= conway.EraIdConway {
+		return PraosTiebreakerConfigConway()
+	}
+	return PraosTiebreakerConfigBeforeConway()
+}
 
 // GetVRFOutput extracts the VRF output from a block header.
 // Returns nil if the header type is not supported or doesn't contain VRF data.
@@ -80,11 +203,19 @@ func CompareVRFOutputs(vrfA, vrfB []byte) ChainComparisonResult {
 	return ChainEqual
 }
 
-// CompareHeaders compares two block headers for chain selection tie-breaking
-// using their VRF outputs. This is a convenience wrapper around GetVRFOutput
-// and CompareVRFOutputs.
-func CompareHeaders(headerA, headerB ledger.BlockHeader) ChainComparisonResult {
-	vrfA := GetVRFOutput(headerA)
-	vrfB := GetVRFOutput(headerB)
-	return CompareVRFOutputs(vrfA, vrfB)
+func cloneBytes(src []byte) []byte {
+	if src == nil {
+		return nil
+	}
+	dst := make([]byte, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func clonePraosTiebreakerView(
+	src PraosTiebreakerView,
+) PraosTiebreakerView {
+	src.Issuer = cloneBytes(src.Issuer)
+	src.TieBreakVRF = cloneBytes(src.TieBreakVRF)
+	return src
 }
