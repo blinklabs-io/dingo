@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -349,6 +350,7 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.AddressTransaction, error) {
 	var ret []models.AddressTransaction
@@ -361,9 +363,9 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 	}
 	query := db.Model(&models.AddressTransaction{}).
 		Select("MIN(id) AS id, payment_key, staking_key").
-		Where("staking_key = ?", stakingKey).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
 		Group("payment_key, staking_key").
-		Order("payment_key ASC")
+		Order(addressOrderClause(order))
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -374,6 +376,146 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
 	}
 	return ret, nil
+}
+
+// CountAddressesByStakingKey returns the total number of distinct addresses mapped to a staking key.
+func (d *MetadataStoreMysql) CountAddressesByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count addresses by staking key: %w",
+			err,
+		)
+	}
+	var count int64
+	if err := db.Model(&models.AddressTransaction{}).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
+		Distinct("payment_key").
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count addresses by staking key: %w", err)
+	}
+	return int(count), nil
+}
+
+func addressOrderClause(order string) string {
+	if strings.EqualFold(order, "desc") {
+		return "payment_key DESC"
+	}
+	return "payment_key ASC"
+}
+
+// GetAccountDelegationHistory returns delegation history rows for a staking key.
+func (d *MetadataStoreMysql) GetAccountDelegationHistory(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account delegation history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryDelegationHistory(
+		db,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account delegation history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountDelegationHistory returns the total number of
+// delegation history rows for a staking key.
+func (d *MetadataStoreMysql) CountAccountDelegationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account delegation history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountDelegationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+// GetAccountRegistrationHistory returns registration history rows for a staking key.
+func (d *MetadataStoreMysql) GetAccountRegistrationHistory(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account registration history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryRegistrationHistory(
+		db,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account registration history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountRegistrationHistory returns the total number of
+// registration history rows for a staking key.
+func (d *MetadataStoreMysql) CountAccountRegistrationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account registration history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountRegistrationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account registration history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata
@@ -531,6 +673,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
 				[]string{
+					"added_slot",
 					"pool",
 					"drep",
 					"drep_type",

@@ -371,8 +371,47 @@ type MetadataStore interface {
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
+		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AddressTransaction, error)
+
+	// CountAddressesByStakingKey retrieves the total count of distinct address mappings for a staking key.
+	CountAddressesByStakingKey(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
+	GetAccountDelegationHistory(
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountDelegationHistoryRow, error)
+
+	// CountAccountDelegationHistory retrieves the total count of
+	// delegation history rows for a staking key.
+	CountAccountDelegationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
+	GetAccountRegistrationHistory(
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// CountAccountRegistrationHistory retrieves the total count of
+	// registration history rows for a staking key.
+	CountAccountRegistrationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
 
 	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
@@ -585,6 +624,10 @@ type MetadataStore interface {
 
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+
+	// GetControlledAmountByStakingKey returns the sum of live UTxO
+	// amounts controlled by the given staking key.
+	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.

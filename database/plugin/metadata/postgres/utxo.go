@@ -76,6 +76,35 @@ func (d *MetadataStorePostgres) GetUtxoIncludingSpent(
 	return ret, nil
 }
 
+// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
+// controlled by the given staking key.
+func (d *MetadataStorePostgres) GetControlledAmountByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for controlled amount by staking key: %w",
+			err,
+		)
+	}
+	var total uint64
+	if err := db.Model(&models.Utxo{}).
+		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf(
+			"get controlled amount by staking key: %w",
+			err,
+		)
+	}
+	return total, nil
+}
+
 // GetUtxosAddedAfterSlot returns a list of Utxos added after a given slot
 func (d *MetadataStorePostgres) GetUtxosAddedAfterSlot(
 	slot uint64,
