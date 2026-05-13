@@ -116,11 +116,6 @@ const (
 	// in multi-producer networks where short forks are expected.
 	headerMismatchResyncThreshold = 20
 
-	// Chainsync re-sync reasons
-	resyncReasonRollbackAhead    = "rollback point ahead of local tip"
-	resyncReasonRollbackNotFound = "rollback point not found"
-	resyncReasonRollbackLoop     = "rollback loop detected"
-
 	maxPeerHeaderHistoryPerConn = 256
 )
 
@@ -180,7 +175,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 							event.ChainsyncResyncEventType,
 							event.ChainsyncResyncEvent{
 								ConnectionId: e.ConnectionId,
-								Reason:       resyncReasonRollbackLoop,
+								Reason:       event.ChainsyncResyncReasonRollbackLoop,
 							},
 						),
 					)
@@ -1186,7 +1181,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					event.ChainsyncResyncEventType,
 					event.ChainsyncResyncEvent{
 						ConnectionId: e.ConnectionId,
-						Reason:       resyncReasonRollbackAhead,
+						Reason:       event.ChainsyncResyncReasonRollbackAhead,
 					},
 				),
 			)
@@ -1224,7 +1219,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       resyncReasonRollbackNotFound,
+							Reason:       event.ChainsyncResyncReasonRollbackNotFound,
 						},
 					),
 				)
@@ -1259,7 +1254,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       "rollback exceeds security parameter K",
+							Reason:       event.ChainsyncResyncReasonRollbackExceedsK,
 						},
 					),
 				)
@@ -1728,7 +1723,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				)
 				ls.requestChainsyncResync(
 					e.ConnectionId,
-					"persistent chain fork",
+					event.ChainsyncResyncReasonPersistentFork,
 				)
 			}
 			return nil
@@ -1923,7 +1918,7 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			resyncReasonRollbackNotFound,
+			event.ChainsyncResyncReasonRollbackNotFound,
 		)
 		return true, nil
 	}
@@ -2020,7 +2015,7 @@ func (ls *LedgerState) tryResolveFork(
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       "fork resolution exceeds security parameter K",
+							Reason:       event.ChainsyncResyncReasonForkResolutionExceedsK,
 						},
 					),
 				)
@@ -3542,7 +3537,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 							event.ChainsyncResyncEventType,
 							event.ChainsyncResyncEvent{
 								ConnectionId: retryConnId,
-								Reason:       "blockfetch timeout retry failed on all available connections",
+								Reason:       event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
 							},
 						),
 					)

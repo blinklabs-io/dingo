@@ -1899,7 +1899,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
-					Reason: "local ledger rollback",
+					Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 					Point:  point,
 				},
 			),
