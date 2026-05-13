@@ -99,6 +99,17 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 	assert.Equal(t, uint32(1), ba.UtxoSpends[0].OutputIdx)
 	assert.Equal(t, uint(42), ba.DeleteTxIDs[0])
 
+	keyWitnessesCap := cap(ba.KeyWitnesses)
+	witnessScriptsCap := cap(ba.WitnessScripts)
+	scriptsCap := cap(ba.Scripts)
+	plutusDataCap := cap(ba.PlutusData)
+	redeemersCap := cap(ba.Redeemers)
+	addressTxsCap := cap(ba.AddressTxs)
+	utxoOutputsCap := cap(ba.UtxoOutputs)
+	utxoSpendsCap := cap(ba.UtxoSpends)
+	collateralRetsCap := cap(ba.CollateralRets)
+	deleteTxIDsCap := cap(ba.DeleteTxIDs)
+
 	// --- Reset and verify all slices are empty ---
 
 	ba.Reset()
@@ -114,18 +125,18 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 	assert.Empty(t, ba.CollateralRets)
 	assert.Empty(t, ba.DeleteTxIDs)
 
-	// --- Verify backing arrays are reused (cap > 0) ---
+	// --- Verify backing arrays are reused ---
 
-	assert.Greater(t, cap(ba.KeyWitnesses), 0)
-	assert.Greater(t, cap(ba.WitnessScripts), 0)
-	assert.Greater(t, cap(ba.Scripts), 0)
-	assert.Greater(t, cap(ba.PlutusData), 0)
-	assert.Greater(t, cap(ba.Redeemers), 0)
-	assert.Greater(t, cap(ba.AddressTxs), 0)
-	assert.Greater(t, cap(ba.UtxoOutputs), 0)
-	assert.Greater(t, cap(ba.UtxoSpends), 0)
-	assert.Greater(t, cap(ba.CollateralRets), 0)
-	assert.Greater(t, cap(ba.DeleteTxIDs), 0)
+	assert.Equal(t, keyWitnessesCap, cap(ba.KeyWitnesses))
+	assert.Equal(t, witnessScriptsCap, cap(ba.WitnessScripts))
+	assert.Equal(t, scriptsCap, cap(ba.Scripts))
+	assert.Equal(t, plutusDataCap, cap(ba.PlutusData))
+	assert.Equal(t, redeemersCap, cap(ba.Redeemers))
+	assert.Equal(t, addressTxsCap, cap(ba.AddressTxs))
+	assert.Equal(t, utxoOutputsCap, cap(ba.UtxoOutputs))
+	assert.Equal(t, utxoSpendsCap, cap(ba.UtxoSpends))
+	assert.Equal(t, collateralRetsCap, cap(ba.CollateralRets))
+	assert.Equal(t, deleteTxIDsCap, cap(ba.DeleteTxIDs))
 
 	// --- Verify re-add after reset works ---
 

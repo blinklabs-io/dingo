@@ -55,7 +55,18 @@ type BatchAccumulator struct {
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{}
+	return &BatchAccumulator{
+		KeyWitnesses:   make([]models.KeyWitness, 0, batchChunkRows),
+		WitnessScripts: make([]models.WitnessScripts, 0, batchChunkRows),
+		Scripts:        make([]models.Script, 0, batchChunkRows),
+		PlutusData:     make([]models.PlutusData, 0, batchChunkRows),
+		Redeemers:      make([]models.Redeemer, 0, batchChunkRows),
+		AddressTxs:     make([]models.AddressTransaction, 0, batchChunkRows),
+		UtxoOutputs:    make([]models.Utxo, 0, batchChunkRows),
+		UtxoSpends:     make([]utxoSpend, 0, batchChunkRows),
+		CollateralRets: make([]models.Utxo, 0, batchChunkRows),
+		DeleteTxIDs:    make([]uint, 0, batchChunkRows),
+	}
 }
 
 // NewBatchAccumulator creates an accumulator for this metadata store.
