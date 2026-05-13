@@ -215,7 +215,7 @@ func (n *Node) processChainsyncRecyclerTick(
 								event.ChainsyncResyncEventType,
 								event.ChainsyncResyncEvent{
 									ConnectionId: *targetConn,
-									Reason:       "local_tip_plateau",
+									Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
 								},
 							),
 						)
@@ -387,7 +387,7 @@ func (n *Node) realignOtherPeersAfterPlateau(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
 					ConnectionId: conn.ConnId,
-					Reason:       "post_plateau_realign",
+					Reason:       event.ChainsyncResyncReasonPostPlateauRealign,
 				},
 			),
 		)

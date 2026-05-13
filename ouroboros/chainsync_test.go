@@ -600,7 +600,7 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
-				Reason: "local ledger rollback",
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 				Point:  rollbackPoint,
 			},
 		),
@@ -656,7 +656,7 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
-				Reason: "local ledger rollback",
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 				Point:  rollbackPoint,
 			},
 		),
@@ -671,101 +671,121 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 	}
 }
 
-func TestSubscribeChainsyncResyncClosesConnectionOnPersistentFork(
+func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 	t *testing.T,
 ) {
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
-	bus := event.NewEventBus(nil, logger)
-	defer bus.Close()
+	reasons := []string{
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonPersistentFork,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackLoop,
+	}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			logBuf := &lockedBuffer{}
+			logger := slog.New(
+				slog.NewJSONHandler(
+					logBuf,
+					&slog.HandlerOptions{Level: slog.LevelDebug},
+				),
+			)
+			bus := event.NewEventBus(nil, logger)
+			defer bus.Close()
 
-	connManager := connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{
-			EventBus: bus,
-			Logger:   logger,
-		},
-	)
-	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(
-			context.Background(),
-			5*time.Second,
-		)
-		defer stopCancel()
-		_ = connManager.Stop(stopCtx)
-	})
+			connManager := connmanager.NewConnectionManager(
+				connmanager.ConnectionManagerConfig{
+					EventBus: bus,
+					Logger:   logger,
+				},
+			)
+			t.Cleanup(func() {
+				stopCtx, stopCancel := context.WithTimeout(
+					context.Background(),
+					5*time.Second,
+				)
+				defer stopCancel()
+				_ = connManager.Stop(stopCtx)
+			})
 
-	mockConn := ouroboros_mock.NewConnection(
-		ouroboros_mock.ProtocolRoleClient,
-		ouroboros_mock.ConversationKeepAlive,
-	)
-	oConn, err := ouroboros.New(
-		ouroboros.WithConnection(mockConn),
-		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
-		ouroboros.WithNodeToNode(true),
-		ouroboros.WithKeepAlive(true),
-		ouroboros.WithKeepAliveConfig(
-			keepalive.NewConfig(
-				keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
-				keepalive.WithPeriod(30*time.Second),
-				keepalive.WithTimeout(15*time.Second),
-			),
-		),
-	)
-	require.NoError(t, err)
-	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
+			mockConn := ouroboros_mock.NewConnection(
+				ouroboros_mock.ProtocolRoleClient,
+				ouroboros_mock.ConversationKeepAlive,
+			)
+			oConn, err := ouroboros.New(
+				ouroboros.WithConnection(mockConn),
+				ouroboros.WithNetworkMagic(
+					ouroboros_mock.MockNetworkMagic,
+				),
+				ouroboros.WithNodeToNode(true),
+				ouroboros.WithKeepAlive(true),
+				ouroboros.WithKeepAliveConfig(
+					keepalive.NewConfig(
+						keepalive.WithCookie(
+							ouroboros_mock.MockKeepAliveCookie,
+						),
+						keepalive.WithPeriod(30*time.Second),
+						keepalive.WithTimeout(15*time.Second),
+					),
+				),
+			)
+			require.NoError(t, err)
+			connManager.AddConnection(oConn, false, "127.0.0.1:1234")
 
-	o := NewOuroboros(OuroborosConfig{
-		EventBus: bus,
-		Logger:   logger,
-	})
-	o.EventBus = bus
-	o.ConnManager = connManager
+			o := NewOuroboros(OuroborosConfig{
+				EventBus: bus,
+				Logger:   logger,
+			})
+			o.EventBus = bus
+			o.ConnManager = connManager
 
-	ctx := t.Context()
-	o.SubscribeChainsyncResync(ctx)
+			ctx := t.Context()
+			o.SubscribeChainsyncResync(ctx)
 
-	connId := oConn.Id()
-	bus.Publish(
-		event.ChainsyncResyncEventType,
-		event.NewEvent(
-			event.ChainsyncResyncEventType,
-			event.ChainsyncResyncEvent{
-				ConnectionId: connId,
-				Reason:       "persistent chain fork",
-			},
-		),
-	)
+			connId := oConn.Id()
+			bus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: connId,
+						Reason:       reason,
+					},
+				),
+			)
 
-	require.Eventually(
-		t,
-		func() bool {
-			return connManager.GetConnectionById(connId) == nil
-		},
-		2*time.Second,
-		20*time.Millisecond,
-	)
-	require.Eventually(
-		t,
-		func() bool {
-			logs := logBuf.String()
-			return strings.Contains(
-				logs,
-				`"msg":"closing stalled connection for fresh chainsync"`,
-			) && strings.Contains(logs, `"reason":"persistent chain fork"`)
-		},
-		2*time.Second,
-		20*time.Millisecond,
-	)
-	require.NotContains(
-		t,
-		logBuf.String(),
-		`"msg":"restarting chainsync client"`,
-	)
+			require.Eventually(
+				t,
+				func() bool {
+					return connManager.GetConnectionById(connId) == nil
+				},
+				2*time.Second,
+				20*time.Millisecond,
+			)
+			require.Eventually(
+				t,
+				func() bool {
+					logs := logBuf.String()
+					return strings.Contains(
+						logs,
+						`"msg":"closing connection for fresh chainsync"`,
+					) && strings.Contains(
+						logs,
+						`"reason":"`+reason+`"`,
+					)
+				},
+				2*time.Second,
+				20*time.Millisecond,
+			)
+			require.NotContains(
+				t,
+				logBuf.String(),
+				`"msg":"restarting chainsync client"`,
+			)
+		})
+	}
 }
 
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(

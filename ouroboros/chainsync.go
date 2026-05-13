@@ -117,6 +117,20 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 	return a.String() == b.String()
 }
 
+func chainsyncResyncRequiresFreshConnection(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonPersistentFork,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackLoop:
+		return true
+	default:
+		return false
+	}
+}
+
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	connId ouroboros.ConnectionId,
 ) ([]ocommon.Point, error) {
@@ -967,7 +981,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				connIds = append(connIds, e.ConnectionId)
 			} else if o.ChainsyncState != nil {
 				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
-				if e.Reason == "local ledger rollback" &&
+				if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback &&
 					len(connIds) == 0 {
 					connIds = o.ChainsyncState.GetClientConnIds()
 				}
@@ -979,7 +993,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					o.ChainsyncState.ClearSeenHeaders()
 				}
 			}
-			if e.Reason == "local ledger rollback" {
+			if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback {
 				if o.LedgerState == nil {
 					return
 				}
@@ -1039,16 +1053,14 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Plateau and unresolved fork events close the connection
-			// immediately rather than attempting an in-place
+			// Events that require a fresh ChainSync bearer close the
+			// connection immediately rather than attempting an in-place
 			// Stop→Start→Sync restart. Stop() blocks for up to 30s
 			// when the protocol is in MustReply state, during which
 			// no recovery can happen. Closing lets peer governance
 			// reconnect with a fresh bearer and updated intersect
 			// points.
-			if e.Reason == "local_tip_plateau" ||
-				e.Reason == "rollback point not found" ||
-				e.Reason == "persistent chain fork" {
+			if chainsyncResyncRequiresFreshConnection(e.Reason) {
 				for _, connId := range connIds {
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearObservedHeaderHistory(connId)
@@ -1061,7 +1073,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 						continue
 					}
 					o.config.Logger.Info(
-						"closing stalled connection for fresh chainsync",
+						"closing connection for fresh chainsync",
 						"connection_id", connId.String(),
 						"reason", e.Reason,
 					)

@@ -300,7 +300,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
-					Reason: "live tx validation recovery",
+					Reason: event.ChainsyncResyncReasonLiveTxValidationRecovery,
 					Point:  rewindPoint,
 				},
 			),

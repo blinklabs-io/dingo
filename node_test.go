@@ -408,7 +408,11 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
 		require.True(t, ok)
 		assert.Equal(t, activeConn, resyncEvt.ConnectionId)
-		assert.Equal(t, "local_tip_plateau", resyncEvt.Reason)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonLocalTipPlateau,
+			resyncEvt.Reason,
+		)
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("expected plateau resync event")
 	}
@@ -579,13 +583,13 @@ func TestProcessChainsyncRecyclerTickRealignsOtherPeersOnPlateau(t *testing.T) {
 			resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
 			require.True(t, ok)
 			switch {
-			case resyncEvt.Reason == "local_tip_plateau" &&
+			case resyncEvt.Reason == event.ChainsyncResyncReasonLocalTipPlateau &&
 				resyncEvt.ConnectionId == stalledConn:
 				gotPlateauForStalled = true
-			case resyncEvt.Reason == "post_plateau_realign" &&
+			case resyncEvt.Reason == event.ChainsyncResyncReasonPostPlateauRealign &&
 				resyncEvt.ConnectionId == candidateConn:
 				gotRealignForCandidate = true
-			case resyncEvt.Reason == "post_plateau_realign" &&
+			case resyncEvt.Reason == event.ChainsyncResyncReasonPostPlateauRealign &&
 				resyncEvt.ConnectionId == farBehindConn:
 				t.Fatalf(
 					"unexpected realign for peer at-or-below local tip: %+v",

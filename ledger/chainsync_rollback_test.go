@@ -604,7 +604,11 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	select {
 	case resync := <-resyncCh:
 		assert.Equal(t, fixture.connId, resync.ConnectionId)
-		assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			resync.Reason,
+		)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected chainsync resync event")
 	}
@@ -642,7 +646,11 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 
 	select {
 	case resync := <-resyncCh:
-		assert.Equal(t, "local ledger rollback", resync.Reason)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonLocalLedgerRollback,
+			resync.Reason,
+		)
 		assert.Equal(t, fixture.ancestorTip.Point, resync.Point)
 		assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
 	case <-time.After(2 * time.Second):
