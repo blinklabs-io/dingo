@@ -232,12 +232,8 @@ intersectTip: false
 
 # Maximum total size (in bytes) of all transactions allowed in the mempool.
 # Transactions exceeding this limit will be rejected.
-# Default: 1048576 (1 MiB) for Praos modes (runMode "serve" / "load" / "dev")
-# Default: 26214400 (25 MiB) when runMode is "leios", since Leios sustains
-# much higher tx throughput across several pipelines and a 1 MiB cap would
-# bottleneck the protocol itself.
-# Leave commented to let the mode-derived default apply; uncomment and
-# edit to override.
+# Default: 1048576 (1 MiB) for Praos modes; 26214400 (25 MiB) for Leios.
+# Leave commented to use the mode default; uncomment to override.
 # CLI: --mempool-capacity
 # mempoolCapacity: 1048576
 

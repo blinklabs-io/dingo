@@ -81,11 +81,6 @@ const (
 	DefaultRejectionWatermark          = 0.95
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
-	// MempoolCapacity defaults are mode-dependent. Praos block
-	// throughput is well served by 1 MiB; Leios runs several input/
-	// endorser block pipelines concurrently and needs substantially
-	// more headroom so the protocol — not the mempool — is what's
-	// being measured.
 	DefaultMempoolCapacityPraos = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios = 26214400 // 25 MiB
 )
