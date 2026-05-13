@@ -587,6 +587,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	// Initialize metrics here so any constructed LedgerState is safe to
+	// use without requiring Start() to have been called. Benchmarks and
+	// other tests that exercise validateTxCore via a constructed-but-
+	// not-started LedgerState would otherwise nil-deref on the metrics
+	// counters.
+	ls.metrics.init(cfg.PromRegistry)
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
@@ -595,8 +601,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.ctx = ctx
-	// Init metrics
-	ls.metrics.init(ls.config.PromRegistry)
 	ls.metrics.nodeStartTime.Set(
 		float64(time.Now().Unix()),
 	)
