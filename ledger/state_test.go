@@ -2344,7 +2344,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	assert.Nil(t, points)
 }
 
-func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {
+func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
@@ -2382,12 +2382,12 @@ func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {
 	points, err := ls.IntersectPoints(3)
 	require.NoError(t, err)
 	require.Len(t, points, 3)
-	assert.Equal(t, ledgerTipBlock.Slot, points[0].Slot)
-	assert.Equal(t, ledgerTipBlock.Hash, points[0].Hash)
-	assert.Equal(t, blocks[1].Slot, points[1].Slot)
-	assert.Equal(t, blocks[1].Hash, points[1].Hash)
-	assert.Equal(t, blocks[0].Slot, points[2].Slot)
-	assert.Equal(t, blocks[0].Hash, points[2].Hash)
+	assert.Equal(t, blocks[4].Slot, points[0].Slot)
+	assert.Equal(t, blocks[4].Hash, points[0].Hash)
+	assert.Equal(t, blocks[3].Slot, points[1].Slot)
+	assert.Equal(t, blocks[3].Hash, points[1].Hash)
+	assert.Equal(t, blocks[2].Slot, points[2].Slot)
+	assert.Equal(t, blocks[2].Hash, points[2].Hash)
 }
 
 func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
