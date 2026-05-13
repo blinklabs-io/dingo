@@ -168,6 +168,20 @@ func (c *Chain) AddBlock(
 	return nil
 }
 
+// HandleBlockProposedEvent applies locally forged block proposals published on
+// the EventBus and acknowledges the result to the proposer when requested.
+func (c *Chain) HandleBlockProposedEvent(evt event.Event) {
+	proposal, ok := evt.Data.(BlockProposedEvent)
+	if !ok {
+		return
+	}
+	if proposal.Block == nil {
+		proposal.Respond(errors.New("proposed block is nil"))
+		return
+	}
+	proposal.Respond(c.AddBlock(proposal.Block, nil))
+}
+
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.

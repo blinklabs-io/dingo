@@ -70,6 +70,7 @@ type Node struct {
 	ctx                              context.Context
 	cancel                           context.CancelFunc
 	shutdownOnce                     sync.Once
+	shutdownErr                      error
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 }
@@ -198,6 +199,10 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	n.eventBus.SubscribeFunc(
+		chain.BlockProposedEventType,
+		n.chainManager.PrimaryChain().HandleBlockProposedEvent,
+	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)

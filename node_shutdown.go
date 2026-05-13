@@ -22,11 +22,55 @@ import (
 )
 
 func (n *Node) Stop() error {
-	var err error
 	n.shutdownOnce.Do(func() {
-		err = n.shutdown()
+		n.shutdownErr = n.shutdown()
 	})
-	return err
+	return n.shutdownErr
+}
+
+func (n *Node) closeWithShutdownTimeout(
+	ctx context.Context,
+	resource string,
+	shutdownTimeout time.Duration,
+	closeFn func() error,
+) error {
+	closeCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+	defer cancel()
+
+	t := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- closeFn()
+	}()
+
+	select {
+	case closeErr := <-done:
+		elapsed := time.Since(t).Round(time.Millisecond)
+		if closeErr != nil {
+			n.config.logger.Error(
+				"shutdown resource close failed",
+				"resource", resource,
+				"elapsed", elapsed,
+				"error", closeErr,
+			)
+			return closeErr
+		}
+		n.config.logger.Info(
+			"shutdown resource closed",
+			"resource", resource,
+			"elapsed", elapsed,
+		)
+		return nil
+	case <-closeCtx.Done():
+		n.config.logger.Warn(
+			"shutdown resource close timed out",
+			"resource", resource,
+			"timeout", shutdownTimeout,
+			"elapsed", time.Since(t).Round(time.Millisecond),
+			"error", closeCtx.Err(),
+		)
+		return closeCtx.Err()
+	}
 }
 
 func (n *Node) shutdown() error {
@@ -157,32 +201,32 @@ func (n *Node) shutdown() error {
 
 	if n.ledgerState != nil {
 		n.config.logger.Info("closing ledger state")
-		t := time.Now()
-		if closeErr := n.ledgerState.Close(); closeErr != nil {
+		if closeErr := n.closeWithShutdownTimeout(
+			ctx,
+			"ledgerState",
+			shutdownTimeout,
+			n.ledgerState.Close,
+		); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("ledger state close: %w", closeErr),
 			)
 		}
-		n.config.logger.Info(
-			"ledger state closed",
-			"elapsed", time.Since(t).Round(time.Millisecond),
-		)
 	}
 
 	if n.db != nil {
 		n.config.logger.Info("closing database")
-		t := time.Now()
-		if closeErr := n.db.Close(); closeErr != nil {
+		if closeErr := n.closeWithShutdownTimeout(
+			ctx,
+			"database",
+			shutdownTimeout,
+			n.db.Close,
+		); closeErr != nil {
 			err = errors.Join(
 				err,
 				fmt.Errorf("database close: %w", closeErr),
 			)
 		}
-		n.config.logger.Info(
-			"database closed",
-			"elapsed", time.Since(t).Round(time.Millisecond),
-		)
 	}
 
 	n.config.logger.Info(
