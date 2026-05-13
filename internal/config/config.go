@@ -81,8 +81,8 @@ const (
 	DefaultRejectionWatermark          = 0.95
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
-	DefaultMempoolCapacityPraos = 1048576  // 1 MiB
-	DefaultMempoolCapacityLeios = 26214400 // 25 MiB
+	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
+	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
 )
 
 // ErrPluginListRequested is returned when the user requests to list
