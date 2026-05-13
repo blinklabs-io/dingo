@@ -56,9 +56,9 @@ type BlobStoreBark struct {
 func NewBarkBlobStore(
 	config BlobStoreBarkConfig,
 	upstream blob.BlobStore,
-) *BlobStoreBark {
+) (*BlobStoreBark, error) {
 	if config.LedgerState == nil {
-		panic("bark: ledger state is required")
+		return nil, errors.New("bark: ledger state is required")
 	}
 
 	httpClient := config.HTTPClient
@@ -76,7 +76,7 @@ func NewBarkBlobStore(
 		),
 		httpClient: httpClient,
 		upstream:   upstream,
-	}
+	}, nil
 }
 
 func (b *BlobStoreBark) Close() error {

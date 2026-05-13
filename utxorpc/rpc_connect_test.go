@@ -193,12 +193,13 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		_ = ls.Close()
 	})
 
-	mp := mempool.NewMempool(mempool.MempoolConfig{
+	mp, err := mempool.NewMempool(mempool.MempoolConfig{
 		Validator:       noopTxValidator{},
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        apiBus,
 		MempoolCapacity: 1 << 30,
 	})
+	require.NoError(t, err)
 	t.Cleanup(func() { _ = mp.Stop(context.Background()) })
 
 	maxHist := opts.maxHistoryItems

@@ -50,7 +50,10 @@ type BarkConfig struct {
 	Port            uint
 }
 
-func NewBark(cfg BarkConfig) *Bark {
+func NewBark(cfg BarkConfig) (*Bark, error) {
+	if cfg.DB == nil {
+		return nil, errors.New("bark: db is required")
+	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -60,12 +63,9 @@ func NewBark(cfg BarkConfig) *Bark {
 	if cfg.Port == 0 {
 		cfg.Port = 9091
 	}
-	if cfg.DB == nil {
-		panic("db is required")
-	}
 	return &Bark{
 		config: cfg,
-	}
+	}, nil
 }
 
 func (b *Bark) Start(ctx context.Context) error {

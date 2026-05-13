@@ -292,6 +292,13 @@ func (o *utxoOverlay) simulateRemoveBatch(
 	return consumed, created
 }
 
+// ErrNilValidator is returned by runtime mempool operations that require
+// a non-nil validator. The constructor refuses to build a Mempool without
+// one, so seeing this in a running node is a programmer error — but
+// returning it lets the chain-update loop log and continue rather than
+// crash the node.
+var ErrNilValidator = errors.New("mempool: validator is nil")
+
 type MempoolFullError struct {
 	CurrentSize int
 	TxSize      int
@@ -307,9 +314,9 @@ func (e *MempoolFullError) Error() string {
 	)
 }
 
-func NewMempool(config MempoolConfig) *Mempool {
+func NewMempool(config MempoolConfig) (*Mempool, error) {
 	if config.Validator == nil {
-		panic("mempool: validator must not be nil")
+		return nil, ErrNilValidator
 	}
 	evictionWatermark := config.EvictionWatermark
 	if evictionWatermark == 0 {
@@ -393,7 +400,7 @@ func NewMempool(config MempoolConfig) *Mempool {
 	go m.processChainEvents()
 	// Start TTL cleanup goroutine
 	go m.expireTransactions()
-	return m
+	return m, nil
 }
 
 func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
@@ -478,8 +485,16 @@ func (m *Mempool) processChainEvents() {
 			continue
 		}
 		// Rebuild overlay: re-validate each pending TX in order against
-		// a fresh overlay, removing TXs that no longer validate.
-		m.rebuildOverlay()
+		// a fresh overlay, removing TXs that no longer validate. Log
+		// and continue on error — the next chain update will try
+		// again rather than crashing the node.
+		if err := m.rebuildOverlay(); err != nil {
+			m.logger.Error(
+				"mempool overlay rebuild failed",
+				"component", "mempool",
+				"error", err,
+			)
+		}
 		lastValidationTime = time.Now()
 	}
 }
@@ -490,9 +505,12 @@ func (m *Mempool) processChainEvents() {
 // AddTransaction (which also holds the write lock when updating the overlay).
 // This is safe because mempool TX submission rate is low at tip and
 // cardano-node also serializes mempool additions.
-func (m *Mempool) rebuildOverlay() {
+//
+// Returns ErrNilValidator if called on a Mempool whose validator is nil —
+// a programmer error the chain-update loop logs rather than crashes on.
+func (m *Mempool) rebuildOverlay() error {
 	if m.validator == nil {
-		panic("mempool: validator is nil in rebuildOverlay")
+		return ErrNilValidator
 	}
 	m.Lock()
 	prevApplied := make([]appliedTx, len(m.overlay.applied))
@@ -500,7 +518,7 @@ func (m *Mempool) rebuildOverlay() {
 
 	if len(prevApplied) == 0 {
 		m.Unlock()
-		return
+		return nil
 	}
 
 	// Re-validate each TX in order against a fresh overlay.
@@ -571,6 +589,7 @@ func (m *Mempool) rebuildOverlay() {
 			m.eventBus.Publish(RemoveTransactionEventType, evt)
 		}
 	}
+	return nil
 }
 
 // expireTransactions periodically removes transactions that have
