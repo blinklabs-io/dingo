@@ -39,7 +39,13 @@ func (d *MetadataStoreMysql) GetPool(
 	result := db.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB {
+				return db.Select("pool_registration.*").
+					Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+					Joins("LEFT JOIN transaction ON transaction.id = certs.transaction_id").
+					Order("pool_registration.added_slot DESC, COALESCE(transaction.block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+					Limit(1)
+			},
 		).
 		Preload("Registration.Owners").
 		Preload("Registration.Relays").

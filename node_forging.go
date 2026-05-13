@@ -106,12 +106,29 @@ func (v blockProducerLedgerView) LatestOpCertSequence(
 func (n *Node) validateBlockProducerLedger(
 	creds *forging.PoolCredentials,
 ) error {
+	view := blockProducerLedgerView{ls: n.ledgerState}
+	return n.validateBlockProducerLedgerWithView(creds, view)
+}
+
+func (n *Node) validateBlockProducerLedgerWithView(
+	creds *forging.PoolCredentials,
+	view forging.LedgerView,
+) error {
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	view := blockProducerLedgerView{ls: n.ledgerState}
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
+		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
+			n.config.network == "devnet" {
+			n.config.logger.Warn(
+				"devnet block producer VRF cross-check failed; node will continue",
+				"component", "node",
+				"pool_id", creds.GetPoolID().String(),
+				"error", err,
+			)
+			return nil
+		}
 		return err
 	}
 	poolID := creds.GetPoolID().String()

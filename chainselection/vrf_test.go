@@ -89,180 +89,125 @@ func TestCompareVRFOutputs(t *testing.T) {
 	}
 }
 
-func TestCompareChainsWithVRF(t *testing.T) {
-	testCases := []struct {
-		name            string
-		tipA            ochainsync.Tip
-		tipB            ochainsync.Tip
-		blocksInWindowA uint64
-		blocksInWindowB uint64
-		vrfA            []byte
-		vrfB            []byte
-		expected        ChainComparisonResult
-	}{
-		{
-			name: "higher block number wins regardless of VRF",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 40,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0xFF), // Higher VRF
-			vrfB:            make64ByteVRF(0x00), // Lower VRF
-			expected:        ChainABetter,        // Block number wins over VRF
-		},
-		{
-			name: "equal block number - higher density wins regardless of VRF",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,                 // Higher density
-			blocksInWindowB: 80,                  // Lower density
-			vrfA:            make64ByteVRF(0xFF), // Higher VRF
-			vrfB:            make64ByteVRF(0x00), // Lower VRF
-			expected:        ChainABetter,        // Density wins over VRF
-		},
-		{
-			name: "equal block number and density - VRF tie-breaker A wins",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0x00), // Lower VRF wins
-			vrfB:            make64ByteVRF(0xFF),
-			expected:        ChainABetter,
-		},
-		{
-			name: "equal block number and density - VRF tie-breaker B wins",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0xFF), // Higher VRF loses
-			vrfB:            make64ByteVRF(0x00), // Lower VRF wins
-			expected:        ChainBBetter,
-		},
-		{
-			name: "equal VRF - falls back to slot comparison A wins",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 90},
-				BlockNumber: 50,
-			}, // Lower slot
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			}, // Higher slot
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0x50),
-			vrfB:            make64ByteVRF(0x50), // Equal VRF
-			expected:        ChainABetter,        // Lower slot wins
-		},
-		{
-			name: "nil VRF - falls back to slot comparison",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 90},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            nil,
-			vrfB:            nil,
-			expected:        ChainABetter, // Lower slot wins as fallback
-		},
-		{
-			name: "one nil VRF - falls back to slot comparison",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 90},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0x00), // Has VRF but B is nil
-			vrfB:            nil,
-			expected:        ChainBBetter, // B has lower slot, VRF comparison skipped
-		},
-		{
-			name: "completely equal chains",
-			tipA: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			tipB: ochainsync.Tip{
-				Point:       ocommon.Point{Slot: 100},
-				BlockNumber: 50,
-			},
-			blocksInWindowA: 100,
-			blocksInWindowB: 100,
-			vrfA:            make64ByteVRF(0x50),
-			vrfB:            make64ByteVRF(0x50),
-			expected:        ChainEqual,
-		},
+func TestComparePraosTipsVRFPrecedesSlot(t *testing.T) {
+	lowerSlotHigherVRF := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 111962097, Hash: []byte("ours")},
+		BlockNumber: 4275844,
+	}
+	laterSlotLowerVRF := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 111962102, Hash: []byte("candidate")},
+		BlockNumber: 4275844,
 	}
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			result := CompareChainsWithVRF(
-				tc.tipA, tc.tipB,
-				tc.blocksInWindowA, tc.blocksInWindowB,
-				tc.vrfA, tc.vrfB,
-			)
-			assert.Equal(t, tc.expected, result)
-		})
-	}
+	result := ComparePraosTips(
+		lowerSlotHigherVRF,
+		laterSlotLowerVRF,
+		PraosTiebreakerViewFromTip(
+			lowerSlotHigherVRF,
+			make64ByteVRFFirstByte(0xBD),
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			laterSlotLowerVRF,
+			make64ByteVRFFirstByte(0x6E),
+			PraosTiebreakerConfigConway(),
+		),
+	)
+
+	assert.Equal(
+		t,
+		ChainBBetter,
+		result,
+		"equal-height Praos comparison must use VRF before slot",
+	)
 }
 
-func TestIsBetterChainWithVRF(t *testing.T) {
-	// Test that IsBetterChainWithVRF correctly wraps CompareChainsWithVRF
-	newTip := ochainsync.Tip{Point: ocommon.Point{Slot: 100}, BlockNumber: 50}
-	currentTip := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 100},
+func TestComparePraosTipsDoesNotInventFallbackWithoutVRF(t *testing.T) {
+	lowerSlot := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 90, Hash: []byte("lower-slot")},
+		BlockNumber: 50,
+	}
+	higherSlot := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("higher-slot")},
 		BlockNumber: 50,
 	}
 
-	// New chain has lower VRF - should be better
-	assert.True(t, IsBetterChainWithVRF(
-		newTip, currentTip,
-		100, 100, // Equal density
-		make64ByteVRF(0x00), make64ByteVRF(0xFF), // New has lower VRF
-	))
+	result := ComparePraosTips(
+		lowerSlot,
+		higherSlot,
+		PraosTiebreakerViewFromTip(
+			lowerSlot,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			higherSlot,
+			nil,
+			PraosTiebreakerConfigConway(),
+		),
+	)
 
-	// New chain has higher VRF - should not be better
-	assert.False(t, IsBetterChainWithVRF(
-		newTip, currentTip,
-		100, 100, // Equal density
-		make64ByteVRF(0xFF), make64ByteVRF(0x00), // New has higher VRF
-	))
+	assert.Equal(t, ChainEqual, result)
+}
+
+func TestComparePraosTipsConwayRestrictionDisarmsDistantVRF(t *testing.T) {
+	ours := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("ours")},
+		BlockNumber: 50,
+	}
+	candidate := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 106, Hash: []byte("candidate")},
+		BlockNumber: 50,
+	}
+
+	result := ComparePraosTips(
+		ours,
+		candidate,
+		PraosTiebreakerViewFromTip(
+			ours,
+			make64ByteVRFFirstByte(0xBD),
+			PraosTiebreakerConfigConway(),
+		),
+		PraosTiebreakerViewFromTip(
+			candidate,
+			make64ByteVRFFirstByte(0x6E),
+			PraosTiebreakerConfigConway(),
+		),
+	)
+
+	assert.Equal(t, ChainEqual, result)
+}
+
+func TestComparePraosTipsSameIssuerSlotHigherOCertWins(t *testing.T) {
+	ours := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("ours")},
+		BlockNumber: 50,
+	}
+	candidate := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("candidate")},
+		BlockNumber: 50,
+	}
+	issuer := []byte("issuer")
+	oursView := PraosTiebreakerViewFromTip(
+		ours,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
+	)
+	oursView.Issuer = issuer
+	oursView.IssueNo = 1
+	oursView.hasIssuerAndIssue = true
+	candidateView := PraosTiebreakerViewFromTip(
+		candidate,
+		make64ByteVRFFirstByte(0xAA),
+		PraosTiebreakerConfigConway(),
+	)
+	candidateView.Issuer = issuer
+	candidateView.IssueNo = 2
+	candidateView.hasIssuerAndIssue = true
+
+	result := ComparePraosTips(ours, candidate, oursView, candidateView)
+
+	assert.Equal(t, ChainBBetter, result)
 }
 
 func TestCompareVRFOutputs_InvalidLength(t *testing.T) {
@@ -330,37 +275,28 @@ func TestCompareVRFOutputs_InvalidLength(t *testing.T) {
 	}
 }
 
-// TestGetVRFOutput_ByronReturnsNil pins the cross-era no-tiebreaker
-// invariant for Byron↔Shelley boundaries. Byron blocks have no VRF
-// (PBFT, not Praos), so any chain-selection tie that includes a Byron
-// tip must NOT use a VRF-derived field. The defense in dingo lives in
-// two layers:
-//
-//  1. GetVRFOutput's default branch returns nil for any header type it
-//     does not recognise — Byron is intentionally absent from the type
-//     switch.
-//  2. CompareVRFOutputs treats nil/wrong-length as ChainEqual, falling
-//     through to the connection-id tiebreak in selector.go.
-//
-// Together these implement the same semantic as Haskell's
-// Cardano/CanHardFork.hs:hardForkChainSel, which is `NoTiebreakerAcrossEras`
-// for Byron↔Shelley and `SameTiebreakerAcrossEras` (PraosTiebreakerView)
-// for inter-Shelley boundaries. This test pins layer 1 explicitly via a
-// real Byron header value, so a future addition to GetVRFOutput's switch
-// (e.g. a "Byron returns h.something" case introduced by mistake) fails
-// loudly. The existing nil-VRF cases in TestCompareVRFOutputs cover
-// layer 2.
+// TestGetVRFOutput_ByronReturnsNil pins the cross-era no-tiebreaker invariant
+// for Byron<->Shelley boundaries. Byron blocks have no VRF (PBFT, not Praos),
+// so any chain-selection tie that includes a Byron tip must not use a
+// VRF-derived field. The reference implementation uses
+// NoTiebreakerAcrossEras at Byron<->Shelley.
 func TestGetVRFOutput_ByronReturnsNil(t *testing.T) {
 	byronHeader := &byron.ByronMainBlockHeader{}
 	assert.Nil(t, GetVRFOutput(byronHeader),
 		"Byron headers must yield nil VRF output (no VRF in PBFT)")
 
 	shelleyHeader := &shelley.ShelleyBlockHeader{}
-	cmp := CompareHeaders(byronHeader, shelleyHeader)
+	cmp := CompareVRFOutputs(
+		GetVRFOutput(byronHeader),
+		GetVRFOutput(shelleyHeader),
+	)
 	assert.Equal(t, ChainEqual, cmp,
 		"a tie that includes a Byron tip must not be broken by VRF "+
-			"(NoTiebreakerAcrossEras at Byron↔Shelley)")
-	cmp = CompareHeaders(shelleyHeader, byronHeader)
+			"(NoTiebreakerAcrossEras at Byron<->Shelley)")
+	cmp = CompareVRFOutputs(
+		GetVRFOutput(shelleyHeader),
+		GetVRFOutput(byronHeader),
+	)
 	assert.Equal(t, ChainEqual, cmp,
 		"NoTiebreakerAcrossEras must be symmetric")
 }

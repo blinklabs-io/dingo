@@ -37,6 +37,7 @@ type PeerTipUpdateEvent struct {
 	Tip          ochainsync.Tip
 	ObservedTip  ochainsync.Tip
 	VRFOutput    []byte // VRF output from observed block header for tie-breaking
+	PraosView    PraosTiebreakerView
 }
 
 // PeerActivityEvent is published when a peer has recent protocol activity

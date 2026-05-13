@@ -537,6 +537,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
+		praosView, _ := chainselection.GetPraosTiebreakerView(v)
 		// Ingress eligibility is the sole gate for feeding the ledger
 		// and chain selection. reconcileChainsyncIngressAdmission
 		// defers to ChainsyncIngressEligible (peergov), which already
@@ -594,6 +595,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 						Tip:          tip,
 						ObservedTip:  observedTip,
 						VRFOutput:    vrfOutput,
+						PraosView:    praosView,
 					},
 				),
 			)

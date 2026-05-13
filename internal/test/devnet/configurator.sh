@@ -170,7 +170,23 @@ for pool in $pools; do
   config_config_json "$pool"
 done
 
-# Test-only credentials: relax permissions so consuming containers running as
-# non-root (e.g. the dingo image runs as uid 100) can read pool keys and
-# genesis/config files.
-chmod -R a+rX /configs
+# Test-only credentials: make config + genesis files world-readable so any
+# consuming container's user can read them.
+find /configs -type d -exec chmod 0755 {} +
+find /configs -type f -exec chmod 0644 {} +
+
+# cardano-node refuses to start when vrf.skey has "other" read permissions,
+# so the per-pool keys directories must be 0700/0600. Pool 1 is consumed by
+# the dingo container (uid 100, gid 101 in the dingo image), so chown it to
+# match. Pool 2 stays root-owned for the cardano-producer container, which
+# runs as root.
+for pool_dir in /configs/[0-9]*; do
+    keys_dir="$pool_dir/keys"
+    if [ -d "$keys_dir" ]; then
+        chmod 0700 "$keys_dir"
+        find "$keys_dir" -type f -exec chmod 0600 {} +
+    fi
+done
+if [ -d /configs/1/keys ]; then
+    chown -R 100:101 /configs/1/keys
+fi

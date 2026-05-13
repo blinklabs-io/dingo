@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger/forging"
 )
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
@@ -142,5 +144,72 @@ func TestValidateBlockProducerStartup_MissingFile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "load pool credentials") {
 		t.Errorf("expected 'load pool credentials' in error, got: %v", err)
+	}
+}
+
+type testBlockProducerLedgerView struct {
+	registered bool
+	regVRFHash [32]byte
+}
+
+func (v testBlockProducerLedgerView) PoolRegistrationVRFKeyHash(
+	[28]byte,
+) ([32]byte, bool, error) {
+	return v.regVRFHash, v.registered, nil
+}
+
+func (v testBlockProducerLedgerView) LatestOpCertSequence(
+	[28]byte,
+) (uint64, bool, error) {
+	return 0, false, nil
+}
+
+func mismatchedVRFHash() [32]byte {
+	var h [32]byte
+	for i := range h {
+		h[i] = 0xdd
+	}
+	return h
+}
+
+func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
+	vrf, kes, opcert := devnetCredPaths()
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "preview"
+	creds, err := n.validateBlockProducerStartup()
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartup: %v", err)
+	}
+	err = n.validateBlockProducerLedgerWithView(
+		creds,
+		testBlockProducerLedgerView{
+			registered: true,
+			regVRFHash: mismatchedVRFHash(),
+		},
+	)
+	if !errors.Is(err, forging.ErrVRFKeyHashMismatch) {
+		t.Fatalf("expected VRF mismatch error, got: %v", err)
+	}
+}
+
+func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
+	vrf, kes, opcert := devnetCredPaths()
+	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
+	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
+	n.config.network = "devnet"
+	creds, err := n.validateBlockProducerStartup()
+	if err != nil {
+		t.Fatalf("validateBlockProducerStartup: %v", err)
+	}
+	err = n.validateBlockProducerLedgerWithView(
+		creds,
+		testBlockProducerLedgerView{
+			registered: true,
+			regVRFHash: mismatchedVRFHash(),
+		},
+	)
+	if err != nil {
+		t.Fatalf("devnet mismatch should warn and continue: %v", err)
 	}
 }
