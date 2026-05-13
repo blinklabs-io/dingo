@@ -3851,17 +3851,24 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	db := ls.db
 	logger := ls.config.Logger
 	decodeFailures := ls.metrics.governanceProposalDecodeFailures
+	onDecodeFailure := func(proposal *models.GovernanceProposal, err error) {
+		logger.Warn(
+			"skipping ratifiable HardForkInitiation: decode failed",
+			"proposal_id", proposal.ID,
+			"error", err,
+		)
+		decodeFailures.Inc()
+	}
 	go func() {
 		defer ls.hfiStabilityEvalInFlight.Store(false)
 		result, err := governance.EvaluateRatifiableHardForkInitiation(
 			governance.NewStabilityCheckInputs(
 				db,
 				nil,
-				logger,
 				snapshotEpoch,
 				snapshotPParams,
 				conwayGenesis,
-				decodeFailures.Inc,
+				onDecodeFailure,
 			),
 		)
 		if err != nil {

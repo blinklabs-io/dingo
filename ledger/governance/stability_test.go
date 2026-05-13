@@ -146,7 +146,7 @@ func seedDRepYesVote(
 func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
 	// pre-Conway: no governance state machine yet
-	in := NewStabilityCheckInputs(db, nil, nil, stabilityTestEpoch, nil, nil, nil)
+	in := NewStabilityCheckInputs(db, nil, stabilityTestEpoch, nil, nil, nil)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
@@ -155,7 +155,7 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T)
 func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
 	in := NewStabilityCheckInputs(
-		db, nil, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *
 	}, nil))
 
 	in := NewStabilityCheckInputs(
-		db, nil, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -208,7 +208,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -228,7 +228,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(t *
 	seedHardForkInitiationProposal(t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx)
 
 	in := NewStabilityCheckInputs(
-		db, nil, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	seedDRepYesVote(t, db, late.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)

@@ -17,8 +17,6 @@ package governance
 import (
 	"errors"
 	"fmt"
-	"io"
-	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -34,37 +32,30 @@ import (
 // mainnet rollover; refactoring it just to support mid-epoch evaluation
 // would risk regressions for marginal benefit.
 //
-// Build with NewStabilityCheckInputs to get a non-nil Logger.
-//
 // OnProposalDecodeFailure, if non-nil, is invoked once per proposal
-// whose stored CBOR fails to decode during the ratifiability scan.
-// Nil disables the signal.
+// whose stored CBOR fails to decode during the ratifiability scan. The
+// callback owns side effects (logging, metrics) so the helper itself
+// stays free of logger/metric dependencies.
 type StabilityCheckInputs struct {
 	DB                      *database.Database
 	Txn                     *database.Txn
-	Logger                  *slog.Logger
 	CurrentEpoch            uint64
 	PParams                 lcommon.ProtocolParameters
 	ConwayGenesis           *conway.ConwayGenesis
-	OnProposalDecodeFailure func()
+	OnProposalDecodeFailure func(proposal *models.GovernanceProposal, err error)
 }
 
 func NewStabilityCheckInputs(
 	db *database.Database,
 	txn *database.Txn,
-	logger *slog.Logger,
 	currentEpoch uint64,
 	pparams lcommon.ProtocolParameters,
 	conwayGenesis *conway.ConwayGenesis,
-	onProposalDecodeFailure func(),
+	onProposalDecodeFailure func(proposal *models.GovernanceProposal, err error),
 ) StabilityCheckInputs {
-	if logger == nil {
-		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
-	}
 	return StabilityCheckInputs{
 		DB:                      db,
 		Txn:                     txn,
-		Logger:                  logger,
 		CurrentEpoch:            currentEpoch,
 		PParams:                 pparams,
 		ConwayGenesis:           conwayGenesis,
@@ -162,7 +153,7 @@ func EvaluateRatifiableHardForkInitiation(
 	committeeNoConfidence := committeeNoConfidenceState(committeeRoot)
 
 	ccQuorum, err := conwayRatifyQuorum(
-		in.Logger, in.DB, in.Txn, in.ConwayGenesis,
+		nil, in.DB, in.Txn, in.ConwayGenesis,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("compute committee quorum: %w", err)
@@ -207,13 +198,8 @@ func EvaluateRatifiableHardForkInitiation(
 			proposal.GovActionCbor, proposal.ActionType,
 		)
 		if err != nil {
-			in.Logger.Warn(
-				"skipping ratifiable HardForkInitiation: decode failed",
-				"proposal_id", proposal.ID,
-				"error", err,
-			)
 			if in.OnProposalDecodeFailure != nil {
-				in.OnProposalDecodeFailure()
+				in.OnProposalDecodeFailure(proposal, err)
 			}
 			continue
 		}
