@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func decodeHex(hexData string) []byte {
@@ -2066,8 +2067,8 @@ func TestIteratorNonInclusiveStartPoint(t *testing.T) {
 }
 
 // TestIteratorBlockingNextDeliversBlock verifies that Next(blocking=true) blocks
-// when the iterator is at tip and unblocks — returning the new block — once a
-// block is added to the chain.
+// when the iterator is at tip and unblocks with the new block once a block is
+// added to the chain.
 func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -2104,34 +2105,41 @@ func TestIteratorBlockingNextDeliversBlock(t *testing.T) {
 		ch <- result{r, err}
 	}()
 
-	// Give the goroutine time to block, then add the next block.
+	testutil.RequireNoReceive(
+		t,
+		ch,
+		50*time.Millisecond,
+		"blocking Next returned before a block was added",
+	)
+
 	want := testBlocks[3]
 	if err := c.AddBlock(want, nil); err != nil {
 		t.Fatalf("AddBlock: %v", err)
 	}
 
-	select {
-	case got := <-ch:
-		if got.err != nil {
-			t.Fatalf("blocking Next returned error: %v", got.err)
-		}
-		if got.r == nil || got.r.Rollback {
-			t.Fatalf("unexpected result from blocking Next: %+v", got.r)
-		}
-		if got.r.Block.Number != want.MockBlockNumber {
-			t.Fatalf(
-				"blocking Next: got block number %d, want %d",
-				got.r.Block.Number, want.MockBlockNumber,
-			)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("blocking Next did not unblock after block was added")
+	got := testutil.RequireReceive(
+		t,
+		ch,
+		5*time.Second,
+		"blocking Next should unblock after block was added",
+	)
+	if got.err != nil {
+		t.Fatalf("blocking Next returned error: %v", got.err)
+	}
+	if got.r == nil || got.r.Rollback {
+		t.Fatalf("unexpected result from blocking Next: %+v", got.r)
+	}
+	if got.r.Block.Number != want.MockBlockNumber {
+		t.Fatalf(
+			"blocking Next: got block number %d, want %d",
+			got.r.Block.Number, want.MockBlockNumber,
+		)
 	}
 }
 
 // TestIteratorPostRollbackBlockDelivery verifies that after an iterator receives
-// a rollback signal, subsequent Next() calls deliver blocks from the rollback
-// point forward.
+// a rollback signal, subsequent Next() calls deliver blocks after the rollback
+// point.
 func TestIteratorPostRollbackBlockDelivery(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
