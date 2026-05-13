@@ -35,6 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
@@ -223,6 +224,43 @@ func TestChainBasic(t *testing.T) {
 			)
 		}
 		testBlockIdx++
+	}
+}
+
+func TestHandleBlockProposedEventAddsBlockAndAcks(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	ack := make(chan error, 1)
+
+	c.HandleBlockProposedEvent(
+		event.NewEvent(
+			chain.BlockProposedEventType,
+			chain.BlockProposedEvent{
+				Block: testBlocks[0],
+				Ack:   ack,
+			},
+		),
+	)
+
+	if err := testutil.RequireReceive(
+		t,
+		ack,
+		time.Second,
+		"block proposal ack",
+	); err != nil {
+		t.Fatalf("unexpected block proposal error: %s", err)
+	}
+	tip := c.Tip()
+	if tip.Point.Slot != testBlocks[0].MockSlot ||
+		!bytes.Equal(tip.Point.Hash, testBlocks[0].Hash().Bytes()) {
+		t.Fatalf(
+			"unexpected tip after block proposal: %d.%x",
+			tip.Point.Slot,
+			tip.Point.Hash,
+		)
 	}
 }
 

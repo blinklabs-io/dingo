@@ -16,17 +16,37 @@ package chain
 
 import (
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 const (
-	ChainUpdateEventType = "chain.update"
-	ChainForkEventType   = "chain.fork_detected"
+	ChainUpdateEventType   = "chain.update"
+	ChainForkEventType     = "chain.fork_detected"
+	BlockProposedEventType = "chain.block_proposed"
 )
 
 type ChainBlockEvent struct {
 	Point ocommon.Point
 	Block models.Block
+}
+
+// BlockProposedEvent carries a locally forged block to the chain component for
+// adoption. Ack is optional; when set, the chain handler reports the AddBlock
+// result without blocking if the sender has already moved on.
+type BlockProposedEvent struct {
+	Block ledger.Block
+	Ack   chan<- error
+}
+
+func (e BlockProposedEvent) Respond(err error) {
+	if e.Ack == nil {
+		return
+	}
+	select {
+	case e.Ack <- err:
+	default:
+	}
 }
 
 type ChainRollbackEvent struct {

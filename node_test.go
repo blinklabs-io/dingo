@@ -15,6 +15,8 @@
 package dingo
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -651,4 +653,54 @@ func TestRunStallCheckerLoopRecoversAndSupportsRestart(t *testing.T) {
 	})
 
 	assert.Equal(t, int32(2), attempts.Load())
+}
+
+func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {
+	wantErr := errors.New("shutdown failed")
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		shutdownFuncs: []func(context.Context) error{
+			func(context.Context) error {
+				return wantErr
+			},
+		},
+	}
+
+	firstErr := n.Stop()
+	secondErr := n.Stop()
+	require.ErrorIs(t, firstErr, wantErr)
+	require.ErrorIs(t, secondErr, wantErr)
+	require.Equal(t, firstErr, secondErr)
+}
+
+func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	releaseClose := make(chan struct{})
+	closeDone := make(chan struct{})
+
+	err := n.closeWithShutdownTimeout(
+		context.Background(),
+		"test",
+		0,
+		func() error {
+			defer close(closeDone)
+			<-releaseClose
+			return nil
+		},
+	)
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	close(releaseClose)
+	testutil.RequireReceive(
+		t,
+		closeDone,
+		time.Second,
+		"close function completion",
+	)
 }

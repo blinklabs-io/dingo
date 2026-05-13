@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -186,7 +187,6 @@ func (n *Node) initBlockForger(
 
 	// Create block broadcaster (uses the chain manager and event bus)
 	broadcaster := &blockBroadcaster{
-		chain:    n.chainManager.PrimaryChain(),
 		eventBus: n.eventBus,
 		logger:   n.config.logger,
 	}
@@ -227,9 +227,6 @@ func (n *Node) initBlockForger(
 		return fmt.Errorf("failed to start leader election: %w", err)
 	}
 
-	// Store election for cleanup during shutdown
-	n.leaderElection = election
-
 	// Create slot clock adapter for the forger
 	slotClock := &slotClockAdapter{ledgerState: n.ledgerState}
 
@@ -259,6 +256,9 @@ func (n *Node) initBlockForger(
 		return fmt.Errorf("failed to start block forger: %w", err)
 	}
 
+	// Store election for cleanup during shutdown only after the forger is
+	// fully created and running.
+	n.leaderElection = election
 	n.blockForger = forger
 	n.config.logger.Info(
 		"block forger started in production mode with leader election",
@@ -286,25 +286,58 @@ func (a *mempoolAdapter) Transactions() []forging.MempoolTransaction {
 	return result
 }
 
-// blockBroadcaster implements forging.BlockBroadcaster using the chain manager.
+// blockBroadcaster implements forging.BlockBroadcaster by proposing locally
+// forged blocks to the chain component over the EventBus.
 type blockBroadcaster struct {
-	chain    *chain.Chain
 	eventBus *event.EventBus
 	logger   *slog.Logger
 }
+
+const blockProposalAckTimeout = 30 * time.Second
 
 func (b *blockBroadcaster) AddBlock(
 	block gledger.Block,
 	_ []byte,
 ) error {
-	// Add block to the chain (CBOR is stored internally by the block).
-	// addBlockInternal notifies iterators after storing the block.
-	if err := b.chain.AddBlock(block, nil); err != nil {
-		return fmt.Errorf("failed to add block to chain: %w", err)
+	if block == nil {
+		return errors.New("proposed block is nil")
+	}
+	if b.eventBus == nil {
+		return errors.New("event bus unavailable")
+	}
+	if !b.eventBus.HasSubscribers(chain.BlockProposedEventType) {
+		return errors.New("no chain block proposal subscribers")
+	}
+
+	ack := make(chan error, 1)
+	b.eventBus.Publish(
+		chain.BlockProposedEventType,
+		event.NewEvent(
+			chain.BlockProposedEventType,
+			chain.BlockProposedEvent{
+				Block: block,
+				Ack:   ack,
+			},
+		),
+	)
+
+	timer := time.NewTimer(blockProposalAckTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-ack:
+		if err != nil {
+			return fmt.Errorf("chain rejected proposed block: %w", err)
+		}
+	case <-timer.C:
+		return fmt.Errorf(
+			"timed out waiting for proposed block ack after %s",
+			blockProposalAckTimeout,
+		)
 	}
 
 	b.logger.Info(
-		"block added to chain",
+		"block proposal accepted by chain",
 		"slot", block.SlotNumber(),
 		"hash", block.Hash(),
 		"block_number", block.BlockNumber(),
@@ -314,34 +347,75 @@ func (b *blockBroadcaster) AddBlock(
 }
 
 // stakeDistributionAdapter adapts ledger.LedgerState to leader.StakeDistributionProvider.
-// It queries the metadata store directly with a nil transaction so the SQLite
-// read pool is used, avoiding contention with block-processing write locks.
+// It queries through LedgerView so leader election observes the same stake
+// snapshot rotation semantics as other ledger queries.
 type stakeDistributionAdapter struct {
 	ledgerState *ledger.LedgerState
+}
+
+func (a *stakeDistributionAdapter) getStakeDistribution(
+	epoch uint64,
+) (_ *ledger.StakeDistribution, err error) {
+	if a.ledgerState == nil {
+		return nil, errors.New("ledger state unavailable")
+	}
+	db := a.ledgerState.Database()
+	if db == nil {
+		return nil, errors.New("database unavailable")
+	}
+	txn := db.MetadataTxn(false)
+	if txn == nil {
+		return nil, errors.New("metadata transaction unavailable")
+	}
+	defer func() {
+		if rollbackErr := txn.Rollback(); rollbackErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"release stake distribution transaction: %w",
+					rollbackErr,
+				),
+			)
+		}
+	}()
+	return a.ledgerState.NewView(txn).GetStakeDistribution(epoch)
 }
 
 func (a *stakeDistributionAdapter) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
 ) (uint64, error) {
-	snapshot, err := a.ledgerState.Database().Metadata().GetPoolStakeSnapshot(
-		epoch, "mark", poolKeyHash, nil,
-	)
+	dist, err := a.getStakeDistribution(epoch)
+	poolKey := hex.EncodeToString(poolKeyHash)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf(
+			"get stake distribution for epoch %d pool %s: %w",
+			epoch,
+			poolKey,
+			err,
+		)
 	}
-	if snapshot == nil {
+	if dist == nil {
 		return 0, nil
 	}
-	return uint64(snapshot.TotalStake), nil
+	return dist.PoolStakes[poolKey], nil
 }
 
 func (a *stakeDistributionAdapter) GetTotalActiveStake(
 	epoch uint64,
 ) (uint64, error) {
-	return a.ledgerState.Database().Metadata().GetTotalActiveStake(
-		epoch, "mark", nil,
-	)
+	dist, err := a.getStakeDistribution(epoch)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"get stake distribution for epoch %d: %w",
+			epoch,
+			err,
+		)
+	}
+	if dist == nil {
+		return 0, nil
+	}
+	return dist.TotalStake, nil
 }
 
 // epochInfoAdapter adapts ledger.LedgerState to leader.EpochInfoProvider.
