@@ -101,7 +101,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	// Validate that the requested slot range is not too large
 	slotRange := end.Slot - start.Slot
 	if slotRange > MaxBlockFetchRange {
-		o.config.Logger.Warn(
+		o.config.Logger.Debug(
 			"blockfetch: requested range exceeds maximum, sending NoBlocks",
 			"connection_id", ctx.ConnectionId.String(),
 			"start_slot", start.Slot,
@@ -120,7 +120,7 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 	// Validate that the start point exists in our chain (#397)
 	chainIter, err := o.LedgerState.GetChainFromPoint(start, true)
 	if err != nil {
-		o.config.Logger.Warn(
+		o.config.Logger.Debug(
 			"blockfetch: start point not found in chain, sending NoBlocks",
 			"connection_id", ctx.ConnectionId.String(),
 			"start_slot", start.Slot,

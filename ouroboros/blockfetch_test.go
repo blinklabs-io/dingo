@@ -203,6 +203,18 @@ func TestBlockfetchServerRequestRange_OversizedRange(t *testing.T) {
 		"range exceeds maximum",
 		"expected log message about oversized range",
 	)
+	assert.Contains(
+		t,
+		logOutput,
+		`"level":"DEBUG"`,
+		"oversized range NoBlocks should log at DEBUG, not WARN",
+	)
+	assert.NotContains(
+		t,
+		logOutput,
+		`"level":"WARN"`,
+		"oversized range NoBlocks should not produce a WARN line",
+	)
 }
 
 func TestBlockfetchServerRequestRange_RangeWithinLimit(t *testing.T) {
