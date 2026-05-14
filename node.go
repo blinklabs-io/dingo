@@ -323,14 +323,18 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkBaseUrl != "" {
-		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
+		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl: n.config.barkBaseUrl,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
 			LedgerState: state,
 			Logger:      n.config.logger,
-		}, n.db.Blob()))
+		}, n.db.Blob())
+		if err != nil {
+			return fmt.Errorf("failed to create bark blob store: %w", err)
+		}
+		n.db.SetBlobStore(barkBlobStore)
 
 		prunerFreq := n.config.barkPrunerFrequency
 		if prunerFreq <= 0 {
@@ -382,7 +386,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
 	// Initialize mempool
-	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
+	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity:    n.config.mempoolCapacity,
 		EvictionWatermark:  n.config.evictionWatermark,
 		RejectionWatermark: n.config.rejectionWatermark,
@@ -393,6 +397,9 @@ func (n *Node) Run(ctx context.Context) error {
 		CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
 	},
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create mempool: %w", err)
+	}
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.mempool.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
@@ -742,7 +749,8 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkPort > 0 {
-		n.bark = bark.NewBark(
+		var err error
+		n.bark, err = bark.NewBark(
 			bark.BarkConfig{
 				Logger:          n.config.logger,
 				DB:              db,
@@ -751,6 +759,9 @@ func (n *Node) Run(ctx context.Context) error {
 				Port:            n.config.barkPort,
 			},
 		)
+		if err != nil {
+			return fmt.Errorf("failed to create bark server: %w", err)
+		}
 		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to start bark server: %w", err)
 		}

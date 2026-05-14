@@ -96,13 +96,15 @@ const testTxHex = "84a700818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a5359
 // newTestMempool creates a mempool configured for testing
 func newTestMempool(t *testing.T) *Mempool {
 	t.Helper()
-	return NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1024 * 1024, // 1MB
 	})
+	require.NoError(t, err)
+	return m
 }
 
 // newTestMempoolWithValidator creates a mempool with a specific validator
@@ -111,13 +113,15 @@ func newTestMempoolWithValidator(
 	v TxValidator,
 ) *Mempool {
 	t.Helper()
-	return NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       v,
 		MempoolCapacity: 1024 * 1024,
 	})
+	require.NoError(t, err)
+	return m
 }
 
 // newTestConnectionId creates a unique connection ID for testing
@@ -173,12 +177,13 @@ func getTestTxBytes(t *testing.T) []byte {
 
 func TestMempool_Stop(t *testing.T) {
 	// Create a mempool with minimal config
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:     event.NewEventBus(nil, nil),
 		PromRegistry: prometheus.NewRegistry(),
 		Validator:    newMockValidator(),
 	})
+	require.NoError(t, err)
 
 	// Add a consumer to test cleanup
 	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
@@ -1350,18 +1355,19 @@ func TestMempool_AddTransaction_ValidationFailure(t *testing.T) {
 }
 
 func TestMempool_MempoolFull(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       newMockValidator(),
 		MempoolCapacity: 100, // Very small capacity
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	// Add transaction that exceeds capacity
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
 
 	require.Error(t, err, "should fail due to capacity")
 	var fullErr *MempoolFullError
@@ -1377,7 +1383,7 @@ func TestMempool_MempoolFull(t *testing.T) {
 const testTxWithValidityStartHex = "84a8081a02faf08000818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
 
 func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
@@ -1385,6 +1391,7 @@ func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(t *test
 		MempoolCapacity: 1024 * 1024,
 		CurrentSlotFunc: func() uint64 { return 40_000_000 },
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
@@ -1398,7 +1405,7 @@ func TestMempool_AddTransaction_RejectsValidityIntervalBeyondCurrentSlot(t *test
 }
 
 func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
@@ -1406,6 +1413,7 @@ func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(t *t
 		MempoolCapacity: 1024 * 1024,
 		CurrentSlotFunc: func() uint64 { return 60_000_000 },
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	txBytes, err := hex.DecodeString(testTxWithValidityStartHex)
@@ -1418,7 +1426,7 @@ func TestMempool_AddTransaction_AcceptsValidityIntervalAtOrBelowCurrentSlot(t *t
 }
 
 func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:        event.NewEventBus(nil, nil),
 		PromRegistry:    prometheus.NewRegistry(),
@@ -1426,11 +1434,12 @@ func TestMempool_AddTransaction_NoValidityStart_BypassesCheck(t *testing.T) {
 		MempoolCapacity: 1024 * 1024,
 		CurrentSlotFunc: func() uint64 { return 1 }, // very low current slot
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	// Original test TX has ValidityIntervalStart=0 (no lower bound)
 	txBytes := getTestTxBytes(t)
-	err := m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	err = m.AddTransaction(uint(conway.EraIdConway), txBytes)
 	require.NoError(t, err)
 	assert.Equal(t, 1, len(m.Transactions()), "TX with no validity start should bypass check")
 }
@@ -1656,7 +1665,7 @@ func newTestMempoolWithCapacity(
 	rejectionWM float64,
 ) *Mempool {
 	t.Helper()
-	return NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -1667,6 +1676,8 @@ func newTestMempoolWithCapacity(
 		EvictionWatermark:  evictionWM,
 		RejectionWatermark: rejectionWM,
 	})
+	require.NoError(t, err)
+	return m
 }
 
 // addMockTransactionsOfSize adds mock transactions with CBOR
@@ -1890,7 +1901,7 @@ func TestMempool_Eviction_CounterIncrements(t *testing.T) {
 }
 
 func TestMempool_DefaultWatermarkValues(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -1899,6 +1910,7 @@ func TestMempool_DefaultWatermarkValues(t *testing.T) {
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1024 * 1024,
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	assert.Equal(
@@ -1916,7 +1928,7 @@ func TestMempool_DefaultWatermarkValues(t *testing.T) {
 }
 
 func TestMempool_CustomWatermarkValues(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -1927,6 +1939,7 @@ func TestMempool_CustomWatermarkValues(t *testing.T) {
 		EvictionWatermark:  0.75,
 		RejectionWatermark: 0.85,
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	assert.Equal(
@@ -2065,7 +2078,7 @@ func newTestMempoolWithTTL(
 	cleanupInterval time.Duration,
 ) *Mempool {
 	t.Helper()
-	return NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -2076,6 +2089,8 @@ func newTestMempoolWithTTL(
 		TransactionTTL:  ttl,
 		CleanupInterval: cleanupInterval,
 	})
+	require.NoError(t, err)
+	return m
 }
 
 func TestMempool_TTL_ExpiredTransactionsRemoved(t *testing.T) {
@@ -2392,7 +2407,7 @@ func TestMempool_TTL_ConsumerIndexAdjustedOnExpiry(t *testing.T) {
 }
 
 func TestMempool_TTL_DefaultValues(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -2401,6 +2416,7 @@ func TestMempool_TTL_DefaultValues(t *testing.T) {
 		Validator:       newMockValidator(),
 		MempoolCapacity: 1024 * 1024,
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	assert.Equal(
@@ -2414,7 +2430,7 @@ func TestMempool_TTL_DefaultValues(t *testing.T) {
 }
 
 func TestMempool_TTL_CustomValues(t *testing.T) {
-	m := NewMempool(MempoolConfig{
+	m, err := NewMempool(MempoolConfig{
 		Logger: slog.New(
 			slog.NewJSONHandler(io.Discard, nil),
 		),
@@ -2425,6 +2441,7 @@ func TestMempool_TTL_CustomValues(t *testing.T) {
 		TransactionTTL:  10 * time.Minute,
 		CleanupInterval: 30 * time.Second,
 	})
+	require.NoError(t, err)
 	defer m.Stop(context.Background())
 
 	assert.Equal(
@@ -3176,7 +3193,7 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 	v.removeBaseUtxo(realInputKey)
 
 	// Rebuild overlay (simulates what processChainEvents does)
-	m.rebuildOverlay()
+	require.NoError(t, m.rebuildOverlay())
 
 	// TX should be evicted because its input is no longer in base UTxOs
 	m.RLock()
@@ -3186,4 +3203,28 @@ func TestOverlayRebuildOnChainUpdate(t *testing.T) {
 		"TX should be removed after its input was consumed by a confirmed block",
 	)
 	m.RUnlock()
+}
+
+// TestRebuildOverlayReturnsErrorOnNilValidator pins that the chain-update
+// loop's overlay rebuild fails gracefully instead of crashing the node
+// when the validator is missing. NewMempool refuses to construct one
+// without a validator, so this path is only reachable through a
+// programming error — but it should not panic.
+func TestRebuildOverlayReturnsErrorOnNilValidator(t *testing.T) {
+	m := &Mempool{}
+	err := m.rebuildOverlay()
+	require.ErrorIs(t, err, ErrNilValidator)
+}
+
+// TestNewMempool_RejectsNilValidator pins that the constructor returns
+// ErrNilValidator rather than panicking when the validator is missing.
+func TestNewMempool_RejectsNilValidator(t *testing.T) {
+	m, err := NewMempool(MempoolConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     event.NewEventBus(nil, nil),
+		PromRegistry: prometheus.NewRegistry(),
+		Validator:    nil,
+	})
+	require.ErrorIs(t, err, ErrNilValidator)
+	assert.Nil(t, m)
 }
