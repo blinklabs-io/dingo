@@ -32,6 +32,27 @@ Hi folks! Here’s what we shipped in v0.46.1.
 * Prevented **misread offset data from Byron boundary blocks:** Nodes now skip offset indexing for Byron epoch boundary blocks that carry no transactions, which avoids false indexing results during historical processing.
 * Secured **start UTxO RPC TLS sessions without reloading files:** UTxO RPC now keeps the loaded TLS certificate in memory for server startup, which makes secure startup behavior more reliable.
 
+### 📋 What You Need to Know
+
+* Clarified **genesis governance now starts in place:** Networks that define initial governance delegates and voter registrations now begin with that governance state already loaded, which makes early governance visibility more complete from startup.
+* Highlighted **safer startup recovery and clearer failure handling:** Block producers now stop when required startup snapshots fail, startup reports missing required services as ordinary errors, and divergent startup state now rolls back to the right shared chain point more cleanly.
+* Emphasized **more reliable scheduling and peer behavior:** Block production scheduling now respects the active epoch layout more accurately, and peer sharing behavior now follows the configured role more consistently across connections.
+* Summarized **steadier operational support paths:** Governance observability, pool state recovery, historical offset handling, secure UTxO RPC startup, and devnet validation all received updates that make operations easier to trust.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.0 (May 13, 2026)
 
 **Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
