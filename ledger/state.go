@@ -65,6 +65,7 @@ const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
 	ledgerIntersectDenseCount    = 32
+	ledgerAncestorSearchWindow   = 10_000
 	firstBlockIndex              = 1
 )
 
@@ -2274,27 +2275,70 @@ func (ls *LedgerState) ledgerReadChain(
 	// Without this, the consumer blocks forever on the channel
 	// read if the reader goroutine exits silently on an error.
 	defer close(resultCh)
-	// Snapshot the current tip under lock to avoid a data race with
-	// concurrent rollbacks that update ls.currentTip.
-	ls.RLock()
-	startPoint := ls.currentTip.Point
-	ls.RUnlock()
-	// Create chain iterator
-	iter, err := ls.chain.FromPoint(startPoint, false)
-	if err != nil {
-		// The start point may have been rolled back off the chain
-		// between the snapshot and iterator creation. Log and return —
-		// the outer loop in ledgerProcessBlocks will retry after the
-		// rollback updates ls.currentTip.
-		ls.config.Logger.Warn(
-			"chain iterator start point not on chain, will retry",
-			"error", err,
-			"start_slot", startPoint.Slot,
-		)
+	const maxReconcileRetries = 3
+	reconcileRetries := 0
+	for {
+		// Snapshot the current tip under lock to avoid a data race with
+		// concurrent rollbacks that update ls.currentTip.
+		ls.RLock()
+		startPoint := ls.currentTip.Point
+		ls.RUnlock()
+		// Create chain iterator
+		iter, err := ls.chain.FromPoint(startPoint, false)
+		if err != nil {
+			if !errors.Is(err, models.ErrBlockNotFound) {
+				ls.config.Logger.Warn(
+					"failed to create chain iterator",
+					"error", err,
+					"start_slot", startPoint.Slot,
+				)
+				return
+			}
+			if reconcileRetries >= maxReconcileRetries {
+				ls.config.Logger.Error(
+					"exhausted ledger rollback retries for missing chain iterator start point",
+					"error", err,
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+					"retries", reconcileRetries,
+					"max_retries", maxReconcileRetries,
+				)
+				return
+			}
+			ls.config.Logger.Warn(
+				"chain iterator start point not on chain, attempting ledger rollback",
+				"error", err,
+				"start_slot", startPoint.Slot,
+				"start_hash", hex.EncodeToString(startPoint.Hash),
+			)
+			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
+				ls.config.Logger.Error(
+					"failed to recover missing chain iterator start point",
+					"error", reconcileErr,
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+				)
+				return
+			}
+			reconcileRetries++
+			ls.RLock()
+			recoveredPoint := ls.currentTip.Point
+			ls.RUnlock()
+			if recoveredPoint.Slot == startPoint.Slot &&
+				bytes.Equal(recoveredPoint.Hash, startPoint.Hash) {
+				ls.config.Logger.Error(
+					"ledger rollback did not change missing chain iterator start point",
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+				)
+				return
+			}
+			continue
+		}
+		defer iter.Cancel()
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
 		return
 	}
-	defer iter.Cancel()
-	ls.ledgerReadChainIterator(ctx, iter, resultCh)
 }
 
 func (ls *LedgerState) ledgerReadChainIterator(
@@ -4175,7 +4219,9 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
+	ls.RLock()
 	ledgerTip := ls.currentTip
+	ls.RUnlock()
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
@@ -4198,15 +4244,158 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		}
 		return nil
 	}
+	containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
+	if err != nil {
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	if containsLedgerTip {
+		if gap, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
+			chainTip,
+			ledgerTip,
+		); unsafe {
+			ls.config.Logger.Warn(
+				"primary chain tip too far ahead of ledger tip at startup, rewinding primary chain",
+				"component", "ledger",
+				"chain_tip_slot", chainTip.Point.Slot,
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"block_gap", gap,
+				"security_param", ls.SecurityParam(),
+			)
+			if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+				ledgerTip.Point,
+			); err != nil {
+				return fmt.Errorf(
+					"rewind primary chain to ledger tip: %w",
+					err,
+				)
+			}
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"primary chain tip ahead of ledger tip at startup; ledgerProcessBlocks will catch up via chainsync",
+			"component", "ledger",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+		return nil
+	}
+	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
+		ledgerTip.Point,
+		containsLedgerTip,
+	)
+	if err != nil {
+		return fmt.Errorf("find common primary-chain ancestor for ledger tip: %w", err)
+	}
+	if !found {
+		return fmt.Errorf(
+			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+			ledgerTip.Point.Slot,
+			hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+	}
 	ls.config.Logger.Warn(
-		"primary chain tip ahead of ledger tip at startup, replaying metadata from selected chain",
+		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",
 		"component", "ledger",
 		"chain_tip_slot", chainTip.Point.Slot,
 		"ledger_tip_slot", ledgerTip.Point.Slot,
 		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		"ancestor_slot", ancestor.Slot,
+		"ancestor_hash", hex.EncodeToString(ancestor.Hash),
 	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+		ancestor,
+	); err != nil {
+		return fmt.Errorf(
+			"rewind primary chain to common primary-chain ancestor: %w",
+			err,
+		)
+	}
+	if err := ls.rollback(ancestor); err != nil {
+		return fmt.Errorf(
+			"rollback ledger tip to common primary-chain ancestor: %w",
+			err,
+		)
+	}
 	return nil
+}
+
+func (ls *LedgerState) primaryChainAheadBeyondLedgerSafetyWindow(
+	chainTip ochainsync.Tip,
+	ledgerTip ochainsync.Tip,
+) (uint64, bool) {
+	if chainTip.BlockNumber <= ledgerTip.BlockNumber {
+		return 0, false
+	}
+	gap := chainTip.BlockNumber - ledgerTip.BlockNumber
+	if ls.config.CardanoNodeConfig == nil {
+		return gap, false
+	}
+	securityParam := ls.SecurityParam()
+	if securityParam <= 0 {
+		return gap, false
+	}
+	return gap, gap > uint64(securityParam)
+}
+
+func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, error) {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return true, nil
+	}
+	if ls.db == nil {
+		return false, nil
+	}
+	_, err := database.BlockByPoint(ls.db, point)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
+	point ocommon.Point,
+	containsPoint bool,
+) (ocommon.Point, bool, error) {
+	if containsPoint {
+		return point, true, nil
+	}
+	if ls.db == nil {
+		return ocommon.Point{}, false, nil
+	}
+	end := point.Slot
+	for {
+		start := uint64(0)
+		if end > ledgerAncestorSearchWindow {
+			start = end - ledgerAncestorSearchWindow
+		}
+		blockNonces, err := ls.db.GetBlockNoncesInSlotRange(start, end, nil)
+		if err != nil {
+			return ocommon.Point{}, false, err
+		}
+		for i := len(blockNonces); i > 0; i-- {
+			blockNonce := blockNonces[i-1]
+			ancestor := ocommon.NewPoint(blockNonce.Slot, blockNonce.Hash)
+			containsAncestor, err := ls.primaryChainContainsPoint(ancestor)
+			if err != nil {
+				return ocommon.Point{}, false, err
+			}
+			if containsAncestor {
+				return ancestor, true, nil
+			}
+		}
+		if start == 0 {
+			break
+		}
+		end = start
+	}
+	return ocommon.Point{}, false, nil
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
@@ -4226,7 +4415,24 @@ func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot > ledgerTip.Point.Slot {
-		return true
+		if _, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
+			chainTip,
+			ledgerTip,
+		); unsafe {
+			return false
+		}
+		containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to confirm ledger tip is on primary chain",
+				"component", "ledger",
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"error", err,
+			)
+			return false
+		}
+		return containsLedgerTip
 	}
 	return chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash)

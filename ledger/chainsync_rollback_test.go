@@ -1129,6 +1129,110 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonAncestor(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	forkHash := testHashBytes("startup-primary-chain-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	require.NoError(t, fixture.ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+1,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+}
+
+func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyondK(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.currentEra.Id = 1
+	fixture.ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 2
+	prevHash := fixture.currentTip.Point.Hash
+	blocks := make([]chain.RawBlock, 0, 3)
+	for idx, seed := range []string{
+		"startup-primary-chain-ahead-1",
+		"startup-primary-chain-ahead-2",
+		"startup-primary-chain-ahead-3",
+	} {
+		hash := testHashBytes(seed)
+		blockOffset := uint64(idx + 1)
+		blocks = append(blocks, chain.RawBlock{
+			Slot:        fixture.currentTip.Point.Slot + blockOffset,
+			Hash:        hash,
+			BlockNumber: fixture.currentTip.BlockNumber + blockOffset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        []byte{0x80},
+		})
+		prevHash = hash
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
+	require.Equal(
+		t,
+		fixture.currentTip.Point.Slot+3,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+
+	require.NoError(t, fixture.ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, dbTip)
+}
+
+func TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	forkHash := testHashBytes("intersect-primary-chain-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	points, err := fixture.ls.IntersectPoints(4)
+	require.NoError(t, err)
+
+	require.Empty(t, points)
+}
+
 func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
