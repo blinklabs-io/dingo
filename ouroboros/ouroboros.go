@@ -39,7 +39,6 @@ import (
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
-	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
 	otxsubmission "github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -224,12 +223,7 @@ func (o *Ouroboros) ConfigureListeners(
 				ouroboros.WithPeerSharing(o.config.PeerSharing),
 				ouroboros.WithNetworkMagic(o.config.NetworkMagic),
 				ouroboros.WithPeerSharingConfig(
-					opeersharing.NewConfig(
-						slices.Concat(
-							o.peersharingClientConnOpts(),
-							o.peersharingServerConnOpts(),
-						)...,
-					),
+					o.peerSharingConfig(),
 				),
 				ouroboros.WithTxSubmissionConfig(
 					otxsubmission.NewConfig(
@@ -294,12 +288,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 		ouroboros.WithFullDuplex(true),
 		ouroboros.WithPeerSharing(o.config.PeerSharing),
 		ouroboros.WithPeerSharingConfig(
-			opeersharing.NewConfig(
-				slices.Concat(
-					o.peersharingClientConnOpts(),
-					o.peersharingServerConnOpts(),
-				)...,
-			),
+			o.peerSharingConfig(),
 		),
 		ouroboros.WithTxSubmissionConfig(
 			otxsubmission.NewConfig(
