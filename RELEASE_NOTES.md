@@ -1,5 +1,58 @@
 # Dingo Releases
 
+## v0.46.1 (May 14, 2026)
+
+**Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
+
+**Date:** May 14, 2026
+
+**Version:** v0.46.1
+
+Hi folks! Here’s what we shipped in v0.46.1.
+
+### ✨ What's New
+
+* Added **bootstrap Conway governance from genesis settings:** Networks that define initial governance delegates and voter registrations now start with that governance state already in place, which gives governance aware services a more complete view from the first block.
+
+### 💪 Improvements
+
+* Improved **surface clearer governance stability signals:** Operators can now see when stored governance proposals fail to decode during stability checks, which makes governance troubleshooting easier and keeps transition monitoring clearer.
+* Refined **pick up devnet configurator changes at startup:** Devnet runs now rebuild the configurator image before launch, which helps environment setup reflect the latest configuration behavior more reliably.
+* Enhanced **steady hard-fork readiness checks in tests:** Release validation now waits for hard-fork readiness checks to finish before asserting results, which makes test outcomes more dependable.
+* Updated **clarify mempool and UTxO RPC package guidance:** Embedded package guidance now explains transaction handling and UTxO filtering more clearly, which makes the exposed behavior easier to understand.
+
+### 🔧 Fixes
+
+* Fixed **stop block producers when genesis snapshots fail:** Block producers now stop immediately if startup cannot build the required initial snapshot, which helps prevent unsafe forging starts.
+* Corrected **recover startup state from the right common chain point:** Startup recovery now rolls back to the latest shared chain point when local state no longer matches the selected chain, which helps nodes resume more cleanly after interrupted or divergent starts.
+* Strengthened **honor peer-sharing settings consistently:** Nodes now apply peer-sharing choices correctly across connections, which makes network behavior match the configured role more reliably.
+* Stabilized **return startup errors instead of crashing on missing services:** Startup now reports missing required services as ordinary errors, which makes failed launches easier to diagnose and recover.
+* Hardened **respect real epoch boundaries during leader scheduling:** Block production scheduling now follows the active epoch layout more accurately, which helps leaders avoid incorrect scheduling around changing epoch boundaries.
+* Repaired **restore pool state details more accurately:** Pool state recovery now reads stored pool details more reliably, which helps stake pool views stay complete after startup and rollback work.
+* Prevented **misread offset data from Byron boundary blocks:** Nodes now skip offset indexing for Byron epoch boundary blocks that carry no transactions, which avoids false indexing results during historical processing.
+* Secured **start UTxO RPC TLS sessions without reloading files:** UTxO RPC now keeps the loaded TLS certificate in memory for server startup, which makes secure startup behavior more reliable.
+
+### 📋 What You Need to Know
+
+* Clarified **genesis governance now starts in place:** Networks that define initial governance delegates and voter registrations now begin with that governance state already loaded, which makes early governance visibility more complete from startup.
+* Highlighted **safer startup recovery and clearer failure handling:** Block producers now stop when required startup snapshots fail, startup reports missing required services as ordinary errors, and divergent startup state now rolls back to the right shared chain point more cleanly.
+* Emphasized **more reliable scheduling and peer behavior:** Block production scheduling now respects the active epoch layout more accurately, and peer sharing behavior now follows the configured role more consistently across connections.
+* Summarized **steadier operational support paths:** Governance observability, pool state recovery, historical offset handling, secure UTxO RPC startup, and devnet validation all received updates that make operations easier to trust.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.0 (May 13, 2026)
 
 **Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
