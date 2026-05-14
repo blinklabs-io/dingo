@@ -14,6 +14,13 @@ Hi folks! Here’s what we shipped in v0.46.1.
 
 * Added **bootstrap Conway governance from genesis settings:** Networks that define initial governance delegates and voter registrations now start with that governance state already in place, which gives governance aware services a more complete view from the first block.
 
+### 💪 Improvements
+
+* Improved **surface clearer governance stability signals:** Operators can now see when stored governance proposals fail to decode during stability checks, which makes governance troubleshooting easier and keeps transition monitoring clearer.
+* Refined **pick up devnet configurator changes at startup:** Devnet runs now rebuild the configurator image before launch, which helps environment setup reflect the latest configuration behavior more reliably.
+* Enhanced **steady hard-fork readiness checks in tests:** Release validation now waits for hard-fork readiness checks to finish before asserting results, which makes test outcomes more dependable.
+* Updated **clarify mempool and UTxO RPC package guidance:** Embedded package guidance now explains transaction handling and UTxO filtering more clearly, which makes the exposed behavior easier to understand.
+
 ## v0.46.0 (May 13, 2026)
 
 **Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
