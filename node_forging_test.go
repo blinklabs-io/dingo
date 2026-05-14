@@ -213,3 +213,36 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 		t.Fatalf("devnet mismatch should warn and continue: %v", err)
 	}
 }
+
+func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
+	n := &Node{
+		config: Config{
+			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			blockProducer: true,
+		},
+	}
+	sentinel := errors.New("db unavailable")
+	err := n.handleGenesisSnapshotError(sentinel)
+	if err == nil {
+		t.Fatal("expected fatal error for block producer, got nil")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Errorf("expected sentinel wrapped in error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "failed to capture genesis snapshot") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestHandleGenesisSnapshotError_RelayWarnsAndContinues(t *testing.T) {
+	n := &Node{
+		config: Config{
+			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			blockProducer: false,
+		},
+	}
+	err := n.handleGenesisSnapshotError(errors.New("db unavailable"))
+	if err != nil {
+		t.Errorf("expected nil for relay node, got: %v", err)
+	}
+}

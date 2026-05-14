@@ -156,6 +156,20 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	return nil
 }
 
+// handleGenesisSnapshotError returns a fatal error for block producers (which
+// require the genesis snapshot for leader election) and logs a warning for
+// relay nodes (which do not perform leader election).
+func (n *Node) handleGenesisSnapshotError(err error) error {
+	if n.config.blockProducer {
+		return fmt.Errorf("failed to capture genesis snapshot: %w", err)
+	}
+	n.config.logger.Warn(
+		"failed to capture genesis snapshot",
+		"error", err,
+	)
+	return nil
+}
+
 // initBlockForger initializes the block forger for production mode.
 // This requires VRF, KES, and OpCert key files to be configured.
 func (n *Node) initBlockForger(
