@@ -255,68 +255,7 @@ func parsePStateConway(data []byte) ([]ParsedPool, error) {
 		return nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
-	// Find map elements sorted by size. PState contains several
-	// maps (pool params, future params, retiring, deposits).
-	// Pool params is the largest; deposits is second-largest
-	// (same key count but smaller values).
-	type mapEntry struct {
-		idx  int
-		size int
-	}
-	var maps []mapEntry
-	for i, elem := range ps {
-		if len(elem) == 0 {
-			continue
-		}
-		major := elem[0] >> 5
-		isMap := major == 5 || elem[0] == 0xbf
-		if isMap {
-			maps = append(maps, mapEntry{i, len(elem)})
-		}
-	}
-
-	if len(maps) == 0 {
-		// Fallback: try the first element as a map
-		if len(ps) > 0 {
-			return parseCertPoolParamsMap(ps[0])
-		}
-		return nil, nil
-	}
-
-	// Sort maps by size descending to identify pool params
-	// (largest) and deposits (second-largest).
-	slices.SortFunc(
-		maps,
-		func(a, b mapEntry) int {
-			return cmp.Compare(b.size, a.size)
-		},
-	)
-
-	pools, warning := parseCertPoolParamsMap(ps[maps[0].idx])
-	if pools == nil {
-		return pools, warning
-	}
-
-	// Merge deposits from the remaining maps (if present).
-	// Multiple maps share the same PoolKeyHash -> uint64 schema
-	// (retiring holds epoch numbers, deposits holds lovelace).
-	// We distinguish them by value range: deposit amounts are
-	// >= 1 ADA (1,000,000 lovelace), epoch numbers are small.
-	for _, m := range maps[1:] {
-		deposits := parsePoolDeposits(ps[m.idx])
-		if deposits != nil && looksLikeDeposits(deposits) {
-			for i := range pools {
-				if dep, ok := deposits[hex.EncodeToString(
-					pools[i].PoolKeyHash,
-				)]; ok {
-					pools[i].Deposit = dep
-				}
-			}
-			break
-		}
-	}
-
-	return pools, warning
+	return parsePStateMaps(ps)
 }
 
 // parseCertPoolParamsMap decodes a map of pool key hash -> pool
@@ -336,7 +275,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 		var poolKeyHash []byte
 		if _, pErr := cbor.Decode(
 			entry.KeyRaw, &poolKeyHash,
-		); pErr != nil {
+		); pErr != nil || len(poolKeyHash) != 28 {
 			skipped++
 			continue
 		}
@@ -670,55 +609,76 @@ func parsePState(data []byte) ([]ParsedPool, error) {
 		return nil, nil
 	}
 
-	// Parse pool deposits if available (index 3)
-	var poolDeposits map[string]uint64
-	if len(ps) > 3 {
-		poolDeposits = parsePoolDeposits(ps[3])
-	}
+	return parsePStateMaps(ps)
+}
 
-	// Parse active pool registrations (index 0) using
-	// decodeMapEntries to handle indefinite-length maps.
-	entries, err := decodeMapEntries(ps[0])
-	if err != nil {
-		return nil, fmt.Errorf(
-			"decoding poolParams map: %w", err,
-		)
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+	type mapEntry struct {
+		idx  int
+		size int
 	}
-
-	pools := make([]ParsedPool, 0, len(entries))
-	var skipped int
-	for _, entry := range entries {
-		var poolKeyHash []byte
-		if _, pErr := cbor.Decode(
-			entry.KeyRaw, &poolKeyHash,
-		); pErr != nil {
-			skipped++
+	var maps []mapEntry
+	for i, elem := range ps {
+		if len(elem) == 0 {
 			continue
 		}
+		major := elem[0] >> 5
+		if major == 5 || elem[0] == 0xbf {
+			maps = append(maps, mapEntry{idx: i, size: len(elem)})
+		}
+	}
+	if len(maps) == 0 {
+		return nil, nil
+	}
 
-		pool, err := parsePoolParamsOrDistr(
-			poolKeyHash, entry.ValueRaw,
-		)
-		if err != nil {
-			skipped++
+	slices.SortFunc(
+		maps,
+		func(a, b mapEntry) int {
+			return cmp.Compare(b.size, a.size)
+		},
+	)
+
+	var bestPools []ParsedPool
+	var bestWarning error
+	bestIdx := -1
+	for _, m := range maps {
+		pools, warning := parseCertPoolParamsMap(ps[m.idx])
+		if bestIdx < 0 || len(pools) > len(bestPools) {
+			bestPools = pools
+			bestWarning = warning
+			bestIdx = m.idx
+		}
+	}
+	if len(bestPools) == 0 {
+		return bestPools, bestWarning
+	}
+
+	mergePoolDeposits(bestPools, ps, bestIdx)
+	return bestPools, bestWarning
+}
+
+func mergePoolDeposits(
+	pools []ParsedPool,
+	ps [][]byte,
+	poolParamsIdx int,
+) {
+	for i, elem := range ps {
+		if i == poolParamsIdx {
 			continue
 		}
-
-		if dep, ok := poolDeposits[hex.EncodeToString(poolKeyHash)]; ok {
-			pool.Deposit = dep
+		deposits := parsePoolDeposits(elem)
+		if deposits == nil || !looksLikeDeposits(deposits) {
+			continue
 		}
-
-		pools = append(pools, *pool)
+		for j := range pools {
+			if dep, ok := deposits[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]; ok {
+				pools[j].Deposit = dep
+			}
+		}
+		return
 	}
-
-	var warning error
-	if skipped > 0 {
-		warning = fmt.Errorf(
-			"PState pool params: skipped %d of %d entries",
-			skipped, len(entries),
-		)
-	}
-	return pools, warning
 }
 
 // parsePoolDeposits decodes the pool deposits map.
@@ -813,6 +773,13 @@ func parsePoolParams(
 		)
 	}
 
+	if pool, ok, err := parsePoolParamsWithoutOperator(
+		poolKeyHash,
+		params,
+	); ok || err != nil {
+		return pool, err
+	}
+
 	pool := &ParsedPool{
 		PoolKeyHash: poolKeyHash,
 	}
@@ -878,18 +845,7 @@ func parsePoolParams(
 	}
 
 	// Owners (index 6) - set of 28-byte key hashes
-	var owners []cbor.RawMessage
-	if _, err := cbor.Decode(params[6], &owners); err == nil {
-		for _, ownerRaw := range owners {
-			var ownerHash []byte
-			if _, err := cbor.Decode(
-				ownerRaw,
-				&ownerHash,
-			); err == nil {
-				pool.Owners = append(pool.Owners, ownerHash)
-			}
-		}
-	}
+	pool.Owners = parsePoolOwners(params[6])
 
 	// Relays (index 7) - array of relay entries
 	if len(params) > 7 {
@@ -902,6 +858,112 @@ func parsePoolParams(
 	}
 
 	return pool, nil
+}
+
+func parsePoolParamsWithoutOperator(
+	poolKeyHash []byte,
+	params []cbor.RawMessage,
+) (*ParsedPool, bool, error) {
+	var vrfKeyHash []byte
+	vrfDecoded := false
+	if _, decodeErr := cbor.Decode(
+		params[0],
+		&vrfKeyHash,
+	); decodeErr == nil {
+		vrfDecoded = true
+	}
+	if !vrfDecoded || len(vrfKeyHash) != 32 {
+		return nil, false, nil
+	}
+
+	pool := &ParsedPool{
+		PoolKeyHash: slices.Clone(poolKeyHash),
+		VrfKeyHash:  vrfKeyHash,
+	}
+
+	if _, err := cbor.Decode(params[1], &pool.Pledge); err != nil {
+		return nil, true, fmt.Errorf("decoding pledge: %w", err)
+	}
+	if _, err := cbor.Decode(params[2], &pool.Cost); err != nil {
+		return nil, true, fmt.Errorf("decoding cost: %w", err)
+	}
+
+	var marginOK bool
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[3])
+	if !marginOK {
+		slog.Warn(
+			"failed to decode pool margin, defaulting to 0/1",
+			"pool", hex.EncodeToString(poolKeyHash),
+		)
+	}
+	if pool.MarginDen == 0 {
+		pool.MarginDen = 1
+	}
+
+	if rewardAccount, ok := parseRewardAccount(params[4]); ok {
+		pool.RewardAccount = rewardAccount
+	}
+
+	pool.Owners = parsePoolOwners(params[5])
+	if len(params) > 6 {
+		pool.Relays = parseRelays(params[6])
+	}
+	if len(params) > 7 {
+		parsePoolMetadata(params[7], pool)
+	}
+	if len(params) > 8 {
+		if _, err := cbor.Decode(params[8], &pool.Deposit); err != nil {
+			return nil, true, fmt.Errorf(
+				"decoding pool deposit: %w",
+				err,
+			)
+		}
+	}
+
+	return pool, true, nil
+}
+
+func parseRewardAccount(data []byte) ([]byte, bool) {
+	var direct []byte
+	if _, err := cbor.Decode(data, &direct); err == nil {
+		return direct, true
+	}
+
+	if cred, err := parseCredential(data); err == nil && len(cred.Hash) > 0 {
+		return cred.Hash, true
+	}
+
+	var parts []cbor.RawMessage
+	if _, err := cbor.Decode(data, &parts); err != nil || len(parts) < 2 {
+		return nil, false
+	}
+	if cred, err := parseCredential(parts[1]); err == nil &&
+		len(cred.Hash) > 0 {
+		return cred.Hash, true
+	}
+	if _, err := cbor.Decode(parts[1], &direct); err == nil {
+		return direct, true
+	}
+
+	return nil, false
+}
+
+func parsePoolOwners(data []byte) [][]byte {
+	var owners []cbor.RawMessage
+	if _, err := cbor.Decode(data, &owners); err != nil {
+		return nil
+	}
+	ret := make([][]byte, 0, len(owners))
+	for _, ownerRaw := range owners {
+		var ownerHash []byte
+		if _, err := cbor.Decode(
+			ownerRaw,
+			&ownerHash,
+		); err == nil {
+			ret = append(ret, ownerHash)
+		}
+	}
+	return ret
 }
 
 func parsePoolParamsOrDistr(
@@ -1084,6 +1146,12 @@ func parsePoolMetadata(
 	var meta []cbor.RawMessage
 	if _, err := cbor.Decode(data, &meta); err != nil {
 		return // null or invalid
+	}
+	if len(meta) == 1 {
+		var unwrapped []cbor.RawMessage
+		if _, err := cbor.Decode(meta[0], &unwrapped); err == nil {
+			meta = unwrapped
+		}
 	}
 	if len(meta) >= 2 {
 		var url string
