@@ -21,6 +21,17 @@ Hi folks! Here’s what we shipped in v0.46.1.
 * Enhanced **steady hard-fork readiness checks in tests:** Release validation now waits for hard-fork readiness checks to finish before asserting results, which makes test outcomes more dependable.
 * Updated **clarify mempool and UTxO RPC package guidance:** Embedded package guidance now explains transaction handling and UTxO filtering more clearly, which makes the exposed behavior easier to understand.
 
+### 🔧 Fixes
+
+* Fixed **stop block producers when genesis snapshots fail:** Block producers now stop immediately if startup cannot build the required initial snapshot, which helps prevent unsafe forging starts.
+* Corrected **recover startup state from the right common chain point:** Startup recovery now rolls back to the latest shared chain point when local state no longer matches the selected chain, which helps nodes resume more cleanly after interrupted or divergent starts.
+* Strengthened **honor peer-sharing settings consistently:** Nodes now apply peer-sharing choices correctly across connections, which makes network behavior match the configured role more reliably.
+* Stabilized **return startup errors instead of crashing on missing services:** Startup now reports missing required services as ordinary errors, which makes failed launches easier to diagnose and recover.
+* Hardened **respect real epoch boundaries during leader scheduling:** Block production scheduling now follows the active epoch layout more accurately, which helps leaders avoid incorrect scheduling around changing epoch boundaries.
+* Repaired **restore pool state details more accurately:** Pool state recovery now reads stored pool details more reliably, which helps stake pool views stay complete after startup and rollback work.
+* Prevented **misread offset data from Byron boundary blocks:** Nodes now skip offset indexing for Byron epoch boundary blocks that carry no transactions, which avoids false indexing results during historical processing.
+* Secured **start UTxO RPC TLS sessions without reloading files:** UTxO RPC now keeps the loaded TLS certificate in memory for server startup, which makes secure startup behavior more reliable.
+
 ## v0.46.0 (May 13, 2026)
 
 **Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
