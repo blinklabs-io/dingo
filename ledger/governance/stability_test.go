@@ -15,8 +15,6 @@
 package governance
 
 import (
-	"io"
-	"log/slog"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -53,14 +51,17 @@ func stabilityConwayPParams(major uint) *conway.ConwayProtocolParameters {
 
 // seedHardForkInitiationProposal inserts an active HardForkInitiation
 // proposal whose enacted state would bump the protocol major version to
-// targetMajor. The proposal is configured to be returned by
-// GetActiveGovernanceProposals(currentEpoch): proposed in the past, not
-// yet expired, not enacted/expired/deleted.
+// targetMajor. addedSlot and txHashSeed identify the proposal so callers
+// can seed multiple in the same DB. The proposal is configured to be
+// returned by GetActiveGovernanceProposals(currentEpoch): proposed in
+// the past, not yet expired, not enacted/expired/deleted.
 func seedHardForkInitiationProposal(
 	t *testing.T,
 	db *database.Database,
 	currentEpoch uint64,
 	targetMajor uint,
+	addedSlot uint64,
+	txHashSeed byte,
 ) *models.GovernanceProposal {
 	t.Helper()
 	action := &lcommon.HardForkInitiationGovAction{Type: 1}
@@ -70,7 +71,7 @@ func seedHardForkInitiationProposal(
 	require.NoError(t, err)
 
 	proposal := &models.GovernanceProposal{
-		TxHash:        testBytes(32, stabilityProposalTx),
+		TxHash:        testBytes(32, txHashSeed),
 		ActionIndex:   0,
 		ActionType:    uint8(lcommon.GovActionTypeHardForkInitiation),
 		ProposedEpoch: currentEpoch - 1,
@@ -80,7 +81,7 @@ func seedHardForkInitiationProposal(
 		AnchorURL:     "https://example.invalid/anchor",
 		AnchorHash:    testBytes(32, 0xEE),
 		GovActionCbor: cborBytes,
-		AddedSlot:     1,
+		AddedSlot:     addedSlot,
 	}
 	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
 	loaded, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
@@ -144,12 +145,8 @@ func seedDRepYesVote(
 
 func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
-	in := StabilityCheckInputs{
-		DB:           db,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CurrentEpoch: stabilityTestEpoch,
-		PParams:      nil, // pre-Conway: no governance state machine yet
-	}
+	// pre-Conway: no governance state machine yet
+	in := NewStabilityCheckInputs(db, nil, stabilityTestEpoch, nil, nil, nil)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
@@ -157,12 +154,9 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T)
 
 func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
-	in := StabilityCheckInputs{
-		DB:           db,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CurrentEpoch: stabilityTestEpoch,
-		PParams:      stabilityConwayPParams(9),
-	}
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "empty active proposal set must yield nil")
@@ -189,12 +183,9 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *
 		AddedSlot:     1,
 	}, nil))
 
-	in := StabilityCheckInputs{
-		DB:           db,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CurrentEpoch: stabilityTestEpoch,
-		PParams:      stabilityConwayPParams(9),
-	}
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "non-HardForkInitiation actions must be ignored")
@@ -210,16 +201,15 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 	db, _ := newTallyTestDB(t)
 
 	const targetMajor uint = 11
-	proposal := seedHardForkInitiationProposal(t, db, stabilityTestEpoch, targetMajor)
+	proposal := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, targetMajor, 1, stabilityProposalTx,
+	)
 	drepCred := seedDRepWithStake(t, db, 1_000)
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
-	in := StabilityCheckInputs{
-		DB:           db,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CurrentEpoch: stabilityTestEpoch,
-		PParams:      stabilityConwayPParams(9),
-	}
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	require.NotNil(t, got, "bootstrap + yes vote must be ratifiable")
@@ -235,15 +225,52 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 // of any kind, the proposal does not ratify.
 func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(t *testing.T) {
 	db, _ := newTallyTestDB(t)
-	seedHardForkInitiationProposal(t, db, stabilityTestEpoch, 11)
+	seedHardForkInitiationProposal(t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx)
 
-	in := StabilityCheckInputs{
-		DB:           db,
-		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
-		CurrentEpoch: stabilityTestEpoch,
-		PParams:      stabilityConwayPParams(9),
-	}
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "no votes means no ratification, even in bootstrap")
+}
+
+// When two HardForkInitiation proposals are simultaneously ratifiable,
+// EvaluateRatifiableHardForkInitiation must return the one with the
+// lower added_slot — matching the order ProcessEpoch's RATIFY phase
+// would select. This pins the parity between the mid-epoch and
+// boundary paths without a full integration test.
+func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAddedSlot(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+
+	const (
+		earlyMajor    uint = 11
+		earlySlot     uint64 = 1
+		earlyHashSeed byte   = 0xA1
+		lateMajor     uint = 12
+		lateSlot      uint64 = 10
+		lateHashSeed  byte   = 0xA2
+	)
+
+	early := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, earlyMajor, earlySlot, earlyHashSeed,
+	)
+	late := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, lateMajor, lateSlot, lateHashSeed,
+	)
+
+	drepCred := seedDRepWithStake(t, db, 1_000)
+	seedDRepYesVote(t, db, early.ID, drepCred)
+	seedDRepYesVote(t, db, late.ID, drepCred)
+
+	in := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+	)
+	got, err := EvaluateRatifiableHardForkInitiation(in)
+	require.NoError(t, err)
+	require.NotNil(t, got, "at least one HFI should be ratifiable")
+	assert.Equal(t, early.ID, got.Proposal.ID,
+		"the lower added_slot proposal must win")
+	assert.Equal(t, earlyMajor, got.NewMajor,
+		"NewMajor must come from the lower added_slot proposal")
 }
