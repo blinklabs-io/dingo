@@ -88,7 +88,7 @@ fi
 # --------------------------------------------------------------------------- #
 
 log "Building Dingo Docker image..."
-docker compose -f "${COMPOSE_FILE}" build dingo-producer
+docker compose -f "${COMPOSE_FILE}" build configurator dingo-producer
 
 log "Starting DevNet containers..."
 docker compose -f "${COMPOSE_FILE}" up -d
