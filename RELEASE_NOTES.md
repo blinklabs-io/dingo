@@ -1,5 +1,19 @@
 # Dingo Releases
 
+## v0.46.1 (May 14, 2026)
+
+**Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
+
+**Date:** May 14, 2026
+
+**Version:** v0.46.1
+
+Hi folks! Here’s what we shipped in v0.46.1.
+
+### ✨ What's New
+
+* Added **bootstrap Conway governance from genesis settings:** Networks that define initial governance delegates and voter registrations now start with that governance state already in place, which gives governance aware services a more complete view from the first block.
+
 ## v0.46.0 (May 13, 2026)
 
 **Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
