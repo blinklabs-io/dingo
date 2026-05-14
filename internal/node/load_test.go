@@ -330,6 +330,36 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 	)
 }
 
+func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
+	db := newTestDB(t)
+	txn := db.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+
+	bodyItems := make([]gcbor.RawMessage, 21_600)
+	for i := range bodyItems {
+		bodyItems[i] = gcbor.RawMessage{0x00}
+	}
+	bodyCbor, err := fxcbor.Marshal(bodyItems)
+	require.NoError(t, err)
+	extraCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x00}})
+	require.NoError(t, err)
+	blockCbor, err := fxcbor.Marshal([]gcbor.RawMessage{
+		{0x80},
+		gcbor.RawMessage(bodyCbor),
+		gcbor.RawMessage(extraCbor),
+	})
+	require.NoError(t, err)
+
+	stored, err := storeRawBlockUtxoOffsets(txn, chain.RawBlock{
+		Slot: 0,
+		Hash: bytes.Repeat([]byte{0x42}, 32),
+		Cbor: blockCbor,
+		Type: gledger.BlockTypeByronEbb,
+	})
+	require.NoError(t, err)
+	require.Zero(t, stored)
+}
+
 func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	t *testing.T,
 ) {

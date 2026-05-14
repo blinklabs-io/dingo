@@ -729,6 +729,12 @@ func storeRawBlockUtxoOffsets(
 	txn *database.Txn,
 	block chain.RawBlock,
 ) (int, error) {
+	// Byron epoch-boundary blocks carry no transactions. Mainnet's slot-0
+	// EBB body can look like a large Shelley-style tx body array to the
+	// generic offset extractor, so skip it before attempting extraction.
+	if block.Type == gledger.BlockTypeByronEbb {
+		return 0, nil
+	}
 	if txn == nil || txn.Blob() == nil {
 		return 0, errors.New("blob transaction not available")
 	}

@@ -17,8 +17,10 @@ package database
 import (
 	"testing"
 
+	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -152,6 +154,29 @@ func TestBlockIndexerEmptyBlock(t *testing.T) {
 	assert.Error(t, err, "expected error for nil block")
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "block cannot be nil")
+}
+
+func TestBlockIndexerNoTxBlockSkipsOffsetExtractor(t *testing.T) {
+	bodyCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x00}, {0x01}})
+	require.NoError(t, err)
+	extraCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x02}})
+	require.NoError(t, err)
+	blockCbor, err := fxcbor.Marshal([]gcbor.RawMessage{
+		{0x80},
+		gcbor.RawMessage(bodyCbor),
+		gcbor.RawMessage(extraCbor),
+	})
+	require.NoError(t, err)
+
+	indexer := NewBlockIndexer(0, make([]byte, 32))
+	result, err := indexer.ComputeOffsets(
+		blockCbor,
+		&ledger.ByronEpochBoundaryBlock{},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.TxOffsets)
+	assert.Empty(t, result.UtxoOffsets)
 }
 
 // findCborInBytes searches for a CBOR byte sequence within a larger byte slice.

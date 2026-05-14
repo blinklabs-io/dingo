@@ -122,16 +122,18 @@ func (bi *BlockIndexer) ComputeOffsets(
 		result.ScriptOffsets = make(map[[32]byte]CborOffset)
 	}
 
+	// Avoid running the era-agnostic offset extractor on blocks that the
+	// era decoder already proved have no transactions. Byron EBBs in
+	// particular can otherwise be mistaken for a Shelley-style body layout.
+	txs := block.Transactions()
+	if len(txs) == 0 {
+		return result, nil
+	}
+
 	// Extract transaction-level offsets from block CBOR
 	txOffsets, err := common.ExtractTransactionOffsets(blockCbor)
 	if err != nil {
 		return nil, fmt.Errorf("extract transaction offsets: %w", err)
-	}
-
-	// Get transactions from the parsed block
-	txs := block.Transactions()
-	if len(txs) == 0 {
-		return result, nil
 	}
 
 	// Verify we have offsets for all transactions
