@@ -25,6 +25,20 @@ import (
 
 const defaultPeersToRequest = 5
 
+func (o *Ouroboros) peerSharingConfig() opeersharing.Config {
+	return opeersharing.NewConfig(o.peersharingConnOpts()...)
+}
+
+func (o *Ouroboros) peersharingConnOpts() []opeersharing.PeerSharingOptionFunc {
+	opts := append(
+		[]opeersharing.PeerSharingOptionFunc{},
+		o.peersharingClientConnOpts()...,
+	)
+	opts = append(opts, o.peersharingServerConnOpts()...)
+	opts = append(opts, opeersharing.WithLocalDisabled(!o.config.PeerSharing))
+	return opts
+}
+
 func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
 		opeersharing.WithShareRequestFunc(
