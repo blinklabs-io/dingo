@@ -1849,16 +1849,19 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	//     a HardForkInitiation governance action survived the
 	//     rollback and is still ratifiable past the voting deadline.
 	//
-	// Without these re-derivations a client querying era history
-	// between rollback completion and the next block-apply would see
-	// a transient Unknown that doesn't reflect the actual chain
-	// state.
+	// These re-derivations are best-effort at rollback time: if an
+	// HFI stability tally is already in flight, the generation bump
+	// below invalidates that result and the fresh tally may be
+	// deferred until the next block reopens the evaluator. That can
+	// leave a transient Unknown between rollback completion and the
+	// next successful evaluation, but prevents stale pre-rollback HFI
+	// results from committing.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	ls.reconstructTransitionInfo()
-	// Reopen the once-per-epoch gate so rollback can re-derive
-	// transitionInfo immediately, and bump the generation counter so
-	// any in-flight tally from before the rollback drops its result
-	// instead of committing stale data.
+	// Reopen the once-per-epoch gate so rollback can attempt to
+	// re-derive transitionInfo, and bump the generation counter so any
+	// in-flight tally from before the rollback drops its result instead
+	// of committing stale data.
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
 	ls.evaluateHardForkInitiationStability()

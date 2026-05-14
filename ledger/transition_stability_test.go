@@ -57,6 +57,14 @@ func awaitTransitionInfo(
 	return ls.transitionInfo
 }
 
+func awaitHFIEvalIdle(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return !ls.hfiStabilityEvalInFlight.Load()
+	}, 2*time.Second, 5*time.Millisecond,
+		"HFI stability evaluation did not become idle")
+}
+
 // stabilityFixtureEpoch parameters: Shelley-style 432_000-slot epoch,
 // safeZone = ceil(3*432/0.05) = 25_920, voting deadline distance from
 // epoch end is 2 * safeZone = 51_840. So an epoch ending at slot
@@ -230,6 +238,7 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"no ratifiable proposal means transitionInfo stays Unknown")
 }
@@ -253,6 +262,7 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(t *testing.T)
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"pre-Conway pparams must short-circuit without promotion")
 }
@@ -329,6 +339,7 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(t *test
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"intra-era HardForkInitiation must not be surfaced as TransitionKnown")
 }
