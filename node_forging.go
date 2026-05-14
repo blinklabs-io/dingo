@@ -439,6 +439,14 @@ func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
 	return a.ledgerState.SlotsPerEpoch()
 }
 
+func (a *epochInfoAdapter) EpochForSlot(slot uint64) (uint64, error) {
+	epoch, err := a.ledgerState.SlotToEpoch(slot)
+	if err != nil {
+		return 0, err
+	}
+	return epoch.EpochId, nil
+}
+
 func (a *epochInfoAdapter) ActiveSlotCoeff() float64 {
 	return a.ledgerState.ActiveSlotCoeff()
 }
