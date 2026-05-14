@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -577,6 +578,17 @@ type MetadataStore interface {
 	SetGenesisStaking(
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
+	// SetGenesisGovernance stores the initial DReps and stake/vote
+	// delegations from the conway-genesis.json governance bootstrap
+	// section. Records are stamped with slot 0 so they appear in the
+	// ledger as having been present since genesis.
+	SetGenesisGovernance(
+		initialDReps conway.ConwayGenesisInitialDReps,
+		delegs conway.ConwayGenesisDelegs,
 		blockHash []byte,
 		txn types.Txn,
 	) error

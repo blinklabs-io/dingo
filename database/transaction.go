@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -716,6 +717,36 @@ func (d *Database) SetGenesisStaking(
 		txn.Metadata(),
 	); err != nil {
 		return fmt.Errorf("set genesis staking: %w", err)
+	}
+	return nil
+}
+
+// SetGenesisGovernance stores initial DReps and delegations from the
+// Conway genesis bootstrap section. This is metadata-only.
+func (d *Database) SetGenesisGovernance(
+	initialDReps conway.ConwayGenesisInitialDReps,
+	delegs conway.ConwayGenesisDelegs,
+	blockHash []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		if err := d.metadata.SetGenesisGovernance(
+			initialDReps,
+			delegs,
+			blockHash,
+			nil,
+		); err != nil {
+			return fmt.Errorf("set genesis governance: %w", err)
+		}
+		return nil
+	}
+	if err := d.metadata.SetGenesisGovernance(
+		initialDReps,
+		delegs,
+		blockHash,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set genesis governance: %w", err)
 	}
 	return nil
 }

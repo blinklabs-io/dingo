@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -3849,6 +3850,209 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 			return fmt.Errorf(
 				"create genesis account: %w",
 				result.Error,
+			)
+		}
+	}
+
+	return nil
+}
+
+// SetGenesisGovernance stores the initial DReps and stake/vote
+// delegations described in the conway-genesis.json bootstrap section.
+// All records are stamped at slot 0 so they appear as part of the
+// initial ledger state.
+func (d *MetadataStoreSqlite) SetGenesisGovernance(
+	initialDReps conway.ConwayGenesisInitialDReps,
+	delegs conway.ConwayGenesisDelegs,
+	_ []byte,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	for cred, state := range initialDReps {
+		if cred == nil {
+			continue
+		}
+		drepCred := cred.Credential[:]
+		drep := &models.Drep{
+			Credential:  drepCred,
+			AddedSlot:   0,
+			ExpiryEpoch: state.Expiry,
+			Active:      true,
+		}
+		if state.Anchor != nil {
+			drep.AnchorURL = state.Anchor.Url
+			drep.AnchorHash = state.Anchor.DataHash[:]
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "credential"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"added_slot",
+				"anchor_url",
+				"anchor_hash",
+				"expiry_epoch",
+				"active",
+			}),
+		}).Create(drep); result.Error != nil {
+			return fmt.Errorf(
+				"create genesis drep: %w",
+				result.Error,
+			)
+		}
+
+		reg := &models.RegistrationDrep{
+			DrepCredential: drepCred,
+			AddedSlot:      0,
+			DepositAmount:  types.Uint64(state.Deposit),
+		}
+		if state.Anchor != nil {
+			reg.AnchorURL = state.Anchor.Url
+			reg.AnchorHash = state.Anchor.DataHash[:]
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "drep_credential"},
+				{Name: "added_slot"},
+			},
+			DoNothing: true,
+		}).Create(reg); result.Error != nil {
+			return fmt.Errorf(
+				"create genesis drep registration: %w",
+				result.Error,
+			)
+		}
+	}
+
+	for cred, delegatee := range delegs {
+		if cred == nil {
+			continue
+		}
+		stakeKey := cred.Credential[:]
+
+		drepType, err := models.DrepTypeFromInt(delegatee.DRep.Type)
+		if err != nil && delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {
+			return fmt.Errorf("genesis delegatee drep type: %w", err)
+		}
+		var drepCredential []byte
+		if delegatee.Type != conway.ConwayGenesisDelegateeTypeStake &&
+			drepType != models.DrepTypeAlwaysAbstain &&
+			drepType != models.DrepTypeAlwaysNoConfidence {
+			drepCredential = delegatee.DRep.Credential
+		}
+
+		account, err := d.getOrCreateAccount(stakeKey, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"get or create genesis delegatee account: %w",
+				err,
+			)
+		}
+		account.AddedSlot = 0
+
+		// Conway genesis delegations implicitly register the staking
+		// credential at slot 0 (no on-chain certificate, no deposit).
+		// We materialize this as a synthetic Registration row so the
+		// rollback path (RestoreAccountStateAtSlot) recognizes the
+		// account as "existed at genesis" via its standard hasReg
+		// check; without it, rolling back past a later on-chain cert
+		// would delete a genesis-rooted account.
+		var existingReg models.Registration
+		regResult := db.Where(
+			"staking_key = ? AND added_slot = ?",
+			stakeKey, uint64(0),
+		).Attrs(models.Registration{
+			StakingKey: stakeKey,
+			AddedSlot:  0,
+		}).FirstOrCreate(&existingReg)
+		if regResult.Error != nil {
+			return fmt.Errorf(
+				"create genesis registration: %w", regResult.Error,
+			)
+		}
+
+		// Delegation history tables have no unique constraint that covers
+		// (staking_key, added_slot), so we use FirstOrCreate to keep the
+		// slot-0 row idempotent across retries (e.g., resumed Mithril
+		// bootstrap). Each staking key contributes at most one genesis
+		// delegation row of a given type, so matching on staking_key +
+		// added_slot is sufficient.
+		switch delegatee.Type {
+		case conway.ConwayGenesisDelegateeTypeStake:
+			account.Pool = delegatee.PoolId[:]
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis stake delegatee account: %w", err,
+				)
+			}
+			var existing models.StakeDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeDelegation{
+				StakingKey:  stakeKey,
+				PoolKeyHash: delegatee.PoolId[:],
+				AddedSlot:   0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis stake delegation: %w", result.Error,
+				)
+			}
+		case conway.ConwayGenesisDelegateeTypeVote:
+			account.Drep = drepCredential
+			account.DrepType = drepType
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis vote delegatee account: %w", err,
+				)
+			}
+			var existing models.VoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.VoteDelegation{
+				StakingKey: stakeKey,
+				Drep:       drepCredential,
+				DrepType:   drepType,
+				AddedSlot:  0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis vote delegation: %w", result.Error,
+				)
+			}
+		case conway.ConwayGenesisDelegateeTypeStakeVote:
+			account.Pool = delegatee.PoolId[:]
+			account.Drep = drepCredential
+			account.DrepType = drepType
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis stake/vote delegatee account: %w", err,
+				)
+			}
+			var existing models.StakeVoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeVoteDelegation{
+				StakingKey:  stakeKey,
+				PoolKeyHash: delegatee.PoolId[:],
+				Drep:        drepCredential,
+				DrepType:    drepType,
+				AddedSlot:   0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis stake/vote delegation: %w", result.Error,
+				)
+			}
+		default:
+			return fmt.Errorf(
+				"unknown genesis delegatee type: %d",
+				delegatee.Type,
 			)
 		}
 	}
