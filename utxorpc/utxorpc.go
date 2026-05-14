@@ -276,15 +276,23 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 	serverType := "non-TLS"
 	if useTLS {
 		serverType = "TLS"
-		if _, err := tls.LoadX509KeyPair(
+		cert, err := tls.LoadX509KeyPair(
 			u.config.TlsCertFilePath,
 			u.config.TlsKeyFilePath,
-		); err != nil {
+		)
+		if err != nil {
 			return fmt.Errorf(
 				"failed to load TLS keypair for utxorpc gRPC %s server: %w",
 				serverType, err,
 			)
 		}
+		if server.TLSConfig == nil {
+			server.TLSConfig = &tls.Config{}
+		}
+		server.TLSConfig.Certificates = append(
+			server.TLSConfig.Certificates,
+			cert,
+		)
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
@@ -296,8 +304,8 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 		if useTLS {
 			serveErr = server.ServeTLS(
 				ln,
-				u.config.TlsCertFilePath,
-				u.config.TlsKeyFilePath,
+				"",
+				"",
 			)
 		} else {
 			serveErr = server.Serve(ln)
