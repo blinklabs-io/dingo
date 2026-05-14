@@ -1,4 +1,4 @@
-# Release Notes
+# Dingo Releases
 
 ## v0.46.0 (May 13, 2026)
 
@@ -23,7 +23,6 @@ Hi folks! Here’s what we shipped in v0.46.0.
 * Enhanced **quiet routine NoBlocks log noise:** Routine blockfetch responses that return no blocks now stay at debug level, which keeps normal logs easier to scan for real issues.
 * Updated **strengthen chain-iterator regression coverage:** Regression checks now cover more iterator ordering, rollback, and waiting paths, which increases confidence in chain recovery behavior.
 * Clarified **explain Mithril API-mode backfill behavior more clearly:** API mode guidance now states that historical metadata backfill runs after Mithril snapshot import, which makes full-history expectations easier to understand.
-* Modernized **keep release history continuous through v0.45.0:** `RELEASE_NOTES.md` now carries forward the v0.45.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
@@ -39,7 +38,7 @@ Hi folks! Here’s what we shipped in v0.46.0.
 * Clarified **broader Blockfrost stake-account API coverage:** Blockfrost compatible services now cover stake-account details, address listings, delegation history, registration history, and reward history through stake-address endpoints.
 * Highlighted **cardano-node aligned Praos tie breaking and safer fresh sync recovery:** Equal-height Praos decisions now follow cardano-node behavior more closely, and unrecoverable sync failures now restart from fresh connections more aggressively.
 * Emphasized **larger Leios mempool defaults and stronger startup checks:** Leios mode now uses a larger default mempool, and pool certificate tracking gives block producers a clearer startup check for stale certificate counters.
-* Summarized **operational polish and documentation updates:** Logging, SQLite batching, regression coverage, Mithril API-mode guidance, and release-history updates all received changes that make operations easier to follow.
+* Summarized **operational polish and documentation updates:** Logging, SQLite batching, regression coverage, and Mithril API-mode guidance all received changes that make operations easier to follow.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -74,7 +73,6 @@ Hi folks! Here’s what we shipped in v0.45.0.
 * Improved **verify upcoming protocol-step readiness on a live multi-node path:** Release validation now checks the Conway to vanRossem progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
 * Refined **expand fuzz-driven regression coverage across core behaviors:** More parsing, storage, networking, and configuration paths now receive broader stress coverage, which helps surface edge cases before they reach operators and integrators.
 * Enhanced **keep publish workflows moving while package indexing catches up:** Release publishing now avoids a broken package refresh step, which keeps releases moving even when package index updates take longer to appear.
-* Updated **keep release history current through v0.44.0:** `RELEASE_NOTES.md` now includes the v0.44.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
@@ -127,7 +125,6 @@ Hi folks! Here’s what we shipped in v0.44.0.
 * Strengthened **align secrets handling with newer sops support:** Encrypted configuration and secrets handling now stay aligned with the newer `sops` release for steadier maintenance.
 * Advanced **align compression support with newer library updates:** Compression support now stays aligned with the newer `klauspost/compress` release for routine compatibility maintenance.
 * Polished **align system support with newer platform updates:** System level compatibility now stays aligned with the newer `golang.org/x/sys` release for steadier maintenance.
-* Restored **keep release history current through v0.43.0:** `RELEASE_NOTES.md` now includes the v0.43.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
@@ -138,7 +135,7 @@ Hi folks! Here’s what we shipped in v0.44.0.
 * Clarified **broader Blockfrost transaction coverage and submit handling:** Blockfrost compatible integrations can now use transaction detail and submit endpoints with clearer coverage across metadata, UTxOs, certificates, redeemers, required signers, signed CBOR, and submit outcomes.
 * Highlighted **safer Mithril backfill and resume handling:** Mithril bootstrap now preserves more recovery state and resumes metadata backfill more safely, which lowers the chance of losing progress after an interrupted run.
 * Emphasized **safer fork and intersect recovery behavior:** Chain recovery now handles sparse intersect points and more fork reconciliation scenarios more safely, which helps nodes recover from difficult rollback paths with less risk of getting stuck.
-* Summarized **maintenance, validation, dependency, and release history updates:** Validation timing, dependency compatibility, and release tracking were refreshed to keep operations and maintenance steadier around this release.
+* Summarized **maintenance, validation, and dependency updates:** Validation timing and dependency compatibility were refreshed to keep operations and maintenance steadier around this release.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -174,7 +171,6 @@ Hi folks! Here’s what we shipped in v0.43.0.
 
 * Improved **show epoch progress against wall-clock time in dashboards:** Operators can now compare current epoch slot progress with a wall-clock reference line, which makes slot stalls easier to notice.
 * Refined **track compatibility with gouroboros 0.168.0:** Protocol compatibility now stays aligned with the newer `gouroboros` `0.168.0` release for steadier maintenance and integration tracking.
-* Enhanced **keep release history current through v0.42.0:** `RELEASE_NOTES.md` now includes the v0.42.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
@@ -186,7 +182,7 @@ Hi folks! Here’s what we shipped in v0.43.0.
 * Clarified **fail-fast forging startup checks:** Block-producer startup now validates VRF, KES, and operational certificate inputs against Shelley genesis data and available ledger state, so misconfigured or expired credentials stop the node early instead of failing later.
 * Highlighted **broader observability and easier dashboard imports:** Operators now get new protocol and peer observability metrics, and bundled dashboards are easier to import because Grafana prompts for the Prometheus datasource.
 * Emphasized **safer rollback recovery and block-hash lookups:** Rollback recovery and block-hash lookups now behave more safely on forked chains and very large databases because stale iterators restart cleanly and expensive fallback scans stop quickly.
-* Summarized **dependency and release tracking updates:** Maintenance tracking now includes the `gouroboros` `0.168.0` update, and release history continuity is refreshed through the added v0.42.0 entry.
+* Summarized **dependency tracking updates:** Maintenance tracking now includes the `gouroboros` `0.168.0` update.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -224,7 +220,6 @@ Hi folks! Here’s what we shipped in v0.42.0.
 * Updated **test environments aligned with cardano-node 11.0.1:** Validation and demo environments now track `cardano-node` `11.0.1`, which keeps operational testing closer to current network expectations.
 * Modernized **project alignment with Go 1.26.x:** Build, test, and release workflows now align on Go `1.26.x`, which keeps maintenance and contributor environments current.
 * Strengthened **Mithril bootstrap rollover coverage:** Regression coverage now checks Mithril bootstrap and candidate nonce rollover paths more thoroughly, which improves confidence around snapshot recovery.
-* Restored **release history continuity:** `RELEASE_NOTES.md` now includes the v0.41.0 entry, which keeps recent release history easier to follow.
 
 ### 🔧 Fixes
 
@@ -280,7 +275,7 @@ Hi folks! Here’s what we shipped in v0.42.0.
   * `cardano_node_metrics_peerSelection_InboundLifecycleTotal` -> `dingo_metrics_peerSelection_InboundLifecycleTotal`
   * `cardano_node_metrics_peerSelection_InboundHotQuotaUsage` -> `dingo_metrics_peerSelection_InboundHotQuotaUsage`
   * `cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy` -> `dingo_metrics_peerSelection_InboundWarmTargetOccupancy`
-* Summarized **refreshed tooling, validation, and release tracking:** Tooling, validation, and release tracking were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, archive-demo reliability improvements, and the restored v0.41.0 release-history entry.
+* Summarized **refreshed tooling and validation:** Tooling and validation were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, and archive-demo reliability improvements.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -317,7 +312,6 @@ Hi folks! Here’s what we shipped in v0.41.0.
 * Refined **era test harness organization:** The era test harness now lives in a clearer shared location, which makes validation work easier to follow.
 * Enhanced **Conway and PV11 readiness confidence:** Readiness coverage now checks Conway and PV11 behavior more clearly, which improves validation confidence.
 * Cleaned **stale rate limit maintenance:** The project now drops an outdated rate-limit constant, which keeps maintenance cleaner without changing runtime behavior.
-* Restored **release history continuity:** RELEASE_NOTES.md now includes the v0.40.0 entry, which keeps recent release history easier to scan.
 * Strengthened **archive node validation coverage:** The archive node demonstration now checks the full runnable flow more thoroughly, which makes the operational demo easier to trust.
 
 ### 🔧 Fixes
@@ -335,7 +329,7 @@ Hi folks! Here’s what we shipped in v0.41.0.
 * Highlighted **lower idle heap usage:** Idle heap usage should be lower because default event subscriber buffers are smaller.
 * Emphasized **safer startup and shutdown paths:** Mithril startup and shutdown behavior is safer around recoverable database edge cases.
 * Summarized **more robust sync and peer management:** Sync and peer-management behavior is safer because plateau recovery and DNS-fallback peer handling are more robust.
-* Reviewed **archive demo and release history updates:** The project now includes an archive-node demonstration plus refreshed release history coverage.
+* Reviewed **archive demo updates:** The project now includes an archive-node demonstration plus stronger validation coverage.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -369,7 +363,6 @@ Hi folks! Here’s what we shipped in v0.40.0.
 
 * Improved **newer Blockfrost client compatibility:** Blockfrost backed integrations now stay aligned with the newer `blockfrost-go` client release for smoother API compatibility.
 * Refreshed **protocol and UTxO RPC compatibility:** Core protocol and UTxO RPC support now stay aligned with newer upstream releases, including Conway version 11 expectations, for steadier interoperability.
-* Restored **release history continuity:** Release tracking now includes the v0.39.3 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
 
 ### 🔧 Fixes
 
@@ -384,7 +377,7 @@ Hi folks! Here’s what we shipped in v0.40.0.
 * Highlighted **new governance DRep lookups:** Blockfrost compatible API users can now look up governance DReps through the new endpoint.
 * Summarized **safer rollback and resync recovery:** Rollback handling now detects loops, rewinds state correctly, and resyncs more cleanly after recovery problems.
 * Emphasized **steadier shutdowns and reconnects:** Catch up shutdowns and source port reuse now behave more reliably, which reduces avoidable interruptions.
-* Reviewed **dependency and release history updates:** Blockfrost, protocol, and UTxO RPC dependencies were refreshed, and release history now includes the v0.39.3 notes entry.
+* Reviewed **dependency updates:** Blockfrost, protocol, and UTxO RPC dependencies were refreshed.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -423,7 +416,6 @@ Hi folks! Here’s what we shipped in v0.39.3.
 * Refreshed **Google API client support:** Google API integrations now stay current with `v0.277.0` for routine compatibility maintenance.
 * Advanced **AWS S3 SDK maintenance:** S3 backed storage support now includes the latest patch level for steadier ongoing compatibility.
 * Streamlined **devnet contributor workflow:** Contributors can work with the devnet test harness more easily because the end to end test support now lives under `internal/test/devnet` in a clearer shared location.
-* Restored **release history continuity:** Release tracking now includes the v0.39.2 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
 
 ### 🔧 Fixes
 
@@ -565,7 +557,6 @@ Hi folks! Here’s what we shipped in v0.39.0.
 * Enhanced **devnet validation workflow:** Development teams can now run `make test-devnet` for a more consistent devnet validation flow.
 * Modernized **Docker build cleanliness:** Container builds now avoid worktree and bot metadata directories, which keeps build contexts cleaner.
 * Updated **Bark download cancellation handling:** Bark block downloads now honor request cancellation and timeout context more cleanly, and lint coverage now checks that path again.
-* Refreshed **release history continuity:** Release history now includes the v0.38.0 notes entry in `RELEASE_NOTES.md`, which keeps recent changes easier to scan.
 
 ### 🔧 Fixes
 
@@ -625,7 +616,6 @@ Hi folks! Here’s what we shipped in v0.38.0.
 * Refreshed **Connect API compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
 * Advanced **AWS S3 integration currency:** S3 backed workflows now stay aligned with the newer `github.com/aws/aws-sdk-go-v2/service/s3` release.
 * Polished **AWS client compatibility:** AWS backed components now stay aligned with the newer `github.com/aws/smithy-go` release.
-* Completed **v0.37.0 release history refresh:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
 
 ### 🔧 Fixes
 
@@ -639,7 +629,7 @@ Hi folks! Here’s what we shipped in v0.38.0.
 * Adopt the new Grafana and Prometheus dashboard bundle and alert rules to monitor Dingo nodes more quickly.
 * Expect steadier near-tip sync and smoother equal-tip peer switching because shadow blockfetch, latency aware peer choice, preserved in-flight batches, and clearer blockfetch failure reporting now work together.
 * Note more explicit era and hard-fork handling because Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns typed era mismatch errors.
-* Review the dependency refreshes and the updated v0.37.0 release history entry when maintaining integrations and internal release records.
+* Review the dependency refreshes when maintaining integrations.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -753,7 +743,6 @@ Hi folks! Here’s what we shipped in v0.36.0.
 * Updated **protocol support alignment:** Network compatibility stays current with newer upstream protocol updates.
 * Modernized **operator tooling support:** Operational workflows stay aligned with newer Cardano command line tooling.
 * Streamlined **era rollover handling:** Era changes now follow one transition path, which makes chain operations more consistent during rollovers.
-* Restored **release history continuity:** Recent changes stay easier to scan in one place through the updated release notes.
 
 ### 🔧 Fixes
 
@@ -788,10 +777,6 @@ Hi folks! Here’s what we shipped in v0.35.3.
 ### ✨ What's New
 
 * Noted **no new features:** This patch focuses on improvements and fixes.
-
-### 💪 Improvements
-
-* Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
 
 ### 🔧 Fixes
 
@@ -828,7 +813,6 @@ Hi folks! Here’s what we shipped in v0.35.2.
 ### 🔧 Fixes
 
 * Corrected **safer era forecasts:** Hard fork era history now stays within the safe forecast horizon, so slot and time lookups do not promise certainty too far past the current ledger tip.
-* Restored **release history continuity:** The changelog now includes the v0.35.1 entry so recent release history stays complete and easier to scan.
 
 ### 📋 What You Need to Know
 
@@ -1046,10 +1030,6 @@ Hi folks! Here’s what we shipped in v0.32.2.
 - **More reliable connection cleanup:** Network operations stay more rock-solid because the node now detects inactive connections and purges leftover state tied to closed links.
 - **Refreshed telemetry and runtime dependencies:** Observability and compatibility stay smoother because core dependencies (including OpenTelemetry, gRPC, and gonum) were refreshed.
 
-### 🔧 Fixes
-
-- **Clearer v0.32.1 release notes:** Documentation is clearer because v0.32.1 release notes are now populated and placeholder text was removed.
-
 ### 📋 What You Need to Know
 
 - **No action required:** You're all set—just upgrade to v0.32.2.
@@ -1187,7 +1167,7 @@ Hi folks! Here’s what we shipped in v0.31.0.
 - **Smarter peer lag filtering:** Sync catch-up is smoother because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
 - **Smoother Prometheus defaults and cache visibility:** Metrics setup is simpler because the node now uses the default Prometheus registry when none is provided and exports Badger cache gauges.
 - **More accurate SQLite disk reporting:** Troubleshooting is easier because SQLite disk size reporting and error diagnostics are now more accurate.
-- **Clearer CI and release documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
+- **Clearer CI workflow documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
 
 ### 🔧 Fixes
 
@@ -1262,7 +1242,6 @@ Hi folks! Here’s what we shipped in v0.29.1.
 - **Steadier rollback iteration:** Catch-up and restart behavior is more predictable because chain iteration is now safer under rollbacks.
 - **Relaxed peer-tip validation during catch-up:** Sync is smoother because peer tip checks are less likely to reject useful peers while you’re catching up.
 - **More reproducible CI and release automation:** Builds are easier to operate because CI and Antithesis automation were hardened.
-- **Clearer release documentation:** What changed is easier to see because release documentation was updated.
 - **Refreshed dependency set:** Compatibility stays rock-solid because a key dependency was updated.
 
 ### 🔧 Fixes
@@ -1477,7 +1456,6 @@ Hi folks! Here’s what we shipped in v0.27.4.
 ### 📋 What You Need to Know
 
 - **Inbound peers excluded from chain choice:** Chain selection behavior may change in mixed inbound/outbound topologies because inbound peers no longer influence which chain is selected.
-- **Documentation-only change:** This release includes a release-notes update with no runtime impact.
 
 ### 🙏 Thank You
 
@@ -1560,7 +1538,6 @@ Hi folks! Here’s what we shipped in v0.27.2.
 
 ### 📋 What You Need to Know
 
-- **Release notes alignment:** Release documentation was updated to reflect the final set of changes, including a detailed v0.27.1 section in `RELEASE_NOTES.md`.
 - **Build provenance updates:** Supply-chain attestations are easier to verify because build provenance now uses `actions/attest` and updated Docker Hub image subjects.
 
 ### 🙏 Thank You
@@ -1659,10 +1636,6 @@ Hi folks! Here’s what we shipped in v0.26.0.
 
 - **No fixes:** No user-facing fixes shipped in this release.
 
-### 📋 What You Need to Know
-
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes an entry for v0.25.1.
-
 ### 🙏 Thank You
 
 Thank you for trying!
@@ -1691,10 +1664,6 @@ Hi folks! Here’s what we shipped in v0.25.1.
 - **Resilient sync across reconnections:** Sync is more rock-solid because chainsync and blockfetch handle connection switches more reliably.
 - **Blockfetch overhead:** Observability is sleeker because blockfetch avoids extra work when no one is listening for events.
 - **Dependencies:** Builds are more solid because dependencies were refreshed for consistency.
-
-### 🔧 Fixes
-
-- **Release notes alignment:** Tracking changes is easier because release documentation now matches shipped content.
 
 ### 📋 What You Need to Know
 
@@ -1758,10 +1727,6 @@ Hi folks! Here’s what we shipped in v0.24.1.
 - **Shutdown reliability:** Shutdowns are more rock-solid because node and ledger shutdown paths are less likely to hang, and logs now show how long shutdown took.
 - **Epoch cache consistency checks:** Diagnosing cache issues is easier because epoch cache validation is stricter and catches inconsistencies earlier.
 
-### 📋 What You Need to Know
-
-- **Release notes:** Release notes are easier to scan because v0.24.0 notes are now included in `RELEASE_NOTES.md`.
-
 ### 🙏 Thank You
 
 Thank you for trying!
@@ -1796,7 +1761,6 @@ Hi folks! Here’s what we shipped in v0.24.0.
 - **CI and publishing:** Releases are more repeatable because CI and publishing workflows were refreshed with Node.js 24.x and newer pinned Docker and GitHub Actions.
 - **Dependencies:** Compatibility is better because key dependencies were updated, including OpenTelemetry Go and gouroboros.
 - **Go toolchain:** Builds are more up to date because the minimum Go version is now 1.25 and CI was updated to match.
-- **Release notes:** Scanning changes is easier because release notes were expanded for recent versions.
 
 ### 🔧 Fixes
 
@@ -1816,17 +1780,13 @@ Thank you for trying!
 
 ## v0.23.1 (March 11, 2026)
 
-**Title:** Clearer release notes and rock-solid Docker publishing
+**Title:** Rock-solid Docker publishing
 
 **Date:** March 11, 2026
 
 **Version:** v0.23.1
 
 Hi folks! Here’s what we shipped in v0.23.1.
-
-### ✨ What's New
-
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes a complete set of notes for v0.23.0.
 
 ### 💪 Improvements
 
@@ -1864,7 +1824,6 @@ Hi folks! Here’s what we shipped in v0.23.0.
 
 - **Docs:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
 - **Publish workflow:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
 
 ### 🔧 Fixes
 
@@ -1889,10 +1848,6 @@ Thank you for trying!
 **Version:** v0.22.1
 
 Hi folks! Here’s what we shipped in v0.22.1.
-
-### ✨ What's New
-
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
 
 ### 💪 Improvements
 
