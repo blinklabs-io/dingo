@@ -831,7 +831,7 @@ func WithChainsyncMaxClients(
 
 // WithChainsyncStallTimeout specifies the duration after
 // which a chainsync client with no activity is considered
-// stalled. Default is 30 seconds.
+// stalled. Default is 2 minutes.
 func WithChainsyncStallTimeout(
 	timeout time.Duration,
 ) ConfigOptionFunc {

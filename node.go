@@ -216,6 +216,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectTip:             n.config.intersectTip,
 		IntersectPoints:          n.config.intersectPoints,
 		PromRegistry:             n.config.promRegistry,
+		ChainsyncBlockTimeout:    n.config.chainsyncStallTimeout,
 		EnableLeios:              n.config.runMode == runModeLeios,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})

@@ -47,6 +47,24 @@ type lockedBuffer struct {
 	buf bytes.Buffer
 }
 
+func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
+	require.Equal(
+		t,
+		ochainsync.MustReplyTimeoutMax,
+		effectiveChainsyncBlockTimeout(0),
+	)
+	require.Equal(
+		t,
+		ochainsync.MustReplyTimeoutMax,
+		effectiveChainsyncBlockTimeout(time.Minute),
+	)
+	require.Equal(
+		t,
+		10*time.Minute,
+		effectiveChainsyncBlockTimeout(10*time.Minute),
+	)
+}
+
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
