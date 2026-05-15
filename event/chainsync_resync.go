@@ -32,6 +32,7 @@ const (
 	ChainsyncResyncReasonRollbackLoop                 = "rollback loop detected"
 	ChainsyncResyncReasonPersistentFork               = "persistent chain fork"
 	ChainsyncResyncReasonRollbackExceedsK             = "rollback exceeds security parameter K"
+	ChainsyncResyncReasonRollbackExceedsMithril       = "rollback exceeds Mithril trust boundary"
 	ChainsyncResyncReasonForkResolutionExceedsK       = "fork resolution exceeds security parameter K"
 	ChainsyncResyncReasonLocalLedgerRollback          = "local ledger rollback"
 	ChainsyncResyncReasonLiveTxValidationRecovery     = "live tx validation recovery"

@@ -1473,6 +1473,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// current tip" branch (issue #2177).
 	ls.RLock()
 	currentTip := ls.currentTip
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
 	ls.RUnlock()
 	if currentTip.Point.Slot == point.Slot &&
 		bytes.Equal(currentTip.Point.Hash, point.Hash) {
@@ -1488,6 +1489,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
 		)
 		return nil
+	}
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return ErrRollbackExceedsMithrilBoundary
 	}
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
@@ -1866,31 +1870,6 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.hfiEvalDoneEpoch = 0
 	ls.hfiEvalGeneration.Add(1)
 	ls.evaluateHardForkInitiationStability()
-	// If rolling back behind the Mithril trust boundary, clear it.
-	// A rollback inside the gap means replacement blocks on the new
-	// fork were NOT processed by SetGapBlockTransaction and must go
-	// through normal block processing.
-	if ls.mithrilLedgerSlot > 0 && point.Slot < ls.mithrilLedgerSlot {
-		ls.config.Logger.Warn(
-			"rollback behind Mithril trust boundary, clearing",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"mithril_ledger_slot", ls.mithrilLedgerSlot,
-		)
-		ls.mithrilLedgerSlot = 0
-		// Also clear the persisted value so a restart doesn't
-		// reload the stale boundary and skip replacement-fork
-		// blocks.
-		if err := ls.db.DeleteSyncState(
-			"mithril_ledger_slot", nil,
-		); err != nil {
-			ls.config.Logger.Warn(
-				"failed to clear persisted Mithril trust boundary",
-				"component", "ledger",
-				"error", err,
-			)
-		}
-	}
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
 	ls.currentTipBlockNonce = newNonce
@@ -1932,6 +1911,12 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
 // metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+	ls.RLock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return ErrRollbackExceedsMithrilBoundary
+	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
 	}

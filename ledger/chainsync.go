@@ -127,6 +127,10 @@ var ErrRollbackLoopDetected = errors.New(
 	"rollback loop detected: same slot rolled back too many times within window",
 )
 
+var ErrRollbackExceedsMithrilBoundary = errors.New(
+	"rollback exceeds Mithril trust boundary",
+)
+
 type peerHeaderRecord struct {
 	event    ChainsyncEvent
 	prevHash []byte
@@ -1283,6 +1287,36 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			}
 			return nil
 		}
+		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
+			// The Mithril snapshot is the local trust anchor. Blocks at
+			// or below its boundary were certified as a single ledger
+			// state, so we cannot reconstruct intermediate UTxO states
+			// for a replacement fork below that point. Reject the peer
+			// chain and force a fresh intersection instead.
+			ls.config.Logger.Error(
+				"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"mithril_ledger_slot", ls.mithrilLedgerSlot,
+				"connection_id", e.ConnectionId.String(),
+			)
+			ls.resetChainsyncResyncState()
+			ls.chainsyncState = SyncingChainsyncState
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
+						},
+					),
+				)
+			}
+			return nil
+		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
 	return nil
@@ -1610,7 +1644,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network and the
 	// epoch nonce may not be fully computed yet (e.g. Byron→Shelley).
-	if ls.validationEnabled {
+	// Also skip headers covered by a Mithril snapshot: those slots were
+	// verified by the certificate chain during import, and the restored
+	// database intentionally does not keep every historical epoch nonce.
+	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
 			if ls.config.EventBus != nil {
 				ls.config.Logger.Warn(
@@ -1875,6 +1912,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		return nil
 	}
 	return nil
+}
+
+func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
+	if !ls.validationEnabled {
+		return false
+	}
+	return ls.mithrilLedgerSlot == 0 || slot > ls.mithrilLedgerSlot
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
