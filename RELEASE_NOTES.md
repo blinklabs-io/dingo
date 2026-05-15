@@ -1,5 +1,22 @@
 # Dingo Releases
 
+## v0.46.2 (May 15, 2026)
+
+**Title:** Mithril trust-boundary protection, safer peer recovery, and sturdier rollback handling
+
+**Date:** May 15, 2026
+
+**Version:** v0.46.2
+
+Hi folks! Here’s what we shipped in v0.46.2.
+
+### ✨ What's New
+
+* Added **record forged-block signals before chain adoption completes:** Operators can now see forged-block metrics and events as soon as a block is built, which improves observability even when chain adoption later fails. ([#2323](https://github.com/blinklabs-io/dingo/pull/2323))
+* Introduced **tune chainsync block timeout and safer reconnect resets:** Operators can now configure the NtN chainsync block timeout, and peer reconnect handling now clears connection timing and outbound retry state only when the connection path truly requires it. ([#2316](https://github.com/blinklabs-io/dingo/pull/2316))
+
+### 💪 Improvements
+
 ## v0.46.1 (May 14, 2026)
 
 **Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
