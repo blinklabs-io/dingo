@@ -25,6 +25,13 @@ Hi folks! Here’s what we shipped in v0.46.2.
 
 ### 🔧 Fixes
 
+* Fixed **enforce Mithril trust boundaries during rollback recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard recovery limit, skip header-only verification at or below that boundary, and rebuild post-restore transaction metadata safely after restore. ([#2326](https://github.com/blinklabs-io/dingo/pull/2326))
+* Corrected **deny divergent peers before they can loop recovery:** Nodes now temporarily deny-list divergent peers, close denied inbound peers, and enforce those denials across more connection paths, which reduces rollback loops and reconnect churn. ([#2324](https://github.com/blinklabs-io/dingo/pull/2324))
+* Strengthened **recover live rollback divergence from a safe shared ancestor:** Live rollback reconciliation can now bring the primary chain and ledger back to a safe common ancestor, which improves recovery from over-K rollback and fork-divergence scenarios. ([#2322](https://github.com/blinklabs-io/dingo/pull/2322))
+* Stabilized **close databases safely during repeated shutdown paths:** Repeated shutdown or cleanup calls no longer trigger duplicate-close failures because `Database.Close` now behaves safely when called more than once. ([#2315](https://github.com/blinklabs-io/dingo/pull/2315))
+
+### 📋 What You Need to Know
+
 ## v0.46.1 (May 14, 2026)
 
 **Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
