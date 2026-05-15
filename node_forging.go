@@ -252,6 +252,7 @@ func (n *Node) initBlockForger(
 		LeaderChecker:               election,
 		BlockBuilder:                builder,
 		BlockBroadcaster:            broadcaster,
+		BlockForged:                 n.ledgerState.RecordForgedBlock,
 		SlotClock:                   slotClock,
 		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
