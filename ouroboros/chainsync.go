@@ -42,6 +42,13 @@ const (
 	chainsyncRestartTimeout = 30 * time.Second
 )
 
+func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
+	if timeout < ochainsync.MustReplyTimeoutMax {
+		return ochainsync.MustReplyTimeoutMax
+	}
+	return timeout
+}
+
 func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithFindIntersectFunc(
@@ -59,6 +66,7 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// server connections alive during periods of low block
 		// production (e.g. DevNets with low activeSlotsCoeff).
 		ochainsync.WithIdleTimeout(1 * time.Hour),
+		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
 }
 
@@ -83,6 +91,7 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// under load (e.g. fast DevNet block production or initial
 		// sync from genesis).
 		ochainsync.WithIntersectTimeout(30 * time.Second),
+		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
 }
 

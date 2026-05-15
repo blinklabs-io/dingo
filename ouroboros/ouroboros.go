@@ -86,6 +86,10 @@ type OuroborosConfig struct {
 	PeerSharing     bool
 	IntersectTip    bool
 	PromRegistry    prometheus.Registerer
+	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
+	// block reply after a peer enters a server-agency state. Low-density
+	// networks may legitimately go longer than the default protocol window.
+	ChainsyncBlockTimeout time.Duration
 	// MaxTxSubmissionsPerSecond is the maximum number of transaction
 	// submissions accepted per peer per second via the TxSubmission
 	// mini-protocol. A value of 0 disables rate limiting, which is the
@@ -120,6 +124,9 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
+	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
+		cfg.ChainsyncBlockTimeout,
+	)
 	o := &Ouroboros{
 		config:           cfg,
 		EventBus:         cfg.EventBus,

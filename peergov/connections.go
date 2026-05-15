@@ -667,40 +667,52 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			oldConn,
 			peer,
 		)
-		if peer.Source != PeerSourceInboundConn {
-			peer.ConnectedAt = time.Time{}
-		}
 		p.updatePeerMetrics()
 		// Only reconnect for outbound peers that are not on the deny list
-		if peer.Source != PeerSourceInboundConn &&
-			!p.isDeniedLocked(peer.NormalizedAddress) {
+		shouldReconnect := peer.Source != PeerSourceInboundConn &&
+			!p.isDeniedLocked(peer.NormalizedAddress)
+		if peer.Source != PeerSourceInboundConn {
 			// Apply backoff for short-lived connections to prevent
 			// rapid reconnection cycles that exhaust ephemeral ports.
 			// Only reset backoff when connection proved stable.
-			connDur := time.Since(peer.ConnectedAt)
-			if !peer.ConnectedAt.IsZero() &&
-				connDur >= minStableConnectionDuration {
-				// Connection was stable, reset backoff
-				peer.ReconnectCount = 0
-				peer.ReconnectDelay = 0
-			} else if !peer.ConnectedAt.IsZero() {
-				// Short-lived connection: apply exponential backoff
-				if peer.ReconnectDelay == 0 {
-					peer.ReconnectDelay = initialReconnectDelay
-				} else if peer.ReconnectDelay < maxReconnectDelay {
-					peer.ReconnectDelay *= reconnectBackoffFactor
-					if peer.ReconnectDelay > maxReconnectDelay {
-						peer.ReconnectDelay = maxReconnectDelay
-					}
+			if shouldReconnect {
+				connDur := connClosedAt.Sub(peer.ConnectedAt)
+				if connDur < 0 {
+					p.config.Logger.Warn(
+						"connection close timestamp predates connection start, clamping duration",
+						"address", peer.Address,
+						"connected_at", peer.ConnectedAt,
+						"closed_at", connClosedAt,
+						"raw_duration", connDur,
+					)
+					connDur = 0
 				}
-				p.config.Logger.Warn(
-					"short-lived connection detected, applying backoff",
-					"address", peer.Address,
-					"connection_duration", connDur,
-					"next_delay", peer.ReconnectDelay,
-				)
+				if !peer.ConnectedAt.IsZero() &&
+					connDur >= minStableConnectionDuration {
+					// Connection was stable, reset backoff
+					peer.ReconnectCount = 0
+					peer.ReconnectDelay = 0
+				} else if !peer.ConnectedAt.IsZero() {
+					// Short-lived connection: apply exponential backoff
+					if peer.ReconnectDelay == 0 {
+						peer.ReconnectDelay = initialReconnectDelay
+					} else if peer.ReconnectDelay < maxReconnectDelay {
+						peer.ReconnectDelay *= reconnectBackoffFactor
+						if peer.ReconnectDelay > maxReconnectDelay {
+							peer.ReconnectDelay = maxReconnectDelay
+						}
+					}
+					p.config.Logger.Warn(
+						"short-lived connection detected, applying backoff",
+						"address", peer.Address,
+						"connection_duration", connDur,
+						"next_delay", peer.ReconnectDelay,
+					)
+				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
+		}
+		if shouldReconnect {
 			// Only spawn a new reconnect goroutine if one is not
 			// already running. The active goroutine's defer
 			// cleanup in createOutboundConnection will clear

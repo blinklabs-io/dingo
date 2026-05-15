@@ -154,6 +154,65 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	return ls
 }
 
+func snapshotChainsyncNtNTimeouts() map[string]struct {
+	timeout        time.Duration
+	hasTimeoutFunc bool
+} {
+	snapshot := make(map[string]struct {
+		timeout        time.Duration
+		hasTimeoutFunc bool
+	})
+	for state, entry := range ochainsync.StateMapNtN {
+		switch state.Name {
+		case "CanAwait", "MustReply":
+			snapshot[state.Name] = struct {
+				timeout        time.Duration
+				hasTimeoutFunc bool
+			}{
+				timeout:        entry.Timeout,
+				hasTimeoutFunc: entry.TimeoutFunc != nil,
+			}
+		}
+	}
+	return snapshot
+}
+
+func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
+	originalStateMap := ochainsync.StateMapNtN.Copy()
+	t.Cleanup(func() {
+		clear(ochainsync.StateMapNtN)
+		for state, entry := range originalStateMap {
+			ochainsync.StateMapNtN[state] = entry
+		}
+	})
+
+	before := snapshotChainsyncNtNTimeouts()
+
+	_ = NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: 10 * time.Minute,
+	})
+	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
+
+	_ = NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: 20 * time.Minute,
+	})
+	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
+}
+
+func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
+	const blockTimeout = 20 * time.Minute
+
+	o := NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: blockTimeout,
+	})
+
+	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
+	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts()...)
+
+	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
+	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
+}
+
 func TestNormalizeIntersectPoints(t *testing.T) {
 	points := []ocommon.Point{
 		ocommon.NewPoint(20, []byte("b")),
