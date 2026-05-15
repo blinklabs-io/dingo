@@ -17,6 +17,14 @@ Hi folks! Here’s what we shipped in v0.46.2.
 
 ### 💪 Improvements
 
+* Improved **refresh upstream compatibility with plutigo v0.1.13:** Deployments now stay aligned with the newer upstream support in `plutigo`, which keeps compatibility and routine maintenance steadier. ([#2327](https://github.com/blinklabs-io/dingo/pull/2327))
+* Refined **tighten default era-test coverage selection:** Default erastest runs now exclude vanRossem unless an explicit run filter is supplied, which keeps routine validation focused unless broader coverage is intentionally requested. ([#2325](https://github.com/blinklabs-io/dingo/pull/2325))
+* Enhanced **refresh protocol-library compatibility with gouroboros v0.170.1:** Protocol support now stays aligned with the newer upstream `gouroboros` release, which supports ongoing compatibility and maintenance work. ([#2321](https://github.com/blinklabs-io/dingo/pull/2321))
+* Updated **modernize dependency-policy checks in CI:** Continuous integration now uses the newer `gomodguard_v2` policy checks, which keeps dependency-policy maintenance current. ([#2320](https://github.com/blinklabs-io/dingo/pull/2320))
+* Modernized **keep published release history current:** `RELEASE_NOTES.md` now includes the published `v0.46.1` entry, which keeps release history easier to follow. ([#2314](https://github.com/blinklabs-io/dingo/pull/2314))
+
+### 🔧 Fixes
+
 ## v0.46.1 (May 14, 2026)
 
 **Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
