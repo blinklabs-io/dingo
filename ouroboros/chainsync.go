@@ -40,6 +40,11 @@ const (
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
 	chainsyncRestartTimeout = 30 * time.Second
+
+	// chainsyncDivergentPeerCooldown slows peers that repeatedly offer a
+	// rollback we cannot safely follow. This prevents full-duplex reconnects
+	// from immediately re-entering the same rollback loop.
+	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
 
 func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
@@ -138,6 +143,36 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	default:
 		return false
 	}
+}
+
+func chainsyncResyncDeniesPeer(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonForkResolutionExceedsK:
+		return true
+	default:
+		return false
+	}
+}
+
+func (o *Ouroboros) denyDivergentChainsyncPeer(
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	if o.PeerGov == nil ||
+		connId.RemoteAddr == nil ||
+		!chainsyncResyncDeniesPeer(reason) {
+		return
+	}
+	address := connId.RemoteAddr.String()
+	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
+	o.config.Logger.Warn(
+		"temporarily denying divergent chainsync peer",
+		"connection_id", connId.String(),
+		"address", address,
+		"reason", reason,
+		"duration", chainsyncDivergentPeerCooldown,
+	)
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
@@ -1073,6 +1108,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			// points.
 			if chainsyncResyncRequiresFreshConnection(e.Reason) {
 				for _, connId := range connIds {
+					o.denyDivergentChainsyncPeer(connId, e.Reason)
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearObservedHeaderHistory(connId)
 					}

@@ -847,6 +847,98 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 	}
 }
 
+func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.EventBus = bus
+	o.PeerGov = peerGov
+	o.SubscribeChainsyncResync(t.Context())
+
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "10.0.0.1:3001")
+	require.NoError(t, err)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       event.ChainsyncResyncReasonRollbackExceedsK,
+			},
+		),
+	)
+
+	require.Eventually(
+		t,
+		func() bool {
+			return peerGov.IsDenied(remoteAddr.String())
+		},
+		2*time.Second,
+		20*time.Millisecond,
+	)
+}
+
+func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.EventBus = bus
+	o.PeerGov = peerGov
+	o.SubscribeChainsyncResync(t.Context())
+
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "10.0.0.1:3001")
+	require.NoError(t, err)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       event.ChainsyncResyncReasonRollbackLoop,
+			},
+		),
+	)
+
+	require.Never(
+		t,
+		func() bool {
+			return peerGov.IsDenied(remoteAddr.String())
+		},
+		200*time.Millisecond,
+		20*time.Millisecond,
+	)
+}
+
 func TestHeaderPreviouslySeenFromOtherConnTreatsEquivalentConnIdsAsSame(
 	t *testing.T,
 ) {
