@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/plugin"
@@ -57,6 +58,8 @@ type Database struct {
 	cborCache       *TieredCborCache
 	sizeMetricsStop chan struct{}
 	sizeMetricsDone chan struct{}
+	closeOnce       sync.Once
+	closeErr        error
 }
 
 // Blob returns the underling blob store instance
@@ -101,19 +104,20 @@ func (d *Database) MetadataTxn(readWrite bool) *Txn {
 
 // Close cleans up the database connections
 func (d *Database) Close() error {
-	// Stop the metrics goroutine if running
-	if d.sizeMetricsStop != nil {
-		close(d.sizeMetricsStop)
-		<-d.sizeMetricsDone
-	}
-	var err error
-	if d.metadata != nil {
-		err = errors.Join(err, d.metadata.Close())
-	}
-	if d.blob != nil {
-		err = errors.Join(err, d.blob.Close())
-	}
-	return err
+	d.closeOnce.Do(func() {
+		// Stop the metrics goroutine if running
+		if d.sizeMetricsStop != nil {
+			close(d.sizeMetricsStop)
+			<-d.sizeMetricsDone
+		}
+		if d.metadata != nil {
+			d.closeErr = errors.Join(d.closeErr, d.metadata.Close())
+		}
+		if d.blob != nil {
+			d.closeErr = errors.Join(d.closeErr, d.blob.Close())
+		}
+	})
+	return d.closeErr
 }
 
 func (d *Database) init() error {
