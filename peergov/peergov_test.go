@@ -16,6 +16,7 @@ package peergov
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -1012,6 +1014,62 @@ func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 	}
 }
 
+func TestPeerGovernor_HandleInboundConnectionDeniedPeer(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = connManager.Stop(stopCtx)
+	})
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       logger,
+		ConnManager:  connManager,
+		DenyDuration: time.Hour,
+	})
+
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		[]ouroboros_mock.ConversationEntry{
+			ouroboros_mock.ConversationEntryHandshakeRequestGeneric,
+			ouroboros_mock.ConversationEntryHandshakeNtNResponse,
+		},
+	)
+	oConn, err := ouroboros.New(
+		ouroboros.WithConnection(mockConn),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(false),
+	)
+	require.NoError(t, err)
+	connId := oConn.Id()
+	address := connId.RemoteAddr.String()
+	require.True(t, connManager.AddConnection(oConn, true, address))
+	pg.DenyPeer(connmanager.NormalizePeerAddr(address), 0)
+
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId:         connId,
+			LocalAddr:            connId.LocalAddr,
+			RemoteAddr:           connId.RemoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(address),
+			IsDuplex:             true,
+		},
+	})
+
+	require.Empty(t, pg.GetPeers())
+	require.True(t, pg.IsDenied(address))
+	require.Eventually(t, func() bool {
+		return connManager.GetConnectionById(connId) == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestPeerGovernor_HandleConnectionClosed(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
@@ -1342,6 +1400,56 @@ func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
 		exists,
 		"deny list should store normalized (lowercase) address",
 	)
+}
+
+func TestPeerGovernor_DenyPeer_MatchesActiveConnectionRemoteAddress(
+	t *testing.T,
+) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: time.Hour,
+	})
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "195.191.47.210:3001")
+	require.NoError(t, err)
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	peer := &Peer{
+		Address:           "prv-relay1.apexpool.info:3001",
+		NormalizedAddress: "203.0.113.10:3001",
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connID,
+			IsClient: true,
+		},
+	}
+	pg.peers = append(pg.peers, peer)
+
+	pg.DenyPeer(remoteAddr.String(), 0)
+
+	assert.True(t, pg.IsDenied(remoteAddr.String()))
+	assert.True(t, pg.IsDenied(peer.Address))
+	assert.True(t, pg.IsDenied(peer.NormalizedAddress))
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.True(t, pg.isPeerDeniedLocked(peer))
+	_, remoteDenied := pg.denyList["195.191.47.210:3001"]
+	assert.True(t, remoteDenied)
+	_, hostnameDenied := pg.denyList["prv-relay1.apexpool.info:3001"]
+	assert.True(t, hostnameDenied)
+	_, configuredDenied := pg.denyList["203.0.113.10:3001"]
+	assert.True(t, configuredDenied)
 }
 
 func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {

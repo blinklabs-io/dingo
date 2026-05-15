@@ -130,6 +130,14 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		return
 	}
 	currentPeer := p.peers[idx]
+	if p.isPeerDeniedLocked(currentPeer) {
+		p.mu.Unlock()
+		p.config.Logger.Debug(
+			"outbound: peer denied, skipping connection attempts",
+			"address", peer.Address,
+		)
+		return
+	}
 	if currentPeer.Reconnecting {
 		p.mu.Unlock()
 		p.config.Logger.Debug(
@@ -194,7 +202,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
-		if p.isDeniedLocked(peer.NormalizedAddress) {
+		currentPeer = p.peers[peerIdx]
+		if p.isPeerDeniedLocked(currentPeer) {
 			p.mu.Unlock()
 			p.config.Logger.Debug(
 				"outbound: peer denied, stopping connection attempts",
@@ -202,7 +211,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
-		if currentPeer := p.peers[peerIdx]; p.inboundSatisfiesTopologyValencyLocked(currentPeer) {
+		if p.inboundSatisfiesTopologyValencyLocked(currentPeer) {
 			p.mu.Unlock()
 			p.config.Logger.Info(
 				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
@@ -259,18 +268,27 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			// Re-check that peer is still valid after connection was created
 			// to eliminate TOCTOU race window
 			peerIdx := p.peerIndexByAddress(peer.NormalizedAddress)
-			if peerIdx == -1 || p.isDeniedLocked(peer.NormalizedAddress) {
+			if peerIdx == -1 {
 				p.mu.Unlock()
-				// Peer was removed or denied while connecting, close connection
+				// Peer was removed while connecting, close connection
 				conn.Close()
 				p.config.Logger.Debug(
-					"outbound: peer removed/denied during connection, closing",
+					"outbound: peer removed during connection, closing",
 					"address", peer.Address,
 				)
 				return
 			}
 			// Use the peer from the slice in case the pointer changed
 			currentPeer := p.peers[peerIdx]
+			if p.isPeerDeniedLocked(currentPeer) {
+				p.mu.Unlock()
+				conn.Close()
+				p.config.Logger.Debug(
+					"outbound: peer denied during connection, closing",
+					"address", peer.Address,
+				)
+				return
+			}
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
 			currentPeer.ConnectedAt = time.Now()
@@ -496,7 +514,19 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			"denied inbound peer during cooldown",
 			"address", address,
 		)
+		connManager := p.config.ConnManager
+		connId := e.ConnectionId
 		p.mu.Unlock()
+		if connManager != nil {
+			if conn := connManager.GetConnectionById(connId); conn != nil {
+				p.config.Logger.Info(
+					"closing denied inbound peer",
+					"address", address,
+					"connection_id", connId.String(),
+				)
+				conn.Close()
+			}
+		}
 		return
 	}
 	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
@@ -636,6 +666,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		oldSource := peer.Source
 		oldConn := clonePeerConnection(peer.Connection)
 		connClosedAt := time.Now()
+		denied := p.isPeerDeniedLocked(peer)
 		if peer.Source == PeerSourceInboundConn {
 			connDur := time.Duration(0)
 			if !peer.InboundConnectedAt.IsZero() {
@@ -669,8 +700,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		)
 		p.updatePeerMetrics()
 		// Only reconnect for outbound peers that are not on the deny list
-		shouldReconnect := peer.Source != PeerSourceInboundConn &&
-			!p.isDeniedLocked(peer.NormalizedAddress)
+		shouldReconnect := peer.Source != PeerSourceInboundConn && !denied
 		if peer.Source != PeerSourceInboundConn {
 			// Apply backoff for short-lived connections to prevent
 			// rapid reconnection cycles that exhaust ephemeral ports.
@@ -740,15 +770,20 @@ func (p *PeerGovernor) DenyPeer(address string, duration time.Duration) {
 	}
 	// Resolve address before acquiring lock to avoid blocking DNS
 	normalized := p.resolveAddress(address)
+	hostnameNormalized := p.normalizeAddress(address)
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	expiry := time.Now().Add(duration)
 	if idx := p.peerIndexByAddress(address); idx != -1 && p.peers[idx] != nil {
-		p.denyList[p.peers[idx].NormalizedAddress] = time.Now().Add(duration)
-		p.denyList[p.normalizeAddress(p.peers[idx].Address)] = time.Now().
-			Add(duration)
+		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
+	} else if idx := p.peerIndexByConnectionRemoteAddressLocked(
+		normalized,
+		hostnameNormalized,
+	); idx != -1 && p.peers[idx] != nil {
+		p.addPeerDenyKeysLocked(p.peers[idx], expiry, normalized, hostnameNormalized)
 	} else {
-		p.denyList[normalized] = time.Now().Add(duration)
-		p.denyList[p.normalizeAddress(address)] = time.Now().Add(duration)
+		p.denyList[normalized] = expiry
+		p.denyList[hostnameNormalized] = expiry
 	}
 	p.config.Logger.Debug(
 		"peer added to deny list",
@@ -789,6 +824,72 @@ func (p *PeerGovernor) isDeniedLocked(address string) bool {
 		return false
 	}
 	return true
+}
+
+func (p *PeerGovernor) peerIndexByConnectionRemoteAddressLocked(
+	addresses ...string,
+) int {
+	for i, peer := range p.peers {
+		if peer == nil ||
+			peer.Connection == nil ||
+			peer.Connection.Id.RemoteAddr == nil {
+			continue
+		}
+		remoteAddress := peer.Connection.Id.RemoteAddr.String()
+		remoteNormalized := connmanager.NormalizePeerAddr(remoteAddress)
+		remoteHostnameNormalized := p.normalizeAddress(remoteAddress)
+		for _, address := range addresses {
+			if address == "" {
+				continue
+			}
+			if address == remoteNormalized || address == remoteHostnameNormalized {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func (p *PeerGovernor) addPeerDenyKeysLocked(
+	peer *Peer,
+	expiry time.Time,
+	addresses ...string,
+) {
+	for _, address := range addresses {
+		if address != "" {
+			p.denyList[address] = expiry
+		}
+	}
+	if peer == nil {
+		return
+	}
+	if peer.NormalizedAddress != "" {
+		p.denyList[peer.NormalizedAddress] = expiry
+	}
+	if peer.Address != "" {
+		p.denyList[p.normalizeAddress(peer.Address)] = expiry
+	}
+	if peer.Connection != nil && peer.Connection.Id.RemoteAddr != nil {
+		remoteAddress := peer.Connection.Id.RemoteAddr.String()
+		p.denyList[connmanager.NormalizePeerAddr(remoteAddress)] = expiry
+		p.denyList[p.normalizeAddress(remoteAddress)] = expiry
+	}
+}
+
+func (p *PeerGovernor) isPeerDeniedLocked(peer *Peer) bool {
+	if peer == nil {
+		return false
+	}
+	if p.isDeniedLocked(peer.NormalizedAddress) ||
+		p.isDeniedLocked(p.normalizeAddress(peer.Address)) {
+		return true
+	}
+	if peer.Connection != nil && peer.Connection.Id.RemoteAddr != nil {
+		remoteAddress := peer.Connection.Id.RemoteAddr.String()
+		return p.isDeniedLocked(connmanager.NormalizePeerAddr(remoteAddress)) ||
+			p.isDeniedLocked(p.normalizeAddress(remoteAddress))
+	}
+	return false
 }
 
 // cleanupDenyList removes expired entries from the deny list.
