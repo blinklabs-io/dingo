@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -64,6 +65,7 @@ type BlockForger struct {
 	leaderChecker    LeaderChecker
 	blockBuilder     BlockBuilder
 	blockBroadcaster BlockBroadcaster
+	blockForged      BlockForgedObserver
 	slotClock        SlotClockProvider
 	slotDuration     time.Duration
 
@@ -105,6 +107,14 @@ type BlockBroadcaster interface {
 	AddBlock(block ledger.Block, cbor []byte) error
 }
 
+// BlockForgedObserver observes blocks after they are successfully built,
+// before chain adoption is attempted.
+type BlockForgedObserver func(
+	block ledger.Block,
+	cbor []byte,
+	latency time.Duration,
+)
+
 // SlotClockProvider provides current slot information from the slot clock.
 type SlotClockProvider interface {
 	// CurrentSlot returns the current slot number based on wall-clock time.
@@ -131,6 +141,7 @@ type ForgerConfig struct {
 	LeaderChecker    LeaderChecker
 	BlockBuilder     BlockBuilder
 	BlockBroadcaster BlockBroadcaster
+	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
 
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
@@ -162,6 +173,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leaderChecker:    cfg.LeaderChecker,
 		blockBuilder:     cfg.BlockBuilder,
 		blockBroadcaster: cfg.BlockBroadcaster,
+		blockForged:      cfg.BlockForged,
 		slotClock:        cfg.SlotClock,
 		slotTracker:      NewSlotTracker(),
 	}
@@ -369,6 +381,8 @@ func (f *BlockForger) checkAndForge(ctx context.Context) error {
 
 // checkAndForgeProduction implements production mode forging.
 func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
+	forgeStartTime := time.Now()
+
 	// Get current slot from slot clock
 	currentSlot, err := f.slotClock.CurrentSlot()
 	if err != nil {
@@ -495,6 +509,20 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.blockTxCount.Observe(
 			float64(len(block.Transactions())),
 		)
+	}
+	if f.blockForged != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					f.logger.Error(
+						"blockForged observer panic",
+						"panic", r,
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
+			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
+		}()
 	}
 
 	// Add block to chain and broadcast

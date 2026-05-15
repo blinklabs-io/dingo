@@ -5668,6 +5668,43 @@ func (ls *LedgerState) loadSlotBattleRecorder() SlotBattleRecorder {
 	return recorder.recorder
 }
 
+// RecordForgedBlock records observability for a block that this node
+// successfully forged. Adoption into the local chain is tracked separately.
+func (ls *LedgerState) RecordForgedBlock(
+	block ledger.Block,
+	blockCbor []byte,
+	forgingLatency time.Duration,
+) {
+	if ls == nil || block == nil {
+		return
+	}
+	if ls.metrics.blocksForgedTotal != nil {
+		ls.metrics.blocksForgedTotal.Inc()
+	}
+	if ls.metrics.blockForgingLatency != nil {
+		ls.metrics.blockForgingLatency.Observe(
+			forgingLatency.Seconds(),
+		)
+	}
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.BlockForgedEventType,
+		event.NewEvent(
+			event.BlockForgedEventType,
+			event.BlockForgedEvent{
+				Slot:        block.SlotNumber(),
+				BlockNumber: block.BlockNumber(),
+				BlockHash:   block.Hash().Bytes(),
+				TxCount:     uint(len(block.Transactions())),
+				BlockSize:   uint(len(blockCbor)),
+				Timestamp:   time.Now(),
+			},
+		),
+	)
+}
+
 // forgeBlock creates a conway block with transactions from mempool
 // Also adds it to the primary chain
 func (ls *LedgerState) forgeBlock() {
@@ -5966,6 +6003,9 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	forgingLatency := time.Since(forgeStartTime)
+	ls.RecordForgedBlock(ledgerBlock, blockCbor, forgingLatency)
+
 	// Add the block to the primary chain
 	err = ls.chain.AddBlock(ledgerBlock, nil)
 	if err != nil {
@@ -5980,31 +6020,6 @@ func (ls *LedgerState) forgeBlock() {
 	// Wake chainsync server iterators so connected peers discover
 	// the newly forged block immediately.
 	ls.chain.NotifyIterators()
-
-	// Calculate forging latency
-	forgingLatency := time.Since(forgeStartTime)
-
-	// Update forging metrics
-	ls.metrics.blocksForgedTotal.Inc()
-	ls.metrics.blockForgingLatency.Observe(forgingLatency.Seconds())
-
-	// Publish BlockForgedEvent for observability and monitoring
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
-			event.BlockForgedEventType,
-			event.NewEvent(
-				event.BlockForgedEventType,
-				event.BlockForgedEvent{
-					Slot:        ledgerBlock.SlotNumber(),
-					BlockNumber: ledgerBlock.BlockNumber(),
-					BlockHash:   ledgerBlock.Hash().Bytes(),
-					TxCount:     uint(len(transactionBodies)),
-					BlockSize:   uint(len(blockCbor)),
-					Timestamp:   time.Now(),
-				},
-			),
-		)
-	}
 
 	// Log the successful block creation
 	ls.config.Logger.Info(
