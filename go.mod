@@ -18,7 +18,7 @@ require (
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
 	github.com/blinklabs-io/gouroboros v0.170.1
-	github.com/blinklabs-io/ouroboros-mock v0.10.0
+	github.com/blinklabs-io/ouroboros-mock v0.11.0
 	github.com/blinklabs-io/plutigo v0.1.13
 	github.com/blockfrost/blockfrost-go v0.4.0
 	github.com/btcsuite/btcd/btcutil v1.1.6
