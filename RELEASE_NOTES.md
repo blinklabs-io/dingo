@@ -21,7 +21,6 @@ Hi folks! Here’s what we shipped in v0.46.2.
 * Refined **tighten default era-test coverage selection:** Default erastest runs now exclude vanRossem unless an explicit run filter is supplied, which keeps routine validation focused unless broader coverage is intentionally requested. ([#2325](https://github.com/blinklabs-io/dingo/pull/2325))
 * Enhanced **refresh protocol-library compatibility with gouroboros v0.170.1:** Protocol support now stays aligned with the newer upstream `gouroboros` release, which supports ongoing compatibility and maintenance work. ([#2321](https://github.com/blinklabs-io/dingo/pull/2321))
 * Updated **modernize dependency-policy checks in CI:** Continuous integration now uses the newer `gomodguard_v2` policy checks, which keeps dependency-policy maintenance current. ([#2320](https://github.com/blinklabs-io/dingo/pull/2320))
-* Modernized **keep published release history current:** `RELEASE_NOTES.md` now includes the published `v0.46.1` entry, which keeps release history easier to follow. ([#2314](https://github.com/blinklabs-io/dingo/pull/2314))
 
 ### 🔧 Fixes
 
@@ -35,7 +34,7 @@ Hi folks! Here’s what we shipped in v0.46.2.
 * Clarified **trust the Mithril restore boundary during recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard rollback and replay limit, and they rebuild post-restore transaction metadata from restored block data after recovery completes.
 * Highlighted **safer divergent-peer recovery paths:** Nodes now temporarily deny bad peers during divergence recovery, and live rollback reconciliation can recover more safely by returning the primary chain and ledger to a shared safe ancestor.
 * Emphasized **stronger forging visibility and connection control:** Forged-block metrics and events now appear as soon as a block is built, and operators can tune the chainsync block timeout more directly.
-* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency-policy checks, database shutdown handling, and release-history maintenance all received updates in this release.
+* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency-policy checks, and database shutdown handling all received updates in this release.
 
 ### Recommended Network Compatibility ⚠️
 
