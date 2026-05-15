@@ -1234,6 +1234,21 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			return nil
 		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
+				"chainsync rollback exceeds security parameter K",
+				e.ConnectionId,
+			)
+			if reconcileErr != nil {
+				return fmt.Errorf(
+					"reconcile primary chain and ledger after over-K rollback: %w",
+					reconcileErr,
+				)
+			}
+			if reconciled {
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				return nil
+			}
 			// The peer's chain has diverged beyond K blocks from
 			// ours. This is a security violation — we must not
 			// follow a chain that requires rolling back more than
@@ -1996,6 +2011,21 @@ func (ls *LedgerState) tryResolveFork(
 
 	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
+				"fork resolution exceeds security parameter K",
+				e.ConnectionId,
+			)
+			if reconcileErr != nil {
+				return false, fmt.Errorf(
+					"reconcile primary chain and ledger after over-K fork resolution: %w",
+					reconcileErr,
+				)
+			}
+			if reconciled {
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				return true, nil
+			}
 			// Fork exceeds security parameter K. We must not
 			// follow a chain that requires rolling back more
 			// than K blocks — this is a fundamental Ouroboros

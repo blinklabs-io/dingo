@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -232,6 +233,42 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
+func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
+
+	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.Point{},
+		},
+	))
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, SyncingChainsyncState, fixture.ls.chainsyncState)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+1,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+}
+
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
@@ -274,6 +311,57 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
 	)
 	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
+
+	localTip := fixture.ls.chain.Tip()
+	forkHash := testHashBytes("over-k-fork-resolution-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: localTip.BlockNumber + 1,
+		slot:        localTip.Point.Slot + 10,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.NoError(t, err)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
@@ -1416,6 +1504,34 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		ancestorNonce: ancestorNonce,
 		forkPoint:     ocommon.NewPoint(currentBlock.Slot+10, testHashBytes("fork-point")),
 	}
+}
+
+func putPrimaryChainOnForkBeyondK(
+	t *testing.T,
+	fixture *chainsyncRollbackFixture,
+	seedPrefix string,
+) {
+	t.Helper()
+
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	prevHash := fixture.ancestorTip.Point.Hash
+	blocks := make([]chain.RawBlock, 0, 3)
+	for idx := range 3 {
+		blockOffset := uint64(idx + 1)
+		hash := testHashBytes(fmt.Sprintf("%s-fork-%d", seedPrefix, idx))
+		blocks = append(blocks, chain.RawBlock{
+			Slot:        fixture.currentTip.Point.Slot + blockOffset*5,
+			Hash:        hash,
+			BlockNumber: fixture.ancestorTip.BlockNumber + blockOffset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        []byte{0x80},
+		})
+		prevHash = hash
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
+	require.NotEqual(t, fixture.currentTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
 func testHashBytes(seed string) []byte {
