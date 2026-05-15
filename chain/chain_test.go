@@ -449,15 +449,14 @@ func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
 		_, err := iter.Next(true)
 		done <- err
 	}()
-	select {
-	case err := <-done:
-		if !errors.Is(err, chain.ErrIteratorChainOrigin) {
-			t.Fatalf(
-				"expected ErrIteratorChainOrigin, got %v", err,
-			)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("blocking reverse Next did not terminate at origin")
+	gotErr := testutil.RequireReceive(
+		t, done, time.Second,
+		"blocking reverse Next did not terminate at origin",
+	)
+	if !errors.Is(gotErr, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin, got %v", gotErr,
+		)
 	}
 }
 
@@ -539,6 +538,66 @@ func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
 	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
 		t.Fatalf(
 			"expected ErrIteratorChainOrigin after post-rollback exhaustion, got %v",
+			err,
+		)
+	}
+}
+
+// TestChainIteratorReverseRollbackToOriginClamps verifies that a reverse
+// iterator whose nextBlockIndex points past a chain that has been rolled
+// back to origin gets clamped, so that a subsequent regrowth of the chain
+// does not cause the iterator to silently emit blocks from the new chain.
+// Regression test for the rollback-hook condition: origin lives at block
+// index 0 (pre-genesis), so the clamp must trigger when rollbackBlockIndex
+// is 0 as well.
+func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := chain.NewManager(nil, eventBus)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// Use a small security param so the entire chain is allowed to be
+	// rolled back during initial-sync semantics.
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// Start a reverse iterator at the tip but do not consume any blocks
+	// yet — nextBlockIndex equals the tip's index.
+	tip := testBlocks[len(testBlocks)-1]
+	tipPoint := ocommon.NewPoint(tip.MockSlot, decodeHex(tip.MockHash))
+	iter, err := c.FromPointReverse(tipPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Roll back to origin (clears the entire chain).
+	if err := c.Rollback(ocommon.NewPointOrigin()); err != nil {
+		t.Fatalf("unexpected rollback error: %s", err)
+	}
+	// The iterator must terminate at origin — chain is empty.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin after rollback to origin, got %v",
+			err,
+		)
+	}
+	// Regrow the chain. With clamping, the iterator stays terminated.
+	// Without the fix, blockByIndex at the old (stale) tip index would
+	// hand out the regrown chain's block of the same index.
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error re-adding block to chain: %s", err,
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"reverse iterator must stay terminated after chain regrowth; got %v",
 			err,
 		)
 	}

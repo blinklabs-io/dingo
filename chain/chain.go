@@ -822,10 +822,13 @@ func (c *Chain) rollbackLocked(
 		// rollback shortened the chain past nextBlockIndex the
 		// iterator must be clamped to the new tip so subsequent Next
 		// calls return the still-present predecessor blocks instead
-		// of mistaking missing blocks for origin.
+		// of mistaking missing blocks for origin. Clamping also
+		// applies to rollback-to-origin (rollbackBlockIndex == 0,
+		// the pre-genesis index — initialBlockIndex is 1): without
+		// it, a regrown chain reaching the iterator's stale index
+		// would silently hand out unrelated blocks.
 		if iter.reverse {
-			if iter.nextBlockIndex > rollbackBlockIndex &&
-				rollbackBlockIndex > 0 {
+			if iter.nextBlockIndex > rollbackBlockIndex {
 				iter.nextBlockIndex = rollbackBlockIndex
 			}
 			continue
