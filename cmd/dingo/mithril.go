@@ -649,6 +649,15 @@ func runMithrilSync(
 			"count", len(gapBlocks),
 		)
 	}
+	if err := processPostLedgerStateBlocks(
+		ctx,
+		db,
+		logger,
+		ledgerStateSlot,
+		ledgerStateHash,
+	); err != nil {
+		return err
+	}
 
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
 		if err := updateMithrilReadyState(
@@ -1387,6 +1396,55 @@ func validateStoredGapBlocks(
 			last.Slot,
 			last.Hash,
 			ledgerStateHash,
+		)
+	}
+	return nil
+}
+
+func processPostLedgerStateBlocks(
+	ctx context.Context,
+	db *database.Database,
+	logger *slog.Logger,
+	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
+) error {
+	recentBlocks, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return fmt.Errorf("reading chain tip for post-ledger processing: %w", err)
+	}
+	if len(recentBlocks) == 0 || recentBlocks[0].Slot <= ledgerStateSlot {
+		return nil
+	}
+	logger.Info(
+		"processing post-ledger-state blocks from blob store",
+		"component", "mithril",
+		"ledger_state_slot", ledgerStateSlot,
+		"stored_tip_slot", recentBlocks[0].Slot,
+	)
+	postLedgerBlocks, err := loadGapBlocksFromBlob(
+		db,
+		ledgerStateSlot+1,
+		recentBlocks[0].Slot,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"loading post-ledger-state blocks from blob store: %w",
+			err,
+		)
+	}
+	if err := validateStoredGapContinuity(
+		postLedgerBlocks,
+		models.Block{Slot: ledgerStateSlot, Hash: ledgerStateHash},
+	); err != nil {
+		return fmt.Errorf(
+			"validating post-ledger-state block continuity: %w",
+			err,
+		)
+	}
+	if err := processGapBlocks(ctx, db, logger, postLedgerBlocks); err != nil {
+		return fmt.Errorf(
+			"processing post-ledger-state block transactions: %w",
+			err,
 		)
 	}
 	return nil

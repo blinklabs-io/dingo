@@ -79,6 +79,83 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 }
 
+func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+	require.NoError(
+		t,
+		fixture.ls.db.SetSyncState("mithril_ledger_slot", "20", nil),
+	)
+	timer := time.NewTimer(time.Hour)
+	t.Cleanup(func() { timer.Stop() })
+	fixture.ls.activeBlockfetchConnId = fixture.connId
+	fixture.ls.selectedBlockfetchConnId = fixture.connId
+	fixture.ls.shadowBlockfetchConnId = fixture.connId
+	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	fixture.ls.chainsyncBlockfetchTimeoutTimer = timer
+	fixture.ls.pendingBlockfetchEvents = []BlockfetchEvent{
+		{Point: fixture.currentTip.Point},
+	}
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	storedBoundary, err := fixture.ls.db.GetSyncState(
+		"mithril_ledger_slot",
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "20", storedBoundary)
+
+	select {
+	case e := <-resyncCh:
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonRollbackExceedsMithril,
+			e.Reason,
+		)
+		assert.Equal(t, fixture.connId, e.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected Mithril rollback-boundary resync event")
+	}
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.activeBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.selectedBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.shadowBlockfetchConnId)
+	assert.Nil(t, fixture.ls.chainsyncBlockfetchReadyChan)
+	assert.Nil(t, fixture.ls.chainsyncBlockfetchTimeoutTimer)
+	assert.Empty(t, fixture.ls.pendingBlockfetchEvents)
+}
+
 func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
 	t *testing.T,
 ) {

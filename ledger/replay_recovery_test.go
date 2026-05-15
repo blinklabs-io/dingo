@@ -20,13 +20,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -207,6 +212,193 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	dbTip, err := ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, parentTip, dbTip)
+}
+
+func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("mithril-recovery-parent", 100, 1, nil)
+	producerBlock := testRawBlock(
+		"mithril-recovery-producer",
+		120,
+		2,
+		parentBlock.Hash,
+	)
+	boundaryBlock := testRawBlock(
+		"mithril-recovery-boundary",
+		200,
+		3,
+		producerBlock.Hash,
+	)
+	failingBlock := testRawBlock(
+		"mithril-recovery-failing",
+		220,
+		4,
+		boundaryBlock.Hash,
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{
+				parentBlock,
+				producerBlock,
+				boundaryBlock,
+				failingBlock,
+			},
+		),
+	)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 3000,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.0.2.10"),
+			Port: 3001,
+		},
+	}
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		EventBus:          bus,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+			return &activeConnId
+		},
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+	shadowConnId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 3000,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.0.2.11"),
+			Port: 3001,
+		},
+	}
+
+	boundaryTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(boundaryBlock.Slot, boundaryBlock.Hash),
+		BlockNumber: boundaryBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(boundaryTip, nil))
+	ls.currentTip = boundaryTip
+	ls.currentTipBlockNonce = []byte("nonce-boundary")
+	ls.mithrilLedgerSlot = boundaryTip.Point.Slot
+	timer := time.NewTimer(time.Hour)
+	t.Cleanup(func() { timer.Stop() })
+	ls.activeBlockfetchConnId = activeConnId
+	ls.selectedBlockfetchConnId = activeConnId
+	ls.shadowBlockfetchConnId = shadowConnId
+	ls.shadowBlockReceivedHashes = map[string]struct{}{"stale": {}}
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chainsyncBlockfetchTimeoutTimer = timer
+	ls.pendingBlockfetchEvents = []BlockfetchEvent{{Point: boundaryTip.Point}}
+	ls.firstBlockReceived = true
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok)
+	producerTxHash := testHashBytes("mithril-recovery-producer-tx")
+	require.NoError(
+		t,
+		store.DB().Create(&models.Transaction{
+			Hash:       producerTxHash,
+			BlockHash:  producerBlock.Hash,
+			Slot:       producerBlock.Slot,
+			Type:       1,
+			Valid:      true,
+			BlockIndex: 0,
+		}).Error,
+	)
+
+	recovered, err := ls.tryRecoverFromTxValidationError(
+		&txValidationError{
+			BlockPoint: ocommon.NewPoint(
+				failingBlock.Slot,
+				failingBlock.Hash,
+			),
+			TxHash: testHashBytes("mithril-recovery-failing-tx"),
+			Inputs: []lcommon.TransactionInput{
+				&replayRecoveryInput{
+					txId:  producerTxHash,
+					index: 0,
+				},
+			},
+			Cause: errors.New("bad input"),
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	assert.Equal(t, boundaryTip, ls.currentTip)
+	assert.Equal(t, boundaryTip, ls.chain.Tip())
+	dbTip, err := db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, boundaryTip, dbTip)
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+	)
+	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected Mithril boundary resync after replay recovery rejection",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		resync.Reason,
+	)
+	assert.Equal(t, activeConnId.String(), resync.ConnectionId.String())
+	assert.Equal(t, boundaryTip.Point, resync.Point)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.activeBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.selectedBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, ls.shadowBlockfetchConnId)
+	assert.Nil(t, ls.shadowBlockReceivedHashes)
+	assert.Nil(t, ls.chainsyncBlockfetchReadyChan)
+	assert.Nil(t, ls.chainsyncBlockfetchTimeoutTimer)
+	assert.Empty(t, ls.pendingBlockfetchEvents)
+	assert.False(t, ls.firstBlockReceived)
 }
 
 func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
