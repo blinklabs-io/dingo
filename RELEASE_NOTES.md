@@ -34,7 +34,7 @@ Hi folks! Here’s what we shipped in v0.46.2.
 * Clarified **trust the Mithril restore boundary during recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard rollback and replay limit, and they rebuild post-restore transaction metadata from restored block data after recovery completes.
 * Highlighted **safer divergent-peer recovery paths:** Nodes now temporarily deny bad peers during divergence recovery, and live rollback reconciliation can recover more safely by returning the primary chain and ledger to a shared safe ancestor.
 * Emphasized **stronger forging visibility and connection control:** Forged-block metrics and events now appear as soon as a block is built, and operators can tune the chainsync block timeout more directly.
-* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency-policy checks, and database shutdown handling all received updates in this release.
+* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency policy checks, and database shutdown handling all received updates in this release.
 
 ### Recommended Network Compatibility ⚠️
 
