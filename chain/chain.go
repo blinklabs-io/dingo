@@ -818,6 +818,18 @@ func (c *Chain) rollbackLocked(
 	c.tipBlockIndex = rollbackBlockIndex
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
+		// Reverse iterators never deliver rollback markers, but if a
+		// rollback shortened the chain past nextBlockIndex the
+		// iterator must be clamped to the new tip so subsequent Next
+		// calls return the still-present predecessor blocks instead
+		// of mistaking missing blocks for origin.
+		if iter.reverse {
+			if iter.nextBlockIndex > rollbackBlockIndex &&
+				rollbackBlockIndex > 0 {
+				iter.nextBlockIndex = rollbackBlockIndex
+			}
+			continue
+		}
 		// Use startPoint for iterators that haven't delivered any blocks
 		// yet (lastPoint is zero-value). Without this, newly created
 		// iterators miss rollback signals entirely.
@@ -1049,6 +1061,34 @@ func (c *Chain) FromPoint(
 		c,
 		point,
 		inclusive,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.iterators = append(c.iterators, iter)
+	return iter, nil
+}
+
+// FromPointReverse returns a ChainIterator that walks backward from the
+// specified point toward chain origin. If inclusive is true the iterator
+// yields the start point first; otherwise it yields the block preceding it.
+// Blocking Next calls on a reverse iterator do not wait for new blocks; once
+// origin is reached, Next returns ErrIteratorChainOrigin.
+func (c *Chain) FromPointReverse(
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	iter, err := newChainIterator(
+		c,
+		point,
+		inclusive,
+		true,
 	)
 	if err != nil {
 		return nil, err
@@ -1118,7 +1158,8 @@ func (c *Chain) iterNext(
 			c.manager.mutex.RUnlock()
 			return nil, err
 		}
-		// Check for pending rollback
+		// Check for pending rollback (forward iterators only; reverse
+		// iterators never have rollbacks queued).
 		if iter.needsRollback {
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
@@ -1147,6 +1188,14 @@ func (c *Chain) iterNext(
 			c.manager.mutex.RUnlock()
 			return ret, nil
 		}
+		// Reverse iterators terminate when they walk past origin.
+		// nextBlockIndex == 0 is the sentinel set by newChainIterator
+		// for "no more blocks available behind this point".
+		if iter.reverse && iter.nextBlockIndex < initialBlockIndex {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainOrigin
+		}
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
 		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
@@ -1154,7 +1203,18 @@ func (c *Chain) iterNext(
 		if err == nil {
 			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
 			ret.Block = tmpBlock
-			iter.nextBlockIndex++
+			if iter.reverse {
+				if iter.nextBlockIndex == initialBlockIndex {
+					// Just delivered the genesis block; mark
+					// the iterator as past origin so the next
+					// call returns ErrIteratorChainOrigin.
+					iter.nextBlockIndex = 0
+				} else {
+					iter.nextBlockIndex--
+				}
+			} else {
+				iter.nextBlockIndex++
+			}
 			iter.lastPoint = ret.Point
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
@@ -1165,6 +1225,12 @@ func (c *Chain) iterNext(
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
 			return ret, err
+		}
+		// Reverse iterators never wait — origin does not grow.
+		if iter.reverse {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainOrigin
 		}
 		// Return immediately if we're not blocking
 		if !blocking {

@@ -28,6 +28,7 @@ type ChainIterator struct {
 	rollbackPoint  ocommon.Point
 	nextBlockIndex uint64
 	needsRollback  bool
+	reverse        bool
 	ctx            context.Context
 	cancel         context.CancelFunc
 }
@@ -42,12 +43,14 @@ func newChainIterator(
 	chain *Chain,
 	startPoint ocommon.Point,
 	inclusive bool,
+	reverse bool,
 ) (*ChainIterator, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ci := &ChainIterator{
 		chain:          chain,
 		startPoint:     startPoint,
 		nextBlockIndex: initialBlockIndex,
+		reverse:        reverse,
 		ctx:            ctx,
 		cancel:         cancel,
 	}
@@ -58,10 +61,24 @@ func newChainIterator(
 			return nil, err
 		}
 		ci.nextBlockIndex = tmpBlock.ID
-		// Increment next block number if non-inclusive
 		if !inclusive {
-			ci.nextBlockIndex++
+			if reverse {
+				// Walking backward: the first block returned must
+				// precede startPoint.
+				if ci.nextBlockIndex <= initialBlockIndex {
+					// Non-inclusive reverse from the first block has
+					// no predecessor; mark as already past origin.
+					ci.nextBlockIndex = 0
+				} else {
+					ci.nextBlockIndex--
+				}
+			} else {
+				ci.nextBlockIndex++
+			}
 		}
+	} else if reverse {
+		// Reverse iteration from origin has no blocks to deliver.
+		ci.nextBlockIndex = 0
 	}
 	return ci, nil
 }
