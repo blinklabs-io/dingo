@@ -4324,6 +4324,55 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	return nil
 }
 
+func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
+	reason string,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	ls.RUnlock()
+	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
+		return false, nil
+	}
+
+	shouldReconcile := chainTip.Point.Slot < ledgerTip.Point.Slot
+	if !shouldReconcile {
+		containsLedgerTip, err := ls.primaryChainContainsPoint(
+			ledgerTip.Point,
+		)
+		if err != nil {
+			return false, fmt.Errorf(
+				"check ledger tip on primary chain: %w",
+				err,
+			)
+		}
+		shouldReconcile = !containsLedgerTip
+	}
+	if !shouldReconcile {
+		return false, nil
+	}
+
+	ls.config.Logger.Warn(
+		"primary chain and ledger diverged during live chainsync recovery, reconciling to common ancestor",
+		"component", "ledger",
+		"reason", reason,
+		"connection_id", connId.String(),
+		"chain_tip_slot", chainTip.Point.Slot,
+		"ledger_tip_slot", ledgerTip.Point.Slot,
+		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+	)
+	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (ls *LedgerState) primaryChainAheadBeyondLedgerSafetyWindow(
 	chainTip ochainsync.Tip,
 	ledgerTip ochainsync.Tip,
