@@ -1,5 +1,55 @@
 # Dingo Releases
 
+## v0.46.2 (May 15, 2026)
+
+**Title:** Mithril trust-boundary protection, safer peer recovery, and sturdier rollback handling
+
+**Date:** May 15, 2026
+
+**Version:** v0.46.2
+
+Hi folks! Here’s what we shipped in v0.46.2.
+
+### ✨ What's New
+
+* Added **record forged-block signals before chain adoption completes:** Operators can now see forged-block metrics and events as soon as a block is built, which improves observability even when chain adoption later fails. ([#2323](https://github.com/blinklabs-io/dingo/pull/2323))
+* Introduced **tune chainsync block timeout and safer reconnect resets:** Operators can now configure the NtN chainsync block timeout, and peer reconnect handling now clears connection timing and outbound retry state only when the connection path truly requires it. ([#2316](https://github.com/blinklabs-io/dingo/pull/2316))
+
+### 💪 Improvements
+
+* Improved **refresh upstream compatibility with plutigo v0.1.13:** Deployments now stay aligned with the newer upstream support in `plutigo`, which keeps compatibility and routine maintenance steadier. ([#2327](https://github.com/blinklabs-io/dingo/pull/2327))
+* Refined **tighten default era-test coverage selection:** Default erastest runs now exclude vanRossem unless an explicit run filter is supplied, which keeps routine validation focused unless broader coverage is intentionally requested. ([#2325](https://github.com/blinklabs-io/dingo/pull/2325))
+* Enhanced **refresh protocol-library compatibility with gouroboros v0.170.1:** Protocol support now stays aligned with the newer upstream `gouroboros` release, which supports ongoing compatibility and maintenance work. ([#2321](https://github.com/blinklabs-io/dingo/pull/2321))
+* Updated **modernize dependency-policy checks in CI:** Continuous integration now uses the newer `gomodguard_v2` policy checks, which keeps dependency-policy maintenance current. ([#2320](https://github.com/blinklabs-io/dingo/pull/2320))
+
+### 🔧 Fixes
+
+* Fixed **enforce Mithril trust boundaries during rollback recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard recovery limit, skip header-only verification at or below that boundary, and rebuild post-restore transaction metadata safely after restore. ([#2326](https://github.com/blinklabs-io/dingo/pull/2326))
+* Corrected **deny divergent peers before they can loop recovery:** Nodes now temporarily deny-list divergent peers, close denied inbound peers, and enforce those denials across more connection paths, which reduces rollback loops and reconnect churn. ([#2324](https://github.com/blinklabs-io/dingo/pull/2324))
+* Strengthened **recover live rollback divergence from a safe shared ancestor:** Live rollback reconciliation can now bring the primary chain and ledger back to a safe common ancestor, which improves recovery from over-K rollback and fork-divergence scenarios. ([#2322](https://github.com/blinklabs-io/dingo/pull/2322))
+* Stabilized **close databases safely during repeated shutdown paths:** Repeated shutdown or cleanup calls no longer trigger duplicate-close failures because `Database.Close` now behaves safely when called more than once. ([#2315](https://github.com/blinklabs-io/dingo/pull/2315))
+
+### 📋 What You Need to Know
+
+* Clarified **trust the Mithril restore boundary during recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard rollback and replay limit, and they rebuild post-restore transaction metadata from restored block data after recovery completes.
+* Highlighted **safer divergent-peer recovery paths:** Nodes now temporarily deny bad peers during divergence recovery, and live rollback reconciliation can recover more safely by returning the primary chain and ledger to a shared safe ancestor.
+* Emphasized **stronger forging visibility and connection control:** Forged-block metrics and events now appear as soon as a block is built, and operators can tune the chainsync block timeout more directly.
+* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency-policy checks, and database shutdown handling all received updates in this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.1 (May 14, 2026)
 
 **Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
