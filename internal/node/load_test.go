@@ -178,6 +178,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		db,
 		cm.PrimaryChain(),
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
@@ -282,6 +283,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 			_, err := storeRawBlockUtxoOffsets(txn, rb)
 			return err
 		},
+		nil,
 	)
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
@@ -385,6 +387,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		db,
 		cm.PrimaryChain(),
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -418,6 +421,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 			offsetsStored += stored
 			return err
 		},
+		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 0, blocksCopied)

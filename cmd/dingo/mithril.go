@@ -256,7 +256,57 @@ func runMithrilSync(
 	cfg *config.Config,
 	logger *slog.Logger,
 	network string,
-) error {
+) (err error) {
+	metrics, metricsHandler := newMithrilSyncMetricsHandler(network)
+	metricsServer, err := startPrometheusMetricsServerWithHandler(
+		logger,
+		cfg.BindAddr,
+		cfg.MetricsPort,
+		"mithril",
+		metricsHandler,
+	)
+	if err != nil {
+		metrics.recordError()
+		logger.Warn(
+			"failed to start prometheus metrics server; continuing",
+			"component", "mithril",
+			"port", cfg.MetricsPort,
+			"error", err,
+		)
+		err = nil
+	}
+	defer func() {
+		if err != nil {
+			metrics.recordError()
+		}
+		if metricsServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := metricsServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop prometheus metrics server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if metricsServer != nil {
+		go func() {
+			if serverErr := <-metricsServer.Err(); serverErr != nil {
+				logger.Error(
+					"prometheus metrics server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
+
 	cardanoConfigPath := cfg.CardanoConfig
 	if cardanoConfigPath == "" {
 		cardanoConfigPath = filepath.Join(network, "config.json")
@@ -287,6 +337,7 @@ func runMithrilSync(
 		)
 	}
 
+	metrics.setPhaseActive(mithrilSyncPhaseBootstrap, true)
 	result, err := mithril.Bootstrap(
 		ctx,
 		mithril.BootstrapConfig{
@@ -307,6 +358,7 @@ func runMithrilSync(
 				lastLoggedPercent := -progressLogPercentStep
 
 				return func(p mithril.DownloadProgress) {
+					metrics.recordDownloadProgress(p)
 					if p.TotalBytes <= 0 {
 						return
 					}
@@ -333,9 +385,11 @@ func runMithrilSync(
 			}(),
 		},
 	)
+	metrics.setPhaseActive(mithrilSyncPhaseBootstrap, false)
 	if err != nil {
 		return fmt.Errorf("mithril bootstrap failed: %w", err)
 	}
+	metrics.recordSnapshot(result.Snapshot)
 
 	// Open database once and reuse for both import and ImmutableDB load
 	db, err := database.New(&database.Config{
@@ -413,18 +467,25 @@ func runMithrilSync(
 	g, gctx := errgroup.WithContext(ctx)
 
 	g.Go(func() error {
+		metrics.setPhaseActive(mithrilSyncPhaseLedgerImport, true)
+		defer metrics.setPhaseActive(mithrilSyncPhaseLedgerImport, false)
 		slot, hash, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, result,
+			gctx, db, logger, nodeCfg, result, metrics,
 		)
 		if importErr != nil {
 			return fmt.Errorf("importing ledger state: %w", importErr)
 		}
 		ledgerStateSlot = slot
 		ledgerStateHash = hash
+		if len(hash) > 0 {
+			metrics.recordLedgerStateSlot(slot)
+		}
 		return nil
 	})
 
 	g.Go(func() error {
+		metrics.setPhaseActive(mithrilSyncPhaseImmutableCopy, true)
+		defer metrics.setPhaseActive(mithrilSyncPhaseImmutableCopy, false)
 		logger.Info(
 			"loading ImmutableDB blocks into blob store",
 			"component", "mithril",
@@ -433,9 +494,18 @@ func runMithrilSync(
 		var loadErr error
 		loadResult, loadErr = node.LoadBlobsWithDB(
 			gctx, cfg, logger, result.ImmutableDir, db,
+			node.WithLoadBlobsProgress(metrics.recordImmutableProgress),
 		)
 		if loadErr != nil {
 			return fmt.Errorf("loading ImmutableDB: %w", loadErr)
+		}
+		if loadResult != nil {
+			metrics.recordImmutableProgress(node.LoadBlobsProgress{
+				BlocksCopied: loadResult.BlocksCopied,
+				CurrentSlot:  loadResult.ImmutableTipSlot,
+				TipSlot:      loadResult.ImmutableTipSlot,
+				Percent:      100,
+			})
 		}
 		return nil
 	})
@@ -490,6 +560,7 @@ func runMithrilSync(
 	if len(recentBlocks) > 0 &&
 		recentBlocks[0].Slot > immutableTipSlot &&
 		immutableTipSlot < ledgerStateSlot {
+		metrics.setPhaseActive(mithrilSyncPhaseGapBlocks, true)
 		resumeGapEnd := min(recentBlocks[0].Slot, ledgerStateSlot)
 		logger.Info(
 			"processing stored volatile gap blocks from blob store",
@@ -593,6 +664,7 @@ func runMithrilSync(
 					"ledger_state_slot", ledgerStateSlot,
 				)
 			}
+			metrics.recordGapBlocks(len(storedGapBlocks))
 			if err := processGapBlocks(
 				ctx,
 				db,
@@ -612,8 +684,10 @@ func runMithrilSync(
 				)
 			}
 		}
+		metrics.setPhaseActive(mithrilSyncPhaseGapBlocks, false)
 	}
 	if len(recentBlocks) > 0 && ledgerStateSlot > recentBlocks[0].Slot {
+		metrics.setPhaseActive(mithrilSyncPhaseGapBlocks, true)
 		immutableTip := recentBlocks[0]
 		logger.Info(
 			"fetching volatile blocks to close gap",
@@ -629,6 +703,7 @@ func runMithrilSync(
 		if fetchErr != nil {
 			return fmt.Errorf("fetching volatile blocks: %w", fetchErr)
 		}
+		metrics.recordGapBlocks(len(gapBlocks))
 		// Store gap blocks to the blob store, then index
 		// their metadata. These two steps are not atomic:
 		// if processGapBlocks fails, re-running the sync
@@ -648,7 +723,9 @@ func runMithrilSync(
 			"component", "mithril",
 			"count", len(gapBlocks),
 		)
+		metrics.setPhaseActive(mithrilSyncPhaseGapBlocks, false)
 	}
+	metrics.setPhaseActive(mithrilSyncPhasePostLedger, true)
 	if err := processPostLedgerStateBlocks(
 		ctx,
 		db,
@@ -658,6 +735,7 @@ func runMithrilSync(
 	); err != nil {
 		return err
 	}
+	metrics.setPhaseActive(mithrilSyncPhasePostLedger, false)
 
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
 		if err := updateMithrilReadyState(
@@ -672,6 +750,7 @@ func runMithrilSync(
 	// This replays all stored blocks to populate transaction
 	// records needed for API queries (Blockfrost, UTxO RPC).
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
+		metrics.setPhaseActive(mithrilSyncPhaseBackfill, true)
 		logger.Info(
 			"backfilling historical metadata for API mode",
 			"component", "mithril",
@@ -681,6 +760,7 @@ func runMithrilSync(
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)
 		}
+		metrics.setPhaseActive(mithrilSyncPhaseBackfill, false)
 	}
 
 	if err := updateMithrilReadyState(
@@ -690,6 +770,7 @@ func runMithrilSync(
 		return err
 	}
 	syncComplete = true
+	metrics.markComplete()
 
 	// Clean up temporary files after a successful complete load.
 	if cfg.Mithril.CleanupAfterLoad {
@@ -858,6 +939,7 @@ func importLedgerState(
 	logger *slog.Logger,
 	nodeCfg *cardano.CardanoNodeConfig,
 	result *mithril.BootstrapResult,
+	metrics *mithrilSyncMetrics,
 ) (ledgerStateSlot uint64, ledgerStateHash []byte, err error) {
 	// Search for ledger state: prefer ancillary dir, fall back to
 	// main extract dir.
@@ -963,6 +1045,7 @@ func importLedgerState(
 				nodeCfg,
 			),
 			OnProgress: func(p ledgerstate.ImportProgress) {
+				metrics.recordLedgerImportProgress(p)
 				attrs := []any{
 					"component", "mithril",
 					"stage", p.Stage,
