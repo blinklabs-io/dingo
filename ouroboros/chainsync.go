@@ -134,6 +134,7 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonPostPlateauRealign,
 		event.ChainsyncResyncReasonRollbackNotFound,
 		event.ChainsyncResyncReasonPersistentFork,
 		event.ChainsyncResyncReasonRollbackExceedsK,

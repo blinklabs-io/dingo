@@ -735,6 +735,7 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 ) {
 	reasons := []string{
 		event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonPostPlateauRealign,
 		event.ChainsyncResyncReasonRollbackNotFound,
 		event.ChainsyncResyncReasonPersistentFork,
 		event.ChainsyncResyncReasonRollbackExceedsK,
