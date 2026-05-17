@@ -67,8 +67,8 @@ func ValidatePredefinedDrepTypes(drepTypes []uint64) error {
 }
 
 type Account struct {
-	StakingKey    []byte `gorm:"uniqueIndex;size:28;index:idx_account_drep_active_staking_key,priority:3;index:idx_account_drep_type_active_staking_key,priority:3"`
-	Pool          []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"uniqueIndex;size:28;index:idx_account_drep_active_staking_key,priority:3;index:idx_account_drep_type_active_staking_key,priority:3;index:idx_account_active_pool_staking_key,priority:3"`
+	Pool          []byte `gorm:"index;size:28;index:idx_account_active_pool_staking_key,priority:2"`
 	Drep          []byte `gorm:"index;size:28;index:idx_account_drep_active_staking_key,priority:1"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -81,7 +81,7 @@ type Account struct {
 	// A zero value (0) means either "key credential" or "no delegation set",
 	// disambiguated by whether Drep is nil.
 	DrepType uint64 `gorm:"default:0;index:idx_account_drep_type_active_staking_key,priority:1"`
-	Active   bool   `gorm:"default:true;index:idx_account_drep_active_staking_key,priority:2;index:idx_account_drep_type_active_staking_key,priority:2"`
+	Active   bool   `gorm:"default:true;index:idx_account_drep_active_staking_key,priority:2;index:idx_account_drep_type_active_staking_key,priority:2;index:idx_account_active_pool_staking_key,priority:1"`
 }
 
 func (a *Account) TableName() string {
