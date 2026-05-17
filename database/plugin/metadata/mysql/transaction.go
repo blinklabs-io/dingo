@@ -3658,6 +3658,18 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 // SetGenesisStaking stores genesis pool registrations and stake delegations
 // from the shelley-genesis.json staking section. It creates Pool,
 // PoolRegistration, and Account records at slot 0.
+//
+// Idempotency notes:
+//   - The slot-0 PoolRegistration is written with OnConflict{DoNothing}. Re-running
+//     with mutated genesis data would leave stale historical fields on the slot-0
+//     row, but a network's genesis file is immutable so this is intentional;
+//     callers must not re-bootstrap with a different genesis against an existing
+//     database.
+//   - No synthetic slot-0 Registration / StakeDelegation history row is written
+//     for the stakeDelegations entries here, unlike SetGenesisGovernance. Shelley
+//     stake credentials predate the Conway registration-deposit model, and
+//     rollback past on-chain certs on Shelley-genesis-delegated keys has worked
+//     correctly on mainnet via the Account.added_slot=0 invariant alone.
 func (d *MetadataStoreMysql) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
@@ -3800,9 +3812,14 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 			Active:     true,
 			AddedSlot:  0,
 		}
+		// Include added_slot in DoUpdates so a pre-existing later-slot
+		// row is reset to 0 — genesis-rooted accounts must report slot 0
+		// for downstream history queries.
 		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "staking_key"}},
-			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
+			Columns: []clause.Column{{Name: "staking_key"}},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{"pool", "active", "added_slot"},
+			),
 		}).Create(account)
 		if result.Error != nil {
 			return fmt.Errorf(
