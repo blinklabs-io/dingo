@@ -17,10 +17,12 @@ package sqlite
 import (
 	"bytes"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -155,6 +157,63 @@ func TestGetLiveUtxosBySlotExcludesSpentAtSameSlot(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, live.TxId, got[0].Hash)
 	assert.Equal(t, live.OutputIdx, got[0].Idx)
+}
+
+func TestGetUtxosBatchUsesTxIdOutputIndex(t *testing.T) {
+	store := setupTestDB(t)
+
+	refs := make([]UtxoRef, 0, 12)
+	for i := range 12 {
+		txID := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		outputIdx := uint32(i % 3) //nolint:gosec
+		row := models.Utxo{
+			TxId:      txID,
+			OutputIdx: outputIdx,
+			AddedSlot: uint64(i + 1), //nolint:gosec
+			Amount:    types.Uint64(i + 1),
+		}
+		require.NoError(t, store.DB().Create(&row).Error)
+		refs = append(refs, UtxoRef{TxId: txID, OutputIdx: outputIdx})
+	}
+
+	var capturedSQL string
+	var capturedVars []any
+	callbackName := "test:capture_get_utxos_batch_sql"
+	require.NoError(t, store.ReadDB().Callback().Query().
+		After("gorm:query").
+		Register(callbackName, func(tx *gorm.DB) {
+			if capturedSQL != "" {
+				return
+			}
+			capturedSQL = tx.Statement.SQL.String()
+			capturedVars = append([]any(nil), tx.Statement.Vars...)
+		}))
+
+	got, err := store.GetUtxosBatch(refs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, len(refs))
+	require.NotEmpty(t, capturedSQL)
+	require.Contains(t, capturedSQL, "INDEXED BY "+utxoRefLookupIndex)
+
+	planRows, err := store.DB().
+		Raw(
+			"EXPLAIN QUERY PLAN "+capturedSQL,
+			capturedVars...,
+		).Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.Contains(t, plan, utxoRefLookupIndex)
+	assert.NotContains(t, plan, "idx_utxo_deleted_slot")
 }
 
 func sortUtxoIds(ids []models.UtxoId) {
