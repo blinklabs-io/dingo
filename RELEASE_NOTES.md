@@ -1,5 +1,52 @@
 # Dingo Releases
 
+## v0.46.3 (May 17, 2026)
+
+**Title:** Faster governance and stake queries, sturdier plateau recovery, and broader rollback test coverage
+
+**Date:** May 17, 2026
+
+**Version:** v0.46.3
+
+Hi folks! Here’s what we shipped in v0.46.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch release focuses on improvements, fixes, and documentation updates.
+
+### 💪 Improvements
+
+* Improved **expand rollback conformance coverage with ouroboros-mock v0.11.0:** Rollback validation now covers a synthetic rollback path and replay fixes, which broadens rollback coverage without requiring adapter changes. ([#2330](https://github.com/blinklabs-io/dingo/pull/2330))
+* Refined **clarify RTS metrics guidance in place:** The code comment now explains how Go memory reporting maps to the matching Haskell runtime view, which makes the metrics guidance more accurate and self contained. ([#2334](https://github.com/blinklabs-io/dingo/pull/2334))
+* Updated **surface the v0.46.2 release details more clearly:** Operators can now review the v0.46.2 release information alongside newer patch releases for clearer recent upgrade context. ([#2329](https://github.com/blinklabs-io/dingo/pull/2329))
+
+### 🔧 Fixes
+
+* Fixed **reconnect plateau recovery with a fresh chainsync session:** Post-plateau peer realignment now starts a fresh chainsync connection, so nodes do not reuse stale cursors during recovery. ([#2337](https://github.com/blinklabs-io/dingo/pull/2337))
+* Corrected **speed governance voting-power and delegate lookups:** New composite indexes reduce query cost for governance voting-power requests and related DRep and staking-key lookups. ([#2332](https://github.com/blinklabs-io/dingo/pull/2332))
+* Strengthened **accelerate stake-by-pool lookups:** A new composite account index speeds active pool and staking-key lookups used by stake-by-pool queries. ([#2335](https://github.com/blinklabs-io/dingo/pull/2335))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps:** Normal upgrade procedures are generally sufficient for this release.
+* Highlighted **expect more efficient governance and stake by pool queries:** New composite indexes help governance and stake by pool lookups run more efficiently.
+* Emphasized **trust safer recovery and broader rollback validation:** Plateau recovery now reconnects with a fresh chainsync session, and the `ouroboros-mock` update broadens rollback conformance coverage.
+* Summarized **expect clearer metrics guidance and recent patch context:** Metrics guidance is now more accurate in place, and v0.46.2 release information stays available for recent patch context.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.2 (May 15, 2026)
 
 **Title:** Mithril trust-boundary protection, safer peer recovery, and sturdier rollback handling
