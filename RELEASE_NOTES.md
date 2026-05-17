@@ -17,7 +17,7 @@ Hi folks! Here’s what we shipped in v0.46.3.
 ### 💪 Improvements
 
 * Improved **expand rollback conformance coverage with ouroboros-mock v0.11.0:** Rollback validation now covers a synthetic rollback path and replay fixes, which broadens rollback coverage without requiring adapter changes. ([#2330](https://github.com/blinklabs-io/dingo/pull/2330))
-* Refined **clarify RTS metrics guidance in place:** In-code guidance now explains the Go to Haskell garbage-collection mapping directly, which makes the metrics explanation more accurate and self contained. ([#2334](https://github.com/blinklabs-io/dingo/pull/2334))
+* Refined **clarify RTS metrics guidance in place:** The code comment now explains how Go memory reporting maps to the matching Haskell runtime view, which makes the metrics guidance more accurate and self contained. ([#2334](https://github.com/blinklabs-io/dingo/pull/2334))
 * Updated **keep published release history current:** `RELEASE_NOTES.md` now includes the v0.46.2 entry, which keeps the release history current and consistent. ([#2329](https://github.com/blinklabs-io/dingo/pull/2329))
 
 ### 🔧 Fixes
@@ -28,8 +28,8 @@ Hi folks! Here’s what we shipped in v0.46.3.
 
 ### 📋 What You Need to Know
 
-* Clarified **follow normal patch-release upgrade steps:** Normal upgrade procedures are generally sufficient for this release.
-* Highlighted **expect more efficient governance and stake-by-pool queries:** New composite indexes help governance and stake-by-pool lookups run more efficiently.
+* Clarified **follow normal patch release upgrade steps:** Normal upgrade procedures are generally sufficient for this release.
+* Highlighted **expect more efficient governance and stake by pool queries:** New composite indexes help governance and stake by pool lookups run more efficiently.
 * Emphasized **trust safer recovery and broader rollback validation:** Plateau recovery now reconnects with a fresh chainsync session, and the `ouroboros-mock` update broadens rollback conformance coverage.
 * Summarized **keep repository guidance current:** Metrics guidance is now more accurate in place, and the published release history now includes v0.46.2.
 
