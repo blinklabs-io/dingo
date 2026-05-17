@@ -347,8 +347,8 @@ func (n *Node) processChainsyncRecyclerTick(
 	}
 }
 
-// realignOtherPeersAfterPlateau requests a chainsync resync via the
-// default Stop+Start+Sync path for every ingress-eligible tracked peer
+// realignOtherPeersAfterPlateau requests a fresh-connection chainsync
+// resync for every ingress-eligible tracked peer
 // other than the one being closed for plateau. Without realignment, a
 // peer that has been streaming RollForwards while the active peer was
 // stuck holds a server-side cursor far past our local tip; the chain
