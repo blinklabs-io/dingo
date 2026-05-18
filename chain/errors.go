@@ -46,6 +46,9 @@ var (
 	ErrIteratorChainTip = errors.New(
 		"chain iterator is at chain tip",
 	)
+	ErrIteratorChainOrigin = errors.New(
+		"chain iterator is at chain origin",
+	)
 	ErrHeaderQueueFull = errors.New(
 		"header queue at maximum capacity",
 	)

@@ -4649,6 +4649,16 @@ func (ls *LedgerState) GetChainFromPoint(
 	return ls.chain.FromPoint(point, inclusive)
 }
 
+// GetChainFromPointReverse returns a ChainIterator that walks backward from
+// the specified point toward chain origin. If inclusive is true the iterator
+// yields the start point first; otherwise it yields the preceding block.
+func (ls *LedgerState) GetChainFromPointReverse(
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointReverse(point, inclusive)
+}
+
 // Tip returns the current chain tip
 func (ls *LedgerState) Tip() ochainsync.Tip {
 	ls.RLock()

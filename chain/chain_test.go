@@ -227,6 +227,382 @@ func TestChainBasic(t *testing.T) {
 	}
 }
 
+func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	tip := testBlocks[len(testBlocks)-1]
+	tipPoint := ocommon.NewPoint(tip.MockSlot, decodeHex(tip.MockHash))
+	iter, err := c.FromPointReverse(tipPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	expectedIdx := len(testBlocks) - 1
+	for {
+		next, err := iter.Next(false)
+		if err != nil {
+			if errors.Is(err, chain.ErrIteratorChainOrigin) {
+				if expectedIdx >= 0 {
+					t.Fatalf(
+						"hit origin before consuming all blocks; remaining=%d",
+						expectedIdx+1,
+					)
+				}
+				break
+			}
+			t.Fatalf("unexpected error from reverse iterator: %s", err)
+		}
+		if next == nil {
+			t.Fatal("unexpected nil result from reverse iterator")
+		}
+		if next.Rollback {
+			t.Fatal("reverse iterator must not emit rollback markers")
+		}
+		if expectedIdx < 0 {
+			t.Fatal("reverse iterator produced more blocks than expected")
+		}
+		expectedHash := testBlocks[expectedIdx].MockHash
+		gotHash := hex.EncodeToString(next.Block.Hash)
+		if gotHash != expectedHash {
+			t.Fatalf(
+				"reverse iterator wrong block: got %s, want %s (idx=%d)",
+				gotHash, expectedHash, expectedIdx,
+			)
+		}
+		expectedIdx--
+	}
+	// Subsequent calls should keep returning ErrIteratorChainOrigin.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin after exhaustion, got %v",
+			err,
+		)
+	}
+}
+
+func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	tip := testBlocks[len(testBlocks)-1]
+	tipPoint := ocommon.NewPoint(tip.MockSlot, decodeHex(tip.MockHash))
+	iter, err := c.FromPointReverse(tipPoint, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Non-inclusive reverse from tip must yield the block before tip first.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error from reverse iterator: %s", err)
+	}
+	want := testBlocks[len(testBlocks)-2].MockHash
+	got := hex.EncodeToString(next.Block.Hash)
+	if got != want {
+		t.Fatalf(
+			"non-inclusive reverse first block: got %s, want %s",
+			got, want,
+		)
+	}
+}
+
+func TestChainIteratorReverseFromMiddleInclusive(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// Start at the 4th block (idx 3), inclusive.
+	startIdx := 3
+	start := testBlocks[startIdx]
+	startPoint := ocommon.NewPoint(start.MockSlot, decodeHex(start.MockHash))
+	iter, err := c.FromPointReverse(startPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	for i := startIdx; i >= 0; i-- {
+		next, err := iter.Next(false)
+		if err != nil {
+			t.Fatalf(
+				"unexpected error from reverse iterator at idx %d: %s",
+				i, err,
+			)
+		}
+		got := hex.EncodeToString(next.Block.Hash)
+		want := testBlocks[i].MockHash
+		if got != want {
+			t.Fatalf(
+				"reverse iterator wrong block at idx %d: got %s, want %s",
+				i, got, want,
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin after exhaustion, got %v",
+			err,
+		)
+	}
+}
+
+func TestChainIteratorReverseFromOrigin(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	iter, err := c.FromPointReverse(ocommon.NewPointOrigin(), true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"reverse from origin should return ErrIteratorChainOrigin immediately, got %v",
+			err,
+		)
+	}
+}
+
+func TestChainIteratorReverseFromGenesisNonInclusive(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	genesis := testBlocks[0]
+	genesisPoint := ocommon.NewPoint(
+		genesis.MockSlot, decodeHex(genesis.MockHash),
+	)
+	iter, err := c.FromPointReverse(genesisPoint, false)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// The genesis block has no predecessor; non-inclusive must terminate.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"non-inclusive reverse from genesis: expected ErrIteratorChainOrigin, got %v",
+			err,
+		)
+	}
+}
+
+func TestChainIteratorReverseBlockingTerminatesAtOrigin(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	genesis := testBlocks[0]
+	genesisPoint := ocommon.NewPoint(
+		genesis.MockSlot, decodeHex(genesis.MockHash),
+	)
+	iter, err := c.FromPointReverse(genesisPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Consume the genesis block.
+	if _, err := iter.Next(true); err != nil {
+		t.Fatalf("unexpected error reading genesis block: %s", err)
+	}
+	// Now blocking=true must NOT wait — reverse iterators terminate at origin.
+	done := make(chan error, 1)
+	go func() {
+		_, err := iter.Next(true)
+		done <- err
+	}()
+	gotErr := testutil.RequireReceive(
+		t, done, time.Second,
+		"blocking reverse Next did not terminate at origin",
+	)
+	if !errors.Is(gotErr, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin, got %v", gotErr,
+		)
+	}
+}
+
+func TestChainIteratorReverseIgnoresRollback(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := chain.NewManager(nil, eventBus)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// Start a reverse iterator at the tip.
+	tip := testBlocks[len(testBlocks)-1]
+	tipPoint := ocommon.NewPoint(tip.MockSlot, decodeHex(tip.MockHash))
+	iter, err := c.FromPointReverse(tipPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Consume the tip block.
+	first, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error consuming tip block: %s", err)
+	}
+	if first.Rollback {
+		t.Fatal("reverse iterator must not emit rollback markers")
+	}
+	// Roll back to the third block — this crosses the iterator's
+	// current position. A forward iterator would observe a rollback
+	// marker on the next call; a reverse iterator must not.
+	rollbackTo := testBlocks[2]
+	rollbackPoint := ocommon.NewPoint(
+		rollbackTo.MockSlot, decodeHex(rollbackTo.MockHash),
+	)
+	if err := c.Rollback(rollbackPoint); err != nil {
+		t.Fatalf("unexpected rollback error: %s", err)
+	}
+	// Next call must return a block (not a rollback marker) and that
+	// block must be the rollback target (the new tip), since the
+	// iterator was clamped from past-tip back to the new tip.
+	next, err := iter.Next(false)
+	if err != nil {
+		t.Fatalf("unexpected error after rollback: %s", err)
+	}
+	if next.Rollback {
+		t.Fatal("reverse iterator emitted a rollback marker")
+	}
+	gotHash := hex.EncodeToString(next.Block.Hash)
+	if gotHash != rollbackTo.MockHash {
+		t.Fatalf(
+			"post-rollback reverse iterator: got %s, want %s",
+			gotHash, rollbackTo.MockHash,
+		)
+	}
+	// Continue down to origin — the iterator should walk back to genesis
+	// over the still-present blocks.
+	for i := 1; i >= 0; i-- {
+		next, err := iter.Next(false)
+		if err != nil {
+			t.Fatalf(
+				"unexpected error continuing reverse after rollback at idx %d: %s",
+				i, err,
+			)
+		}
+		gotHash := hex.EncodeToString(next.Block.Hash)
+		wantHash := testBlocks[i].MockHash
+		if gotHash != wantHash {
+			t.Fatalf(
+				"post-rollback reverse at idx %d: got %s, want %s",
+				i, gotHash, wantHash,
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin after post-rollback exhaustion, got %v",
+			err,
+		)
+	}
+}
+
+// TestChainIteratorReverseRollbackToOriginClamps verifies that a reverse
+// iterator whose nextBlockIndex points past a chain that has been rolled
+// back to origin gets clamped, so that a subsequent regrowth of the chain
+// does not cause the iterator to silently emit blocks from the new chain.
+// Regression test for the rollback-hook condition: origin lives at block
+// index 0 (pre-genesis), so the clamp must trigger when rollbackBlockIndex
+// is 0 as well.
+func TestChainIteratorReverseRollbackToOriginClamps(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := chain.NewManager(nil, eventBus)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	// Use a small security param so the entire chain is allowed to be
+	// rolled back during initial-sync semantics.
+	mustSetLedger(t, cm, 100)
+	c := cm.PrimaryChain()
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block to chain: %s", err)
+		}
+	}
+	// Start a reverse iterator at the tip but do not consume any blocks
+	// yet — nextBlockIndex equals the tip's index.
+	tip := testBlocks[len(testBlocks)-1]
+	tipPoint := ocommon.NewPoint(tip.MockSlot, decodeHex(tip.MockHash))
+	iter, err := c.FromPointReverse(tipPoint, true)
+	if err != nil {
+		t.Fatalf("unexpected error creating reverse chain iterator: %s", err)
+	}
+	defer iter.Cancel()
+	// Roll back to origin (clears the entire chain).
+	if err := c.Rollback(ocommon.NewPointOrigin()); err != nil {
+		t.Fatalf("unexpected rollback error: %s", err)
+	}
+	// The iterator must terminate at origin — chain is empty.
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"expected ErrIteratorChainOrigin after rollback to origin, got %v",
+			err,
+		)
+	}
+	// Regrow the chain. With clamping, the iterator stays terminated.
+	// Without the fix, blockByIndex at the old (stale) tip index would
+	// hand out the regrown chain's block of the same index.
+	for _, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf(
+				"unexpected error re-adding block to chain: %s", err,
+			)
+		}
+	}
+	if _, err := iter.Next(false); !errors.Is(err, chain.ErrIteratorChainOrigin) {
+		t.Fatalf(
+			"reverse iterator must stay terminated after chain regrowth; got %v",
+			err,
+		)
+	}
+}
+
 func TestHandleBlockProposedEventAddsBlockAndAcks(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
