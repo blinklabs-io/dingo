@@ -2434,6 +2434,321 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 	}
 }
 
+func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := make([]models.Block, 0, 256)
+	for slot := uint64(1); slot <= 256; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 173,
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+
+	boundarySlot := uint64(173)
+	var boundaryPoint *ocommon.Point
+	for _, point := range points {
+		if point.Slot == boundarySlot {
+			point := point
+			boundaryPoint = &point
+			break
+		}
+	}
+	require.NotNil(t, boundaryPoint)
+	assert.Equal(t, blocks[boundarySlot-1].Hash, boundaryPoint.Hash)
+}
+
+func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 0,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, 0)
+}
+
+func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	boundarySlot := ledgerTipBlock.Slot + 1
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	var blocks []models.Block
+	for slot := uint64(1); slot <= 10; slot++ {
+		if slot == 5 {
+			continue
+		}
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	boundarySlot := uint64(5)
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	boundarySlot := uint64(5)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return db.Blob().Set(
+			txn.Blob(),
+			dbtypes.BlockHashIndexKey(blocks[boundarySlot-1].Hash),
+			[]byte("bad"),
+		)
+	}))
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 64)
+	for slot := uint64(1); slot <= 64; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	boundarySlot := uint64(20)
+	canonicalBoundaryBlock := blocks[boundarySlot-1]
+	nonCanonicalBoundaryBlock := makeTestBlock(boundarySlot, 1000)
+	nonCanonicalBoundaryBlock.Hash = bytes.Repeat([]byte{0xff}, 32)
+	nonCanonicalBoundaryBlock.PrevHash = append(
+		[]byte(nil),
+		blocks[boundarySlot-2].Hash...,
+	)
+	require.NoError(t, db.BlockCreate(nonCanonicalBoundaryBlock, nil))
+
+	rawBoundaryBlock, err := database.BlockBeforeSlot(
+		db,
+		boundarySlot+1,
+	)
+	require.NoError(t, err)
+	require.Equal(t, nonCanonicalBoundaryBlock.Hash, rawBoundaryBlock.Hash)
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+
+	var boundaryPoint *ocommon.Point
+	for _, point := range points {
+		if point.Slot == boundarySlot {
+			point := point
+			boundaryPoint = &point
+			break
+		}
+	}
+	require.NotNil(t, boundaryPoint)
+	assert.Equal(t, canonicalBoundaryBlock.Hash, boundaryPoint.Hash)
+	assert.NotEqual(t, nonCanonicalBoundaryBlock.Hash, boundaryPoint.Hash)
+}
+
+func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 64)
+	for slot := uint64(1); slot <= 64; slot++ {
+		id := slot
+		switch slot {
+		case 20:
+			id = 50
+		case 50:
+			id = 20
+		}
+		block := makeTestBlock(slot, id)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{db: db}
+
+	block, err := ls.authoritativeLedgerBlockAtSlot(
+		20,
+		makeTestPoint(ledgerTipBlock),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(20), block.Slot)
+	assert.Equal(t, blocks[19].Hash, block.Hash)
+}
+
+func TestIntersectPointsKeepsMithrilTrustBoundaryWhenPointListIsFull(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 5,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.Len(t, points, 4)
+	assert.Equal(t, uint64(10), points[0].Slot)
+	assert.Equal(t, uint64(9), points[1].Slot)
+	assert.Equal(t, uint64(8), points[2].Slot)
+	assert.Equal(t, uint64(5), points[3].Slot)
+}
+
+func assertNoIntersectPointAtSlot(
+	t *testing.T,
+	points []ocommon.Point,
+	slot uint64,
+) {
+	t.Helper()
+	for _, point := range points {
+		assert.NotEqual(t, slot, point.Slot)
+	}
+}
+
 func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 	db := newTestDB(t)
 
