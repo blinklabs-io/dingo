@@ -646,6 +646,14 @@ type MetadataStore interface {
 	// source block.
 	GetLiveUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
+	// GetUtxosBySlot returns the references ({TxId, OutputIdx}) of every
+	// UTxO created at the given slot, including rows soft-marked as spent
+	// (deleted_slot != 0). Used by the pruner in API storage mode to
+	// materialize CBOR bytes for retained spent UTxOs before tombstoning
+	// the source block, since API mode keeps spent rows past the stability
+	// window for historical transaction queries.
+	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
+
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 

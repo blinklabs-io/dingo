@@ -35,28 +35,45 @@ import (
 // UTxO blob entries are stored as 52-byte CborOffset references that point
 // into a source block's CBOR. Tombstoning a block while live UTxOs still
 // reference it would leave those UTxOs unresolvable. To preserve them,
-// PruneBlock first finds every live UTxO with added_slot equal to the
-// pruned block's slot, decodes its offset, slices the underlying CBOR out
-// of the block, and rewrites the UTxO blob entry as raw CBOR (which the
-// resolver treats as the legacy non-offset format). The block tombstone
-// and all UTxO rewrites happen in a single blob transaction, so the block
-// is never tombstoned while live UTxOs still depend on it.
+// PruneBlock first finds every UTxO with added_slot equal to the pruned
+// block's slot, decodes its offset, slices the underlying CBOR out of the
+// block, and rewrites the UTxO blob entry as raw CBOR (which the resolver
+// treats as the legacy non-offset format). The block tombstone and all
+// UTxO rewrites happen in a single blob transaction, so the block is
+// never tombstoned while live UTxOs still depend on it.
+//
+// In core storage mode only live (deleted_slot = 0) UTxOs at the slot are
+// considered, because spent UTxOs are hard-deleted by the periodic
+// stability-window cleanup and need no historical resolution. In API
+// storage mode the cleanup is skipped and spent UTxO rows are retained
+// indefinitely for historical transaction queries; in that mode every
+// UTxO at the slot (including spent rows whose blob entries still hold
+// offset references) is materialized so CBOR resolution survives the
+// block tombstone without requiring a wrapping archive proxy.
 //
 // Returns the number of UTxOs that were materialized.
 func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
-	// Read live UTxO refs for this slot from metadata. This is a separate
+	// Read UTxO refs for this slot from metadata. This is a separate
 	// transaction so the blob write txn below has a single, simple commit
 	// scope. A UTxO consumed between this read and the blob write is
 	// handled below: GetUtxo will return ErrBlobKeyNotFound and the entry
-	// is skipped. Release the read txn as soon as liveUtxos is
+	// is skipped. Release the read txn as soon as the refs are
 	// materialized so the connection is freed before the blob write txn
 	// and block operations run.
 	mdTxn := d.MetadataTxn(false)
-	liveUtxos, err := d.metadata.GetLiveUtxosBySlot(slot, mdTxn.Metadata())
+	var (
+		utxoRefs []models.UtxoId
+		err      error
+	)
+	if d.config.StorageMode == types.StorageModeAPI {
+		utxoRefs, err = d.metadata.GetUtxosBySlot(slot, mdTxn.Metadata())
+	} else {
+		utxoRefs, err = d.metadata.GetLiveUtxosBySlot(slot, mdTxn.Metadata())
+	}
 	mdTxn.Release()
 	if err != nil {
 		return 0, fmt.Errorf(
-			"prune block (slot=%d): list live utxos: %w",
+			"prune block (slot=%d): list utxos: %w",
 			slot,
 			err,
 		)
@@ -73,7 +90,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 				err,
 			)
 		}
-		for _, ref := range liveUtxos {
+		for _, ref := range utxoRefs {
 			n, err := d.materializeUtxo(txn.Blob(), slot, hash, blockCbor, ref)
 			if err != nil {
 				return err

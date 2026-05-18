@@ -271,6 +271,91 @@ func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound)
 }
 
+// TestPruneBlock_APIModeMaterializesSpentUtxos verifies that in API
+// storage mode the pruner materializes CBOR bytes for retained spent
+// UTxOs at the slot as well as live ones. This is the counterpart fix
+// to skipping cleanupConsumedUtxos in API mode: with spent rows
+// retained for historical transaction queries, the source block can
+// still be tombstoned, but the spent UTxO blob entries — which hold
+// offset references into the (now-tombstoned) block — must be rewritten
+// to raw CBOR up front so resolution does not require a wrapping
+// archive proxy to fetch the source block.
+func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
+	db := newTestDBWithMode(t, types.StorageModeAPI)
+
+	const slot uint64 = 100
+	txId := bytes.Repeat([]byte{0xA1}, 32)
+	livePayload := []byte("live-cbor-payload-api-mode")
+	spentPayload := []byte("spent-cbor-payload-api-mode")
+
+	hash, _ := seedPrunableBlock(t, db, slot, txId, map[uint32][]byte{
+		0: livePayload,
+		1: spentPayload,
+	})
+
+	// Live UTxO at slot 100; spent UTxO consumed at slot 150. In API mode
+	// the spent row is retained past the stability window, and its blob
+	// entry — still an offset reference to slot 100 — must be materialized
+	// before the block is tombstoned.
+	seedUtxoMetadata(t, db, txId, 0, slot, 0)
+	seedUtxoMetadata(t, db, txId, 1, slot, 150)
+
+	n, err := db.PruneBlock(slot, hash)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n,
+		"API mode must materialize both live and retained spent UTxOs")
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Release()
+
+	postLive, err := db.Blob().GetUtxo(blobTxn.Blob(), txId, 0)
+	require.NoError(t, err)
+	assert.False(t, IsUtxoOffsetStorage(postLive),
+		"live UTxO blob entry must be rewritten to raw CBOR")
+	assert.Equal(t, livePayload, postLive)
+
+	postSpent, err := db.Blob().GetUtxo(blobTxn.Blob(), txId, 1)
+	require.NoError(t, err)
+	assert.False(t, IsUtxoOffsetStorage(postSpent),
+		"spent UTxO blob entry must also be rewritten to raw CBOR in API mode")
+	assert.Equal(t, spentPayload, postSpent)
+}
+
+// TestPruneBlock_CoreModeLeavesSpentUtxos verifies the existing core-mode
+// invariant: spent UTxOs at the slot are NOT materialized. Core mode
+// hard-deletes consumed UTxOs in the stability-window cleanup, so by the
+// time the pruner runs the spent row is gone — but until then any leftover
+// spent blob entry must remain as the original offset reference (and is
+// then deleted by the next cleanup pass).
+func TestPruneBlock_CoreModeLeavesSpentUtxos(t *testing.T) {
+	db := newTestDBWithMode(t, types.StorageModeCore)
+
+	const slot uint64 = 100
+	txId := bytes.Repeat([]byte{0xA2}, 32)
+	livePayload := []byte("live-cbor-payload-core-mode")
+	spentPayload := []byte("spent-cbor-payload-core-mode")
+
+	hash, _ := seedPrunableBlock(t, db, slot, txId, map[uint32][]byte{
+		0: livePayload,
+		1: spentPayload,
+	})
+	seedUtxoMetadata(t, db, txId, 0, slot, 0)
+	seedUtxoMetadata(t, db, txId, 1, slot, 150)
+
+	n, err := db.PruneBlock(slot, hash)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n,
+		"core mode must materialize only the live UTxO at the slot")
+
+	blobTxn := db.BlobTxn(false)
+	defer blobTxn.Release()
+
+	postSpent, err := db.Blob().GetUtxo(blobTxn.Blob(), txId, 1)
+	require.NoError(t, err)
+	assert.True(t, IsUtxoOffsetStorage(postSpent),
+		"core mode must leave spent UTxO blob entry as offset storage")
+}
+
 func TestPruneBlock_SkipsAlreadyMaterializedUtxo(t *testing.T) {
 	db := newTestDB(t)
 

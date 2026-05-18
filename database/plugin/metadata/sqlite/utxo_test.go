@@ -333,6 +333,61 @@ func BenchmarkGetUtxoAddressKeysBatch(b *testing.B) {
 	})
 }
 
+// TestGetUtxosBySlotIncludesSpent verifies that GetUtxosBySlot returns
+// every UTxO created at the slot, including rows soft-marked as spent.
+// API storage mode relies on this so the pruner can materialize CBOR
+// bytes for retained spent UTxOs before tombstoning the source block.
+func TestGetUtxosBySlotIncludesSpent(t *testing.T) {
+	store := setupTestDB(t)
+
+	live := models.Utxo{
+		TxId:      bytes.Repeat([]byte{0xAA}, 32),
+		OutputIdx: 0,
+		AddedSlot: 500,
+		Amount:    types.Uint64(1),
+	}
+	spentLater := models.Utxo{
+		TxId:        bytes.Repeat([]byte{0xBB}, 32),
+		OutputIdx:   0,
+		AddedSlot:   500,
+		DeletedSlot: 700,
+		Amount:      types.Uint64(2),
+	}
+	spentSameSlot := models.Utxo{
+		TxId:        bytes.Repeat([]byte{0xDD}, 32),
+		OutputIdx:   0,
+		AddedSlot:   500,
+		DeletedSlot: 500,
+		Amount:      types.Uint64(3),
+	}
+	otherSlot := models.Utxo{
+		TxId:      bytes.Repeat([]byte{0xFF}, 32),
+		OutputIdx: 0,
+		AddedSlot: 600,
+		Amount:    types.Uint64(4),
+	}
+	for _, u := range []*models.Utxo{&live, &spentLater, &spentSameSlot, &otherSlot} {
+		require.NoError(t, store.DB().Create(u).Error)
+	}
+
+	got, err := store.GetUtxosBySlot(500, nil)
+	require.NoError(t, err)
+	sortUtxoIds(got)
+	want := []models.UtxoId{
+		{Hash: live.TxId, Idx: 0},
+		{Hash: spentLater.TxId, Idx: 0},
+		{Hash: spentSameSlot.TxId, Idx: 0},
+	}
+	sortUtxoIds(want)
+	assert.Equal(t, want, got)
+
+	// Sanity: GetLiveUtxosBySlot only returns the unspent row.
+	gotLive, err := store.GetLiveUtxosBySlot(500, nil)
+	require.NoError(t, err)
+	require.Len(t, gotLive, 1)
+	assert.Equal(t, live.TxId, gotLive[0].Hash)
+}
+
 func sortUtxoIds(ids []models.UtxoId) {
 	sort.Slice(ids, func(i, j int) bool {
 		if c := bytes.Compare(ids[i].Hash, ids[j].Hash); c != 0 {
