@@ -1090,7 +1090,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			if len(caseClauses) > 0 {
 				args := append(caseArgs, whereArgs...)
 				sql := fmt.Sprintf(
-					"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+					"UPDATE "+utxoRefIndexedTable()+
+						" SET collateral_by_tx_id = CASE %s "+
+						"ELSE collateral_by_tx_id END WHERE %s",
 					strings.Join(caseClauses, " "),
 					strings.Join(whereConditions, " OR "),
 				)
@@ -1151,7 +1153,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			if len(caseClauses) > 0 {
 				args := append(caseArgs, whereArgs...)
 				sql := fmt.Sprintf(
-					"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+					"UPDATE "+utxoRefIndexedTable()+
+						" SET referenced_by_tx_id = CASE %s "+
+						"ELSE referenced_by_tx_id END WHERE %s",
 					strings.Join(caseClauses, " "),
 					strings.Join(whereConditions, " OR "),
 				)
@@ -1204,7 +1208,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				updateArgs = append(updateArgs, ref.txID, ref.idx)
 			}
 			sql := fmt.Sprintf(
-				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
+				"UPDATE "+utxoRefIndexedTable()+
+					" SET deleted_slot = ?, spent_at_tx_id = ? "+
 					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
 				strings.Join(whereConditions, " OR "),
 			)
@@ -2570,7 +2575,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				"UPDATE "+utxoRefIndexedTable()+
+					" SET collateral_by_tx_id = CASE %s "+
+					"ELSE collateral_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)
@@ -2627,7 +2634,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
 			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				"UPDATE "+utxoRefIndexedTable()+
+					" SET referenced_by_tx_id = CASE %s "+
+					"ELSE referenced_by_tx_id END WHERE %s",
 				strings.Join(caseClauses, " "),
 				strings.Join(whereConditions, " OR "),
 			)

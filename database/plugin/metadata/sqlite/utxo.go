@@ -84,6 +84,12 @@ func (d *MetadataStoreSqlite) GetUtxoIncludingSpent(
 // under SQLite's default SQLITE_MAX_VARIABLE_NUMBER limit of 999 bind parameters.
 const batchChunkSize = 499
 
+const utxoRefLookupIndex = "tx_id_output_idx"
+
+func utxoRefIndexedTable() string {
+	return (&models.Utxo{}).TableName() + " INDEXED BY " + utxoRefLookupIndex
+}
+
 // GetUtxosBatch retrieves multiple UTXOs by their references in a single query.
 // Returns a map keyed by "txid:outputidx" for easy lookup.
 // Large batches are automatically chunked to avoid SQLite expression limits.
@@ -119,7 +125,8 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		// Wrap OR conditions in parentheses to ensure deleted_slot=0 applies to all refs.
 		// Without parens, SQL operator precedence (AND > OR) causes deleted_slot=0
 		// to only apply to the first condition.
-		query := db.Where("deleted_slot = 0").
+		query := db.Table(utxoRefIndexedTable()).
+			Where("deleted_slot = 0").
 			Where("("+strings.Join(conditions, " OR ")+")", args...)
 		if queryResult := query.Find(&utxos); queryResult.Error != nil {
 			return nil, queryResult.Error
@@ -750,9 +757,12 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 			args = append(args, r.TxId, r.OutputIdx)
 		}
 		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
-		result := db.Model(&models.Utxo{}).
-			Where(whereClause, args...).
-			Update("deleted_slot", atSlot)
+		updateArgs := append([]any{atSlot}, args...)
+		result := db.Exec(
+			"UPDATE "+utxoRefIndexedTable()+
+				" SET deleted_slot = ? WHERE "+whereClause,
+			updateArgs...,
+		)
 		if result.Error != nil {
 			return result.Error
 		}

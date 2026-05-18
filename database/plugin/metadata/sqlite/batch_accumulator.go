@@ -352,7 +352,10 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 		args = append(args, spentAtArgs...)
 		args = append(args, whereArgs...)
 		sql := fmt.Sprintf(
-			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND (%s)",
+			"UPDATE "+utxoRefIndexedTable()+
+				" SET deleted_slot = CASE %s ELSE deleted_slot END, "+
+				"spent_at_tx_id = CASE %s ELSE spent_at_tx_id END "+
+				"WHERE deleted_slot = 0 AND (%s)",
 			strings.Join(deletedSlotCases, " "),
 			strings.Join(spentAtCases, " "),
 			strings.Join(whereConditions, " OR "),
