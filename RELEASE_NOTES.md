@@ -1,5 +1,54 @@
 # Dingo Releases
 
+## v0.46.4 (May 18, 2026)
+
+**Title:** Genesis bootstrap expansion, Mithril sync visibility, and sturdier SQLite metadata handling
+
+**Date:** May 18, 2026
+
+**Version:** v0.46.4
+
+Hi folks! Here’s what we shipped in v0.46.4.
+
+### ✨ What's New
+
+* Added **expand genesis bootstrap across MySQL and Postgres deployments:** Networks that use MySQL or Postgres can now bootstrap genesis staking and governance state, which gives non mainnet deployments a more complete starting view on networks that depend on genesis rooted state. ([#2331](https://github.com/blinklabs-io/dingo/pull/2331))
+* Introduced **surface Mithril sync progress through metrics visibility:** Operators can now follow long running Mithril sync work through Mithril metrics and a dedicated metrics server, which makes recovery progress easier to observe. ([#2341](https://github.com/blinklabs-io/dingo/pull/2341))
+
+### 💪 Improvements
+
+* Improved **speed batched SQLite UTxO lookups and updates:** SQLite heavy lookup and update paths now use the `tx_id_output_idx` route more consistently, which helps batched UTxO work finish more smoothly. ([#2342](https://github.com/blinklabs-io/dingo/pull/2342))
+* Refined **keep S3 integrations aligned with newer client support:** S3 backed workflows now stay aligned with the refreshed AWS S3 client, which supports steadier compatibility and maintenance. ([#2348](https://github.com/blinklabs-io/dingo/pull/2348))
+* Enhanced **keep Google API integrations current:** Google API integrations now stay aligned with a newer client release, which supports ongoing compatibility and maintenance. ([#2347](https://github.com/blinklabs-io/dingo/pull/2347))
+* Updated **keep bitcoin utility support current:** Bitcoin related utility support now stays aligned with a newer upstream release, which improves compatibility maintenance. ([#2346](https://github.com/blinklabs-io/dingo/pull/2346))
+* Modernized **publish the v0.46.3 release history entry:** The repository now includes the v0.46.3 release notes entry in its published release history, which makes recent patch release context easier to review. ([#2340](https://github.com/blinklabs-io/dingo/pull/2340))
+
+### 🔧 Fixes
+
+* Fixed **keep genesis rooted history consistent across supported databases:** Account history and rollback related paths now preserve visibility for genesis rooted accounts and delegations more consistently across supported database backends. ([#2344](https://github.com/blinklabs-io/dingo/pull/2344))
+* Corrected **handle high value transaction metadata labels more reliably:** Supported databases now keep high bit transaction metadata labels readable, and SQLite handles the affected metadata and lookup paths more reliably. ([#2357](https://github.com/blinklabs-io/dingo/pull/2357))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps:** Normal patch release upgrade steps are generally sufficient for this release.
+* Highlighted **expect broader genesis bootstrap support on non mainnet SQL deployments:** Non mainnet networks that use MySQL or Postgres now gain genesis bootstrap support and more consistent handling for genesis rooted history.
+* Emphasized **watch Mithril sync progress and trust steadier SQLite query paths:** Mithril sync now exposes Prometheus visible progress, and SQLite heavy backfill and query workloads should see better behavior from the indexing and metadata fixes.
+* Summarized **review refreshed integrations and updated release history:** Dependency refreshes keep S3, Google API, and bitcoin utility support current, and the repository release history now includes the v0.46.3 notes.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.3 (May 17, 2026)
 
 **Title:** Faster governance and stake queries, sturdier plateau recovery, and broader rollback test coverage
