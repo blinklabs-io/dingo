@@ -3658,6 +3658,22 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 // SetGenesisStaking stores genesis pool registrations and stake delegations
 // from the shelley-genesis.json staking section. It creates Pool,
 // PoolRegistration, and Account records at slot 0.
+//
+// Idempotency notes:
+//   - The slot-0 PoolRegistration is written with OnConflict{DoNothing}. Re-running
+//     with mutated genesis data would leave stale historical fields on the slot-0
+//     row, but a network's genesis file is immutable so this is intentional;
+//     callers must not re-bootstrap with a different genesis against an existing
+//     database.
+//   - No synthetic slot-0 Registration / StakeDelegation history row is written
+//     for the stakeDelegations entries here, unlike SetGenesisGovernance. This
+//     leaves a known rollback hole: a later on-chain cert touching a
+//     Shelley-genesis-delegated key, followed by a rollback past that cert, can
+//     delete the genesis-rooted account because RestoreAccountStateAtSlot keys
+//     off the registration table rather than Account.added_slot. Mainnet does
+//     not exercise this path (its shelley-genesis declares no stake
+//     delegations), so the hole has not been triaged for the test networks;
+//     closing it is tracked separately.
 func (d *MetadataStoreMysql) SetGenesisStaking(
 	pools map[string]lcommon.PoolRegistrationCertificate,
 	stakeDelegations map[string]string,
@@ -3800,6 +3816,11 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 			Active:     true,
 			AddedSlot:  0,
 		}
+		// DoUpdates intentionally omits added_slot: RestoreAccountStateAtSlot
+		// selects rows by `added_slot > rollback_slot`, so resetting a
+		// non-zero added_slot back to 0 on a re-bootstrap (e.g. resumed
+		// Mithril after partial sync) would make that row invisible to
+		// every future rollback.
 		result := db.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
