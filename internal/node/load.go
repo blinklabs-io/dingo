@@ -246,6 +246,31 @@ type LoadBlobsResult struct {
 	ImmutableTipSlot uint64
 }
 
+// LoadBlobsProgress reports ImmutableDB blob-copy progress.
+type LoadBlobsProgress struct {
+	BlocksCopied    int
+	CurrentSlot     uint64
+	TipSlot         uint64
+	BlocksPerSecond float64
+	Percent         float64
+}
+
+type loadBlobsOptions struct {
+	onProgress func(LoadBlobsProgress)
+}
+
+// LoadBlobsOption customizes LoadBlobsWithDB behavior.
+type LoadBlobsOption func(*loadBlobsOptions)
+
+// WithLoadBlobsProgress registers a callback for blob-copy progress.
+func WithLoadBlobsProgress(
+	onProgress func(LoadBlobsProgress),
+) LoadBlobsOption {
+	return func(opts *loadBlobsOptions) {
+		opts.onProgress = onProgress
+	}
+}
+
 // LoadBlobsWithDB copies blocks from an ImmutableDB directory into the blob
 // store without starting the ledger processing pipeline. This is used after
 // a Mithril snapshot import where the ledger state has already been loaded
@@ -257,7 +282,15 @@ func LoadBlobsWithDB(
 	logger *slog.Logger,
 	immutableDir string,
 	db *database.Database,
+	options ...LoadBlobsOption,
 ) (*LoadBlobsResult, error) {
+	opts := loadBlobsOptions{}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		option(&opts)
+	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
 	db, closeDB, err := ensureDB(cfg, logger, db)
@@ -293,6 +326,7 @@ func LoadBlobsWithDB(
 			utxoOffsetsStored += stored
 			return nil
 		},
+		opts.onProgress,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
@@ -441,6 +475,7 @@ func copyBlocksRawWithCallback(
 	db *database.Database,
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
+	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
 	imm, err := immutable.New(immutableDir)
 	if err != nil {
@@ -560,6 +595,13 @@ func copyBlocksRawWithCallback(
 			lastProgressSlot = blockBatch[tmpLen-1].Slot
 		}
 		blockBatch = blockBatch[:0]
+		reportLoadBlobsProgress(
+			onProgress,
+			blocksCopied,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+		)
 		maybeLogBlockCopyProgress(
 			logger,
 			"copying blocks from immutable DB",
@@ -919,6 +961,31 @@ func checkedUint32(v int) (uint32, error) {
 		return 0, fmt.Errorf("value %d overflows uint32", v)
 	}
 	return uint32(v), nil // #nosec G115
+}
+
+func reportLoadBlobsProgress(
+	onProgress func(LoadBlobsProgress),
+	blocksCopied int,
+	currentSlot uint64,
+	tipSlot uint64,
+	startTime time.Time,
+) {
+	if onProgress == nil {
+		return
+	}
+	elapsed := time.Since(startTime).Seconds()
+	progress := LoadBlobsProgress{
+		BlocksCopied: blocksCopied,
+		CurrentSlot:  currentSlot,
+		TipSlot:      tipSlot,
+	}
+	if elapsed > 0 {
+		progress.BlocksPerSecond = float64(blocksCopied) / elapsed
+	}
+	if tipSlot > 0 {
+		progress.Percent = float64(currentSlot) / float64(tipSlot) * 100
+	}
+	onProgress(progress)
 }
 
 func maybeLogBlockCopyProgress(
