@@ -542,7 +542,7 @@ func (d *MetadataStoreMysql) GetTransactionsByMetadataLabel(
 
 	subQuery := db.Model(&models.TransactionMetadataLabel{}).
 		Select("transaction_id").
-		Where("label = ?", label)
+		Where("label = ?", types.Uint64(label))
 
 	query := db.
 		Where("id IN (?)", subQuery).
@@ -584,7 +584,7 @@ func (d *MetadataStoreMysql) CountTransactionsByMetadataLabel(
 
 	var count int64
 	if result := db.Model(&models.TransactionMetadataLabel{}).
-		Where("label = ?", label).
+		Where("label = ?", types.Uint64(label)).
 		Count(&count); result.Error != nil {
 		return 0, fmt.Errorf(
 			"count txs by metadata label %d: %w",
@@ -877,7 +877,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 		for _, tmpLabel := range metadataLabels {
 			labelRecords = append(labelRecords, models.TransactionMetadataLabel{
 				TransactionID: tmpTx.ID,
-				Label:         tmpLabel.Label,
+				Label:         types.Uint64(tmpLabel.Label),
 				Slot:          point.Slot,
 				CborValue:     tmpLabel.CborValue,
 				JsonValue:     tmpLabel.JsonValue,
@@ -2327,7 +2327,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 		for _, tmpLabel := range metadataLabels {
 			labelRecords = append(labelRecords, models.TransactionMetadataLabel{
 				TransactionID: tmpTx.ID,
-				Label:         tmpLabel.Label,
+				Label:         types.Uint64(tmpLabel.Label),
 				Slot:          point.Slot,
 				CborValue:     tmpLabel.CborValue,
 				JsonValue:     tmpLabel.JsonValue,

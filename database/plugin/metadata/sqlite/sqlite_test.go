@@ -322,6 +322,7 @@ func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
 
 func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
+	highBitLabel := uint64(16450635129309362000)
 
 	makeMetadata := func(labels map[uint64]lcommon.TransactionMetadatum) lcommon.TransactionMetadatum {
 		pairs := make([]lcommon.MetaPair, 0, len(labels))
@@ -363,6 +364,7 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 					},
 				},
 			},
+			highBitLabel: lcommon.MetaText{Value: "high-bit-label"},
 		}),
 	}
 
@@ -397,8 +399,8 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 		Find(&rows).Error; err != nil {
 		t.Fatalf("query metadata labels failed: %v", err)
 	}
-	if len(rows) != 3 {
-		t.Fatalf("expected 3 metadata label rows, got %d", len(rows))
+	if len(rows) != 4 {
+		t.Fatalf("expected 4 metadata label rows, got %d", len(rows))
 	}
 	for _, row := range rows {
 		if len(row.CborValue) == 0 {
@@ -450,6 +452,35 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 	}
 	if count721 != 2 {
 		t.Fatalf("expected count 2 for label 721, got %d", count721)
+	}
+
+	txsHighBit, err := sqliteStore.GetTransactionsByMetadataLabel(
+		highBitLabel,
+		10,
+		0,
+		false,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("GetTransactionsByMetadataLabel high-bit label failed: %v", err)
+	}
+	if len(txsHighBit) != 1 || txsHighBit[0].Slot != 200 {
+		t.Fatalf("unexpected high-bit label query result: %#v", txsHighBit)
+	}
+
+	countHighBit, err := sqliteStore.CountTransactionsByMetadataLabel(
+		highBitLabel,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("CountTransactionsByMetadataLabel high-bit label failed: %v", err)
+	}
+	if countHighBit != 1 {
+		t.Fatalf(
+			"expected count 1 for high-bit label %d, got %d",
+			highBitLabel,
+			countHighBit,
+		)
 	}
 }
 
