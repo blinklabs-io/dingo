@@ -236,26 +236,53 @@ func collectAddressTransactions(
 	txIndex uint32,
 	utxos []models.Utxo,
 ) []models.AddressTransaction {
-	ret := make([]models.AddressTransaction, 0, len(utxos))
-	seen := make(map[string]struct{}, len(utxos))
+	addressKeys := make([]UtxoAddressKeys, 0, len(utxos))
 	for _, utxo := range utxos {
-		if len(utxo.PaymentKey) == 0 && len(utxo.StakingKey) == 0 {
+		addressKeys = append(addressKeys, utxoAddressKeysFromUtxo(utxo))
+	}
+	return collectAddressTransactionsFromKeys(
+		transactionID,
+		slot,
+		txIndex,
+		addressKeys,
+	)
+}
+
+func collectAddressTransactionsFromKeys(
+	transactionID uint,
+	slot uint64,
+	txIndex uint32,
+	addressKeys []UtxoAddressKeys,
+) []models.AddressTransaction {
+	ret := make([]models.AddressTransaction, 0, len(addressKeys))
+	seen := make(map[string]struct{}, len(addressKeys))
+	for _, addressKey := range addressKeys {
+		if len(addressKey.PaymentKey) == 0 && len(addressKey.StakingKey) == 0 {
 			continue
 		}
-		key := fmt.Sprintf("%x|%x", utxo.PaymentKey, utxo.StakingKey)
+		key := fmt.Sprintf("%x|%x", addressKey.PaymentKey, addressKey.StakingKey)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		ret = append(ret, models.AddressTransaction{
-			PaymentKey:    bytes.Clone(utxo.PaymentKey),
-			StakingKey:    bytes.Clone(utxo.StakingKey),
+			PaymentKey:    bytes.Clone(addressKey.PaymentKey),
+			StakingKey:    bytes.Clone(addressKey.StakingKey),
 			TransactionID: transactionID,
 			Slot:          slot,
 			TxIndex:       txIndex,
 		})
 	}
 	return ret
+}
+
+func utxoAddressKeysFromUtxo(utxo models.Utxo) UtxoAddressKeys {
+	return UtxoAddressKeys{
+		TxId:       utxo.TxId,
+		OutputIdx:  utxo.OutputIdx,
+		PaymentKey: utxo.PaymentKey,
+		StakingKey: utxo.StakingKey,
+	}
 }
 
 // GetTransactionsByAddress returns transactions that involve
@@ -2530,6 +2557,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		local.AddCollateralReturn(*colRetUtxo)
 	}
 
+	var collateralAddressKeys map[string]UtxoAddressKeys
+	var refInputAddressKeys map[string]UtxoAddressKeys
+
 	// ------------------------------------------------------------------ //
 	// 3. Collateral / reference-input marker UPDATEs (immediate)         //
 	//    These update UTxOs that already exist from prior blocks.        //
@@ -2542,10 +2572,14 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				OutputIdx: input.Index(),
 			})
 		}
-		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+		var err error
+		collateralAddressKeys, err = d.GetUtxoAddressKeysBatch(
+			collateralRefs,
+			txn,
+		)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to batch fetch collateral UTXOs (batched): %w",
+				"failed to batch fetch collateral UTXO address keys (batched): %w",
 				err,
 			)
 		}
@@ -2557,7 +2591,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
 			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-			if collateralUtxos[key] == nil {
+			if _, ok := collateralAddressKeys[key]; !ok {
 				continue
 			}
 			caseClauses = append(
@@ -2570,7 +2604,6 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				"(tx_id = ? AND output_idx = ?)",
 			)
 			whereArgs = append(whereArgs, inTxId, inIdx)
-			tmpTx.Collateral = append(tmpTx.Collateral, *collateralUtxos[key])
 		}
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
@@ -2598,10 +2631,14 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				OutputIdx: input.Index(),
 			})
 		}
-		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+		var err error
+		refInputAddressKeys, err = d.GetUtxoAddressKeysBatch(
+			refInputRefs,
+			txn,
+		)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to batch fetch reference input UTXOs (batched): %w",
+				"failed to batch fetch reference input UTXO address keys (batched): %w",
 				err,
 			)
 		}
@@ -2613,7 +2650,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
 			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
-			if refInputUtxos[key] == nil {
+			if _, ok := refInputAddressKeys[key]; !ok {
 				continue
 			}
 			caseClauses = append(
@@ -2626,10 +2663,6 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				"(tx_id = ? AND output_idx = ?)",
 			)
 			whereArgs = append(whereArgs, inTxId, inIdx)
-			tmpTx.ReferenceInputs = append(
-				tmpTx.ReferenceInputs,
-				*refInputUtxos[key],
-			)
 		}
 		if len(caseClauses) > 0 {
 			args := append(caseArgs, whereArgs...)
@@ -2680,7 +2713,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			local.AddDeleteTxID(tmpTx.ID)
 		}
 
-		// Fetch input UTxOs for address-indexing below.
+		// Fetch input address keys for address-indexing below.
 		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
 		for _, input := range tx.Inputs() {
 			inputRefs = append(inputRefs, UtxoRef{
@@ -2688,37 +2721,52 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				OutputIdx: input.Index(),
 			})
 		}
-		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
+		inputAddressKeys, err := d.GetUtxoAddressKeysBatch(inputRefs, txn)
 		if err != nil {
 			return fmt.Errorf(
-				"failed to batch fetch input UTXOs (batched): %w",
+				"failed to batch fetch input UTXO address keys (batched): %w",
 				err,
 			)
 		}
-		for _, input := range tx.Inputs() {
-			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
-			if u := inputUtxos[key]; u != nil {
-				tmpTx.Inputs = append(tmpTx.Inputs, *u)
-			}
-		}
 
 		// Address-transaction index.
-		addressUtxos := make(
-			[]models.Utxo,
+		addressKeys := make(
+			[]UtxoAddressKeys,
 			0,
-			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(outputModels)+1,
+			len(tx.Inputs())+
+				len(tx.Collateral())+
+				len(tx.ReferenceInputs())+
+				len(outputModels)+1,
 		)
-		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
-		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
-		addressUtxos = append(addressUtxos, outputModels...)
-		if colRetUtxo != nil {
-			addressUtxos = append(addressUtxos, *colRetUtxo)
+		for _, input := range tx.Inputs() {
+			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+			if addressKey, ok := inputAddressKeys[key]; ok {
+				addressKeys = append(addressKeys, addressKey)
+			}
 		}
-		for _, atx := range collectAddressTransactions(
+		for _, input := range tx.Collateral() {
+			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+			if addressKey, ok := collateralAddressKeys[key]; ok {
+				addressKeys = append(addressKeys, addressKey)
+			}
+		}
+		for _, input := range tx.ReferenceInputs() {
+			key := fmt.Sprintf("%x:%d", input.Id().Bytes(), input.Index())
+			if addressKey, ok := refInputAddressKeys[key]; ok {
+				addressKeys = append(addressKeys, addressKey)
+			}
+		}
+		for _, output := range outputModels {
+			addressKeys = append(addressKeys, utxoAddressKeysFromUtxo(output))
+		}
+		if colRetUtxo != nil {
+			addressKeys = append(addressKeys, utxoAddressKeysFromUtxo(*colRetUtxo))
+		}
+		for _, atx := range collectAddressTransactionsFromKeys(
 			tmpTx.ID,
 			point.Slot,
 			idx,
-			addressUtxos,
+			addressKeys,
 		) {
 			local.AddAddressTx(atx)
 		}

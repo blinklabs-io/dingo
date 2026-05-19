@@ -355,6 +355,86 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 	require.Equal(t, uint32(3), rows[0].TxIndex)
 }
 
+func TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys(t *testing.T) {
+	store := setupTestDBWithMode(t, types.StorageModeAPI)
+
+	inputTxId := bytes.Repeat([]byte{0xA1}, 32)
+	collateralTxId := bytes.Repeat([]byte{0xA2}, 32)
+	referenceTxId := bytes.Repeat([]byte{0xA3}, 32)
+	rows := []models.Utxo{
+		{
+			TxId:       inputTxId,
+			OutputIdx:  0,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x11}, 28),
+			StakingKey: bytes.Repeat([]byte{0x21}, 28),
+			Amount:     types.Uint64(1),
+		},
+		{
+			TxId:       collateralTxId,
+			OutputIdx:  1,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x12}, 28),
+			StakingKey: bytes.Repeat([]byte{0x22}, 28),
+			Amount:     types.Uint64(2),
+		},
+		{
+			TxId:       referenceTxId,
+			OutputIdx:  2,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x13}, 28),
+			StakingKey: bytes.Repeat([]byte{0x23}, 28),
+			Amount:     types.Uint64(3),
+		},
+	}
+	require.NoError(t, store.DB().Create(&rows).Error)
+
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB2}, 32))
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		inputs: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(inputTxId, 0),
+		},
+		collateral: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(collateralTxId, 1),
+		},
+		refInputs: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(referenceTxId, 2),
+		},
+	}
+	point := ocommon.Point{
+		Hash: bytes.Repeat([]byte{0xC2}, 32),
+		Slot: 200,
+	}
+
+	acc := NewBatchAccumulator()
+	require.NoError(t, store.SetTransactionBatched(tx, point, 4, nil, acc, nil))
+	require.NoError(t, store.FlushBatch(acc, nil))
+
+	var dbTx models.Transaction
+	require.NoError(
+		t,
+		store.DB().Where("hash = ?", txHash.Bytes()).First(&dbTx).Error,
+	)
+	var indexed []models.AddressTransaction
+	require.NoError(
+		t,
+		store.DB().
+			Where("transaction_id = ?", dbTx.ID).
+			Order("payment_key").
+			Find(&indexed).Error,
+	)
+	require.Len(t, indexed, 3)
+	require.Equal(t, rows[0].PaymentKey, indexed[0].PaymentKey)
+	require.Equal(t, rows[1].PaymentKey, indexed[1].PaymentKey)
+	require.Equal(t, rows[2].PaymentKey, indexed[2].PaymentKey)
+	for _, row := range indexed {
+		require.Equal(t, point.Slot, row.Slot)
+		require.Equal(t, uint32(4), row.TxIndex)
+	}
+}
+
 // --- Rollback state restoration tests ---
 
 // TestRollbackAccountState tests that RestoreAccountStateAtSlot correctly

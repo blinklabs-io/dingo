@@ -35,7 +35,7 @@ import (
 
 // setupTestDB creates and initializes a test SQLite database.
 // It returns the store and a cleanup function that should be deferred.
-func setupTestDB(t *testing.T) *MetadataStoreSqlite {
+func setupTestDB(t testing.TB) *MetadataStoreSqlite {
 	t.Helper()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {

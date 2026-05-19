@@ -33,6 +33,14 @@ type UtxoRef struct {
 	OutputIdx uint32
 }
 
+// UtxoAddressKeys is the skinny UTxO projection needed for address indexing.
+type UtxoAddressKeys struct {
+	TxId       []byte `gorm:"column:tx_id"`
+	PaymentKey []byte `gorm:"column:payment_key"`
+	StakingKey []byte `gorm:"column:staking_key"`
+	OutputIdx  uint32 `gorm:"column:output_idx"`
+}
+
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreSqlite) GetUtxo(
 	txId []byte,
@@ -136,6 +144,52 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		for j := range utxos {
 			key := fmt.Sprintf("%x:%d", utxos[j].TxId, utxos[j].OutputIdx)
 			result[key] = &utxos[j]
+		}
+	}
+
+	return result, nil
+}
+
+// GetUtxoAddressKeysBatch retrieves only the UTxO ref and address key columns
+// needed to build address_transaction rows.
+func (d *MetadataStoreSqlite) GetUtxoAddressKeysBatch(
+	refs []UtxoRef,
+	txn types.Txn,
+) (map[string]UtxoAddressKeys, error) {
+	if len(refs) == 0 {
+		return make(map[string]UtxoAddressKeys), nil
+	}
+
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]UtxoAddressKeys, len(refs))
+
+	for i := 0; i < len(refs); i += batchChunkSize {
+		end := min(i+batchChunkSize, len(refs))
+		chunk := refs[i:end]
+
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, ref := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, ref.TxId, ref.OutputIdx)
+		}
+
+		var rows []UtxoAddressKeys
+		query := db.Table(utxoRefIndexedTable()).
+			Select("tx_id", "output_idx", "payment_key", "staking_key").
+			Where("deleted_slot = 0").
+			Where("("+strings.Join(conditions, " OR ")+")", args...)
+		if queryResult := query.Find(&rows); queryResult.Error != nil {
+			return nil, queryResult.Error
+		}
+
+		for j := range rows {
+			key := fmt.Sprintf("%x:%d", rows[j].TxId, rows[j].OutputIdx)
+			result[key] = rows[j]
 		}
 	}
 
