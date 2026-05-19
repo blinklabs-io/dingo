@@ -216,6 +216,9 @@ func TestGetUtxosBatchUsesTxIdOutputIndex(t *testing.T) {
 	assert.NotContains(t, plan, "idx_utxo_deleted_slot")
 }
 
+// TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup verifies that the
+// address-key lookup selects only the address-index fields and uses the UTxO ref
+// index instead of a broader deleted-slot scan.
 func TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup(t *testing.T) {
 	store := setupTestDB(t)
 
@@ -281,6 +284,8 @@ func TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup(t *testing.T) {
 	assert.NotContains(t, plan, "idx_utxo_deleted_slot")
 }
 
+// BenchmarkGetUtxoAddressKeysBatch compares the full UTxO batch lookup with
+// the skinny address-key lookup used by API-mode backfill address indexing.
 func BenchmarkGetUtxoAddressKeysBatch(b *testing.B) {
 	store := setupTestDB(b)
 

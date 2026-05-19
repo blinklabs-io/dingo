@@ -355,6 +355,9 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 	require.Equal(t, uint32(3), rows[0].TxIndex)
 }
 
+// TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys
+// verifies that API-mode batched address indexing includes every input class
+// resolved through the skinny address-key lookup.
 func TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys(t *testing.T) {
 	store := setupTestDBWithMode(t, types.StorageModeAPI)
 
