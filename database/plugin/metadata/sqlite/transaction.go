@@ -1297,14 +1297,18 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
 	if d.storageMode == types.StorageModeAPI {
 		// Index unique addresses participating in this transaction.
-		// Includes inputs, collateral inputs, outputs, and collateral return.
+		// Includes inputs, collateral inputs, reference inputs, outputs, and collateral return.
 		addressUtxos := make(
 			[]models.Utxo,
 			0,
-			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
+			len(tmpTx.Inputs)+
+				len(tmpTx.Collateral)+
+				len(tmpTx.ReferenceInputs)+
+				len(tmpTx.Outputs)+1,
 		)
 		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, tmpTx.ReferenceInputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Outputs...)
 		if tmpTx.CollateralReturn != nil {
 			addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
