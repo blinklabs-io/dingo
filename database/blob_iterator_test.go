@@ -26,8 +26,17 @@ import (
 // newTestDB creates an in-memory Database instance for testing.
 func newTestDB(t *testing.T) *Database {
 	t.Helper()
+	return newTestDBWithMode(t, "")
+}
+
+// newTestDBWithMode creates an in-memory Database instance for testing
+// configured with the given storage mode. An empty mode defaults to
+// "core" (per Database.New).
+func newTestDBWithMode(t *testing.T, mode string) *Database {
+	t.Helper()
 	config := &Config{
-		DataDir: "", // In-memory
+		DataDir:     "", // In-memory
+		StorageMode: mode,
 	}
 	db, err := New(config)
 	require.NoError(t, err, "failed to create test database")

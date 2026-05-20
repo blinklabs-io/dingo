@@ -1420,6 +1420,15 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// In API storage mode we retain spent UTxO metadata rows past the
+	// stability window so historical transaction queries can resolve
+	// input/collateral/reference-input details via spent_at_tx_id,
+	// collateral_by_tx_id, and referenced_by_tx_id. Spent state is already
+	// encoded by deleted_slot and spent_at_tx_id; live-UTxO queries continue
+	// to filter on deleted_slot = 0.
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return
+	}
 	// Get the current tip slot while holding the read lock to avoid TOCTOU race.
 	// We capture only the slot value we need, so even if currentTip changes after
 	// we release the lock, we're working with a consistent snapshot of the slot.
