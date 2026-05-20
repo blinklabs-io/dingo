@@ -16,13 +16,64 @@ package event_test
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+type publishBlockingGateSubscriber struct {
+	targetData string
+	entered    chan struct{}
+	release    chan struct{}
+	enterOnce  sync.Once
+	closeOnce  sync.Once
+}
+
+func (s *publishBlockingGateSubscriber) Deliver(evt event.Event) error {
+	data, ok := evt.Data.(string)
+	if !ok || data != s.targetData {
+		return nil
+	}
+	s.enterOnce.Do(func() {
+		close(s.entered)
+	})
+	<-s.release
+	return nil
+}
+
+func (s *publishBlockingGateSubscriber) Close() {
+	s.closeOnce.Do(func() {
+		close(s.release)
+	})
+}
+
+func (s *publishBlockingGateSubscriber) Release() {
+	s.Close()
+}
+
+type publishBlockingProbeSubscriber struct {
+	targetData string
+	delivered  chan struct{}
+}
+
+func (s *publishBlockingProbeSubscriber) Deliver(evt event.Event) error {
+	data, ok := evt.Data.(string)
+	if !ok || data != s.targetData {
+		return nil
+	}
+	select {
+	case s.delivered <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+func (s *publishBlockingProbeSubscriber) Close() {}
 
 func TestEventBusSingleSubscriber(t *testing.T) {
 	var testEvtData int = 999
@@ -418,6 +469,172 @@ func TestPublishDropsEventsOnFullBuffer(t *testing.T) {
 			t.Fatal("expected buffered event not received")
 		}
 	}
+}
+
+func TestPublishBlockingWaitsForSubscriberCapacity(t *testing.T) {
+	const testEvtType event.EventType = "test.blocking"
+	eb := event.NewEventBus(nil, nil)
+	defer eb.Stop()
+
+	gateSub := &publishBlockingGateSubscriber{
+		targetData: "second",
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	require.NotZero(t, eb.RegisterSubscriber(testEvtType, gateSub))
+
+	_, subCh := eb.SubscribeWithBuffer(testEvtType, 1)
+
+	probeSub := &publishBlockingProbeSubscriber{
+		targetData: "second",
+		delivered:  make(chan struct{}, 1),
+	}
+	require.NotZero(t, eb.RegisterSubscriber(testEvtType, probeSub))
+
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- eb.PublishBlocking(
+			testEvtType,
+			event.NewEvent(testEvtType, "second"),
+		)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		gateSub.entered,
+		time.Second,
+		"PublishBlocking should enter delivery before capacity is released",
+	)
+	gateSub.Release()
+	testutil.RequireNoReceive(
+		t,
+		probeSub.delivered,
+		50*time.Millisecond,
+		"PublishBlocking reached the next subscriber before channel capacity was available",
+	)
+
+	evt := testutil.RequireReceive(
+		t,
+		subCh,
+		time.Second,
+		"expected first buffered event",
+	)
+	require.Equal(t, "first", evt.Data)
+
+	testutil.RequireReceive(
+		t,
+		probeSub.delivered,
+		time.Second,
+		"PublishBlocking should reach the next subscriber after capacity is available",
+	)
+	err := testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"PublishBlocking did not unblock after capacity was available",
+	)
+	require.NoError(t, err)
+
+	evt = testutil.RequireReceive(
+		t,
+		subCh,
+		time.Second,
+		"expected second event",
+	)
+	require.Equal(t, "second", evt.Data)
+}
+
+func TestPublishBlockingUnblocksOnStop(t *testing.T) {
+	const testEvtType event.EventType = "test.blocking.stop"
+	eb := event.NewEventBus(nil, nil)
+
+	_, _ = eb.SubscribeWithBuffer(testEvtType, 1)
+	eb.Publish(testEvtType, event.NewEvent(testEvtType, "first"))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- eb.PublishBlocking(
+			testEvtType,
+			event.NewEvent(testEvtType, "second"),
+		)
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		done,
+		50*time.Millisecond,
+		"PublishBlocking returned before Stop",
+	)
+
+	eb.Stop()
+
+	err := testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"PublishBlocking did not unblock after Stop",
+	)
+	require.ErrorIs(t, err, event.ErrEventBusStopped)
+}
+
+func TestPublishBlockingReturnsErrWhenStopCompletesDuringDelivery(
+	t *testing.T,
+) {
+	const testEvtType event.EventType = "test.blocking.stop.remote"
+	eb := event.NewEventBus(nil, nil)
+
+	gateSub := &publishBlockingGateSubscriber{
+		targetData: "blocked",
+		entered:    make(chan struct{}),
+		release:    make(chan struct{}),
+	}
+	require.NotZero(t, eb.RegisterSubscriber(testEvtType, gateSub))
+
+	done := make(chan error, 1)
+	go func() {
+		done <- eb.PublishBlocking(
+			testEvtType,
+			event.NewEvent(testEvtType, "blocked"),
+		)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		gateSub.entered,
+		time.Second,
+		"PublishBlocking did not enter subscriber delivery",
+	)
+
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		eb.Stop()
+	}()
+	testutil.RequireReceive(
+		t,
+		stopDone,
+		time.Second,
+		"Stop did not complete",
+	)
+
+	err := testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"PublishBlocking did not return after Stop",
+	)
+	require.ErrorIs(t, err, event.ErrEventBusStopped)
+}
+
+func TestPublishBlockingReturnsErrWhenClosed(t *testing.T) {
+	const testEvtType event.EventType = "test.blocking.closed"
+	eb := event.NewEventBus(nil, nil)
+	eb.Close()
+
+	err := eb.PublishBlocking(testEvtType, event.NewEvent(testEvtType, "closed"))
+	require.ErrorIs(t, err, event.ErrEventBusStopped)
 }
 
 // TestSubscribeUsesSmallDefaultBuffer is the regression test for #2106.

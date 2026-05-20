@@ -555,8 +555,10 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
-	// Generate event
-	o.EventBus.Publish(
+	// Generate event. This stream is ordering-critical: dropping a
+	// rollback/header event can strand the ledger pipeline, so use blocking
+	// delivery to apply backpressure instead of lossy buffer overflow.
+	if err := o.EventBus.PublishBlocking(
 		ledger.ChainsyncEventType,
 		event.NewEvent(
 			ledger.ChainsyncEventType,
@@ -567,7 +569,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 				Tip:          tip,
 			},
 		),
-	)
+	); err != nil {
+		return err
+	}
 	o.EventBus.Publish(
 		chainselection.PeerRollbackEventType,
 		event.NewEvent(
@@ -705,7 +709,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				return nil
 			}
 		}
-		o.EventBus.Publish(
+		if err := o.EventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
@@ -717,7 +721,9 @@ func (o *Ouroboros) chainsyncClientRollForward(
 					Tip:          tip,
 				},
 			),
-		)
+		); err != nil {
+			return err
+		}
 		if point.Slot == tip.Point.Slot &&
 			bytes.Equal(point.Hash, tip.Point.Hash) {
 			if o.ChainsyncState != nil {
