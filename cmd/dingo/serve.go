@@ -179,7 +179,11 @@ func resumeBackfill(
 		return clearBackfillSyncStatus(db)
 	}
 
-	// Enable bulk-load optimizations for the backfill
+	if err := node.RunPlannerStats(db, logger); err != nil {
+		return fmt.Errorf("running planner statistics before backfill: %w", err)
+	}
+
+	// Enable bulk-load optimizations for the backfill.
 	cleanup := node.WithBulkLoadPragmas(db, logger)
 	defer cleanup()
 
