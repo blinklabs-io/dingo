@@ -87,8 +87,8 @@ type OuroborosConfig struct {
 	IntersectTip    bool
 	PromRegistry    prometheus.Registerer
 	// ChainsyncBlockTimeout bounds how long NtN chain-sync can wait for a
-	// block reply after a peer enters a server-agency state. Low-density
-	// networks may legitimately go longer than the default protocol window.
+	// block reply after a peer enters a server-agency state. Values below
+	// the protocol maximum are raised to the protocol maximum.
 	ChainsyncBlockTimeout time.Duration
 	// MaxTxSubmissionsPerSecond is the maximum number of transaction
 	// submissions accepted per peer per second via the TxSubmission
