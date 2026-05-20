@@ -310,21 +310,37 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 	utxoTxId := bytes.Repeat([]byte{0xA1}, 32)
 	paymentKey := bytes.Repeat([]byte{0x11}, 28)
 	stakingKey := bytes.Repeat([]byte{0x22}, 28)
-	utxo := models.Utxo{
-		TxId:       utxoTxId,
-		OutputIdx:  0,
-		AddedSlot:  100,
-		PaymentKey: paymentKey,
-		StakingKey: stakingKey,
-		Amount:     types.Uint64(5000000),
+	refInputTxId := bytes.Repeat([]byte{0xA2}, 32)
+	refPaymentKey := bytes.Repeat([]byte{0x33}, 28)
+	refStakingKey := bytes.Repeat([]byte{0x44}, 28)
+	utxos := []models.Utxo{
+		{
+			TxId:       utxoTxId,
+			OutputIdx:  0,
+			AddedSlot:  100,
+			PaymentKey: paymentKey,
+			StakingKey: stakingKey,
+			Amount:     types.Uint64(5000000),
+		},
+		{
+			TxId:       refInputTxId,
+			OutputIdx:  1,
+			AddedSlot:  100,
+			PaymentKey: refPaymentKey,
+			StakingKey: refStakingKey,
+			Amount:     types.Uint64(6000000),
+		},
 	}
-	require.NoError(t, store.DB().Create(&utxo).Error)
+	require.NoError(t, store.DB().Create(&utxos).Error)
 
 	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB1}, 32))
 	tx := &mockTransactionWithInputs{
 		mockTransaction: mockTransaction{
 			hash:    txHash,
 			isValid: true,
+			refInputs: []lcommon.TransactionInput{
+				dbtestutil.NewMockInput(refInputTxId, 1),
+			},
 		},
 		consumed: []dbtestutil.MockInput{
 			{TxId: utxoTxId, IndexValue: 0},
@@ -346,13 +362,106 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 	var rows []models.AddressTransaction
 	require.NoError(
 		t,
-		store.DB().Where("transaction_id = ?", dbTx.ID).Find(&rows).Error,
+		store.DB().
+			Where("transaction_id = ?", dbTx.ID).
+			Order("payment_key").
+			Find(&rows).Error,
 	)
-	require.Len(t, rows, 1, "duplicate addresses in one tx should be deduplicated")
+	require.Len(t, rows, 2, "duplicate addresses in one tx should be deduplicated")
 	require.Equal(t, paymentKey, rows[0].PaymentKey)
 	require.Equal(t, stakingKey, rows[0].StakingKey)
-	require.Equal(t, point.Slot, rows[0].Slot)
-	require.Equal(t, uint32(3), rows[0].TxIndex)
+	require.Equal(t, refPaymentKey, rows[1].PaymentKey)
+	require.Equal(t, refStakingKey, rows[1].StakingKey)
+	for _, row := range rows {
+		require.Equal(t, point.Slot, row.Slot)
+		require.Equal(t, uint32(3), row.TxIndex)
+	}
+}
+
+// TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys
+// verifies that API-mode batched address indexing includes every input class
+// resolved through the skinny address-key lookup.
+func TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys(t *testing.T) {
+	store := setupTestDBWithMode(t, types.StorageModeAPI)
+
+	inputTxId := bytes.Repeat([]byte{0xA1}, 32)
+	collateralTxId := bytes.Repeat([]byte{0xA2}, 32)
+	referenceTxId := bytes.Repeat([]byte{0xA3}, 32)
+	rows := []models.Utxo{
+		{
+			TxId:       inputTxId,
+			OutputIdx:  0,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x11}, 28),
+			StakingKey: bytes.Repeat([]byte{0x21}, 28),
+			Amount:     types.Uint64(1),
+		},
+		{
+			TxId:       collateralTxId,
+			OutputIdx:  1,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x12}, 28),
+			StakingKey: bytes.Repeat([]byte{0x22}, 28),
+			Amount:     types.Uint64(2),
+		},
+		{
+			TxId:       referenceTxId,
+			OutputIdx:  2,
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{0x13}, 28),
+			StakingKey: bytes.Repeat([]byte{0x23}, 28),
+			Amount:     types.Uint64(3),
+		},
+	}
+	require.NoError(t, store.DB().Create(&rows).Error)
+
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB2}, 32))
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		inputs: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(inputTxId, 0),
+		},
+		collateral: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(collateralTxId, 1),
+		},
+		refInputs: []lcommon.TransactionInput{
+			dbtestutil.NewMockInput(referenceTxId, 2),
+		},
+	}
+	point := ocommon.Point{
+		Hash: bytes.Repeat([]byte{0xC2}, 32),
+		Slot: 200,
+	}
+
+	acc := NewBatchAccumulator()
+	require.NoError(t, store.SetTransactionBatched(tx, point, 4, nil, acc, nil))
+	require.NoError(t, store.FlushBatch(acc, nil))
+
+	var dbTx models.Transaction
+	require.NoError(
+		t,
+		store.DB().Where("hash = ?", txHash.Bytes()).First(&dbTx).Error,
+	)
+	var indexed []models.AddressTransaction
+	require.NoError(
+		t,
+		store.DB().
+			Where("transaction_id = ?", dbTx.ID).
+			Order("payment_key").
+			Find(&indexed).Error,
+	)
+	require.Len(t, indexed, 3)
+	require.Equal(t, rows[0].PaymentKey, indexed[0].PaymentKey)
+	require.Equal(t, rows[0].StakingKey, indexed[0].StakingKey)
+	require.Equal(t, rows[1].PaymentKey, indexed[1].PaymentKey)
+	require.Equal(t, rows[1].StakingKey, indexed[1].StakingKey)
+	require.Equal(t, rows[2].PaymentKey, indexed[2].PaymentKey)
+	require.Equal(t, rows[2].StakingKey, indexed[2].StakingKey)
+	for _, row := range indexed {
+		require.Equal(t, point.Slot, row.Slot)
+		require.Equal(t, uint32(4), row.TxIndex)
+	}
 }
 
 // --- Rollback state restoration tests ---
