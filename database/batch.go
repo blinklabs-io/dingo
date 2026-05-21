@@ -52,6 +52,23 @@ func (d *Database) FlushBatch(
 	return d.metadata.FlushBatch(acc, metadataTxn)
 }
 
+// BatchedTxIngestOpts toggles optional behaviors of SetTransactionBatched.
+//
+// Defaults preserve the original full-write behavior; setters opt callers
+// (currently API-mode Mithril backfill) into write-elision when the offsets
+// are known to already be present.
+type BatchedTxIngestOpts struct {
+	// SkipProducedUtxoOffsetWrites elides blob.SetUtxo calls for produced
+	// outputs. Use when the produced-UTxO offset references for this block
+	// have already been written (e.g. by the Mithril immutable-copy phase
+	// reflected in the immutable_utxo_offsets_tip sync-state key). Offsets
+	// must still be computed and present in the BlockIngestionResult — the
+	// guarantee is verified, only the redundant blob write is dropped.
+	// TX offset writes, metadata writes, and consumed-input handling are
+	// unaffected.
+	SkipProducedUtxoOffsetWrites bool
+}
+
 // SetTransactionBatched stores transaction blob offsets and immediate
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.
@@ -65,6 +82,27 @@ func (d *Database) SetTransactionBatched(
 	offsets *BlockIngestionResult,
 	acc BatchAccumulator,
 	txn *Txn,
+) (retErr error) {
+	return d.SetTransactionBatchedWithOpts(
+		tx, point, idx, updateEpoch, pparamUpdates,
+		certDeposits, offsets, acc, txn,
+		BatchedTxIngestOpts{},
+	)
+}
+
+// SetTransactionBatchedWithOpts is the option-aware form of
+// SetTransactionBatched. See BatchedTxIngestOpts for the available toggles.
+func (d *Database) SetTransactionBatchedWithOpts(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	updateEpoch uint64,
+	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+	certDeposits map[int]uint64,
+	offsets *BlockIngestionResult,
+	acc BatchAccumulator,
+	txn *Txn,
+	opts BatchedTxIngestOpts,
 ) (retErr error) {
 	if acc == nil {
 		return errors.New("batch accumulator must not be nil")
@@ -132,6 +170,13 @@ func (d *Database) SetTransactionBatched(
 				outputIdx,
 				point.Slot,
 			)
+		}
+		if opts.SkipProducedUtxoOffsetWrites {
+			// Offset is required to be computed (validated above) so a
+			// regression in the indexer is still caught, but the blob
+			// write itself is elided: the immutable-copy phase already
+			// persisted this exact reference.
+			continue
 		}
 		offsetData := EncodeUtxoOffset(&offset)
 		if err := blob.SetUtxo(blobTxn, txID, outputIdx, offsetData); err != nil {

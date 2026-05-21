@@ -58,6 +58,17 @@ type Backfill struct {
 	runningNonce   []byte
 	computeNonces  bool
 	epochIdx       int // moving index into epochs for O(1) lookup
+
+	// immutableUtxoOffsetsTipSlot is the highest slot for which the Mithril
+	// immutable-copy phase already persisted produced-UTxO offset references.
+	// Blocks at or below this slot can have their per-block produced-UTxO
+	// blob writes elided. Zero (the default) means "no skip threshold".
+	immutableUtxoOffsetsTipSlot uint64
+
+	// Counters surfaced in the completion log to make the optimisation
+	// observable.
+	skippedBlocks   uint64
+	skippedUtxoRefs uint64
 }
 
 // NewBackfill creates a new Backfill instance.
@@ -80,6 +91,15 @@ func NewBackfill(
 // nonce rows.
 func (b *Backfill) DisableNonceComputation() {
 	b.computeNonces = false
+}
+
+// SetImmutableUtxoOffsetsTipSlot informs the backfill that produced-UTxO
+// offset references have already been persisted by the Mithril immutable-copy
+// phase for every block at or below the given slot. The backfill will then
+// elide the redundant blob writes for those blocks. Passing 0 disables the
+// optimisation. Has no effect if called after Run has started.
+func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
+	b.immutableUtxoOffsetsTipSlot = slot
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -547,6 +567,31 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 
+	// Auto-detect the immutable-copy offset tip once. Callers that have
+	// already set a threshold via SetImmutableUtxoOffsetsTipSlot keep
+	// their override; otherwise we read the sync state written by the
+	// Mithril immutable-copy phase so the optimisation works even when
+	// Run is invoked outside the mithril sync command (e.g. a recovery
+	// rerun against an existing data directory).
+	if b.immutableUtxoOffsetsTipSlot == 0 {
+		if slot, ok, tipErr := ImmutableUtxoOffsetsTipSlot(b.db); tipErr != nil {
+			b.logger.Warn(
+				"failed to read immutable UTxO offset tip; "+
+					"backfill will write all offsets",
+				"component", "backfill",
+				"error", tipErr,
+			)
+		} else if ok {
+			b.immutableUtxoOffsetsTipSlot = slot
+			b.logger.Info(
+				"detected immutable UTxO offset tip; "+
+					"redundant blob writes will be skipped below it",
+				"component", "backfill",
+				"immutable_utxo_offsets_tip_slot", slot,
+			)
+		}
+	}
+
 	tipBlocks, err := database.BlocksRecent(b.db, 1)
 	if err != nil {
 		return fmt.Errorf("reading chain tip: %w", err)
@@ -894,6 +939,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"blocks_processed", processedBlocks,
 		"transactions_stored", processedTxs,
 		"elapsed", elapsed.Round(time.Second),
+		"skipped_utxo_offset_block_writes", b.skippedBlocks,
+		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
 	return nil
 }
@@ -910,15 +957,26 @@ func (b *Backfill) processBlockTxsBatched(
 	acc database.BatchAccumulator,
 	txn *database.Txn,
 ) error {
+	opts := database.BatchedTxIngestOpts{
+		SkipProducedUtxoOffsetWrites: b.immutableUtxoOffsetsTipSlot > 0 &&
+			point.Slot <= b.immutableUtxoOffsetsTipSlot,
+	}
+	if opts.SkipProducedUtxoOffsetWrites {
+		b.skippedBlocks++
+	}
 	for i, tx := range txs {
 		updateEpoch, paramUpdates := tx.ProtocolParameterUpdates()
 		certDeposits := b.calculateCertDeposits(
 			tx, eraId, pp,
 		)
-		if err := b.db.SetTransactionBatched(
+		if opts.SkipProducedUtxoOffsetWrites {
+			// Counter is informational; Produced() is cheap (slice length).
+			b.skippedUtxoRefs += uint64(len(tx.Produced()))
+		}
+		if err := b.db.SetTransactionBatchedWithOpts(
 			tx, point, uint32(i), // #nosec G115
 			updateEpoch, paramUpdates,
-			certDeposits, offsets, acc, txn,
+			certDeposits, offsets, acc, txn, opts,
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
 		}
