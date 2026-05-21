@@ -12,7 +12,7 @@ Hi folks! Here’s what we shipped in v0.47.0.
 
 ### ✨ What's New
 
-* Added **traverse chain history in reverse order:** Operators and integrators can now walk chain history backward more directly, which makes reverse historical inspection and recovery work easier to manage. ([#2318](https://github.com/blinklabs-io/dingo/pull/2318))
+* Added **traverse chain history in reverse order:** Operators and integrators can now walk chain history backward more directly, which makes historical inspection and recovery work easier to manage. ([#2318](https://github.com/blinklabs-io/dingo/pull/2318))
 * Introduced **tune chainsync stall timeouts:** Operators can now configure how quickly stalled chainsync work triggers recovery, which makes sync behavior easier to adapt to different network conditions. ([#2319](https://github.com/blinklabs-io/dingo/pull/2319))
 * Expanded **recover Mithril downloads after idle stalls:** Mithril sync can now detect idle download stalls and resume work more safely, which makes long running bootstrap and backfill flows more resilient. ([#2365](https://github.com/blinklabs-io/dingo/pull/2365))
 
@@ -20,23 +20,23 @@ Hi folks! Here’s what we shipped in v0.47.0.
 
 * Improved **speed address lookup work during API backfill:** API mode backfill now finds input addresses with less overhead, which helps historical indexing move more efficiently. ([#2363](https://github.com/blinklabs-io/dingo/pull/2363))
 * Refined **surface SQLite planning details before and during resumed backfill:** Operators can now see SQLite planning statistics before API mode backfill starts and when it resumes, which makes backfill behavior easier to understand and troubleshoot. ([#2367](https://github.com/blinklabs-io/dingo/pull/2367))
-* Enhanced **avoid duplicate UTxO offset writes during Mithril backfill:** Mithril API mode backfill now skips repeated produced UTxO offset writes, which reduces unnecessary storage work during historical catch up. ([#2368](https://github.com/blinklabs-io/dingo/pull/2368))
+* Enhanced **avoid duplicate transaction output offset writes during Mithril backfill:** Mithril API mode backfill now skips repeated produced transaction output offset writes, which reduces unnecessary storage work during historical catch up. ([#2368](https://github.com/blinklabs-io/dingo/pull/2368))
 * Updated **broaden governance tally and enactment regression coverage:** Governance related validation now checks tally and enactment behavior more thoroughly, which increases confidence in governance tracking during upgrades. ([#2370](https://github.com/blinklabs-io/dingo/pull/2370))
 * Modernized **publish the v0.46.4 release history entry:** The repository now includes the v0.46.4 release notes entry in its published release history, which keeps recent patch context easier to review. ([#2362](https://github.com/blinklabs-io/dingo/pull/2362))
 
 ### 🔧 Fixes
 
-* Fixed **preserve ordering for ledger chainsync events:** Ordering critical `ledger.chainsync` events now arrive through blocking delivery, which makes downstream consumers less likely to miss important sequence changes. ([#2366](https://github.com/blinklabs-io/dingo/pull/2366))
-* Corrected **end stalled WaitForTx streams with a clear deadline:** `UTxORPC` `WaitForTx` requests now stop with a server side timeout instead of hanging indefinitely, which makes stalled request handling easier to detect. ([#2379](https://github.com/blinklabs-io/dingo/pull/2379))
-* Strengthened **choose Mithril trust-boundary intersect points more reliably:** Mithril recovery now includes the trust boundary intersect point when picking where to resume, which makes restore and recovery decisions safer. ([#2358](https://github.com/blinklabs-io/dingo/pull/2358))
-* Stabilized **retain spent UTxOs for historical queries during pruning:** API storage mode now keeps spent UTxOs available through pruning, which helps historical queries remain reliable over time. ([#2361](https://github.com/blinklabs-io/dingo/pull/2361))
+* Fixed **preserve ordering for ledger sync events:** Ordering critical ledger sync events now arrive through blocking delivery, which makes downstream consumers less likely to miss important sequence changes. ([#2366](https://github.com/blinklabs-io/dingo/pull/2366))
+* Corrected **end stalled transaction wait streams with a clear deadline:** Transaction wait requests now stop with a server side timeout instead of hanging indefinitely, which makes stalled request handling easier to detect. ([#2379](https://github.com/blinklabs-io/dingo/pull/2379))
+* Strengthened **choose Mithril trust boundary intersect points more reliably:** Mithril recovery now includes the trust boundary intersect point when picking where to resume, which makes restore and recovery decisions safer. ([#2358](https://github.com/blinklabs-io/dingo/pull/2358))
+* Stabilized **retain spent transaction outputs for historical queries during pruning:** API storage mode now keeps spent transaction outputs available through pruning, which helps historical queries remain reliable over time. ([#2361](https://github.com/blinklabs-io/dingo/pull/2361))
 
 ### 📋 What You Need to Know
 
 * Clarified **follow normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
-* Highlighted **expect steadier Mithril and API backfill behavior:** Mithril and API mode backfill should be more resilient and more efficient because downloads recover from stalls, SQLite planning improves before backfill, and redundant UTxO offset writes are avoided.
-* Emphasized **trust safer sync recovery and event handling:** Operators and integrators should expect safer sync behavior because chainsync stall detection is configurable, ordering critical `ledger.chainsync` events no longer rely on lossy delivery, and Mithril trust boundary point selection is more reliable.
-* Summarized **rely on stronger historical query behavior:** API mode historical queries should remain more reliable because spent UTxOs stay available through pruning, and `UTxORPC` `WaitForTx` requests now fail with a clear server side deadline instead of hanging indefinitely.
+* Highlighted **expect steadier Mithril and API backfill behavior:** Mithril and API mode backfill should be more resilient and more efficient because downloads recover from stalls, SQLite planning improves before backfill, and redundant transaction output offset writes are avoided.
+* Emphasized **trust safer sync recovery and event handling:** Operators and integrators should expect safer sync behavior because chainsync stall detection is configurable, ordering critical ledger sync events no longer rely on lossy delivery, and Mithril trust boundary point selection is more reliable.
+* Summarized **rely on stronger historical query behavior:** API mode historical queries should remain more reliable because spent transaction outputs stay available through pruning, and transaction wait requests now fail with a clear server side deadline instead of hanging indefinitely.
 
 ### Recommended Network Compatibility ⚠️
 
