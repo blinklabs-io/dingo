@@ -91,7 +91,7 @@ type UtxoWithOrdering struct {
 // UtxoOrderingCursor is the keyset position for SearchUtxos.
 //
 // Text form (non-empty): slot:block_index:output_idx. GetUtxosByAddressWithOrdering
-// uses INNER JOIN transaction so these come from real chain position (no COALESCE).
+// uses the producing transaction position for ordering.
 type UtxoOrderingCursor struct {
 	Slot       uint64
 	BlockIndex uint32
