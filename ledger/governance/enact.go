@@ -38,6 +38,13 @@ type EnactmentContext struct {
 	Slot     uint64
 	PParams  lcommon.ProtocolParameters
 	UpdateFn func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error)
+
+	// TreasuryWithdrawalRemaining tracks the ENACT rule's cumulative
+	// withdrawal limit across all treasury-withdrawal actions enacted in
+	// the same epoch boundary. Actual treasury can differ when a withdrawal
+	// target is unregistered because unclaimed amounts remain in treasury.
+	TreasuryWithdrawalRemaining    uint64
+	TreasuryWithdrawalRemainingSet bool
 }
 
 // EnactmentResult is returned from EnactProposal when an action mutates
@@ -178,7 +185,8 @@ func EnactProposal(
 }
 
 // applyTreasuryWithdrawal debits the treasury by the sum of the
-// per-address amounts and credits each destination reward account.
+// per-address amounts, credits registered destination reward accounts,
+// and leaves unclaimed withdrawals in the treasury.
 func applyTreasuryWithdrawal(
 	ctx *EnactmentContext,
 	a *lcommon.TreasuryWithdrawalGovAction,
@@ -206,12 +214,18 @@ func applyTreasuryWithdrawal(
 		}
 		total += amount
 	}
-	if total > treasury {
+	if !ctx.TreasuryWithdrawalRemainingSet {
+		ctx.TreasuryWithdrawalRemaining = treasury
+		ctx.TreasuryWithdrawalRemainingSet = true
+	}
+	if total > ctx.TreasuryWithdrawalRemaining {
 		return fmt.Errorf(
-			"treasury withdrawal of %d exceeds tracked treasury balance %d",
-			total, treasury,
+			"treasury withdrawal of %d exceeds tracked treasury withdrawal capacity %d",
+			total, ctx.TreasuryWithdrawalRemaining,
 		)
 	}
+	ctx.TreasuryWithdrawalRemaining -= total
+	var unclaimed uint64
 	for rewardAddr, amount := range a.Withdrawals {
 		if amount == 0 {
 			continue
@@ -229,19 +243,80 @@ func applyTreasuryWithdrawal(
 		if err != nil {
 			return fmt.Errorf("treasury withdrawal reward account: %w", err)
 		}
-		if err := ctx.DB.AddAccountReward(
+		credited, err := creditRegisteredRewardAccount(
+			ctx.DB,
+			ctx.Txn,
 			stakeCredential,
 			amount,
 			ctx.Slot,
-			ctx.Txn,
-		); err != nil {
-			return fmt.Errorf("credit reward account: %w", err)
+		)
+		if err != nil {
+			return err
+		}
+		if !credited {
+			if unclaimed > ^uint64(0)-amount {
+				return errors.New("unclaimed treasury withdrawal overflow")
+			}
+			unclaimed += amount
 		}
 	}
 	return ctx.DB.Metadata().SetNetworkState(
-		treasury-total,
+		treasury-total+unclaimed,
 		reserves,
 		ctx.Slot,
+		metaTxn,
+	)
+}
+
+func creditRegisteredRewardAccount(
+	db *database.Database,
+	txn *database.Txn,
+	stakeCredential []byte,
+	amount uint64,
+	slot uint64,
+) (bool, error) {
+	err := db.AddAccountReward(stakeCredential, amount, slot, txn)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, models.ErrAccountNotFound) {
+		return false, nil
+	}
+	return false, fmt.Errorf("credit reward account: %w", err)
+}
+
+func addUnclaimedToTreasury(
+	db *database.Database,
+	txn *database.Txn,
+	amount uint64,
+	slot uint64,
+) error {
+	if amount == 0 {
+		return nil
+	}
+	var metaTxn types.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
+	state, err := db.Metadata().GetNetworkState(metaTxn)
+	if err != nil {
+		return fmt.Errorf("get network state: %w", err)
+	}
+	var treasury, reserves uint64
+	if state != nil {
+		treasury = uint64(state.Treasury)
+		reserves = uint64(state.Reserves)
+	}
+	if treasury > ^uint64(0)-amount {
+		return fmt.Errorf(
+			"treasury overflow adding unclaimed reward amount %d",
+			amount,
+		)
+	}
+	return db.Metadata().SetNetworkState(
+		treasury+amount,
+		reserves,
+		slot,
 		metaTxn,
 	)
 }

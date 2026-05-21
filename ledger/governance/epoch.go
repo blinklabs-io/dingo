@@ -100,13 +100,24 @@ func ProcessEpoch(
 	}
 
 	// --- ENACTMENT ----------------------------------------------------
+	initialNetworkState, err := in.DB.Metadata().
+		GetNetworkState(in.Txn.Metadata())
+	if err != nil {
+		return nil, fmt.Errorf("get initial network state: %w", err)
+	}
+	var treasuryWithdrawalRemaining uint64
+	if initialNetworkState != nil {
+		treasuryWithdrawalRemaining = uint64(initialNetworkState.Treasury)
+	}
 	enactCtx := &EnactmentContext{
-		DB:       in.DB,
-		Txn:      in.Txn,
-		Epoch:    in.NewEpoch,
-		Slot:     in.BoundarySlot,
-		PParams:  in.PParams,
-		UpdateFn: in.UpdateFn,
+		DB:                             in.DB,
+		Txn:                            in.Txn,
+		Epoch:                          in.NewEpoch,
+		Slot:                           in.BoundarySlot,
+		PParams:                        in.PParams,
+		UpdateFn:                       in.UpdateFn,
+		TreasuryWithdrawalRemaining:    treasuryWithdrawalRemaining,
+		TreasuryWithdrawalRemainingSet: true,
 	}
 	ratified, err := in.DB.GetRatifiedGovernanceProposals(in.Txn)
 	if err != nil {
@@ -482,9 +493,9 @@ func isDelayingActionPurpose(purpose govActionPurpose) bool {
 	}
 }
 
-// refundProposalDeposit credits the proposal deposit back to the
-// proposer's reward account. The caller marks the proposal final only
-// after this succeeds so a failed credit rolls back the epoch tick.
+// refundProposalDeposit returns the proposal deposit to the proposer when
+// the return reward account is still registered. If the reward account is
+// missing or inactive, the unclaimed deposit returns to the treasury.
 func refundProposalDeposit(
 	db *database.Database,
 	txn *database.Txn,
@@ -503,13 +514,28 @@ func refundProposalDeposit(
 	if err != nil {
 		return err
 	}
-	if err := db.AddAccountReward(
+	credited, err := creditRegisteredRewardAccount(
+		db,
+		txn,
 		stakeCredential,
 		proposal.Deposit,
 		slot,
-		txn,
-	); err != nil {
-		return fmt.Errorf("credit reward account: %w", err)
+	)
+	if err != nil {
+		return err
+	}
+	if !credited {
+		if err := addUnclaimedToTreasury(
+			db,
+			txn,
+			proposal.Deposit,
+			slot,
+		); err != nil {
+			return fmt.Errorf(
+				"return unclaimed proposal deposit to treasury: %w",
+				err,
+			)
+		}
 	}
 	return nil
 }
