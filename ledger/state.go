@@ -4586,10 +4586,154 @@ func (ls *LedgerState) IntersectPoints(
 	if ls.primaryChainTipAtOrAheadOfLedgerTip() {
 		points := ls.chain.IntersectPoints(count)
 		if len(points) > 0 {
-			return points, nil
+			return ls.withMithrilTrustBoundaryIntersectPoint(
+				points,
+				count,
+			), nil
 		}
 	}
-	return ls.RecentChainPoints(count)
+	points, err := ls.RecentChainPoints(count)
+	if err != nil {
+		return nil, err
+	}
+	return ls.withMithrilTrustBoundaryIntersectPoint(points, count), nil
+}
+
+func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
+	points []ocommon.Point,
+	count int,
+) []ocommon.Point {
+	if count <= 0 {
+		return points
+	}
+	point, ok := ls.mithrilTrustBoundaryPoint()
+	if !ok {
+		return points
+	}
+	for _, existing := range points {
+		if existing.Slot == point.Slot &&
+			bytes.Equal(existing.Hash, point.Hash) {
+			return points
+		}
+	}
+
+	insertAt := len(points)
+	for idx, existing := range points {
+		if point.Slot > existing.Slot {
+			insertAt = idx
+			break
+		}
+	}
+	ret := make([]ocommon.Point, 0, len(points)+1)
+	ret = append(ret, points[:insertAt]...)
+	ret = append(ret, point)
+	ret = append(ret, points[insertAt:]...)
+	if len(ret) <= count {
+		return ret
+	}
+	if insertAt >= count {
+		ret[count-1] = point
+	}
+	return ret[:count]
+}
+
+func (ls *LedgerState) mithrilTrustBoundaryPoint() (ocommon.Point, bool) {
+	if ls == nil || ls.db == nil {
+		return ocommon.Point{}, false
+	}
+	ls.RLock()
+	boundarySlot := ls.mithrilLedgerSlot
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if boundarySlot == 0 || boundarySlot == ^uint64(0) {
+		return ocommon.Point{}, false
+	}
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return ocommon.Point{}, false
+	}
+	if boundarySlot > currentTip.Point.Slot {
+		return ocommon.Point{}, false
+	}
+	block, err := ls.authoritativeLedgerBlockAtSlot(
+		boundarySlot,
+		currentTip.Point,
+	)
+	if err != nil {
+		if ls.config.Logger != nil &&
+			!errors.Is(err, models.ErrBlockNotFound) {
+			ls.config.Logger.Debug(
+				"failed to load Mithril trust boundary intersect point",
+				"component", "ledger",
+				"mithril_ledger_slot", boundarySlot,
+				"error", err,
+			)
+		}
+		return ocommon.Point{}, false
+	}
+	if block.Slot != boundarySlot || len(block.Hash) == 0 {
+		return ocommon.Point{}, false
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true
+}
+
+func (ls *LedgerState) authoritativeLedgerBlockAtSlot(
+	slot uint64,
+	tipPoint ocommon.Point,
+) (models.Block, error) {
+	var ret models.Block
+	txn := ls.db.Transaction(false)
+	err := txn.Do(func(txn *database.Txn) error {
+		block, err := database.BlockByPointTxn(txn, tipPoint)
+		if err != nil {
+			return err
+		}
+		if slot > block.Slot {
+			return models.ErrBlockNotFound
+		}
+		// Same-slot fork blocks can coexist in blob storage. Only the
+		// current tip's PrevHash chain proves the boundary is canonical.
+		for remaining := block.Slot - slot + 1; remaining > 0; remaining-- {
+			if block.Slot == slot {
+				ret = block
+				return nil
+			}
+			if block.Slot < slot {
+				return models.ErrBlockNotFound
+			}
+			prevHash, err := blockPrevHash(block)
+			if err != nil {
+				return err
+			}
+			if len(prevHash) == 0 {
+				return models.ErrBlockNotFound
+			}
+			block, err = database.BlockByHashTxn(txn, prevHash)
+			if err != nil {
+				return err
+			}
+		}
+		return models.ErrBlockNotFound
+	})
+	return ret, err
+}
+
+func blockPrevHash(block models.Block) ([]byte, error) {
+	if len(block.PrevHash) > 0 {
+		return block.PrevHash, nil
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode block at slot %d for previous hash: %w",
+			block.Slot,
+			err,
+		)
+	}
+	prevHash := decodedBlock.PrevHash().Bytes()
+	if len(prevHash) == 0 {
+		return nil, nil
+	}
+	return prevHash, nil
 }
 
 // GetIntersectPoint returns the intersect between the specified points and the current chain

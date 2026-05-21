@@ -220,6 +220,17 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	return ret, err
 }
 
+func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = BlockBySlotTxn(txn, slot)
+		return err
+	})
+	return ret, err
+}
+
 func BlockURL(
 	ctx context.Context,
 	db *Database,
@@ -375,6 +386,76 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return models.Block{}, err
 	}
 	return models.Block{}, models.ErrBlockNotFound
+}
+
+func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	slotPrefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: slotPrefix,
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	var ret models.Block
+	found := false
+	for it.Seek(slotPrefix); it.ValidForPrefix(slotPrefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		k := item.Key()
+		if k == nil {
+			continue
+		}
+		if strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		block, err := blockByKey(txn, k)
+		if err != nil {
+			return models.Block{}, err
+		}
+		if block.Slot != slot {
+			continue
+		}
+		indexedBlock, err := txn.DB().BlockByIndex(block.ID, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return models.Block{}, err
+		}
+		if indexedBlock.Slot != block.Slot ||
+			!bytes.Equal(indexedBlock.Hash, block.Hash) {
+			continue
+		}
+		if !found || block.ID > ret.ID {
+			ret = block
+			found = true
+		}
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return ret, nil
 }
 
 func (d *Database) BlockByIndex(
