@@ -526,7 +526,7 @@ func (d *BlobStoreBadger) Delete(txn types.Txn, key []byte) error {
 func (d *BlobStoreBadger) NewIterator(
 	txn types.Txn,
 	opts types.BlobIteratorOptions,
-) types.BlobIterator {
+) (iter types.BlobIterator) {
 	badgerTxn, err := d.validateTxn(txn)
 	if err != nil {
 		return &errorIterator{err: err}
@@ -535,6 +535,18 @@ func (d *BlobStoreBadger) NewIterator(
 		Prefix:  opts.Prefix,
 		Reverse: opts.Reverse,
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			err, ok := r.(error)
+			if ok && errors.Is(err, badger.ErrDBClosed) {
+				iter = &errorIterator{
+					err: fmt.Errorf("%w: %w", types.ErrBlobStoreUnavailable, err),
+				}
+				return
+			}
+			panic(r)
+		}
+	}()
 	return &badgerIterator{iter: badgerTxn.tx.NewIterator(iterOpts)}
 }
 

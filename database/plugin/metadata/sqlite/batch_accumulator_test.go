@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -98,6 +99,17 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 	assert.Equal(t, uint32(1), ba.UtxoSpends[0].OutputIdx)
 	assert.Equal(t, uint(42), ba.DeleteTxIDs[0])
 
+	keyWitnessesCap := cap(ba.KeyWitnesses)
+	witnessScriptsCap := cap(ba.WitnessScripts)
+	scriptsCap := cap(ba.Scripts)
+	plutusDataCap := cap(ba.PlutusData)
+	redeemersCap := cap(ba.Redeemers)
+	addressTxsCap := cap(ba.AddressTxs)
+	utxoOutputsCap := cap(ba.UtxoOutputs)
+	utxoSpendsCap := cap(ba.UtxoSpends)
+	collateralRetsCap := cap(ba.CollateralRets)
+	deleteTxIDsCap := cap(ba.DeleteTxIDs)
+
 	// --- Reset and verify all slices are empty ---
 
 	ba.Reset()
@@ -113,18 +125,18 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 	assert.Empty(t, ba.CollateralRets)
 	assert.Empty(t, ba.DeleteTxIDs)
 
-	// --- Verify backing arrays are reused (cap > 0) ---
+	// --- Verify backing arrays are reused ---
 
-	assert.Greater(t, cap(ba.KeyWitnesses), 0)
-	assert.Greater(t, cap(ba.WitnessScripts), 0)
-	assert.Greater(t, cap(ba.Scripts), 0)
-	assert.Greater(t, cap(ba.PlutusData), 0)
-	assert.Greater(t, cap(ba.Redeemers), 0)
-	assert.Greater(t, cap(ba.AddressTxs), 0)
-	assert.Greater(t, cap(ba.UtxoOutputs), 0)
-	assert.Greater(t, cap(ba.UtxoSpends), 0)
-	assert.Greater(t, cap(ba.CollateralRets), 0)
-	assert.Greater(t, cap(ba.DeleteTxIDs), 0)
+	assert.Equal(t, keyWitnessesCap, cap(ba.KeyWitnesses))
+	assert.Equal(t, witnessScriptsCap, cap(ba.WitnessScripts))
+	assert.Equal(t, scriptsCap, cap(ba.Scripts))
+	assert.Equal(t, plutusDataCap, cap(ba.PlutusData))
+	assert.Equal(t, redeemersCap, cap(ba.Redeemers))
+	assert.Equal(t, addressTxsCap, cap(ba.AddressTxs))
+	assert.Equal(t, utxoOutputsCap, cap(ba.UtxoOutputs))
+	assert.Equal(t, utxoSpendsCap, cap(ba.UtxoSpends))
+	assert.Equal(t, collateralRetsCap, cap(ba.CollateralRets))
+	assert.Equal(t, deleteTxIDsCap, cap(ba.DeleteTxIDs))
 
 	// --- Verify re-add after reset works ---
 
@@ -335,4 +347,65 @@ func TestFlushBatch_Idempotent(t *testing.T) {
 		store.DB().Model(&models.Utxo{}).Count(&utxoCount).Error,
 	)
 	assert.Equal(t, int64(1), utxoCount)
+}
+
+// TestSetTransactionBatched_AccumulatesCorrectly verifies that
+// SetTransactionBatched writes the transaction record to the DB immediately
+// (so it can be queried) and routes key witnesses and address-transaction rows
+// to the accumulator rather than the database.
+// A subsequent FlushBatch call must materialise those rows correctly.
+func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
+	store := setupTestDBWithMode(t, "api")
+
+	// ------------------------------------------------------------------ //
+	// Build a mock transaction with one VKey witness.                    //
+	// (uses the same helper pattern as TestStorageMode_APIStoresWitnesses)//
+	// ------------------------------------------------------------------ //
+	tx := newTestWitnessTransaction(
+		"batched_test_hash_1234567890123456789012345678901234567890",
+	)
+	point := ocommon.Point{
+		Hash: []byte("block_hash_batched_12345678901234"),
+		Slot: 999,
+	}
+	acc := NewBatchAccumulator()
+
+	require.NoError(
+		t,
+		store.SetTransactionBatched(tx, point, 0, nil, acc, nil),
+	)
+
+	// ------------------------------------------------------------------ //
+	// 1. Transaction record must exist in the DB immediately.             //
+	// ------------------------------------------------------------------ //
+	var txCount int64
+	require.NoError(
+		t,
+		store.DB().Model(&models.Transaction{}).Count(&txCount).Error,
+	)
+	assert.Equal(t, int64(1), txCount, "transaction record must be written immediately")
+
+	// ------------------------------------------------------------------ //
+	// 2. Key witness must be in the accumulator, NOT yet in the DB.      //
+	// ------------------------------------------------------------------ //
+	assert.Len(t, acc.KeyWitnesses, 1, "one vkey witness expected in accumulator")
+	assert.Equal(t, models.KeyWitnessTypeVkey, acc.KeyWitnesses[0].Type)
+
+	var witnessCount int64
+	require.NoError(
+		t,
+		store.DB().Model(&models.KeyWitness{}).Count(&witnessCount).Error,
+	)
+	assert.Equal(t, int64(0), witnessCount, "witness must not yet be flushed to DB")
+
+	// ------------------------------------------------------------------ //
+	// 3. FlushBatch must write the deferred rows to the DB.              //
+	// ------------------------------------------------------------------ //
+	require.NoError(t, store.FlushBatch(acc, nil))
+
+	require.NoError(
+		t,
+		store.DB().Model(&models.KeyWitness{}).Count(&witnessCount).Error,
+	)
+	assert.Equal(t, int64(1), witnessCount, "witness must be present after flush")
 }

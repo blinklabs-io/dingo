@@ -49,12 +49,17 @@ const (
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
 
-	// When we're still meaningfully behind tip, wait for a small header runway
-	// before starting blockfetch. This avoids repeated one-block fetch loops
-	// near a fork boundary where peers may not yet serve the first announced
-	// block body.
+	// When we're still meaningfully behind tip, wait for a header runway
+	// before starting blockfetch so each batch amortises peer round-trip
+	// and protocol overhead over many blocks instead of trickling 1-8
+	// blocks per request. The cap was 64 historically (a fork-boundary
+	// safety value) — too small for catchup, where the chain can fall
+	// thousands of blocks behind and we want to fetch hundreds-per-batch.
+	// `desiredBlockfetchBatchHeaders` scales up to this cap based on the
+	// observed block-gap; near tip it falls back to small batches for
+	// low latency.
 	blockfetchMinBatchHeadersWhenBehind = 8
-	blockfetchMaxBatchHeadersWhenBehind = 64
+	blockfetchMaxBatchHeadersWhenBehind = 500
 	blockfetchMinBatchGapSlots          = 64
 
 	// Number of received blockfetch blocks to buffer before committing them.
@@ -111,11 +116,19 @@ const (
 	// in multi-producer networks where short forks are expected.
 	headerMismatchResyncThreshold = 20
 
-	// Chainsync re-sync reasons
-	resyncReasonRollbackAhead    = "rollback point ahead of local tip"
-	resyncReasonRollbackNotFound = "rollback point not found"
-
 	maxPeerHeaderHistoryPerConn = 256
+)
+
+// ErrRollbackLoopDetected is returned by handleEventChainsyncRollback when
+// the same peer repeatedly requests a rollback to the same slot within the
+// rollback loop detection window. The rollback is skipped to break the loop,
+// and the caller should trigger a chainsync re-sync to recover.
+var ErrRollbackLoopDetected = errors.New(
+	"rollback loop detected: same slot rolled back too many times within window",
+)
+
+var ErrRollbackExceedsMithrilBoundary = errors.New(
+	"rollback exceeds Mithril trust boundary",
 )
 
 type peerHeaderRecord struct {
@@ -152,6 +165,27 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 	}
 	if e.Rollback {
 		if err := ls.handleEventChainsyncRollback(e); err != nil {
+			if errors.Is(err, ErrRollbackLoopDetected) {
+				// The rollback was skipped to break a pathological
+				// loop. Trigger a chainsync re-sync so the peer
+				// can negotiate a fresh intersection rather than
+				// continuing to send the same rollback point.
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				if ls.config.EventBus != nil {
+					ls.config.EventBus.Publish(
+						event.ChainsyncResyncEventType,
+						event.NewEvent(
+							event.ChainsyncResyncEventType,
+							event.ChainsyncResyncEvent{
+								ConnectionId: e.ConnectionId,
+								Reason:       event.ChainsyncResyncReasonRollbackLoop,
+							},
+						),
+					)
+				}
+				return
+			}
 			ls.config.Logger.Error(
 				"failed to handle rollback",
 				"component", "ledger",
@@ -686,7 +720,7 @@ func (ls *LedgerState) findPeerForkPath(
 	}
 	for depth := 0; depth < maxPeerHeaderHistoryPerConn &&
 		len(prevHash) > 0; depth++ {
-		ancestorBlock, err := database.BlockByHash(ls.db, prevHash)
+		ancestorBlock, err := ls.blockByHash(prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(
 				ancestorBlock.Slot,
@@ -736,6 +770,13 @@ func (ls *LedgerState) findPeerForkPath(
 	return nil, nil, nil
 }
 
+func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
+	if ls.lookupBlockByHash != nil {
+		return ls.lookupBlockByHash(hash)
+	}
+	return database.BlockByHash(ls.db, hash)
+}
+
 func connIdKey(connId ouroboros.ConnectionId) string {
 	if connId.LocalAddr == nil && connId.RemoteAddr == nil {
 		return ""
@@ -766,12 +807,24 @@ func desiredBlockfetchBatchHeaders(
 		}
 		return min(1, maxHeaders)
 	}
+	// Scale the header runway with the size of the catchup gap. A node
+	// that's hundreds of blocks behind benefits from batching close to
+	// the blockfetch protocol limit (500), while near-tip cases keep
+	// small batches for low latency. The previous values (max 8 when
+	// gapBlocks > 64) starved the blockfetch pipeline during catchup —
+	// every blockfetch round-trip carried only a handful of blocks even
+	// though `chain.HeaderRange(blockfetchBatchSize)` is willing to span
+	// up to 500.
 	var minHeaders int
 	switch {
+	case gapBlocks > 1000:
+		minHeaders = 256
+	case gapBlocks > 256:
+		minHeaders = 128
 	case gapBlocks > 64:
-		minHeaders = 8
+		minHeaders = 32
 	case gapBlocks > 16:
-		minHeaders = 4
+		minHeaders = 8
 	case gapBlocks > 4:
 		minHeaders = 2
 	default:
@@ -935,9 +988,28 @@ func (ls *LedgerState) nextBufferedHeaderConnId() (
 func (ls *LedgerState) replayBufferedHeadersAsync(
 	connId ouroboros.ConnectionId,
 ) {
+	// Hold replayMu so Close cannot start Wait between our closed check
+	// and Add(1); otherwise Wait could observe a zero counter and the
+	// subsequent Add(1) would panic with "WaitGroup misuse: Add called
+	// concurrently with Wait" (#2107).
+	ls.replayMu.Lock()
+	if ls.closed.Load() {
+		ls.replayMu.Unlock()
+		return
+	}
+	ls.replayWG.Add(1)
+	ls.replayMu.Unlock()
 	go func() {
+		defer ls.replayWG.Done()
 		ls.chainsyncMutex.Lock()
 		defer ls.chainsyncMutex.Unlock()
+		// Re-check after acquiring the mutex in case Close started
+		// while we were waiting for the lock; the DB reads inside
+		// handleEventChainsyncBlockHeader (BlockByHash etc.) will
+		// panic with "DB Closed" once the owner closes the DB.
+		if ls.closed.Load() {
+			return
+		}
 		if ls.headerPipelineConnId != (ouroboros.ConnectionId{}) ||
 			ls.chain.HeaderCount() > 0 {
 			return
@@ -1079,7 +1151,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"count", slotCount,
 				"window", rollbackLoopWindow,
 			)
-			return nil
+			return ErrRollbackLoopDetected
 		}
 	}
 
@@ -1120,7 +1192,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					event.ChainsyncResyncEventType,
 					event.ChainsyncResyncEvent{
 						ConnectionId: e.ConnectionId,
-						Reason:       resyncReasonRollbackAhead,
+						Reason:       event.ChainsyncResyncReasonRollbackAhead,
 					},
 				),
 			)
@@ -1158,7 +1230,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       resyncReasonRollbackNotFound,
+							Reason:       event.ChainsyncResyncReasonRollbackNotFound,
 						},
 					),
 				)
@@ -1166,6 +1238,21 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			return nil
 		}
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
+				"chainsync rollback exceeds security parameter K",
+				e.ConnectionId,
+			)
+			if reconcileErr != nil {
+				return fmt.Errorf(
+					"reconcile primary chain and ledger after over-K rollback: %w",
+					reconcileErr,
+				)
+			}
+			if reconciled {
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				return nil
+			}
 			// The peer's chain has diverged beyond K blocks from
 			// ours. This is a security violation — we must not
 			// follow a chain that requires rolling back more than
@@ -1193,7 +1280,37 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       "rollback exceeds security parameter K",
+							Reason:       event.ChainsyncResyncReasonRollbackExceedsK,
+						},
+					),
+				)
+			}
+			return nil
+		}
+		if errors.Is(err, ErrRollbackExceedsMithrilBoundary) {
+			// The Mithril snapshot is the local trust anchor. Blocks at
+			// or below its boundary were certified as a single ledger
+			// state, so we cannot reconstruct intermediate UTxO states
+			// for a replacement fork below that point. Reject the peer
+			// chain and force a fresh intersection instead.
+			ls.config.Logger.Error(
+				"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"hash", hex.EncodeToString(e.Point.Hash),
+				"mithril_ledger_slot", ls.mithrilLedgerSlot,
+				"connection_id", e.ConnectionId.String(),
+			)
+			ls.resetChainsyncResyncState()
+			ls.chainsyncState = SyncingChainsyncState
+			if ls.config.EventBus != nil {
+				ls.config.EventBus.Publish(
+					event.ChainsyncResyncEventType,
+					event.NewEvent(
+						event.ChainsyncResyncEventType,
+						event.ChainsyncResyncEvent{
+							ConnectionId: e.ConnectionId,
+							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
 						},
 					),
 				)
@@ -1227,6 +1344,109 @@ func pointMatches(a, b ocommon.Point) bool {
 	return a.Slot == b.Slot && bytes.Equal(a.Hash, b.Hash)
 }
 
+func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
+	if e.BlockHeader == nil {
+		return e.Tip
+	}
+	return ochainsync.Tip{
+		Point:       e.Point,
+		BlockNumber: e.BlockHeader.BlockNumber(),
+	}
+}
+
+func (ls *LedgerState) localTipPraosView(
+	localTip ochainsync.Tip,
+) chainselection.PraosTiebreakerView {
+	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
+		return chainselection.PraosTiebreakerView{}
+	}
+	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"local tip Praos view unavailable: block lookup failed",
+				"component", "ledger",
+				"slot", localTip.Point.Slot,
+				"hash", hex.EncodeToString(localTip.Point.Hash),
+				"error", err,
+			)
+		}
+		return chainselection.PraosTiebreakerView{}
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Debug(
+				"local tip Praos view unavailable: block decode failed",
+				"component", "ledger",
+				"slot", localTip.Point.Slot,
+				"hash", hex.EncodeToString(localTip.Point.Hash),
+				"error", err,
+			)
+		}
+		return chainselection.PraosTiebreakerView{}
+	}
+	if decoded == nil {
+		return chainselection.PraosTiebreakerView{}
+	}
+	view, _ := chainselection.GetPraosTiebreakerView(decoded.Header())
+	return view
+}
+
+func (ls *LedgerState) compareIncomingHeaderToLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) chainselection.ChainComparisonResult {
+	observedTip := observedHeaderTip(e)
+	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
+		observedTip = e.Tip
+	}
+
+	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
+	result := chainselection.ComparePraosTips(
+		observedTip,
+		localTip,
+		incomingView,
+		ls.localTipPraosView(localTip),
+	)
+	if result != chainselection.ChainEqual {
+		return result
+	}
+
+	// If the peer has advertised a further tip than the header just delivered,
+	// use that only when block number alone decides the comparison. We do not
+	// have the advertised tip's Praos select view until its header arrives.
+	if e.Tip.BlockNumber > observedTip.BlockNumber {
+		switch {
+		case e.Tip.BlockNumber > localTip.BlockNumber:
+			return chainselection.ChainABetter
+		case e.Tip.BlockNumber < localTip.BlockNumber:
+			return chainselection.ChainBBetter
+		}
+	}
+	return result
+}
+
+func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
+	e ChainsyncEvent,
+	localTip ochainsync.Tip,
+) bool {
+	observedTip := observedHeaderTip(e)
+	if observedTip.BlockNumber > localTip.BlockNumber {
+		return true
+	}
+	if observedTip.BlockNumber < localTip.BlockNumber {
+		return false
+	}
+	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
+	return chainselection.ComparePraosTips(
+		observedTip,
+		localTip,
+		incomingView,
+		ls.localTipPraosView(localTip),
+	) == chainselection.ChainABetter
+}
+
 type LocalRollbackRecoveryResult struct {
 	Recovered           bool
 	SkipConnectionClose bool
@@ -1256,8 +1476,20 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 		if ancestorPoint == nil || !pointMatches(*ancestorPoint, point) {
 			continue
 		}
+		// Anything at or below the chain's current header tip is already
+		// applied. Without this guard, a forkPath entry whose hash equals
+		// the header tip causes AddBlockHeader to fail the prev-hash
+		// check (header tip's prev != header tip), which aborts recovery
+		// and breaks the chainsync session permanently. Use the larger
+		// of the rollback point and the live header tip so concurrent
+		// progress past `point` does not regress recovery.
+		cutoffSlot := point.Slot
+		if tipSlot := ls.chain.HeaderTip().Point.Slot; tipSlot > cutoffSlot {
+			cutoffSlot = tipSlot
+		}
+		added := 0
 		for _, evt := range forkPath {
-			if evt.Point.Slot <= point.Slot {
+			if evt.Point.Slot <= cutoffSlot {
 				continue
 			}
 			if err := ls.chain.AddBlockHeader(evt.BlockHeader); err != nil {
@@ -1265,8 +1497,9 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 				ls.headerPipelineConnId = ouroboros.ConnectionId{}
 				return 0, err
 			}
+			added++
 		}
-		if ls.chain.HeaderCount() == 0 {
+		if added == 0 {
 			continue
 		}
 		ls.headerPipelineConnId = connId
@@ -1411,7 +1644,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network and the
 	// epoch nonce may not be fully computed yet (e.g. Byron→Shelley).
-	if ls.validationEnabled {
+	// Also skip headers covered by a Mithril snapshot: those slots were
+	// verified by the certificate chain during import, and the restored
+	// database intentionally does not keep every historical epoch nonce.
+	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
 			if ls.config.EventBus != nil {
 				ls.config.Logger.Warn(
@@ -1475,20 +1711,19 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		var notFitErr chain.BlockNotFitChainTipError
 		if errors.As(err, &notFitErr) {
 			localTip := ls.chain.Tip()
-			// A header strictly behind the local tip is genuinely
-			// stale and can be dropped. A header AT the same slot
-			// as the local tip with a different hash is a slot
-			// battle — both pools forged at the same slot — and
-			// must fall through to the fork-resolution path so
-			// chainselection's tiebreak picks a side. Treating
-			// equal-slot mismatches as stale here drops the peer's
-			// forge before tryResolveFork ever sees it, locks
-			// dingo onto whichever block it adopted first, and
-			// diverges the chain from peers that resolved the
-			// same battle the other way; that drift then folds
-			// into the evolving nonce and breaks header
-			// verification at the next epoch boundary.
-			if e.Point.Slot < localTip.Point.Slot {
+			// A header behind the local tip is stale only if the
+			// Praos comparison also says it cannot beat the local
+			// tip. At equal block number, cardano-node resolves the
+			// fork by Praos select view, even when the winning
+			// header is at an earlier slot. Without both select
+			// views, keep the old stale behavior for earlier-slot
+			// headers and let a future observed header prove the
+			// advertised tip.
+			if e.Point.Slot < localTip.Point.Slot &&
+				!ls.earlierHeaderCanBeatLocalTip(
+					e,
+					localTip,
+				) {
 				ls.config.Logger.Debug(
 					"ignoring stale roll forward behind local tip",
 					"component", "ledger",
@@ -1547,7 +1782,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 				)
 				ls.requestChainsyncResync(
 					e.ConnectionId,
-					"persistent chain fork",
+					event.ChainsyncResyncReasonPersistentFork,
 				)
 			}
 			return nil
@@ -1679,6 +1914,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	return nil
 }
 
+func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
+	if !ls.validationEnabled {
+		return false
+	}
+	return ls.mithrilLedgerSlot == 0 || slot > ls.mithrilLedgerSlot
+}
+
 // tryResolveFork attempts to resolve a chain fork when an incoming header
 // doesn't fit the local chain tip. The incoming header's prevHash identifies
 // a block that exists on our local chain. If the peer's immediate prevHash
@@ -1696,16 +1938,13 @@ func (ls *LedgerState) tryResolveFork(
 	notFitErr chain.BlockNotFitChainTipError,
 ) (bool, error) {
 	// Only resolve forks when the peer's chain is genuinely better than
-	// ours per Praos rules (longer wins; at equal length, lower slot wins).
-	// A bare slot comparison would force a rollback whenever the peer's tip
-	// happens to land on a later slot — even when the two chains have the
-	// same block count and our local tip is at the lower (denser) slot, in
-	// which case Praos says we should keep ours. With two block producers
-	// this misorders fork resolution: every locally-forged block forks at
-	// the same length as the peer's, the peer's later-slot tip wins the
-	// gate here, and the local block is rolled back.
+	// ours per Praos rules. Longer chains win first; at equal length,
+	// cardano-node uses the Praos VRF tiebreaker, not a lower-slot rule.
 	localTip := ls.chain.Tip()
-	if !chainselection.IsBetterChain(e.Tip, localTip) {
+	if ls.compareIncomingHeaderToLocalTip(
+		e,
+		localTip,
+	) != chainselection.ChainABetter {
 		return false, nil
 	}
 
@@ -1745,11 +1984,11 @@ func (ls *LedgerState) tryResolveFork(
 		)
 		ls.requestChainsyncResync(
 			e.ConnectionId,
-			resyncReasonRollbackNotFound,
+			event.ChainsyncResyncReasonRollbackNotFound,
 		)
 		return true, nil
 	}
-	ancestorBlock, err := database.BlockByHash(ls.db, ancestorPoint.Hash)
+	ancestorBlock, err := ls.blockByHash(ancestorPoint.Hash)
 	if err != nil {
 		return false, fmt.Errorf(
 			"failed to reload common ancestor block %s: %w",
@@ -1816,6 +2055,21 @@ func (ls *LedgerState) tryResolveFork(
 
 	if err := ls.rollbackChainAndState(rollbackPoint); err != nil {
 		if errors.Is(err, chain.ErrRollbackExceedsSecurityParam) {
+			reconciled, reconcileErr := ls.reconcileLivePrimaryChainLedgerDivergence(
+				"fork resolution exceeds security parameter K",
+				e.ConnectionId,
+			)
+			if reconcileErr != nil {
+				return false, fmt.Errorf(
+					"reconcile primary chain and ledger after over-K fork resolution: %w",
+					reconcileErr,
+				)
+			}
+			if reconciled {
+				ls.resetChainsyncResyncState()
+				ls.chainsyncState = SyncingChainsyncState
+				return true, nil
+			}
 			// Fork exceeds security parameter K. We must not
 			// follow a chain that requires rolling back more
 			// than K blocks — this is a fundamental Ouroboros
@@ -1842,11 +2096,12 @@ func (ls *LedgerState) tryResolveFork(
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       "fork resolution exceeds security parameter K",
+							Reason:       event.ChainsyncResyncReasonForkResolutionExceedsK,
 						},
 					),
 				)
 			}
+			return true, nil
 		} else {
 			ls.config.Logger.Error(
 				"failed to roll back to common ancestor",
@@ -1854,8 +2109,11 @@ func (ls *LedgerState) tryResolveFork(
 				"error", err,
 				"ancestor_slot", ancestorBlock.Slot,
 			)
+			return false, fmt.Errorf(
+				"failed to roll back to common ancestor: %w",
+				err,
+			)
 		}
-		return false, nil
 	}
 
 	// Mark state as rollback so the next block header event logs
@@ -2401,6 +2659,32 @@ func (ls *LedgerState) createGenesisBlock() error {
 				txn,
 			); err != nil {
 				return fmt.Errorf("set genesis staking: %w", err)
+			}
+		}
+
+		// Load Conway genesis bootstrap data (initial DReps and
+		// stake/vote delegations). The conway-genesis.json may declare
+		// pre-existing DReps and delegations for test networks; mainnet
+		// has none.
+		conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
+		if conwayGenesis != nil &&
+			(len(conwayGenesis.InitialDReps) > 0 ||
+				len(conwayGenesis.Delegs) > 0) {
+			ls.config.Logger.Info(
+				fmt.Sprintf(
+					"loading genesis governance: %d initial dreps, %d delegations",
+					len(conwayGenesis.InitialDReps),
+					len(conwayGenesis.Delegs),
+				),
+				"component", "ledger",
+			)
+			if err := ls.db.SetGenesisGovernance(
+				conwayGenesis.InitialDReps,
+				conwayGenesis.Delegs,
+				genesisHash[:],
+				txn,
+			); err != nil {
+				return fmt.Errorf("set genesis governance: %w", err)
 			}
 		}
 
@@ -3364,7 +3648,7 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 							event.ChainsyncResyncEventType,
 							event.ChainsyncResyncEvent{
 								ConnectionId: retryConnId,
-								Reason:       "blockfetch timeout retry failed on all available connections",
+								Reason:       event.ChainsyncResyncReasonBlockfetchTimeoutRetryFailed,
 							},
 						),
 					)

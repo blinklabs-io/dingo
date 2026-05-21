@@ -120,4 +120,3 @@ func TestShape_Validate_VersionContiguityHandlesUintOverflow(t *testing.T) {
 	assert.True(t, strings.Contains(err.Error(), "\"B\"") || strings.Contains(err.Error(), "B"),
 		"error should identify the offending era, got: %s", err.Error())
 }
-

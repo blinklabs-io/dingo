@@ -15,12 +15,15 @@
 package database
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -32,25 +35,23 @@ const (
 	BlockInitialIndex uint64 = 1
 )
 
-// blockByHashCounters tracks how often BlockByHashTxn hits the O(1)
-// hash-index path versus the (now hard-miss) fallback path. The counters
-// are package-level atomics so callers can read them without holding a
-// txn, fork-resolution probes one ancestor per peer per depth, and a
-// non-trivial false-fallback rate is the load-only signal the operator
-// needs to justify a hash-index back-fill.
-//
-// See blinklabs-io/dingo#2105, the iterator fallback was the second
-// largest CPU consumer (11.2% cum, 370 MB/min churn) on preview catch-up
-// because it ran a full block-blob prefix scan per missing-index probe.
+var (
+	blockByHashScanDeadline               = 100 * time.Millisecond
+	blockByHashScanDeadlineExceededWarned atomic.Bool
+)
+
+// blockByHashIndexHits and blockByHashIndexMisses track how often
+// BlockByHashTxn resolves via the O(1) hash index versus falling through
+// to the time-bounded prefix scan. A non-trivial miss rate on a healthy
+// node is the load-only signal that operators can use to justify a
+// hash-index back-fill for pre-#1915 blocks (see #2105).
 var (
 	blockByHashIndexHits   atomic.Uint64
 	blockByHashIndexMisses atomic.Uint64
 )
 
 // BlockByHashStats returns the cumulative hit/miss counts for the
-// hash-index fast path used by BlockByHashTxn. Misses are treated as
-// ErrBlockNotFound, a non-zero miss count on a fully-indexed DB is a
-// signal to back-fill the index for blocks ingested before #1915.
+// hash-index fast path used by BlockByHashTxn.
 func BlockByHashStats() (hits, misses uint64) {
 	return blockByHashIndexHits.Load(), blockByHashIndexMisses.Load()
 }
@@ -241,6 +242,17 @@ func BlockByHash(db *Database, hash []byte) (models.Block, error) {
 	return ret, err
 }
 
+func BlockBySlot(db *Database, slot uint64) (models.Block, error) {
+	var ret models.Block
+	txn := db.Transaction(false)
+	err := txn.Do(func(txn *Txn) error {
+		var err error
+		ret, err = BlockBySlotTxn(txn, slot)
+		return err
+	})
+	return ret, err
+}
+
 func BlockURL(
 	ctx context.Context,
 	db *Database,
@@ -345,13 +357,144 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		blockByHashIndexHits.Add(1)
 		return blockByKey(txn, blockKey)
 	}
+	if err == nil && len(blockKey) == 0 {
+		// Empty value at a present hash-index entry is local DB corruption,
+		// not a soft miss. Surface a descriptive error so the operator sees
+		// the problem rather than retrying on another peer.
+		return models.Block{}, fmt.Errorf("empty block hash index entry for %s", hex.EncodeToString(hash))
+	}
 	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
-		// Surface real backend errors (I/O, closed DB, etc), don't
-		// hide them behind ErrBlockNotFound.
+		// Surface real backend errors (I/O, closed DB) instead of folding
+		// them into ErrBlockNotFound.
 		return models.Block{}, err
 	}
 	blockByHashIndexMisses.Add(1)
+	// Fallback to sequential scan for blocks written before the index
+	// existed. Time-bounded: a Mithril-bootstrapped node carries
+	// millions of blob entries and chainsync intersect-point lookups
+	// (buildDefaultChainsyncIntersectPoints, RecentChainPoints,
+	// BlockByHash) call this per peer connection. An unbounded scan
+	// can pin one CPU per ongoing inbound chainsync handshake; with
+	// peer-sharing or a busy listener the node wedges and stops both
+	// chain extension and block production. Treating the hash as not
+	// found after the deadline lets fork recovery and intersect-point
+	// callers fall back to alternative paths (PeerHeaderLookupFunc,
+	// chainsync resync), which is fast.
+	scanDeadline := time.Now().Add(blockByHashScanDeadline)
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: []byte(types.BlockBlobKeyPrefix),
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
+		if time.Now().After(scanDeadline) {
+			if blockByHashScanDeadlineExceededWarned.CompareAndSwap(false, true) {
+				txn.DB().logger.Warn(
+					"block hash fallback scan deadline exceeded; returning not found",
+					"deadline", blockByHashScanDeadline.String(),
+					"hash", hex.EncodeToString(hash),
+				)
+			}
+			return models.Block{}, models.ErrBlockNotFound
+		}
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		key := item.Key()
+		if key == nil {
+			continue
+		}
+		// Skip the metadata key
+		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		// Validate key length and hash segment before comparing.
+		if len(key) < 10+len(hash) {
+			continue
+		}
+		if !bytes.Equal(key[10:10+len(hash)], hash) {
+			continue
+		}
+		return blockByKey(txn, key)
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
 	return models.Block{}, models.ErrBlockNotFound
+}
+
+func BlockBySlotTxn(txn *Txn, slot uint64) (models.Block, error) {
+	if txn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	slotPrefix := slices.Concat(
+		[]byte(types.BlockBlobKeyPrefix),
+		types.BlockBlobKeyUint64ToBytes(slot),
+	)
+	iterOpts := types.BlobIteratorOptions{
+		Prefix: slotPrefix,
+	}
+	it := blob.NewIterator(blobTxn, iterOpts)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	var ret models.Block
+	found := false
+	for it.Seek(slotPrefix); it.ValidForPrefix(slotPrefix); it.Next() {
+		item := it.Item()
+		if item == nil {
+			continue
+		}
+		k := item.Key()
+		if k == nil {
+			continue
+		}
+		if strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
+			continue
+		}
+		block, err := blockByKey(txn, k)
+		if err != nil {
+			return models.Block{}, err
+		}
+		if block.Slot != slot {
+			continue
+		}
+		indexedBlock, err := txn.DB().BlockByIndex(block.ID, txn)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				continue
+			}
+			return models.Block{}, err
+		}
+		if indexedBlock.Slot != block.Slot ||
+			!bytes.Equal(indexedBlock.Hash, block.Hash) {
+			continue
+		}
+		if !found || block.ID > ret.ID {
+			ret = block
+			found = true
+		}
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return ret, nil
 }
 
 func (d *Database) BlockByIndex(

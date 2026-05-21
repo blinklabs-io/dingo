@@ -69,7 +69,7 @@ var flagSpecs = []flagSpec{
 	uintFlag("PrivatePort", "private-port", "private/NtC port"),
 	uintFlag("MetricsPort", "metrics-port", "metrics port"),
 	uintFlag("DebugPort", "debug-port", "debug pprof port (0 = disabled)"),
-	boolFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol"),
+	boolPtrFlag("PeerSharing", "peer-sharing", "enable peer sharing protocol (default: cardano-node config.json fallback for non-block-producers; false for block producers)"),
 
 	// APIs
 	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
@@ -272,6 +272,31 @@ func boolFlag(field, name, help string) flagSpec {
 				return err
 			}
 			targetValue(cfg, field).SetBool(v)
+			return nil
+		},
+	}
+}
+
+// boolPtrFlag binds a CLI flag to a *bool field. The pointer distinguishes
+// "operator did not set this" (nil) from "explicitly false", which the flag
+// alone cannot express. The default the user sees in --help is false; we
+// only write to the field when the flag was explicitly passed.
+func boolPtrFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet) {
+			f.Bool(name, false, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetBool(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(&v))
 			return nil
 		},
 	}

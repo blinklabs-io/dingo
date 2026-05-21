@@ -55,7 +55,23 @@ type BatchAccumulator struct {
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{}
+	return &BatchAccumulator{
+		KeyWitnesses:   make([]models.KeyWitness, 0, batchChunkRows),
+		WitnessScripts: make([]models.WitnessScripts, 0, batchChunkRows),
+		Scripts:        make([]models.Script, 0, batchChunkRows),
+		PlutusData:     make([]models.PlutusData, 0, batchChunkRows),
+		Redeemers:      make([]models.Redeemer, 0, batchChunkRows),
+		AddressTxs:     make([]models.AddressTransaction, 0, batchChunkRows),
+		UtxoOutputs:    make([]models.Utxo, 0, batchChunkRows),
+		UtxoSpends:     make([]utxoSpend, 0, batchChunkRows),
+		CollateralRets: make([]models.Utxo, 0, batchChunkRows),
+		DeleteTxIDs:    make([]uint, 0, batchChunkRows),
+	}
+}
+
+// NewBatchAccumulator creates an accumulator for this metadata store.
+func (d *MetadataStoreSqlite) NewBatchAccumulator() types.MetadataBatchAccumulator {
+	return NewBatchAccumulator()
 }
 
 // AddKeyWitness appends a key witness record to the batch.
@@ -124,11 +140,33 @@ func (b *BatchAccumulator) Reset() {
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
 }
 
+// MergeFrom appends all records from other into b.
+// It is a no-op when other is nil or other == b.
+func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
+	if other == nil || other == b {
+		return
+	}
+	b.KeyWitnesses = append(b.KeyWitnesses, other.KeyWitnesses...)
+	b.WitnessScripts = append(b.WitnessScripts, other.WitnessScripts...)
+	b.Scripts = append(b.Scripts, other.Scripts...)
+	b.PlutusData = append(b.PlutusData, other.PlutusData...)
+	b.Redeemers = append(b.Redeemers, other.Redeemers...)
+	b.AddressTxs = append(b.AddressTxs, other.AddressTxs...)
+	b.UtxoOutputs = append(b.UtxoOutputs, other.UtxoOutputs...)
+	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
+	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
+	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+}
+
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStoreSqlite) FlushBatch(
-	batch *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf("sqlite FlushBatch: wrong accumulator type %T", acc)
+	}
 	if batch == nil {
 		return nil
 	}
@@ -235,13 +273,7 @@ func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return importUtxosWithDB(db, items)
 }
 
 func batchCreateScripts(db *gorm.DB, items []models.Script) error {
@@ -314,12 +346,16 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 			)
 			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
 		}
+
 		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
 		args = append(args, deletedSlotArgs...)
 		args = append(args, spentAtArgs...)
 		args = append(args, whereArgs...)
 		sql := fmt.Sprintf(
-			"UPDATE utxo SET deleted_slot = CASE %s ELSE deleted_slot END, spent_at_tx_id = CASE %s ELSE spent_at_tx_id END WHERE deleted_slot = 0 AND (%s)",
+			"UPDATE "+utxoRefIndexedTable()+
+				" SET deleted_slot = CASE %s ELSE deleted_slot END, "+
+				"spent_at_tx_id = CASE %s ELSE spent_at_tx_id END "+
+				"WHERE deleted_slot = 0 AND (%s)",
 			strings.Join(deletedSlotCases, " "),
 			strings.Join(spentAtCases, " "),
 			strings.Join(whereConditions, " OR "),

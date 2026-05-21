@@ -81,7 +81,7 @@ services:
       start_period: 10s
 
   cardano-producer:
-    image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
     container_name: cardano-producer
     depends_on:
       configurator:
@@ -151,7 +151,7 @@ services:
         ipv4_address: 172.20.0.20
 
   cardano-relay:
-    image: ghcr.io/blinklabs-io/cardano-node:10.5.4
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
     container_name: cardano-relay
     depends_on:
       configurator:

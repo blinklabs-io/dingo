@@ -53,6 +53,18 @@ type gapConsumeCandidate struct {
 	producers     []gapProducerTx
 }
 
+type batchedCrossBlockSpendCandidate struct {
+	producerBlock models.Block
+	producerPoint ocommon.Point
+	producerTx    lcommon.Transaction
+	producerIdx   uint32
+	consumerBlock models.Block
+	consumerPoint ocommon.Point
+	consumerTx    lcommon.Transaction
+	consumerIdx   uint32
+	input         lcommon.TransactionInput
+}
+
 func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 	t *testing.T,
 ) {
@@ -196,6 +208,73 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 			utxo.SpentAtTxId,
 		)
 	}
+}
+
+func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
+	t *testing.T,
+) {
+	// Intentionally not t.Parallel(): database.New() writes to
+	// plugin option destination pointers via SetPluginOption, which
+	// the race detector flags when two tests build a Database
+	// concurrently.
+	db, err := New(&Config{
+		DataDir:        t.TempDir(),
+		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	candidate := findBatchedCrossBlockSpendCandidate(t)
+	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	defer txn.Release()
+	defer txn.Rollback() //nolint:errcheck
+
+	require.NoError(
+		t,
+		db.SetTransactionBatched(
+			candidate.producerTx,
+			candidate.producerPoint,
+			candidate.producerIdx,
+			0,
+			nil,
+			nil,
+			mustBlockOffsets(t, candidate.producerBlock),
+			acc,
+			txn,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetTransactionBatched(
+			candidate.consumerTx,
+			candidate.consumerPoint,
+			candidate.consumerIdx,
+			0,
+			nil,
+			nil,
+			mustBlockOffsets(t, candidate.consumerBlock),
+			acc,
+			txn,
+		),
+	)
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+
+	utxo, err := db.Metadata().GetUtxoIncludingSpent(
+		candidate.input.Id().Bytes(),
+		candidate.input.Index(),
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, utxo)
+	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
+	require.Equal(t, candidate.consumerTx.Hash().Bytes(), utxo.SpentAtTxId)
 }
 
 func findGapRollbackCandidate(t *testing.T) gapRollbackCandidate {
@@ -601,6 +680,103 @@ func findGapConsumeCandidateWithoutCertificates(
 		"failed to find cert-free gap consume candidate in immutable testdata",
 	)
 	return gapConsumeCandidate{}
+}
+
+func findBatchedCrossBlockSpendCandidate(
+	t *testing.T,
+) batchedCrossBlockSpendCandidate {
+	t.Helper()
+
+	imm, err := immutable.New("immutable/testdata")
+	require.NoError(t, err)
+
+	iter, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer iter.Close()
+
+	type producedEntry struct {
+		block models.Block
+		point ocommon.Point
+		tx    lcommon.Transaction
+		idx   uint32
+	}
+	prevProduced := make(map[string]producedEntry)
+
+	for {
+		immBlock, err := iter.Next()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			require.NoError(t, err)
+		}
+		if immBlock == nil {
+			break
+		}
+		block, err := gledger.NewBlockFromCbor(immBlock.Type, immBlock.Cbor)
+		require.NoError(t, err)
+		blockModel := models.Block{
+			Slot:     block.SlotNumber(),
+			Hash:     block.Hash().Bytes(),
+			Number:   block.BlockNumber(),
+			Type:     uint(block.Type()),
+			PrevHash: block.PrevHash().Bytes(),
+			Cbor:     block.Cbor(),
+		}
+		blockPoint := ocommon.Point{
+			Slot: blockModel.Slot,
+			Hash: blockModel.Hash,
+		}
+
+		for idx, tx := range block.Transactions() {
+			if len(tx.Certificates()) > 0 {
+				continue
+			}
+			for _, input := range tx.Consumed() {
+				entry, ok := prevProduced[inputRefKey(
+					input.Id().Bytes(),
+					input.Index(),
+				)]
+				if !ok {
+					continue
+				}
+				return batchedCrossBlockSpendCandidate{
+					producerBlock: entry.block,
+					producerPoint: entry.point,
+					producerTx:    entry.tx,
+					producerIdx:   entry.idx,
+					consumerBlock: blockModel,
+					consumerPoint: blockPoint,
+					consumerTx:    tx,
+					consumerIdx:   uint32(idx),
+					input:         input,
+				}
+			}
+		}
+
+		prevProduced = make(map[string]producedEntry)
+		for idx, tx := range block.Transactions() {
+			if len(tx.Certificates()) > 0 {
+				continue
+			}
+			for _, utxo := range tx.Produced() {
+				prevProduced[inputRefKey(
+					utxo.Id.Id().Bytes(),
+					utxo.Id.Index(),
+				)] = producedEntry{
+					block: blockModel,
+					point: blockPoint,
+					tx:    tx,
+					idx:   uint32(idx),
+				}
+			}
+		}
+	}
+
+	t.Fatal(
+		"failed to find previous-block spend candidate in immutable testdata",
+	)
+	return batchedCrossBlockSpendCandidate{}
 }
 
 // TestSetGapBlockTransactionSpendsLiveProducedInputs verifies that when

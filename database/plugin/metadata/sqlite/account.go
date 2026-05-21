@@ -26,25 +26,30 @@ import (
 
 // certRecord holds common fields extracted from certificate records for
 // batch processing during account state restoration.
-// Includes certIndex for same-slot disambiguation.
+// Includes blockIndex and certIndex for same-slot disambiguation across
+// transactions and within a transaction respectively.
 type certRecord struct {
-	pool      []byte
-	drep      []byte
-	drepType  uint64
-	addedSlot uint64
-	certIndex uint32
+	pool       []byte
+	drep       []byte
+	drepType   uint64
+	addedSlot  uint64
+	blockIndex uint64
+	certIndex  uint32
 }
 
 // isMoreRecent checks if this certificate is more recent than the other.
-// When slots are equal, certIndex determines order (higher = later in transaction).
+// Order matches the SQL ORDER BY clause used in batchFetch helpers:
+// added_slot DESC, block_index DESC, cert_index DESC. block_index is
+// required to disambiguate same-slot certs across different transactions
+// because cert_index resets per transaction.
 func (r certRecord) isMoreRecent(other certRecord) bool {
-	if r.addedSlot > other.addedSlot {
-		return true
+	if r.addedSlot != other.addedSlot {
+		return r.addedSlot > other.addedSlot
 	}
-	if r.addedSlot == other.addedSlot && r.certIndex > other.certIndex {
-		return true
+	if r.blockIndex != other.blockIndex {
+		return r.blockIndex > other.blockIndex
 	}
-	return false
+	return r.certIndex > other.certIndex
 }
 
 // accountCertCache holds batch-fetched certificate data for all accounts
@@ -177,22 +182,24 @@ func batchFetchStakeRegistration(
 	type result struct {
 		StakingKey []byte
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_registration t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index
+		SELECT staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -200,7 +207,7 @@ func batchFetchStakeRegistration(
 	for _, r := range records {
 		cache.updateReg(
 			string(r.StakingKey),
-			certRecord{addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
 	return nil
@@ -216,22 +223,24 @@ func batchFetchStakeRegistrationDelegation(
 		StakingKey  []byte
 		PoolKeyHash []byte
 		AddedSlot   uint64
+		BlockIndex  uint64
 		CertIndex   uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_registration_delegation t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -239,9 +248,10 @@ func batchFetchStakeRegistrationDelegation(
 	for _, r := range records {
 		key := string(r.StakingKey)
 		rec := certRecord{
-			pool:      r.PoolKeyHash,
-			addedSlot: r.AddedSlot,
-			certIndex: r.CertIndex,
+			pool:       r.PoolKeyHash,
+			addedSlot:  r.AddedSlot,
+			blockIndex: r.BlockIndex,
+			certIndex:  r.CertIndex,
 		}
 		cache.updateReg(key, rec)
 		cache.updatePoolDelegation(key, rec)
@@ -261,22 +271,24 @@ func batchFetchStakeVoteRegistrationDelegation(
 		Drep        []byte
 		DrepType    uint64
 		AddedSlot   uint64
+		BlockIndex  uint64
 		CertIndex   uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_vote_registration_delegation t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -284,21 +296,23 @@ func batchFetchStakeVoteRegistrationDelegation(
 	for _, r := range records {
 		key := string(r.StakingKey)
 		rec := certRecord{
-			pool:      r.PoolKeyHash,
-			drep:      r.Drep,
-			drepType:  r.DrepType,
-			addedSlot: r.AddedSlot,
-			certIndex: r.CertIndex,
+			pool:       r.PoolKeyHash,
+			drep:       r.Drep,
+			drepType:   r.DrepType,
+			addedSlot:  r.AddedSlot,
+			blockIndex: r.BlockIndex,
+			certIndex:  r.CertIndex,
 		}
 		cache.updateReg(key, rec)
 		cache.updatePoolDelegation(key, rec)
 		cache.updateDrepDelegation(
 			key,
 			certRecord{
-				drep:      r.Drep,
-				drepType:  r.DrepType,
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				drep:       r.Drep,
+				drepType:   r.DrepType,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			},
 		)
 	}
@@ -316,22 +330,24 @@ func batchFetchVoteRegistrationDelegation(
 		Drep       []byte
 		DrepType   uint64
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM vote_registration_delegation t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, drep_type, added_slot, cert_index
+		SELECT staking_key, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -339,10 +355,11 @@ func batchFetchVoteRegistrationDelegation(
 	for _, r := range records {
 		key := string(r.StakingKey)
 		rec := certRecord{
-			drep:      r.Drep,
-			drepType:  r.DrepType,
-			addedSlot: r.AddedSlot,
-			certIndex: r.CertIndex,
+			drep:       r.Drep,
+			drepType:   r.DrepType,
+			addedSlot:  r.AddedSlot,
+			blockIndex: r.BlockIndex,
+			certIndex:  r.CertIndex,
 		}
 		cache.updateReg(key, rec)
 		cache.updateDrepDelegation(key, rec)
@@ -359,22 +376,29 @@ func batchFetchRegistration(
 	type result struct {
 		StakingKey []byte
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so synthetic genesis Registration rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM registration t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index
+		SELECT staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -382,7 +406,7 @@ func batchFetchRegistration(
 	for _, r := range records {
 		cache.updateReg(
 			string(r.StakingKey),
-			certRecord{addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
 	return nil
@@ -397,22 +421,24 @@ func batchFetchStakeDeregistration(
 	type result struct {
 		StakingKey []byte
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_deregistration t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index
+		SELECT staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -420,7 +446,7 @@ func batchFetchStakeDeregistration(
 	for _, r := range records {
 		cache.updateDereg(
 			string(r.StakingKey),
-			certRecord{addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
 	return nil
@@ -435,22 +461,24 @@ func batchFetchDeregistration(
 	type result struct {
 		StakingKey []byte
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM deregistration t
 			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index
+		SELECT staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -458,7 +486,7 @@ func batchFetchDeregistration(
 	for _, r := range records {
 		cache.updateDereg(
 			string(r.StakingKey),
-			certRecord{addedSlot: r.AddedSlot, certIndex: r.CertIndex},
+			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
 	return nil
@@ -474,22 +502,29 @@ func batchFetchStakeDelegation(
 		StakingKey  []byte
 		PoolKeyHash []byte
 		AddedSlot   uint64
+		BlockIndex  uint64
 		CertIndex   uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis stake_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -498,9 +533,10 @@ func batchFetchStakeDelegation(
 		cache.updatePoolDelegation(
 			string(r.StakingKey),
 			certRecord{
-				pool:      r.PoolKeyHash,
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				pool:       r.PoolKeyHash,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			},
 		)
 	}
@@ -518,22 +554,29 @@ func batchFetchVoteDelegation(
 		Drep       []byte
 		DrepType   uint64
 		AddedSlot  uint64
+		BlockIndex uint64
 		CertIndex  uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis vote_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM vote_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, drep_type, added_slot, cert_index
+		SELECT staking_key, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -542,10 +585,11 @@ func batchFetchVoteDelegation(
 		cache.updateDrepDelegation(
 			string(r.StakingKey),
 			certRecord{
-				drep:      r.Drep,
-				drepType:  r.DrepType,
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				drep:       r.Drep,
+				drepType:   r.DrepType,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			},
 		)
 	}
@@ -564,22 +608,29 @@ func batchFetchStakeVoteDelegation(
 		Drep        []byte
 		DrepType    uint64
 		AddedSlot   uint64
+		BlockIndex  uint64
 		CertIndex   uint32
 	}
 	var records []result
-	// Use ROW_NUMBER to fetch only the latest record per staking key
+	// Use ROW_NUMBER to fetch only the latest record per staking key.
+	// LEFT JOIN so genesis stake_vote_delegation rows (no certs row,
+	// certificate_id=0) still surface; cert_index defaults to 0, which
+	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index,
+			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot,
+				COALESCE(tx.block_index, 0) AS block_index,
+				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
 					PARTITION BY t.staking_key
-					ORDER BY t.added_slot DESC, c.cert_index DESC
+					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_vote_delegation t
-			INNER JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN certs c ON c.id = t.certificate_id
+			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index
+		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
@@ -589,18 +640,20 @@ func batchFetchStakeVoteDelegation(
 		cache.updatePoolDelegation(
 			key,
 			certRecord{
-				pool:      r.PoolKeyHash,
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				pool:       r.PoolKeyHash,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			},
 		)
 		cache.updateDrepDelegation(
 			key,
 			certRecord{
-				drep:      r.Drep,
-				drepType:  r.DrepType,
-				addedSlot: r.AddedSlot,
-				certIndex: r.CertIndex,
+				drep:       r.Drep,
+				drepType:   r.DrepType,
+				addedSlot:  r.AddedSlot,
+				blockIndex: r.BlockIndex,
+				certIndex:  r.CertIndex,
 			},
 		)
 	}
@@ -628,6 +681,35 @@ func (d *MetadataStoreSqlite) GetAccount(
 			return nil, nil
 		}
 		return nil, result.Error
+	}
+	return ret, nil
+}
+
+// GetAccounts fetches multiple accounts in one IN-list query, keyed by
+// string(StakingKey). Stake keys with no matching row are omitted.
+func (d *MetadataStoreSqlite) GetAccounts(
+	stakeKeys [][]byte,
+	includeInactive bool,
+	txn types.Txn,
+) (map[string]*models.Account, error) {
+	ret := make(map[string]*models.Account, len(stakeKeys))
+	if len(stakeKeys) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where("staking_key IN ?", stakeKeys)
+	if !includeInactive {
+		query = query.Where("active = ?", true)
+	}
+	var rows []*models.Account
+	if result := query.Find(&rows); result.Error != nil {
+		return nil, result.Error
+	}
+	for _, row := range rows {
+		ret[string(row.StakingKey)] = row
 	}
 	return ret, nil
 }

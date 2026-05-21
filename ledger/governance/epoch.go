@@ -203,7 +203,7 @@ func ProcessEpoch(
 	}
 
 	// Active set changes as we ratify; snapshot once.
-	activeDRepCount, err := countActiveDReps(in)
+	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.NewEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
 	}
@@ -290,6 +290,29 @@ func ProcessEpoch(
 			root = rootsByPurpose[purpose]
 		}
 		if !validateParentChain(proposal, root) {
+			// A chained proposal that references a parent we
+			// don't have an enacted root for is the silent
+			// failure mode behind issue #2195: on a Mithril-
+			// bootstrapped node missing per-purpose seeded
+			// roots, every chained proposal hits this branch and
+			// silently expires. Log a warning so the next
+			// occurrence shows up in operator logs instead of
+			// only as a block-producer divergence at the next
+			// enactment boundary.
+			if in.Logger != nil &&
+				root == nil &&
+				proposal.ParentTxHash != nil &&
+				purpose != purposeNone {
+				in.Logger.Warn(
+					"skipping chained proposal: no enacted root for purpose; possible mithril bootstrap gap (#2195)",
+					"component", "governance",
+					"tx_hash", shortHash(proposal.TxHash),
+					"action_index", proposal.ActionIndex,
+					"action_type", proposal.ActionType,
+					"parent_tx_hash", hex.EncodeToString(proposal.ParentTxHash),
+					"epoch", in.NewEpoch,
+				)
+			}
 			continue
 		}
 
@@ -392,21 +415,21 @@ func stakeEpochFor(newEpoch uint64) uint64 {
 	return 0
 }
 
-// countActiveDReps returns the number of DReps eligible to vote in the
-// current tick. AlwaysAbstain / AlwaysNoConfidence virtual DReps are
-// not included.
-//
-// countActiveDRepsAtEpoch in stability.go is the parallel for the
-// mid-epoch ratifiability check — it takes plain inputs instead of
-// EpochInput. Behaviour changes here must mirror there.
-func countActiveDReps(in *EpochInput) (int, error) {
-	dreps, err := in.DB.GetActiveDreps(in.Txn)
+// countActiveDReps returns the number of credential-backed DReps
+// eligible to vote in currentEpoch. AlwaysAbstain / AlwaysNoConfidence
+// virtual DReps are not counted.
+func countActiveDReps(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+) (int, error) {
+	dreps, err := db.GetActiveDreps(txn)
 	if err != nil {
 		return 0, err
 	}
 	active := 0
 	for _, drep := range dreps {
-		if drepActiveAtEpoch(drep, in.NewEpoch) {
+		if drepActiveAtEpoch(drep, currentEpoch) {
 			active++
 		}
 	}

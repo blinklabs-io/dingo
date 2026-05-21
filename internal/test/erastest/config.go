@@ -28,8 +28,9 @@ import (
 )
 
 // defaultTestnetYAMLPath is the relative path used when ERASTEST_TESTNET_YAML
-// is unset. Resolved from the test package directory (internal/erastest/).
-const defaultTestnetYAMLPath = "../test/erastest/testnet.yaml"
+// is unset. Resolved from the test package directory
+// (internal/test/erastest/), which is where testnet.yaml lives.
+const defaultTestnetYAMLPath = "testnet.yaml"
 
 // testnetParams holds the required testnet parameters from document 1.
 type testnetParams struct {

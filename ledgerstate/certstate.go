@@ -255,68 +255,7 @@ func parsePStateConway(data []byte) ([]ParsedPool, error) {
 		return nil, fmt.Errorf("decoding PState: %w", err)
 	}
 
-	// Find map elements sorted by size. PState contains several
-	// maps (pool params, future params, retiring, deposits).
-	// Pool params is the largest; deposits is second-largest
-	// (same key count but smaller values).
-	type mapEntry struct {
-		idx  int
-		size int
-	}
-	var maps []mapEntry
-	for i, elem := range ps {
-		if len(elem) == 0 {
-			continue
-		}
-		major := elem[0] >> 5
-		isMap := major == 5 || elem[0] == 0xbf
-		if isMap {
-			maps = append(maps, mapEntry{i, len(elem)})
-		}
-	}
-
-	if len(maps) == 0 {
-		// Fallback: try the first element as a map
-		if len(ps) > 0 {
-			return parseCertPoolParamsMap(ps[0])
-		}
-		return nil, nil
-	}
-
-	// Sort maps by size descending to identify pool params
-	// (largest) and deposits (second-largest).
-	slices.SortFunc(
-		maps,
-		func(a, b mapEntry) int {
-			return cmp.Compare(b.size, a.size)
-		},
-	)
-
-	pools, warning := parseCertPoolParamsMap(ps[maps[0].idx])
-	if pools == nil {
-		return pools, warning
-	}
-
-	// Merge deposits from the remaining maps (if present).
-	// Multiple maps share the same PoolKeyHash -> uint64 schema
-	// (retiring holds epoch numbers, deposits holds lovelace).
-	// We distinguish them by value range: deposit amounts are
-	// >= 1 ADA (1,000,000 lovelace), epoch numbers are small.
-	for _, m := range maps[1:] {
-		deposits := parsePoolDeposits(ps[m.idx])
-		if deposits != nil && looksLikeDeposits(deposits) {
-			for i := range pools {
-				if dep, ok := deposits[hex.EncodeToString(
-					pools[i].PoolKeyHash,
-				)]; ok {
-					pools[i].Deposit = dep
-				}
-			}
-			break
-		}
-	}
-
-	return pools, warning
+	return parsePStateMaps(ps)
 }
 
 // parseCertPoolParamsMap decodes a map of pool key hash -> pool
@@ -336,7 +275,7 @@ func parseCertPoolParamsMap(data []byte) ([]ParsedPool, error) {
 		var poolKeyHash []byte
 		if _, pErr := cbor.Decode(
 			entry.KeyRaw, &poolKeyHash,
-		); pErr != nil {
+		); pErr != nil || len(poolKeyHash) != 28 {
 			skipped++
 			continue
 		}
@@ -670,55 +609,76 @@ func parsePState(data []byte) ([]ParsedPool, error) {
 		return nil, nil
 	}
 
-	// Parse pool deposits if available (index 3)
-	var poolDeposits map[string]uint64
-	if len(ps) > 3 {
-		poolDeposits = parsePoolDeposits(ps[3])
-	}
+	return parsePStateMaps(ps)
+}
 
-	// Parse active pool registrations (index 0) using
-	// decodeMapEntries to handle indefinite-length maps.
-	entries, err := decodeMapEntries(ps[0])
-	if err != nil {
-		return nil, fmt.Errorf(
-			"decoding poolParams map: %w", err,
-		)
+func parsePStateMaps(ps [][]byte) ([]ParsedPool, error) {
+	type mapEntry struct {
+		idx  int
+		size int
 	}
-
-	pools := make([]ParsedPool, 0, len(entries))
-	var skipped int
-	for _, entry := range entries {
-		var poolKeyHash []byte
-		if _, pErr := cbor.Decode(
-			entry.KeyRaw, &poolKeyHash,
-		); pErr != nil {
-			skipped++
+	var maps []mapEntry
+	for i, elem := range ps {
+		if len(elem) == 0 {
 			continue
 		}
+		major := elem[0] >> 5
+		if major == 5 || elem[0] == 0xbf {
+			maps = append(maps, mapEntry{idx: i, size: len(elem)})
+		}
+	}
+	if len(maps) == 0 {
+		return nil, nil
+	}
 
-		pool, err := parsePoolParamsOrDistr(
-			poolKeyHash, entry.ValueRaw,
-		)
-		if err != nil {
-			skipped++
+	slices.SortFunc(
+		maps,
+		func(a, b mapEntry) int {
+			return cmp.Compare(b.size, a.size)
+		},
+	)
+
+	var bestPools []ParsedPool
+	var bestWarning error
+	bestIdx := -1
+	for _, m := range maps {
+		pools, warning := parseCertPoolParamsMap(ps[m.idx])
+		if bestIdx < 0 || len(pools) > len(bestPools) {
+			bestPools = pools
+			bestWarning = warning
+			bestIdx = m.idx
+		}
+	}
+	if len(bestPools) == 0 {
+		return bestPools, bestWarning
+	}
+
+	mergePoolDeposits(bestPools, ps, bestIdx)
+	return bestPools, bestWarning
+}
+
+func mergePoolDeposits(
+	pools []ParsedPool,
+	ps [][]byte,
+	poolParamsIdx int,
+) {
+	for i, elem := range ps {
+		if i == poolParamsIdx {
 			continue
 		}
-
-		if dep, ok := poolDeposits[hex.EncodeToString(poolKeyHash)]; ok {
-			pool.Deposit = dep
+		deposits := parsePoolDeposits(elem)
+		if deposits == nil || !looksLikeDeposits(deposits) {
+			continue
 		}
-
-		pools = append(pools, *pool)
+		for j := range pools {
+			if dep, ok := deposits[hex.EncodeToString(
+				pools[j].PoolKeyHash,
+			)]; ok {
+				pools[j].Deposit = dep
+			}
+		}
+		return
 	}
-
-	var warning error
-	if skipped > 0 {
-		warning = fmt.Errorf(
-			"PState pool params: skipped %d of %d entries",
-			skipped, len(entries),
-		)
-	}
-	return pools, warning
 }
 
 // parsePoolDeposits decodes the pool deposits map.
@@ -813,6 +773,13 @@ func parsePoolParams(
 		)
 	}
 
+	if pool, ok, err := parsePoolParamsWithoutOperator(
+		poolKeyHash,
+		params,
+	); ok || err != nil {
+		return pool, err
+	}
+
 	pool := &ParsedPool{
 		PoolKeyHash: poolKeyHash,
 	}
@@ -878,18 +845,7 @@ func parsePoolParams(
 	}
 
 	// Owners (index 6) - set of 28-byte key hashes
-	var owners []cbor.RawMessage
-	if _, err := cbor.Decode(params[6], &owners); err == nil {
-		for _, ownerRaw := range owners {
-			var ownerHash []byte
-			if _, err := cbor.Decode(
-				ownerRaw,
-				&ownerHash,
-			); err == nil {
-				pool.Owners = append(pool.Owners, ownerHash)
-			}
-		}
-	}
+	pool.Owners = parsePoolOwners(params[6])
 
 	// Relays (index 7) - array of relay entries
 	if len(params) > 7 {
@@ -902,6 +858,112 @@ func parsePoolParams(
 	}
 
 	return pool, nil
+}
+
+func parsePoolParamsWithoutOperator(
+	poolKeyHash []byte,
+	params []cbor.RawMessage,
+) (*ParsedPool, bool, error) {
+	var vrfKeyHash []byte
+	vrfDecoded := false
+	if _, decodeErr := cbor.Decode(
+		params[0],
+		&vrfKeyHash,
+	); decodeErr == nil {
+		vrfDecoded = true
+	}
+	if !vrfDecoded || len(vrfKeyHash) != 32 {
+		return nil, false, nil
+	}
+
+	pool := &ParsedPool{
+		PoolKeyHash: slices.Clone(poolKeyHash),
+		VrfKeyHash:  vrfKeyHash,
+	}
+
+	if _, err := cbor.Decode(params[1], &pool.Pledge); err != nil {
+		return nil, true, fmt.Errorf("decoding pledge: %w", err)
+	}
+	if _, err := cbor.Decode(params[2], &pool.Cost); err != nil {
+		return nil, true, fmt.Errorf("decoding cost: %w", err)
+	}
+
+	var marginOK bool
+	pool.MarginNum, pool.MarginDen, marginOK = parseRational(params[3])
+	if !marginOK {
+		slog.Warn(
+			"failed to decode pool margin, defaulting to 0/1",
+			"pool", hex.EncodeToString(poolKeyHash),
+		)
+	}
+	if pool.MarginDen == 0 {
+		pool.MarginDen = 1
+	}
+
+	if rewardAccount, ok := parseRewardAccount(params[4]); ok {
+		pool.RewardAccount = rewardAccount
+	}
+
+	pool.Owners = parsePoolOwners(params[5])
+	if len(params) > 6 {
+		pool.Relays = parseRelays(params[6])
+	}
+	if len(params) > 7 {
+		parsePoolMetadata(params[7], pool)
+	}
+	if len(params) > 8 {
+		if _, err := cbor.Decode(params[8], &pool.Deposit); err != nil {
+			return nil, true, fmt.Errorf(
+				"decoding pool deposit: %w",
+				err,
+			)
+		}
+	}
+
+	return pool, true, nil
+}
+
+func parseRewardAccount(data []byte) ([]byte, bool) {
+	var direct []byte
+	if _, err := cbor.Decode(data, &direct); err == nil {
+		return direct, true
+	}
+
+	if cred, err := parseCredential(data); err == nil && len(cred.Hash) > 0 {
+		return cred.Hash, true
+	}
+
+	var parts []cbor.RawMessage
+	if _, err := cbor.Decode(data, &parts); err != nil || len(parts) < 2 {
+		return nil, false
+	}
+	if cred, err := parseCredential(parts[1]); err == nil &&
+		len(cred.Hash) > 0 {
+		return cred.Hash, true
+	}
+	if _, err := cbor.Decode(parts[1], &direct); err == nil {
+		return direct, true
+	}
+
+	return nil, false
+}
+
+func parsePoolOwners(data []byte) [][]byte {
+	var owners []cbor.RawMessage
+	if _, err := cbor.Decode(data, &owners); err != nil {
+		return nil
+	}
+	ret := make([][]byte, 0, len(owners))
+	for _, ownerRaw := range owners {
+		var ownerHash []byte
+		if _, err := cbor.Decode(
+			ownerRaw,
+			&ownerHash,
+		); err == nil {
+			ret = append(ret, ownerHash)
+		}
+	}
+	return ret
 }
 
 func parsePoolParamsOrDistr(
@@ -1084,6 +1146,12 @@ func parsePoolMetadata(
 	var meta []cbor.RawMessage
 	if _, err := cbor.Decode(data, &meta); err != nil {
 		return // null or invalid
+	}
+	if len(meta) == 1 {
+		var unwrapped []cbor.RawMessage
+		if _, err := cbor.Decode(meta[0], &unwrapped); err == nil {
+			meta = unwrapped
+		}
 	}
 	if len(meta) >= 2 {
 		var url string
@@ -1412,14 +1480,52 @@ type ParsedGovProposal struct {
 	AnchorHash   []byte
 	ProposedIn   uint64
 	ExpiresAfter uint64
+	// ParentTxHash is the parent gov-action's tx hash for chained action
+	// types (ParameterChange, HardForkInitiation, NoConfidence,
+	// UpdateCommittee, NewConstitution). Nil for unchained actions
+	// (TreasuryWithdrawals, InfoAction) and for chained actions with no
+	// prior enacted predecessor (SNothing in cardano-ledger terms).
+	ParentTxHash []byte
+	// ParentActionIdx is the action index that pairs with ParentTxHash.
+	// nil iff ParentTxHash is nil; otherwise points to the parent's
+	// uint32 index.
+	ParentActionIdx *uint32
+	// GovActionCbor is the raw CBOR bytes of the gov action body (the
+	// govAction element inside the ProposalProcedure). Persisted on
+	// import so the enactment path (ledger/governance/enact.go) can
+	// decode the action's payload (e.g. HardForkInitiation's protocol
+	// version, ParameterChange's pparam delta) at the boundary tick
+	// that enacts a previously-ratified proposal. Without it, ENACT
+	// fails to decode and aborts the entire boundary tick, halting
+	// the chain at the first enactment after a Mithril boot.
+	GovActionCbor []byte
+}
+
+// ParsedGovActionId holds a decoded GovActionId (txHash + index).
+type ParsedGovActionId struct {
+	TxHash      []byte // 32 bytes
+	ActionIndex uint32
+}
+
+// ParsedPrevGovActionIds holds the per-purpose chain roots from
+// cgsProposals's GovRelation (the first element of the proposals
+// container). Each pointer is non-nil when the corresponding
+// purpose has an enacted predecessor (SJust); nil means SNothing
+// (no enacted predecessor for that purpose).
+type ParsedPrevGovActionIds struct {
+	PParamUpdate *ParsedGovActionId
+	HardFork     *ParsedGovActionId
+	Committee    *ParsedGovActionId
+	Constitution *ParsedGovActionId
 }
 
 // ParsedGovState holds all decoded governance state components.
 type ParsedGovState struct {
-	Constitution    *ParsedConstitution
-	Committee       []ParsedCommitteeMember
-	CommitteeQuorum *cbor.Rat
-	Proposals       []ParsedGovProposal
+	Constitution     *ParsedConstitution
+	Committee        []ParsedCommitteeMember
+	CommitteeQuorum  *cbor.Rat
+	Proposals        []ParsedGovProposal
+	PrevGovActionIds *ParsedPrevGovActionIds
 }
 
 // ParseGovState decodes governance state from raw CBOR.
@@ -1487,13 +1593,14 @@ func ParseGovState(
 	result.CommitteeQuorum = quorum
 
 	// Parse proposals (field 0) — best-effort
-	proposals, err := parseProposals(fields[0])
+	proposals, prevIds, err := parseProposals(fields[0])
 	if err != nil {
 		warnings = append(warnings, fmt.Errorf(
 			"parsing proposals: %w", err,
 		))
 	}
 	result.Proposals = proposals
+	result.PrevGovActionIds = prevIds
 
 	return result, errors.Join(warnings...)
 }
@@ -1691,27 +1798,34 @@ func parseCommittee(data []byte) (
 //
 //	[roots, omap]
 //
-// where roots are previous governance action IDs and omap
-// is a flat array of GovActionState values (keys are derived
-// from the values via HasOKey during decoding).
+// where roots is a GovRelation StrictMaybe — a 4-element array of
+// per-purpose previous governance action IDs in the order
+// [PParamUpdate, HardFork, Committee, Constitution] — and omap is
+// a flat array of GovActionState values (keys are derived from the
+// values via HasOKey during decoding).
 //
 // Each GovActionState = [govActionId, committeeVotes,
 // drepVotes, spoVotes, proposalProcedure, proposedIn,
 // expiresAfter].
+//
+// Returns the proposals slice and the parsed per-purpose roots
+// (nil when all SNothing). Errors decoding the roots are surfaced
+// as warnings on the joined error so callers can still consume the
+// proposal list.
 func parseProposals(data []byte) (
-	[]ParsedGovProposal, error,
+	[]ParsedGovProposal, *ParsedPrevGovActionIds, error,
 ) {
 	container, err := decodeRawArray(data)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding proposals container: %w", err,
 		)
 	}
 	if len(container) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(container) < 2 {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"proposals container has %d elements, "+
 				"expected 0 or at least 2",
 			len(container),
@@ -1724,7 +1838,7 @@ func parseProposals(data []byte) (
 
 	items, err := decodeRawArray(proposalSeq)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"decoding proposals OMap: %w", err,
 		)
 	}
@@ -1742,8 +1856,171 @@ func parseProposals(data []byte) (
 		}
 	}
 
-	// Return parsed proposals even if some failed
-	return proposals, errors.Join(propErrs...)
+	// Parse per-purpose roots (the GovRelation). A failure to
+	// decode roots is independently fatal to the chained-proposal
+	// ratification path on a Mithril-bootstrapped node, but we
+	// still want the proposals list to be returned so the rest of
+	// the import can complete. Surface the error as a warning.
+	prevIds, rootsErr := parseProposalsRoots(container[0])
+	if rootsErr != nil {
+		propErrs = append(propErrs, fmt.Errorf(
+			"decoding proposals roots: %w", rootsErr,
+		))
+	}
+
+	return proposals, prevIds, errors.Join(propErrs...)
+}
+
+// parseProposalsRoots decodes the GovRelation StrictMaybe at the
+// head of a Proposals CBOR container. The canonical encoding is a
+// 4-element array of StrictMaybe (GovPurposeId p era) values, in
+// the order [PParamUpdate, HardFork, Committee, Constitution].
+// StrictMaybe encodes as a 0- or 1-element array; SJust wraps a
+// GovActionId = [txHash, actionIndex].
+//
+// A 0-element top-level array (degenerate "no roots" form some
+// historical encoders emit) is accepted as all SNothing. Returns
+// nil when every purpose is SNothing.
+func parseProposalsRoots(data []byte) (
+	*ParsedPrevGovActionIds, error,
+) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovRelation: %w", err,
+		)
+	}
+	if len(fields) == 0 {
+		// Degenerate "all SNothing" encoding: nothing to seed.
+		return nil, nil
+	}
+	if len(fields) != 4 {
+		return nil, fmt.Errorf(
+			"GovRelation has %d elements, expected 4",
+			len(fields),
+		)
+	}
+
+	pp, err := parseStrictMaybeGovActionId(fields[0])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding pparam-update root: %w", err,
+		)
+	}
+	hf, err := parseStrictMaybeGovActionId(fields[1])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding hard-fork root: %w", err,
+		)
+	}
+	cm, err := parseStrictMaybeGovActionId(fields[2])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding committee root: %w", err,
+		)
+	}
+	cn, err := parseStrictMaybeGovActionId(fields[3])
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding constitution root: %w", err,
+		)
+	}
+
+	if pp == nil && hf == nil && cm == nil && cn == nil {
+		return nil, nil
+	}
+	return &ParsedPrevGovActionIds{
+		PParamUpdate: pp,
+		HardFork:     hf,
+		Committee:    cm,
+		Constitution: cn,
+	}, nil
+}
+
+// parseStrictMaybeGovActionId decodes a StrictMaybe (GovPurposeId p
+// era) field. SNothing is the empty array; SJust wraps the inner
+// GovActionId = [txHash, actionIndex]. Returns nil for SNothing.
+//
+// Tolerates a CBOR null (0xf6) emitted by some historical encoders
+// in lieu of an empty array, and tolerates a directly-encoded
+// GovActionId (without the 1-element wrapper) so a non-canonical
+// encoder cannot silently drop a root.
+func parseStrictMaybeGovActionId(data []byte) (
+	*ParsedGovActionId, error,
+) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	if len(data) == 1 && data[0] == 0xf6 {
+		return nil, nil
+	}
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding StrictMaybe: %w", err,
+		)
+	}
+	switch len(fields) {
+	case 0:
+		return nil, nil
+	case 1:
+		// SJust [GovActionId]
+		return parseGovActionId(fields[0])
+	case 2:
+		// Directly-encoded GovActionId = [txHash, actionIndex].
+		// Some encoders skip the SJust wrapper; accept this shape
+		// rather than dropping the root.
+		return parseGovActionIdFromFields(fields)
+	default:
+		return nil, fmt.Errorf(
+			"StrictMaybe has %d elements, expected 0, 1, or 2",
+			len(fields),
+		)
+	}
+}
+
+// parseGovActionId decodes a CBOR-encoded GovActionId =
+// [txHash, actionIndex].
+func parseGovActionId(data []byte) (*ParsedGovActionId, error) {
+	fields, err := decodeRawArray(data)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId: %w", err,
+		)
+	}
+	return parseGovActionIdFromFields(fields)
+}
+
+func parseGovActionIdFromFields(fields [][]byte) (
+	*ParsedGovActionId, error,
+) {
+	if len(fields) < 2 {
+		return nil, fmt.Errorf(
+			"GovActionId has %d elements, expected 2",
+			len(fields),
+		)
+	}
+	id := &ParsedGovActionId{}
+	if _, err := cbor.Decode(fields[0], &id.TxHash); err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId txHash: %w", err,
+		)
+	}
+	if len(id.TxHash) != 32 {
+		return nil, fmt.Errorf(
+			"GovActionId txHash has %d bytes, expected 32",
+			len(id.TxHash),
+		)
+	}
+	if _, err := cbor.Decode(fields[1], &id.ActionIndex); err != nil {
+		return nil, fmt.Errorf(
+			"decoding GovActionId index: %w", err,
+		)
+	}
+	return id, nil
 }
 
 // parseGovActionState decodes a single GovActionState.
@@ -1839,6 +2116,14 @@ func parseGovActionState(
 		)
 	}
 
+	// Persist the raw gov action CBOR. EnactProposal decodes this
+	// payload at the enactment tick to read action-specific fields
+	// (HardForkInitiation's protocol version, ParameterChange's
+	// pparam delta, etc). Snapshot-imported proposals must carry it
+	// or the first enactment after a Mithril bootstrap aborts the
+	// whole boundary txn with "decode gov action: ...".
+	prop.GovActionCbor = append([]byte(nil), procedure[2]...)
+
 	// govAction = [actionType, ...] - extract actionType
 	govAction, err := decodeRawArray(procedure[2])
 	if err != nil {
@@ -1857,6 +2142,42 @@ func parseGovActionState(
 		return nil, fmt.Errorf(
 			"decoding govAction type: %w", err,
 		)
+	}
+
+	// Parent gov-action ID. Chained actions (ParameterChange=0,
+	// HardForkInitiation=1, NoConfidence=3, UpdateCommittee=4,
+	// NewConstitution=5) carry the parent at govAction[1] as
+	// StrictMaybe(GovActionId); SNothing means no prior enacted
+	// predecessor. TreasuryWithdrawals=2 and InfoAction=6 have no
+	// parent. Without this, validateParentChain rejects every
+	// chained child of a pre-snapshot enactment as if the parent
+	// were missing, and chained proposals silently expire instead of
+	// ratifying. See issue #2195.
+	switch prop.ActionType {
+	case 0, 1, 3, 4, 5:
+		if len(govAction) < 2 {
+			return nil, fmt.Errorf(
+				"decoding parent gov action id "+
+					"for action type %d: missing parent field",
+				prop.ActionType,
+			)
+		}
+		parentId, parentErr := parseStrictMaybeGovActionId(
+			govAction[1],
+		)
+		if parentErr != nil {
+			return nil, fmt.Errorf(
+				"decoding parent gov action id "+
+					"for action type %d: %w",
+				prop.ActionType,
+				parentErr,
+			)
+		}
+		if parentId != nil {
+			prop.ParentTxHash = parentId.TxHash
+			idx := parentId.ActionIndex
+			prop.ParentActionIdx = &idx
+		}
 	}
 
 	// anchor = [url, hash] — best-effort: proposals are still

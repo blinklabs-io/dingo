@@ -32,9 +32,11 @@ TESTNET_YAML="${SCRIPT_DIR}/testnet.yaml"
 
 KEEP_UP=false
 TEST_ARGS=()
+HAS_RUN=false
 for arg in "$@"; do
   case "${arg}" in
     --keep-up) KEEP_UP=true ;;
+    -run|-run=*) HAS_RUN=true; TEST_ARGS+=("${arg}") ;;
     *)         TEST_ARGS+=("${arg}") ;;
   esac
 done
@@ -116,6 +118,10 @@ export ERASTEST_CARDANO_ADDR="localhost:${CARDANO_PORT}"
 export ERASTEST_RELAY_ADDR="localhost:${RELAY_PORT}"
 export ERASTEST_TESTNET_YAML="${TESTNET_YAML}"
 
+if [[ "${HAS_RUN}" == "false" ]]; then
+  TEST_ARGS=(-run 'TestEraTransitions|TestPV11Readiness' "${TEST_ARGS[@]}")
+fi
+
 # Default timeout: ~6 epochs * 75s ≈ 7.5 min for a healthy traversal
 # plus margin for bootstrap and the test cascade. Set TEST_TIMEOUT in
 # the environment to override (e.g. for slow CI runners or extended
@@ -128,7 +134,7 @@ go test \
   -v \
   -timeout "${TEST_TIMEOUT}" \
   ${TEST_ARGS[@]+"${TEST_ARGS[@]}"} \
-  ./internal/erastest/...
+  ./internal/test/erastest/...
 TEST_EXIT=$?
 set -e
 

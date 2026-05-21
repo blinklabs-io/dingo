@@ -124,6 +124,36 @@ func (d *MetadataStoreMysql) GetLiveUtxosBySlot(
 	return ret, nil
 }
 
+// GetUtxosBySlot returns the references of every UTxO created at the given
+// slot, including rows soft-marked as spent (deleted_slot != 0). Only TxId
+// and OutputIdx are populated.
+func (d *MetadataStoreMysql) GetUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	result := db.
+		Model(&models.Utxo{}).
+		Where("added_slot = ?", slot).
+		Select("tx_id", "output_idx").
+		Find(&rows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	ret := make([]models.UtxoId, len(rows))
+	for i, r := range rows {
+		ret[i] = models.UtxoId{Hash: r.TxId, Idx: r.OutputIdx}
+	}
+	return ret, nil
+}
+
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
 func (d *MetadataStoreMysql) GetUtxosDeletedBeforeSlot(
 	slot uint64,
@@ -203,6 +233,35 @@ func (d *MetadataStoreMysql) GetUtxosByAddress(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
+// controlled by the given staking key.
+func (d *MetadataStoreMysql) GetControlledAmountByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for controlled amount by staking key: %w",
+			err,
+		)
+	}
+	var total uint64
+	if err := db.Model(&models.Utxo{}).
+		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf(
+			"get controlled amount by staking key: %w",
+			err,
+		)
+	}
+	return total, nil
 }
 
 // GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).

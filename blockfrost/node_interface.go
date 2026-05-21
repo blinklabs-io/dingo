@@ -91,6 +91,48 @@ type BlockfrostNode interface {
 		params PaginationParams,
 	) ([]MetadataTransactionCBORInfo, int, error)
 
+	// Transaction returns summary details for a transaction hash.
+	Transaction(hash []byte) (TransactionInfo, error)
+
+	// TransactionSubmit submits raw signed transaction CBOR to the mempool.
+	TransactionSubmit(txCbor []byte) (string, error)
+
+	// TransactionCBOR returns raw signed transaction CBOR bytes.
+	TransactionCBOR(hash []byte) ([]byte, error)
+
+	// TransactionMetadata returns transaction metadata labels as JSON values.
+	TransactionMetadata(hash []byte) ([]TransactionMetadataInfo, error)
+
+	// TransactionMetadataCBOR returns transaction metadata labels as CBOR values.
+	TransactionMetadataCBOR(hash []byte) ([]TransactionMetadataCBORInfo, error)
+
+	// TransactionUTXOs returns transaction inputs and outputs.
+	TransactionUTXOs(hash []byte) (TransactionUTXOsInfo, error)
+
+	// TransactionDelegations returns delegation certificates in a transaction.
+	TransactionDelegations(hash []byte) ([]TransactionDelegationInfo, error)
+
+	// TransactionStakeAddresses returns stake address certificates in a transaction.
+	TransactionStakeAddresses(hash []byte) ([]TransactionStakeAddressInfo, error)
+
+	// TransactionWithdrawals returns reward withdrawals in a transaction.
+	TransactionWithdrawals(hash []byte) ([]TransactionWithdrawalInfo, error)
+
+	// TransactionMIRs returns MIR certificates in a transaction.
+	TransactionMIRs(hash []byte) ([]TransactionMIRInfo, error)
+
+	// TransactionPoolUpdates returns pool registration certificates in a transaction.
+	TransactionPoolUpdates(hash []byte) ([]TransactionPoolUpdateInfo, error)
+
+	// TransactionPoolRetires returns pool retirement certificates in a transaction.
+	TransactionPoolRetires(hash []byte) ([]TransactionPoolRetireInfo, error)
+
+	// TransactionRedeemers returns Plutus redeemers in a transaction.
+	TransactionRedeemers(hash []byte) ([]TransactionRedeemerInfo, error)
+
+	// TransactionRequiredSigners returns required signing key hashes in a transaction.
+	TransactionRequiredSigners(hash []byte) ([]TransactionRequiredSignerInfo, error)
+
 	// Asset returns native asset information for a
 	// concatenated hex asset ID ({policy_id}{asset_name}).
 	Asset(
@@ -101,6 +143,38 @@ type BlockfrostNode interface {
 	// DRep returns governance DRep information for a parsed
 	// DRep credential.
 	DRep(DRepCredential) (DRepInfo, error)
+
+	// Account returns stake-account information for the
+	// requested stake address.
+	Account(string) (AccountInfo, error)
+
+	// AccountAssociatedAddresses returns payment addresses
+	// associated with the requested stake address.
+	AccountAssociatedAddresses(
+		string,
+		PaginationParams,
+	) ([]AccountAssociatedAddressInfo, int, error)
+
+	// AccountDelegationHistory returns delegation history
+	// rows for the requested stake address.
+	AccountDelegationHistory(
+		string,
+		PaginationParams,
+	) ([]AccountDelegationHistoryInfo, int, error)
+
+	// AccountRegistrationHistory returns registration
+	// history rows for the requested stake address.
+	AccountRegistrationHistory(
+		string,
+		PaginationParams,
+	) ([]AccountRegistrationHistoryInfo, int, error)
+
+	// AccountRewardHistory returns reward history rows for
+	// the requested stake address.
+	AccountRewardHistory(
+		string,
+		PaginationParams,
+	) ([]AccountRewardHistoryInfo, int, error)
 }
 
 // ChainTipInfo holds chain tip data needed by the API.
@@ -290,6 +364,158 @@ type MetadataTransactionCBORInfo struct {
 	Metadata string
 }
 
+// TransactionInfo holds transaction summary data needed by the API.
+type TransactionInfo struct {
+	InvalidBefore      *string
+	InvalidHereafter   *string
+	OutputAmount       []AddressAmountInfo
+	Hash               string
+	Block              string
+	Deposit            string
+	Fees               string
+	Slot               uint64
+	BlockHeight        uint64
+	BlockTime          int64
+	Size               int
+	Index              uint32
+	UtxoCount          int
+	WithdrawalCount    int
+	MirCertCount       int
+	DelegationCount    int
+	StakeCertCount     int
+	PoolUpdateCount    int
+	PoolRetireCount    int
+	AssetMintBurnCount int
+	RedeemerCount      int
+	ValidContract      bool
+}
+
+// TransactionMetadataInfo holds a transaction metadata label and JSON value.
+type TransactionMetadataInfo struct {
+	JSONMetadata json.RawMessage
+	Label        string
+}
+
+// TransactionMetadataCBORInfo holds a transaction metadata label and CBOR value.
+type TransactionMetadataCBORInfo struct {
+	CBORMetadata string
+	Label        string
+}
+
+// TransactionUTXOsInfo holds transaction inputs and outputs.
+type TransactionUTXOsInfo struct {
+	Hash    string
+	Inputs  []TransactionInputInfo
+	Outputs []TransactionOutputInfo
+}
+
+// TransactionInputInfo holds one transaction input.
+type TransactionInputInfo struct {
+	ReferenceScriptHash *string
+	InlineDatum         *string
+	DataHash            *string
+	Address             string
+	TxHash              string
+	Amount              []AddressAmountInfo
+	OutputIndex         uint32
+	Collateral          bool
+	Reference           *bool
+}
+
+// TransactionOutputInfo holds one transaction output.
+type TransactionOutputInfo struct {
+	ReferenceScriptHash *string
+	InlineDatum         *string
+	DataHash            *string
+	ConsumedByTx        *string
+	Address             string
+	Amount              []AddressAmountInfo
+	OutputIndex         uint32
+	Collateral          bool
+}
+
+// TransactionDelegationInfo holds one delegation certificate.
+type TransactionDelegationInfo struct {
+	Address     string
+	PoolID      string
+	CertIndex   int
+	ActiveEpoch uint64
+}
+
+// TransactionStakeAddressInfo holds one stake registration/deregistration certificate.
+type TransactionStakeAddressInfo struct {
+	Address      string
+	CertIndex    int
+	Registration bool
+}
+
+// TransactionWithdrawalInfo holds one reward withdrawal.
+type TransactionWithdrawalInfo struct {
+	Address string
+	Amount  string
+}
+
+// TransactionMIRInfo holds one MIR target.
+type TransactionMIRInfo struct {
+	Address   string
+	Amount    string
+	CertIndex int
+	Pot       string
+}
+
+// TransactionPoolUpdateInfo holds one pool registration certificate.
+type TransactionPoolUpdateInfo struct {
+	Metadata      *TransactionPoolMetadataInfo
+	Owners        []string
+	Relays        []TransactionPoolRelayInfo
+	ActiveEpoch   uint64
+	CertIndex     int
+	FixedCost     string
+	MarginCost    float64
+	Pledge        string
+	PoolID        string
+	RewardAccount string
+	VrfKey        string
+}
+
+// TransactionPoolMetadataInfo holds on-chain pool metadata pointer data.
+type TransactionPoolMetadataInfo struct {
+	URL  string
+	Hash string
+}
+
+// TransactionPoolRelayInfo holds one pool relay from a pool registration cert.
+type TransactionPoolRelayInfo struct {
+	DNS    string
+	DNSSrv string
+	IPv4   string
+	IPv6   string
+	Port   *int
+}
+
+// TransactionPoolRetireInfo holds one pool retirement certificate.
+type TransactionPoolRetireInfo struct {
+	PoolID        string
+	CertIndex     int
+	RetiringEpoch uint64
+}
+
+// TransactionRedeemerInfo holds one Plutus redeemer.
+type TransactionRedeemerInfo struct {
+	TxIndex          int
+	Purpose          string
+	ScriptHash       string
+	RedeemerDataHash string
+	UnitMem          string
+	UnitSteps        string
+	Fee              string
+}
+
+// TransactionRequiredSignerInfo holds one required signing key hash.
+type TransactionRequiredSignerInfo struct {
+	WitnessHash string
+}
+
 // AssetInfo holds native asset data needed by the API.
 type AssetInfo struct {
 	Asset             string
@@ -321,4 +547,48 @@ type DRepInfo struct {
 	Active      bool
 	ActiveEpoch uint64
 	LiveStake   string
+}
+
+// AccountInfo holds stake-account data needed by the API.
+type AccountInfo struct {
+	StakeAddress       string
+	Active             bool
+	ActiveEpoch        *int64
+	ControlledAmount   string
+	RewardsSum         string
+	WithdrawalsSum     string
+	ReservesSum        string
+	TreasurySum        string
+	WithdrawableAmount string
+	PoolID             *string
+}
+
+// AccountAssociatedAddressInfo holds a payment address
+// associated with a stake key.
+type AccountAssociatedAddressInfo struct {
+	Address string
+}
+
+// AccountDelegationHistoryInfo holds a stake-account
+// delegation history row.
+type AccountDelegationHistoryInfo struct {
+	ActiveEpoch int32
+	TxHash      string
+	Amount      string
+	PoolID      string
+}
+
+// AccountRegistrationHistoryInfo holds a stake-account
+// registration history row.
+type AccountRegistrationHistoryInfo struct {
+	TxHash string
+	Action string
+}
+
+// AccountRewardHistoryInfo holds a stake-account reward
+// history row.
+type AccountRewardHistoryInfo struct {
+	Epoch  int32
+	Amount string
+	PoolID string
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -139,6 +140,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Pool, error)
 
+	UpdatePoolOpCertSequence(
+		lcommon.PoolKeyHash,
+		uint64, // sequence
+		uint64, // slot
+		types.Txn,
+	) error
+
+	LatestPoolOpCertSequence(
+		lcommon.PoolKeyHash,
+		types.Txn,
+	) (uint64, bool, error)
+
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
 		[]lcommon.PoolKeyHash,
@@ -212,6 +225,16 @@ type MetadataStore interface {
 		bool, // includeInactive
 		types.Txn,
 	) (*models.Account, error)
+
+	// GetAccounts retrieves multiple accounts by stake key in a single query,
+	// optionally including inactive accounts. The returned map is keyed by
+	// string(StakingKey); stake keys with no matching row are omitted. An
+	// empty input returns an empty (non-nil) map and no error.
+	GetAccounts(
+		[][]byte, // stakeKeys
+		bool, // includeInactive
+		types.Txn,
+	) (map[string]*models.Account, error)
 
 	// AddAccountReward credits a reward account by stake credential.
 	AddAccountReward(
@@ -361,8 +384,47 @@ type MetadataStore interface {
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
+		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AddressTransaction, error)
+
+	// CountAddressesByStakingKey retrieves the total count of distinct address mappings for a staking key.
+	CountAddressesByStakingKey(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
+	GetAccountDelegationHistory(
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountDelegationHistoryRow, error)
+
+	// CountAccountDelegationHistory retrieves the total count of
+	// delegation history rows for a staking key.
+	CountAccountDelegationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
+	GetAccountRegistrationHistory(
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// CountAccountRegistrationHistory retrieves the total count of
+	// registration history rows for a staking key.
+	CountAccountRegistrationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
 
 	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
@@ -468,6 +530,27 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// NewBatchAccumulator creates a metadata-plugin-specific accumulator
+	// for batched transaction ingestion.
+	NewBatchAccumulator() types.MetadataBatchAccumulator
+
+	// FlushBatch writes accumulated batched metadata rows.
+	FlushBatch(
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
+
+	// SetTransactionBatched stores transaction metadata while accumulating
+	// batchable rows into the provided accumulator for a later FlushBatch.
+	SetTransactionBatched(
+		lcommon.Transaction,
+		ocommon.Point,
+		uint32, // idx
+		map[int]uint64, // certDeposits
+		types.MetadataBatchAccumulator,
+		types.Txn,
+	) error
+
 	// SetGapBlockTransaction stores a transaction record and its
 	// produced outputs without looking up or consuming input UTxOs.
 	// This is used for mithril gap blocks where the snapshot's UTxO
@@ -495,6 +578,17 @@ type MetadataStore interface {
 	SetGenesisStaking(
 		pools map[string]lcommon.PoolRegistrationCertificate,
 		stakeDelegations map[string]string,
+		blockHash []byte,
+		txn types.Txn,
+	) error
+
+	// SetGenesisGovernance stores the initial DReps and stake/vote
+	// delegations from the conway-genesis.json governance bootstrap
+	// section. Records are stamped with slot 0 so they appear in the
+	// ledger as having been present since genesis.
+	SetGenesisGovernance(
+		initialDReps conway.ConwayGenesisInitialDReps,
+		delegs conway.ConwayGenesisDelegs,
 		blockHash []byte,
 		txn types.Txn,
 	) error
@@ -552,8 +646,20 @@ type MetadataStore interface {
 	// source block.
 	GetLiveUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
 
+	// GetUtxosBySlot returns the references ({TxId, OutputIdx}) of every
+	// UTxO created at the given slot, including rows soft-marked as spent
+	// (deleted_slot != 0). Used by the pruner in API storage mode to
+	// materialize CBOR bytes for retained spent UTxOs before tombstoning
+	// the source block, since API mode keeps spent rows past the stability
+	// window for historical transaction queries.
+	GetUtxosBySlot(uint64, types.Txn) ([]models.UtxoId, error)
+
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
+
+	// GetControlledAmountByStakingKey returns the sum of live UTxO
+	// amounts controlled by the given staking key.
+	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
 
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.
@@ -1046,6 +1152,12 @@ type MetadataStore interface {
 type BulkLoadOptimizer interface {
 	SetBulkLoadPragmas() error
 	RestoreNormalPragmas() error
+}
+
+// PlannerStatsUpdater is an optional interface for metadata stores that can
+// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+type PlannerStatsUpdater interface {
+	UpdatePlannerStats() error
 }
 
 // New creates a new metadata store instance using the specified plugin

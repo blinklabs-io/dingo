@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -42,6 +43,8 @@ import (
 const (
 	loadBlockBatchSize  = 50
 	progressLogInterval = 10 * time.Second
+
+	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
 
 func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
@@ -70,6 +73,22 @@ func ensureDB(
 	}
 	newDB, err := database.New(dbConfig)
 	if err != nil {
+		// Bootstrap paths (load / mithril sync) tolerate a recoverable
+		// commit-timestamp mismatch: the import work that follows
+		// writes through full transactions which heal the timestamps.
+		// Returning the error here would leave the user unable to
+		// re-run a load / re-bootstrap from a previous interrupted
+		// import.
+		var cte database.CommitTimestampError
+		if errors.As(err, &cte) && newDB != nil {
+			logger.Warn(
+				"opened database with commit timestamp mismatch; "+
+					"continuing — import will heal it",
+				"metadata_timestamp", cte.MetadataTimestamp,
+				"blob_timestamp", cte.BlobTimestamp,
+			)
+			return newDB, func() { newDB.Close() }, nil
+		}
 		return nil, nil, fmt.Errorf("creating database: %w", err)
 	}
 	return newDB, func() { newDB.Close() }, nil
@@ -101,6 +120,19 @@ func WithBulkLoadPragmas(
 			)
 		}
 	}
+}
+
+// RunPlannerStats collects query-planner statistics on the metadata store
+// if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
+func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
+	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
+	if !ok {
+		return nil
+	}
+	if err := updater.UpdatePlannerStats(); err != nil {
+		return fmt.Errorf("planner statistics maintenance: %w", err)
+	}
+	return nil
 }
 
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
@@ -227,6 +259,31 @@ type LoadBlobsResult struct {
 	ImmutableTipSlot uint64
 }
 
+// LoadBlobsProgress reports ImmutableDB blob-copy progress.
+type LoadBlobsProgress struct {
+	BlocksCopied    int
+	CurrentSlot     uint64
+	TipSlot         uint64
+	BlocksPerSecond float64
+	Percent         float64
+}
+
+type loadBlobsOptions struct {
+	onProgress func(LoadBlobsProgress)
+}
+
+// LoadBlobsOption customizes LoadBlobsWithDB behavior.
+type LoadBlobsOption func(*loadBlobsOptions)
+
+// WithLoadBlobsProgress registers a callback for blob-copy progress.
+func WithLoadBlobsProgress(
+	onProgress func(LoadBlobsProgress),
+) LoadBlobsOption {
+	return func(opts *loadBlobsOptions) {
+		opts.onProgress = onProgress
+	}
+}
+
 // LoadBlobsWithDB copies blocks from an ImmutableDB directory into the blob
 // store without starting the ledger processing pipeline. This is used after
 // a Mithril snapshot import where the ledger state has already been loaded
@@ -238,7 +295,15 @@ func LoadBlobsWithDB(
 	logger *slog.Logger,
 	immutableDir string,
 	db *database.Database,
+	options ...LoadBlobsOption,
 ) (*LoadBlobsResult, error) {
+	opts := loadBlobsOptions{}
+	for _, option := range options {
+		if option == nil {
+			continue
+		}
+		option(&opts)
+	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
 	db, closeDB, err := ensureDB(cfg, logger, db)
@@ -274,6 +339,7 @@ func LoadBlobsWithDB(
 			utxoOffsetsStored += stored
 			return nil
 		},
+		opts.onProgress,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("loading blocks: %w", err)
@@ -422,6 +488,7 @@ func copyBlocksRawWithCallback(
 	db *database.Database,
 	c *chain.Chain,
 	callback func(chain.RawBlock, *database.Txn) error,
+	onProgress func(LoadBlobsProgress),
 ) (int, uint64, error) {
 	imm, err := immutable.New(immutableDir)
 	if err != nil {
@@ -443,22 +510,42 @@ func copyBlocksRawWithCallback(
 			"immutable_tip_slot", immutableTip.Slot,
 		)
 		if callback != nil && db != nil {
-			blocksBackfilled, err := backfillRawBlockCallbacks(
-				ctx,
-				imm,
+			complete, err := immutableUtxoOffsetsComplete(
 				db,
-				callback,
+				immutableTip.Slot,
 			)
 			if err != nil {
-				return 0, immutableTip.Slot, fmt.Errorf(
-					"backfill immutable raw block callback state: %w",
-					err,
+				return 0, immutableTip.Slot, err
+			}
+			if complete {
+				logger.Info(
+					"immutable raw block callback state already backfilled",
+					"immutable_tip_slot", immutableTip.Slot,
+				)
+			} else {
+				blocksBackfilled, err := backfillRawBlockCallbacks(
+					ctx,
+					imm,
+					db,
+					callback,
+				)
+				if err != nil {
+					return 0, immutableTip.Slot, fmt.Errorf(
+						"backfill immutable raw block callback state: %w",
+						err,
+					)
+				}
+				if err := markImmutableUtxoOffsetsComplete(
+					db,
+					immutableTip.Slot,
+				); err != nil {
+					return 0, immutableTip.Slot, err
+				}
+				logger.Info(
+					"backfilled immutable raw block callback state",
+					"blocks_backfilled", blocksBackfilled,
 				)
 			}
-			logger.Info(
-				"backfilled immutable raw block callback state",
-				"blocks_backfilled", blocksBackfilled,
-			)
 		}
 		return 0, immutableTip.Slot, nil
 	}
@@ -521,6 +608,13 @@ func copyBlocksRawWithCallback(
 			lastProgressSlot = blockBatch[tmpLen-1].Slot
 		}
 		blockBatch = blockBatch[:0]
+		reportLoadBlobsProgress(
+			onProgress,
+			blocksCopied,
+			lastProgressSlot,
+			immutableTip.Slot,
+			startTime,
+		)
 		maybeLogBlockCopyProgress(
 			logger,
 			"copying blocks from immutable DB",
@@ -540,7 +634,78 @@ func copyBlocksRawWithCallback(
 		"finished copying blocks from immutable DB",
 		"blocks_copied", blocksCopied,
 	)
+	if callback != nil && db != nil && blocksCopied > 0 {
+		if err := markImmutableUtxoOffsetsComplete(
+			db,
+			immutableTip.Slot,
+		); err != nil {
+			return blocksCopied, immutableTip.Slot, err
+		}
+	}
 	return blocksCopied, immutableTip.Slot, nil
+}
+
+func immutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) (bool, error) {
+	slot, ok, err := ImmutableUtxoOffsetsTipSlot(db)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return slot >= immutableTipSlot, nil
+}
+
+// ImmutableUtxoOffsetsTipSlot reports the latest slot for which the Mithril
+// immutable-copy phase persisted produced-UTxO offset references. The second
+// return value is false when no immutable copy has run (the sync-state key is
+// unset); callers must treat that as "no skip threshold" and write offsets
+// normally.
+func ImmutableUtxoOffsetsTipSlot(
+	db *database.Database,
+) (uint64, bool, error) {
+	val, err := db.GetSyncState(
+		immutableUtxoOffsetsSyncStateKey,
+		nil,
+	)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"checking immutable UTxO offset state: %w",
+			err,
+		)
+	}
+	if val == "" {
+		return 0, false, nil
+	}
+	slot, err := strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf(
+			"parsing immutable UTxO offset state %q: %w",
+			val,
+			err,
+		)
+	}
+	return slot, true, nil
+}
+
+func markImmutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) error {
+	if err := db.SetSyncState(
+		immutableUtxoOffsetsSyncStateKey,
+		strconv.FormatUint(immutableTipSlot, 10),
+		nil,
+	); err != nil {
+		return fmt.Errorf(
+			"marking immutable UTxO offset state complete: %w",
+			err,
+		)
+	}
+	return nil
 }
 
 func backfillRawBlockCallbacks(
@@ -637,6 +802,12 @@ func storeRawBlockUtxoOffsets(
 	txn *database.Txn,
 	block chain.RawBlock,
 ) (int, error) {
+	// Byron epoch-boundary blocks carry no transactions. Mainnet's slot-0
+	// EBB body can look like a large Shelley-style tx body array to the
+	// generic offset extractor, so skip it before attempting extraction.
+	if block.Type == gledger.BlockTypeByronEbb {
+		return 0, nil
+	}
 	if txn == nil || txn.Blob() == nil {
 		return 0, errors.New("blob transaction not available")
 	}
@@ -821,6 +992,31 @@ func checkedUint32(v int) (uint32, error) {
 		return 0, fmt.Errorf("value %d overflows uint32", v)
 	}
 	return uint32(v), nil // #nosec G115
+}
+
+func reportLoadBlobsProgress(
+	onProgress func(LoadBlobsProgress),
+	blocksCopied int,
+	currentSlot uint64,
+	tipSlot uint64,
+	startTime time.Time,
+) {
+	if onProgress == nil {
+		return
+	}
+	elapsed := time.Since(startTime).Seconds()
+	progress := LoadBlobsProgress{
+		BlocksCopied: blocksCopied,
+		CurrentSlot:  currentSlot,
+		TipSlot:      tipSlot,
+	}
+	if elapsed > 0 {
+		progress.BlocksPerSecond = float64(blocksCopied) / elapsed
+	}
+	if tipSlot > 0 {
+		progress.Percent = float64(currentSlot) / float64(tipSlot) * 100
+	}
+	onProgress(progress)
 }
 
 func maybeLogBlockCopyProgress(

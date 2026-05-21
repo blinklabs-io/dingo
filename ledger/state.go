@@ -48,9 +48,13 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -60,6 +64,9 @@ import (
 const (
 	cleanupConsumedUtxosInterval = 5 * time.Minute
 	batchSize                    = 50 // Number of blocks to process in a single DB transaction
+	ledgerIntersectDenseCount    = 32
+	ledgerAncestorSearchWindow   = 10_000
+	firstBlockIndex              = 1
 )
 
 type metadataDbReader interface {
@@ -441,6 +448,9 @@ type LedgerState struct {
 	currentPParams                     lcommon.ProtocolParameters
 	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
 	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch                   uint64                     // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration                  atomic.Uint64              // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight           atomic.Bool                // guard against overlapping async HFI tallies
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -497,7 +507,14 @@ type LedgerState struct {
 	// closed.Load() and Add(1) in handleEventChainUpdate.
 	rollbackMu sync.Mutex
 	// rollbackWG tracks in-flight rollback event emission goroutines
-	rollbackWG        sync.WaitGroup
+	rollbackWG sync.WaitGroup
+	// replayMu serializes replayWG.Add with Close's replayWG.Wait to
+	// prevent Add-after-Wait panics from the TOCTOU race between
+	// closed.Load() and Add(1) in replayBufferedHeadersAsync (#2107).
+	replayMu sync.Mutex
+	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
+	// Close can drain them before the database is closed (issue #2107).
+	replayWG          sync.WaitGroup
 	validationEnabled bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
@@ -517,6 +534,8 @@ type LedgerState struct {
 	headerMismatchCount  int // consecutive header mismatch count
 	bufferedHeaderEvents map[string][]ChainsyncEvent
 	peerHeaderHistory    map[string]*peerHeaderChain
+	// Test hook for fork ancestor lookups.
+	lookupBlockByHash func([]byte) (models.Block, error)
 }
 
 // EraTransitionResult holds computed state from an era transition
@@ -575,6 +594,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
 	}
+	// Initialize metrics here so any constructed LedgerState is safe to
+	// use without requiring Start() to have been called. Benchmarks and
+	// other tests that exercise validateTxCore via a constructed-but-
+	// not-started LedgerState would otherwise nil-deref on the metrics
+	// counters.
+	ls.metrics.init(cfg.PromRegistry)
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
@@ -583,8 +608,6 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 
 func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.ctx = ctx
-	// Init metrics
-	ls.metrics.init(ls.config.PromRegistry)
 	ls.metrics.nodeStartTime.Set(
 		float64(time.Now().Unix()),
 	)
@@ -643,22 +666,27 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.config.Logger.Info("database worker pool disabled")
 	}
 
-	// Setup event handlers
+	// Setup event handlers. The chainsync/blockfetch/chain-update streams
+	// can burst at bulk-sync rates (#1556 / #1914), so they opt into the
+	// large EventQueueSize buffer. Sparser streams use the default.
 	if ls.config.EventBus != nil {
-		ls.chainsyncSubID = ls.config.EventBus.SubscribeFunc(
+		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			ChainsyncEventType,
+			event.EventQueueSize,
 			ls.handleEventChainsync,
 		)
 		ls.chainsyncAwaitReplySubID = ls.config.EventBus.SubscribeFunc(
 			ChainsyncAwaitReplyEventType,
 			ls.handleEventChainsyncAwaitReply,
 		)
-		ls.blockfetchSubID = ls.config.EventBus.SubscribeFunc(
+		ls.blockfetchSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			BlockfetchEventType,
+			event.EventQueueSize,
 			ls.handleEventBlockfetch,
 		)
-		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFunc(
+		ls.chainUpdateSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			chain.ChainUpdateEventType,
+			event.EventQueueSize,
 			ls.handleEventChainUpdate,
 		)
 		ls.chainSwitchSubID = ls.config.EventBus.SubscribeFunc(
@@ -924,6 +952,57 @@ func (ls *LedgerState) Chain() *chain.Chain {
 	return ls.chain
 }
 
+// PoolRegistrationVRFKeyHash returns the VRF key hash recorded on the
+// most recent active pool registration certificate for the given pool.
+// found is false when the pool has no on-chain registration yet — that
+// is informational, not an error condition, since operators commonly
+// stage credentials before the registration certificate is on chain.
+//
+// Used by the block-producer credential check at startup to confirm the
+// loaded VRF key matches what the chain has on file.
+func (ls *LedgerState) PoolRegistrationVRFKeyHash(
+	poolID [28]byte,
+) (vrfHash [32]byte, found bool, err error) {
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	pool, err := ls.db.GetPool(pkh, false, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return [32]byte{}, false, nil
+		}
+		return [32]byte{}, false, err
+	}
+	if pool == nil {
+		return [32]byte{}, false, nil
+	}
+	if len(pool.Registration) > 0 &&
+		len(pool.Registration[0].VrfKeyHash) == 32 {
+		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
+		return vrfHash, true, nil
+	}
+	if len(pool.VrfKeyHash) != 32 {
+		return [32]byte{}, false, nil
+	}
+	copy(vrfHash[:], pool.VrfKeyHash)
+	return vrfHash, true, nil
+}
+
+func (ls *LedgerState) LatestOpCertSequence(
+	poolID [28]byte,
+) (sequence uint64, found bool, err error) {
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	pool, err := ls.db.GetPool(pkh, false, nil)
+	if err != nil {
+		if errors.Is(err, models.ErrPoolNotFound) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if pool == nil {
+		return 0, false, nil
+	}
+	return ls.db.LatestPoolOpCertSequence(pkh, nil)
+}
+
 // Datum looks up a datum by hash & adding this for implementing query.ReadData #741
 func (ls *LedgerState) Datum(hash []byte) (*models.Datum, error) {
 	return ls.db.GetDatum(hash, nil)
@@ -986,6 +1065,24 @@ func (ls *LedgerState) Close() error {
 		)
 	}
 	ls.rollbackMu.Unlock()
+
+	// Drain in-flight replayBufferedHeadersAsync goroutines so they
+	// finish issuing DB reads before the owner closes the database
+	// (#2107). Hold replayMu so no new goroutine can Add(1) between our
+	// closed flag and this Wait. The closed flag set above prevents
+	// new goroutines from being spawned, so the Wait is bounded by the
+	// in-flight workers; we wait unconditionally because returning
+	// while replay goroutines are still issuing DB reads would
+	// reintroduce the panic this fix is meant to prevent.
+	ls.config.Logger.Info("waiting for in-flight header replay goroutines")
+	replayStart := time.Now()
+	ls.replayMu.Lock()
+	ls.replayWG.Wait()
+	ls.replayMu.Unlock()
+	ls.config.Logger.Info(
+		"header replay goroutines finished",
+		"elapsed", time.Since(replayStart).Round(time.Millisecond),
+	)
 
 	// Stop slot clock
 	if ls.slotClock != nil {
@@ -1323,6 +1420,15 @@ func (ls *LedgerState) scheduleCleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) cleanupConsumedUtxos() {
+	// In API storage mode we retain spent UTxO metadata rows past the
+	// stability window so historical transaction queries can resolve
+	// input/collateral/reference-input details via spent_at_tx_id,
+	// collateral_by_tx_id, and referenced_by_tx_id. Spent state is already
+	// encoded by deleted_slot and spent_at_tx_id; live-UTxO queries continue
+	// to filter on deleted_slot = 0.
+	if ls.db.StorageMode() == types.StorageModeAPI {
+		return
+	}
 	// Get the current tip slot while holding the read lock to avoid TOCTOU race.
 	// We capture only the slot value we need, so even if currentTip changes after
 	// we release the lock, we're working with a consistent snapshot of the slot.
@@ -1366,6 +1472,36 @@ func (ls *LedgerState) cleanupConsumedUtxos() {
 }
 
 func (ls *LedgerState) rollback(point ocommon.Point) error {
+	// Rolling back to the point we already sit at is a no-op. Skip
+	// it entirely so we don't publish a "local ledger rollback"
+	// resync event for a rollback that didn't move the ledger. That
+	// event drives RecoverAfterLocalRollback, which on a single-peer
+	// block producer wedges the chain in a per-cycle replay loop
+	// when the peer rolls back to a point already covered by queued
+	// headers extended via tryResolveFork's "fork extends from
+	// current tip" branch (issue #2177).
+	ls.RLock()
+	currentTip := ls.currentTip
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+	if currentTip.Point.Slot == point.Slot &&
+		bytes.Equal(currentTip.Point.Hash, point.Hash) {
+		return nil
+	}
+	if point.Slot > currentTip.Point.Slot {
+		ls.config.Logger.Debug(
+			"rollback point ahead of ledger tip, skipping metadata rollback",
+			"component", "ledger",
+			"rollback_slot", point.Slot,
+			"ledger_tip_slot", currentTip.Point.Slot,
+			"rollback_hash", hex.EncodeToString(point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(currentTip.Point.Hash),
+		)
+		return nil
+	}
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return ErrRollbackExceedsMithrilBoundary
+	}
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
@@ -1727,38 +1863,22 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	//     a HardForkInitiation governance action survived the
 	//     rollback and is still ratifiable past the voting deadline.
 	//
-	// Without these re-derivations a client querying era history
-	// between rollback completion and the next block-apply would see
-	// a transient Unknown that doesn't reflect the actual chain
-	// state.
+	// These re-derivations are best-effort at rollback time: if an
+	// HFI stability tally is already in flight, the generation bump
+	// below invalidates that result and the fresh tally may be
+	// deferred until the next block reopens the evaluator. That can
+	// leave a transient Unknown between rollback completion and the
+	// next successful evaluation, but prevents stale pre-rollback HFI
+	// results from committing.
 	ls.transitionInfo = hardfork.NewTransitionUnknown()
 	ls.reconstructTransitionInfo()
+	// Reopen the once-per-epoch gate so rollback can attempt to
+	// re-derive transitionInfo, and bump the generation counter so any
+	// in-flight tally from before the rollback drops its result instead
+	// of committing stale data.
+	ls.hfiEvalDoneEpoch = 0
+	ls.hfiEvalGeneration.Add(1)
 	ls.evaluateHardForkInitiationStability()
-	// If rolling back behind the Mithril trust boundary, clear it.
-	// A rollback inside the gap means replacement blocks on the new
-	// fork were NOT processed by SetGapBlockTransaction and must go
-	// through normal block processing.
-	if ls.mithrilLedgerSlot > 0 && point.Slot < ls.mithrilLedgerSlot {
-		ls.config.Logger.Warn(
-			"rollback behind Mithril trust boundary, clearing",
-			"component", "ledger",
-			"rollback_slot", point.Slot,
-			"mithril_ledger_slot", ls.mithrilLedgerSlot,
-		)
-		ls.mithrilLedgerSlot = 0
-		// Also clear the persisted value so a restart doesn't
-		// reload the stale boundary and skip replacement-fork
-		// blocks.
-		if err := ls.db.DeleteSyncState(
-			"mithril_ledger_slot", nil,
-		); err != nil {
-			ls.config.Logger.Warn(
-				"failed to clear persisted Mithril trust boundary",
-				"component", "ledger",
-				"error", err,
-			)
-		}
-	}
 	// Always update nonce - clear it on genesis rollback, set
 	// it otherwise
 	ls.currentTipBlockNonce = newNonce
@@ -1773,7 +1893,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
-					Reason: "local ledger rollback",
+					Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 					Point:  point,
 				},
 			),
@@ -1800,6 +1920,12 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 // rollbackChainAndState rewinds the primary chain and then synchronizes the
 // metadata-backed ledger state to the same point.
 func (ls *LedgerState) rollbackChainAndState(point ocommon.Point) error {
+	ls.RLock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	ls.RUnlock()
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return ErrRollbackExceedsMithrilBoundary
+	}
 	if err := ls.chain.Rollback(point); err != nil {
 		return err
 	}
@@ -1947,7 +2073,10 @@ func (ls *LedgerState) IsAtTip() bool {
 // For Byron era, returns 2k. For Shelley+ eras, returns 3k/f.
 // Returns the default threshold if genesis data is unavailable or invalid.
 func (ls *LedgerState) calculateStabilityWindow() uint64 {
-	return ls.calculateStabilityWindowForEra(ls.currentEra.Id)
+	ls.RLock()
+	eraId := ls.currentEra.Id
+	ls.RUnlock()
+	return ls.calculateStabilityWindowForEra(eraId)
 }
 
 // calculateStabilityWindowForEra calculates the stability window for the given era.
@@ -2101,8 +2230,6 @@ func (ls *LedgerState) SecurityParam() int {
 // current era in slots. For Byron the window is 2k; for Shelley+ it is 3k/f.
 // It is safe to call from multiple goroutines.
 func (ls *LedgerState) StabilityWindow() uint64 {
-	ls.RLock()
-	defer ls.RUnlock()
 	return ls.calculateStabilityWindow()
 }
 
@@ -2142,27 +2269,70 @@ func (ls *LedgerState) ledgerReadChain(
 	// Without this, the consumer blocks forever on the channel
 	// read if the reader goroutine exits silently on an error.
 	defer close(resultCh)
-	// Snapshot the current tip under lock to avoid a data race with
-	// concurrent rollbacks that update ls.currentTip.
-	ls.RLock()
-	startPoint := ls.currentTip.Point
-	ls.RUnlock()
-	// Create chain iterator
-	iter, err := ls.chain.FromPoint(startPoint, false)
-	if err != nil {
-		// The start point may have been rolled back off the chain
-		// between the snapshot and iterator creation. Log and return —
-		// the outer loop in ledgerProcessBlocks will retry after the
-		// rollback updates ls.currentTip.
-		ls.config.Logger.Warn(
-			"chain iterator start point not on chain, will retry",
-			"error", err,
-			"start_slot", startPoint.Slot,
-		)
+	const maxReconcileRetries = 3
+	reconcileRetries := 0
+	for {
+		// Snapshot the current tip under lock to avoid a data race with
+		// concurrent rollbacks that update ls.currentTip.
+		ls.RLock()
+		startPoint := ls.currentTip.Point
+		ls.RUnlock()
+		// Create chain iterator
+		iter, err := ls.chain.FromPoint(startPoint, false)
+		if err != nil {
+			if !errors.Is(err, models.ErrBlockNotFound) {
+				ls.config.Logger.Warn(
+					"failed to create chain iterator",
+					"error", err,
+					"start_slot", startPoint.Slot,
+				)
+				return
+			}
+			if reconcileRetries >= maxReconcileRetries {
+				ls.config.Logger.Error(
+					"exhausted ledger rollback retries for missing chain iterator start point",
+					"error", err,
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+					"retries", reconcileRetries,
+					"max_retries", maxReconcileRetries,
+				)
+				return
+			}
+			ls.config.Logger.Warn(
+				"chain iterator start point not on chain, attempting ledger rollback",
+				"error", err,
+				"start_slot", startPoint.Slot,
+				"start_hash", hex.EncodeToString(startPoint.Hash),
+			)
+			if reconcileErr := ls.reconcilePrimaryChainTipWithLedgerTip(); reconcileErr != nil {
+				ls.config.Logger.Error(
+					"failed to recover missing chain iterator start point",
+					"error", reconcileErr,
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+				)
+				return
+			}
+			reconcileRetries++
+			ls.RLock()
+			recoveredPoint := ls.currentTip.Point
+			ls.RUnlock()
+			if recoveredPoint.Slot == startPoint.Slot &&
+				bytes.Equal(recoveredPoint.Hash, startPoint.Hash) {
+				ls.config.Logger.Error(
+					"ledger rollback did not change missing chain iterator start point",
+					"start_slot", startPoint.Slot,
+					"start_hash", hex.EncodeToString(startPoint.Hash),
+				)
+				return
+			}
+			continue
+		}
+		defer iter.Cancel()
+		ls.ledgerReadChainIterator(ctx, iter, resultCh)
 		return
 	}
-	defer iter.Cancel()
-	ls.ledgerReadChainIterator(ctx, iter, resultCh)
 }
 
 func (ls *LedgerState) ledgerReadChainIterator(
@@ -3059,6 +3229,22 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					completeReadResult()
 					return errRestartLedgerPipeline
 				}
+				// A stale chain iterator delivers a fork block whose prev-hash
+				// doesn't match our current tip. This happens when a concurrent
+				// rollback moved the chain behind the iterator's position: the
+				// iterator skips the first fork block and reads one that extends
+				// a branch we are no longer on. Restarting the pipeline creates
+				// a fresh iterator from the (already rolled-back) currentTip,
+				// which will walk all fork blocks in order.
+				if errors.Is(err, errStaleChainIterator) {
+					ls.config.Logger.Debug(
+						"stale chain iterator detected, restarting pipeline to resync",
+						"component", "ledger",
+						"error", err,
+					)
+					completeReadResult()
+					return errRestartLedgerPipeline
+				}
 				completeReadResult()
 				return fmt.Errorf("process block batch: %w", err)
 			}
@@ -3156,11 +3342,22 @@ func (ls *LedgerState) ledgerProcessBlock(
 			expectedPrevHash,
 		) {
 			return nil, fmt.Errorf(
-				"block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				"%w: block %s (with prev hash %s) does not fit on current chain tip (%x)",
+				errStaleChainIterator,
 				block.Hash().String(),
 				block.PrevHash().String(),
 				expectedPrevHash,
 			)
+		}
+	}
+	// Reject blocks whose header protocol major version runs more than
+	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
+	// per cardano-ledger PR 5785.
+	if shouldValidate {
+		if err := ls.validateBlockHeaderProtocolVersion(
+			block.Header(), pparams,
+		); err != nil {
+			return nil, err
 		}
 	}
 	// Process transactions
@@ -3326,7 +3523,41 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
+	if seqNum, ok := opCertSequenceNumber(block); ok {
+		issuerVkey := block.IssuerVkey()
+		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+		if err := ls.db.UpdatePoolOpCertSequence(
+			poolKeyHash,
+			uint64(seqNum),
+			point.Slot,
+			txn,
+		); err != nil {
+			if delta != nil {
+				delta.Release()
+			}
+			return nil, err
+		}
+	}
 	return delta, nil
+}
+
+func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
+	switch header := block.Header().(type) {
+	case *shelley.ShelleyBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *allegra.AllegraBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *mary.MaryBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *alonzo.AlonzoBlockHeader:
+		return header.Body.OpCertSequenceNumber, true
+	case *babbage.BabbageBlockHeader:
+		return header.Body.OpCert.SequenceNumber, true
+	case *conway.ConwayBlockHeader:
+		return header.Body.OpCert.SequenceNumber, true
+	default:
+		return 0, false
+	}
 }
 
 // densityEntry records a block's slot and block number for the chain density
@@ -3609,7 +3840,6 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	if ls.transitionInfo.State == hardfork.TransitionKnown {
 		return
 	}
-	expectedTargetEpoch := ls.currentEpoch.EpochId + 1
 	epochEndSlot, addErr := checkedSlotAdd(
 		ls.currentEpoch.StartSlot,
 		uint64(ls.currentEpoch.LengthInSlots),
@@ -3630,47 +3860,112 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 	if ls.currentTip.Point.Slot < votingDeadline {
 		return
 	}
+	// Once-per-epoch gate: post-deadline, the inputs to ratification
+	// (DRep voting power, SPO voting power, CC votes) are frozen —
+	// the pre-epoch stake snapshot fixes voting weights and votes
+	// after the deadline don't count toward this epoch's outcome. So
+	// one tally per epoch is the entire correctness budget; running
+	// it more often only wastes CPU on the SQLite DRep cascade
+	// (~94% of total CPU during catchup on preview, where the
+	// post-deadline window can span many hours). hfiEvalDoneEpoch is
+	// reset to 0 in rollback() to reopen the gate when chain history
+	// changes.
+	if ls.hfiEvalDoneEpoch == ls.currentEpoch.EpochId {
+		return
+	}
+	if !ls.hfiStabilityEvalInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	ls.hfiEvalDoneEpoch = ls.currentEpoch.EpochId
+	gen := ls.hfiEvalGeneration.Load()
+	// Snapshot inputs while we hold the caller's write lock, then run
+	// the heavy DB call without it. Reacquiring the lock only to write
+	// transitionInfo keeps the per-block path off the SQLite query —
+	// otherwise the tally would run inline under ls.Lock() and stall
+	// the chainsync pipeline (rollback / new-block apply / read-side
+	// chainsync server FindIntersect requests all wait on the same
+	// RWMutex), adding multi-second pauses to every block on the
+	// catchup path. The snapshot/apply pattern matches the rollback()
+	// comment that calls this out as the intended approach for this
+	// exact contention concern.
+	snapshotEpoch := ls.currentEpoch.EpochId
+	snapshotPParams := ls.currentPParams
 	conwayGenesis := ls.config.CardanoNodeConfig.ConwayGenesis()
-	result, err := governance.EvaluateRatifiableHardForkInitiation(
-		governance.StabilityCheckInputs{
-			DB:            ls.db,
-			Logger:        ls.config.Logger,
-			CurrentEpoch:  ls.currentEpoch.EpochId,
-			PParams:       ls.currentPParams,
-			ConwayGenesis: conwayGenesis,
-		},
-	)
-	if err != nil {
-		ls.config.Logger.Warn(
-			"hardfork-initiation stability check failed",
+	db := ls.db
+	logger := ls.config.Logger
+	decodeFailures := ls.metrics.governanceProposalDecodeFailures
+	onDecodeFailure := func(proposal *models.GovernanceProposal, err error) {
+		logger.Warn(
+			"skipping ratifiable HardForkInitiation: decode failed",
+			"proposal_id", proposal.ID,
 			"error", err,
-			"component", "ledger",
 		)
-		return
+		decodeFailures.Inc()
 	}
-	if result == nil {
-		return
-	}
-	// A ratifiable HardForkInitiation is only an era transition if its
-	// target ProtocolVersion crosses an era boundary. An intra-era
-	// pparams bump (e.g. Plomin's pv9 → pv10, both Conway) ratifies
-	// through the same governance path but doesn't end the era;
-	// surfacing it as TransitionKnown would mislead clients into
-	// thinking the era ends at the next boundary. Filter using the
-	// same era-mapping rule the boundary-time IsHardForkTransition
-	// applies, so mid-epoch detection and boundary dispatch agree.
-	currentVer, err := GetProtocolVersion(ls.currentPParams)
-	if err != nil {
-		return
-	}
-	targetVer := ProtocolVersion{
-		Major: result.NewMajor,
-		Minor: result.NewMinor,
-	}
-	if !IsHardForkTransition(currentVer, targetVer) {
-		return
-	}
-	ls.transitionInfo = hardfork.NewTransitionKnown(expectedTargetEpoch)
+	go func() {
+		defer ls.hfiStabilityEvalInFlight.Store(false)
+		result, err := governance.EvaluateRatifiableHardForkInitiation(
+			governance.NewStabilityCheckInputs(
+				db,
+				nil,
+				snapshotEpoch,
+				snapshotPParams,
+				conwayGenesis,
+				onDecodeFailure,
+			),
+		)
+		if err != nil {
+			logger.Warn(
+				"hardfork-initiation stability check failed",
+				"error", err,
+				"component", "ledger",
+			)
+			return
+		}
+		if result == nil {
+			return
+		}
+		// A ratifiable HardForkInitiation is only an era transition
+		// if its target ProtocolVersion crosses an era boundary. An
+		// intra-era pparams bump (e.g. Plomin's pv9 → pv10, both
+		// Conway) ratifies through the same governance path but
+		// doesn't end the era; surfacing it as TransitionKnown would
+		// mislead clients. Use the snapshotted PParams so the
+		// version comparison reflects the state we computed against.
+		currentVer, verErr := GetProtocolVersion(snapshotPParams)
+		if verErr != nil {
+			return
+		}
+		targetVer := ProtocolVersion{
+			Major: result.NewMajor,
+			Minor: result.NewMinor,
+		}
+		if !IsHardForkTransition(currentVer, targetVer) {
+			return
+		}
+		ls.Lock()
+		defer ls.Unlock()
+		// Generation guard: a rollback that landed while the tally
+		// was running invalidated our snapshot. Drop the result
+		// rather than commit stale data — rollback's own call to
+		// evaluateHardForkInitiationStability will spawn a fresh
+		// tally against the post-rollback state.
+		if ls.hfiEvalGeneration.Load() != gen {
+			return
+		}
+		// A higher-priority source (TestX override or pparams-bump
+		// detection) may have set TransitionKnown while the tally
+		// was running; don't overwrite.
+		if ls.transitionInfo.State == hardfork.TransitionKnown {
+			return
+		}
+		// Re-derive the target epoch from the current state at
+		// commit time so an epoch rollover that landed during the
+		// tally doesn't pin TransitionKnown to a stale epoch id.
+		ls.transitionInfo = hardfork.NewTransitionKnown(
+			ls.currentEpoch.EpochId + 1,
+		)
+	}()
 }
 
 // computePParams loads protocol parameters for the given epoch/era
@@ -3918,7 +4213,9 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	if ls.chain == nil || ls.config.ChainManager == nil {
 		return nil
 	}
+	ls.RLock()
 	ledgerTip := ls.currentTip
+	ls.RUnlock()
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
@@ -3941,15 +4238,207 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		}
 		return nil
 	}
+	containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
+	if err != nil {
+		return fmt.Errorf("check ledger tip on primary chain: %w", err)
+	}
+	if containsLedgerTip {
+		if gap, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
+			chainTip,
+			ledgerTip,
+		); unsafe {
+			ls.config.Logger.Warn(
+				"primary chain tip too far ahead of ledger tip at startup, rewinding primary chain",
+				"component", "ledger",
+				"chain_tip_slot", chainTip.Point.Slot,
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"block_gap", gap,
+				"security_param", ls.SecurityParam(),
+			)
+			if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+				ledgerTip.Point,
+			); err != nil {
+				return fmt.Errorf(
+					"rewind primary chain to ledger tip: %w",
+					err,
+				)
+			}
+			return nil
+		}
+		ls.config.Logger.Warn(
+			"primary chain tip ahead of ledger tip at startup; ledgerProcessBlocks will catch up via chainsync",
+			"component", "ledger",
+			"chain_tip_slot", chainTip.Point.Slot,
+			"ledger_tip_slot", ledgerTip.Point.Slot,
+			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+		return nil
+	}
+	ancestor, found, err := ls.latestLedgerPrimaryChainAncestor(
+		ledgerTip.Point,
+		containsLedgerTip,
+	)
+	if err != nil {
+		return fmt.Errorf("find common primary-chain ancestor for ledger tip: %w", err)
+	}
+	if !found {
+		return fmt.Errorf(
+			"ledger tip %d/%s is not on primary chain and no common ancestor was found",
+			ledgerTip.Point.Slot,
+			hex.EncodeToString(ledgerTip.Point.Hash),
+		)
+	}
 	ls.config.Logger.Warn(
-		"primary chain tip ahead of ledger tip at startup, replaying metadata from selected chain",
+		"ledger tip not on primary chain at startup, rolling back metadata to common ancestor",
 		"component", "ledger",
 		"chain_tip_slot", chainTip.Point.Slot,
 		"ledger_tip_slot", ledgerTip.Point.Slot,
 		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+		"ancestor_slot", ancestor.Slot,
+		"ancestor_hash", hex.EncodeToString(ancestor.Hash),
 	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
+		ancestor,
+	); err != nil {
+		return fmt.Errorf(
+			"rewind primary chain to common primary-chain ancestor: %w",
+			err,
+		)
+	}
+	if err := ls.rollback(ancestor); err != nil {
+		return fmt.Errorf(
+			"rollback ledger tip to common primary-chain ancestor: %w",
+			err,
+		)
+	}
 	return nil
+}
+
+func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
+	reason string,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	if ls.chain == nil || ls.config.ChainManager == nil {
+		return false, nil
+	}
+	ls.RLock()
+	ledgerTip := ls.currentTip
+	ls.RUnlock()
+	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot == ledgerTip.Point.Slot &&
+		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash) {
+		return false, nil
+	}
+
+	shouldReconcile := chainTip.Point.Slot < ledgerTip.Point.Slot
+	if !shouldReconcile {
+		containsLedgerTip, err := ls.primaryChainContainsPoint(
+			ledgerTip.Point,
+		)
+		if err != nil {
+			return false, fmt.Errorf(
+				"check ledger tip on primary chain: %w",
+				err,
+			)
+		}
+		shouldReconcile = !containsLedgerTip
+	}
+	if !shouldReconcile {
+		return false, nil
+	}
+
+	ls.config.Logger.Warn(
+		"primary chain and ledger diverged during live chainsync recovery, reconciling to common ancestor",
+		"component", "ledger",
+		"reason", reason,
+		"connection_id", connId.String(),
+		"chain_tip_slot", chainTip.Point.Slot,
+		"ledger_tip_slot", ledgerTip.Point.Slot,
+		"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+		"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+	)
+	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (ls *LedgerState) primaryChainAheadBeyondLedgerSafetyWindow(
+	chainTip ochainsync.Tip,
+	ledgerTip ochainsync.Tip,
+) (uint64, bool) {
+	if chainTip.BlockNumber <= ledgerTip.BlockNumber {
+		return 0, false
+	}
+	gap := chainTip.BlockNumber - ledgerTip.BlockNumber
+	if ls.config.CardanoNodeConfig == nil {
+		return gap, false
+	}
+	securityParam := ls.SecurityParam()
+	if securityParam <= 0 {
+		return gap, false
+	}
+	return gap, gap > uint64(securityParam)
+}
+
+func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, error) {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return true, nil
+	}
+	if ls.db == nil {
+		return false, nil
+	}
+	_, err := database.BlockByPoint(ls.db, point)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return false, nil
+	}
+	return false, err
+}
+
+func (ls *LedgerState) latestLedgerPrimaryChainAncestor(
+	point ocommon.Point,
+	containsPoint bool,
+) (ocommon.Point, bool, error) {
+	if containsPoint {
+		return point, true, nil
+	}
+	if ls.db == nil {
+		return ocommon.Point{}, false, nil
+	}
+	end := point.Slot
+	for {
+		start := uint64(0)
+		if end > ledgerAncestorSearchWindow {
+			start = end - ledgerAncestorSearchWindow
+		}
+		blockNonces, err := ls.db.GetBlockNoncesInSlotRange(start, end, nil)
+		if err != nil {
+			return ocommon.Point{}, false, err
+		}
+		for i := len(blockNonces); i > 0; i-- {
+			blockNonce := blockNonces[i-1]
+			ancestor := ocommon.NewPoint(blockNonce.Slot, blockNonce.Hash)
+			containsAncestor, err := ls.primaryChainContainsPoint(ancestor)
+			if err != nil {
+				return ocommon.Point{}, false, err
+			}
+			if containsAncestor {
+				return ancestor, true, nil
+			}
+		}
+		if start == 0 {
+			break
+		}
+		end = start
+	}
+	return ocommon.Point{}, false, nil
 }
 
 func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
@@ -3960,7 +4449,7 @@ func (ls *LedgerState) GetBlock(point ocommon.Point) (models.Block, error) {
 	return ret, nil
 }
 
-func (ls *LedgerState) chainTipMatchesLedgerTip() bool {
+func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 	if ls.chain == nil {
 		return false
 	}
@@ -3968,6 +4457,26 @@ func (ls *LedgerState) chainTipMatchesLedgerTip() bool {
 	ledgerTip := ls.currentTip
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
+	if chainTip.Point.Slot > ledgerTip.Point.Slot {
+		if _, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
+			chainTip,
+			ledgerTip,
+		); unsafe {
+			return false
+		}
+		containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to confirm ledger tip is on primary chain",
+				"component", "ledger",
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"error", err,
+			)
+			return false
+		}
+		return containsLedgerTip
+	}
 	return chainTip.Point.Slot == ledgerTip.Point.Slot &&
 		bytes.Equal(chainTip.Point.Hash, ledgerTip.Point.Hash)
 }
@@ -3985,20 +4494,71 @@ func (ls *LedgerState) authoritativeRecentChainPoints(
 		return nil, nil
 	}
 	points := make([]ocommon.Point, 0, count)
-	nextHash := append([]byte(nil), currentTip.Point.Hash...)
-	for len(points) < count && len(nextHash) > 0 {
-		block, err := database.BlockByHash(ls.db, nextHash)
-		if err != nil {
-			return nil, err
+	seen := make(map[string]struct{}, count)
+	appendBlock := func(block models.Block) {
+		if len(points) >= count {
+			return
+		}
+		key := fmt.Sprintf("%d:%x", block.Slot, block.Hash)
+		if _, ok := seen[key]; ok {
+			return
 		}
 		points = append(
 			points,
 			ocommon.NewPoint(block.Slot, block.Hash),
 		)
-		if len(block.PrevHash) == 0 {
+		seen[key] = struct{}{}
+	}
+	appendBlockByIndex := func(blockIndex uint64) {
+		if len(points) >= count {
+			return
+		}
+		block, err := ls.db.BlockByIndex(blockIndex, nil)
+		if err != nil {
+			return
+		}
+		appendBlock(block)
+	}
+	tipBlock, err := database.BlockByPoint(ls.db, currentTip.Point)
+	if err != nil {
+		// Tolerate a missing authoritative tip: returning the
+		// error here would leave us unable to send any intersect
+		// points to peers, which breaks both inbound chainsync
+		// (peers can't sync from us) and our own outbound
+		// chainsync setup (we ship MsgFindIntersect with these
+		// points).
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return points, nil
+		}
+		return nil, err
+	}
+	appendBlock(tipBlock)
+	denseStartIndex := tipBlock.ID
+	if denseStartIndex > firstBlockIndex {
+		denseStartIndex--
+	} else {
+		denseStartIndex = 0
+	}
+	denseCount := min(count, ledgerIntersectDenseCount)
+	for idx := denseStartIndex; idx >= firstBlockIndex && len(points) < denseCount; idx-- {
+		appendBlockByIndex(idx)
+		if idx == firstBlockIndex {
 			break
 		}
-		nextHash = append(nextHash[:0], block.PrevHash...)
+	}
+	if len(points) >= count {
+		return points, nil
+	}
+	if tipBlock.ID > firstBlockIndex {
+		for offset := uint64(denseCount); len(points) < count; offset *= 2 {
+			if offset == 0 || offset >= tipBlock.ID {
+				break
+			}
+			appendBlockByIndex(tipBlock.ID - offset)
+		}
+	}
+	if len(points) < count {
+		appendBlockByIndex(firstBlockIndex)
 	}
 	return points, nil
 }
@@ -4023,13 +4583,157 @@ func (ls *LedgerState) IntersectPoints(
 	if count <= 0 {
 		return nil, nil
 	}
-	if ls.chain != nil && ls.chainTipMatchesLedgerTip() {
+	if ls.primaryChainTipAtOrAheadOfLedgerTip() {
 		points := ls.chain.IntersectPoints(count)
 		if len(points) > 0 {
-			return points, nil
+			return ls.withMithrilTrustBoundaryIntersectPoint(
+				points,
+				count,
+			), nil
 		}
 	}
-	return ls.RecentChainPoints(count)
+	points, err := ls.RecentChainPoints(count)
+	if err != nil {
+		return nil, err
+	}
+	return ls.withMithrilTrustBoundaryIntersectPoint(points, count), nil
+}
+
+func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
+	points []ocommon.Point,
+	count int,
+) []ocommon.Point {
+	if count <= 0 {
+		return points
+	}
+	point, ok := ls.mithrilTrustBoundaryPoint()
+	if !ok {
+		return points
+	}
+	for _, existing := range points {
+		if existing.Slot == point.Slot &&
+			bytes.Equal(existing.Hash, point.Hash) {
+			return points
+		}
+	}
+
+	insertAt := len(points)
+	for idx, existing := range points {
+		if point.Slot > existing.Slot {
+			insertAt = idx
+			break
+		}
+	}
+	ret := make([]ocommon.Point, 0, len(points)+1)
+	ret = append(ret, points[:insertAt]...)
+	ret = append(ret, point)
+	ret = append(ret, points[insertAt:]...)
+	if len(ret) <= count {
+		return ret
+	}
+	if insertAt >= count {
+		ret[count-1] = point
+	}
+	return ret[:count]
+}
+
+func (ls *LedgerState) mithrilTrustBoundaryPoint() (ocommon.Point, bool) {
+	if ls == nil || ls.db == nil {
+		return ocommon.Point{}, false
+	}
+	ls.RLock()
+	boundarySlot := ls.mithrilLedgerSlot
+	currentTip := ls.currentTip
+	ls.RUnlock()
+	if boundarySlot == 0 || boundarySlot == ^uint64(0) {
+		return ocommon.Point{}, false
+	}
+	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
+		return ocommon.Point{}, false
+	}
+	if boundarySlot > currentTip.Point.Slot {
+		return ocommon.Point{}, false
+	}
+	block, err := ls.authoritativeLedgerBlockAtSlot(
+		boundarySlot,
+		currentTip.Point,
+	)
+	if err != nil {
+		if ls.config.Logger != nil &&
+			!errors.Is(err, models.ErrBlockNotFound) {
+			ls.config.Logger.Debug(
+				"failed to load Mithril trust boundary intersect point",
+				"component", "ledger",
+				"mithril_ledger_slot", boundarySlot,
+				"error", err,
+			)
+		}
+		return ocommon.Point{}, false
+	}
+	if block.Slot != boundarySlot || len(block.Hash) == 0 {
+		return ocommon.Point{}, false
+	}
+	return ocommon.NewPoint(block.Slot, block.Hash), true
+}
+
+func (ls *LedgerState) authoritativeLedgerBlockAtSlot(
+	slot uint64,
+	tipPoint ocommon.Point,
+) (models.Block, error) {
+	var ret models.Block
+	txn := ls.db.Transaction(false)
+	err := txn.Do(func(txn *database.Txn) error {
+		block, err := database.BlockByPointTxn(txn, tipPoint)
+		if err != nil {
+			return err
+		}
+		if slot > block.Slot {
+			return models.ErrBlockNotFound
+		}
+		// Same-slot fork blocks can coexist in blob storage. Only the
+		// current tip's PrevHash chain proves the boundary is canonical.
+		for remaining := block.Slot - slot + 1; remaining > 0; remaining-- {
+			if block.Slot == slot {
+				ret = block
+				return nil
+			}
+			if block.Slot < slot {
+				return models.ErrBlockNotFound
+			}
+			prevHash, err := blockPrevHash(block)
+			if err != nil {
+				return err
+			}
+			if len(prevHash) == 0 {
+				return models.ErrBlockNotFound
+			}
+			block, err = database.BlockByHashTxn(txn, prevHash)
+			if err != nil {
+				return err
+			}
+		}
+		return models.ErrBlockNotFound
+	})
+	return ret, err
+}
+
+func blockPrevHash(block models.Block) ([]byte, error) {
+	if len(block.PrevHash) > 0 {
+		return block.PrevHash, nil
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode block at slot %d for previous hash: %w",
+			block.Slot,
+			err,
+		)
+	}
+	prevHash := decodedBlock.PrevHash().Bytes()
+	if len(prevHash) == 0 {
+		return nil, nil
+	}
+	return prevHash, nil
 }
 
 // GetIntersectPoint returns the intersect between the specified points and the current chain
@@ -4096,6 +4800,16 @@ func (ls *LedgerState) GetChainFromPoint(
 	inclusive bool,
 ) (*chain.ChainIterator, error) {
 	return ls.chain.FromPoint(point, inclusive)
+}
+
+// GetChainFromPointReverse returns a ChainIterator that walks backward from
+// the specified point toward chain origin. If inclusive is true the iterator
+// yields the start point first; otherwise it yields the preceding block.
+func (ls *LedgerState) GetChainFromPointReverse(
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointReverse(point, inclusive)
 }
 
 // Tip returns the current chain tip
@@ -5102,6 +5816,43 @@ func (ls *LedgerState) loadSlotBattleRecorder() SlotBattleRecorder {
 	return recorder.recorder
 }
 
+// RecordForgedBlock records observability for a block that this node
+// successfully forged. Adoption into the local chain is tracked separately.
+func (ls *LedgerState) RecordForgedBlock(
+	block ledger.Block,
+	blockCbor []byte,
+	forgingLatency time.Duration,
+) {
+	if ls == nil || block == nil {
+		return
+	}
+	if ls.metrics.blocksForgedTotal != nil {
+		ls.metrics.blocksForgedTotal.Inc()
+	}
+	if ls.metrics.blockForgingLatency != nil {
+		ls.metrics.blockForgingLatency.Observe(
+			forgingLatency.Seconds(),
+		)
+	}
+	if ls.config.EventBus == nil {
+		return
+	}
+	ls.config.EventBus.Publish(
+		event.BlockForgedEventType,
+		event.NewEvent(
+			event.BlockForgedEventType,
+			event.BlockForgedEvent{
+				Slot:        block.SlotNumber(),
+				BlockNumber: block.BlockNumber(),
+				BlockHash:   block.Hash().Bytes(),
+				TxCount:     uint(len(block.Transactions())),
+				BlockSize:   uint(len(blockCbor)),
+				Timestamp:   time.Now(),
+			},
+		),
+	)
+}
+
 // forgeBlock creates a conway block with transactions from mempool
 // Also adds it to the primary chain
 func (ls *LedgerState) forgeBlock() {
@@ -5400,6 +6151,9 @@ func (ls *LedgerState) forgeBlock() {
 		return
 	}
 
+	forgingLatency := time.Since(forgeStartTime)
+	ls.RecordForgedBlock(ledgerBlock, blockCbor, forgingLatency)
+
 	// Add the block to the primary chain
 	err = ls.chain.AddBlock(ledgerBlock, nil)
 	if err != nil {
@@ -5414,31 +6168,6 @@ func (ls *LedgerState) forgeBlock() {
 	// Wake chainsync server iterators so connected peers discover
 	// the newly forged block immediately.
 	ls.chain.NotifyIterators()
-
-	// Calculate forging latency
-	forgingLatency := time.Since(forgeStartTime)
-
-	// Update forging metrics
-	ls.metrics.blocksForgedTotal.Inc()
-	ls.metrics.blockForgingLatency.Observe(forgingLatency.Seconds())
-
-	// Publish BlockForgedEvent for observability and monitoring
-	if ls.config.EventBus != nil {
-		ls.config.EventBus.Publish(
-			event.BlockForgedEventType,
-			event.NewEvent(
-				event.BlockForgedEventType,
-				event.BlockForgedEvent{
-					Slot:        ledgerBlock.SlotNumber(),
-					BlockNumber: ledgerBlock.BlockNumber(),
-					BlockHash:   ledgerBlock.Hash().Bytes(),
-					TxCount:     uint(len(transactionBodies)),
-					BlockSize:   uint(len(blockCbor)),
-					Timestamp:   time.Now(),
-				},
-			),
-		)
-	}
 
 	// Log the successful block creation
 	ls.config.Logger.Info(

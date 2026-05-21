@@ -12,6 +12,9 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -178,6 +181,7 @@ func TestCopyBlocksRaw_PreservesByronEbbLinkageAtOrigin(t *testing.T) {
 		db,
 		cm.PrimaryChain(),
 		nil,
+		nil,
 	)
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
@@ -282,6 +286,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 			_, err := storeRawBlockUtxoOffsets(txn, rb)
 			return err
 		},
+		nil,
 	)
 	require.NoError(t, err)
 	require.Greater(t, blocksCopied, 1)
@@ -330,6 +335,36 @@ func TestStoreRawBlockUtxoOffsetsPropagatesExtractError(t *testing.T) {
 	)
 }
 
+func TestStoreRawBlockUtxoOffsetsSkipsByronEbb(t *testing.T) {
+	db := newTestDB(t)
+	txn := db.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+
+	bodyItems := make([]gcbor.RawMessage, 21_600)
+	for i := range bodyItems {
+		bodyItems[i] = gcbor.RawMessage{0x00}
+	}
+	bodyCbor, err := fxcbor.Marshal(bodyItems)
+	require.NoError(t, err)
+	extraCbor, err := fxcbor.Marshal([]gcbor.RawMessage{{0x00}})
+	require.NoError(t, err)
+	blockCbor, err := fxcbor.Marshal([]gcbor.RawMessage{
+		{0x80},
+		gcbor.RawMessage(bodyCbor),
+		gcbor.RawMessage(extraCbor),
+	})
+	require.NoError(t, err)
+
+	stored, err := storeRawBlockUtxoOffsets(txn, chain.RawBlock{
+		Slot: 0,
+		Hash: bytes.Repeat([]byte{0x42}, 32),
+		Cbor: blockCbor,
+		Type: gledger.BlockTypeByronEbb,
+	})
+	require.NoError(t, err)
+	require.Zero(t, stored)
+}
+
 func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	t *testing.T,
 ) {
@@ -354,6 +389,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 		immutableDir,
 		db,
 		cm.PrimaryChain(),
+		nil,
 		nil,
 	)
 	require.NoError(t, err)
@@ -388,6 +424,7 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 			offsetsStored += stored
 			return err
 		},
+		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 0, blocksCopied)
@@ -414,4 +451,58 @@ func decodeImmutableBlockHeader(
 		)
 	}
 	return header, nil
+}
+
+// TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
+// against an in-memory SQLite database and populates sqlite_stat1.
+func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
+		{
+			TxId:      []byte("run_planner_stats_tx_id_00000001"),
+			OutputIdx: 0,
+			AddedSlot: 1,
+			Amount:    types.Uint64(1),
+		},
+	}, nil))
+
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+
+	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
+	require.True(t, ok, "test database should use SQLite metadata")
+
+	var count int64
+	err := sqliteStore.DB().Raw(
+		"SELECT COUNT(*) FROM sqlite_stat1",
+	).Scan(&count).Error
+	require.NoError(t, err)
+	assert.Positive(t, count, "sqlite_stat1 should be populated")
+}
+
+// TestRunPlannerStats_Idempotent verifies that repeated planner-stat
+// maintenance stays safe for resume/restart paths.
+func TestRunPlannerStats_Idempotent(t *testing.T) {
+	db := newTestDB(t)
+
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+
+	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
+	require.True(t, ok, "test database should use SQLite metadata")
+
+	var count int64
+	err := sqliteStore.DB().Raw(
+		"SELECT COUNT(*) FROM sqlite_stat1",
+	).Scan(&count).Error
+	require.NoError(t, err)
+	assert.Positive(t, count, "sqlite_stat1 should remain populated")
+}
+
+func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.Close())
+
+	err := RunPlannerStats(db, slog.Default())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "planner statistics maintenance")
 }

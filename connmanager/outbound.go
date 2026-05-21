@@ -60,6 +60,19 @@ func (c *ConnectionManager) CreateOutboundConn(
 	if err != nil {
 		return nil, err
 	}
+	// When source-port reuse is in use, force RST on close so the
+	// 4-tuple does not get stuck in TIME_WAIT and block a subsequent
+	// dial to the same peer with EADDRNOTAVAIL.
+	if c.config.OutboundSourcePort > 0 {
+		if lingerErr := enableTCPLingerZero(tmpConn); lingerErr != nil {
+			c.config.Logger.Warn(
+				"outbound: failed to enable SO_LINGER 0 on dialed connection",
+				"role", "client",
+				"address", address,
+				"error", lingerErr,
+			)
+		}
+	}
 	// Build connection options
 	connOpts := make(
 		[]ouroboros.ConnectionOptionFunc,

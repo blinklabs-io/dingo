@@ -151,7 +151,7 @@ Some metrics only emit when their feature is active. Panels display "No data" un
 |--------|---------------|
 | `cardano_node_metrics_Forge_node_is_leader_int` | Forging is enabled |
 | `cardano_node_metrics_Forge_adopted_int` | Block is forged and adopted |
-| `cardano_node_metrics_blockForgingLatency_seconds_bucket` | Block is forged |
+| `dingo_metrics_blockForgingLatency_seconds_bucket` | Block is forged |
 | `cardano_node_metrics_remainingKESPeriods_int` | KES key is configured |
 | `dingo_forge_tip_gap_slots` | Forging is enabled |
 | `dingo_database_size_bytes` | Database stores are initialized |

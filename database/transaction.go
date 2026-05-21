@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -720,6 +721,36 @@ func (d *Database) SetGenesisStaking(
 	return nil
 }
 
+// SetGenesisGovernance stores initial DReps and delegations from the
+// Conway genesis bootstrap section. This is metadata-only.
+func (d *Database) SetGenesisGovernance(
+	initialDReps conway.ConwayGenesisInitialDReps,
+	delegs conway.ConwayGenesisDelegs,
+	blockHash []byte,
+	txn *Txn,
+) error {
+	if txn == nil {
+		if err := d.metadata.SetGenesisGovernance(
+			initialDReps,
+			delegs,
+			blockHash,
+			nil,
+		); err != nil {
+			return fmt.Errorf("set genesis governance: %w", err)
+		}
+		return nil
+	}
+	if err := d.metadata.SetGenesisGovernance(
+		initialDReps,
+		delegs,
+		blockHash,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set genesis governance: %w", err)
+	}
+	return nil
+}
+
 func (d *Database) GetTransactionByHash(
 	hash []byte,
 	txn *Txn,
@@ -924,6 +955,7 @@ func (d *Database) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn *Txn,
 ) ([]models.AddressTransaction, error) {
 	if txn == nil {
@@ -934,6 +966,7 @@ func (d *Database) GetAddressesByStakingKey(
 		stakingKey,
 		limit,
 		offset,
+		order,
 		txn.Metadata(),
 	)
 	if err != nil {
@@ -946,6 +979,29 @@ func (d *Database) GetAddressesByStakingKey(
 		)
 	}
 	return addresses, nil
+}
+
+// CountAddressesByStakingKey returns the total number of distinct address mappings for a staking key.
+func (d *Database) CountAddressesByStakingKey(
+	stakingKey []byte,
+	txn *Txn,
+) (int, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	count, err := d.metadata.CountAddressesByStakingKey(
+		stakingKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count addresses by staking key=%x: %w",
+			stakingKey,
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions that include metadata

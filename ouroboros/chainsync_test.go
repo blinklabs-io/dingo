@@ -47,6 +47,24 @@ type lockedBuffer struct {
 	buf bytes.Buffer
 }
 
+func TestEffectiveChainsyncBlockTimeoutUsesProtocolMaxAsFloor(t *testing.T) {
+	require.Equal(
+		t,
+		ochainsync.MustReplyTimeoutMax,
+		effectiveChainsyncBlockTimeout(0),
+	)
+	require.Equal(
+		t,
+		ochainsync.MustReplyTimeoutMax,
+		effectiveChainsyncBlockTimeout(time.Minute),
+	)
+	require.Equal(
+		t,
+		10*time.Minute,
+		effectiveChainsyncBlockTimeout(10*time.Minute),
+	)
+}
+
 func (b *lockedBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -152,6 +170,65 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	})
 	require.NoError(t, err)
 	return ls
+}
+
+func snapshotChainsyncNtNTimeouts() map[string]struct {
+	timeout        time.Duration
+	hasTimeoutFunc bool
+} {
+	snapshot := make(map[string]struct {
+		timeout        time.Duration
+		hasTimeoutFunc bool
+	})
+	for state, entry := range ochainsync.StateMapNtN {
+		switch state.Name {
+		case "CanAwait", "MustReply":
+			snapshot[state.Name] = struct {
+				timeout        time.Duration
+				hasTimeoutFunc bool
+			}{
+				timeout:        entry.Timeout,
+				hasTimeoutFunc: entry.TimeoutFunc != nil,
+			}
+		}
+	}
+	return snapshot
+}
+
+func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
+	originalStateMap := ochainsync.StateMapNtN.Copy()
+	t.Cleanup(func() {
+		clear(ochainsync.StateMapNtN)
+		for state, entry := range originalStateMap {
+			ochainsync.StateMapNtN[state] = entry
+		}
+	})
+
+	before := snapshotChainsyncNtNTimeouts()
+
+	_ = NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: 10 * time.Minute,
+	})
+	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
+
+	_ = NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: 20 * time.Minute,
+	})
+	require.Equal(t, before, snapshotChainsyncNtNTimeouts())
+}
+
+func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
+	const blockTimeout = 20 * time.Minute
+
+	o := NewOuroboros(OuroborosConfig{
+		ChainsyncBlockTimeout: blockTimeout,
+	})
+
+	clientCfg := ochainsync.NewConfig(o.chainsyncClientConnOpts()...)
+	serverCfg := ochainsync.NewConfig(o.chainsyncServerConnOpts()...)
+
+	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
+	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
 }
 
 func TestNormalizeIntersectPoints(t *testing.T) {
@@ -600,7 +677,7 @@ func TestSubscribeChainsyncResyncRewindsClientsWithoutRecycle(
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
-				Reason: "local ledger rollback",
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 				Point:  rollbackPoint,
 			},
 		),
@@ -656,7 +733,7 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
-				Reason: "local ledger rollback",
+				Reason: event.ChainsyncResyncReasonLocalLedgerRollback,
 				Point:  rollbackPoint,
 			},
 		),
@@ -671,72 +748,156 @@ func TestSubscribeChainsyncResyncDoesNotRecycleOnLocalRollbackWithoutPeerHistory
 	}
 }
 
-func TestSubscribeChainsyncResyncClosesConnectionOnPersistentFork(
+func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 	t *testing.T,
 ) {
-	logBuf := &lockedBuffer{}
-	logger := slog.New(
-		slog.NewJSONHandler(
-			logBuf,
-			&slog.HandlerOptions{Level: slog.LevelDebug},
-		),
-	)
+	reasons := []string{
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonPostPlateauRealign,
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonPersistentFork,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackLoop,
+	}
+	for _, reason := range reasons {
+		reason := reason
+		t.Run(reason, func(t *testing.T) {
+			logBuf := &lockedBuffer{}
+			logger := slog.New(
+				slog.NewJSONHandler(
+					logBuf,
+					&slog.HandlerOptions{Level: slog.LevelDebug},
+				),
+			)
+			bus := event.NewEventBus(nil, logger)
+			defer bus.Close()
+
+			connManager := connmanager.NewConnectionManager(
+				connmanager.ConnectionManagerConfig{
+					EventBus: bus,
+					Logger:   logger,
+				},
+			)
+			t.Cleanup(func() {
+				stopCtx, stopCancel := context.WithTimeout(
+					context.Background(),
+					5*time.Second,
+				)
+				defer stopCancel()
+				_ = connManager.Stop(stopCtx)
+			})
+
+			mockConn := ouroboros_mock.NewConnection(
+				ouroboros_mock.ProtocolRoleClient,
+				ouroboros_mock.ConversationKeepAlive,
+			)
+			oConn, err := ouroboros.New(
+				ouroboros.WithConnection(mockConn),
+				ouroboros.WithNetworkMagic(
+					ouroboros_mock.MockNetworkMagic,
+				),
+				ouroboros.WithNodeToNode(true),
+				ouroboros.WithKeepAlive(true),
+				ouroboros.WithKeepAliveConfig(
+					keepalive.NewConfig(
+						keepalive.WithCookie(
+							ouroboros_mock.MockKeepAliveCookie,
+						),
+						keepalive.WithPeriod(30*time.Second),
+						keepalive.WithTimeout(15*time.Second),
+					),
+				),
+			)
+			require.NoError(t, err)
+			connManager.AddConnection(oConn, false, "127.0.0.1:1234")
+
+			o := NewOuroboros(OuroborosConfig{
+				EventBus: bus,
+				Logger:   logger,
+			})
+			o.EventBus = bus
+			o.ConnManager = connManager
+
+			ctx := t.Context()
+			o.SubscribeChainsyncResync(ctx)
+
+			connId := oConn.Id()
+			bus.Publish(
+				event.ChainsyncResyncEventType,
+				event.NewEvent(
+					event.ChainsyncResyncEventType,
+					event.ChainsyncResyncEvent{
+						ConnectionId: connId,
+						Reason:       reason,
+					},
+				),
+			)
+
+			require.Eventually(
+				t,
+				func() bool {
+					return connManager.GetConnectionById(connId) == nil
+				},
+				2*time.Second,
+				20*time.Millisecond,
+			)
+			require.Eventually(
+				t,
+				func() bool {
+					logs := logBuf.String()
+					return strings.Contains(
+						logs,
+						`"msg":"closing connection for fresh chainsync"`,
+					) && strings.Contains(
+						logs,
+						`"reason":"`+reason+`"`,
+					)
+				},
+				2*time.Second,
+				20*time.Millisecond,
+			)
+			require.NotContains(
+				t,
+				logBuf.String(),
+				`"msg":"restarting chainsync client"`,
+			)
+		})
+	}
+}
+
+func TestSubscribeChainsyncResyncDeniesDivergentPeer(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	bus := event.NewEventBus(nil, logger)
 	defer bus.Close()
 
-	connManager := connmanager.NewConnectionManager(
-		connmanager.ConnectionManagerConfig{
-			EventBus: bus,
-			Logger:   logger,
-		},
-	)
-	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(
-			context.Background(),
-			5*time.Second,
-		)
-		defer stopCancel()
-		_ = connManager.Stop(stopCtx)
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
 	})
-
-	mockConn := ouroboros_mock.NewConnection(
-		ouroboros_mock.ProtocolRoleClient,
-		ouroboros_mock.ConversationKeepAlive,
-	)
-	oConn, err := ouroboros.New(
-		ouroboros.WithConnection(mockConn),
-		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
-		ouroboros.WithNodeToNode(true),
-		ouroboros.WithKeepAlive(true),
-		ouroboros.WithKeepAliveConfig(
-			keepalive.NewConfig(
-				keepalive.WithCookie(ouroboros_mock.MockKeepAliveCookie),
-				keepalive.WithPeriod(30*time.Second),
-				keepalive.WithTimeout(15*time.Second),
-			),
-		),
-	)
-	require.NoError(t, err)
-	connManager.AddConnection(oConn, false, "127.0.0.1:1234")
-
 	o := NewOuroboros(OuroborosConfig{
 		EventBus: bus,
 		Logger:   logger,
 	})
 	o.EventBus = bus
-	o.ConnManager = connManager
+	o.PeerGov = peerGov
+	o.SubscribeChainsyncResync(t.Context())
 
-	ctx := t.Context()
-	o.SubscribeChainsyncResync(ctx)
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "10.0.0.1:3001")
+	require.NoError(t, err)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
 
-	connId := oConn.Id()
 	bus.Publish(
 		event.ChainsyncResyncEventType,
 		event.NewEvent(
 			event.ChainsyncResyncEventType,
 			event.ChainsyncResyncEvent{
 				ConnectionId: connId,
-				Reason:       "persistent chain fork",
+				Reason:       event.ChainsyncResyncReasonRollbackExceedsK,
 			},
 		),
 	)
@@ -744,27 +905,56 @@ func TestSubscribeChainsyncResyncClosesConnectionOnPersistentFork(
 	require.Eventually(
 		t,
 		func() bool {
-			return connManager.GetConnectionById(connId) == nil
+			return peerGov.IsDenied(remoteAddr.String())
 		},
 		2*time.Second,
 		20*time.Millisecond,
 	)
-	require.Eventually(
+}
+
+func TestSubscribeChainsyncResyncDoesNotDenyRollbackLoop(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	defer bus.Close()
+
+	peerGov := peergov.NewPeerGovernor(peergov.PeerGovernorConfig{
+		Logger: logger,
+	})
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.EventBus = bus
+	o.PeerGov = peerGov
+	o.SubscribeChainsyncResync(t.Context())
+
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "10.0.0.1:3001")
+	require.NoError(t, err)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+
+	bus.Publish(
+		event.ChainsyncResyncEventType,
+		event.NewEvent(
+			event.ChainsyncResyncEventType,
+			event.ChainsyncResyncEvent{
+				ConnectionId: connId,
+				Reason:       event.ChainsyncResyncReasonRollbackLoop,
+			},
+		),
+	)
+
+	require.Never(
 		t,
 		func() bool {
-			logs := logBuf.String()
-			return strings.Contains(
-				logs,
-				`"msg":"closing stalled connection for fresh chainsync"`,
-			) && strings.Contains(logs, `"reason":"persistent chain fork"`)
+			return peerGov.IsDenied(remoteAddr.String())
 		},
-		2*time.Second,
+		200*time.Millisecond,
 		20*time.Millisecond,
-	)
-	require.NotContains(
-		t,
-		logBuf.String(),
-		`"msg":"restarting chainsync client"`,
 	)
 }
 

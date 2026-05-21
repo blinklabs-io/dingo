@@ -38,9 +38,9 @@ import (
 //
 //   - currentEpoch = Alonzo (epoch 3, EraId=4, slots 225–299)
 //   - currentEra   = Babbage (5)              ← already advanced by
-//                                                applyHardForkTransition
+//     applyHardForkTransition
 //   - k=6, f=0.4 → TPraos stability window = 3k/f = 45 slots,
-//                  Praos stability window  = 4k/f = 60 slots
+//     Praos stability window  = 4k/f = 60 slots
 //   - Alonzo cutoff (TPraos): 225 + 75 - 45 = 255
 //   - Alonzo cutoff (Praos):  225 + 75 - 60 = 240
 //

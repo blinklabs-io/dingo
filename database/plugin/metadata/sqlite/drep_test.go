@@ -189,4 +189,3 @@ func TestSqliteInsertDrepIfAbsentLeavesExistingRowUntouched(t *testing.T) {
 	assert.Equal(t, anchorHash, drep.AnchorHash)
 	assert.True(t, drep.Active)
 }
-

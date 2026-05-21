@@ -68,6 +68,56 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	require.NoError(t, err)
 }
 
+// It verifies that calculating the stability window is synchronized with
+// concurrent currentEra updates from block processing.
+func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
+	ls := &LedgerState{
+		currentEra: eras.ShelleyEraDesc,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	start := make(chan struct{})
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 100; i++ {
+			ls.Lock()
+			if i%2 == 0 {
+				ls.currentEra = eras.BabbageEraDesc
+			} else {
+				ls.currentEra = eras.ConwayEraDesc
+			}
+			ls.Unlock()
+		}
+		close(done)
+	}()
+
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					_ = ls.calculateStabilityWindow()
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+}
+
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	testCases := []struct {
@@ -2294,7 +2344,7 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	assert.Nil(t, points)
 }
 
-func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {
+func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 	db, err := database.New(&database.Config{
 		BlobPlugin:     "badger",
 		MetadataPlugin: "sqlite",
@@ -2332,12 +2382,422 @@ func TestIntersectPointsUsesLedgerTipWhenPrimaryChainIsAhead(t *testing.T) {
 	points, err := ls.IntersectPoints(3)
 	require.NoError(t, err)
 	require.Len(t, points, 3)
+	assert.Equal(t, blocks[4].Slot, points[0].Slot)
+	assert.Equal(t, blocks[4].Hash, points[0].Hash)
+	assert.Equal(t, blocks[3].Slot, points[1].Slot)
+	assert.Equal(t, blocks[3].Hash, points[1].Hash)
+	assert.Equal(t, blocks[2].Slot, points[2].Slot)
+	assert.Equal(t, blocks[2].Hash, points[2].Hash)
+}
+
+func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := make([]models.Block, 0, 256)
+	for slot := uint64(1); slot <= 256; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+	require.Greater(t, len(points), ledgerIntersectDenseCount)
 	assert.Equal(t, ledgerTipBlock.Slot, points[0].Slot)
 	assert.Equal(t, ledgerTipBlock.Hash, points[0].Hash)
-	assert.Equal(t, blocks[1].Slot, points[1].Slot)
-	assert.Equal(t, blocks[1].Hash, points[1].Hash)
-	assert.Equal(t, blocks[0].Slot, points[2].Slot)
-	assert.Equal(t, blocks[0].Hash, points[2].Hash)
+
+	pointSlots := make(map[uint64]struct{}, len(points))
+	for _, point := range points {
+		pointSlots[point.Slot] = struct{}{}
+	}
+	for _, slot := range []uint64{224, 192, 128, 1} {
+		_, ok := pointSlots[slot]
+		assert.True(t, ok, "missing sparse intersect point at slot %d", slot)
+	}
+}
+
+func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := make([]models.Block, 0, 256)
+	for slot := uint64(1); slot <= 256; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 173,
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+
+	boundarySlot := uint64(173)
+	var boundaryPoint *ocommon.Point
+	for _, point := range points {
+		if point.Slot == boundarySlot {
+			point := point
+			boundaryPoint = &point
+			break
+		}
+	}
+	require.NotNil(t, boundaryPoint)
+	assert.Equal(t, blocks[boundarySlot-1].Hash, boundaryPoint.Hash)
+}
+
+func TestIntersectPointsSkipsZeroMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 0,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, 0)
+}
+
+func TestIntersectPointsSkipsFutureMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	boundarySlot := ledgerTipBlock.Slot + 1
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	var blocks []models.Block
+	for slot := uint64(1); slot <= 10; slot++ {
+		if slot == 5 {
+			continue
+		}
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	boundarySlot := uint64(5)
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsSkipsMithrilTrustBoundaryOnLookupError(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	boundarySlot := uint64(5)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return db.Blob().Set(
+			txn.Blob(),
+			dbtypes.BlockHashIndexKey(blocks[boundarySlot-1].Hash),
+			[]byte("bad"),
+		)
+	}))
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.NotEmpty(t, points)
+	assertNoIntersectPointAtSlot(t, points, boundarySlot)
+}
+
+func TestIntersectPointsUsesCanonicalMithrilTrustBoundary(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 64)
+	for slot := uint64(1); slot <= 64; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	boundarySlot := uint64(20)
+	canonicalBoundaryBlock := blocks[boundarySlot-1]
+	nonCanonicalBoundaryBlock := makeTestBlock(boundarySlot, 1000)
+	nonCanonicalBoundaryBlock.Hash = bytes.Repeat([]byte{0xff}, 32)
+	nonCanonicalBoundaryBlock.PrevHash = append(
+		[]byte(nil),
+		blocks[boundarySlot-2].Hash...,
+	)
+	require.NoError(t, db.BlockCreate(nonCanonicalBoundaryBlock, nil))
+
+	rawBoundaryBlock, err := database.BlockBeforeSlot(
+		db,
+		boundarySlot+1,
+	)
+	require.NoError(t, err)
+	require.Equal(t, nonCanonicalBoundaryBlock.Hash, rawBoundaryBlock.Hash)
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: boundarySlot,
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+
+	var boundaryPoint *ocommon.Point
+	for _, point := range points {
+		if point.Slot == boundarySlot {
+			point := point
+			boundaryPoint = &point
+			break
+		}
+	}
+	require.NotNil(t, boundaryPoint)
+	assert.Equal(t, canonicalBoundaryBlock.Hash, boundaryPoint.Hash)
+	assert.NotEqual(t, nonCanonicalBoundaryBlock.Hash, boundaryPoint.Hash)
+}
+
+func TestAuthoritativeLedgerBlockAtSlotDoesNotRequireMonotonicBlockIDs(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 64)
+	for slot := uint64(1); slot <= 64; slot++ {
+		id := slot
+		switch slot {
+		case 20:
+			id = 50
+		case 50:
+			id = 20
+		}
+		block := makeTestBlock(slot, id)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{db: db}
+
+	block, err := ls.authoritativeLedgerBlockAtSlot(
+		20,
+		makeTestPoint(ledgerTipBlock),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(20), block.Slot)
+	assert.Equal(t, blocks[19].Hash, block.Hash)
+}
+
+func TestIntersectPointsKeepsMithrilTrustBoundaryWhenPointListIsFull(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 10)
+	for slot := uint64(1); slot <= 10; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append([]byte(nil), blocks[len(blocks)-1].Hash...)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+		mithrilLedgerSlot: 5,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.Len(t, points, 4)
+	assert.Equal(t, uint64(10), points[0].Slot)
+	assert.Equal(t, uint64(9), points[1].Slot)
+	assert.Equal(t, uint64(8), points[2].Slot)
+	assert.Equal(t, uint64(5), points[3].Slot)
+}
+
+func assertNoIntersectPointAtSlot(
+	t *testing.T,
+	points []ocommon.Point,
+	slot uint64,
+) {
+	t.Helper()
+	for _, point := range points {
+		assert.NotEqual(t, slot, point.Slot)
+	}
+}
+
+func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
+	db := newTestDB(t)
+
+	blocks := make([]models.Block, 0, 40)
+	for slot := uint64(1); slot <= 40; slot++ {
+		block := makeTestBlock(slot, slot)
+		if len(blocks) > 0 {
+			block.PrevHash = append(
+				[]byte(nil),
+				blocks[len(blocks)-1].Hash...,
+			)
+		}
+		blocks = append(blocks, block)
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	blockBlobIndexKey := dbtypes.BlockBlobIndexKey(39)
+	txn := db.BlobTxn(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		indexBytes, err := db.Blob().Get(txn.Blob(), blockBlobIndexKey)
+		require.NoError(t, err)
+		require.NotNil(t, indexBytes)
+		return db.Blob().Delete(
+			txn.Blob(),
+			blockBlobIndexKey,
+		)
+	}))
+
+	ledgerTipBlock := blocks[len(blocks)-1]
+	ls := &LedgerState{
+		db: db,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(ledgerTipBlock),
+			BlockNumber: ledgerTipBlock.Number,
+		},
+	}
+
+	points, err := ls.IntersectPoints(40)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(points), ledgerIntersectDenseCount)
+
+	pointSlots := make(map[uint64]struct{}, len(points))
+	for _, point := range points {
+		pointSlots[point.Slot] = struct{}{}
+	}
+	_, hasMissingIndexSlot := pointSlots[39]
+	assert.False(t, hasMissingIndexSlot)
+	_, hasPreviousDenseSlot := pointSlots[38]
+	assert.True(t, hasPreviousDenseSlot)
 }
 
 func TestDensityWindow(t *testing.T) {
@@ -3098,4 +3558,108 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"plain epoch rollover must not change transitionInfo")
+}
+
+func TestLatestOpCertSequenceTracksHighestObservedAndRollback(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	var poolID [28]byte
+	for i := range poolID {
+		poolID[i] = byte(i + 1)
+	}
+	pkh := lcommon.PoolKeyHash(lcommon.NewBlake2b224(poolID[:]))
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, uint64(0), sequence)
+
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 3, 10, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 7, 20, nil))
+	require.NoError(t, db.UpdatePoolOpCertSequence(pkh, 5, 30, nil))
+
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(7), sequence)
+
+	require.NoError(t, db.RestorePoolStateAtSlot(15, nil))
+	sequence, found, err = ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(3), sequence)
+}
+
+func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	var issuerVkey lcommon.IssuerVkey
+	for i := range issuerVkey {
+		issuerVkey[i] = byte(i + 1)
+	}
+	pkh := lcommon.PoolKeyHash(issuerVkey.Hash())
+	require.NoError(t, db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: pkh.Bytes(),
+			VrfKeyHash:  make([]byte, 32),
+			AddedSlot:   1,
+			Pledge:      dbtypes.Uint64(1),
+			Cost:        dbtypes.Uint64(1),
+		},
+		nil,
+	))
+
+	block := &babbage.BabbageBlock{
+		BlockHeader: &babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				Slot:       10,
+				IssuerVkey: issuerVkey,
+				OpCert: babbage.BabbageOpCert{
+					SequenceNumber: 4,
+				},
+			},
+		},
+	}
+
+	require.NoError(t, db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: 10},
+			block,
+			false,
+			nil,
+			nil,
+			eras.BabbageEraDesc,
+			nil,
+			nil,
+		)
+		return err
+	}))
+
+	var poolID [28]byte
+	copy(poolID[:], pkh.Bytes())
+	sequence, found, err := ls.LatestOpCertSequence(poolID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, uint64(4), sequence)
 }

@@ -19,10 +19,10 @@
 //
 // Mempool is the top-level type. It validates every submitted
 // transaction through the ledger package — UTxO resolution, fees,
-// ExUnit budgets, validity interval, size, and all 41 UTxO validation
-// rules — before admitting it. Transactions outside their validity
-// interval relative to the current tip are rejected at submission
-// time rather than held until expiry.
+// ExUnit budgets, validity interval, size, and the full UTxO validation
+// rules enforced by the ledger package — before admitting it. Transactions
+// outside their validity interval relative to the current tip are rejected
+// at submission time rather than held until expiry.
 //
 // # Eviction and watermarks
 //

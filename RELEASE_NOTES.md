@@ -1,5 +1,596 @@
-# Release Notes
+# Dingo Releases
 
+## v0.46.4 (May 18, 2026)
+
+**Title:** Genesis bootstrap expansion, Mithril sync visibility, and sturdier SQLite metadata handling
+
+**Date:** May 18, 2026
+
+**Version:** v0.46.4
+
+Hi folks! Here’s what we shipped in v0.46.4.
+
+### ✨ What's New
+
+* Added **expand genesis bootstrap across MySQL and Postgres deployments:** Networks that use MySQL or Postgres can now start with genesis staking and governance state already available, which gives non mainnet deployments a more complete view on networks that depend on genesis rooted state. ([#2331](https://github.com/blinklabs-io/dingo/pull/2331))
+* Introduced **surface Mithril sync progress through metrics visibility:** Operators can now follow long running Mithril sync work through Mithril metrics and a dedicated metrics server, which makes sync progress easier to observe. ([#2341](https://github.com/blinklabs-io/dingo/pull/2341))
+
+### 💪 Improvements
+
+* Improved **speed batched SQLite UTxO lookups and updates:** SQLite heavy lookup and update paths now use the `tx_id_output_idx` path more consistently, which helps batched UTxO work finish more smoothly. ([#2342](https://github.com/blinklabs-io/dingo/pull/2342))
+* Refined **keep S3 integrations aligned with newer client support:** S3 backed workflows now stay aligned with the refreshed AWS S3 client, which supports steadier compatibility and maintenance. ([#2348](https://github.com/blinklabs-io/dingo/pull/2348))
+* Enhanced **keep Google API integrations current:** Google API integrations now stay aligned with a newer client release, which supports ongoing compatibility and maintenance. ([#2347](https://github.com/blinklabs-io/dingo/pull/2347))
+* Updated **keep bitcoin utility support current:** Bitcoin related utility support now stays aligned with a newer upstream release, which improves compatibility maintenance. ([#2346](https://github.com/blinklabs-io/dingo/pull/2346))
+* Modernized **publish the v0.46.3 release history entry:** The repository now includes the v0.46.3 release notes entry in its published release history, which makes recent patch release context easier to review. ([#2340](https://github.com/blinklabs-io/dingo/pull/2340))
+
+### 🔧 Fixes
+
+* Fixed **keep genesis rooted history consistent across supported databases:** Account history and rollback related paths now preserve visibility for genesis rooted accounts and delegations more consistently across MySQL, Postgres, and SQLite backends. ([#2344](https://github.com/blinklabs-io/dingo/pull/2344))
+* Corrected **handle high value transaction metadata labels more reliably:** Supported databases now keep high bit transaction metadata labels readable, and SQLite handles the affected metadata and lookup paths more reliably. ([#2357](https://github.com/blinklabs-io/dingo/pull/2357))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps:** Normal patch release upgrade steps are generally sufficient for this release.
+* Highlighted **expect broader genesis bootstrap support on non mainnet SQL deployments:** Non mainnet networks that use MySQL or Postgres now gain genesis bootstrap support and more consistent genesis history handling.
+* Emphasized **watch Mithril sync progress and trust steadier SQLite query paths:** Mithril sync now exposes Prometheus visible progress, and SQLite heavy backfill and query workloads should see better behavior from the indexing and metadata fixes.
+* Summarized **review refreshed integrations and updated release history:** Dependency refreshes keep S3, Google API, and bitcoin utility support current, and the repository release history now includes the v0.46.3 notes.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.46.3 (May 17, 2026)
+
+**Title:** Faster governance and stake queries, sturdier plateau recovery, and broader rollback test coverage
+
+**Date:** May 17, 2026
+
+**Version:** v0.46.3
+
+Hi folks! Here’s what we shipped in v0.46.3.
+
+### ✨ What's New
+
+* Noted **no new features:** This patch release focuses on improvements, fixes, and documentation updates.
+
+### 💪 Improvements
+
+* Improved **expand rollback conformance coverage with ouroboros-mock v0.11.0:** Rollback validation now covers a synthetic rollback path and replay fixes, which broadens rollback coverage without requiring adapter changes. ([#2330](https://github.com/blinklabs-io/dingo/pull/2330))
+* Refined **clarify RTS metrics guidance in place:** The code comment now explains how Go memory reporting maps to the matching Haskell runtime view, which makes the metrics guidance more accurate and self contained. ([#2334](https://github.com/blinklabs-io/dingo/pull/2334))
+* Updated **surface the v0.46.2 release details more clearly:** Operators can now review the v0.46.2 release information alongside newer patch releases for clearer recent upgrade context. ([#2329](https://github.com/blinklabs-io/dingo/pull/2329))
+
+### 🔧 Fixes
+
+* Fixed **reconnect plateau recovery with a fresh chainsync session:** Post-plateau peer realignment now starts a fresh chainsync connection, so nodes do not reuse stale cursors during recovery. ([#2337](https://github.com/blinklabs-io/dingo/pull/2337))
+* Corrected **speed governance voting-power and delegate lookups:** New composite indexes reduce query cost for governance voting-power requests and related DRep and staking-key lookups. ([#2332](https://github.com/blinklabs-io/dingo/pull/2332))
+* Strengthened **accelerate stake-by-pool lookups:** A new composite account index speeds active pool and staking-key lookups used by stake-by-pool queries. ([#2335](https://github.com/blinklabs-io/dingo/pull/2335))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps:** Normal upgrade procedures are generally sufficient for this release.
+* Highlighted **expect more efficient governance and stake by pool queries:** New composite indexes help governance and stake by pool lookups run more efficiently.
+* Emphasized **trust safer recovery and broader rollback validation:** Plateau recovery now reconnects with a fresh chainsync session, and the `ouroboros-mock` update broadens rollback conformance coverage.
+* Summarized **expect clearer metrics guidance and recent patch context:** Metrics guidance is now more accurate in place, and v0.46.2 release information stays available for recent patch context.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.46.2 (May 15, 2026)
+
+**Title:** Mithril trust-boundary protection, safer peer recovery, and sturdier rollback handling
+
+**Date:** May 15, 2026
+
+**Version:** v0.46.2
+
+Hi folks! Here’s what we shipped in v0.46.2.
+
+### ✨ What's New
+
+* Added **record forged-block signals before chain adoption completes:** Operators can now see forged-block metrics and events as soon as a block is built, which improves observability even when chain adoption later fails. ([#2323](https://github.com/blinklabs-io/dingo/pull/2323))
+* Introduced **tune chainsync block timeout and safer reconnect resets:** Operators can now configure the NtN chainsync block timeout, and peer reconnect handling now clears connection timing and outbound retry state only when the connection path truly requires it. ([#2316](https://github.com/blinklabs-io/dingo/pull/2316))
+
+### 💪 Improvements
+
+* Improved **refresh upstream compatibility with plutigo v0.1.13:** Deployments now stay aligned with the newer upstream support in `plutigo`, which keeps compatibility and routine maintenance steadier. ([#2327](https://github.com/blinklabs-io/dingo/pull/2327))
+* Refined **tighten default era-test coverage selection:** Default erastest runs now exclude vanRossem unless an explicit run filter is supplied, which keeps routine validation focused unless broader coverage is intentionally requested. ([#2325](https://github.com/blinklabs-io/dingo/pull/2325))
+* Enhanced **refresh protocol-library compatibility with gouroboros v0.170.1:** Protocol support now stays aligned with the newer upstream `gouroboros` release, which supports ongoing compatibility and maintenance work. ([#2321](https://github.com/blinklabs-io/dingo/pull/2321))
+* Updated **modernize dependency-policy checks in CI:** Continuous integration now uses the newer `gomodguard_v2` policy checks, which keeps dependency-policy maintenance current. ([#2320](https://github.com/blinklabs-io/dingo/pull/2320))
+
+### 🔧 Fixes
+
+* Fixed **enforce Mithril trust boundaries during rollback recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard recovery limit, skip header-only verification at or below that boundary, and rebuild post-restore transaction metadata safely after restore. ([#2326](https://github.com/blinklabs-io/dingo/pull/2326))
+* Corrected **deny divergent peers before they can loop recovery:** Nodes now temporarily deny-list divergent peers, close denied inbound peers, and enforce those denials across more connection paths, which reduces rollback loops and reconnect churn. ([#2324](https://github.com/blinklabs-io/dingo/pull/2324))
+* Strengthened **recover live rollback divergence from a safe shared ancestor:** Live rollback reconciliation can now bring the primary chain and ledger back to a safe common ancestor, which improves recovery from over-K rollback and fork-divergence scenarios. ([#2322](https://github.com/blinklabs-io/dingo/pull/2322))
+* Stabilized **close databases safely during repeated shutdown paths:** Repeated shutdown or cleanup calls no longer trigger duplicate-close failures because `Database.Close` now behaves safely when called more than once. ([#2315](https://github.com/blinklabs-io/dingo/pull/2315))
+
+### 📋 What You Need to Know
+
+* Clarified **trust the Mithril restore boundary during recovery:** Mithril-restored nodes now treat the trusted snapshot boundary as a hard rollback and replay limit, and they rebuild post-restore transaction metadata from restored block data after recovery completes.
+* Highlighted **safer divergent-peer recovery paths:** Nodes now temporarily deny bad peers during divergence recovery, and live rollback reconciliation can recover more safely by returning the primary chain and ledger to a shared safe ancestor.
+* Emphasized **stronger forging visibility and connection control:** Forged-block metrics and events now appear as soon as a block is built, and operators can tune the chainsync block timeout more directly.
+* Summarized **broader maintenance refreshes:** Dependency compatibility, validation defaults, dependency-policy checks, and database shutdown handling all received updates in this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.46.1 (May 14, 2026)
+
+**Title:** Conway genesis governance bootstrap, safer startup recovery, and networking fixes
+
+**Date:** May 14, 2026
+
+**Version:** v0.46.1
+
+Hi folks! Here’s what we shipped in v0.46.1.
+
+### ✨ What's New
+
+* Added **bootstrap Conway governance from genesis settings:** Networks that define initial governance delegates and voter registrations now start with that governance state already in place, which gives governance aware services a more complete view from the first block.
+
+### 💪 Improvements
+
+* Improved **surface clearer governance stability signals:** Operators can now see when stored governance proposals fail to decode during stability checks, which makes governance troubleshooting easier and keeps transition monitoring clearer.
+* Refined **pick up devnet configurator changes at startup:** Devnet runs now rebuild the configurator image before launch, which helps environment setup reflect the latest configuration behavior more reliably.
+* Enhanced **steady hard-fork readiness checks in tests:** Release validation now waits for hard-fork readiness checks to finish before asserting results, which makes test outcomes more dependable.
+* Updated **clarify mempool and UTxO RPC package guidance:** Embedded package guidance now explains transaction handling and UTxO filtering more clearly, which makes the exposed behavior easier to understand.
+
+### 🔧 Fixes
+
+* Fixed **stop block producers when genesis snapshots fail:** Block producers now stop immediately if startup cannot build the required initial snapshot, which helps prevent unsafe forging starts.
+* Corrected **recover startup state from the right common chain point:** Startup recovery now rolls back to the latest shared chain point when local state no longer matches the selected chain, which helps nodes resume more cleanly after interrupted or divergent starts.
+* Strengthened **honor peer-sharing settings consistently:** Nodes now apply peer-sharing choices correctly across connections, which makes network behavior match the configured role more reliably.
+* Stabilized **return startup errors instead of crashing on missing services:** Startup now reports missing required services as ordinary errors, which makes failed launches easier to diagnose and recover.
+* Hardened **respect real epoch boundaries during leader scheduling:** Block production scheduling now follows the active epoch layout more accurately, which helps leaders avoid incorrect scheduling around changing epoch boundaries.
+* Repaired **restore pool state details more accurately:** Pool state recovery now reads stored pool details more reliably, which helps stake pool views stay complete after startup and rollback work.
+* Prevented **misread offset data from Byron boundary blocks:** Nodes now skip offset indexing for Byron epoch boundary blocks that carry no transactions, which avoids false indexing results during historical processing.
+* Secured **start UTxO RPC TLS sessions without reloading files:** UTxO RPC now keeps the loaded TLS certificate in memory for server startup, which makes secure startup behavior more reliable.
+
+### 📋 What You Need to Know
+
+* Clarified **genesis governance now starts in place:** Networks that define initial governance delegates and voter registrations now begin with that governance state already loaded, which makes early governance visibility more complete from startup.
+* Highlighted **safer startup recovery and clearer failure handling:** Block producers now stop when required startup snapshots fail, startup reports missing required services as ordinary errors, and divergent startup state now rolls back to the right shared chain point more cleanly.
+* Emphasized **more reliable scheduling and peer behavior:** Block production scheduling now respects the active epoch layout more accurately, and peer sharing behavior now follows the configured role more consistently across connections.
+* Summarized **steadier operational support paths:** Governance observability, pool state recovery, historical offset handling, secure UTxO RPC startup, and devnet validation all received updates that make operations easier to trust.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.46.0 (May 13, 2026)
+
+**Title:** Stake account APIs, cardano-node Praos selection, and safer sync recovery
+
+**Date:** May 13, 2026
+
+**Version:** v0.46.0
+
+Hi folks! Here’s what we shipped in v0.46.0.
+
+### ✨ What's New
+
+* Added **expand Blockfrost stake-account coverage:** Blockfrost compatible services can now return stake-account details, associated addresses, delegation history, registration history, and reward history through stake-address endpoints.
+* Introduced **surface chain block-proposed events:** Locally forged blocks now follow a dedicated proposal path before the chain accepts them, which gives operators clearer behavior around block adoption.
+* Expanded **track the highest observed pool certificate sequence:** Block producers can now compare the newest observed pool certificate sequence during startup, which makes outdated certificate counters easier to catch before they cause trouble.
+
+### 💪 Improvements
+
+* Improved **raise the default Leios mempool capacity:** Leios mode now starts with a larger default mempool capacity, which gives transaction-heavy runs more room before the queue fills.
+* Refined **reduce SQLite batch allocation churn:** SQLite metadata backfill now reuses batch storage more efficiently, which helps sustained indexing work run more smoothly.
+* Enhanced **quiet routine NoBlocks log noise:** Routine blockfetch responses that return no blocks now stay at debug level, which keeps normal logs easier to scan for real issues.
+* Updated **strengthen chain-iterator regression coverage:** Regression checks now cover more iterator ordering, rollback, and waiting paths, which increases confidence in chain recovery behavior.
+* Clarified **explain Mithril API-mode backfill behavior more clearly:** API mode guidance now states that historical metadata backfill runs after Mithril snapshot import, which makes full-history expectations easier to understand.
+
+### 🔧 Fixes
+
+* Fixed **align Praos chain selection with cardano-node behavior:** Equal-height chain choices now follow cardano-node tie breaking more closely, which helps nodes converge more reliably during competing forges.
+* Corrected **refresh connections after unrecoverable sync failures:** Nodes now drop affected sync connections and start fresh after security-window or unrecoverable recovery failures, which gives sync recovery a cleaner restart path.
+* Strengthened **use safer chain intersects across snapshot gaps:** Recovery now prefers better chain intersect points across snapshot gaps, which helps sync continue more reliably when history is incomplete.
+* Stabilized **restore account history in deterministic order:** Account recovery now uses block order as well as certificate order, which keeps restored account state consistent when multiple transactions share a slot.
+* Hardened **initialize ledger metrics earlier:** Ledger metrics now exist as soon as ledger state starts, which avoids failures in paths that read metrics before full startup completes.
+* Repaired **propagate rollback recovery errors correctly:** Rollback recovery now returns ancestor lookup and rollback errors directly, which makes serious recovery failures easier to detect and handle.
+
+### 📋 What You Need to Know
+
+* Clarified **broader Blockfrost stake-account API coverage:** Blockfrost compatible services now cover stake-account details, address listings, delegation history, registration history, and reward history through stake-address endpoints.
+* Highlighted **cardano-node aligned Praos tie breaking and safer fresh sync recovery:** Equal-height Praos decisions now follow cardano-node behavior more closely, and unrecoverable sync failures now restart from fresh connections more aggressively.
+* Emphasized **larger Leios mempool defaults and stronger startup checks:** Leios mode now uses a larger default mempool, and pool certificate tracking gives block producers a clearer startup check for stale certificate counters.
+* Summarized **operational polish and documentation updates:** Logging, SQLite batching, regression coverage, and Mithril API-mode guidance all received changes that make operations easier to follow.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.45.0 (May 12, 2026)
+
+**Title:** Batched backfill, ledger safety fixes, and stronger PV11 readiness
+
+**Date:** May 12, 2026
+
+**Version:** v0.45.0
+
+Hi folks! Here’s what we shipped in v0.45.0.
+
+### ✨ What's New
+
+* Added **batch historical backfill work for smoother replay progress:** Historical metadata replay now writes work in larger batches, which helps long backfills move forward more smoothly and keeps checkpoint recovery safer when replay resumes.
+
+### 💪 Improvements
+
+* Improved **verify upcoming protocol-step readiness on a live multi-node path:** Release validation now checks the Conway to vanRossem progression more directly, which increases confidence that mixed-node networks can cross that protocol step cleanly.
+* Refined **expand fuzz-driven regression coverage across core behaviors:** More parsing, storage, networking, and configuration paths now receive broader stress coverage, which helps surface edge cases before they reach operators and integrators.
+* Enhanced **keep publish workflows moving while package indexing catches up:** Release publishing now avoids a broken package refresh step, which keeps releases moving even when package index updates take longer to appear.
+
+### 🔧 Fixes
+
+* Fixed **recover sparse chain intersections more reliably after missing history gaps:** Synchronization can now fall back to safer recent chain points more consistently, which helps recovery continue when recent ledger history is incomplete.
+* Corrected **reject headers that run ahead of safe ledger rules:** Ledger validation now stops headers that claim a protocol step too far beyond the active rules, which reduces the risk of unsafe acceptance during version transitions.
+* Strengthened **skip rollback work that moves past the known ledger tip:** Recovery now avoids applying rollbacks that run ahead of recorded ledger progress, which keeps replay and catch-up behavior safer when metadata trails the raw chain.
+
+### 📋 What You Need to Know
+
+* Clarified **backfill batching and safer replay progress:** Historical replay now batches more backfill work and keeps checkpoint progress safer, which helps long catch-up runs resume more smoothly after interruptions.
+* Highlighted **safer ledger validation, rollback handling, and sparse recovery:** Ledger validation now rejects headers that jump too far ahead, rollback handling no longer pushes past the known ledger tip, and sparse intersect recovery finds safer restart points more reliably.
+* Emphasized **stronger PV11 and fuzz regression coverage:** Release validation now exercises PV11 crossing behavior more directly, and broader stress coverage checks more parsing, storage, networking, and configuration paths for regressions.
+* Summarized **publish maintenance and package-index timing:** Release publishing keeps moving even while package index refreshes may lag because the refresh pull remains disabled.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.44.0 (May 11, 2026)
+
+**Title:** Blockfrost transaction endpoints, steadier Mithril backfill, and safer chain recovery
+
+**Date:** May 11, 2026
+
+**Version:** v0.44.0
+
+Hi folks! Here’s what we shipped in v0.44.0.
+
+### ✨ What's New
+
+* Added **expand Blockfrost transaction access:** Blockfrost compatible services can now look up transaction details, metadata, UTxOs, certificates, redeemers, required signers, and signed CBOR, and they can also submit transactions with clearer submit responses.
+
+### 💪 Improvements
+
+* Improved **preserve Mithril backfill progress across interruptions:** Mithril bootstrap now keeps more recovery state and resumes metadata backfill more safely, which helps interrupted runs continue without losing important progress.
+* Refined **give full devnet validation more time:** Devnet validation now has a longer default timeout, which reduces avoidable failures during full environment checks.
+* Enhanced **recover forked chains across more rollback paths:** Chain reconciliation now handles more rollback and fork combinations without dropping useful chain history, which makes recovery steadier after difficult fork scenarios.
+* Updated **align operational tooling with newer cardano-cli support:** Operational tooling now stays aligned with the newer `cardano-cli` release for smoother maintenance.
+* Modernized **align data handling with newer CBOR support:** Data handling now stays aligned with the newer CBOR library release for steadier compatibility maintenance.
+* Strengthened **align secrets handling with newer sops support:** Encrypted configuration and secrets handling now stay aligned with the newer `sops` release for steadier maintenance.
+* Advanced **align compression support with newer library updates:** Compression support now stays aligned with the newer `klauspost/compress` release for routine compatibility maintenance.
+* Polished **align system support with newer platform updates:** System level compatibility now stays aligned with the newer `golang.org/x/sys` release for steadier maintenance.
+
+### 🔧 Fixes
+
+* Fixed **return safer intersect points from sparse ledger history:** Chains can now find safer meeting points even when recent ledger history is sparse, which helps sync and recovery continue more reliably.
+
+### 📋 What You Need to Know
+
+* Clarified **broader Blockfrost transaction coverage and submit handling:** Blockfrost compatible integrations can now use transaction detail and submit endpoints with clearer coverage across metadata, UTxOs, certificates, redeemers, required signers, signed CBOR, and submit outcomes.
+* Highlighted **safer Mithril backfill and resume handling:** Mithril bootstrap now preserves more recovery state and resumes metadata backfill more safely, which lowers the chance of losing progress after an interrupted run.
+* Emphasized **safer fork and intersect recovery behavior:** Chain recovery now handles sparse intersect points and more fork reconciliation scenarios more safely, which helps nodes recover from difficult rollback paths with less risk of getting stuck.
+* Summarized **maintenance, validation, and dependency updates:** Validation timing and dependency compatibility were refreshed to keep operations and maintenance steadier around this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.43.0 (May 9, 2026)
+
+**Title:** Safer block-producer startup, deeper observability, and easier dashboard imports
+
+**Date:** May 9, 2026
+
+**Version:** v0.43.0
+
+Hi folks! Here’s what we shipped in v0.43.0.
+
+### ✨ What's New
+
+* Added **catch block-producer credential problems during startup:** Block producers now stop early when forging credentials are missing, mismatched, expired, or not yet valid, which prevents later surprises after launch.
+* Expanded **track protocol activity and peer state changes:** Operators can now see clearer network behavior signals, which makes it easier to spot unhealthy connections and shifting peer conditions.
+* Introduced **prompt for the Prometheus datasource during dashboard imports:** Bundled Grafana dashboards now ask for the right Prometheus datasource during import, which makes dashboard setup smoother across different Grafana environments.
+
+### 💪 Improvements
+
+* Improved **show epoch progress against wall-clock time in dashboards:** Operators can now compare current epoch slot progress with a wall-clock reference line, which makes slot stalls easier to notice.
+* Refined **track compatibility with gouroboros 0.168.0:** Protocol compatibility now stays aligned with the newer `gouroboros` `0.168.0` release for steadier maintenance and integration tracking.
+
+### 🔧 Fixes
+
+* Updated **limit slow fallback block lookups in large databases:** Large databases and fork recovery paths now avoid long lookup stalls because fallback scans stop quickly and move on to safer recovery paths.
+* Modernized **restart ledger recovery after stale rollback iterators:** Rollback recovery now restarts cleanly when an iterator points at stale chain data, which helps forked chains continue without getting stuck on the wrong branch.
+
+### 📋 What You Need to Know
+
+* Clarified **fail-fast forging startup checks:** Block-producer startup now validates VRF, KES, and operational certificate inputs against Shelley genesis data and available ledger state, so misconfigured or expired credentials stop the node early instead of failing later.
+* Highlighted **broader observability and easier dashboard imports:** Operators now get new protocol and peer observability metrics, and bundled dashboards are easier to import because Grafana prompts for the Prometheus datasource.
+* Emphasized **safer rollback recovery and block-hash lookups:** Rollback recovery and block-hash lookups now behave more safely on forked chains and very large databases because stale iterators restart cleanly and expensive fallback scans stop quickly.
+* Summarized **dependency tracking updates:** Maintenance tracking now includes the `gouroboros` `0.168.0` update.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.42.0 (May 8, 2026)
+
+**Title:** Batch stake account lookups for faster delegation queries
+
+**Date:** May 8, 2026
+
+**Version:** v0.42.0
+
+Hi folks! Here’s what we shipped in v0.42.0.
+
+### ✨ What's New
+
+* Added **batch stake account lookups for faster delegation queries:** Stake-key-heavy delegation and reward account requests now return more smoothly because Dingo can load many stake accounts in one pass.
+
+### 💪 Improvements
+
+* Improved **catch-up checks that no longer stall sync work:** Catch-up runs now stay smoother because hard-fork readiness checks evaluate in the background instead of pausing the main sync path.
+* Refined **larger deep catch-up block batches:** Nodes now pull much larger block batches during deep catch-up, which helps long syncs move forward faster with less stop-and-go behavior.
+* Enhanced **quieter inbound listener logging:** Routine inbound connection handling now produces calmer logs, which makes real connection problems easier to spot.
+* Updated **test environments aligned with cardano-node 11.0.1:** Validation and demo environments now track `cardano-node` `11.0.1`, which keeps operational testing closer to current network expectations.
+* Modernized **project alignment with Go 1.26.x:** Build, test, and release workflows now align on Go `1.26.x`, which keeps maintenance and contributor environments current.
+* Strengthened **Mithril bootstrap rollover coverage:** Regression coverage now checks Mithril bootstrap and candidate nonce rollover paths more thoroughly, which improves confidence around snapshot recovery.
+
+### 🔧 Fixes
+
+* Fixed **governance imports that now preserve proposal history:** Mithril-bootstrapped nodes now keep parent action links, full proposal details, and ratified hard-fork timing so governance stays aligned after snapshot startup.
+* Corrected **archive demo teardown that no longer hangs on pruning shutdown:** The archive demonstration now cleans up pruning data with the right permissions, which makes teardown finish reliably.
+* Stabilized **clearer Bark and UTxO RPC startup failures:** Bark and UTxO RPC now return deterministic startup errors for TLS and port-binding problems, which makes failed launches easier to diagnose.
+* Preserved **Mithril governance roots across snapshot startup:** Mithril bootstrap now seeds governance roots so chained governance proposals keep progressing instead of silently expiring after startup.
+* Hardened **safer peer-sharing defaults by node role:** Block producers now keep peer sharing off by default, while non-block producers fall back to `cardano-node` behavior when the setting is unset.
+* Prevented **rollback recovery from replaying applied headers:** Chainsync rollback recovery now skips headers the node already applied, which prevents recovery from wedging after rollback scenarios.
+* Repaired **benchmark runs that no longer leave stray cloud paths in the worktree:** Benchmark tests now keep temporary cloud-backend metadata out of the worktree, which leaves local checkouts cleaner.
+* Eliminated **pinned-tip rollback loops during no-op rollbacks:** No-op rollbacks at the current tip no longer trigger repeated local resync loops, which keeps chainsync from wedging at a pinned tip.
+* Renamed **Dingo-owned metrics under the dingo_metrics prefix:** Dingo-owned metric families moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names, bundled dashboards now use the new names, and operators who use any affected metrics must update alerts, dashboards, and monitoring queries.
+
+### 📋 What You Need to Know
+
+* Clarified **faster stake account queries:** Batched account lookups now improve delegation and reward account queries for stake-key-heavy workloads.
+* Highlighted **faster and smoother catch-up behavior:** Catch-up behavior is faster and smoother because blockfetch batching scales much more aggressively, and hard-fork initiation checks no longer block the ledger path the same way.
+* Emphasized **safer governance continuity after Mithril bootstrap:** Mithril-bootstrapped nodes should see safer governance continuity because governance roots, parent action links, and ratification timing are now preserved more accurately after snapshot import.
+* Reviewed **operator updates for startup, peer sharing, and metrics:** Operators using Bark, UTxO RPC, PeerSharing, or any affected metrics must update alerts, dashboards, and monitoring queries for the Dingo-owned metric families that moved from `cardano_node_metrics_*` names to `dingo_metrics_*` names:
+  * `cardano_node_metrics_txsEvictedNum_int` -> `dingo_metrics_txsEvictedNum_int`
+  * `cardano_node_metrics_txsExpiredNum_int` -> `dingo_metrics_txsExpiredNum_int`
+  * `cardano_node_metrics_slotBattlesTotal_int` -> `dingo_metrics_slotBattlesTotal_int`
+  * `cardano_node_metrics_blockForgingLatency_seconds` -> `dingo_metrics_blockForgingLatency_seconds`
+  * `cardano_node_metrics_forgedBlockSize_bytes` -> `dingo_metrics_forgedBlockSize_bytes`
+  * `cardano_node_metrics_forgedBlockTxCount_int` -> `dingo_metrics_forgedBlockTxCount_int`
+  * `cardano_node_metrics_leader_slot_checks_total` -> `dingo_metrics_leader_slot_checks_total`
+  * `cardano_node_metrics_leader_slot_won_total` -> `dingo_metrics_leader_slot_won_total`
+  * `cardano_node_metrics_leader_slot_not_won_total` -> `dingo_metrics_leader_slot_not_won_total`
+  * `cardano_node_metrics_leader_vrf_eval_duration_seconds` -> `dingo_metrics_leader_vrf_eval_duration_seconds`
+  * `cardano_node_metrics_leader_stake_lookup_duration_seconds` -> `dingo_metrics_leader_stake_lookup_duration_seconds`
+  * `cardano_node_metrics_leader_last_epoch_slots_checked_int` -> `dingo_metrics_leader_last_epoch_slots_checked_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_won_int` -> `dingo_metrics_leader_last_epoch_slots_won_int`
+  * `cardano_node_metrics_leader_last_epoch_slots_not_won_int` -> `dingo_metrics_leader_last_epoch_slots_not_won_int`
+  * `cardano_node_metrics_leader_last_evaluated_epoch_int` -> `dingo_metrics_leader_last_evaluated_epoch_int`
+  * `cardano_node_metrics_stake_snapshot_capture_duration_seconds` -> `dingo_metrics_stake_snapshot_capture_duration_seconds`
+  * `cardano_node_metrics_stake_snapshot_capture_success_total` -> `dingo_metrics_stake_snapshot_capture_success_total`
+  * `cardano_node_metrics_stake_snapshot_capture_failure_total` -> `dingo_metrics_stake_snapshot_capture_failure_total`
+  * `cardano_node_metrics_stake_snapshot_pool_count_int` -> `dingo_metrics_stake_snapshot_pool_count_int`
+  * `cardano_node_metrics_stake_snapshot_total_active_stake_lovelace` -> `dingo_metrics_stake_snapshot_total_active_stake_lovelace`
+  * `cardano_node_metrics_stake_snapshot_last_successful_epoch_int` -> `dingo_metrics_stake_snapshot_last_successful_epoch_int`
+  * `cardano_node_metrics_peerSelection_peers_by_source` -> `dingo_metrics_peerSelection_peers_by_source`
+  * `cardano_node_metrics_peerSelection_churn_demotions_by_source` -> `dingo_metrics_peerSelection_churn_demotions_by_source`
+  * `cardano_node_metrics_peerSelection_churn_promotions_by_source` -> `dingo_metrics_peerSelection_churn_promotions_by_source`
+  * `cardano_node_metrics_peerSelection_InboundWarmTarget` -> `dingo_metrics_peerSelection_InboundWarmTarget`
+  * `cardano_node_metrics_peerSelection_InboundHotQuota` -> `dingo_metrics_peerSelection_InboundHotQuota`
+  * `cardano_node_metrics_peerSelection_InboundWarmHeld` -> `dingo_metrics_peerSelection_InboundWarmHeld`
+  * `cardano_node_metrics_peerSelection_InboundHotHeld` -> `dingo_metrics_peerSelection_InboundHotHeld`
+  * `cardano_node_metrics_peerSelection_InboundPruned` -> `dingo_metrics_peerSelection_InboundPruned`
+  * `cardano_node_metrics_peerSelection_InboundArrivalsTotal` -> `dingo_metrics_peerSelection_InboundArrivalsTotal`
+  * `cardano_node_metrics_peerSelection_InboundTopologyMatched` -> `dingo_metrics_peerSelection_InboundTopologyMatched`
+  * `cardano_node_metrics_peerSelection_InboundDuplexHeld` -> `dingo_metrics_peerSelection_InboundDuplexHeld`
+  * `cardano_node_metrics_peerSelection_InboundPrunedByReason` -> `dingo_metrics_peerSelection_InboundPrunedByReason`
+  * `cardano_node_metrics_peerSelection_InboundLifecycleTotal` -> `dingo_metrics_peerSelection_InboundLifecycleTotal`
+  * `cardano_node_metrics_peerSelection_InboundHotQuotaUsage` -> `dingo_metrics_peerSelection_InboundHotQuotaUsage`
+  * `cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy` -> `dingo_metrics_peerSelection_InboundWarmTargetOccupancy`
+* Summarized **refreshed tooling and validation:** Tooling and validation were refreshed through Go `1.26.x` alignment, `cardano-node` `11.0.1` test coverage, stronger Mithril rollover regression coverage, and archive-demo reliability improvements.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.41.0 (May 6, 2026)
+
+**Title:** Batched metadata writes, leaner memory use, and safer node behavior
+
+**Date:** May 6, 2026
+
+**Version:** v0.41.0
+
+Hi folks! Here’s what we shipped in v0.41.0.
+
+### ✨ What's New
+
+* Added **batched metadata persistence across supported databases:** Metadata transaction data can now flush in batches across sqlite, MySQL, and Postgres backends, which makes high-volume metadata persistence easier to manage.
+* Expanded **archive node demonstration tooling:** Teams can now run an archive node demonstration with MinIO-backed archive storage, a pruning node, helper scripts, and an end-to-end runnable flow.
+
+### 💪 Improvements
+
+* Improved **leaner default subscriber buffering:** Default subscriber buffers are now much smaller, while high-burst consumers keep large queues where needed, which reduces idle memory use.
+* Refined **era test harness organization:** The era test harness now lives in a clearer shared location, which makes validation work easier to follow.
+* Enhanced **Conway and PV11 readiness confidence:** Readiness coverage now checks Conway and PV11 behavior more clearly, which improves validation confidence.
+* Cleaned **stale rate limit maintenance:** The project now drops an outdated rate-limit constant, which keeps maintenance cleaner without changing runtime behavior.
+* Strengthened **archive node validation coverage:** The archive node demonstration now checks the full runnable flow more thoroughly, which makes the operational demo easier to trust.
+
+### 🔧 Fixes
+
+* Fixed **safer Mithril startup around recoverable metadata gaps:** Missing blob commit-timestamp keys now resolve as empty values, and recoverable mismatches no longer block Mithril or related startup paths.
+* Corrected **iterator handling after storage closes:** Iterator creation now returns an error after Badger closes, which prevents a shutdown panic.
+* Synchronized **stability window reads during era changes:** Stability-window reads now stay aligned with concurrent era updates, which avoids race-driven failures.
+* Released **pruning locks earlier:** Pruning now releases the metadata and prune lock sooner, which reduces contention and improves diagnostics.
+* Preserved **eligible peer continuity during local tip plateaus:** Nodes no longer disconnect their only eligible peer when a local tip plateau appears.
+* Unified **peer identity handling across DNS fallbacks:** Hostname and IP variants now stay consistent for deduplication, deny lists, and DNS-failure logging.
+
+### 📋 What You Need to Know
+
+* Clarified **batched metadata persistence availability:** Batched metadata persistence is now available across sqlite, MySQL, and Postgres backends.
+* Highlighted **lower idle heap usage:** Idle heap usage should be lower because default event subscriber buffers are smaller.
+* Emphasized **safer startup and shutdown paths:** Mithril startup and shutdown behavior is safer around recoverable database edge cases.
+* Summarized **more robust sync and peer management:** Sync and peer-management behavior is safer because plateau recovery and DNS-fallback peer handling are more robust.
+* Reviewed **archive demo updates:** The project now includes an archive-node demonstration plus stronger validation coverage.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.40.0 (May 5, 2026)
+
+**Title:** Governance DRep APIs and safer rollback recovery
+
+**Date:** May 5, 2026
+
+**Version:** v0.40.0
+
+Hi folks! Here’s what we shipped in v0.40.0.
+
+### ✨ What's New
+
+* Added **Blockfrost compatible governance DRep lookups:** Blockfrost compatible services can now look up governance DReps by hex or bech32 identifier and retrieve registration, voting power, and activity details.
+
+### 💪 Improvements
+
+* Improved **newer Blockfrost client compatibility:** Blockfrost backed integrations now stay aligned with the newer `blockfrost-go` client release for smoother API compatibility.
+* Refreshed **protocol and UTxO RPC compatibility:** Core protocol and UTxO RPC support now stay aligned with newer upstream releases, including Conway version 11 expectations, for steadier interoperability.
+
+### 🔧 Fixes
+
+* Corrected **rollback loop recovery:** Nodes now force a fresh chainsync resync when the same rollback repeats, which helps recovery move forward instead of circling on the same point.
+* Stabilized **shutdown during catch up:** Nodes now finish in flight replay work before closing storage, which prevents `DB Closed` shutdown failures during catch up.
+* Realigned **ledger state after rollbacks:** Rollback recovery now rewinds ledger state together with the chain, which prevents repeated validation failures after peers resend the same blocks.
+* Enabled **faster source port reuse:** TCP reconnects now reuse configured source ports more reliably, which reduces reconnect failures after connection churn.
+
+### 📋 What You Need to Know
+
+* Clarified **patch release upgrade guidance:** This is a patch release, and normal upgrade procedures are generally sufficient.
+* Highlighted **new governance DRep lookups:** Blockfrost compatible API users can now look up governance DReps through the new endpoint.
+* Summarized **safer rollback and resync recovery:** Rollback handling now detects loops, rewinds state correctly, and resyncs more cleanly after recovery problems.
+* Emphasized **steadier shutdowns and reconnects:** Catch up shutdowns and source port reuse now behave more reliably, which reduces avoidable interruptions.
+* Reviewed **dependency updates:** Blockfrost, protocol, and UTxO RPC dependencies were refreshed.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.39.3 (May 4, 2026)
 
@@ -24,7 +615,6 @@ Hi folks! Here’s what we shipped in v0.39.3.
 * Refreshed **Google API client support:** Google API integrations now stay current with `v0.277.0` for routine compatibility maintenance.
 * Advanced **AWS S3 SDK maintenance:** S3 backed storage support now includes the latest patch level for steadier ongoing compatibility.
 * Streamlined **devnet contributor workflow:** Contributors can work with the devnet test harness more easily because the end to end test support now lives under `internal/test/devnet` in a clearer shared location.
-* Restored **release history continuity:** Release tracking now includes the v0.39.2 notes entry in `RELEASE_NOTES.md`, which keeps recent history easier to scan.
 
 ### 🔧 Fixes
 
@@ -166,7 +756,6 @@ Hi folks! Here’s what we shipped in v0.39.0.
 * Enhanced **devnet validation workflow:** Development teams can now run `make test-devnet` for a more consistent devnet validation flow.
 * Modernized **Docker build cleanliness:** Container builds now avoid worktree and bot metadata directories, which keeps build contexts cleaner.
 * Updated **Bark download cancellation handling:** Bark block downloads now honor request cancellation and timeout context more cleanly, and lint coverage now checks that path again.
-* Refreshed **release history continuity:** Release history now includes the v0.38.0 notes entry in `RELEASE_NOTES.md`, which keeps recent changes easier to scan.
 
 ### 🔧 Fixes
 
@@ -226,7 +815,6 @@ Hi folks! Here’s what we shipped in v0.38.0.
 * Refreshed **Connect API compatibility:** Connect based integrations now stay current with the newer `connectrpc.com/connect` release.
 * Advanced **AWS S3 integration currency:** S3 backed workflows now stay aligned with the newer `github.com/aws/aws-sdk-go-v2/service/s3` release.
 * Polished **AWS client compatibility:** AWS backed components now stay aligned with the newer `github.com/aws/smithy-go` release.
-* Completed **v0.37.0 release history refresh:** Release history now includes the refreshed v0.37.0 notes entry for easier scanning.
 
 ### 🔧 Fixes
 
@@ -240,7 +828,7 @@ Hi folks! Here’s what we shipped in v0.38.0.
 * Adopt the new Grafana and Prometheus dashboard bundle and alert rules to monitor Dingo nodes more quickly.
 * Expect steadier near-tip sync and smoother equal-tip peer switching because shadow blockfetch, latency aware peer choice, preserved in-flight batches, and clearer blockfetch failure reporting now work together.
 * Note more explicit era and hard-fork handling because Dingo now surfaces upcoming transition stability earlier, advances only one era at a time, and returns typed era mismatch errors.
-* Review the dependency refreshes and the updated v0.37.0 release history entry when maintaining integrations and internal release records.
+* Review the dependency refreshes when maintaining integrations.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -354,7 +942,6 @@ Hi folks! Here’s what we shipped in v0.36.0.
 * Updated **protocol support alignment:** Network compatibility stays current with newer upstream protocol updates.
 * Modernized **operator tooling support:** Operational workflows stay aligned with newer Cardano command line tooling.
 * Streamlined **era rollover handling:** Era changes now follow one transition path, which makes chain operations more consistent during rollovers.
-* Restored **release history continuity:** Recent changes stay easier to scan in one place through the updated release notes.
 
 ### 🔧 Fixes
 
@@ -389,10 +976,6 @@ Hi folks! Here’s what we shipped in v0.35.3.
 ### ✨ What's New
 
 * Noted **no new features:** This patch focuses on improvements and fixes.
-
-### 💪 Improvements
-
-* Refined **release history continuity:** RELEASE_NOTES.md now stays up to date, so recent changes are easier to scan in one place.
 
 ### 🔧 Fixes
 
@@ -429,7 +1012,6 @@ Hi folks! Here’s what we shipped in v0.35.2.
 ### 🔧 Fixes
 
 * Corrected **safer era forecasts:** Hard fork era history now stays within the safe forecast horizon, so slot and time lookups do not promise certainty too far past the current ledger tip.
-* Restored **release history continuity:** The changelog now includes the v0.35.1 entry so recent release history stays complete and easier to scan.
 
 ### 📋 What You Need to Know
 
@@ -647,10 +1229,6 @@ Hi folks! Here’s what we shipped in v0.32.2.
 - **More reliable connection cleanup:** Network operations stay more rock-solid because the node now detects inactive connections and purges leftover state tied to closed links.
 - **Refreshed telemetry and runtime dependencies:** Observability and compatibility stay smoother because core dependencies (including OpenTelemetry, gRPC, and gonum) were refreshed.
 
-### 🔧 Fixes
-
-- **Clearer v0.32.1 release notes:** Documentation is clearer because v0.32.1 release notes are now populated and placeholder text was removed.
-
 ### 📋 What You Need to Know
 
 - **No action required:** You're all set—just upgrade to v0.32.2.
@@ -788,7 +1366,7 @@ Hi folks! Here’s what we shipped in v0.31.0.
 - **Smarter peer lag filtering:** Sync catch-up is smoother because peer selection now skips nodes that are far behind the best known tip using a `securityParam`-based filter.
 - **Smoother Prometheus defaults and cache visibility:** Metrics setup is simpler because the node now uses the default Prometheus registry when none is provided and exports Badger cache gauges.
 - **More accurate SQLite disk reporting:** Troubleshooting is easier because SQLite disk size reporting and error diagnostics are now more accurate.
-- **Clearer CI and release documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
+- **Clearer CI workflow documentation:** Release automation is easier to follow because workflow behavior and related documentation were refined.
 
 ### 🔧 Fixes
 
@@ -863,7 +1441,6 @@ Hi folks! Here’s what we shipped in v0.29.1.
 - **Steadier rollback iteration:** Catch-up and restart behavior is more predictable because chain iteration is now safer under rollbacks.
 - **Relaxed peer-tip validation during catch-up:** Sync is smoother because peer tip checks are less likely to reject useful peers while you’re catching up.
 - **More reproducible CI and release automation:** Builds are easier to operate because CI and Antithesis automation were hardened.
-- **Clearer release documentation:** What changed is easier to see because release documentation was updated.
 - **Refreshed dependency set:** Compatibility stays rock-solid because a key dependency was updated.
 
 ### 🔧 Fixes
@@ -1078,7 +1655,6 @@ Hi folks! Here’s what we shipped in v0.27.4.
 ### 📋 What You Need to Know
 
 - **Inbound peers excluded from chain choice:** Chain selection behavior may change in mixed inbound/outbound topologies because inbound peers no longer influence which chain is selected.
-- **Documentation-only change:** This release includes a release-notes update with no runtime impact.
 
 ### 🙏 Thank You
 
@@ -1161,7 +1737,6 @@ Hi folks! Here’s what we shipped in v0.27.2.
 
 ### 📋 What You Need to Know
 
-- **Release notes alignment:** Release documentation was updated to reflect the final set of changes, including a detailed v0.27.1 section in `RELEASE_NOTES.md`.
 - **Build provenance updates:** Supply-chain attestations are easier to verify because build provenance now uses `actions/attest` and updated Docker Hub image subjects.
 
 ### 🙏 Thank You
@@ -1260,10 +1835,6 @@ Hi folks! Here’s what we shipped in v0.26.0.
 
 - **No fixes:** No user-facing fixes shipped in this release.
 
-### 📋 What You Need to Know
-
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes an entry for v0.25.1.
-
 ### 🙏 Thank You
 
 Thank you for trying!
@@ -1292,10 +1863,6 @@ Hi folks! Here’s what we shipped in v0.25.1.
 - **Resilient sync across reconnections:** Sync is more rock-solid because chainsync and blockfetch handle connection switches more reliably.
 - **Blockfetch overhead:** Observability is sleeker because blockfetch avoids extra work when no one is listening for events.
 - **Dependencies:** Builds are more solid because dependencies were refreshed for consistency.
-
-### 🔧 Fixes
-
-- **Release notes alignment:** Tracking changes is easier because release documentation now matches shipped content.
 
 ### 📋 What You Need to Know
 
@@ -1359,10 +1926,6 @@ Hi folks! Here’s what we shipped in v0.24.1.
 - **Shutdown reliability:** Shutdowns are more rock-solid because node and ledger shutdown paths are less likely to hang, and logs now show how long shutdown took.
 - **Epoch cache consistency checks:** Diagnosing cache issues is easier because epoch cache validation is stricter and catches inconsistencies earlier.
 
-### 📋 What You Need to Know
-
-- **Release notes:** Release notes are easier to scan because v0.24.0 notes are now included in `RELEASE_NOTES.md`.
-
 ### 🙏 Thank You
 
 Thank you for trying!
@@ -1397,7 +1960,6 @@ Hi folks! Here’s what we shipped in v0.24.0.
 - **CI and publishing:** Releases are more repeatable because CI and publishing workflows were refreshed with Node.js 24.x and newer pinned Docker and GitHub Actions.
 - **Dependencies:** Compatibility is better because key dependencies were updated, including OpenTelemetry Go and gouroboros.
 - **Go toolchain:** Builds are more up to date because the minimum Go version is now 1.25 and CI was updated to match.
-- **Release notes:** Scanning changes is easier because release notes were expanded for recent versions.
 
 ### 🔧 Fixes
 
@@ -1417,17 +1979,13 @@ Thank you for trying!
 
 ## v0.23.1 (March 11, 2026)
 
-**Title:** Clearer release notes and rock-solid Docker publishing
+**Title:** Rock-solid Docker publishing
 
 **Date:** March 11, 2026
 
 **Version:** v0.23.1
 
 Hi folks! Here’s what we shipped in v0.23.1.
-
-### ✨ What's New
-
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes a complete set of notes for v0.23.0.
 
 ### 💪 Improvements
 
@@ -1465,7 +2023,6 @@ Hi folks! Here’s what we shipped in v0.23.0.
 
 - **Docs:** Setup is easier because `README.md` now includes expanded usage, deployment, and DevNet guidance plus a clear “not for production” warning.
 - **Publish workflow:** Publishing is more rock-solid because the release workflow now targets Node.js `24.x` and pins key GitHub Actions versions.
-- **Release notes:** Release notes are easier to scan because `RELEASE_NOTES.md` now includes v0.22.1 and tightens up transaction validation wording.
 
 ### 🔧 Fixes
 
@@ -1490,10 +2047,6 @@ Thank you for trying!
 **Version:** v0.22.1
 
 Hi folks! Here’s what we shipped in v0.22.1.
-
-### ✨ What's New
-
-- **Release notes:** We added v0.22.0 release notes to `RELEASE_NOTES.md` so you can scan changes in one place.
 
 ### 💪 Improvements
 

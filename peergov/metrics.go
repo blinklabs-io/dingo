@@ -58,6 +58,9 @@ type peerGovernorMetrics struct {
 	inboundLifecycle       *prometheus.CounterVec
 	inboundHotQuotaUsage   prometheus.Gauge
 	inboundWarmOccupancy   prometheus.Gauge
+	// Temperature observability
+	peerPromotions *prometheus.CounterVec // transitions toward hot, labels: from, to
+	peerDemotions  *prometheus.CounterVec // transitions toward cold, labels: from, to
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -152,85 +155,141 @@ func (p *PeerGovernor) initMetrics() {
 	// Per-source metrics (Phase 7: Enhanced Observability)
 	p.metrics.peersBySource = promautoFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_peerSelection_peers_by_source",
+			Name: "dingo_metrics_peerSelection_peers_by_source",
 			Help: "number of peers by source and state",
 		},
 		[]string{"source", "state"},
 	)
 	p.metrics.churnDemotionsBySource = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_peerSelection_churn_demotions_by_source",
+			Name: "dingo_metrics_peerSelection_churn_demotions_by_source",
 			Help: "number of churn demotions by source",
 		},
 		[]string{"source"},
 	)
 	p.metrics.churnPromotionsBySource = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_peerSelection_churn_promotions_by_source",
+			Name: "dingo_metrics_peerSelection_churn_promotions_by_source",
 			Help: "number of churn promotions by source",
 		},
 		[]string{"source"},
 	)
 	p.metrics.inboundWarmTarget = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundWarmTarget",
+		Name: "dingo_metrics_peerSelection_InboundWarmTarget",
 		Help: "configured inbound warm peer target",
 	})
 	p.metrics.inboundHotQuota = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundHotQuota",
+		Name: "dingo_metrics_peerSelection_InboundHotQuota",
 		Help: "configured inbound hot peer quota",
 	})
 	p.metrics.inboundWarmHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundWarmHeld",
+		Name: "dingo_metrics_peerSelection_InboundWarmHeld",
 		Help: "current number of inbound peers held warm",
 	})
 	p.metrics.inboundHotHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundHotHeld",
+		Name: "dingo_metrics_peerSelection_InboundHotHeld",
 		Help: "current number of inbound peers held hot",
 	})
 	p.metrics.inboundPruned = promautoFactory.NewCounter(prometheus.CounterOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundPruned",
+		Name: "dingo_metrics_peerSelection_InboundPruned",
 		Help: "total inbound peers pruned from governed sets",
 	})
 	p.metrics.inboundArrivalsTotal = promautoFactory.NewCounter(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_peerSelection_InboundArrivalsTotal",
+			Name: "dingo_metrics_peerSelection_InboundArrivalsTotal",
 			Help: "total inbound connection events observed since startup (includes re-arrivals)",
 		},
 	)
 	p.metrics.inboundTopologyMatched = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_peerSelection_InboundTopologyMatched",
+			Name: "dingo_metrics_peerSelection_InboundTopologyMatched",
 			Help: "current number of peers whose inbound arrival was identified as a configured topology peer",
 		},
 	)
 	p.metrics.inboundDuplexHeld = promautoFactory.NewGauge(
 		prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_peerSelection_InboundDuplexHeld",
+			Name: "dingo_metrics_peerSelection_InboundDuplexHeld",
 			Help: "current number of inbound peers on full-duplex connections",
 		},
 	)
 	p.metrics.inboundPrunedByReason = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_peerSelection_InboundPrunedByReason",
+			Name: "dingo_metrics_peerSelection_InboundPrunedByReason",
 			Help: "total inbound peers pruned by policy reason",
 		},
 		[]string{"reason"},
 	)
 	p.metrics.inboundLifecycle = promautoFactory.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_peerSelection_InboundLifecycleTotal",
+			Name: "dingo_metrics_peerSelection_InboundLifecycleTotal",
 			Help: "total inbound lifecycle transitions by stage",
 		},
 		[]string{"stage"},
 	)
 	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundHotQuotaUsage",
+		Name: "dingo_metrics_peerSelection_InboundHotQuotaUsage",
 		Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
 	})
 	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(prometheus.GaugeOpts{
-		Name: "cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy",
+		Name: "dingo_metrics_peerSelection_InboundWarmTargetOccupancy",
 		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
 	})
+	p.metrics.peerPromotions = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_peer_promotion_total",
+			Help: "total peer state transitions toward hot",
+		},
+		[]string{"from", "to"},
+	)
+	p.metrics.peerDemotions = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_peer_demotion_total",
+			Help: "total peer state transitions toward cold",
+		},
+		[]string{"from", "to"},
+	)
+	// Pre-populate every reachable transition with zero so Prometheus
+	// exports the series from startup. Without this, rate()/increase()
+	// alerts would have no data until the first event of each kind.
+	p.metrics.peerPromotions.WithLabelValues("cold", "warm").Add(0)
+	p.metrics.peerPromotions.WithLabelValues("cold", "hot").Add(0)
+	p.metrics.peerPromotions.WithLabelValues("warm", "hot").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("hot", "warm").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("hot", "cold").Add(0)
+	p.metrics.peerDemotions.WithLabelValues("warm", "cold").Add(0)
+}
+
+// peerStateLabel maps a PeerState to its Prometheus temperature label.
+func peerStateLabel(state PeerState) string {
+	switch state {
+	case PeerStateCold:
+		return "cold"
+	case PeerStateWarm:
+		return "warm"
+	case PeerStateHot:
+		return "hot"
+	}
+	return "unknown"
+}
+
+// recordPeerStateChange increments the appropriate transition counter
+// when a peer moves between cold/warm/hot. No-op when from == to or
+// metrics aren't initialized.
+func (p *PeerGovernor) recordPeerStateChange(from, to PeerState) {
+	if p.metrics == nil || p.metrics.peerPromotions == nil || p.metrics.peerDemotions == nil {
+		return
+	}
+	if from == to {
+		return
+	}
+	fromLabel := peerStateLabel(from)
+	toLabel := peerStateLabel(to)
+	// Promotion = toward hot (Cold<Warm<Hot in PeerState ordering).
+	if to > from {
+		p.metrics.peerPromotions.WithLabelValues(fromLabel, toLabel).Inc()
+	} else {
+		p.metrics.peerDemotions.WithLabelValues(fromLabel, toLabel).Inc()
+	}
 }
 
 func (p *PeerGovernor) recordInboundLifecycle(stage string) {

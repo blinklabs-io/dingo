@@ -187,7 +187,7 @@ func TestPublishDoesNotBlockOnFullChannel(t *testing.T) {
 	eb := NewEventBus(nil, nil)
 	typ := EventType("deadlock.test")
 
-	_, ch := eb.Subscribe(typ)
+	_, ch := eb.SubscribeWithBuffer(typ, EventQueueSize)
 
 	// Fill the subscriber's channel buffer completely.
 	for range EventQueueSize {
@@ -248,7 +248,7 @@ func TestCloseDoesNotDeadlockWithFullChannel(t *testing.T) {
 	for range iters {
 		eb := NewEventBus(nil, nil)
 		typ := EventType("close.deadlock.test")
-		subId, ch := eb.Subscribe(typ)
+		subId, ch := eb.SubscribeWithBuffer(typ, EventQueueSize)
 
 		// Fill the buffer.
 		for range EventQueueSize {

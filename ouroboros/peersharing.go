@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"net"
 	"strconv"
+	"time"
 
 	"github.com/blinklabs-io/dingo/peergov"
 	opeersharing "github.com/blinklabs-io/gouroboros/protocol/peersharing"
@@ -24,15 +25,47 @@ import (
 
 const defaultPeersToRequest = 5
 
+func (o *Ouroboros) peerSharingConfig() opeersharing.Config {
+	return opeersharing.NewConfig(o.peersharingConnOpts()...)
+}
+
+func (o *Ouroboros) peersharingConnOpts() []opeersharing.PeerSharingOptionFunc {
+	opts := append(
+		[]opeersharing.PeerSharingOptionFunc{},
+		o.peersharingClientConnOpts()...,
+	)
+	opts = append(opts, o.peersharingServerConnOpts()...)
+	opts = append(opts, opeersharing.WithLocalDisabled(!o.config.PeerSharing))
+	return opts
+}
+
 func (o *Ouroboros) peersharingServerConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
-		opeersharing.WithShareRequestFunc(o.peersharingShareRequest),
+		opeersharing.WithShareRequestFunc(
+			o.instrumentPeersharingShareRequest(o.peersharingShareRequest),
+		),
 	}
 }
 
 func (o *Ouroboros) peersharingClientConnOpts() []opeersharing.PeerSharingOptionFunc {
 	return []opeersharing.PeerSharingOptionFunc{
-		opeersharing.WithShareRequestFunc(o.peersharingClientRequest),
+		opeersharing.WithShareRequestFunc(
+			o.instrumentPeersharingShareRequest(o.peersharingClientRequest),
+		),
+	}
+}
+
+func (o *Ouroboros) instrumentPeersharingShareRequest(
+	fn func(opeersharing.CallbackContext, int) ([]opeersharing.PeerAddress, error),
+) func(opeersharing.CallbackContext, int) ([]opeersharing.PeerAddress, error) {
+	return func(
+		ctx opeersharing.CallbackContext,
+		amount int,
+	) ([]opeersharing.PeerAddress, error) {
+		start := time.Now()
+		addrs, err := fn(ctx, amount)
+		o.recordProtocolMessage("peersharing", err, time.Since(start))
+		return addrs, err
 	}
 }
 

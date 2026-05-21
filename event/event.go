@@ -24,10 +24,22 @@ import (
 )
 
 const (
-	EventQueueSize       = 100000
-	AsyncQueueSize       = 1000
-	AsyncWorkerPoolSize  = 4
-	RemoteDeliverTimeout = 5 * time.Second
+	// EventQueueSize is the high-burst buffer used by subscribers that may
+	// receive bulk-sync bursts (e.g. chainsync/blockfetch ingest in the
+	// ledger). Subscribers opt in to this size via the *WithBuffer
+	// variants. Sized to absorb the worst case from #1556 / #1914.
+	EventQueueSize = 100000
+	// DefaultSubscriberBuffer is the per-subscriber channel buffer used by
+	// Subscribe/SubscribeFunc when no explicit size is requested. Most
+	// subscribers (peergov, governance, async housekeeping, etc.) only
+	// receive sparse traffic and do not need 100k slots; sizing the
+	// default down keeps idle steady-state heap small while leaving the
+	// burst headroom available to opt-in callers via SubscribeWithBuffer
+	// / SubscribeFuncWithBuffer. See blinklabs-io/dingo#2106.
+	DefaultSubscriberBuffer = 1024
+	AsyncQueueSize          = 1000
+	AsyncWorkerPoolSize     = 4
+	RemoteDeliverTimeout    = 5 * time.Second
 )
 
 type EventType string
@@ -230,11 +242,15 @@ func (c *channelSubscriber) Close() {
 // Callers must hold stopMu.RLock or have otherwise ensured the EventBus is not stopped.
 func (e *EventBus) subscribeInternal(
 	eventType EventType,
+	buffer int,
 ) (EventSubscriberId, *channelSubscriber) {
+	if buffer <= 0 {
+		buffer = DefaultSubscriberBuffer
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Create channel-backed subscriber
-	chSub := newChannelSubscriber(EventQueueSize, e.Logger)
+	chSub := newChannelSubscriber(buffer, e.Logger)
 	// Increment subscriber ID
 	subId := e.lastSubId + 1
 	e.lastSubId = subId
@@ -257,12 +273,24 @@ func (e *EventBus) subscribeInternal(
 func (e *EventBus) Subscribe(
 	eventType EventType,
 ) (EventSubscriberId, <-chan Event) {
+	return e.SubscribeWithBuffer(eventType, DefaultSubscriberBuffer)
+}
+
+// SubscribeWithBuffer is like Subscribe but lets the caller pick the
+// per-subscriber channel buffer. Use this for subscribers that need to
+// tolerate bursts larger than DefaultSubscriberBuffer (e.g. chainsync
+// or blockfetch ingest during bulk catch-up). A non-positive buffer
+// falls back to DefaultSubscriberBuffer.
+func (e *EventBus) SubscribeWithBuffer(
+	eventType EventType,
+	buffer int,
+) (EventSubscriberId, <-chan Event) {
 	e.stopMu.RLock()
 	if e.stopped || e.closed {
 		e.stopMu.RUnlock()
 		return 0, nil
 	}
-	subId, chSub := e.subscribeInternal(eventType)
+	subId, chSub := e.subscribeInternal(eventType, buffer)
 	e.stopMu.RUnlock()
 	return subId, chSub.ch
 }
@@ -271,6 +299,20 @@ func (e *EventBus) Subscribe(
 // Returns 0 if the EventBus is stopped or closed.
 func (e *EventBus) SubscribeFunc(
 	eventType EventType,
+	handlerFunc EventHandlerFunc,
+) EventSubscriberId {
+	return e.SubscribeFuncWithBuffer(
+		eventType,
+		DefaultSubscriberBuffer,
+		handlerFunc,
+	)
+}
+
+// SubscribeFuncWithBuffer is like SubscribeFunc but lets the caller pick
+// the per-subscriber channel buffer. See SubscribeWithBuffer for details.
+func (e *EventBus) SubscribeFuncWithBuffer(
+	eventType EventType,
+	buffer int,
 	handlerFunc EventHandlerFunc,
 ) EventSubscriberId {
 	// Hold stopMu.RLock through Add(1) to prevent Stop() from calling Wait()
@@ -283,7 +325,7 @@ func (e *EventBus) SubscribeFunc(
 		e.stopMu.RUnlock()
 		return 0
 	}
-	subId, chSub := e.subscribeInternal(eventType)
+	subId, chSub := e.subscribeInternal(eventType, buffer)
 	e.subscriberWg.Add(1)
 	e.stopMu.RUnlock()
 

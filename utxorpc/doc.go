@@ -23,12 +23,12 @@
 //
 // # Predicate evaluation
 //
-// Search requests carry a TxPredicate tree with composite operators
-// (not / all_of / any_of) that wrap leaf predicates (address,
-// policy, certificate, consumes, produces, …). Predicate evaluation
-// lives alongside the leaf types (e.g. certificate_pattern.go,
-// plutusdata_cardano.go). A nil SearchUtxos predicate is treated as
-// "match everything", allowing a full UTxO scan.
+// SearchUtxos uses UtxoPredicate filters over live UTxOs; a nil
+// SearchUtxos predicate scans all addresses. TxPredicate evaluation for
+// transaction streams uses composite operators (not / all_of / any_of)
+// around leaf predicates (address, policy, certificate, consumes,
+// produces, …). That path is stricter: evalTxPredicateOutcome returns
+// predNoMatch for a nil converted TxPredicate node.
 //
 // # Authentication
 //

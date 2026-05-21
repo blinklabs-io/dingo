@@ -823,8 +823,16 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 		},
 	}
 
+	// gapBlocks > 1000 puts the runway in the deepest catchup bucket
+	// (minHeaders = 256), so we send enough headers to cross that
+	// threshold and trigger exactly one batch. Headers added past the
+	// trigger queue against the in-flight batch (the test's
+	// BlockfetchRequestRangeFunc mock never completes), so requestCount
+	// stays at 1 — that's the "scales up but doesn't re-fire while
+	// in-flight" guarantee this test pins.
+	const totalHeaders = 260
 	prevHash := lcommon.NewBlake2b256(nil)
-	for i := 1; i <= 20; i++ {
+	for i := 1; i <= totalHeaders; i++ {
 		headerHash := lcommon.NewBlake2b256(fmt.Appendf(nil, "hdr-%d", i))
 		err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 			ConnectionId: connId,
@@ -843,12 +851,13 @@ func TestHandleEventChainsyncBlockHeaderScalesBatchWhenFarBehind(t *testing.T) {
 		require.NoError(t, err)
 		prevHash = headerHash
 		if i == 7 {
-			assert.Equal(t, 0, requestCount)
+			assert.Equal(t, 0, requestCount,
+				"no batch before runway accumulates")
 		}
 	}
 
 	assert.Equal(t, 1, requestCount)
-	assert.Equal(t, 20, ls.chain.HeaderCount())
+	assert.Equal(t, totalHeaders, ls.chain.HeaderCount())
 }
 
 func TestHandleEventChainsyncBlockHeaderAcceptsEquivalentOwnerConnectionId(
@@ -1088,6 +1097,44 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleHeaderBehindChainTip(
 			Point: ocommon.NewPoint(
 				fixture.currentTip.Point.Slot+10,
 				[]byte("tip-30"),
+			),
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+		},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 0, fixture.ls.headerMismatchCount)
+	assert.Equal(t, 0, fixture.ls.chain.HeaderCount())
+	assert.Equal(
+		t,
+		fixture.currentTip.Point.Slot,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+}
+
+func TestHandleEventChainsyncBlockHeaderSkipsMithrilBoundaryHeaderVerification(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.validationEnabled = true
+	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+
+	staleHash := lcommon.NewBlake2b256([]byte("mithril-stale-header"))
+	err := fixture.ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		BlockHeader: mockHeader{
+			hash:        staleHash,
+			prevHash:    lcommon.NewBlake2b256(nil),
+			blockNumber: 2,
+			slot:        fixture.ancestorTip.Point.Slot + 5,
+		},
+		Point: ocommon.NewPoint(
+			fixture.ancestorTip.Point.Slot+5,
+			staleHash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				fixture.currentTip.Point.Slot+10,
+				[]byte("tip-after-mithril"),
 			),
 			BlockNumber: fixture.currentTip.BlockNumber + 1,
 		},

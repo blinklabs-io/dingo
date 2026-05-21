@@ -172,6 +172,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		}
 		_ = rp // TargetNumberOfRootPeers not yet wired to peergov
 	}
+	var cardanoNodePeerSharing *bool
+	if nodeCfg != nil {
+		cardanoNodePeerSharing = nodeCfg.PeerSharing
+	}
+	peerSharing := resolvePeerSharing(
+		cfg.PeerSharing,
+		cfg.BlockProducer,
+		cardanoNodePeerSharing,
+		logger,
+	)
 
 	listeners := []dingo.ListenerConfig{}
 	if cfg.RelayPort > 0 {
@@ -283,7 +293,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithCardanoNodeConfig(nodeCfg),
 			dingo.WithListeners(listeners...),
 			dingo.WithOutboundSourcePort(cfg.RelayPort),
-			dingo.WithPeerSharing(cfg.PeerSharing),
+			dingo.WithPeerSharing(peerSharing),
 			dingo.WithUtxorpcPort(cfg.UtxorpcPort),
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),

@@ -40,12 +40,28 @@ const (
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
 	chainsyncRestartTimeout = 30 * time.Second
+
+	// chainsyncDivergentPeerCooldown slows peers that repeatedly offer a
+	// rollback we cannot safely follow. This prevents full-duplex reconnects
+	// from immediately re-entering the same rollback loop.
+	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
+
+func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
+	if timeout < ochainsync.MustReplyTimeoutMax {
+		return ochainsync.MustReplyTimeoutMax
+	}
+	return timeout
+}
 
 func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithFindIntersectFunc(o.chainsyncServerFindIntersect),
-		ochainsync.WithRequestNextFunc(o.chainsyncServerRequestNext),
+		ochainsync.WithFindIntersectFunc(
+			o.instrumentChainsyncFindIntersect(o.chainsyncServerFindIntersect),
+		),
+		ochainsync.WithRequestNextFunc(
+			o.instrumentChainsyncRequestNext(o.chainsyncServerRequestNext),
+		),
 		// Increase intersect timeout from the 10s default. Downstream
 		// peers may send FindIntersect with many points during initial
 		// sync, and processing can be slow under load.
@@ -55,13 +71,18 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// server connections alive during periods of low block
 		// production (e.g. DevNets with low activeSlotsCoeff).
 		ochainsync.WithIdleTimeout(1 * time.Hour),
+		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
 }
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(o.chainsyncClientRollForward),
-		ochainsync.WithRollBackwardFunc(o.chainsyncClientRollBackward),
+		ochainsync.WithRollForwardFunc(
+			o.instrumentChainsyncRollForward(o.chainsyncClientRollForward),
+		),
+		ochainsync.WithRollBackwardFunc(
+			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
+		),
 		// Pipeline enough headers to keep one blockfetch batch (500
 		// blocks) ready while the previous batch processes. A depth
 		// of 10 is sufficient; higher values flood the header queue
@@ -75,6 +96,7 @@ func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 		// under load (e.g. fast DevNet block production or initial
 		// sync from genesis).
 		ochainsync.WithIntersectTimeout(30 * time.Second),
+		ochainsync.WithBlockTimeout(o.config.ChainsyncBlockTimeout),
 	}
 }
 
@@ -107,6 +129,52 @@ func sameConnectionId(a, b ouroboros.ConnectionId) bool {
 		return false
 	}
 	return a.String() == b.String()
+}
+
+func chainsyncResyncRequiresFreshConnection(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonLocalTipPlateau,
+		event.ChainsyncResyncReasonPostPlateauRealign,
+		event.ChainsyncResyncReasonRollbackNotFound,
+		event.ChainsyncResyncReasonPersistentFork,
+		event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackLoop:
+		return true
+	default:
+		return false
+	}
+}
+
+func chainsyncResyncDeniesPeer(reason string) bool {
+	switch reason {
+	case event.ChainsyncResyncReasonRollbackExceedsK,
+		event.ChainsyncResyncReasonForkResolutionExceedsK:
+		return true
+	default:
+		return false
+	}
+}
+
+func (o *Ouroboros) denyDivergentChainsyncPeer(
+	connId ouroboros.ConnectionId,
+	reason string,
+) {
+	if o.PeerGov == nil ||
+		connId.RemoteAddr == nil ||
+		!chainsyncResyncDeniesPeer(reason) {
+		return
+	}
+	address := connId.RemoteAddr.String()
+	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
+	o.config.Logger.Warn(
+		"temporarily denying divergent chainsync peer",
+		"connection_id", connId.String(),
+		"address", address,
+		"reason", reason,
+		"duration", chainsyncDivergentPeerCooldown,
+	)
 }
 
 func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
@@ -529,6 +597,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
 		vrfOutput := chainselection.GetVRFOutput(v)
+		praosView, _ := chainselection.GetPraosTiebreakerView(v)
 		// Ingress eligibility is the sole gate for feeding the ledger
 		// and chain selection. reconcileChainsyncIngressAdmission
 		// defers to ChainsyncIngressEligible (peergov), which already
@@ -586,6 +655,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 						Tip:          tip,
 						ObservedTip:  observedTip,
 						VRFOutput:    vrfOutput,
+						PraosView:    praosView,
 					},
 				),
 			)
@@ -959,7 +1029,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				connIds = append(connIds, e.ConnectionId)
 			} else if o.ChainsyncState != nil {
 				connIds = o.ChainsyncState.RewindTrackedClientsTo(e.Point)
-				if e.Reason == "local ledger rollback" &&
+				if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback &&
 					len(connIds) == 0 {
 					connIds = o.ChainsyncState.GetClientConnIds()
 				}
@@ -971,7 +1041,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					o.ChainsyncState.ClearSeenHeaders()
 				}
 			}
-			if e.Reason == "local ledger rollback" {
+			if e.Reason == event.ChainsyncResyncReasonLocalLedgerRollback {
 				if o.LedgerState == nil {
 					return
 				}
@@ -1031,17 +1101,16 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			if len(connIds) == 0 {
 				return
 			}
-			// Plateau and unresolved fork events close the connection
-			// immediately rather than attempting an in-place
+			// Events that require a fresh ChainSync bearer close the
+			// connection immediately rather than attempting an in-place
 			// Stop→Start→Sync restart. Stop() blocks for up to 30s
 			// when the protocol is in MustReply state, during which
 			// no recovery can happen. Closing lets peer governance
 			// reconnect with a fresh bearer and updated intersect
 			// points.
-			if e.Reason == "local_tip_plateau" ||
-				e.Reason == "rollback point not found" ||
-				e.Reason == "persistent chain fork" {
+			if chainsyncResyncRequiresFreshConnection(e.Reason) {
 				for _, connId := range connIds {
+					o.denyDivergentChainsyncPeer(connId, e.Reason)
 					if o.ChainsyncState != nil {
 						o.ChainsyncState.ClearObservedHeaderHistory(connId)
 					}
@@ -1053,7 +1122,7 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 						continue
 					}
 					o.config.Logger.Info(
-						"closing stalled connection for fresh chainsync",
+						"closing connection for fresh chainsync",
 						"connection_id", connId.String(),
 						"reason", e.Reason,
 					)
@@ -1091,4 +1160,65 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 			}
 		},
 	)
+}
+
+func (o *Ouroboros) instrumentChainsyncFindIntersect(
+	fn func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error),
+) func(ochainsync.CallbackContext, []ocommon.Point) (ocommon.Point, ochainsync.Tip, error) {
+	return func(
+		ctx ochainsync.CallbackContext,
+		points []ocommon.Point,
+	) (ocommon.Point, ochainsync.Tip, error) {
+		start := time.Now()
+		p, t, err := fn(ctx, points)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return p, t, err
+	}
+}
+
+// instrumentChainsyncRequestNext wraps the RequestNext callback. Note
+// that chainsyncServerRequestNext does some synchronous work (initial
+// rollback, AddClient bookkeeping) then dispatches the Next-block fetch
+// to a goroutine. The metric outcome reflects only the synchronous path;
+// errors during async block delivery are logged but not surfaced here.
+func (o *Ouroboros) instrumentChainsyncRequestNext(
+	fn func(ochainsync.CallbackContext) error,
+) func(ochainsync.CallbackContext) error {
+	return func(ctx ochainsync.CallbackContext) error {
+		start := time.Now()
+		err := fn(ctx)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentChainsyncRollBackward(
+	fn func(ochainsync.CallbackContext, ocommon.Point, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, ocommon.Point, ochainsync.Tip) error {
+	return func(
+		ctx ochainsync.CallbackContext,
+		point ocommon.Point,
+		tip ochainsync.Tip,
+	) error {
+		start := time.Now()
+		err := fn(ctx, point, tip)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
+}
+
+func (o *Ouroboros) instrumentChainsyncRollForward(
+	fn func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error {
+	return func(
+		ctx ochainsync.CallbackContext,
+		blockType uint,
+		blockData any,
+		tip ochainsync.Tip,
+	) error {
+		start := time.Now()
+		err := fn(ctx, blockType, blockData, tip)
+		o.recordProtocolMessage("chainsync", err, time.Since(start))
+		return err
+	}
 }

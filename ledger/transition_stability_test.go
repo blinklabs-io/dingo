@@ -18,6 +18,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -26,12 +27,44 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// awaitTransitionInfo blocks until evaluateHardForkInitiationStability's
+// async tally goroutine commits a new transitionInfo, then returns it
+// under a read lock so the caller's assertions race-free against the
+// goroutine's write. Use this whenever a test expects the helper to
+// promote transitionInfo (Unknown/Impossible -> Known); paths that
+// short-circuit before spawning the goroutine don't need it.
+func awaitTransitionInfo(
+	t *testing.T,
+	ls *LedgerState,
+	want hardfork.TransitionState,
+) hardfork.TransitionInfo {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		ls.RLock()
+		defer ls.RUnlock()
+		return ls.transitionInfo.State == want
+	}, 2*time.Second, 5*time.Millisecond,
+		"transitionInfo.State did not reach %v", want)
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.transitionInfo
+}
+
+func awaitHFIEvalIdle(t *testing.T, ls *LedgerState) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		return !ls.hfiStabilityEvalInFlight.Load()
+	}, 2*time.Second, 5*time.Millisecond,
+		"HFI stability evaluation did not become idle")
+}
 
 // stabilityFixtureEpoch parameters: Shelley-style 432_000-slot epoch,
 // safeZone = ceil(3*432/0.05) = 25_920, voting deadline distance from
@@ -76,6 +109,7 @@ func stabilityFixtureLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.metrics.init(prometheus.NewRegistry())
 	return ls, db
 }
 
@@ -190,9 +224,8 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_Ratifiable_SetsKnown(t
 
 	ls.evaluateHardForkInitiationStability()
 
-	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
-		"post-deadline + ratifiable must set TransitionKnown")
-	assert.Equal(t, stabilityFixtureEpochID+1, ls.transitionInfo.KnownEpoch,
+	got := awaitTransitionInfo(t, ls, hardfork.TransitionKnown)
+	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch,
 		"target epoch is the next epoch boundary")
 }
 
@@ -207,6 +240,7 @@ func TestEvaluateHardForkInitiationStability_PostDeadline_NotRatifiable_NoChange
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"no ratifiable proposal means transitionInfo stays Unknown")
 }
@@ -230,6 +264,7 @@ func TestEvaluateHardForkInitiationStability_PreConwayPParams_NoOp(t *testing.T)
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"pre-Conway pparams must short-circuit without promotion")
 }
@@ -306,6 +341,7 @@ func TestEvaluateHardForkInitiationStability_IntraEraHFI_DoesNotSetKnown(t *test
 
 	ls.evaluateHardForkInitiationStability()
 
+	awaitHFIEvalIdle(t, ls)
 	assert.Equal(t, hardfork.TransitionUnknown, ls.transitionInfo.State,
 		"intra-era HardForkInitiation must not be surfaced as TransitionKnown")
 }
@@ -327,8 +363,6 @@ func TestEvaluateHardForkInitiationStability_UpgradesImpossibleToKnown(t *testin
 
 	ls.evaluateHardForkInitiationStability()
 
-	assert.Equal(t, hardfork.TransitionKnown, ls.transitionInfo.State,
-		"a ratifiable proposal must upgrade Impossible to Known")
-	assert.Equal(t, stabilityFixtureEpochID+1, ls.transitionInfo.KnownEpoch)
+	got := awaitTransitionInfo(t, ls, hardfork.TransitionKnown)
+	assert.Equal(t, stabilityFixtureEpochID+1, got.KnownEpoch)
 }
-

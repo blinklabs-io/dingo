@@ -160,6 +160,102 @@ func TestParseCredentialMapLegacyUMElem(t *testing.T) {
 	}
 }
 
+func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
+	poolHash := bytes.Repeat([]byte{0x11}, 28)
+	vrfHash := bytes.Repeat([]byte{0x22}, 32)
+	rewardHash := bytes.Repeat([]byte{0x33}, 28)
+	ownerHash := bytes.Repeat([]byte{0x44}, 28)
+	metadataHash := bytes.Repeat([]byte{0x55}, 32)
+
+	// UTxO-HD Preview snapshots encode PState with a non-pool map at
+	// index 0 and the active pool map at index 1. The active pool map
+	// omits the operator from the value because it is already the map key.
+	wrongKey := bytes.Repeat([]byte{0x99}, 32)
+	wrongMap := encodeCredentialMapEntry(t, wrongKey, uint64(1))
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash,
+		[]any{
+			vrfHash,
+			uint64(500_000_000),
+			uint64(340_000_000),
+			[]uint64{1, 20},
+			[]any{uint64(0), []any{uint64(0), rewardHash}},
+			[]any{ownerHash},
+			[]any{
+				[]any{
+					uint64(0),
+					uint64(3001),
+					[]byte{127, 0, 0, 1},
+					nil,
+				},
+			},
+			[]any{[]any{"https://pool.example", metadataHash}},
+			uint64(500_000_000),
+			[]any{},
+		},
+	)
+	emptyMap, err := cbor.Encode(map[uint64]uint64{})
+	if err != nil {
+		t.Fatalf("encoding empty map: %v", err)
+	}
+
+	pstate, err := cbor.Encode([]any{
+		cbor.RawMessage(wrongMap),
+		cbor.RawMessage(poolMap),
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(emptyMap),
+	})
+	if err != nil {
+		t.Fatalf("encoding PState: %v", err)
+	}
+
+	pools, err := parsePState(pstate)
+	if err != nil {
+		t.Fatalf("parsePState failed: %v", err)
+	}
+	if len(pools) != 1 {
+		t.Fatalf("expected 1 pool, got %d", len(pools))
+	}
+
+	pool := pools[0]
+	if !bytes.Equal(pool.PoolKeyHash, poolHash) {
+		t.Fatalf("pool hash mismatch: %x", pool.PoolKeyHash)
+	}
+	if !bytes.Equal(pool.VrfKeyHash, vrfHash) {
+		t.Fatalf("vrf hash mismatch: %x", pool.VrfKeyHash)
+	}
+	if pool.Pledge != 500_000_000 {
+		t.Fatalf("pledge mismatch: %d", pool.Pledge)
+	}
+	if pool.Cost != 340_000_000 {
+		t.Fatalf("cost mismatch: %d", pool.Cost)
+	}
+	if pool.MarginNum != 1 || pool.MarginDen != 20 {
+		t.Fatalf("margin mismatch: %d/%d", pool.MarginNum, pool.MarginDen)
+	}
+	if !bytes.Equal(pool.RewardAccount, rewardHash) {
+		t.Fatalf("reward account mismatch: %x", pool.RewardAccount)
+	}
+	if len(pool.Owners) != 1 || !bytes.Equal(pool.Owners[0], ownerHash) {
+		t.Fatalf("owners mismatch: %#v", pool.Owners)
+	}
+	if len(pool.Relays) != 1 || pool.Relays[0].Port != 3001 {
+		t.Fatalf("relays mismatch: %#v", pool.Relays)
+	}
+	if pool.MetadataUrl != "https://pool.example" ||
+		!bytes.Equal(pool.MetadataHash, metadataHash) {
+		t.Fatalf(
+			"metadata mismatch: url=%q hash=%x",
+			pool.MetadataUrl,
+			pool.MetadataHash,
+		)
+	}
+	if pool.Deposit != 500_000_000 {
+		t.Fatalf("deposit mismatch: %d", pool.Deposit)
+	}
+}
+
 func encodeCredentialMapEntry(t *testing.T, key any, value any) []byte {
 	t.Helper()
 

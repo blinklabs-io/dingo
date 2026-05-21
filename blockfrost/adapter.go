@@ -16,10 +16,13 @@ package blockfrost
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -27,7 +30,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -37,31 +42,95 @@ import (
 )
 
 var (
-	ErrInvalidAddress = errors.New("invalid address")
-	ErrInvalidBlockID = errors.New("invalid block id")
-	ErrBlockNotFound  = errors.New("block not found")
-	ErrEpochNotFound  = errors.New("epoch not found")
-	ErrAssetNotFound  = errors.New("asset not found")
-	ErrDRepNotFound   = errors.New("drep not found")
+	ErrInvalidAddress      = errors.New("invalid address")
+	ErrInvalidBlockID      = errors.New("invalid block id")
+	ErrBlockNotFound       = errors.New("block not found")
+	ErrEpochNotFound       = errors.New("epoch not found")
+	ErrAssetNotFound       = errors.New("asset not found")
+	ErrDRepNotFound        = errors.New("drep not found")
+	ErrInvalidTransaction  = errors.New("invalid transaction")
+	ErrMempoolUnavailable  = errors.New("mempool unavailable")
+	ErrMempoolFull         = errors.New("mempool full")
+	ErrTransactionNotFound = errors.New("transaction not found")
+	ErrInvalidStakeAddress = errors.New("invalid stake address")
 )
+
+// TransactionSubmitter accepts raw transaction CBOR for mempool admission.
+type TransactionSubmitter interface {
+	AddTransaction(txType uint, txBytes []byte) error
+}
 
 // NodeAdapter wraps a real dingo Node's LedgerState to
 // implement the BlockfrostNode interface.
 type NodeAdapter struct {
 	ledgerState *ledger.LedgerState
+	submitter   TransactionSubmitter
 }
 
 // NewNodeAdapter creates a NodeAdapter that queries the
 // given LedgerState for blockchain data.
 func NewNodeAdapter(
 	ls *ledger.LedgerState,
+	submitter TransactionSubmitter,
 ) (*NodeAdapter, error) {
 	if ls == nil {
 		return nil, errors.New(
 			"new node adapter: ledger state must not be nil",
 		)
 	}
-	return &NodeAdapter{ledgerState: ls}, nil
+	return &NodeAdapter{
+		ledgerState: ls,
+		submitter:   submitter,
+	}, nil
+}
+
+func uintToUint8(v uint, fieldName string) (uint8, error) {
+	if v > math.MaxUint8 {
+		return 0, fmt.Errorf(
+			"%s out of range for uint8: %d",
+			fieldName,
+			v,
+		)
+	}
+	return uint8(v), nil
+}
+
+func uint64ToInt64(v uint64, fieldName string) (int64, error) {
+	if v > math.MaxInt64 {
+		return 0, fmt.Errorf(
+			"%s out of range for int64: %d",
+			fieldName,
+			v,
+		)
+	}
+	return int64(v), nil
+}
+
+func uint64ToInt32(v uint64, fieldName string) (int32, error) {
+	if v > math.MaxInt32 {
+		return 0, fmt.Errorf(
+			"%s out of range for int32: %d",
+			fieldName,
+			v,
+		)
+	}
+	return int32(v), nil
+}
+
+func delegationActivationEpoch(
+	ls *ledger.LedgerState,
+	slot uint64,
+) (int32, error) {
+	epoch, err := ls.SlotToEpoch(slot)
+	if err != nil {
+		return 0, err
+	}
+	// Stake delegation becomes active after snapshot
+	// rotation, two epochs after the certificate epoch.
+	return uint64ToInt32(
+		epoch.EpochId+2,
+		"delegation active epoch",
+	)
 }
 
 // ChainTip returns the current chain tip from the ledger
@@ -893,11 +962,313 @@ func (a *NodeAdapter) PoolsExtended() (
 	return ret, nil
 }
 
+// Account returns stake-account information for the
+// requested stake address.
+func (a *NodeAdapter) Account(
+	stakeAddress string,
+) (AccountInfo, error) {
+	_, stakeKey, err := parseStakeAddress(
+		stakeAddress,
+	)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+
+	db := a.ledgerState.Database()
+	account, err := db.GetAccount(stakeKey, true, nil)
+	if err != nil {
+		return AccountInfo{}, err
+	}
+	controlledAmount, err := a.ledgerState.Database().
+		GetControlledAmountByStakingKey(stakeKey, nil)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf(
+			"get controlled amount: %w",
+			err,
+		)
+	}
+
+	var activeEpoch *int64
+	if account.Active {
+		epoch, err := a.ledgerState.SlotToEpoch(account.AddedSlot)
+		if err != nil {
+			return AccountInfo{}, fmt.Errorf(
+				"get account active epoch for slot %d: %w",
+				account.AddedSlot,
+				err,
+			)
+		}
+		epochID, err := uint64ToInt64(
+			epoch.EpochId,
+			"account active epoch",
+		)
+		if err != nil {
+			return AccountInfo{}, err
+		}
+		activeEpoch = &epochID
+	}
+
+	var poolID *string
+	if account.Active && len(account.Pool) > 0 {
+		pool := lcommon.PoolId(
+			lcommon.NewBlake2b224(account.Pool),
+		).String()
+		poolID = &pool
+	}
+
+	reward := strconv.FormatUint(uint64(account.Reward), 10)
+	return AccountInfo{
+		StakeAddress:       stakeAddress,
+		Active:             account.Active,
+		ActiveEpoch:        activeEpoch,
+		ControlledAmount:   strconv.FormatUint(controlledAmount, 10),
+		RewardsSum:         reward,
+		WithdrawalsSum:     "0",
+		ReservesSum:        "0",
+		TreasurySum:        "0",
+		WithdrawableAmount: reward,
+		PoolID:             poolID,
+	}, nil
+}
+
+// AccountAssociatedAddresses returns payment addresses
+// associated with the requested stake address.
+func (a *NodeAdapter) AccountAssociatedAddresses(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountAssociatedAddressInfo, int, error) {
+	stakeAddr, stakeKey, err := parseStakeAddress(
+		stakeAddress,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	networkID, err := uintToUint8(
+		stakeAddr.NetworkId(),
+		"stake address network id",
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	total, err := a.ledgerState.Database().
+		CountAddressesByStakingKey(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count associated addresses: %w",
+			err,
+		)
+	}
+	offset := (params.Page - 1) * params.Count
+
+	rows, err := a.ledgerState.Database().
+		GetAddressesByStakingKey(
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get associated addresses: %w",
+			err,
+		)
+	}
+
+	ret := make(
+		[]AccountAssociatedAddressInfo,
+		0,
+		len(rows),
+	)
+	for _, row := range rows {
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			networkID,
+			row.PaymentKey,
+			stakeKey,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"build associated address: %w",
+				err,
+			)
+		}
+		ret = append(ret, AccountAssociatedAddressInfo{
+			Address: addr.String(),
+		})
+	}
+	return ret, total, nil
+}
+
+// AccountDelegationHistory returns delegation history
+// rows for the requested stake address.
+func (a *NodeAdapter) AccountDelegationHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountDelegationHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	offset := (params.Page - 1) * params.Count
+	total, err := a.ledgerState.Database().
+		CountAccountDelegationHistory(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountDelegationHistoryInfo{}, total, nil
+	}
+	rows, err := a.ledgerState.Database().
+		GetAccountDelegationHistory(
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account delegation history: %w",
+			err,
+		)
+	}
+
+	ret := make([]AccountDelegationHistoryInfo, 0, len(rows))
+	for _, row := range rows {
+		activeEpoch, err := delegationActivationEpoch(
+			a.ledgerState,
+			row.AddedSlot,
+		)
+		if err != nil {
+			return nil, 0, fmt.Errorf(
+				"get activation epoch for delegation slot %d: %w",
+				row.AddedSlot,
+				err,
+			)
+		}
+		ret = append(ret, AccountDelegationHistoryInfo{
+			ActiveEpoch: activeEpoch,
+			TxHash:      hex.EncodeToString(row.TxHash),
+			Amount:      "0",
+			PoolID: lcommon.PoolId(
+				lcommon.NewBlake2b224(row.PoolKeyHash),
+			).String(),
+		})
+	}
+	return ret, total, nil
+}
+
+// AccountRegistrationHistory returns registration
+// history rows for the requested stake address.
+func (a *NodeAdapter) AccountRegistrationHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountRegistrationHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	offset := (params.Page - 1) * params.Count
+	total, err := a.ledgerState.Database().
+		CountAccountRegistrationHistory(stakeKey, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"count account registration history: %w",
+			err,
+		)
+	}
+	if offset >= total {
+		return []AccountRegistrationHistoryInfo{}, total, nil
+	}
+	rows, err := a.ledgerState.Database().
+		GetAccountRegistrationHistory(
+			stakeKey,
+			params.Count,
+			offset,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get account registration history: %w",
+			err,
+		)
+	}
+
+	ret := make(
+		[]AccountRegistrationHistoryInfo,
+		0,
+		len(rows),
+	)
+	for _, row := range rows {
+		ret = append(ret, AccountRegistrationHistoryInfo{
+			TxHash: hex.EncodeToString(row.TxHash),
+			Action: row.Action,
+		})
+	}
+	return ret, total, nil
+}
+
+// AccountRewardHistory returns reward history rows for
+// the requested stake address.
+func (a *NodeAdapter) AccountRewardHistory(
+	stakeAddress string,
+	params PaginationParams,
+) ([]AccountRewardHistoryInfo, int, error) {
+	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	if err != nil {
+		return nil, 0, err
+	}
+	if _, err := a.ledgerState.Database().
+		GetAccount(stakeKey, true, nil); err != nil {
+		return nil, 0, err
+	}
+	// TODO(#1875): Implement reward history once Dingo persists
+	// per-account, per-epoch reward records. This endpoint remains
+	// stubbed in this PR because the backing reward-history storage
+	// and rollback-safe ledger/database plumbing do not exist yet.
+	return []AccountRewardHistoryInfo{}, 0, nil
+}
+
 func blockIssuer(issuer lcommon.IssuerVkey) string {
 	if bytes.Equal(issuer[:], make([]byte, len(issuer))) {
 		return ""
 	}
 	return issuer.PoolId()
+}
+
+func parseStakeAddress(
+	stakeAddress string,
+) (lcommon.Address, []byte, error) {
+	addr, err := lcommon.NewAddress(stakeAddress)
+	if err != nil {
+		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+	}
+	zeroHash := lcommon.NewBlake2b224(nil)
+	if addr.PaymentKeyHash() != zeroHash ||
+		addr.StakeKeyHash() == zeroHash {
+		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+	}
+	stakeKey := addr.StakeKeyHash().Bytes()
+	return addr, stakeKey, nil
 }
 
 func blockHashString(hash []byte) string {
@@ -1280,6 +1651,721 @@ func (a *NodeAdapter) MetadataTransactionsCBOR(
 	return ret, total, nil
 }
 
+// Transaction returns summary details for the requested transaction.
+func (a *NodeAdapter) Transaction(
+	hash []byte,
+) (TransactionInfo, error) {
+	tx, block, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return TransactionInfo{}, err
+	}
+
+	blockTime, err := a.transactionBlockTime(*tx)
+	if err != nil {
+		return TransactionInfo{}, err
+	}
+
+	size := len(decodedTx.Cbor())
+	withdrawalCount := len(decodedTx.Withdrawals())
+	assetMintBurnCount := 0
+	if mint := decodedTx.AssetMint(); mint != nil {
+		for _, policy := range mint.Policies() {
+			assetMintBurnCount += len(mint.Assets(policy))
+		}
+	}
+
+	var invalidBefore *string
+	if v := decodedTx.ValidityIntervalStart(); v != 0 {
+		ret := strconv.FormatUint(v, 10)
+		invalidBefore = &ret
+	}
+	var invalidHereafter *string
+	if v := decodedTx.TTL(); v != 0 {
+		ret := strconv.FormatUint(v, 10)
+		invalidHereafter = &ret
+	}
+
+	counts := transactionCertificateCounts(tx.Certificates)
+	outputs := tx.Outputs
+	if !tx.Valid && tx.CollateralReturn != nil {
+		outputs = []models.Utxo{*tx.CollateralReturn}
+	}
+	outputAmount := aggregateTransactionOutputAmount(outputs)
+	utxoCount := len(tx.Inputs) +
+		len(tx.Collateral) +
+		len(tx.ReferenceInputs) +
+		len(tx.Outputs)
+	if tx.CollateralReturn != nil && !tx.Valid {
+		utxoCount++
+	}
+	deposit, err := a.transactionDeposit(decodedTx, block.Type, tx.Slot)
+	if err != nil {
+		return TransactionInfo{}, fmt.Errorf(
+			"calculate deposit for transaction %x: %w",
+			hash,
+			err,
+		)
+	}
+
+	return TransactionInfo{
+		Hash:               hex.EncodeToString(tx.Hash),
+		Block:              hex.EncodeToString(tx.BlockHash),
+		Slot:               tx.Slot,
+		BlockHeight:        block.Number,
+		BlockTime:          blockTime,
+		Index:              tx.BlockIndex,
+		OutputAmount:       outputAmount,
+		Fees:               strconv.FormatUint(uint64(tx.Fee), 10),
+		Deposit:            strconv.FormatUint(deposit, 10),
+		Size:               size,
+		UtxoCount:          utxoCount,
+		WithdrawalCount:    withdrawalCount,
+		MirCertCount:       counts.mirCerts,
+		DelegationCount:    counts.delegations,
+		StakeCertCount:     counts.stakeCerts,
+		PoolUpdateCount:    counts.poolUpdates,
+		PoolRetireCount:    counts.poolRetires,
+		AssetMintBurnCount: assetMintBurnCount,
+		RedeemerCount:      len(tx.Redeemers),
+		ValidContract:      tx.Valid,
+		InvalidBefore:      invalidBefore,
+		InvalidHereafter:   invalidHereafter,
+	}, nil
+}
+
+// TransactionSubmit submits raw signed transaction CBOR to the mempool.
+func (a *NodeAdapter) TransactionSubmit(
+	txCbor []byte,
+) (string, error) {
+	if a.submitter == nil {
+		return "", ErrMempoolUnavailable
+	}
+	txType, err := gledger.DetermineTransactionType(txCbor)
+	if err != nil {
+		return "", fmt.Errorf(
+			"%w: determine transaction type: %w",
+			ErrInvalidTransaction,
+			err,
+		)
+	}
+	tx, err := gledger.NewTransactionFromCbor(txType, txCbor)
+	if err != nil {
+		return "", fmt.Errorf(
+			"decode transaction: %w: %w",
+			err,
+			ErrInvalidTransaction,
+		)
+	}
+	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
+		var mempoolFull *mempool.MempoolFullError
+		if errors.As(err, &mempoolFull) {
+			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolFull)
+		}
+		return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrInvalidTransaction)
+	}
+	return tx.Hash().String(), nil
+}
+
+// TransactionCBOR returns raw signed transaction CBOR bytes for the requested
+// transaction hash.
+func (a *NodeAdapter) TransactionCBOR(
+	hash []byte,
+) ([]byte, error) {
+	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	txCbor := decodedTx.Cbor()
+	if len(txCbor) == 0 {
+		return nil, fmt.Errorf(
+			"transaction %x CBOR unavailable",
+			hash,
+		)
+	}
+	return txCbor, nil
+}
+
+// TransactionMetadata returns metadata labels for the requested transaction as
+// JSON values.
+func (a *NodeAdapter) TransactionMetadata(
+	hash []byte,
+) ([]TransactionMetadataInfo, error) {
+	entries, err := a.transactionMetadataEntries(hash)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]TransactionMetadataInfo, 0, len(entries))
+	for _, entry := range entries {
+		ret = append(ret, TransactionMetadataInfo{
+			Label:        strconv.FormatUint(entry.Label, 10),
+			JSONMetadata: json.RawMessage(entry.JsonValue),
+		})
+	}
+	return ret, nil
+}
+
+// TransactionMetadataCBOR returns metadata labels for the requested transaction
+// as CBOR hex values.
+func (a *NodeAdapter) TransactionMetadataCBOR(
+	hash []byte,
+) ([]TransactionMetadataCBORInfo, error) {
+	entries, err := a.transactionMetadataEntries(hash)
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]TransactionMetadataCBORInfo, 0, len(entries))
+	for _, entry := range entries {
+		ret = append(ret, TransactionMetadataCBORInfo{
+			Label:        strconv.FormatUint(entry.Label, 10),
+			CBORMetadata: hex.EncodeToString(entry.CborValue),
+		})
+	}
+	return ret, nil
+}
+
+// TransactionUTXOs returns inputs and outputs for the requested transaction.
+func (a *NodeAdapter) TransactionUTXOs(
+	hash []byte,
+) (TransactionUTXOsInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return TransactionUTXOsInfo{}, err
+	}
+
+	decodedOutputs := decodedTx.Outputs()
+	txOutputs := slices.Clone(tx.Outputs)
+	isCollateralReturn := false
+	if !tx.Valid && tx.CollateralReturn != nil {
+		txOutputs = []models.Utxo{*tx.CollateralReturn}
+		isCollateralReturn = true
+	}
+	slices.SortFunc(txOutputs, func(a, b models.Utxo) int {
+		return cmp.Compare(a.OutputIdx, b.OutputIdx)
+	})
+	outputs := make([]TransactionOutputInfo, 0, len(txOutputs))
+	for _, output := range txOutputs {
+		address := ""
+		outputIndex := int(output.OutputIdx)
+		if outputIndex < len(decodedOutputs) {
+			address = decodedOutputs[outputIndex].Address().String()
+		}
+		outputs = append(outputs, TransactionOutputInfo{
+			Address:             address,
+			Amount:              addressAmountsFromUtxo(output),
+			OutputIndex:         output.OutputIdx,
+			DataHash:            optionalHexString(output.DatumHash),
+			InlineDatum:         optionalHexString(output.Datum),
+			ReferenceScriptHash: nil,
+			Collateral:          isCollateralReturn,
+		})
+	}
+
+	txInputs := slices.Clone(tx.Inputs)
+	slices.SortFunc(txInputs, compareUtxoRefs)
+	txCollateral := slices.Clone(tx.Collateral)
+	slices.SortFunc(txCollateral, compareUtxoRefs)
+	txReferenceInputs := slices.Clone(tx.ReferenceInputs)
+	slices.SortFunc(txReferenceInputs, compareUtxoRefs)
+
+	inputCbor, err := a.transactionInputCbor(
+		txInputs,
+		txCollateral,
+		txReferenceInputs,
+	)
+	if err != nil {
+		return TransactionUTXOsInfo{}, fmt.Errorf(
+			"resolve transaction input CBOR for %x: %w",
+			hash,
+			err,
+		)
+	}
+
+	inputs := make([]TransactionInputInfo, 0, len(txInputs)+len(txCollateral)+len(txReferenceInputs))
+	for _, input := range txInputs {
+		input.Cbor = inputCbor[utxoRef(input)]
+		info, err := a.transactionInputInfoFromUtxo(input, false, nil)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
+	}
+	for _, input := range txCollateral {
+		input.Cbor = inputCbor[utxoRef(input)]
+		info, err := a.transactionInputInfoFromUtxo(input, true, nil)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve collateral address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
+	}
+	referenceInput := true
+	for _, input := range txReferenceInputs {
+		input.Cbor = inputCbor[utxoRef(input)]
+		info, err := a.transactionInputInfoFromUtxo(input, false, &referenceInput)
+		if err != nil {
+			return TransactionUTXOsInfo{}, fmt.Errorf("resolve reference input address for %x:%d: %w", input.TxId, input.OutputIdx, err)
+		}
+		inputs = append(inputs, info)
+	}
+
+	return TransactionUTXOsInfo{
+		Hash:    hex.EncodeToString(tx.Hash),
+		Inputs:  inputs,
+		Outputs: outputs,
+	}, nil
+}
+
+func (a *NodeAdapter) transactionInputCbor(
+	inputGroups ...[]models.Utxo,
+) (map[database.UtxoRef][]byte, error) {
+	seen := map[database.UtxoRef]struct{}{}
+	refs := []database.UtxoRef{}
+	for _, inputs := range inputGroups {
+		for _, input := range inputs {
+			ref := utxoRef(input)
+			if _, ok := seen[ref]; ok {
+				continue
+			}
+			seen[ref] = struct{}{}
+			refs = append(refs, ref)
+		}
+	}
+	if len(refs) == 0 {
+		return map[database.UtxoRef][]byte{}, nil
+	}
+	return a.ledgerState.Database().CborCache().ResolveUtxoCborBatch(refs)
+}
+
+func utxoRef(utxo models.Utxo) database.UtxoRef {
+	var txID [32]byte
+	copy(txID[:], utxo.TxId)
+	return database.UtxoRef{
+		TxId:      txID,
+		OutputIdx: utxo.OutputIdx,
+	}
+}
+
+// TransactionDelegations returns delegation certificates in the requested
+// transaction.
+func (a *NodeAdapter) TransactionDelegations(
+	hash []byte,
+) ([]TransactionDelegationInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	epoch, err := a.ledgerState.SlotToEpoch(tx.Slot)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get active delegation epoch for transaction %x: %w",
+			hash,
+			err,
+		)
+	}
+	activeEpoch := epoch.EpochId + 2
+	networkID := a.networkID()
+
+	certs, err := transactionCertificatesByType(
+		hash,
+		tx,
+		decodedTx,
+		lcommon.CertificateTypeStakeDelegation,
+		lcommon.CertificateTypeStakeRegistrationDelegation,
+		lcommon.CertificateTypeStakeVoteDelegation,
+		lcommon.CertificateTypeStakeVoteRegistrationDelegation,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := []TransactionDelegationInfo{}
+	for _, cert := range certs {
+		var stakeCredential lcommon.Credential
+		var poolKeyHash lcommon.PoolKeyHash
+		switch c := cert.Certificate.(type) {
+		case *lcommon.StakeDelegationCertificate:
+			if c.StakeCredential == nil {
+				continue
+			}
+			stakeCredential = *c.StakeCredential
+			poolKeyHash = c.PoolKeyHash
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			poolKeyHash = c.PoolKeyHash
+		case *lcommon.StakeVoteDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			poolKeyHash = c.PoolKeyHash
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			poolKeyHash = c.PoolKeyHash
+		default:
+			continue
+		}
+		address, err := stakeAddressFromCredential(stakeCredential, networkID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"convert delegation stake address for transaction %x cert %d: %w",
+				hash,
+				cert.Index,
+				err,
+			)
+		}
+		ret = append(ret, TransactionDelegationInfo{
+			Address:     address,
+			PoolID:      lcommon.PoolId(poolKeyHash).String(),
+			CertIndex:   cert.Index,
+			ActiveEpoch: activeEpoch,
+		})
+	}
+	return ret, nil
+}
+
+// TransactionStakeAddresses returns stake registration/deregistration
+// certificates in the requested transaction.
+func (a *NodeAdapter) TransactionStakeAddresses(
+	hash []byte,
+) ([]TransactionStakeAddressInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	networkID := a.networkID()
+
+	certs, err := transactionCertificatesByType(
+		hash,
+		tx,
+		decodedTx,
+		lcommon.CertificateTypeStakeRegistration,
+		lcommon.CertificateTypeStakeDeregistration,
+		lcommon.CertificateTypeRegistration,
+		lcommon.CertificateTypeDeregistration,
+		lcommon.CertificateTypeStakeRegistrationDelegation,
+		lcommon.CertificateTypeStakeVoteRegistrationDelegation,
+		lcommon.CertificateTypeVoteRegistrationDelegation,
+	)
+	if err != nil {
+		return nil, err
+	}
+	ret := []TransactionStakeAddressInfo{}
+	for _, cert := range certs {
+		var stakeCredential lcommon.Credential
+		var registration bool
+		switch c := cert.Certificate.(type) {
+		case *lcommon.StakeRegistrationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.RegistrationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.StakeRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.StakeVoteRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.VoteRegistrationDelegationCertificate:
+			stakeCredential = c.StakeCredential
+			registration = true
+		case *lcommon.StakeDeregistrationCertificate:
+			stakeCredential = c.StakeCredential
+		case *lcommon.DeregistrationCertificate:
+			stakeCredential = c.StakeCredential
+		default:
+			continue
+		}
+		address, err := stakeAddressFromCredential(stakeCredential, networkID)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"convert stake address for transaction %x cert %d: %w",
+				hash,
+				cert.Index,
+				err,
+			)
+		}
+		ret = append(ret, TransactionStakeAddressInfo{
+			Address:      address,
+			CertIndex:    cert.Index,
+			Registration: registration,
+		})
+	}
+	return ret, nil
+}
+
+// TransactionWithdrawals returns reward withdrawals in the requested
+// transaction.
+func (a *NodeAdapter) TransactionWithdrawals(
+	hash []byte,
+) ([]TransactionWithdrawalInfo, error) {
+	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := make([]TransactionWithdrawalInfo, 0, len(decodedTx.Withdrawals()))
+	for address, amount := range decodedTx.Withdrawals() {
+		ret = append(ret, TransactionWithdrawalInfo{
+			Address: address.String(),
+			Amount:  amount.String(),
+		})
+	}
+	slices.SortFunc(ret, func(a, b TransactionWithdrawalInfo) int {
+		return cmp.Compare(a.Address, b.Address)
+	})
+	return ret, nil
+}
+
+// TransactionMIRs returns MIR certificate reward targets in the requested
+// transaction.
+func (a *NodeAdapter) TransactionMIRs(
+	hash []byte,
+) ([]TransactionMIRInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	certs, err := transactionCertificatesByType(
+		hash,
+		tx,
+		decodedTx,
+		lcommon.CertificateTypeMoveInstantaneousRewards,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	networkID := a.networkID()
+	ret := []TransactionMIRInfo{}
+	for _, cert := range certs {
+		c, ok := cert.Certificate.(*lcommon.MoveInstantaneousRewardsCertificate)
+		if !ok {
+			continue
+		}
+		pot := ""
+		switch c.Reward.Source {
+		case uint(lcommon.MirSourceReserves):
+			pot = "reserve"
+		case uint(lcommon.MirSourceTreasury):
+			pot = "treasury"
+		}
+		for credential, amount := range c.Reward.Rewards {
+			address, err := stakeAddressFromCredential(*credential, networkID)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"convert MIR stake address for transaction %x cert %d: %w",
+					hash,
+					cert.Index,
+					err,
+				)
+			}
+			ret = append(ret, TransactionMIRInfo{
+				Address:   address,
+				Amount:    strconv.FormatUint(amount, 10),
+				CertIndex: cert.Index,
+				Pot:       pot,
+			})
+		}
+	}
+	slices.SortFunc(ret, func(a, b TransactionMIRInfo) int {
+		if c := cmp.Compare(a.CertIndex, b.CertIndex); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Address, b.Address)
+	})
+	return ret, nil
+}
+
+// TransactionPoolUpdates returns pool registration certificates in the
+// requested transaction.
+func (a *NodeAdapter) TransactionPoolUpdates(
+	hash []byte,
+) ([]TransactionPoolUpdateInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	epoch, err := a.ledgerState.SlotToEpoch(tx.Slot)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get active pool epoch for transaction %x: %w",
+			hash,
+			err,
+		)
+	}
+	certs, err := transactionCertificatesByType(
+		hash,
+		tx,
+		decodedTx,
+		lcommon.CertificateTypePoolRegistration,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	networkID := a.networkID()
+	ret := []TransactionPoolUpdateInfo{}
+	for _, cert := range certs {
+		c, ok := cert.Certificate.(*lcommon.PoolRegistrationCertificate)
+		if !ok {
+			continue
+		}
+		owners := make([]string, 0, len(c.PoolOwners))
+		for _, owner := range c.PoolOwners {
+			address, err := stakeAddressFromCredential(
+				lcommon.Credential{
+					CredType:   lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.CredentialHash(owner),
+				},
+				networkID,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"convert pool owner address for transaction %x cert %d: %w",
+					hash,
+					cert.Index,
+					err,
+				)
+			}
+			owners = append(owners, address)
+		}
+
+		rewardAccount, err := stakeAddressFromCredential(
+			lcommon.Credential{
+				CredType:   lcommon.CredentialTypeAddrKeyHash,
+				Credential: lcommon.CredentialHash(c.RewardAccount),
+			},
+			networkID,
+		)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"convert pool reward account for transaction %x cert %d: %w",
+				hash,
+				cert.Index,
+				err,
+			)
+		}
+
+		ret = append(ret, TransactionPoolUpdateInfo{
+			ActiveEpoch: epoch.EpochId + 2,
+			CertIndex:   cert.Index,
+			FixedCost:   strconv.FormatUint(c.Cost, 10),
+			MarginCost:  ratToFloat64(&c.Margin),
+			Metadata: func() *TransactionPoolMetadataInfo {
+				if c.PoolMetadata == nil {
+					return nil
+				}
+				return &TransactionPoolMetadataInfo{
+					URL:  c.PoolMetadata.Url,
+					Hash: hex.EncodeToString(c.PoolMetadata.Hash.Bytes()),
+				}
+			}(),
+			Owners:        owners,
+			Pledge:        strconv.FormatUint(c.Pledge, 10),
+			PoolID:        lcommon.PoolId(c.Operator).String(),
+			Relays:        transactionPoolRelaysInfo(c.Relays),
+			RewardAccount: rewardAccount,
+			VrfKey:        hex.EncodeToString(c.VrfKeyHash.Bytes()),
+		})
+	}
+	return ret, nil
+}
+
+// TransactionPoolRetires returns pool retirement certificates in the requested
+// transaction.
+func (a *NodeAdapter) TransactionPoolRetires(
+	hash []byte,
+) ([]TransactionPoolRetireInfo, error) {
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	certs, err := transactionCertificatesByType(
+		hash,
+		tx,
+		decodedTx,
+		lcommon.CertificateTypePoolRetirement,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ret := []TransactionPoolRetireInfo{}
+	for _, cert := range certs {
+		c, ok := cert.Certificate.(*lcommon.PoolRetirementCertificate)
+		if !ok {
+			continue
+		}
+		ret = append(ret, TransactionPoolRetireInfo{
+			PoolID:        lcommon.PoolId(c.PoolKeyHash).String(),
+			CertIndex:     cert.Index,
+			RetiringEpoch: c.Epoch,
+		})
+	}
+	return ret, nil
+}
+
+// TransactionRedeemers returns Plutus redeemers stored for the requested
+// transaction.
+func (a *NodeAdapter) TransactionRedeemers(
+	hash []byte,
+) ([]TransactionRedeemerInfo, error) {
+	tx, err := a.ledgerState.TransactionByHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transaction by hash %x: %w",
+			hash,
+			err,
+		)
+	}
+	if tx == nil {
+		return nil, fmt.Errorf(
+			"transaction %x: %w",
+			hash,
+			ErrTransactionNotFound,
+		)
+	}
+
+	redeemers := slices.Clone(tx.Redeemers)
+	slices.SortFunc(redeemers, func(a, b models.Redeemer) int {
+		if c := cmp.Compare(a.Tag, b.Tag); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Index, b.Index)
+	})
+
+	ret := make([]TransactionRedeemerInfo, 0, len(redeemers))
+	for _, redeemer := range redeemers {
+		dataHash := lcommon.Blake2b256Hash(redeemer.Data)
+		ret = append(ret, TransactionRedeemerInfo{
+			TxIndex: int(redeemer.Index),
+			Purpose: redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
+			// TODO: Populate script_hash once redeemer-to-script mapping is stored.
+			ScriptHash:       "",
+			RedeemerDataHash: hex.EncodeToString(dataHash.Bytes()),
+			UnitMem:          strconv.FormatUint(redeemer.ExUnitsMemory, 10),
+			UnitSteps:        strconv.FormatUint(redeemer.ExUnitsCPU, 10),
+			Fee:              "0",
+		})
+	}
+	return ret, nil
+}
+
+// TransactionRequiredSigners returns the required signers (extra signing key
+// hashes) declared in the requested transaction.
+func (a *NodeAdapter) TransactionRequiredSigners(
+	hash []byte,
+) ([]TransactionRequiredSignerInfo, error) {
+	_, _, decodedTx, err := a.decodedTransactionByHash(hash)
+	if err != nil {
+		return nil, err
+	}
+	signers := decodedTx.RequiredSigners()
+	ret := make([]TransactionRequiredSignerInfo, 0, len(signers))
+	for _, signer := range signers {
+		ret = append(ret, TransactionRequiredSignerInfo{
+			WitnessHash: hex.EncodeToString(signer.Bytes()),
+		})
+	}
+	return ret, nil
+}
+
 func (a *NodeAdapter) addressUtxoBlockHashes(
 	utxos []models.UtxoWithOrdering,
 ) (map[string]string, error) {
@@ -1310,6 +2396,440 @@ func (a *NodeAdapter) addressUtxoBlockHashes(
 		ret[hex.EncodeToString(tx.Hash)] = hex.EncodeToString(tx.BlockHash)
 	}
 	return ret, nil
+}
+
+func findTransactionInBlock(
+	block lcommon.Block,
+	hash []byte,
+	index uint32,
+) lcommon.Transaction {
+	txs := block.Transactions()
+	if int(index) < len(txs) {
+		tx := txs[index]
+		if bytes.Equal(tx.Hash().Bytes(), hash) {
+			return tx
+		}
+	}
+	for _, tx := range txs {
+		if bytes.Equal(tx.Hash().Bytes(), hash) {
+			return tx
+		}
+	}
+	return nil
+}
+
+func (a *NodeAdapter) decodedTransactionByHash(
+	hash []byte,
+) (*models.Transaction, models.Block, lcommon.Transaction, error) {
+	tx, err := a.ledgerState.TransactionByHash(hash)
+	if err != nil {
+		return nil, models.Block{}, nil, fmt.Errorf(
+			"get transaction by hash %x: %w",
+			hash,
+			err,
+		)
+	}
+	if tx == nil {
+		return nil, models.Block{}, nil, fmt.Errorf(
+			"transaction %x: %w",
+			hash,
+			ErrTransactionNotFound,
+		)
+	}
+	block, err := a.ledgerState.BlockByHash(tx.BlockHash)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, models.Block{}, nil, fmt.Errorf(
+				"transaction %x block %x: %w",
+				hash,
+				tx.BlockHash,
+				ErrTransactionNotFound,
+			)
+		}
+		return nil, models.Block{}, nil, fmt.Errorf(
+			"get block for transaction %x: %w",
+			hash,
+			err,
+		)
+	}
+	decodedBlock, err := block.Decode()
+	if err != nil {
+		return nil, models.Block{}, nil, fmt.Errorf(
+			"decode block %x for transaction %x: %w",
+			tx.BlockHash,
+			hash,
+			err,
+		)
+	}
+	decodedTx := findTransactionInBlock(decodedBlock, hash, tx.BlockIndex)
+	if decodedTx == nil {
+		return nil, models.Block{}, nil, fmt.Errorf(
+			"transaction %x not found in block %x: %w",
+			hash,
+			tx.BlockHash,
+			ErrTransactionNotFound,
+		)
+	}
+	return tx, block, decodedTx, nil
+}
+
+type transactionCertificate struct {
+	Certificate lcommon.Certificate
+	Index       int
+}
+
+func (a *NodeAdapter) transactionMetadataEntries(
+	hash []byte,
+) ([]labelcodec.Entry, error) {
+	tx, err := a.ledgerState.TransactionByHash(hash)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get transaction by hash %x: %w",
+			hash,
+			err,
+		)
+	}
+	if tx == nil {
+		return nil, fmt.Errorf(
+			"transaction %x: %w",
+			hash,
+			ErrTransactionNotFound,
+		)
+	}
+	if len(tx.Metadata) == 0 {
+		return []labelcodec.Entry{}, nil
+	}
+
+	entries, err := labelcodec.EntriesFromCBOR(tx.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decode transaction metadata %x: %w",
+			hash,
+			err,
+		)
+	}
+	return entries, nil
+}
+
+func transactionCertificatesByType(
+	hash []byte,
+	tx *models.Transaction,
+	decodedTx lcommon.Transaction,
+	certTypes ...lcommon.CertificateType,
+) ([]transactionCertificate, error) {
+	allowed := make(map[uint]struct{}, len(certTypes))
+	for _, certType := range certTypes {
+		allowed[uint(certType)] = struct{}{}
+	}
+
+	decodedCerts := decodedTx.Certificates()
+	ret := []transactionCertificate{}
+	for _, certRow := range tx.Certificates {
+		if _, ok := allowed[certRow.CertType]; !ok {
+			continue
+		}
+		certIndex := int(certRow.CertIndex)
+		if certIndex >= len(decodedCerts) {
+			return nil, fmt.Errorf(
+				"transaction %x cert index %d out of range",
+				hash,
+				certIndex,
+			)
+		}
+		ret = append(ret, transactionCertificate{
+			Certificate: decodedCerts[certIndex],
+			Index:       certIndex,
+		})
+	}
+	slices.SortFunc(ret, func(a, b transactionCertificate) int {
+		return cmp.Compare(a.Index, b.Index)
+	})
+	return ret, nil
+}
+
+func (a *NodeAdapter) transactionInputInfoFromUtxo(
+	utxo models.Utxo,
+	collateral bool,
+	reference *bool,
+) (TransactionInputInfo, error) {
+	addr, err := a.addressFromUtxo(utxo)
+	if err != nil {
+		return TransactionInputInfo{}, err
+	}
+	return TransactionInputInfo{
+		Address:             addr,
+		Amount:              addressAmountsFromUtxo(utxo),
+		TxHash:              hex.EncodeToString(utxo.TxId),
+		OutputIndex:         utxo.OutputIdx,
+		DataHash:            optionalHexString(utxo.DatumHash),
+		Collateral:          collateral,
+		InlineDatum:         optionalHexString(utxo.Datum),
+		ReferenceScriptHash: nil,
+		Reference:           reference,
+	}, nil
+}
+
+func compareUtxoRefs(a, b models.Utxo) int {
+	if ret := bytes.Compare(a.TxId, b.TxId); ret != 0 {
+		return ret
+	}
+	return cmp.Compare(a.OutputIdx, b.OutputIdx)
+}
+
+func (a *NodeAdapter) addressFromUtxo(
+	utxo models.Utxo,
+) (string, error) {
+	if len(utxo.Cbor) > 0 {
+		output, err := utxo.Decode()
+		if err == nil {
+			return output.Address().String(), nil
+		}
+	}
+
+	networkID := a.networkID()
+	switch {
+	case len(utxo.PaymentKey) == lcommon.AddressHashSize &&
+		len(utxo.StakingKey) == lcommon.AddressHashSize:
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyKey,
+			networkID,
+			utxo.PaymentKey,
+			utxo.StakingKey,
+		)
+		if err == nil {
+			return addr.String(), nil
+		}
+	case len(utxo.PaymentKey) == lcommon.AddressHashSize:
+		addr, err := lcommon.NewAddressFromParts(
+			lcommon.AddressTypeKeyNone,
+			networkID,
+			utxo.PaymentKey,
+			nil,
+		)
+		if err == nil {
+			return addr.String(), nil
+		}
+	}
+	return "", fmt.Errorf("address not resolvable for utxo %x:%d: CBOR unavailable and no payment key hash stored", utxo.TxId, utxo.OutputIdx)
+}
+
+func (a *NodeAdapter) networkID() uint8 {
+	cfg := a.ledgerState.CardanoNodeConfig()
+	if cfg == nil || cfg.ShelleyGenesis() == nil {
+		return lcommon.AddressNetworkTestnet
+	}
+	if cfg.ShelleyGenesis().NetworkId == "Mainnet" {
+		return lcommon.AddressNetworkMainnet
+	}
+	return lcommon.AddressNetworkTestnet
+}
+
+func stakeAddressFromCredential(
+	credential lcommon.Credential,
+	networkID uint8,
+) (string, error) {
+	addressType := uint8(lcommon.AddressTypeNoneKey)
+	if credential.CredType == lcommon.CredentialTypeScriptHash {
+		addressType = lcommon.AddressTypeNoneScript
+	}
+	addr, err := lcommon.NewAddressFromParts(
+		addressType,
+		networkID,
+		nil,
+		credential.Credential.Bytes(),
+	)
+	if err != nil {
+		return "", err
+	}
+	return addr.String(), nil
+}
+
+func redeemerPurpose(tag lcommon.RedeemerTag) string {
+	switch tag {
+	case lcommon.RedeemerTagSpend:
+		return "spend"
+	case lcommon.RedeemerTagMint:
+		return "mint"
+	case lcommon.RedeemerTagCert:
+		return "cert"
+	case lcommon.RedeemerTagReward:
+		return "reward"
+	case lcommon.RedeemerTagVoting:
+		return "voting"
+	case lcommon.RedeemerTagProposing:
+		return "proposing"
+	default:
+		return ""
+	}
+}
+
+func transactionPoolRelaysInfo(
+	relays []lcommon.PoolRelay,
+) []TransactionPoolRelayInfo {
+	ret := make([]TransactionPoolRelayInfo, 0, len(relays))
+	for _, relay := range relays {
+		info := TransactionPoolRelayInfo{}
+		if relay.Port != nil {
+			port := int(*relay.Port)
+			info.Port = &port
+		}
+		if relay.Ipv4 != nil {
+			info.IPv4 = relay.Ipv4.String()
+		}
+		if relay.Ipv6 != nil {
+			info.IPv6 = relay.Ipv6.String()
+		}
+		if relay.Hostname != nil {
+			if relay.Type == lcommon.PoolRelayTypeMultiHostName {
+				info.DNSSrv = *relay.Hostname
+			} else {
+				info.DNS = *relay.Hostname
+			}
+		}
+		ret = append(ret, info)
+	}
+	return ret
+}
+
+type certificateCounts struct {
+	mirCerts    int
+	delegations int
+	stakeCerts  int
+	poolUpdates int
+	poolRetires int
+}
+
+func transactionCertificateCounts(
+	certs []models.Certificate,
+) certificateCounts {
+	var ret certificateCounts
+	for _, cert := range certs {
+		certType := cert.CertType
+		if certType == uint(lcommon.CertificateTypeMoveInstantaneousRewards) {
+			ret.mirCerts++
+		}
+		switch certType {
+		case uint(lcommon.CertificateTypeStakeDelegation),
+			uint(lcommon.CertificateTypeStakeRegistrationDelegation),
+			uint(lcommon.CertificateTypeStakeVoteDelegation),
+			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation):
+			ret.delegations++
+		}
+		switch certType {
+		case uint(lcommon.CertificateTypeStakeRegistration),
+			uint(lcommon.CertificateTypeStakeDeregistration),
+			uint(lcommon.CertificateTypeRegistration),
+			uint(lcommon.CertificateTypeDeregistration),
+			uint(lcommon.CertificateTypeStakeRegistrationDelegation),
+			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+			uint(lcommon.CertificateTypeVoteRegistrationDelegation):
+			ret.stakeCerts++
+		}
+		switch certType {
+		case uint(lcommon.CertificateTypePoolRegistration):
+			ret.poolUpdates++
+		case uint(lcommon.CertificateTypePoolRetirement):
+			ret.poolRetires++
+		}
+	}
+	return ret
+}
+
+func aggregateTransactionOutputAmount(
+	outputs []models.Utxo,
+) []AddressAmountInfo {
+	amounts := map[string]uint64{}
+	for _, output := range outputs {
+		amounts["lovelace"] += uint64(output.Amount)
+		for _, asset := range output.Assets {
+			unit := hex.EncodeToString(asset.PolicyId) +
+				hex.EncodeToString(asset.Name)
+			amounts[unit] += uint64(asset.Amount)
+		}
+	}
+	ret := make([]AddressAmountInfo, 0, len(amounts))
+	if lovelace, ok := amounts["lovelace"]; ok {
+		ret = append(ret, AddressAmountInfo{
+			Unit:     "lovelace",
+			Quantity: strconv.FormatUint(lovelace, 10),
+		})
+		delete(amounts, "lovelace")
+	}
+	keys := make([]string, 0, len(amounts))
+	for unit := range amounts {
+		keys = append(keys, unit)
+	}
+	slices.Sort(keys)
+	for _, unit := range keys {
+		ret = append(ret, AddressAmountInfo{
+			Unit:     unit,
+			Quantity: strconv.FormatUint(amounts[unit], 10),
+		})
+	}
+	return ret
+}
+
+func (a *NodeAdapter) transactionDeposit(
+	tx lcommon.Transaction,
+	blockEraID uint,
+	slot uint64,
+) (uint64, error) {
+	blockEra := eras.GetEraById(blockEraID)
+	if blockEra == nil || blockEra.CertDepositFunc == nil {
+		return 0, nil
+	}
+	pparams, err := a.protocolParamsForSlot(slot)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	for _, cert := range tx.Certificates() {
+		deposit, err := blockEra.CertDepositFunc(cert, pparams)
+		if err != nil {
+			if errors.Is(err, eras.ErrIncompatibleProtocolParams) {
+				return 0, nil
+			}
+			return 0, err
+		}
+		total += deposit
+	}
+	return total, nil
+}
+
+func (a *NodeAdapter) protocolParamsForSlot(
+	slot uint64,
+) (lcommon.ProtocolParameters, error) {
+	db := a.ledgerState.Database()
+	txn := db.Transaction(false)
+	defer txn.Release()
+	epoch, err := db.GetEpochBySlot(slot, txn)
+	if err != nil {
+		return nil, err
+	}
+	if epoch == nil {
+		pparams := a.ledgerState.GetCurrentPParams()
+		if pparams == nil {
+			return nil, errors.New("protocol parameters not available")
+		}
+		return pparams, nil
+	}
+	era := eras.GetEraById(epoch.EraId)
+	if era == nil {
+		return nil, fmt.Errorf("unknown era ID %d", epoch.EraId)
+	}
+	pparams, err := db.GetPParams(
+		epoch.EpochId,
+		era.Id,
+		era.DecodePParamsFunc,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if pparams == nil {
+		return nil, errors.New("decoded protocol parameters are nil")
+	}
+	return pparams, nil
 }
 
 func (a *NodeAdapter) transactionBlockTime(

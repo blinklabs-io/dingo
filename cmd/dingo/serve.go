@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,7 +77,20 @@ func checkSyncState(
 		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		// A commit-timestamp mismatch is recoverable downstream in
+		// node.Run. We only need to read sync_status here, which
+		// works on the partially-initialised db handle returned with
+		// the error.
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+		logger.Warn(
+			"sync state check observed commit timestamp mismatch; "+
+				"deferring recovery to node startup",
+			"metadata_timestamp", cte.MetadataTimestamp,
+			"blob_timestamp", cte.BlobTimestamp,
+		)
 	}
 	defer db.Close()
 
@@ -84,7 +98,7 @@ func checkSyncState(
 	if err != nil {
 		return fmt.Errorf("checking sync state: %w", err)
 	}
-	if val == "" {
+	if val == "" || val == syncStatusBackfill {
 		return nil
 	}
 	return fmt.Errorf(
@@ -137,20 +151,39 @@ func resumeBackfill(
 		StorageMode:    cfg.StorageMode,
 	})
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		// Backfill writes through full transactions which heal a
+		// commit-timestamp mismatch as it makes progress, and
+		// node.Run will run a full recovery pass afterwards. So a
+		// recoverable mismatch should not block the resume.
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+		logger.Warn(
+			"backfill observed commit timestamp mismatch; "+
+				"continuing — backfill writes will heal it",
+			"component", "backfill",
+			"metadata_timestamp", cte.MetadataTimestamp,
+			"blob_timestamp", cte.BlobTimestamp,
+		)
 	}
 	defer db.Close()
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
+	bf.DisableNonceComputation()
 	needed, err := bf.NeedsBackfill()
 	if err != nil {
 		return fmt.Errorf("checking backfill state: %w", err)
 	}
 	if !needed {
-		return nil
+		return clearBackfillSyncStatus(db)
 	}
 
-	// Enable bulk-load optimizations for the backfill
+	if err := node.RunPlannerStats(db, logger); err != nil {
+		return fmt.Errorf("running planner statistics before backfill: %w", err)
+	}
+
+	// Enable bulk-load optimizations for the backfill.
 	cleanup := node.WithBulkLoadPragmas(db, logger)
 	defer cleanup()
 
@@ -160,6 +193,23 @@ func resumeBackfill(
 	)
 	if err := bf.Run(ctx); err != nil {
 		return fmt.Errorf("backfill: %w", err)
+	}
+	if err := clearBackfillSyncStatus(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func clearBackfillSyncStatus(db *database.Database) error {
+	status, err := db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return fmt.Errorf("reading sync status: %w", err)
+	}
+	if status != syncStatusBackfill {
+		return nil
+	}
+	if err := db.DeleteSyncState("sync_status", nil); err != nil {
+		return fmt.Errorf("clearing backfill sync status: %w", err)
 	}
 	return nil
 }

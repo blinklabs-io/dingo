@@ -17,7 +17,6 @@ package governance
 import (
 	"errors"
 	"fmt"
-	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -32,13 +31,36 @@ import (
 // sharing because ProcessEpoch is the boundary path used on every
 // mainnet rollover; refactoring it just to support mid-epoch evaluation
 // would risk regressions for marginal benefit.
+//
+// OnProposalDecodeFailure, if non-nil, is invoked once per proposal
+// whose stored CBOR fails to decode during the ratifiability scan. The
+// callback owns side effects (logging, metrics) so the helper itself
+// stays free of logger/metric dependencies.
 type StabilityCheckInputs struct {
-	DB            *database.Database
-	Txn           *database.Txn
-	Logger        *slog.Logger
-	CurrentEpoch  uint64
-	PParams       lcommon.ProtocolParameters
-	ConwayGenesis *conway.ConwayGenesis
+	DB                      *database.Database
+	Txn                     *database.Txn
+	CurrentEpoch            uint64
+	PParams                 lcommon.ProtocolParameters
+	ConwayGenesis           *conway.ConwayGenesis
+	OnProposalDecodeFailure func(proposal *models.GovernanceProposal, err error)
+}
+
+func NewStabilityCheckInputs(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+	pparams lcommon.ProtocolParameters,
+	conwayGenesis *conway.ConwayGenesis,
+	onProposalDecodeFailure func(proposal *models.GovernanceProposal, err error),
+) StabilityCheckInputs {
+	return StabilityCheckInputs{
+		DB:                      db,
+		Txn:                     txn,
+		CurrentEpoch:            currentEpoch,
+		PParams:                 pparams,
+		ConwayGenesis:           conwayGenesis,
+		OnProposalDecodeFailure: onProposalDecodeFailure,
+	}
 }
 
 // RatifiableHardForkInitiation describes a HardForkInitiation proposal
@@ -109,9 +131,7 @@ func EvaluateRatifiableHardForkInitiation(
 		CurrentEpoch: in.CurrentEpoch,
 	}
 
-	activeDRepCount, err := countActiveDRepsAtEpoch(
-		in.DB, in.Txn, in.CurrentEpoch,
-	)
+	activeDRepCount, err := countActiveDReps(in.DB, in.Txn, in.CurrentEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("count active dreps: %w", err)
 	}
@@ -133,7 +153,7 @@ func EvaluateRatifiableHardForkInitiation(
 	committeeNoConfidence := committeeNoConfidenceState(committeeRoot)
 
 	ccQuorum, err := conwayRatifyQuorum(
-		in.Logger, in.DB, in.Txn, in.ConwayGenesis,
+		nil, in.DB, in.Txn, in.ConwayGenesis,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("compute committee quorum: %w", err)
@@ -178,12 +198,8 @@ func EvaluateRatifiableHardForkInitiation(
 			proposal.GovActionCbor, proposal.ActionType,
 		)
 		if err != nil {
-			if in.Logger != nil {
-				in.Logger.Warn(
-					"skipping ratifiable HardForkInitiation: decode failed",
-					"proposal_id", proposal.ID,
-					"error", err,
-				)
+			if in.OnProposalDecodeFailure != nil {
+				in.OnProposalDecodeFailure(proposal, err)
 			}
 			continue
 		}
@@ -198,27 +214,4 @@ func EvaluateRatifiableHardForkInitiation(
 		}, nil
 	}
 	return nil, nil
-}
-
-// countActiveDRepsAtEpoch returns the number of credential-backed DReps
-// eligible to vote in the given epoch (active and not aged out by
-// inactivity). AlwaysAbstain / AlwaysNoConfidence virtual DReps are not
-// counted. Equivalent to countActiveDReps but takes plain inputs so it
-// can be called outside the EpochInput-driven boundary path.
-func countActiveDRepsAtEpoch(
-	db *database.Database,
-	txn *database.Txn,
-	currentEpoch uint64,
-) (int, error) {
-	dreps, err := db.GetActiveDreps(txn)
-	if err != nil {
-		return 0, err
-	}
-	active := 0
-	for _, drep := range dreps {
-		if drepActiveAtEpoch(drep, currentEpoch) {
-			active++
-		}
-	}
-	return active, nil
 }

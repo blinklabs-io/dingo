@@ -134,6 +134,82 @@ func (b *Blockfrost) Start(
 		"GET /api/v0/metadata/txs/labels/{label}/cbor",
 		b.handleMetadataTransactionsCBOR,
 	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}",
+		b.handleTransaction,
+	)
+	mux.HandleFunc(
+		"POST /api/v0/tx/submit",
+		b.handleTransactionSubmit,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/cbor",
+		b.handleTransactionCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/metadata",
+		b.handleTransactionMetadata,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/metadata/cbor",
+		b.handleTransactionMetadataCBOR,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/utxos",
+		b.handleTransactionUTXOs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/delegations",
+		b.handleTransactionDelegations,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/stakes",
+		b.handleTransactionStakeAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/withdrawals",
+		b.handleTransactionWithdrawals,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/mirs",
+		b.handleTransactionMIRs,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/pool_updates",
+		b.handleTransactionPoolUpdates,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/pool_retires",
+		b.handleTransactionPoolRetires,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/redeemers",
+		b.handleTransactionRedeemers,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/txs/{hash}/required_signers",
+		b.handleTransactionRequiredSigners,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}",
+		b.handleAccount,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/addresses",
+		b.handleAccountAssociatedAddresses,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/delegations",
+		b.handleAccountDelegationHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/registrations",
+		b.handleAccountRegistrationHistory,
+	)
+	mux.HandleFunc(
+		"GET /api/v0/accounts/{stake_address}/rewards",
+		b.handleAccountRewardHistory,
+	)
 
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.

@@ -15,6 +15,7 @@
 package ledgerstate
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -1941,6 +1943,34 @@ func importGovState(
 
 	// Import governance proposals
 	if len(govState.Proposals) > 0 {
+		// Snapshot bootstrap close-the-1-epoch-lag heuristic. Canon
+		// nodes mark a HFI ratified at boundary N-1 -> N and enact at
+		// boundary N -> N+1. The snapshot at epoch N reflects the
+		// ratification (in cgsDRepPulsingState's DRComplete result)
+		// but we don't parse that field, so without intervention our
+		// local node would re-ratify at boundary N -> N+1 and only
+		// enact at N+1 -> N+2 — putting us one epoch behind canon
+		// for the protocol-version bump. As a block producer that is
+		// the difference between forging vN+ blocks alongside canon
+		// and forging vN- blocks that risk rejection on TX-validation
+		// rule mismatches gated by the new version.
+		//
+		// Heuristic: when there is exactly one active HFI whose
+		// parent equals the snapshot's per-purpose HardFork root,
+		// mark it ratified at the snapshot's epoch so ENACT picks
+		// it up at the next boundary tick. Skips silently when the
+		// match is ambiguous (0 or >1 candidates) — the lag returns
+		// in those cases but correctness is preserved.
+		ratifiedHFI := findRatifiedHFICandidate(govState)
+		if ratifiedHFI != nil {
+			cfg.Logger.Info(
+				"marking active HFI as ratified at snapshot epoch (close 1-epoch lag)",
+				"component", "ledgerstate",
+				"tx_hash", hex.EncodeToString(ratifiedHFI.TxHash),
+				"action_index", ratifiedHFI.ActionIndex,
+				"ratified_epoch", cfg.State.Epoch,
+			)
+		}
 		if err := func() error {
 			txn := cfg.Database.MetadataTxn(true)
 			defer txn.Release()
@@ -1958,18 +1988,33 @@ func importGovState(
 					cfg,
 					prop.ProposedIn,
 				)
+				var ratifiedEpoch *uint64
+				var ratifiedSlot *uint64
+				if ratifiedHFI != nil &&
+					bytes.Equal(prop.TxHash, ratifiedHFI.TxHash) &&
+					prop.ActionIndex == ratifiedHFI.ActionIndex {
+					re := cfg.State.Epoch
+					rs := currentEpochSlot
+					ratifiedEpoch = &re
+					ratifiedSlot = &rs
+				}
 				if err := store.SetGovernanceProposal(
 					&models.GovernanceProposal{
-						TxHash:        prop.TxHash,
-						ActionIndex:   prop.ActionIndex,
-						ActionType:    prop.ActionType,
-						ProposedEpoch: prop.ProposedIn,
-						ExpiresEpoch:  prop.ExpiresAfter,
-						Deposit:       prop.Deposit,
-						ReturnAddress: prop.ReturnAddr,
-						AnchorURL:     prop.AnchorURL,
-						AnchorHash:    prop.AnchorHash,
-						AddedSlot:     proposedSlot,
+						TxHash:          prop.TxHash,
+						ActionIndex:     prop.ActionIndex,
+						ActionType:      prop.ActionType,
+						ProposedEpoch:   prop.ProposedIn,
+						ExpiresEpoch:    prop.ExpiresAfter,
+						Deposit:         prop.Deposit,
+						ReturnAddress:   prop.ReturnAddr,
+						AnchorURL:       prop.AnchorURL,
+						AnchorHash:      prop.AnchorHash,
+						ParentTxHash:    prop.ParentTxHash,
+						ParentActionIdx: prop.ParentActionIdx,
+						GovActionCbor:   prop.GovActionCbor,
+						RatifiedEpoch:   ratifiedEpoch,
+						RatifiedSlot:    ratifiedSlot,
+						AddedSlot:       proposedSlot,
 					},
 					metaTxn,
 				); err != nil {
@@ -1998,6 +2043,35 @@ func importGovState(
 		)
 	}
 
+	// Seed per-purpose chain roots from cgsPrevGovActionIds. Without
+	// these synthetic enacted rows, the next chained proposal that
+	// references a parent enacted before the snapshot would be
+	// rejected by validateParentChain (currentRoot is nil) and
+	// silently expire — see issue #2195. Genesis-synced nodes get
+	// these rows from the normal enactment path; Mithril snapshots
+	// don't surface them otherwise.
+	if govState.PrevGovActionIds != nil {
+		seeded, err := seedPrevGovActionIds(
+			cfg,
+			store,
+			govState,
+			currentEpochSlot,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"seeding per-purpose governance roots: %w",
+				err,
+			)
+		}
+		if seeded > 0 {
+			cfg.Logger.Info(
+				"seeded per-purpose governance chain roots",
+				"component", "ledgerstate",
+				"count", seeded,
+			)
+		}
+	}
+
 	progress(ImportProgress{
 		Stage:       "governance",
 		Percent:     100,
@@ -2006,6 +2080,208 @@ func importGovState(
 
 	return nil
 }
+
+// seedPrevGovActionIds writes synthetic enacted GovernanceProposal
+// rows for each per-purpose root recorded in the snapshot's
+// cgsPrevGovActionIds. These rows do not represent the full
+// proposal payload (anchor, deposit, return address are placeholders)
+// — they exist solely so GetLastEnactedGovernanceProposal returns a
+// non-nil root for the purpose, allowing chained children whose
+// parent is the on-chain enacted action to pass validateParentChain.
+//
+// AddedSlot is set to 0 so a normal rollback (which deletes rows
+// with added_slot > slot) cannot remove the seeded root. The
+// Mithril trust boundary blocks rollbacks past the snapshot anyway,
+// but slot 0 is a defense-in-depth choice.
+//
+// EnactedSlot/EnactedEpoch are set to the snapshot's current epoch
+// anchor so a later real enactment (which writes its own row with
+// a higher enacted slot/epoch) sorts above this synthetic row in
+// GetLastEnactedGovernanceProposal's ORDER BY.
+func seedPrevGovActionIds(
+	cfg ImportConfig,
+	store metadata.MetadataStore,
+	govState *ParsedGovState,
+	currentEpochSlot uint64,
+) (int, error) {
+	prev := govState.PrevGovActionIds
+	if prev == nil {
+		return 0, nil
+	}
+
+	// Committee root action_type heuristic: when the committee is
+	// absent (no members and no quorum), the most recent enacted
+	// committee-purpose action was a NoConfidence; otherwise an
+	// UpdateCommittee. The action_type matters because epoch.go
+	// reads committeeNoConfidenceState off the committee root to
+	// pick CommitteeNoConfidence vs CommitteeNormal thresholds.
+	committeeNoConfidence := len(govState.Committee) == 0 &&
+		govState.CommitteeQuorum == nil
+
+	type seed struct {
+		id         *ParsedGovActionId
+		actionType uint8
+	}
+	seeds := []seed{
+		{
+			id:         prev.PParamUpdate,
+			actionType: govActionTypeParameterChange,
+		},
+		{
+			id:         prev.HardFork,
+			actionType: govActionTypeHardForkInitiation,
+		},
+		{
+			id:         prev.Committee,
+			actionType: committeeRootActionType(committeeNoConfidence),
+		},
+		{
+			id:         prev.Constitution,
+			actionType: govActionTypeNewConstitution,
+		},
+	}
+
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	count := 0
+	for _, s := range seeds {
+		if s.id == nil {
+			continue
+		}
+		// Defense-in-depth: an active proposal with the same
+		// (txHash, actionIndex) would collide with the unique
+		// index. Active proposals are pre-enactment, so a row
+		// matching a root cannot exist; skip if it does to avoid
+		// clobbering the live row's anchor/deposit data.
+		existing, err := store.GetGovernanceProposal(
+			s.id.TxHash, s.id.ActionIndex, metaTxn,
+		)
+		if err != nil && !errors.Is(
+			err, models.ErrGovernanceProposalNotFound,
+		) {
+			return count, fmt.Errorf(
+				"checking existing proposal for root %s#%d: %w",
+				hex.EncodeToString(s.id.TxHash),
+				s.id.ActionIndex,
+				err,
+			)
+		}
+		if existing != nil {
+			cfg.Logger.Warn(
+				"per-purpose root already exists in proposals; skipping seed",
+				"component", "ledgerstate",
+				"tx_hash", hex.EncodeToString(s.id.TxHash),
+				"action_index", s.id.ActionIndex,
+				"existing_action_type", existing.ActionType,
+			)
+			continue
+		}
+
+		enactedEpoch := cfg.State.Epoch
+		enactedSlot := currentEpochSlot
+		row := &models.GovernanceProposal{
+			TxHash:        s.id.TxHash,
+			ActionIndex:   s.id.ActionIndex,
+			ActionType:    s.actionType,
+			ProposedEpoch: 0,
+			ExpiresEpoch:  0,
+			EnactedEpoch:  &enactedEpoch,
+			EnactedSlot:   &enactedSlot,
+			Deposit:       0,
+			ReturnAddress: make([]byte, 29),
+			AnchorURL:     "",
+			AnchorHash:    make([]byte, 32),
+			AddedSlot:     0,
+		}
+		if err := store.SetGovernanceProposal(row, metaTxn); err != nil {
+			return count, fmt.Errorf(
+				"seeding root %s#%d (action_type %d): %w",
+				hex.EncodeToString(s.id.TxHash),
+				s.id.ActionIndex,
+				s.actionType,
+				err,
+			)
+		}
+		count++
+	}
+
+	if count == 0 {
+		return 0, nil
+	}
+	if err := txn.Commit(); err != nil {
+		return count, fmt.Errorf(
+			"committing seeded roots: %w", err,
+		)
+	}
+	return count, nil
+}
+
+// findRatifiedHFICandidate returns the unique active HFI proposal whose
+// parent equals the snapshot's per-purpose HardFork root, or nil if no
+// such proposal exists or more than one matches.
+//
+// The snapshot's PrevGovActionIds.HardFork is the action ID of the most
+// recently enacted HFI before the snapshot. An active proposal whose
+// parent equals that root is the next link in the chain — by canon's
+// ratify ordering, when more than one such candidate exists at most one
+// can be canonically ratified per epoch boundary (priority ties broken
+// by submission order/IDs), and we cannot tell which without parsing
+// cgsDRepPulsingState. Returning nil in the ambiguous case preserves
+// correctness at the cost of a 1-epoch enactment lag for that boundary.
+func findRatifiedHFICandidate(
+	govState *ParsedGovState,
+) *ParsedGovProposal {
+	if govState == nil ||
+		govState.PrevGovActionIds == nil ||
+		govState.PrevGovActionIds.HardFork == nil {
+		return nil
+	}
+	root := govState.PrevGovActionIds.HardFork
+	var candidate *ParsedGovProposal
+	matches := 0
+	for i := range govState.Proposals {
+		p := &govState.Proposals[i]
+		if p.ActionType != govActionTypeHardForkInitiation {
+			continue
+		}
+		if p.ParentTxHash == nil || p.ParentActionIdx == nil {
+			continue
+		}
+		if !bytes.Equal(p.ParentTxHash, root.TxHash) {
+			continue
+		}
+		if *p.ParentActionIdx != root.ActionIndex {
+			continue
+		}
+		matches++
+		candidate = p
+	}
+	if matches != 1 {
+		return nil
+	}
+	return candidate
+}
+
+func committeeRootActionType(noConfidence bool) uint8 {
+	if noConfidence {
+		return govActionTypeNoConfidence
+	}
+	return govActionTypeUpdateCommittee
+}
+
+// Action type discriminators used when seeding synthetic per-purpose
+// chain roots. Kept as untyped uint8 constants so this file does not
+// need to depend on the gouroboros lcommon package — these match the
+// CIP-1694 GovActionType wire values.
+const (
+	govActionTypeParameterChange    uint8 = 0
+	govActionTypeHardForkInitiation uint8 = 1
+	govActionTypeNoConfidence       uint8 = 3
+	govActionTypeUpdateCommittee    uint8 = 4
+	govActionTypeNewConstitution    uint8 = 5
+)
 
 func snapshotEpochAnchorSlot(
 	cfg ImportConfig,

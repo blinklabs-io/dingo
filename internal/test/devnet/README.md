@@ -52,7 +52,7 @@ Driven by `testnet.yaml`. Notable values:
 - Docker with the Compose plugin (`docker compose version` must work).
 - Go 1.25+ on the host (matching `go.mod`) to run the integration tests.
 - Outbound network access on first run to pull
-  `ghcr.io/blinklabs-io/cardano-node:10.5.4` and to clone
+  `ghcr.io/blinklabs-io/cardano-node:11.0.1` and to clone
   `cardano-foundation/testnet-generation-tool` inside the configurator image.
 - Local build of Dingo via the repo root `Dockerfile` — Compose builds it
   automatically on `up` / `run-tests.sh`.

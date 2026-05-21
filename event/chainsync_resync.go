@@ -24,6 +24,21 @@ import (
 // or rollback exceeds the security parameter).
 const ChainsyncResyncEventType = EventType("chainsync.resync")
 
+const (
+	ChainsyncResyncReasonLocalTipPlateau              = "local_tip_plateau"
+	ChainsyncResyncReasonPostPlateauRealign           = "post_plateau_realign"
+	ChainsyncResyncReasonRollbackAhead                = "rollback point ahead of local tip"
+	ChainsyncResyncReasonRollbackNotFound             = "rollback point not found"
+	ChainsyncResyncReasonRollbackLoop                 = "rollback loop detected"
+	ChainsyncResyncReasonPersistentFork               = "persistent chain fork"
+	ChainsyncResyncReasonRollbackExceedsK             = "rollback exceeds security parameter K"
+	ChainsyncResyncReasonRollbackExceedsMithril       = "rollback exceeds Mithril trust boundary"
+	ChainsyncResyncReasonForkResolutionExceedsK       = "fork resolution exceeds security parameter K"
+	ChainsyncResyncReasonLocalLedgerRollback          = "local ledger rollback"
+	ChainsyncResyncReasonLiveTxValidationRecovery     = "live tx validation recovery"
+	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed = "blockfetch timeout retry failed on all available connections"
+)
+
 // ChainsyncResyncEvent carries the connection ID that should
 // be re-synced.
 type ChainsyncResyncEvent struct {

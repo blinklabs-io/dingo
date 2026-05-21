@@ -262,6 +262,23 @@ func (c *ConnectionManager) startListener(
 				continue
 			}
 
+			// N2N path: when source-port reuse is in use, force RST
+			// on close so the 4-tuple does not get stuck in TIME_WAIT
+			// and block a subsequent outbound dial to the same peer
+			// with EADDRNOTAVAIL on the matching local-listen-port
+			// 4-tuple.
+			if c.config.OutboundSourcePort > 0 {
+				if lingerErr := enableTCPLingerZero(conn); lingerErr != nil {
+					c.config.Logger.Warn(
+						fmt.Sprintf(
+							"listener: failed to enable SO_LINGER 0 on inbound connection from %s: %s",
+							conn.RemoteAddr(),
+							lingerErr,
+						),
+					)
+				}
+			}
+
 			// N2N path: reserve an inbound slot before further processing
 			if !c.tryReserveInboundSlot() {
 				c.config.Logger.Warn(
@@ -305,12 +322,6 @@ func (c *ConnectionManager) startListener(
 				c.releaseInboundSlot()
 				continue
 			}
-			c.config.Logger.Info(
-				fmt.Sprintf(
-					"listener: accepted connection from %s",
-					conn.RemoteAddr(),
-				),
-			)
 			// Setup Ouroboros connection
 			connOpts := append(
 				defaultConnOpts,
@@ -318,9 +329,9 @@ func (c *ConnectionManager) startListener(
 			)
 			oConn, err := ouroboros.NewConnection(connOpts...)
 			if err != nil {
-				c.config.Logger.Error(
+				c.config.Logger.Info(
 					fmt.Sprintf(
-						"listener: failed to setup connection from %s: %s",
+						"listener: inbound connection from %s failed: %s",
 						conn.RemoteAddr(),
 						err,
 					),
@@ -331,6 +342,12 @@ func (c *ConnectionManager) startListener(
 				c.releaseInboundSlot()
 				continue
 			}
+			c.config.Logger.Info(
+				fmt.Sprintf(
+					"listener: inbound connection from %s",
+					conn.RemoteAddr(),
+				),
+			)
 			// Consume the reserved slot and add to connection manager.
 			// The reservation is released because AddConnection will
 			// add the actual connection entry to the map.

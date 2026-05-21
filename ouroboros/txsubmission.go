@@ -54,14 +54,73 @@ func txsubmissionBackoffDuration(consecutiveHits int) time.Duration {
 
 func (o *Ouroboros) txsubmissionServerConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
-		txsubmission.WithInitFunc(o.txsubmissionServerInit),
+		txsubmission.WithInitFunc(
+			o.instrumentTxsubmissionInit(o.txsubmissionServerInit),
+		),
 	}
 }
 
 func (o *Ouroboros) txsubmissionClientConnOpts() []txsubmission.TxSubmissionOptionFunc {
 	return []txsubmission.TxSubmissionOptionFunc{
-		txsubmission.WithRequestTxIdsFunc(o.txsubmissionClientRequestTxIds),
-		txsubmission.WithRequestTxsFunc(o.txsubmissionClientRequestTxs),
+		txsubmission.WithRequestTxIdsFunc(
+			o.instrumentTxsubmissionRequestTxIds(o.txsubmissionClientRequestTxIds),
+		),
+		txsubmission.WithRequestTxsFunc(
+			o.instrumentTxsubmissionRequestTxs(o.txsubmissionClientRequestTxs),
+		),
+	}
+}
+
+// instrumentTxsubmissionInit wraps the Init callback. txsubmissionServerInit
+// returns immediately after launching the per-peer mempool-pump goroutine.
+// The metric outcome reflects only that synchronous handoff; errors from
+// the long-running goroutine (rate-limit failures, peer disconnects) are
+// not visible here.
+func (o *Ouroboros) instrumentTxsubmissionInit(
+	fn func(txsubmission.CallbackContext) error,
+) func(txsubmission.CallbackContext) error {
+	return func(ctx txsubmission.CallbackContext) error {
+		start := time.Now()
+		err := fn(ctx)
+		o.recordProtocolMessage("txsubmission", err, time.Since(start))
+		return err
+	}
+}
+
+// instrumentTxsubmissionRequestTxIds wraps the RequestTxIds callback. When
+// the peer requests blocking=true and the mempool is empty, the underlying
+// callback waits inside consumer.NextTx(true) until a tx arrives, which on
+// quiet networks can be seconds to minutes. Those waits land in the
+// duration histogram and dominate p95/p99 — operators reading the
+// histogram should treat long tails for txsubmission as expected idle
+// time, not callback work.
+func (o *Ouroboros) instrumentTxsubmissionRequestTxIds(
+	fn func(txsubmission.CallbackContext, bool, uint16, uint16) ([]txsubmission.TxIdAndSize, error),
+) func(txsubmission.CallbackContext, bool, uint16, uint16) ([]txsubmission.TxIdAndSize, error) {
+	return func(
+		ctx txsubmission.CallbackContext,
+		blocking bool,
+		ack uint16,
+		req uint16,
+	) ([]txsubmission.TxIdAndSize, error) {
+		start := time.Now()
+		ids, err := fn(ctx, blocking, ack, req)
+		o.recordProtocolMessage("txsubmission", err, time.Since(start))
+		return ids, err
+	}
+}
+
+func (o *Ouroboros) instrumentTxsubmissionRequestTxs(
+	fn func(txsubmission.CallbackContext, []txsubmission.TxId) ([]txsubmission.TxBody, error),
+) func(txsubmission.CallbackContext, []txsubmission.TxId) ([]txsubmission.TxBody, error) {
+	return func(
+		ctx txsubmission.CallbackContext,
+		txIds []txsubmission.TxId,
+	) ([]txsubmission.TxBody, error) {
+		start := time.Now()
+		bodies, err := fn(ctx, txIds)
+		o.recordProtocolMessage("txsubmission", err, time.Since(start))
+		return bodies, err
 	}
 }
 

@@ -147,19 +147,29 @@ func getTestBackends(b namer, diskDataDir string) []struct {
 		},
 	}
 
-	// Add cloud backends if credentials are available AND database can be created
+	// Add cloud backends if credentials are available AND database can be created.
+	// Cloud blob plugins read bucket/prefix from plugin options, not DataDir, so
+	// DataDir is only consumed by the sqlite metadata plugin and must be a local
+	// filesystem path — using a "gcs://"/"s3://" URL would create a literal
+	// "gcs:/"/"s3:/" directory in the working tree.
 	if hasGCSCredentials() {
 		testBucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
 		if testBucket == "" {
 			testBucket = "dingo-test-bucket"
 		}
-		// Use path prefix for isolation instead of unique bucket names
-		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
 		gcsConfig := &database.Config{
 			BlobPlugin:     "gcs",
-			DataDir:        "gcs://" + testBucket + "/" + testPrefix,
+			DataDir:        filepath.Join(diskDataDir, "gcs-metadata"),
 			MetadataPlugin: "sqlite",
 		}
+
+		plugin.SetPluginOption(
+			plugin.PluginTypeBlob,
+			"gcs",
+			"bucket",
+			testBucket,
+		)
+
 		if canCreateDatabase(gcsConfig) {
 			backends = append(backends, struct {
 				config *database.Config
@@ -177,10 +187,10 @@ func getTestBackends(b namer, diskDataDir string) []struct {
 			testBucket = "dingo-test-bucket"
 		}
 		// Use path prefix for isolation instead of unique bucket names
-		testPrefix := strings.ReplaceAll(b.Name(), "/", "-")
+		testPrefix := strings.ReplaceAll(b.Name(), "/", "-") + "/"
 		s3Config := &database.Config{
 			BlobPlugin:     "s3",
-			DataDir:        "s3://" + testBucket + "/" + testPrefix,
+			DataDir:        filepath.Join(diskDataDir, "s3-metadata"),
 			MetadataPlugin: "sqlite",
 		}
 
@@ -189,6 +199,13 @@ func getTestBackends(b namer, diskDataDir string) []struct {
 			"s3",
 			"bucket",
 			testBucket,
+		)
+
+		plugin.SetPluginOption(
+			plugin.PluginTypeBlob,
+			"s3",
+			"prefix",
+			testPrefix,
 		)
 
 		region := os.Getenv("AWS_REGION")

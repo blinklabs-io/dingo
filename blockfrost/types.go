@@ -260,3 +260,209 @@ type MetadataTransactionCBORResponse struct {
 	CborMetadata *string `json:"cbor_metadata"`
 	Metadata     string  `json:"metadata"`
 }
+
+// TransactionResponse represents a Blockfrost transaction
+// content object.
+type TransactionResponse struct {
+	InvalidBefore      *string                 `json:"invalid_before"`
+	InvalidHereafter   *string                 `json:"invalid_hereafter"`
+	OutputAmount       []AddressAmountResponse `json:"output_amount"`
+	Hash               string                  `json:"hash"`
+	Block              string                  `json:"block"`
+	Deposit            string                  `json:"deposit"`
+	Fees               string                  `json:"fees"`
+	Slot               uint64                  `json:"slot"`
+	BlockHeight        uint64                  `json:"block_height"`
+	BlockTime          int64                   `json:"block_time"`
+	Size               int                     `json:"size"`
+	Index              int                     `json:"index"`
+	UtxoCount          int                     `json:"utxo_count"`
+	WithdrawalCount    int                     `json:"withdrawal_count"`
+	MirCertCount       int                     `json:"mir_cert_count"`
+	DelegationCount    int                     `json:"delegation_count"`
+	StakeCertCount     int                     `json:"stake_cert_count"`
+	PoolUpdateCount    int                     `json:"pool_update_count"`
+	PoolRetireCount    int                     `json:"pool_retire_count"`
+	AssetMintBurnCount int                     `json:"asset_mint_or_burn_count"`
+	RedeemerCount      int                     `json:"redeemer_count"`
+	ValidContract      bool                    `json:"valid_contract"`
+}
+
+// TransactionCBORResponse represents transaction CBOR in
+// hex form.
+type TransactionCBORResponse struct {
+	CBOR string `json:"cbor"`
+}
+
+// TransactionMetadataResponse represents one transaction metadata label in
+// JSON form.
+type TransactionMetadataResponse struct {
+	JSONMetadata json.RawMessage `json:"json_metadata"`
+	Label        string          `json:"label"`
+}
+
+// TransactionMetadataCBORResponse represents one transaction metadata label in
+// CBOR form.
+type TransactionMetadataCBORResponse struct {
+	CborMetadata *string `json:"cbor_metadata"`
+	Metadata     string  `json:"metadata"`
+	Label        string  `json:"label"`
+}
+
+// TransactionUTXOsResponse represents transaction inputs and outputs.
+type TransactionUTXOsResponse struct {
+	Hash    string                      `json:"hash"`
+	Inputs  []TransactionInputResponse  `json:"inputs"`
+	Outputs []TransactionOutputResponse `json:"outputs"`
+}
+
+// TransactionInputResponse represents one transaction input.
+type TransactionInputResponse struct {
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	DataHash            *string                 `json:"data_hash"`
+	Reference           *bool                   `json:"reference"`
+	Address             string                  `json:"address"`
+	TxHash              string                  `json:"tx_hash"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	OutputIndex         int                     `json:"output_index"`
+	Collateral          bool                    `json:"collateral"`
+}
+
+// TransactionOutputResponse represents one transaction output.
+type TransactionOutputResponse struct {
+	ReferenceScriptHash *string                 `json:"reference_script_hash"`
+	InlineDatum         *string                 `json:"inline_datum"`
+	DataHash            *string                 `json:"data_hash"`
+	ConsumedByTx        *string                 `json:"consumed_by_tx"`
+	Address             string                  `json:"address"`
+	Amount              []AddressAmountResponse `json:"amount"`
+	OutputIndex         int                     `json:"output_index"`
+	Collateral          bool                    `json:"collateral"`
+}
+
+// TransactionDelegationResponse represents one delegation certificate.
+type TransactionDelegationResponse struct {
+	Address     string `json:"address"`
+	PoolID      string `json:"pool_id"`
+	CertIndex   int    `json:"cert_index"`
+	ActiveEpoch uint64 `json:"active_epoch"`
+}
+
+// TransactionStakeAddressResponse represents one stake address certificate.
+type TransactionStakeAddressResponse struct {
+	Address      string `json:"address"`
+	CertIndex    int    `json:"cert_index"`
+	Registration bool   `json:"registration"`
+}
+
+// TransactionWithdrawalResponse represents one reward withdrawal.
+type TransactionWithdrawalResponse struct {
+	Address string `json:"address"`
+	Amount  string `json:"amount"`
+}
+
+// TransactionMIRResponse represents one MIR certificate target.
+type TransactionMIRResponse struct {
+	Address   string `json:"address"`
+	Amount    string `json:"amount"`
+	CertIndex int    `json:"cert_index"`
+	Pot       string `json:"pot"`
+}
+
+// TransactionPoolUpdateResponse represents one pool registration certificate.
+type TransactionPoolUpdateResponse struct {
+	Metadata      *TransactionPoolMetadataResponse `json:"metadata"`
+	Owners        []string                         `json:"owners"`
+	Relays        []TransactionPoolRelayResponse   `json:"relays"`
+	ActiveEpoch   uint64                           `json:"active_epoch"`
+	CertIndex     int                              `json:"cert_index"`
+	FixedCost     string                           `json:"fixed_cost"`
+	MarginCost    float64                          `json:"margin_cost"`
+	Pledge        string                           `json:"pledge"`
+	PoolID        string                           `json:"pool_id"`
+	RewardAccount string                           `json:"reward_account"`
+	VrfKey        string                           `json:"vrf_key"`
+}
+
+// TransactionPoolMetadataResponse represents pool metadata pointer data.
+type TransactionPoolMetadataResponse struct {
+	Hash string `json:"hash"`
+	URL  string `json:"url"`
+}
+
+// TransactionPoolRelayResponse represents one relay in a pool registration cert.
+type TransactionPoolRelayResponse struct {
+	DNS    *string `json:"dns"`
+	DNSSrv *string `json:"dns_srv"`
+	IPv4   *string `json:"ipv4"`
+	IPv6   *string `json:"ipv6"`
+	Port   *int    `json:"port"`
+}
+
+// TransactionPoolRetireResponse represents one pool retirement certificate.
+type TransactionPoolRetireResponse struct {
+	PoolID        string `json:"pool_id"`
+	CertIndex     int    `json:"cert_index"`
+	RetiringEpoch uint64 `json:"retiring_epoch"`
+}
+
+// TransactionRedeemerResponse represents one Plutus redeemer.
+type TransactionRedeemerResponse struct {
+	TxIndex          int    `json:"tx_index"`
+	Purpose          string `json:"purpose"`
+	ScriptHash       string `json:"script_hash"`
+	RedeemerDataHash string `json:"redeemer_data_hash"`
+	UnitMem          string `json:"unit_mem"`
+	UnitSteps        string `json:"unit_steps"`
+	Fee              string `json:"fee"`
+}
+
+// TransactionRequiredSignerResponse represents one required signing key hash.
+type TransactionRequiredSignerResponse struct {
+	WitnessHash string `json:"witness_hash"`
+}
+
+// AccountResponse represents a Blockfrost stake account.
+type AccountResponse struct {
+	StakeAddress       string  `json:"stake_address"`
+	Active             bool    `json:"active"`
+	ActiveEpoch        *int64  `json:"active_epoch"`
+	ControlledAmount   string  `json:"controlled_amount"`
+	RewardsSum         string  `json:"rewards_sum"`
+	WithdrawalsSum     string  `json:"withdrawals_sum"`
+	ReservesSum        string  `json:"reserves_sum"`
+	TreasurySum        string  `json:"treasury_sum"`
+	WithdrawableAmount string  `json:"withdrawable_amount"`
+	PoolID             *string `json:"pool_id"`
+}
+
+// AccountAssociatedAddressResponse represents a stake
+// account associated payment address.
+type AccountAssociatedAddressResponse struct {
+	Address string `json:"address"`
+}
+
+// AccountDelegationHistoryResponse represents a
+// stake-account delegation history row.
+type AccountDelegationHistoryResponse struct {
+	ActiveEpoch int32  `json:"active_epoch"`
+	TxHash      string `json:"tx_hash"`
+	Amount      string `json:"amount"`
+	PoolID      string `json:"pool_id"`
+}
+
+// AccountRegistrationHistoryResponse represents a
+// stake-account registration history row.
+type AccountRegistrationHistoryResponse struct {
+	TxHash string `json:"tx_hash"`
+	Action string `json:"action"`
+}
+
+// AccountRewardHistoryResponse represents a stake-account
+// reward history row.
+type AccountRewardHistoryResponse struct {
+	Epoch  int32  `json:"epoch"`
+	Amount string `json:"amount"`
+	PoolID string `json:"pool_id"`
+}

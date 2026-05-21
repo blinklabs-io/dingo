@@ -47,7 +47,7 @@ func BuildSummary(
 	for i, p := range past {
 		if p.End == nil {
 			return Summary{}, fmt.Errorf(
-				"hardfork: past era %d (%q) is unbounded",
+				"hardfork: past era %d (%d) is unbounded",
 				i, p.EraID,
 			)
 		}

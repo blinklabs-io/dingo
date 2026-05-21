@@ -15,26 +15,24 @@
 package database
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestBlockByHashTxn_UnknownHashIsHardMiss verifies that looking up an
-// unknown hash returns ErrBlockNotFound without exercising the legacy
-// iterator-fallback prefix scan. This is the regression guard for
-// blinklabs-io/dingo#2105, fork-resolution probes one ancestor per
-// peer per depth, and pre-fix every miss ran a full block-blob prefix
-// scan, dominating catch-up CPU.
-func TestBlockByHashTxn_UnknownHashIsHardMiss(t *testing.T) {
+// TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
+// unknown hash increments the miss counter (so operators can track the
+// false-fallback rate from #2105) and surfaces ErrBlockNotFound after
+// the time-bounded fallback scan finds nothing.
+func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	db := newTestDB(t)
 	resetBlockByHashStats()
 
-	// Seed enough blocks to make a prefix scan obviously expensive if
-	// it were still in place.
-	const seeded = 64
+	const seeded = 16
 	for i := 0; i < seeded; i++ {
 		insertTestBlock(t, db, uint64(i+1), randomHash(t), []byte("cbor"))
 	}
@@ -42,14 +40,12 @@ func TestBlockByHashTxn_UnknownHashIsHardMiss(t *testing.T) {
 	unknown := randomHash(t)
 	_, err := BlockByHash(db, unknown)
 	require.ErrorIs(t, err, models.ErrBlockNotFound,
-		"unknown hash must surface as ErrBlockNotFound so fork-resolution "+
-			"can rotate peers without scanning the whole block blob")
+		"unknown hash must surface as ErrBlockNotFound so fork-resolution can rotate peers")
 
 	hits, misses := BlockByHashStats()
 	assert.Equal(t, uint64(0), hits, "no hash-index hit expected for unknown hash")
 	assert.Equal(t, uint64(1), misses,
-		"miss counter must record the false-fallback so operators can "+
-			"track the back-fill rate (issue #2105 ask)")
+		"miss counter must record the false-fallback so operators can track the back-fill rate (#2105)")
 }
 
 // TestBlockByHashTxn_KnownHashStillResolves guards the fast path: every
@@ -72,9 +68,37 @@ func TestBlockByHashTxn_KnownHashStillResolves(t *testing.T) {
 	assert.Equal(t, uint64(0), misses)
 }
 
+// TestBlockByHashTxn_EmptyIndexEntryIsCorruption asserts that a hash-
+// index entry whose value is an empty byte slice surfaces a descriptive
+// non-ErrBlockNotFound error rather than a soft miss. An empty value
+// means the index was written but the pointer is invalid: a local DB
+// problem the operator needs to see, not a fork-resolution miss.
+func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
+	db := newTestDB(t)
+	resetBlockByHashStats()
+
+	hash := randomHash(t)
+	hashIndexKey := types.BlockHashIndexKey(hash)
+	txn := db.BlobTxn(true)
+	require.NoError(t, db.Blob().Set(txn.Blob(), hashIndexKey, []byte{}))
+	require.NoError(t, txn.Commit())
+
+	_, err := BlockByHash(db, hash)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, models.ErrBlockNotFound,
+		"empty index entry must not be reported as a soft miss")
+	assert.True(t,
+		strings.Contains(err.Error(), "empty block hash index entry"),
+		"error should identify corruption: got %v", err)
+
+	hits, misses := BlockByHashStats()
+	assert.Equal(t, uint64(0), hits)
+	assert.Equal(t, uint64(0), misses,
+		"corruption must not be folded into the miss counter")
+}
+
 // BenchmarkBlockByHashTxn_UnknownHash measures the cost of the fork-
-// resolution miss path. Pre-fix this benchmark scaled with the number of
-// seeded blocks (full prefix iterator); post-fix it is constant-time.
+// resolution miss path on a small DB.
 //
 // Run with: go test -bench=BenchmarkBlockByHashTxn -benchmem ./database/
 func BenchmarkBlockByHashTxn_UnknownHash(b *testing.B) {

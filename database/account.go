@@ -141,6 +141,22 @@ func (d *Database) GetAccount(
 	return account, nil
 }
 
+// GetAccounts returns accounts for the given staking keys in a single
+// query, keyed by string(StakingKey). Stake keys with no matching row
+// are omitted (callers detect "not found" by absence). An empty input
+// returns an empty (non-nil) map and no error.
+func (d *Database) GetAccounts(
+	stakeKeys [][]byte,
+	includeInactive bool,
+	txn *Txn,
+) (map[string]*models.Account, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetAccounts(stakeKeys, includeInactive, txn.Metadata())
+}
+
 // AddAccountReward credits the reward balance for a registered account.
 func (d *Database) AddAccountReward(
 	stakeKey []byte,

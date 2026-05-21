@@ -17,10 +17,12 @@ package sqlite
 import (
 	"bytes"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -155,6 +157,235 @@ func TestGetLiveUtxosBySlotExcludesSpentAtSameSlot(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, live.TxId, got[0].Hash)
 	assert.Equal(t, live.OutputIdx, got[0].Idx)
+}
+
+func TestGetUtxosBatchUsesTxIdOutputIndex(t *testing.T) {
+	store := setupTestDB(t)
+
+	refs := make([]UtxoRef, 0, 12)
+	for i := range 12 {
+		txID := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		outputIdx := uint32(i % 3) //nolint:gosec
+		row := models.Utxo{
+			TxId:      txID,
+			OutputIdx: outputIdx,
+			AddedSlot: uint64(i + 1), //nolint:gosec
+			Amount:    types.Uint64(i + 1),
+		}
+		require.NoError(t, store.DB().Create(&row).Error)
+		refs = append(refs, UtxoRef{TxId: txID, OutputIdx: outputIdx})
+	}
+
+	var capturedSQL string
+	var capturedVars []any
+	callbackName := "test:capture_get_utxos_batch_sql"
+	require.NoError(t, store.ReadDB().Callback().Query().
+		After("gorm:query").
+		Register(callbackName, func(tx *gorm.DB) {
+			if capturedSQL != "" {
+				return
+			}
+			capturedSQL = tx.Statement.SQL.String()
+			capturedVars = append([]any(nil), tx.Statement.Vars...)
+		}))
+
+	got, err := store.GetUtxosBatch(refs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, len(refs))
+	require.NotEmpty(t, capturedSQL)
+	require.Contains(t, capturedSQL, "INDEXED BY "+utxoRefLookupIndex)
+
+	planRows, err := store.DB().
+		Raw(
+			"EXPLAIN QUERY PLAN "+capturedSQL,
+			capturedVars...,
+		).Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.Contains(t, plan, utxoRefLookupIndex)
+	assert.NotContains(t, plan, "idx_utxo_deleted_slot")
+}
+
+// TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup verifies that the
+// address-key lookup selects only the address-index fields and uses the UTxO ref
+// index instead of a broader deleted-slot scan.
+func TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup(t *testing.T) {
+	store := setupTestDB(t)
+
+	refs := make([]UtxoRef, 0, 12)
+	for i := range 12 {
+		txID := bytes.Repeat([]byte{byte(i + 1)}, 32)
+		outputIdx := uint32(i % 3) //nolint:gosec
+		row := models.Utxo{
+			TxId:       txID,
+			OutputIdx:  outputIdx,
+			AddedSlot:  uint64(i + 1), //nolint:gosec
+			PaymentKey: bytes.Repeat([]byte{byte(0x40 + i)}, 28),
+			StakingKey: bytes.Repeat([]byte{byte(0x70 + i)}, 28),
+			Amount:     types.Uint64(i + 1),
+		}
+		require.NoError(t, store.DB().Create(&row).Error)
+		refs = append(refs, UtxoRef{TxId: txID, OutputIdx: outputIdx})
+	}
+
+	var capturedSQL string
+	var capturedVars []any
+	callbackName := "test:capture_get_utxo_address_keys_batch_sql"
+	require.NoError(t, store.ReadDB().Callback().Query().
+		After("gorm:query").
+		Register(callbackName, func(tx *gorm.DB) {
+			if capturedSQL != "" {
+				return
+			}
+			capturedSQL = tx.Statement.SQL.String()
+			capturedVars = append([]any(nil), tx.Statement.Vars...)
+		}))
+
+	got, err := store.GetUtxoAddressKeysBatch(refs, nil)
+	require.NoError(t, err)
+	require.Len(t, got, len(refs))
+	require.NotEmpty(t, capturedSQL)
+	require.Contains(t, capturedSQL, "INDEXED BY "+utxoRefLookupIndex)
+	require.Contains(t, capturedSQL, "`tx_id`")
+	require.Contains(t, capturedSQL, "`output_idx`")
+	require.Contains(t, capturedSQL, "`payment_key`")
+	require.Contains(t, capturedSQL, "`staking_key`")
+	require.NotContains(t, capturedSQL, "`amount`")
+	require.NotContains(t, capturedSQL, "`datum_hash`")
+
+	planRows, err := store.DB().
+		Raw(
+			"EXPLAIN QUERY PLAN "+capturedSQL,
+			capturedVars...,
+		).Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.Contains(t, plan, utxoRefLookupIndex)
+	assert.NotContains(t, plan, "idx_utxo_deleted_slot")
+}
+
+// BenchmarkGetUtxoAddressKeysBatch compares the full UTxO batch lookup with
+// the skinny address-key lookup used by API-mode backfill address indexing.
+func BenchmarkGetUtxoAddressKeysBatch(b *testing.B) {
+	store := setupTestDB(b)
+
+	const rows = 512
+	refs := make([]UtxoRef, 0, rows)
+	for i := range rows {
+		txID := bytes.Repeat([]byte{byte((i % 250) + 1)}, 32)
+		txID[31] = byte(i / 250)
+		outputIdx := uint32(i % 4) //nolint:gosec
+		row := models.Utxo{
+			TxId:       txID,
+			OutputIdx:  outputIdx,
+			AddedSlot:  uint64(i + 1), //nolint:gosec
+			PaymentKey: bytes.Repeat([]byte{byte(0x20 + (i % 80))}, 28),
+			StakingKey: bytes.Repeat([]byte{byte(0x80 + (i % 80))}, 28),
+			Amount:     types.Uint64(i + 1),
+			DatumHash:  bytes.Repeat([]byte{byte(0x40 + (i % 80))}, 32),
+		}
+		require.NoError(b, store.DB().Create(&row).Error)
+		refs = append(refs, UtxoRef{TxId: txID, OutputIdx: outputIdx})
+	}
+
+	b.ReportAllocs()
+	b.Run("full-utxo", func(b *testing.B) {
+		for b.Loop() {
+			got, err := store.GetUtxosBatch(refs, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(got) != len(refs) {
+				b.Fatalf("got %d rows, want %d", len(got), len(refs))
+			}
+		}
+	})
+	b.Run("address-keys", func(b *testing.B) {
+		for b.Loop() {
+			got, err := store.GetUtxoAddressKeysBatch(refs, nil)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(got) != len(refs) {
+				b.Fatalf("got %d rows, want %d", len(got), len(refs))
+			}
+		}
+	})
+}
+
+// TestGetUtxosBySlotIncludesSpent verifies that GetUtxosBySlot returns
+// every UTxO created at the slot, including rows soft-marked as spent.
+// API storage mode relies on this so the pruner can materialize CBOR
+// bytes for retained spent UTxOs before tombstoning the source block.
+func TestGetUtxosBySlotIncludesSpent(t *testing.T) {
+	store := setupTestDB(t)
+
+	live := models.Utxo{
+		TxId:      bytes.Repeat([]byte{0xAA}, 32),
+		OutputIdx: 0,
+		AddedSlot: 500,
+		Amount:    types.Uint64(1),
+	}
+	spentLater := models.Utxo{
+		TxId:        bytes.Repeat([]byte{0xBB}, 32),
+		OutputIdx:   0,
+		AddedSlot:   500,
+		DeletedSlot: 700,
+		Amount:      types.Uint64(2),
+	}
+	spentSameSlot := models.Utxo{
+		TxId:        bytes.Repeat([]byte{0xDD}, 32),
+		OutputIdx:   0,
+		AddedSlot:   500,
+		DeletedSlot: 500,
+		Amount:      types.Uint64(3),
+	}
+	otherSlot := models.Utxo{
+		TxId:      bytes.Repeat([]byte{0xFF}, 32),
+		OutputIdx: 0,
+		AddedSlot: 600,
+		Amount:    types.Uint64(4),
+	}
+	for _, u := range []*models.Utxo{&live, &spentLater, &spentSameSlot, &otherSlot} {
+		require.NoError(t, store.DB().Create(u).Error)
+	}
+
+	got, err := store.GetUtxosBySlot(500, nil)
+	require.NoError(t, err)
+	sortUtxoIds(got)
+	want := []models.UtxoId{
+		{Hash: live.TxId, Idx: 0},
+		{Hash: spentLater.TxId, Idx: 0},
+		{Hash: spentSameSlot.TxId, Idx: 0},
+	}
+	sortUtxoIds(want)
+	assert.Equal(t, want, got)
+
+	// Sanity: GetLiveUtxosBySlot only returns the unspent row.
+	gotLive, err := store.GetLiveUtxosBySlot(500, nil)
+	require.NoError(t, err)
+	require.Len(t, gotLive, 1)
+	assert.Equal(t, live.TxId, gotLive[0].Hash)
 }
 
 func sortUtxoIds(ids []models.UtxoId) {

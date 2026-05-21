@@ -282,12 +282,12 @@ func tallyDRepVotes(
 // distribution snapshot at StakeEpoch. Pools that did not vote are not
 // counted.
 //
-// TODO(#1988): account for the SPO reward-account delegation rules from
+// TODO(#2369): account for the SPO reward-account delegation rules from
 // CIP-1694. Pools whose reward account delegates to AlwaysNoConfidence
 // auto-vote per the action's NoConfidence handling, and pools delegating
 // to AlwaysAbstain count toward abstain stake (excluded from the
-// denominator). Wiring this requires the reward-account credit/lookup
-// path tracked alongside #1988.
+// denominator). This is related to the reward-account plumbing from
+// #1988, but the delegation semantics are separate follow-up work.
 func tallySPOVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,

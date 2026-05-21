@@ -23,60 +23,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestCompareChains_SlotBattleAtSameLengthAndSlotIsAmbiguous shows the
-// gap that lets the eras-DevNet VRF-failure cascade get started:
-// IsBetterChain treats two competing tips at the same block count AND
-// the same slot — the exact shape of a slot-battle pair — as "equal"
-// and refuses to switch in either direction. cardano-node's Praos
-// chain selection breaks this case with a deterministic tie-breaker
-// (the lower VRF leader output). With no tie-break here, dingo cannot
-// pick a side on its own; whichever chain it stays on is whichever
-// chain happened to land first.
-//
-// Why it matters in the eras DevNet:
-//
-// At slot 40 of a recent run, dingo forged a Shelley block 5c25... on
-// top of slot 38. cardano-producer concurrently forged a different
-// Shelley block 0c54... on top of the same slot 38. Two valid chains
-// of equal length, both ending at slot 40. cardano-relay (cardano-
-// node) ran its Praos tie-break and picked 0c54. dingo's chainsync
-// client received a cursor-mismatch from the relay, the relay closed
-// the connection (TCP RST), dingo reconnected, re-intersected, rolled
-// back to slot 38, and adopted 0c54. The "slot battle" log line on
-// dingo confirms local_won=false — its locally-forged 5c25 was
-// dropped.
-//
-// All nine slot battles in that run came back local_won=false. The
-// run's full canonical chain (the relay's view) ended with zero
-// dingo-issued blocks across every era, even though dingo successfully
-// produced 95 blocks. That's not 50/50 randomness; it's the signature
-// of a chain-selection asymmetry between dingo and cardano-node.
-//
-// In dingo, the chainsync-driven rollback hides the asymmetry at slots
-// where a battle is recognised — chainsync is authoritative over local
-// chain selection there. But the absence of a same-slot tie-break
-// elsewhere means: when dingo's local chain selection considers the
-// peer's tip and finds it "equal", it makes no decision either way.
-// Anywhere chainsync is not actively forcing a rollback, the chains
-// are free to drift, and the evolving nonce — which carries across
-// epoch boundaries without resetting — picks up the drift. By the
-// next era boundary the candidate-nonce inputs disagree, eta0
-// disagrees, and every header from the peer VRF-fails.
-//
-// The fix is to extend CompareChains so the equal-length-equal-slot
-// case has a deterministic tie-break (lower hash, matching cardano-
-// node's effective ordering once block hashes become available).
-// After that, dingo's local chain-selection decisions match cardano-
-// node's at every slot battle, the run-by-run "always lose" pattern
-// stops, and chains converge cleanly.
-func TestCompareChains_SlotBattleAtSameLengthAndSlotIsAmbiguous(t *testing.T) {
-	// Two Shelley blocks at slot 40, both extending the same slot-38
-	// parent, block_number=11 (same length past the common ancestor).
+func TestComparePraosTipsSlotBattleWithoutSelectViewDoesNotInventHashTieBreak(
+	t *testing.T,
+) {
 	dingoTip := ochainsync.Tip{
 		BlockNumber: 11,
 		Point: ocommon.Point{
 			Slot: 40,
-			// 5c259f44... — the dingo-forged hash from the run.
 			Hash: []byte{
 				0x5c, 0x25, 0x9f, 0x44, 0x42, 0xe1, 0x49, 0x33,
 				0x72, 0xe2, 0x07, 0x83, 0xaa, 0xb3, 0x06, 0x39,
@@ -89,7 +42,6 @@ func TestCompareChains_SlotBattleAtSameLengthAndSlotIsAmbiguous(t *testing.T) {
 		BlockNumber: 11,
 		Point: ocommon.Point{
 			Slot: 40,
-			// 0c541182... — the cardano-producer-forged hash.
 			Hash: []byte{
 				0x0c, 0x54, 0x11, 0x82, 0xc9, 0xa9, 0xa6, 0x6d,
 				0xa2, 0xf7, 0xc3, 0x1a, 0x1f, 0x9b, 0x9e, 0x4a,
@@ -99,38 +51,19 @@ func TestCompareChains_SlotBattleAtSameLengthAndSlotIsAmbiguous(t *testing.T) {
 		},
 	}
 
-	// cardanoTip's hash (0c54…) is lower than dingoTip's (5c25…), so
-	// the rule-3 tiebreak selects cardanoTip. CompareChains must
-	// return ChainBBetter and IsBetterChain(cardano, dingo) must be
-	// true so the local selector adopts the lower-hash forge
-	// independently of chainsync arrival order.
-	got := chainselection.CompareChains(dingoTip, cardanoTip)
-	require.Equalf(
-		t,
-		chainselection.ChainBBetter,
-		got,
-		"CompareChains at a slot battle must apply the lower-hash "+
-			"tiebreak. Got %d. ChainEqual here is the original gap: "+
-			"the local chain-selection result becomes order-dependent, "+
-			"the locally-forged block is kept, and its VRF output "+
-			"folds into the evolving nonce — seeding the eta0 drift "+
-			"that breaks header verification at the next era boundary.",
-		got,
+	got := chainselection.ComparePraosTips(
+		dingoTip,
+		cardanoTip,
+		chainselection.PraosTiebreakerViewFromTip(
+			dingoTip,
+			nil,
+			chainselection.PraosTiebreakerConfigConway(),
+		),
+		chainselection.PraosTiebreakerViewFromTip(
+			cardanoTip,
+			nil,
+			chainselection.PraosTiebreakerConfigConway(),
+		),
 	)
-
-	require.Falsef(
-		t,
-		chainselection.IsBetterChain(dingoTip, cardanoTip),
-		"IsBetterChain(higher-hash, lower-hash) must be false: the "+
-			"higher-hash forge does not win the rule-3 tiebreak.",
-	)
-	require.Truef(
-		t,
-		chainselection.IsBetterChain(cardanoTip, dingoTip),
-		"IsBetterChain(lower-hash, higher-hash) must be true so the "+
-			"local selector adopts the lower-hash forge. Returning "+
-			"false re-introduces the original gap where the chains "+
-			"are free to drift between slot battles and chainsync is "+
-			"the only path that ever resolves them.",
-	)
+	require.Equal(t, chainselection.ChainEqual, got)
 }

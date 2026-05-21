@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -35,6 +36,14 @@ var errRestartLedgerPipeline = errors.New(
 var errHaltLedgerPipeline = errors.New(
 	"halt ledger pipeline after persistent tx validation failure",
 )
+
+// errStaleChainIterator is returned by ledgerProcessBlock when a block's
+// prev-hash doesn't match the current ledger tip. This signals that the
+// chain iterator has been made stale by a concurrent rollback: the iterator's
+// nextBlockIndex skipped ahead past the first new fork block and is now
+// returning a block that extends a branch we are no longer on. The ledger
+// pipeline must restart so its iterator rewinds to the current tip.
+var errStaleChainIterator = errors.New("block does not fit chain tip: stale iterator after rollback")
 
 type txValidationError struct {
 	BlockPoint ocommon.Point
@@ -174,6 +183,16 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		"rollback_slot", candidate.RollbackPoint.Slot,
 		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
 	)
+	if ls.replayRecoveryRollbackExceedsMithrilBoundary(candidate.RollbackPoint) {
+		if err := ls.rejectReplayRecoveryAtMithrilBoundary(
+			validationErr,
+			candidate,
+			producerTxHash,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if err := ls.rollback(candidate.RollbackPoint); err != nil {
 		return false, fmt.Errorf(
 			"rollback ledger state for replay recovery: %w",
@@ -181,6 +200,77 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		)
 	}
 	return true, nil
+}
+
+func (ls *LedgerState) replayRecoveryRollbackExceedsMithrilBoundary(
+	point ocommon.Point,
+) bool {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.mithrilLedgerSlot > 0 && point.Slot < ls.mithrilLedgerSlot
+}
+
+func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
+	validationErr *txValidationError,
+	candidate *replayRecoveryCandidate,
+	producerTxHash string,
+) error {
+	ls.RLock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	rewindPoint := ls.currentTip.Point
+	ls.RUnlock()
+	if ls.config.ChainManager == nil {
+		return fmt.Errorf(
+			"replay recovery rollback exceeds Mithril trust boundary: %w",
+			ErrRollbackExceedsMithrilBoundary,
+		)
+	}
+	ls.config.Logger.Warn(
+		"detected replay recovery below Mithril trust boundary, rejecting peer chain",
+		"component", "ledger",
+		"recovery_strategy", candidate.Strategy,
+		"tx_hash", hex.EncodeToString(validationErr.TxHash),
+		"failing_block_slot", validationErr.BlockPoint.Slot,
+		"missing_input", candidate.Input.String(),
+		"producer_tx_hash", producerTxHash,
+		"producer_block_slot", candidate.ProducerBlock.Slot,
+		"rollback_slot", candidate.RollbackPoint.Slot,
+		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
+		"mithril_ledger_slot", mithrilLedgerSlot,
+		"rewind_target_slot", rewindPoint.Slot,
+		"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+	)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+		return fmt.Errorf(
+			"rewind primary chain to Mithril trust boundary: %w",
+			err,
+		)
+	}
+	ls.chainsyncMutex.Lock()
+	ls.resetChainsyncResyncState()
+	ls.chainsyncState = SyncingChainsyncState
+	ls.chainsyncMutex.Unlock()
+	if ls.config.EventBus != nil {
+		var activeConnId ouroboros.ConnectionId
+		if ls.config.GetActiveConnectionFunc != nil {
+			if connId := ls.config.GetActiveConnectionFunc(); connId != nil {
+				activeConnId = *connId
+			}
+		}
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					ConnectionId: activeConnId,
+					Reason: event.
+						ChainsyncResyncReasonRollbackExceedsMithril,
+					Point: rewindPoint,
+				},
+			),
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
@@ -270,13 +360,29 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 			err,
 		)
 	}
+	// Roll back the ledger metadata state to the rewind point. Without
+	// this, the chain is pruned to rewindPoint but the UTxO database
+	// still reflects the failing block's post-apply state — consumed
+	// inputs stay consumed, created outputs stay created. When peers
+	// re-deliver the block we just rewound past, ledger validation
+	// looks up its inputs, finds them already marked consumed, and
+	// returns "rule 22 bad input(s) ... rule 24 value not conserved
+	// (consumed 0)" again, looping the recovery indefinitely until
+	// process restart. RewindPrimaryChainToPoint by design only touches
+	// the chain blob — the matching ledger rollback must be explicit.
+	if err := ls.rollback(rewindPoint); err != nil {
+		return false, fmt.Errorf(
+			"rollback ledger state after validation failure: %w",
+			err,
+		)
+	}
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
 			event.ChainsyncResyncEventType,
 			event.NewEvent(
 				event.ChainsyncResyncEventType,
 				event.ChainsyncResyncEvent{
-					Reason: "live tx validation recovery",
+					Reason: event.ChainsyncResyncReasonLiveTxValidationRecovery,
 					Point:  rewindPoint,
 				},
 			),

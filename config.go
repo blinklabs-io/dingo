@@ -224,8 +224,8 @@ const rtsMetricsUpdateInterval = 10 * time.Second
 // rtsMetrics holds Haskell-cardano-node-style RTS memory gauges backed
 // by Go runtime.MemStats. Matching the Haskell naming lets existing
 // cardano-node dashboards and alert rules work against Dingo without
-// rewriting queries. See docs/plans/RTS_METRICS.md for the semantic
-// mapping between Go and Haskell GC concepts.
+// rewriting queries. The gauges are approximate mappings from Go heap
+// statistics to Haskell RTS GC concepts.
 type rtsMetrics struct {
 	gcLiveBytes prometheus.Gauge
 	gcHeapBytes prometheus.Gauge
@@ -831,7 +831,7 @@ func WithChainsyncMaxClients(
 
 // WithChainsyncStallTimeout specifies the duration after
 // which a chainsync client with no activity is considered
-// stalled. Default is 30 seconds.
+// stalled. Default is 2 minutes.
 func WithChainsyncStallTimeout(
 	timeout time.Duration,
 ) ConfigOptionFunc {

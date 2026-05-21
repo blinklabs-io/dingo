@@ -55,6 +55,11 @@ func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{}
 }
 
+// NewBatchAccumulator creates an accumulator for this metadata store.
+func (d *MetadataStoreMysql) NewBatchAccumulator() types.MetadataBatchAccumulator {
+	return NewBatchAccumulator()
+}
+
 // AddKeyWitness appends a key witness record to the batch.
 func (b *BatchAccumulator) AddKeyWitness(kw models.KeyWitness) {
 	b.KeyWitnesses = append(b.KeyWitnesses, kw)
@@ -121,11 +126,33 @@ func (b *BatchAccumulator) Reset() {
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
 }
 
+// MergeFrom appends all records from other into b.
+// It is a no-op when other is nil or other == b.
+func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
+	if other == nil || other == b {
+		return
+	}
+	b.KeyWitnesses = append(b.KeyWitnesses, other.KeyWitnesses...)
+	b.WitnessScripts = append(b.WitnessScripts, other.WitnessScripts...)
+	b.Scripts = append(b.Scripts, other.Scripts...)
+	b.PlutusData = append(b.PlutusData, other.PlutusData...)
+	b.Redeemers = append(b.Redeemers, other.Redeemers...)
+	b.AddressTxs = append(b.AddressTxs, other.AddressTxs...)
+	b.UtxoOutputs = append(b.UtxoOutputs, other.UtxoOutputs...)
+	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
+	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
+	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+}
+
 // FlushBatch writes all accumulated records in a deterministic order.
 func (d *MetadataStoreMysql) FlushBatch(
-	batch *BatchAccumulator,
+	acc types.MetadataBatchAccumulator,
 	txn types.Txn,
 ) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf("mysql FlushBatch: wrong accumulator type %T", acc)
+	}
 	if batch == nil {
 		return nil
 	}
@@ -232,13 +259,7 @@ func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
+	return importUtxosWithDB(db, items)
 }
 
 func batchCreateScripts(db *gorm.DB, items []models.Script) error {

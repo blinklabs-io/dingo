@@ -16,10 +16,12 @@ package utxorpc
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -260,44 +262,60 @@ func (u *Utxorpc) Stop(ctx context.Context) error {
 	return nil
 }
 
-// startServer starts the HTTP server with error detection
+// startServer starts the HTTP server with deterministic error
+// detection. It binds the listening socket and pre-loads any TLS
+// keypair synchronously so port and certificate errors surface before
+// returning, then serves in a background goroutine.
 func (u *Utxorpc) startServer(server *http.Server) error {
-	startErr := make(chan error, 1)
-	go func() {
-		var err error
-		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
-			err = server.ListenAndServeTLS(
-				u.config.TlsCertFilePath,
-				u.config.TlsKeyFilePath,
+	if (u.config.TlsCertFilePath != "") != (u.config.TlsKeyFilePath != "") {
+		return errors.New(
+			"failed to start utxorpc gRPC server: both tls cert and key must be specified",
+		)
+	}
+	useTLS := u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != ""
+	serverType := "non-TLS"
+	if useTLS {
+		serverType = "TLS"
+		cert, err := tls.LoadX509KeyPair(
+			u.config.TlsCertFilePath,
+			u.config.TlsKeyFilePath,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to load TLS keypair for utxorpc gRPC %s server: %w",
+				serverType, err,
 			)
-		} else {
-			err = server.ListenAndServe()
 		}
-		if err != nil && err != http.ErrServerClosed {
-			select {
-			case startErr <- err:
-			default:
-				u.config.Logger.Error(
-					"utxorpc gRPC server error",
-					"error", err,
-				)
-			}
+		if server.TLSConfig == nil {
+			server.TLSConfig = &tls.Config{}
 		}
-	}()
-
-	// Wait briefly for startup to succeed or fail
-	// NOTE: 100ms timeout assumes startup errors occur quickly (e.g., port binding).
-	// Delayed failures (e.g., certificate loading issues) may not be detected.
-	select {
-	case err := <-startErr:
-		serverType := "non-TLS"
-		if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
-			serverType = "TLS"
-		}
+		server.TLSConfig.Certificates = append(
+			server.TLSConfig.Certificates,
+			cert,
+		)
+	}
+	ln, err := net.Listen("tcp", server.Addr)
+	if err != nil {
 		return fmt.Errorf("failed to start utxorpc gRPC %s server: %w",
 			serverType, err)
-	case <-time.After(100 * time.Millisecond):
-		// Assume startup succeeded if no error within 100ms
 	}
+	go func() {
+		var serveErr error
+		if useTLS {
+			serveErr = server.ServeTLS(
+				ln,
+				"",
+				"",
+			)
+		} else {
+			serveErr = server.Serve(ln)
+		}
+		if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			u.config.Logger.Error(
+				"utxorpc gRPC server error",
+				"error", serveErr,
+			)
+		}
+	}()
 	return nil
 }

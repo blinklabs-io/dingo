@@ -67,6 +67,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				(peer.Source != PeerSourceTopologyLocalRoot &&
 					now.Sub(peer.LastActivity) > p.config.InactivityTimeout)
 			if demoteForInactivity {
+				p.recordPeerStateChange(p.peers[i].State, PeerStateWarm)
 				p.peers[i].State = PeerStateWarm
 				warmDemotions++
 				activeDecreased++
@@ -119,6 +120,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 						peer,
 					)
 				} else {
+					p.recordPeerStateChange(p.peers[i].State, PeerStateWarm)
 					p.peers[i].State = PeerStateWarm
 					if p.peers[i].Source == PeerSourceInboundConn {
 						p.recordInboundLifecycle("warmed")
@@ -312,6 +314,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				)
 				continue
 			}
+			p.recordPeerStateChange(peer.State, PeerStateHot)
 			peer.State = PeerStateHot
 			peer.LastActivity = now
 			warmPromotions++

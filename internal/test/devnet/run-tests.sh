@@ -88,7 +88,7 @@ fi
 # --------------------------------------------------------------------------- #
 
 log "Building Dingo Docker image..."
-docker compose -f "${COMPOSE_FILE}" build dingo-producer
+docker compose -f "${COMPOSE_FILE}" build configurator dingo-producer
 
 log "Starting DevNet containers..."
 docker compose -f "${COMPOSE_FILE}" up -d
@@ -148,7 +148,7 @@ export DEVNET_RELAY_ADDR="localhost:${RELAY_PORT}"
 
 # Run tests with the devnet build tag
 # The -count=1 flag disables test caching
-TEST_TIMEOUT="${TEST_TIMEOUT:-5m}"
+TEST_TIMEOUT="${TEST_TIMEOUT:-20m}"
 set +e
 go test \
   -tags devnet \

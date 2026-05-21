@@ -33,6 +33,14 @@ type UtxoRef struct {
 	OutputIdx uint32
 }
 
+// UtxoAddressKeys is the skinny UTxO projection needed for address indexing.
+type UtxoAddressKeys struct {
+	TxId       []byte `gorm:"column:tx_id"`
+	PaymentKey []byte `gorm:"column:payment_key"`
+	StakingKey []byte `gorm:"column:staking_key"`
+	OutputIdx  uint32 `gorm:"column:output_idx"`
+}
+
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreSqlite) GetUtxo(
 	txId []byte,
@@ -84,6 +92,12 @@ func (d *MetadataStoreSqlite) GetUtxoIncludingSpent(
 // under SQLite's default SQLITE_MAX_VARIABLE_NUMBER limit of 999 bind parameters.
 const batchChunkSize = 499
 
+const utxoRefLookupIndex = "tx_id_output_idx"
+
+func utxoRefIndexedTable() string {
+	return (&models.Utxo{}).TableName() + " INDEXED BY " + utxoRefLookupIndex
+}
+
 // GetUtxosBatch retrieves multiple UTXOs by their references in a single query.
 // Returns a map keyed by "txid:outputidx" for easy lookup.
 // Large batches are automatically chunked to avoid SQLite expression limits.
@@ -119,8 +133,8 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		// Wrap OR conditions in parentheses to ensure deleted_slot=0 applies to all refs.
 		// Without parens, SQL operator precedence (AND > OR) causes deleted_slot=0
 		// to only apply to the first condition.
-		query := db.Where("deleted_slot = 0").
-			Preload("Assets").
+		query := db.Table(utxoRefIndexedTable()).
+			Where("deleted_slot = 0").
 			Where("("+strings.Join(conditions, " OR ")+")", args...)
 		if queryResult := query.Find(&utxos); queryResult.Error != nil {
 			return nil, queryResult.Error
@@ -130,6 +144,52 @@ func (d *MetadataStoreSqlite) GetUtxosBatch(
 		for j := range utxos {
 			key := fmt.Sprintf("%x:%d", utxos[j].TxId, utxos[j].OutputIdx)
 			result[key] = &utxos[j]
+		}
+	}
+
+	return result, nil
+}
+
+// GetUtxoAddressKeysBatch retrieves only the UTxO ref and address key columns
+// needed to build address_transaction rows.
+func (d *MetadataStoreSqlite) GetUtxoAddressKeysBatch(
+	refs []UtxoRef,
+	txn types.Txn,
+) (map[string]UtxoAddressKeys, error) {
+	if len(refs) == 0 {
+		return make(map[string]UtxoAddressKeys), nil
+	}
+
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]UtxoAddressKeys, len(refs))
+
+	for i := 0; i < len(refs); i += batchChunkSize {
+		end := min(i+batchChunkSize, len(refs))
+		chunk := refs[i:end]
+
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, ref := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, ref.TxId, ref.OutputIdx)
+		}
+
+		var rows []UtxoAddressKeys
+		query := db.Table(utxoRefIndexedTable()).
+			Select("tx_id", "output_idx", "payment_key", "staking_key").
+			Where("deleted_slot = 0").
+			Where("("+strings.Join(conditions, " OR ")+")", args...)
+		if queryResult := query.Find(&rows); queryResult.Error != nil {
+			return nil, queryResult.Error
+		}
+
+		for j := range rows {
+			key := fmt.Sprintf("%x:%d", rows[j].TxId, rows[j].OutputIdx)
+			result[key] = rows[j]
 		}
 	}
 
@@ -172,6 +232,36 @@ func (d *MetadataStoreSqlite) GetLiveUtxosBySlot(
 	result := db.
 		Model(&models.Utxo{}).
 		Where("deleted_slot = 0 AND added_slot = ?", slot).
+		Select("tx_id", "output_idx").
+		Find(&rows)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	ret := make([]models.UtxoId, len(rows))
+	for i, r := range rows {
+		ret[i] = models.UtxoId{Hash: r.TxId, Idx: r.OutputIdx}
+	}
+	return ret, nil
+}
+
+// GetUtxosBySlot returns the references of every UTxO created at the given
+// slot, including rows soft-marked as spent (deleted_slot != 0). Only TxId
+// and OutputIdx are populated.
+func (d *MetadataStoreSqlite) GetUtxosBySlot(
+	slot uint64,
+	txn types.Txn,
+) ([]models.UtxoId, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	result := db.
+		Model(&models.Utxo{}).
+		Where("added_slot = ?", slot).
 		Select("tx_id", "output_idx").
 		Find(&rows)
 	if result.Error != nil {
@@ -263,6 +353,35 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
+// controlled by the given staking key.
+func (d *MetadataStoreSqlite) GetControlledAmountByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for controlled amount by staking key: %w",
+			err,
+		)
+	}
+	var total uint64
+	if err := db.Model(&models.Utxo{}).
+		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf(
+			"get controlled amount by staking key: %w",
+			err,
+		)
+	}
+	return total, nil
 }
 
 // GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).
@@ -722,9 +841,12 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 			args = append(args, r.TxId, r.OutputIdx)
 		}
 		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
-		result := db.Model(&models.Utxo{}).
-			Where(whereClause, args...).
-			Update("deleted_slot", atSlot)
+		updateArgs := append([]any{atSlot}, args...)
+		result := db.Exec(
+			"UPDATE "+utxoRefIndexedTable()+
+				" SET deleted_slot = ? WHERE "+whereClause,
+			updateArgs...,
+		)
 		if result.Error != nil {
 			return result.Error
 		}

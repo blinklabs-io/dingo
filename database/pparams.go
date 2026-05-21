@@ -84,11 +84,19 @@ func (d *Database) ApplyPParamUpdates(
 	updateFunc func(lcommon.ProtocolParameters, any) (lcommon.ProtocolParameters, error),
 	txn *Txn,
 ) error {
-	// Handle nil transaction by creating a read-only transaction
 	if txn == nil {
-		tmpTxn := d.Transaction(false)
+		tmpTxn := d.MetadataTxn(true)
 		defer tmpTxn.Release()
-		txn = tmpTxn
+		if err := d.ApplyPParamUpdates(
+			slot, epoch, era, quorum, currentPParams,
+			decodeFunc, updateFunc, tmpTxn,
+		); err != nil {
+			return err
+		}
+		if err := tmpTxn.Commit(); err != nil {
+			return fmt.Errorf("commit pparams update: %w", err)
+		}
+		return nil
 	}
 	// Check for pparam updates that apply at the end of the epoch
 	pparamUpdates, err := d.metadata.GetPParamUpdates(epoch, txn.Metadata())
@@ -189,11 +197,20 @@ func (d *Database) ComputeAndApplyPParamUpdates(
 	) (lcommon.ProtocolParameters, error),
 	txn *Txn,
 ) (lcommon.ProtocolParameters, error) {
-	// Handle nil transaction by creating a read-only transaction
 	if txn == nil {
-		tmpTxn := d.Transaction(false)
+		tmpTxn := d.MetadataTxn(true)
 		defer tmpTxn.Release()
-		txn = tmpTxn
+		result, err := d.ComputeAndApplyPParamUpdates(
+			slot, epoch, era, quorum, currentPParams,
+			decodeFunc, updateFunc, tmpTxn,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if err := tmpTxn.Commit(); err != nil {
+			return nil, fmt.Errorf("commit pparams update: %w", err)
+		}
+		return result, nil
 	}
 	// Check for pparam updates that apply at the end of the epoch
 	pparamUpdates, err := d.metadata.GetPParamUpdates(epoch, txn.Metadata())

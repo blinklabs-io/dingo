@@ -28,6 +28,7 @@ type PeerChainTip struct {
 	Tip           ochainsync.Tip
 	ObservedTip   ochainsync.Tip
 	VRFOutput     []byte // VRF output from tip block for tie-breaking
+	PraosView     PraosTiebreakerView
 	LastUpdated   time.Time
 	observedSlots []uint64
 }
@@ -44,7 +45,12 @@ func NewPeerChainTip(
 		Tip:          tip,
 		ObservedTip:  tip,
 		VRFOutput:    vrfOutput,
-		LastUpdated:  time.Now(),
+		PraosView: PraosTiebreakerViewFromTip(
+			tip,
+			vrfOutput,
+			PraosTiebreakerConfigUnknown(),
+		),
+		LastUpdated: time.Now(),
 	}
 }
 
@@ -60,9 +66,34 @@ func (p *PeerChainTip) UpdateTipWithObserved(
 	observedTip ochainsync.Tip,
 	vrfOutput []byte,
 ) {
+	p.UpdateTipWithObservedPraosView(
+		tip,
+		observedTip,
+		vrfOutput,
+		PraosTiebreakerViewFromTip(
+			observedTip,
+			vrfOutput,
+			PraosTiebreakerConfigUnknown(),
+		),
+	)
+}
+
+// UpdateTipWithObservedPraosView updates the remote advertised tip, the latest
+// locally observed frontier, the VRF output, and the Praos tiebreaker view for
+// the peer. Callers must provide a PraosTiebreakerView derived from observedTip
+// and the supplied vrfOutput when that VRF output participates in the view.
+// The view is stored as supplied; this method does not validate consistency, so
+// an inconsistent view can make later chain-selection comparisons incorrect.
+func (p *PeerChainTip) UpdateTipWithObservedPraosView(
+	tip ochainsync.Tip,
+	observedTip ochainsync.Tip,
+	vrfOutput []byte,
+	praosView PraosTiebreakerView,
+) {
 	p.Tip = tip
 	p.ObservedTip = observedTip
 	p.VRFOutput = vrfOutput
+	p.PraosView = praosView
 	p.LastUpdated = time.Now()
 }
 
@@ -78,6 +109,7 @@ func (p *PeerChainTip) ApplyRollback(
 	p.Tip = tip
 	p.ObservedTip = tip
 	p.VRFOutput = nil
+	p.PraosView = PraosTiebreakerView{}
 	p.LastUpdated = time.Now()
 	if point.Slot == 0 || len(p.observedSlots) == 0 {
 		p.observedSlots = nil

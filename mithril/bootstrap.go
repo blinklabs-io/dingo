@@ -317,6 +317,7 @@ func Bootstrap(
 		truncateDigest(snapshot.Digest),
 	)
 	archivePath := filepath.Join(downloadDir, archiveFilename)
+	snapshotCacheKey := snapshot.Digest
 
 	if isFileComplete(archivePath, snapshot.Size) {
 		cfg.Logger.Info(
@@ -360,7 +361,10 @@ func Bootstrap(
 	// Steps 4+5: Extract main archive and download ancillary in
 	// parallel. These write to separate directories (immutable/
 	// vs ancillary/) so they are independent.
-	extractDir := filepath.Join(downloadDir, "immutable")
+	extractDir := filepath.Join(
+		downloadDir,
+		"immutable-"+snapshotCacheKey,
+	)
 	var ancillaryDir string
 	var ancillaryArchivePath string
 
@@ -378,7 +382,8 @@ func Bootstrap(
 	if len(snapshot.AncillaryLocations) > 0 {
 		ancWg.Go(func() {
 			candidateDir := filepath.Join(
-				downloadDir, "ancillary",
+				downloadDir,
+				"ancillary-"+snapshotCacheKey,
 			)
 			if hasLedgerFiles(candidateDir) {
 				cfg.Logger.Info(
@@ -538,7 +543,10 @@ func downloadAncillary(
 		)
 	}
 
-	ancillaryDir := filepath.Join(downloadDir, "ancillary")
+	ancillaryDir := filepath.Join(
+		downloadDir,
+		"ancillary-"+snapshot.Digest,
+	)
 	if _, extractErr := ExtractArchive(
 		ctx, ancillaryPath, ancillaryDir, cfg.Logger,
 	); extractErr != nil {

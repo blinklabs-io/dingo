@@ -15,16 +15,20 @@
 package peergov
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -506,6 +510,152 @@ func TestPeerGovernor_Metrics(t *testing.T) {
 	assert.Equal(t, float64(1), testutil.ToFloat64(pg.metrics.activePeers))
 }
 
+func TestPeerGovernor_RecordPeerStateChange(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry: reg,
+	})
+
+	// Cold -> Warm = promotion.
+	pg.recordPeerStateChange(PeerStateCold, PeerStateWarm)
+	// Warm -> Hot = promotion.
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateHot)
+	// Hot -> Warm = demotion.
+	pg.recordPeerStateChange(PeerStateHot, PeerStateWarm)
+	// Warm -> Cold = demotion.
+	pg.recordPeerStateChange(PeerStateWarm, PeerStateCold)
+	// Same-state = no-op.
+	pg.recordPeerStateChange(PeerStateHot, PeerStateHot)
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("cold", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("warm", "cold"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_ReconcilePromotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: reg,
+		MinHotPeers:  1,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateWarm
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_GossipChurnDemotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:           newMockEventBus(),
+		PromRegistry:       reg,
+		GossipChurnPercent: 0.50,
+		MinScoreThreshold:  0.3,
+	})
+
+	pg.peers = []*Peer{
+		{
+			Address: "gossip1:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.9,
+		},
+		{
+			Address: "gossip2:3001", Source: PeerSourceP2PGossip,
+			State: PeerStateHot, PerformanceScore: 0.2,
+		},
+	}
+
+	pg.gossipChurn()
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "cold"),
+		),
+	)
+}
+
+func TestPeerGovernor_TransitionMetrics_ReconcileDemotion(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: reg,
+	})
+
+	pg.AddPeer("44.0.0.1:3001", PeerSourceP2PGossip)
+	pg.mu.Lock()
+	pg.peers[0].State = PeerStateHot
+	pg.peers[0].Connection = nil
+	pg.peers[0].LastActivity = time.Now().Add(-15 * time.Minute)
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(
+			pg.metrics.peerDemotions.WithLabelValues("hot", "warm"),
+		),
+	)
+	assert.Equal(
+		t,
+		float64(0),
+		testutil.ToFloat64(
+			pg.metrics.peerPromotions.WithLabelValues("warm", "hot"),
+		),
+	)
+}
+
 func TestPeerGovernor_PeerSharing(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
@@ -864,6 +1014,62 @@ func TestPeerGovernor_HandleInboundConnection(t *testing.T) {
 	}
 }
 
+func TestPeerGovernor_HandleInboundConnectionDeniedPeer(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			Logger: logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = connManager.Stop(stopCtx)
+	})
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       logger,
+		ConnManager:  connManager,
+		DenyDuration: time.Hour,
+	})
+
+	mockConn := ouroboros_mock.NewConnection(
+		ouroboros_mock.ProtocolRoleClient,
+		[]ouroboros_mock.ConversationEntry{
+			ouroboros_mock.ConversationEntryHandshakeRequestGeneric,
+			ouroboros_mock.ConversationEntryHandshakeNtNResponse,
+		},
+	)
+	oConn, err := ouroboros.New(
+		ouroboros.WithConnection(mockConn),
+		ouroboros.WithNetworkMagic(ouroboros_mock.MockNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithKeepAlive(false),
+	)
+	require.NoError(t, err)
+	connId := oConn.Id()
+	address := connId.RemoteAddr.String()
+	require.True(t, connManager.AddConnection(oConn, true, address))
+	pg.DenyPeer(connmanager.NormalizePeerAddr(address), 0)
+
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId:         connId,
+			LocalAddr:            connId.LocalAddr,
+			RemoteAddr:           connId.RemoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(address),
+			IsDuplex:             true,
+		},
+	})
+
+	require.Empty(t, pg.GetPeers())
+	require.True(t, pg.IsDenied(address))
+	require.Eventually(t, func() bool {
+		return connManager.GetConnectionById(connId) == nil
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestPeerGovernor_HandleConnectionClosed(t *testing.T) {
 	eventBus := newMockEventBus()
 	reg := prometheus.NewRegistry()
@@ -1196,6 +1402,56 @@ func TestPeerGovernor_DenyPeer_CaseInsensitive(t *testing.T) {
 	)
 }
 
+func TestPeerGovernor_DenyPeer_MatchesActiveConnectionRemoteAddress(
+	t *testing.T,
+) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: time.Hour,
+	})
+	localAddr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	require.NoError(t, err)
+	remoteAddr, err := net.ResolveTCPAddr("tcp", "195.191.47.210:3001")
+	require.NoError(t, err)
+	connID := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	peer := &Peer{
+		Address:           "prv-relay1.apexpool.info:3001",
+		NormalizedAddress: "203.0.113.10:3001",
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connID,
+			IsClient: true,
+		},
+	}
+	pg.peers = append(pg.peers, peer)
+
+	pg.DenyPeer(remoteAddr.String(), 0)
+
+	assert.True(t, pg.IsDenied(remoteAddr.String()))
+	assert.True(t, pg.IsDenied(peer.Address))
+	assert.True(t, pg.IsDenied(peer.NormalizedAddress))
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	assert.True(t, pg.isPeerDeniedLocked(peer))
+	_, remoteDenied := pg.denyList["195.191.47.210:3001"]
+	assert.True(t, remoteDenied)
+	_, hostnameDenied := pg.denyList["prv-relay1.apexpool.info:3001"]
+	assert.True(t, hostnameDenied)
+	_, configuredDenied := pg.denyList["203.0.113.10:3001"]
+	assert.True(t, configuredDenied)
+}
+
 func TestPeerGovernor_IsDenied_Expiry(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -1235,6 +1491,75 @@ func TestPeerGovernor_AddPeer_Denied(t *testing.T) {
 	peers = pg.GetPeers()
 	assert.Len(t, peers, 1)
 	assert.Equal(t, "44.0.0.1:3002", peers[0].Address)
+}
+
+func TestPeerGovernor_AddPeer_DedupesHostnameAfterDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "relay.example.com:3001",
+		NormalizedAddress: "44.0.0.1:3001",
+		Source:            PeerSourceP2PGossip,
+		State:             PeerStateCold,
+	})
+
+	err := pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
+
+	require.NoError(t, err)
+	assert.Len(t, pg.peers, 1)
+}
+
+func TestPeerGovernor_DenyPeer_BlocksHostnameAfterDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		DenyDuration: time.Hour,
+	})
+
+	lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("44.0.0.1")}, nil
+	}
+	pg.DenyPeer("relay.example.com:3001", 0)
+
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	err := pg.AddPeer("relay.example.com:3001", PeerSourceP2PGossip)
+
+	require.NoError(t, err)
+	assert.Empty(t, pg.peers)
+	assert.True(t, pg.IsDenied("relay.example.com:3001"))
+}
+
+func TestPeerGovernor_ResolveAddress_LogsDNSFailure(t *testing.T) {
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return nil, errors.New("lookup failed")
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	var buf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(&buf, nil)),
+	})
+
+	normalized := pg.resolveAddress("relay.example.com:3001")
+
+	assert.Equal(t, "relay.example.com:3001", normalized)
+	assert.True(
+		t,
+		strings.Contains(buf.String(), "failed to resolve peer hostname"),
+		"expected DNS resolution failure to be logged",
+	)
 }
 
 func TestPeerGovernor_TestPeer_DeniesOnFailure(t *testing.T) {

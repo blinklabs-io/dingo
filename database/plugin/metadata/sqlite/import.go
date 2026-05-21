@@ -49,7 +49,13 @@ func (d *MetadataStoreSqlite) ImportUtxos(
 			"ImportUtxos: resolve db: %w", err,
 		)
 	}
+	return importUtxosWithDB(db, utxos)
+}
 
+func importUtxosWithDB(
+	db *gorm.DB,
+	utxos []models.Utxo,
+) error {
 	// Collect assets from UTxOs before insert. We work on a
 	// local copy of each UTxO so the caller's slice is not
 	// mutated (Assets remains intact after this call).
@@ -74,7 +80,7 @@ func (d *MetadataStoreSqlite) ImportUtxos(
 	for i := 0; i < len(stripped); i += importUtxoBatchSize {
 		end := min(i+importUtxoBatchSize, len(stripped))
 		batch := stripped[i:end]
-		result := db.Clauses(clause.OnConflict{
+		result := db.Omit("Assets").Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "tx_id"},
 				{Name: "output_idx"},
@@ -101,7 +107,18 @@ func (d *MetadataStoreSqlite) ImportUtxos(
 		assets := make([]models.Asset, 0, len(pending))
 		for _, p := range pending {
 			p.asset.UtxoID = stripped[p.utxoIdx].ID
+			p.asset.ID = 0
+			if p.asset.UtxoID == 0 {
+				return fmt.Errorf(
+					"missing UTxO ID for asset on %x#%d",
+					stripped[p.utxoIdx].TxId,
+					stripped[p.utxoIdx].OutputIdx,
+				)
+			}
 			assets = append(assets, p.asset)
+		}
+		if len(assets) == 0 {
+			return nil
 		}
 		for i := 0; i < len(assets); i += importAssetBatchSize {
 			end := min(i+importAssetBatchSize, len(assets))

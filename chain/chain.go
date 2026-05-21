@@ -168,6 +168,20 @@ func (c *Chain) AddBlock(
 	return nil
 }
 
+// HandleBlockProposedEvent applies locally forged block proposals published on
+// the EventBus and acknowledges the result to the proposer when requested.
+func (c *Chain) HandleBlockProposedEvent(evt event.Event) {
+	proposal, ok := evt.Data.(BlockProposedEvent)
+	if !ok {
+		return
+	}
+	if proposal.Block == nil {
+		proposal.Respond(errors.New("proposed block is nil"))
+		return
+	}
+	proposal.Respond(c.AddBlock(proposal.Block, nil))
+}
+
 // AddBlockWithPoint adds a block using a caller-supplied point. This avoids
 // recomputing the block hash when the caller already has the canonical slot/hash
 // pair from a validated upstream source such as blockfetch.
@@ -804,6 +818,21 @@ func (c *Chain) rollbackLocked(
 	c.tipBlockIndex = rollbackBlockIndex
 	// Update iterators for rollback
 	for _, iter := range c.iterators {
+		// Reverse iterators never deliver rollback markers, but if a
+		// rollback shortened the chain past nextBlockIndex the
+		// iterator must be clamped to the new tip so subsequent Next
+		// calls return the still-present predecessor blocks instead
+		// of mistaking missing blocks for origin. Clamping also
+		// applies to rollback-to-origin (rollbackBlockIndex == 0,
+		// the pre-genesis index — initialBlockIndex is 1): without
+		// it, a regrown chain reaching the iterator's stale index
+		// would silently hand out unrelated blocks.
+		if iter.reverse {
+			if iter.nextBlockIndex > rollbackBlockIndex {
+				iter.nextBlockIndex = rollbackBlockIndex
+			}
+			continue
+		}
 		// Use startPoint for iterators that haven't delivered any blocks
 		// yet (lastPoint is zero-value). Without this, newly created
 		// iterators miss rollback signals entirely.
@@ -925,29 +954,26 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	}
 	points := make([]ocommon.Point, 0, count)
 	seen := make(map[string]struct{}, count)
-	appendPoint := func(point ocommon.Point) bool {
+	appendPoint := func(point ocommon.Point) {
 		if len(points) >= count {
-			return false
+			return
 		}
 		key := fmt.Sprintf("%d:%x", point.Slot, point.Hash)
 		if _, ok := seen[key]; ok {
-			return true
+			return
 		}
 		points = append(points, point)
 		seen[key] = struct{}{}
-		return true
 	}
-	appendBlockPoint := func(blockIndex uint64) bool {
+	appendBlockPoint := func(blockIndex uint64) {
 		if len(points) >= count {
-			return false
+			return
 		}
 		blk, err := c.blockByIndex(blockIndex)
 		if err != nil {
-			return false
+			return
 		}
-		return appendPoint(
-			ocommon.NewPoint(blk.Slot, blk.Hash),
-		)
+		appendPoint(ocommon.NewPoint(blk.Slot, blk.Hash))
 	}
 	denseStartIndex := c.tipBlockIndex
 	tip := c.currentTip.Point
@@ -961,7 +987,8 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	}
 	denseCount := min(count, intersectDensePointCount)
 	for idx := denseStartIndex; idx >= initialBlockIndex && len(points) < denseCount; idx-- {
-		if !appendBlockPoint(idx) {
+		appendBlockPoint(idx)
+		if idx == initialBlockIndex {
 			break
 		}
 	}
@@ -975,12 +1002,10 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break
 		}
-		if !appendBlockPoint(c.tipBlockIndex - offset) {
-			break
-		}
+		appendBlockPoint(c.tipBlockIndex - offset)
 	}
 	if len(points) < count {
-		_ = appendBlockPoint(initialBlockIndex)
+		appendBlockPoint(initialBlockIndex)
 	}
 	return points
 }
@@ -1039,6 +1064,34 @@ func (c *Chain) FromPoint(
 		c,
 		point,
 		inclusive,
+		false,
+	)
+	if err != nil {
+		return nil, err
+	}
+	c.iterators = append(c.iterators, iter)
+	return iter, nil
+}
+
+// FromPointReverse returns a ChainIterator that walks backward from the
+// specified point toward chain origin. If inclusive is true the iterator
+// yields the start point first; otherwise it yields the block preceding it.
+// Blocking Next calls on a reverse iterator do not wait for new blocks; once
+// origin is reached, Next returns ErrIteratorChainOrigin.
+func (c *Chain) FromPointReverse(
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
+	if c == nil {
+		return nil, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	iter, err := newChainIterator(
+		c,
+		point,
+		inclusive,
+		true,
 	)
 	if err != nil {
 		return nil, err
@@ -1108,7 +1161,8 @@ func (c *Chain) iterNext(
 			c.manager.mutex.RUnlock()
 			return nil, err
 		}
-		// Check for pending rollback
+		// Check for pending rollback (forward iterators only; reverse
+		// iterators never have rollbacks queued).
 		if iter.needsRollback {
 			ret := &ChainIteratorResult{}
 			ret.Point = iter.rollbackPoint
@@ -1137,6 +1191,14 @@ func (c *Chain) iterNext(
 			c.manager.mutex.RUnlock()
 			return ret, nil
 		}
+		// Reverse iterators terminate when they walk past origin.
+		// nextBlockIndex == 0 is the sentinel set by newChainIterator
+		// for "no more blocks available behind this point".
+		if iter.reverse && iter.nextBlockIndex < initialBlockIndex {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainOrigin
+		}
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
 		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
@@ -1144,7 +1206,18 @@ func (c *Chain) iterNext(
 		if err == nil {
 			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
 			ret.Block = tmpBlock
-			iter.nextBlockIndex++
+			if iter.reverse {
+				if iter.nextBlockIndex == initialBlockIndex {
+					// Just delivered the genesis block; mark
+					// the iterator as past origin so the next
+					// call returns ErrIteratorChainOrigin.
+					iter.nextBlockIndex = 0
+				} else {
+					iter.nextBlockIndex--
+				}
+			} else {
+				iter.nextBlockIndex++
+			}
 			iter.lastPoint = ret.Point
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
@@ -1155,6 +1228,12 @@ func (c *Chain) iterNext(
 			c.mutex.Unlock()
 			c.manager.mutex.RUnlock()
 			return ret, err
+		}
+		// Reverse iterators never wait — origin does not grow.
+		if iter.reverse {
+			c.mutex.Unlock()
+			c.manager.mutex.RUnlock()
+			return nil, ErrIteratorChainOrigin
 		}
 		// Return immediately if we're not blocking
 		if !blocking {
@@ -1232,8 +1311,18 @@ func (c *Chain) reconcile() error {
 	}
 	// Determine prev-hash from earliest known good block
 	knownPoint := c.currentTip.Point
+	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
+	// Accumulate blocks locally to avoid O(K²) prepending
+	newBlocks := make([]ocommon.Point, 0, securityParam)
 	if len(c.blocks) > 0 {
 		knownPoint = c.blocks[0]
+	} else {
+		// No in-memory blocks: the chain's current tip is itself the
+		// earliest known good block. Seed newBlocks so the tip is
+		// preserved after we re-anchor lastCommonBlockIndex against
+		// the primary; otherwise iteration past the new common point
+		// would silently truncate at it.
+		newBlocks = append(newBlocks, knownPoint)
 	}
 	knownBlock, err := c.manager.blockByPoint(knownPoint, nil)
 	if err != nil {
@@ -1244,9 +1333,6 @@ func (c *Chain) reconcile() error {
 		return err
 	}
 	lastPrevHash := decodedKnownBlock.PrevHash().Bytes()
-	// Iterate backward through chain based on prev-hash until we find a matching block on the primary chain
-	// Accumulate blocks locally to avoid O(K²) prepending
-	newBlocks := make([]ocommon.Point, 0, securityParam)
 	iterationCount := 0
 	for {
 		if iterationCount >= securityParam {
@@ -1257,13 +1343,17 @@ func (c *Chain) reconcile() error {
 		if err != nil {
 			return err
 		}
-		// Lookup same block index on primary chain
+		// Lookup same block index on primary chain. When the primary
+		// has rolled back past tmpBlock's old index the lookup misses;
+		// treat tmpBlock as non-common and keep walking back via its
+		// PrevHash rather than aborting reconcile.
 		primaryBlock, err := primaryChain.blockByIndex(tmpBlock.ID)
-		if err != nil {
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
 		// Update last common block index and return when we find a matching block on the primary chain
-		if tmpBlock.Slot == primaryBlock.Slot &&
+		if err == nil &&
+			tmpBlock.Slot == primaryBlock.Slot &&
 			bytes.Equal(tmpBlock.Hash, primaryBlock.Hash) {
 			c.lastCommonBlockIndex = tmpBlock.ID
 			break

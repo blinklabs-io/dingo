@@ -15,15 +15,18 @@
 package mysql
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -349,6 +352,7 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 	stakingKey []byte,
 	limit int,
 	offset int,
+	order string,
 	txn types.Txn,
 ) ([]models.AddressTransaction, error) {
 	var ret []models.AddressTransaction
@@ -361,9 +365,9 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 	}
 	query := db.Model(&models.AddressTransaction{}).
 		Select("MIN(id) AS id, payment_key, staking_key").
-		Where("staking_key = ?", stakingKey).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
 		Group("payment_key, staking_key").
-		Order("payment_key ASC")
+		Order(addressOrderClause(order))
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -374,6 +378,146 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
 	}
 	return ret, nil
+}
+
+// CountAddressesByStakingKey returns the total number of distinct addresses mapped to a staking key.
+func (d *MetadataStoreMysql) CountAddressesByStakingKey(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	if len(stakingKey) == 0 {
+		return 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count addresses by staking key: %w",
+			err,
+		)
+	}
+	var count int64
+	if err := db.Model(&models.AddressTransaction{}).
+		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
+		Distinct("payment_key").
+		Count(&count).Error; err != nil {
+		return 0, fmt.Errorf("count addresses by staking key: %w", err)
+	}
+	return int(count), nil
+}
+
+func addressOrderClause(order string) string {
+	if strings.EqualFold(order, "desc") {
+		return "payment_key DESC"
+	}
+	return "payment_key ASC"
+}
+
+// GetAccountDelegationHistory returns delegation history rows for a staking key.
+func (d *MetadataStoreMysql) GetAccountDelegationHistory(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account delegation history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryDelegationHistory(
+		db,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account delegation history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountDelegationHistory returns the total number of
+// delegation history rows for a staking key.
+func (d *MetadataStoreMysql) CountAccountDelegationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account delegation history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountDelegationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account delegation history: %w",
+			err,
+		)
+	}
+	return count, nil
+}
+
+// GetAccountRegistrationHistory returns registration history rows for a staking key.
+func (d *MetadataStoreMysql) GetAccountRegistrationHistory(
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve DB for account registration history: %w",
+			err,
+		)
+	}
+	rows, err := accounthistory.QueryRegistrationHistory(
+		db,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"query account registration history: %w",
+			err,
+		)
+	}
+	return rows, nil
+}
+
+// CountAccountRegistrationHistory returns the total number of
+// registration history rows for a staking key.
+func (d *MetadataStoreMysql) CountAccountRegistrationHistory(
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve DB for count account registration history: %w",
+			err,
+		)
+	}
+	count, err := accounthistory.CountRegistrationHistory(db, stakingKey)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"count account registration history: %w",
+			err,
+		)
+	}
+	return count, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata
@@ -398,7 +542,7 @@ func (d *MetadataStoreMysql) GetTransactionsByMetadataLabel(
 
 	subQuery := db.Model(&models.TransactionMetadataLabel{}).
 		Select("transaction_id").
-		Where("label = ?", label)
+		Where("label = ?", types.Uint64(label))
 
 	query := db.
 		Where("id IN (?)", subQuery).
@@ -440,7 +584,7 @@ func (d *MetadataStoreMysql) CountTransactionsByMetadataLabel(
 
 	var count int64
 	if result := db.Model(&models.TransactionMetadataLabel{}).
-		Where("label = ?", label).
+		Where("label = ?", types.Uint64(label)).
 		Count(&count); result.Error != nil {
 		return 0, fmt.Errorf(
 			"count txs by metadata label %d: %w",
@@ -531,6 +675,7 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 			Columns: []clause.Column{{Name: "staking_key"}},
 			DoUpdates: clause.AssignmentColumns(
 				[]string{
+					"added_slot",
 					"pool",
 					"drep",
 					"drep_type",
@@ -732,7 +877,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 		for _, tmpLabel := range metadataLabels {
 			labelRecords = append(labelRecords, models.TransactionMetadataLabel{
 				TransactionID: tmpTx.ID,
-				Label:         tmpLabel.Label,
+				Label:         types.Uint64(tmpLabel.Label),
 				Slot:          point.Slot,
 				CborValue:     tmpLabel.CborValue,
 				JsonValue:     tmpLabel.JsonValue,
@@ -2042,6 +2187,1274 @@ func (d *MetadataStoreMysql) SetTransaction(
 	return nil
 }
 
+// SetTransactionBatched performs the same logical work as SetTransaction but
+// accumulates all per-item metadata rows into acc for later bulk flushing via
+// FlushBatch.  The transaction record itself is still written immediately so
+// that downstream foreign-key dependencies (witness, script, etc.) can
+// reference its auto-increment ID.
+//
+// Items written immediately (FK or ordering dependency):
+//   - Transaction record (upsert)
+//   - Collateral / reference-input UTXO marker UPDATEs
+//   - Certificates and governance records
+//   - storeTransactionDatums hash index
+//
+// Items deferred to acc:
+//   - UTxO outputs, collateral return, UTxO spends
+//   - Key witnesses, witness scripts, scripts, plutus data, redeemers
+//   - Address-transaction index rows
+func (d *MetadataStoreMysql) SetTransactionBatched(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	acc types.MetadataBatchAccumulator,
+	txn types.Txn,
+) error {
+	batch, ok := acc.(*BatchAccumulator)
+	if !ok {
+		return fmt.Errorf(
+			"SetTransactionBatched: wrong accumulator type %T",
+			acc,
+		)
+	}
+	if batch == nil {
+		return errors.New("SetTransactionBatched: acc must not be nil")
+	}
+	local := NewBatchAccumulator()
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// ------------------------------------------------------------------ //
+	// 1. Write transaction record immediately (needed for FK IDs)         //
+	// ------------------------------------------------------------------ //
+	var feeUint uint64
+	if txFee := tx.Fee(); txFee != nil {
+		if txFee.BitLen() > 64 {
+			feeUint = math.MaxUint64
+		} else {
+			feeUint = txFee.Uint64()
+		}
+	}
+	tmpTx := &models.Transaction{
+		Hash:       txHash,
+		Type:       tx.Type(),
+		BlockHash:  point.Hash,
+		BlockIndex: idx,
+		Slot:       point.Slot,
+		Fee:        types.Uint64(feeUint),
+		TTL:        types.Uint64(tx.TTL()),
+		Valid:      tx.IsValid(),
+	}
+	var metadataLabels []labelcodec.Entry
+	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
+		tmpMetadata, tmpLabels, err := labelcodec.EncodeAndExtract(
+			tx.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to extract metadata labels: %w",
+				err,
+			)
+		}
+		tmpTx.Metadata = tmpMetadata
+		metadataLabels = tmpLabels
+	}
+
+	collateralReturn := tx.CollateralReturn()
+	produced := tx.Produced()
+
+	// Separate collateral return from regular outputs.
+	// tx.Produced() already returns correct indices for both valid transactions
+	// (regular outputs at 0, 1, ...) and invalid transactions (collateral return
+	// at len(Outputs())), so no index rewriting is needed.
+	var colRetUtxo *models.Utxo
+	outputModels := make([]models.Utxo, 0, len(produced))
+	for _, utxo := range produced {
+		m := models.UtxoLedgerToModel(utxo, point.Slot)
+		if collateralReturn != nil && utxo.Output == collateralReturn {
+			colRetUtxo = &m
+			continue
+		}
+		outputModels = append(outputModels, m)
+	}
+
+	// Clear Outputs on tmpTx so the upsert doesn't try to create them.
+	tmpTx.Outputs = nil
+
+	result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "hash"}},
+		DoUpdates: clause.AssignmentColumns(
+			[]string{"block_hash", "block_index", "slot"},
+		),
+	}).Create(tmpTx)
+	needsIdFetch := tmpTx.ID == 0
+
+	if result.Error != nil {
+		return fmt.Errorf(
+			"create transaction (batched) at slot %d, block %x, txHash %x, txIndex %d: %w",
+			point.Slot,
+			point.Hash,
+			txHash,
+			idx,
+			result.Error,
+		)
+	}
+	if needsIdFetch {
+		var existing struct{ ID uint }
+		if err := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("hash = ?", txHash).
+			Take(&existing).Error; err != nil {
+			return fmt.Errorf(
+				"failed to fetch transaction ID after upsert (batched): %w",
+				err,
+			)
+		}
+		tmpTx.ID = existing.ID
+	}
+
+	// metadata labels – small, write immediately just like SetTransaction.
+	if len(metadataLabels) > 0 {
+		labelRecords := make(
+			[]models.TransactionMetadataLabel,
+			0,
+			len(metadataLabels),
+		)
+		for _, tmpLabel := range metadataLabels {
+			labelRecords = append(labelRecords, models.TransactionMetadataLabel{
+				TransactionID: tmpTx.ID,
+				Label:         types.Uint64(tmpLabel.Label),
+				Slot:          point.Slot,
+				CborValue:     tmpLabel.CborValue,
+				JsonValue:     tmpLabel.JsonValue,
+			})
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "transaction_id"},
+				{Name: "label"},
+			},
+			DoUpdates: clause.AssignmentColumns(
+				[]string{"slot", "cbor_value", "json_value"},
+			),
+		}).Create(&labelRecords); result.Error != nil {
+			return fmt.Errorf(
+				"create metadata labels for tx %x (batched): %w",
+				txHash,
+				result.Error,
+			)
+		}
+	}
+
+	// ------------------------------------------------------------------ //
+	// 2. Accumulate UTxO outputs                                          //
+	// ------------------------------------------------------------------ //
+	for i := range outputModels {
+		outputModels[i].ID = 0
+		outputModels[i].TransactionID = &tmpTx.ID
+		local.AddUtxoOutput(outputModels[i])
+	}
+	if colRetUtxo != nil {
+		colRetUtxo.CollateralReturnForTxID = &tmpTx.ID
+		local.AddCollateralReturn(*colRetUtxo)
+	}
+
+	// ------------------------------------------------------------------ //
+	// 3. Collateral / reference-input marker UPDATEs (immediate)         //
+	//    These update UTxOs that already exist from prior blocks.        //
+	// ------------------------------------------------------------------ //
+	if len(tx.Collateral()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.Collateral() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch collateral UTxO (batched): %w",
+					err,
+				)
+			}
+			if utxo == nil {
+				continue
+			}
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
+		}
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
+				return fmt.Errorf(
+					"batch update collateral (batched): %w",
+					r.Error,
+				)
+			}
+		}
+	}
+
+	if len(tx.ReferenceInputs()) > 0 {
+		var caseClauses []string
+		var whereConditions []string
+		var caseArgs []any
+		var whereArgs []any
+		for _, input := range tx.ReferenceInputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch reference input UTxO (batched): %w",
+					err,
+				)
+			}
+			if utxo == nil {
+				continue
+			}
+			caseClauses = append(
+				caseClauses,
+				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			)
+			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
+			whereConditions = append(
+				whereConditions,
+				"(tx_id = ? AND output_idx = ?)",
+			)
+			whereArgs = append(whereArgs, inTxId, inIdx)
+			tmpTx.ReferenceInputs = append(
+				tmpTx.ReferenceInputs,
+				*utxo,
+			)
+		}
+		if len(caseClauses) > 0 {
+			args := append(caseArgs, whereArgs...)
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
+				strings.Join(caseClauses, " "),
+				strings.Join(whereConditions, " OR "),
+			)
+			if r := db.Exec(sql, args...); r.Error != nil {
+				return fmt.Errorf(
+					"batch update reference inputs (batched): %w",
+					r.Error,
+				)
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ //
+	// 4. Accumulate UTxO spends (consumed inputs)                        //
+	// ------------------------------------------------------------------ //
+	if len(tx.Consumed()) > 0 {
+		seen := make(map[string]bool, len(tx.Consumed()))
+		for _, input := range tx.Consumed() {
+			inTxID := input.Id().Bytes()
+			inIdx := input.Index()
+			key := fmt.Sprintf("%x:%d", inTxID, inIdx)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			local.AddUtxoSpend(utxoSpend{
+				TxId:          inTxID,
+				OutputIdx:     inIdx,
+				Slot:          point.Slot,
+				SpentByTxHash: txHash,
+			})
+		}
+	}
+
+	// ------------------------------------------------------------------ //
+	// 5. Accumulate API-mode metadata (witnesses, scripts, address txs)  //
+	// ------------------------------------------------------------------ //
+	if d.storageMode == types.StorageModeAPI {
+		// On retry: schedule deletion of previously flushed rows for this tx.
+		if needsIdFetch {
+			local.AddDeleteTxID(tmpTx.ID)
+		}
+
+		// Fetch input UTxOs for address-indexing below.
+		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+			if err != nil {
+				return fmt.Errorf(
+					"failed to fetch input UTxO (batched): %w",
+					err,
+				)
+			}
+			if utxo == nil {
+				continue
+			}
+			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
+		}
+
+		// Address-transaction index.
+		addressUtxos := make(
+			[]models.Utxo,
+			0,
+			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(outputModels)+1,
+		)
+		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
+		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, outputModels...)
+		if colRetUtxo != nil {
+			addressUtxos = append(addressUtxos, *colRetUtxo)
+		}
+		for _, atx := range collectAddressTransactions(
+			tmpTx.ID,
+			point.Slot,
+			idx,
+			addressUtxos,
+		) {
+			local.AddAddressTx(atx)
+		}
+
+		// Witnesses.
+		ws := tx.Witnesses()
+		if ws != nil {
+			for _, vkey := range ws.Vkey() {
+				local.AddKeyWitness(models.KeyWitness{
+					TransactionID: tmpTx.ID,
+					Type:          models.KeyWitnessTypeVkey,
+					Vkey:          vkey.Vkey,
+					Signature:     vkey.Signature,
+				})
+			}
+			for _, bootstrap := range ws.Bootstrap() {
+				local.AddKeyWitness(models.KeyWitness{
+					TransactionID: tmpTx.ID,
+					Type:          models.KeyWitnessTypeBootstrap,
+					PublicKey:     bootstrap.PublicKey,
+					Signature:     bootstrap.Signature,
+					ChainCode:     bootstrap.ChainCode,
+					Attributes:    bootstrap.Attributes,
+				})
+			}
+
+			// Scripts – collect into accumulator instead of writing to DB.
+			for _, s := range ws.NativeScripts() {
+				local.AddWitnessScript(models.WitnessScripts{
+					TransactionID: tmpTx.ID,
+					Type:          uint8(lcommon.ScriptRefTypeNativeScript),
+					ScriptHash:    s.Hash().Bytes(),
+				})
+				local.AddScript(models.Script{
+					Hash:        s.Hash().Bytes(),
+					Type:        uint8(lcommon.ScriptRefTypeNativeScript),
+					Content:     s.RawScriptBytes(),
+					CreatedSlot: point.Slot,
+				})
+			}
+			for _, s := range ws.PlutusV1Scripts() {
+				local.AddWitnessScript(models.WitnessScripts{
+					TransactionID: tmpTx.ID,
+					Type:          uint8(lcommon.ScriptRefTypePlutusV1),
+					ScriptHash:    s.Hash().Bytes(),
+				})
+				local.AddScript(models.Script{
+					Hash:        s.Hash().Bytes(),
+					Type:        uint8(lcommon.ScriptRefTypePlutusV1),
+					Content:     s.RawScriptBytes(),
+					CreatedSlot: point.Slot,
+				})
+			}
+			for _, s := range ws.PlutusV2Scripts() {
+				local.AddWitnessScript(models.WitnessScripts{
+					TransactionID: tmpTx.ID,
+					Type:          uint8(lcommon.ScriptRefTypePlutusV2),
+					ScriptHash:    s.Hash().Bytes(),
+				})
+				local.AddScript(models.Script{
+					Hash:        s.Hash().Bytes(),
+					Type:        uint8(lcommon.ScriptRefTypePlutusV2),
+					Content:     s.RawScriptBytes(),
+					CreatedSlot: point.Slot,
+				})
+			}
+			for _, s := range ws.PlutusV3Scripts() {
+				local.AddWitnessScript(models.WitnessScripts{
+					TransactionID: tmpTx.ID,
+					Type:          uint8(lcommon.ScriptRefTypePlutusV3),
+					ScriptHash:    s.Hash().Bytes(),
+				})
+				local.AddScript(models.Script{
+					Hash:        s.Hash().Bytes(),
+					Type:        uint8(lcommon.ScriptRefTypePlutusV3),
+					Content:     s.RawScriptBytes(),
+					CreatedSlot: point.Slot,
+				})
+			}
+
+			// PlutusData (datums).
+			if tx.IsValid() {
+				for _, datum := range ws.PlutusData() {
+					local.AddPlutusData(models.PlutusData{
+						TransactionID: tmpTx.ID,
+						Data:          datum.Cbor(),
+					})
+				}
+			}
+
+			// Redeemers.
+			if ws.Redeemers() != nil {
+				for key, value := range ws.Redeemers().Iter() {
+					//nolint:gosec
+					local.AddRedeemer(models.Redeemer{
+						TransactionID: tmpTx.ID,
+						Tag:           uint8(key.Tag),
+						Index:         key.Index,
+						Data:          value.Data.Cbor(),
+						ExUnitsMemory: uint64(max(0, value.ExUnits.Memory)),
+						ExUnitsCPU:    uint64(max(0, value.ExUnits.Steps)),
+					})
+				}
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------ //
+	// 6. Certificates and governance – immediate, same as SetTransaction //
+	// ------------------------------------------------------------------ //
+	if tx.IsValid() {
+		certs := tx.Certificates()
+		if len(certs) > 0 {
+			unifiedIDs := []uint{}
+			if result := db.Model(&models.Certificate{}).
+				Where("transaction_id = ?", tmpTx.ID).
+				Pluck("id", &unifiedIDs); result.Error != nil {
+				return fmt.Errorf(
+					"query existing unified certificates (batched): %w",
+					result.Error,
+				)
+			}
+			if len(unifiedIDs) > 0 {
+				poolRegistrationIDs := []uint{}
+				if result := db.Model(&models.PoolRegistration{}).
+					Where("certificate_id IN ?", unifiedIDs).
+					Pluck("id", &poolRegistrationIDs); result.Error != nil {
+					return fmt.Errorf(
+						"query existing pool registrations (batched): %w",
+						result.Error,
+					)
+				}
+				if len(poolRegistrationIDs) > 0 {
+					if result := db.Table("pool_registration_owner").
+						Where("pool_registration_id IN ?", poolRegistrationIDs).
+						Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing pool_registration_owner records (batched): %w",
+							result.Error,
+						)
+					}
+					if result := db.Table("pool_registration_relay").
+						Where("pool_registration_id IN ?", poolRegistrationIDs).
+						Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing pool_registration_relay records (batched): %w",
+							result.Error,
+						)
+					}
+				}
+				tables := []string{
+					"stake_registration", "pool_registration", "pool_retirement",
+					"auth_committee_hot", "resign_committee_cold",
+					"deregistration", "stake_delegation",
+					"stake_registration_delegation", "stake_vote_delegation",
+					"stake_vote_registration_delegation", "registration",
+					"registration_drep", "deregistration_drep", "update_drep",
+					"vote_delegation", "vote_registration_delegation",
+					"move_instantaneous_rewards",
+				}
+				for _, table := range tables {
+					if result := db.Table(table).
+						Where("certificate_id IN ?", unifiedIDs).
+						Delete(nil); result.Error != nil {
+						return fmt.Errorf(
+							"delete existing %s records (batched): %w",
+							table,
+							result.Error,
+						)
+					}
+				}
+			}
+			certIDMap := make(map[int]uint)
+			certIDUpdates := make(map[uint]uint)
+			for i, cert := range certs {
+				var certType uint
+				switch cert.(type) {
+				case *lcommon.PoolRegistrationCertificate:
+					certType = uint(lcommon.CertificateTypePoolRegistration)
+				case *lcommon.StakeRegistrationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeRegistration)
+				case *lcommon.PoolRetirementCertificate:
+					certType = uint(lcommon.CertificateTypePoolRetirement)
+				case *lcommon.StakeDeregistrationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeDeregistration)
+				case *lcommon.DeregistrationCertificate:
+					certType = uint(lcommon.CertificateTypeDeregistration)
+				case *lcommon.StakeDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeDelegation)
+				case *lcommon.StakeRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeRegistrationDelegation)
+				case *lcommon.StakeVoteDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeVoteDelegation)
+				case *lcommon.RegistrationCertificate:
+					certType = uint(lcommon.CertificateTypeRegistration)
+				case *lcommon.RegistrationDrepCertificate:
+					certType = uint(lcommon.CertificateTypeRegistrationDrep)
+				case *lcommon.DeregistrationDrepCertificate:
+					certType = uint(lcommon.CertificateTypeDeregistrationDrep)
+				case *lcommon.UpdateDrepCertificate:
+					certType = uint(lcommon.CertificateTypeUpdateDrep)
+				case *lcommon.StakeVoteRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation)
+				case *lcommon.VoteRegistrationDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeVoteRegistrationDelegation)
+				case *lcommon.VoteDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeVoteDelegation)
+				case *lcommon.AuthCommitteeHotCertificate:
+					certType = uint(lcommon.CertificateTypeAuthCommitteeHot)
+				case *lcommon.ResignCommitteeColdCertificate:
+					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
+				case *lcommon.MoveInstantaneousRewardsCertificate:
+					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				default:
+					d.logger.Warn(
+						"unknown certificate type (batched)",
+						"type",
+						fmt.Sprintf("%T", cert),
+					)
+					continue
+				}
+				unifiedCert := models.Certificate{
+					TransactionID: tmpTx.ID,
+					CertIndex:     uint(i), //nolint:gosec
+					CertType:      certType,
+					Slot:          point.Slot,
+					BlockHash:     point.Hash,
+				}
+				if result := db.Clauses(clause.OnConflict{
+					Columns: []clause.Column{
+						{Name: "transaction_id"},
+						{Name: "cert_index"},
+					},
+					DoNothing: true,
+				}).Create(&unifiedCert); result.Error != nil {
+					return fmt.Errorf(
+						"create unified certificate (batched): %w",
+						result.Error,
+					)
+				}
+				if unifiedCert.ID == 0 {
+					if result := db.Where(
+						"transaction_id = ? AND cert_index = ?",
+						tmpTx.ID,
+						uint(i), //nolint:gosec
+					).First(&unifiedCert); result.Error != nil {
+						return fmt.Errorf(
+							"fetch existing unified certificate (batched): %w",
+							result.Error,
+						)
+					}
+				}
+				certIDMap[i] = unifiedCert.ID
+			}
+			for i, cert := range certs {
+				deposit := uint64(0)
+				if certDeposits != nil {
+					if depositVal, ok := certDeposits[i]; ok {
+						deposit = depositVal
+					} else if certRequiresDeposit(cert) {
+						d.logger.Warn(
+							"missing deposit for deposit-bearing certificate (batched)",
+							"index", i, "type", fmt.Sprintf("%T", cert),
+						)
+					}
+				}
+				if certDeposits == nil && certRequiresDeposit(cert) {
+					return fmt.Errorf(
+						"missing certDeposits for deposit-bearing certificate at index %d (batched)",
+						i,
+					)
+				}
+				switch c := cert.(type) {
+				case *lcommon.PoolRegistrationCertificate:
+					tmpPool, err := d.GetPool(
+						lcommon.PoolKeyHash(c.Operator[:]),
+						true,
+						txn,
+					)
+					if err != nil && !errors.Is(err, models.ErrPoolNotFound) {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if tmpPool == nil {
+						tmpPool = &models.Pool{
+							PoolKeyHash: c.Operator[:],
+							VrfKeyHash:  c.VrfKeyHash[:],
+						}
+					}
+					tmpPool.Pledge = types.Uint64(c.Pledge)
+					tmpPool.Cost = types.Uint64(c.Cost)
+					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
+					tmpPool.RewardAccount = c.RewardAccount[:]
+					tmpReg := models.PoolRegistration{
+						PoolKeyHash:   c.Operator[:],
+						VrfKeyHash:    c.VrfKeyHash[:],
+						Pledge:        types.Uint64(c.Pledge),
+						Cost:          types.Uint64(c.Cost),
+						Margin:        &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount: c.RewardAccount[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					if c.PoolMetadata != nil {
+						tmpReg.MetadataUrl = c.PoolMetadata.Url
+						tmpReg.MetadataHash = c.PoolMetadata.Hash[:]
+					}
+					for _, owner := range c.PoolOwners {
+						tmpReg.Owners = append(
+							tmpReg.Owners,
+							models.PoolRegistrationOwner{KeyHash: owner[:]},
+						)
+					}
+					tmpPool.Owners = tmpReg.Owners
+					for _, relay := range c.Relays {
+						r := models.PoolRegistrationRelay{
+							Ipv4: relay.Ipv4,
+							Ipv6: relay.Ipv6,
+						}
+						if relay.Port != nil {
+							r.Port = uint(*relay.Port)
+						}
+						if relay.Hostname != nil {
+							r.Hostname = *relay.Hostname
+						}
+						tmpReg.Relays = append(tmpReg.Relays, r)
+					}
+					tmpPool.Relays = tmpReg.Relays
+					if tmpPool.ID == 0 {
+						if r := db.Omit(clause.Associations).Create(tmpPool); r.Error != nil {
+							return fmt.Errorf(
+								"process certificate (batched): %w",
+								r.Error,
+							)
+						}
+					} else {
+						if r := db.Omit(clause.Associations).Save(tmpPool); r.Error != nil {
+							return fmt.Errorf(
+								"process certificate (batched): %w",
+								r.Error,
+							)
+						}
+					}
+					tmpReg.PoolID = tmpPool.ID
+					for j := range tmpReg.Owners {
+						tmpReg.Owners[j].PoolID = tmpPool.ID
+					}
+					for j := range tmpReg.Relays {
+						tmpReg.Relays[j].PoolID = tmpPool.ID
+					}
+					r2 := db.Clauses(clause.OnConflict{
+						Columns: []clause.Column{
+							{Name: "pool_id"},
+							{Name: "added_slot"},
+						},
+						DoUpdates: clause.AssignmentColumns([]string{
+							"vrf_key_hash", "pledge", "cost", "margin",
+							"reward_account", "certificate_id",
+							"metadata_url", "metadata_hash", "deposit_amount",
+						}),
+					}).Omit("Owners", "Relays").Create(&tmpReg)
+					if r2.Error != nil {
+						return fmt.Errorf(
+							"process certificate (batched): %w",
+							r2.Error,
+						)
+					}
+					if tmpReg.ID == 0 {
+						var existing models.PoolRegistration
+						if err := db.Where(
+							"pool_id = ? AND added_slot = ?",
+							tmpReg.PoolID, tmpReg.AddedSlot,
+						).First(&existing).Error; err != nil {
+							return fmt.Errorf(
+								"fetching pool registration ID after upsert (batched): %w",
+								err,
+							)
+						}
+						tmpReg.ID = existing.ID
+					}
+					if r := db.Where(
+						"pool_registration_id = ?", tmpReg.ID,
+					).Delete(&models.PoolRegistrationOwner{}); r.Error != nil {
+						return fmt.Errorf(
+							"delete pool registration owners (batched): %w",
+							r.Error,
+						)
+					}
+					if r := db.Where(
+						"pool_registration_id = ?", tmpReg.ID,
+					).Delete(&models.PoolRegistrationRelay{}); r.Error != nil {
+						return fmt.Errorf(
+							"delete pool registration relays (batched): %w",
+							r.Error,
+						)
+					}
+					if len(tmpReg.Owners) > 0 {
+						for j := range tmpReg.Owners {
+							tmpReg.Owners[j].PoolRegistrationID = tmpReg.ID
+							tmpReg.Owners[j].PoolID = tmpPool.ID
+						}
+						if r := db.Create(&tmpReg.Owners); r.Error != nil {
+							return fmt.Errorf(
+								"create pool registration owners (batched): %w",
+								r.Error,
+							)
+						}
+					}
+					if len(tmpReg.Relays) > 0 {
+						for j := range tmpReg.Relays {
+							tmpReg.Relays[j].PoolRegistrationID = tmpReg.ID
+							tmpReg.Relays[j].PoolID = tmpPool.ID
+						}
+						if r := db.Create(&tmpReg.Relays); r.Error != nil {
+							return fmt.Errorf(
+								"create pool registration relays (batched): %w",
+								r.Error,
+							)
+						}
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.StakeRegistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					tmpReg := models.StakeRegistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					tmpAccount.AddedSlot = point.Slot
+					if tmpAccount.ID == 0 {
+						tmpAccount.CertificateID = certIDMap[i]
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpReg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.PoolRetirementCertificate:
+					tmpPool, err := d.GetPool(
+						lcommon.PoolKeyHash(c.PoolKeyHash[:]),
+						true,
+						txn,
+					)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if tmpPool == nil {
+						tmpPool = &models.Pool{PoolKeyHash: c.PoolKeyHash[:]}
+						r := db.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "pool_key_hash"}},
+							UpdateAll: true,
+						}).Create(&tmpPool)
+						if r.Error != nil {
+							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						}
+					}
+					tmpItem := models.PoolRetirement{
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Epoch:         c.Epoch,
+						AddedSlot:     point.Slot,
+						PoolID:        tmpPool.ID,
+						CertificateID: certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.StakeDeregistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if tmpAccount == nil {
+						tmpAccount = &models.Account{StakingKey: stakeKey}
+						r := db.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "staking_key"}},
+							UpdateAll: true,
+						}).Create(tmpAccount)
+						if r.Error != nil {
+							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						}
+					}
+					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
+					tmpItem := models.StakeDeregistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.DeregistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if tmpAccount == nil {
+						tmpAccount = &models.Account{StakingKey: stakeKey}
+						r := db.Clauses(clause.OnConflict{
+							Columns:   []clause.Column{{Name: "staking_key"}},
+							UpdateAll: true,
+						}).Create(tmpAccount)
+						if r.Error != nil {
+							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						}
+					}
+					tmpAccount.Active = false
+					tmpAccount.AddedSlot = point.Slot
+					tmpItem := models.Deregistration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+						Amount:        types.Uint64(deposit),
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.StakeDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
+					tmpItem := models.StakeDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.StakeRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.AddedSlot = point.Slot
+					tmpReg := models.StakeRegistrationDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpReg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.StakeVoteDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
+					tmpItem := models.StakeVoteDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.RegistrationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					tmpReg := models.Registration{
+						StakingKey:    stakeKey,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					tmpAccount.AddedSlot = point.Slot
+					if tmpAccount.ID == 0 {
+						tmpAccount.CertificateID = certIDMap[i]
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpReg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.RegistrationDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+					tmpReg := models.RegistrationDrep{
+						DrepCredential: drepCredential,
+						AddedSlot:      point.Slot,
+						DepositAmount:  types.Uint64(deposit),
+						CertificateID:  certIDMap[i],
+					}
+					if c.Anchor != nil {
+						tmpReg.AnchorURL = c.Anchor.Url
+						tmpReg.AnchorHash = c.Anchor.DataHash[:]
+					}
+					if err := d.SetDrep(
+						drepCredential, point.Slot,
+						tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn,
+					); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					r2 := db.Clauses(clause.OnConflict{
+						Columns: []clause.Column{
+							{Name: "drep_credential"},
+							{Name: "added_slot"},
+						},
+						DoUpdates: clause.AssignmentColumns([]string{
+							"anchor_url", "anchor_hash", "certificate_id",
+						}),
+					}).Create(&tmpReg)
+					if r2.Error != nil {
+						return fmt.Errorf("process certificate (batched): %w", r2.Error)
+					}
+					if tmpReg.ID == 0 {
+						var existing models.RegistrationDrep
+						if err := db.Where(
+							"drep_credential = ? AND added_slot = ?",
+							tmpReg.DrepCredential, tmpReg.AddedSlot,
+						).First(&existing).Error; err != nil {
+							return fmt.Errorf(
+								"fetching drep registration ID after upsert (batched): %w",
+								err,
+							)
+						}
+						tmpReg.ID = existing.ID
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.DeregistrationDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+					tmpDereg := models.DeregistrationDrep{
+						DrepCredential: drepCredential,
+						AddedSlot:      point.Slot,
+						DepositAmount:  types.Uint64(deposit),
+						CertificateID:  certIDMap[i],
+					}
+					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if existingDrep == nil {
+						return fmt.Errorf(
+							"process certificate (batched): %w",
+							models.ErrDrepNotFound,
+						)
+					}
+					if err := d.SetDrep(
+						drepCredential, point.Slot, "", nil, false, txn,
+					); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpDereg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpDereg.ID
+				case *lcommon.UpdateDrepCertificate:
+					drepCredential := c.DrepCredential.Credential[:]
+					tmpUpdate := models.UpdateDrep{
+						Credential:    drepCredential,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if c.Anchor != nil {
+						tmpUpdate.AnchorURL = c.Anchor.Url
+						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
+					}
+					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if existingDrep == nil {
+						return fmt.Errorf(
+							"process certificate (batched): %w",
+							models.ErrDrepNotFound,
+						)
+					}
+					if err := d.SetDrep(
+						drepCredential, point.Slot,
+						tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn,
+					); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
+				case *lcommon.StakeVoteRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
+					tmpAccount.Pool = c.PoolKeyHash[:]
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
+					tmpReg := models.StakeVoteRegistrationDelegation{
+						StakingKey:    stakeKey,
+						PoolKeyHash:   c.PoolKeyHash[:],
+						Drep:          drepCredential,
+						DrepType:      drepType,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpReg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.VoteRegistrationDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
+					tmpReg := models.VoteRegistrationDelegation{
+						StakingKey:    stakeKey,
+						Drep:          drepCredential,
+						DrepType:      drepType,
+						AddedSlot:     point.Slot,
+						DepositAmount: types.Uint64(deposit),
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpReg, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.VoteDelegationCertificate:
+					stakeKey := c.StakeCredential.Credential[:]
+					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					drepType, err := models.DrepTypeFromInt(c.Drep.Type)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					var drepCredential []byte
+					if drepType != models.DrepTypeAlwaysAbstain &&
+						drepType != models.DrepTypeAlwaysNoConfidence {
+						drepCredential = c.Drep.Credential[:]
+					}
+					tmpAccount.Drep = drepCredential
+					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
+					tmpItem := models.VoteDelegation{
+						StakingKey:    stakeKey,
+						Drep:          drepCredential,
+						DrepType:      drepType,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if err := saveAccount(tmpAccount, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
+				case *lcommon.AuthCommitteeHotCertificate:
+					coldCredential := c.ColdCredential.Credential[:]
+					hotCredential := c.HotCredential.Credential[:]
+					tmpAuth := models.AuthCommitteeHot{
+						ColdCredential: coldCredential,
+						HotCredential:  hotCredential,
+						CertificateID:  certIDMap[i],
+						AddedSlot:      point.Slot,
+					}
+					if err := saveCertRecord(&tmpAuth, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpAuth.ID
+				case *lcommon.ResignCommitteeColdCertificate:
+					coldCredential := c.ColdCredential.Credential[:]
+					tmpResign := models.ResignCommitteeCold{
+						ColdCredential: coldCredential,
+						CertificateID:  certIDMap[i],
+						AddedSlot:      point.Slot,
+					}
+					if c.Anchor != nil {
+						tmpResign.AnchorURL = c.Anchor.Url
+						tmpResign.AnchorHash = c.Anchor.DataHash[:]
+					}
+					if err := saveCertRecord(&tmpResign, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpResign.ID
+				case *lcommon.MoveInstantaneousRewardsCertificate:
+					tmpMIR := models.MoveInstantaneousRewards{
+						Pot:           c.Reward.Source,
+						AddedSlot:     point.Slot,
+						CertificateID: certIDMap[i],
+					}
+					if r := db.Create(&tmpMIR); r.Error != nil {
+						return fmt.Errorf("process certificate (batched): %w", r.Error)
+					}
+					certIDUpdates[certIDMap[i]] = tmpMIR.ID
+					for credential, amount := range c.Reward.Rewards {
+						tmpReward := models.MoveInstantaneousRewardsReward{
+							Credential: credential.Credential[:],
+							Amount:     types.Uint64(amount),
+							MIRID:      tmpMIR.ID,
+						}
+						if r := db.Create(&tmpReward); r.Error != nil {
+							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						}
+					}
+				default:
+					return fmt.Errorf(
+						"unsupported certificate type (batched) %T",
+						cert,
+					)
+				}
+			}
+
+			if len(certIDUpdates) > 0 {
+				var ids []uint
+				var whenClauses []string
+				var values []any
+				for unifiedID, specializedID := range certIDUpdates {
+					ids = append(ids, unifiedID)
+					whenClauses = append(whenClauses, "WHEN id = ? THEN ?")
+					values = append(values, unifiedID, specializedID)
+				}
+				caseStmt := strings.Join(whenClauses, " ")
+				query := fmt.Sprintf(
+					"UPDATE certs SET certificate_id = CASE %s END WHERE id IN ?",
+					caseStmt,
+				)
+				values = append(values, ids)
+				if r := db.Exec(query, values...); r.Error != nil {
+					return fmt.Errorf(
+						"batch update unified certificates (batched): %w",
+						r.Error,
+					)
+				}
+			}
+		}
+
+		if d.storageMode == types.StorageModeAPI {
+			if err := d.storeTransactionDatums(tx, point.Slot, txn); err != nil {
+				return fmt.Errorf("store datums failed (batched): %w", err)
+			}
+		}
+	}
+
+	batch.MergeFrom(local)
+	return nil
+}
+
 // SetGenesisTransaction stores a genesis transaction record.
 // Genesis transactions have no inputs, witnesses, or fees - just outputs.
 func (d *MetadataStoreMysql) SetGenesisTransaction(
@@ -2242,14 +3655,388 @@ func (d *MetadataStoreMysql) DeleteTransactionsAfterSlot(
 	return nil
 }
 
-// SetGenesisStaking is not implemented for the MySQL metadata plugin.
+// SetGenesisStaking stores genesis pool registrations and stake delegations
+// from the shelley-genesis.json staking section. It creates Pool,
+// PoolRegistration, and Account records at slot 0.
+//
+// Idempotency notes:
+//   - The slot-0 PoolRegistration is written with OnConflict{DoNothing}. Re-running
+//     with mutated genesis data would leave stale historical fields on the slot-0
+//     row, but a network's genesis file is immutable so this is intentional;
+//     callers must not re-bootstrap with a different genesis against an existing
+//     database.
+//   - No synthetic slot-0 Registration / StakeDelegation history row is written
+//     for the stakeDelegations entries here, unlike SetGenesisGovernance. This
+//     leaves a known rollback hole: a later on-chain cert touching a
+//     Shelley-genesis-delegated key, followed by a rollback past that cert, can
+//     delete the genesis-rooted account because RestoreAccountStateAtSlot keys
+//     off the registration table rather than Account.added_slot. Mainnet does
+//     not exercise this path (its shelley-genesis declares no stake
+//     delegations), so the hole has not been triaged for the test networks;
+//     closing it is tracked separately.
 func (d *MetadataStoreMysql) SetGenesisStaking(
-	_ map[string]lcommon.PoolRegistrationCertificate,
-	_ map[string]string,
+	pools map[string]lcommon.PoolRegistrationCertificate,
+	stakeDelegations map[string]string,
 	_ []byte,
-	_ types.Txn,
+	txn types.Txn,
 ) error {
-	return errors.New("genesis staking not implemented for mysql")
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	// Batch fetch all existing pools to avoid N+1 queries
+	poolKeyHashes := make([][]byte, 0, len(pools))
+	for _, cert := range pools {
+		poolKeyHashes = append(poolKeyHashes, cert.Operator[:])
+	}
+	var existingPools []models.Pool
+	if len(poolKeyHashes) > 0 {
+		if result := db.Where(
+			"pool_key_hash IN ?",
+			poolKeyHashes,
+		).Find(&existingPools); result.Error != nil {
+			return fmt.Errorf(
+				"batch fetch genesis pools: %w",
+				result.Error,
+			)
+		}
+	}
+	existingPoolMap := make(map[string]*models.Pool, len(existingPools))
+	for i := range existingPools {
+		key := hex.EncodeToString(existingPools[i].PoolKeyHash)
+		existingPoolMap[key] = &existingPools[i]
+	}
+
+	for _, cert := range pools {
+		poolKey := hex.EncodeToString(cert.Operator[:])
+		tmpPool := existingPoolMap[poolKey]
+		if tmpPool == nil {
+			tmpPool = &models.Pool{
+				PoolKeyHash: cert.Operator[:],
+				VrfKeyHash:  cert.VrfKeyHash[:],
+			}
+		}
+		tmpPool.Pledge = types.Uint64(cert.Pledge)
+		tmpPool.Cost = types.Uint64(cert.Cost)
+		tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
+		tmpPool.RewardAccount = cert.RewardAccount[:]
+
+		tmpReg := models.PoolRegistration{
+			PoolKeyHash:   cert.Operator[:],
+			VrfKeyHash:    cert.VrfKeyHash[:],
+			Pledge:        types.Uint64(cert.Pledge),
+			Cost:          types.Uint64(cert.Cost),
+			Margin:        &types.Rat{Rat: cert.Margin.Rat},
+			RewardAccount: cert.RewardAccount[:],
+			AddedSlot:     0,
+		}
+		if cert.PoolMetadata != nil {
+			tmpReg.MetadataUrl = cert.PoolMetadata.Url
+			tmpReg.MetadataHash = cert.PoolMetadata.Hash[:]
+		}
+		for _, owner := range cert.PoolOwners {
+			tmpReg.Owners = append(
+				tmpReg.Owners,
+				models.PoolRegistrationOwner{KeyHash: owner[:]},
+			)
+		}
+		tmpPool.Owners = tmpReg.Owners
+
+		for _, relay := range cert.Relays {
+			tmpRelay := models.PoolRegistrationRelay{
+				Ipv4: relay.Ipv4,
+				Ipv6: relay.Ipv6,
+			}
+			if relay.Port != nil {
+				tmpRelay.Port = uint(*relay.Port)
+			}
+			if relay.Hostname != nil {
+				tmpRelay.Hostname = *relay.Hostname
+			}
+			tmpReg.Relays = append(tmpReg.Relays, tmpRelay)
+		}
+		tmpPool.Relays = tmpReg.Relays
+
+		if tmpPool.ID == 0 {
+			result := db.Omit(clause.Associations).Create(tmpPool)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis pool: %w",
+					result.Error,
+				)
+			}
+		} else {
+			result := db.Omit(clause.Associations).Save(tmpPool)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"save genesis pool: %w",
+					result.Error,
+				)
+			}
+		}
+		tmpReg.PoolID = tmpPool.ID
+		for i := range tmpReg.Owners {
+			tmpReg.Owners[i].PoolID = tmpPool.ID
+		}
+		for i := range tmpReg.Relays {
+			tmpReg.Relays[i].PoolID = tmpPool.ID
+		}
+
+		result := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&tmpReg)
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create genesis pool registration: %w",
+				result.Error,
+			)
+		}
+	}
+
+	for stakerHex, poolHex := range stakeDelegations {
+		stakerBytes, err := hex.DecodeString(stakerHex)
+		if err != nil {
+			return fmt.Errorf(
+				"decode staker hash %s: %w",
+				stakerHex,
+				err,
+			)
+		}
+		poolBytes, err := hex.DecodeString(poolHex)
+		if err != nil {
+			return fmt.Errorf(
+				"decode pool hash %s: %w",
+				poolHex,
+				err,
+			)
+		}
+
+		account := &models.Account{
+			StakingKey: stakerBytes,
+			Pool:       poolBytes,
+			Active:     true,
+			AddedSlot:  0,
+		}
+		// DoUpdates intentionally omits added_slot: RestoreAccountStateAtSlot
+		// selects rows by `added_slot > rollback_slot`, so resetting a
+		// non-zero added_slot back to 0 on a re-bootstrap (e.g. resumed
+		// Mithril after partial sync) would make that row invisible to
+		// every future rollback.
+		result := db.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "staking_key"}},
+			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
+		}).Create(account)
+		if result.Error != nil {
+			return fmt.Errorf(
+				"create genesis account: %w",
+				result.Error,
+			)
+		}
+	}
+
+	return nil
+}
+
+// SetGenesisGovernance stores the initial DReps and stake/vote
+// delegations described in the conway-genesis.json bootstrap section.
+// All records are stamped at slot 0 so they appear as part of the
+// initial ledger state.
+func (d *MetadataStoreMysql) SetGenesisGovernance(
+	initialDReps conway.ConwayGenesisInitialDReps,
+	delegs conway.ConwayGenesisDelegs,
+	_ []byte,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+
+	for cred, state := range initialDReps {
+		if cred == nil {
+			continue
+		}
+		drepCred := cred.Credential[:]
+		drep := &models.Drep{
+			Credential:  drepCred,
+			AddedSlot:   0,
+			ExpiryEpoch: state.Expiry,
+			Active:      true,
+		}
+		if state.Anchor != nil {
+			drep.AnchorURL = state.Anchor.Url
+			drep.AnchorHash = state.Anchor.DataHash[:]
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "credential"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"added_slot",
+				"anchor_url",
+				"anchor_hash",
+				"expiry_epoch",
+				"active",
+			}),
+		}).Create(drep); result.Error != nil {
+			return fmt.Errorf(
+				"create genesis drep: %w",
+				result.Error,
+			)
+		}
+
+		reg := &models.RegistrationDrep{
+			DrepCredential: drepCred,
+			AddedSlot:      0,
+			DepositAmount:  types.Uint64(state.Deposit),
+		}
+		if state.Anchor != nil {
+			reg.AnchorURL = state.Anchor.Url
+			reg.AnchorHash = state.Anchor.DataHash[:]
+		}
+		if result := db.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "drep_credential"},
+				{Name: "added_slot"},
+			},
+			DoNothing: true,
+		}).Create(reg); result.Error != nil {
+			return fmt.Errorf(
+				"create genesis drep registration: %w",
+				result.Error,
+			)
+		}
+	}
+
+	for cred, delegatee := range delegs {
+		if cred == nil {
+			continue
+		}
+		stakeKey := cred.Credential[:]
+
+		drepType, err := models.DrepTypeFromInt(delegatee.DRep.Type)
+		if err != nil && delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {
+			return fmt.Errorf("genesis delegatee drep type: %w", err)
+		}
+		var drepCredential []byte
+		if delegatee.Type != conway.ConwayGenesisDelegateeTypeStake &&
+			drepType != models.DrepTypeAlwaysAbstain &&
+			drepType != models.DrepTypeAlwaysNoConfidence {
+			drepCredential = delegatee.DRep.Credential
+		}
+
+		account, err := d.getOrCreateAccount(stakeKey, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"get or create genesis delegatee account: %w",
+				err,
+			)
+		}
+		account.AddedSlot = 0
+
+		// Conway genesis delegations implicitly register the staking
+		// credential at slot 0 (no on-chain certificate, no deposit).
+		// We materialize this as a synthetic Registration row so the
+		// rollback path (RestoreAccountStateAtSlot) recognizes the
+		// account as "existed at genesis" via its standard hasReg
+		// check; without it, rolling back past a later on-chain cert
+		// would delete a genesis-rooted account.
+		var existingReg models.Registration
+		regResult := db.Where(
+			"staking_key = ? AND added_slot = ?",
+			stakeKey, uint64(0),
+		).Attrs(models.Registration{
+			StakingKey: stakeKey,
+			AddedSlot:  0,
+		}).FirstOrCreate(&existingReg)
+		if regResult.Error != nil {
+			return fmt.Errorf(
+				"create genesis registration: %w", regResult.Error,
+			)
+		}
+
+		// Delegation history tables have no unique constraint that covers
+		// (staking_key, added_slot), so we use FirstOrCreate to keep the
+		// slot-0 row idempotent across retries (e.g., resumed Mithril
+		// bootstrap). Each staking key contributes at most one genesis
+		// delegation row of a given type, so matching on staking_key +
+		// added_slot is sufficient.
+		switch delegatee.Type {
+		case conway.ConwayGenesisDelegateeTypeStake:
+			account.Pool = delegatee.PoolId[:]
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis stake delegatee account: %w", err,
+				)
+			}
+			var existing models.StakeDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeDelegation{
+				StakingKey:  stakeKey,
+				PoolKeyHash: delegatee.PoolId[:],
+				AddedSlot:   0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis stake delegation: %w", result.Error,
+				)
+			}
+		case conway.ConwayGenesisDelegateeTypeVote:
+			account.Drep = drepCredential
+			account.DrepType = drepType
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis vote delegatee account: %w", err,
+				)
+			}
+			var existing models.VoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.VoteDelegation{
+				StakingKey: stakeKey,
+				Drep:       drepCredential,
+				DrepType:   drepType,
+				AddedSlot:  0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis vote delegation: %w", result.Error,
+				)
+			}
+		case conway.ConwayGenesisDelegateeTypeStakeVote:
+			account.Pool = delegatee.PoolId[:]
+			account.Drep = drepCredential
+			account.DrepType = drepType
+			if err := saveAccount(account, db); err != nil {
+				return fmt.Errorf(
+					"save genesis stake/vote delegatee account: %w", err,
+				)
+			}
+			var existing models.StakeVoteDelegation
+			result := db.Where(
+				"staking_key = ? AND added_slot = ?",
+				stakeKey, uint64(0),
+			).Attrs(models.StakeVoteDelegation{
+				StakingKey:  stakeKey,
+				PoolKeyHash: delegatee.PoolId[:],
+				Drep:        drepCredential,
+				DrepType:    drepType,
+				AddedSlot:   0,
+			}).FirstOrCreate(&existing)
+			if result.Error != nil {
+				return fmt.Errorf(
+					"create genesis stake/vote delegation: %w", result.Error,
+				)
+			}
+		default:
+			return fmt.Errorf(
+				"unknown genesis delegatee type: %d",
+				delegatee.Type,
+			)
+		}
+	}
+
+	return nil
 }
 
 // DeleteAddressTransactionsAfterSlot removes address-transaction mapping records

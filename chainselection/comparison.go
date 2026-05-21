@@ -30,33 +30,20 @@ const (
 	ChainComparisonUnknown ChainComparisonResult = 2
 )
 
-// CompareChains compares two chain tips according to Ouroboros Praos rules:
-//  1. Higher block number wins (longer chain)
-//  2. At equal block number, lower slot wins (denser chain)
-//  3. At equal block number AND equal slot (a slot battle between two
-//     pools' competing forges), lower block hash wins.
+// ComparePraosTips compares two Praos-era tips using cardano-node's
+// equal-length tiebreaker shape:
+//  1. Higher block number wins.
+//  2. At equal block number, prefer a candidate with the same issuer and slot
+//     only when it has a higher opcert issue number.
+//  3. Otherwise compare the tip VRF only when the era's VRF tiebreaker flavor
+//     is armed. Conway restricts this to tips at most 5 slots apart.
 //
-// Rule 3 is the deterministic tiebreak the chainsync handler needs to
-// pick a side at a slot battle. Without it, two competing forges at
-// the same slot+length collapse to ChainEqual, the handler refuses to
-// switch in either direction, and the local chain permanently keeps
-// whichever block was adopted first. The losing block's VRF output
-// then keeps folding into the local evolving nonce, and the drift
-// compounds across epochs until eta0 disagreement breaks header
-// verification at the next epoch boundary.
-//
-// Block hash is a deterministic function of every input the full
-// Praos select-view comparator (chain length → slot → self-issued →
-// issuer hash → VRF output → opcert counter) considers, so two peers
-// independently applying "lower hash wins" to the same pair of
-// competing tips arrive at the same decision and the chains converge.
-//
-// Returns:
-//   - ChainABetter (1) if tipA represents a better chain
-//   - ChainBBetter (-1) if tipB represents a better chain
-//   - ChainEqual (0) only when both tips refer to the same block
-func CompareChains(tipA, tipB ochainsync.Tip) ChainComparisonResult {
-	// Rule 1: Higher block number wins (longer chain)
+// If neither reference implementation rule applies, this returns ChainEqual so
+// callers keep the incumbent.
+func ComparePraosTips(
+	tipA, tipB ochainsync.Tip,
+	viewA, viewB PraosTiebreakerView,
+) ChainComparisonResult {
 	if tipA.BlockNumber > tipB.BlockNumber {
 		return ChainABetter
 	}
@@ -64,176 +51,82 @@ func CompareChains(tipA, tipB ochainsync.Tip) ChainComparisonResult {
 		return ChainBBetter
 	}
 
-	// Rule 2: At equal block number, lower slot wins (denser chain)
-	if tipA.Point.Slot < tipB.Point.Slot {
+	if tipA.Point.Slot == tipB.Point.Slot &&
+		bytes.Equal(tipA.Point.Hash, tipB.Point.Hash) {
+		return ChainEqual
+	}
+
+	if PreferPraosCandidate(viewB, viewA) {
 		return ChainABetter
 	}
-	if tipB.Point.Slot < tipA.Point.Slot {
+	if PreferPraosCandidate(viewA, viewB) {
 		return ChainBBetter
 	}
-
-	// Rule 3: At a slot battle (same length, same slot, different
-	// hash), lower hash wins.
-	if cmp := bytes.Compare(tipA.Point.Hash, tipB.Point.Hash); cmp != 0 {
-		if cmp < 0 {
-			return ChainABetter
-		}
-		return ChainBBetter
-	}
-
-	// Tips refer to the same block.
 	return ChainEqual
 }
 
-// IsBetterChain returns true if newTip represents a better chain than
-// currentTip according to Ouroboros Praos rules.
-func IsBetterChain(newTip, currentTip ochainsync.Tip) bool {
-	return CompareChains(newTip, currentTip) == ChainABetter
-}
-
-// IsSignificantlyBetter returns true if newTip is better than currentTip by
-// at least the specified minimum block difference. This can be used to avoid
-// frequent chain switches for marginal improvements.
-func IsSignificantlyBetter(
-	newTip, currentTip ochainsync.Tip,
-	minBlockDiff uint64,
+// PreferPraosCandidate mirrors ouroboros-consensus'
+// preferCandidate cfg ours cand for equal-length Praos chains.
+func PreferPraosCandidate(
+	ours, cand PraosTiebreakerView,
 ) bool {
-	if newTip.BlockNumber <= currentTip.BlockNumber {
+	if praosIssueNoArmed(ours, cand) {
+		if cand.IssueNo > ours.IssueNo {
+			return true
+		}
+		if cand.IssueNo < ours.IssueNo {
+			return false
+		}
+	}
+	if !praosVRFArmed(ours, cand) {
 		return false
 	}
-	return newTip.BlockNumber-currentTip.BlockNumber >= minBlockDiff
-}
-
-// CompareChainsWithDensity compares two chain tips using density-based
-// comparison according to Ouroboros Praos rules:
-// 1. Higher block number wins (longer chain)
-// 2. At equal block number, higher density wins (more blocks in 3k/f window)
-// 3. At equal density, lower slot wins (tie-breaker)
-//
-// The blocksInWindowA and blocksInWindowB parameters represent the number of
-// blocks in the stability window (3k/f slots) for each chain tip. These values
-// should be computed by counting blocks within the window ending at each tip.
-//
-// Returns:
-//   - ChainABetter (1) if tipA represents a better chain
-//   - ChainBBetter (-1) if tipB represents a better chain
-//   - ChainEqual (0) if they are equal
-func CompareChainsWithDensity(
-	tipA, tipB ochainsync.Tip,
-	blocksInWindowA, blocksInWindowB uint64,
-) ChainComparisonResult {
-	// Rule 1: Higher block number wins (longer chain)
-	if tipA.BlockNumber > tipB.BlockNumber {
-		return ChainABetter
-	}
-	if tipB.BlockNumber > tipA.BlockNumber {
-		return ChainBBetter
-	}
-
-	// Rule 2: At equal block number, higher density wins
-	// (more blocks in 3k/f window)
-	if blocksInWindowA > blocksInWindowB {
-		return ChainABetter
-	}
-	if blocksInWindowB > blocksInWindowA {
-		return ChainBBetter
-	}
-
-	// Rule 3: At equal density, lower slot wins (tie-breaker)
-	if tipA.Point.Slot < tipB.Point.Slot {
-		return ChainABetter
-	}
-	if tipB.Point.Slot < tipA.Point.Slot {
-		return ChainBBetter
-	}
-
-	// Chains are equal
-	return ChainEqual
-}
-
-// IsBetterChainWithDensity returns true if newTip represents a better chain
-// than currentTip according to Ouroboros Praos density-based rules.
-func IsBetterChainWithDensity(
-	newTip, currentTip ochainsync.Tip,
-	blocksInWindowNew, blocksInWindowCurrent uint64,
-) bool {
-	return CompareChainsWithDensity(
-		newTip,
-		currentTip,
-		blocksInWindowNew,
-		blocksInWindowCurrent,
+	return CompareVRFOutputs(
+		cand.TieBreakVRF,
+		ours.TieBreakVRF,
 	) == ChainABetter
 }
 
-// CompareChainsWithVRF compares two chain tips using the complete Ouroboros
-// Praos chain selection algorithm including VRF tie-breaking:
-// 1. Higher block number wins (longer chain)
-// 2. At equal block number, higher density wins (more blocks in 3k/f window)
-// 3. At equal density, lower VRF output wins (deterministic tie-breaker)
-//
-// The vrfOutputA and vrfOutputB parameters are the VRF outputs from the tip
-// blocks of each chain. These should be extracted using GetVRFOutput() from
-// the block headers. If VRF outputs are nil, falls back to slot-based comparison.
-//
-// Returns:
-//   - ChainABetter (1) if tipA represents a better chain
-//   - ChainBBetter (-1) if tipB represents a better chain
-//   - ChainEqual (0) if they are equal
-func CompareChainsWithVRF(
-	tipA, tipB ochainsync.Tip,
-	blocksInWindowA, blocksInWindowB uint64,
-	vrfOutputA, vrfOutputB []byte,
-) ChainComparisonResult {
-	// Rule 1: Higher block number wins (longer chain)
-	if tipA.BlockNumber > tipB.BlockNumber {
-		return ChainABetter
-	}
-	if tipB.BlockNumber > tipA.BlockNumber {
-		return ChainBBetter
-	}
-
-	// Rule 2: At equal block number, higher density wins
-	// (more blocks in 3k/f window)
-	if blocksInWindowA > blocksInWindowB {
-		return ChainABetter
-	}
-	if blocksInWindowB > blocksInWindowA {
-		return ChainBBetter
-	}
-
-	// Rule 3: At equal density, lower VRF output wins (per Ouroboros Praos)
-	if vrfOutputA != nil && vrfOutputB != nil {
-		vrfResult := CompareVRFOutputs(vrfOutputA, vrfOutputB)
-		if vrfResult != ChainEqual {
-			return vrfResult
-		}
-	}
-
-	// Fallback: At equal VRF (or if VRF unavailable), lower slot wins
-	if tipA.Point.Slot < tipB.Point.Slot {
-		return ChainABetter
-	}
-	if tipB.Point.Slot < tipA.Point.Slot {
-		return ChainBBetter
-	}
-
-	// Chains are equal
-	return ChainEqual
+func praosIssueNoArmed(ours, cand PraosTiebreakerView) bool {
+	return ours.Slot == cand.Slot &&
+		ours.hasIssuerIssueNo() &&
+		cand.hasIssuerIssueNo() &&
+		bytes.Equal(ours.Issuer, cand.Issuer)
 }
 
-// IsBetterChainWithVRF returns true if newTip represents a better chain than
-// currentTip according to the complete Ouroboros Praos rules including VRF.
-func IsBetterChainWithVRF(
-	newTip, currentTip ochainsync.Tip,
-	blocksInWindowNew, blocksInWindowCurrent uint64,
-	vrfOutputNew, vrfOutputCurrent []byte,
-) bool {
-	return CompareChainsWithVRF(
-		newTip,
-		currentTip,
-		blocksInWindowNew,
-		blocksInWindowCurrent,
-		vrfOutputNew,
-		vrfOutputCurrent,
-	) == ChainABetter
+func praosVRFArmed(ours, cand PraosTiebreakerView) bool {
+	config, ok := praosTiebreakerConfig(ours, cand)
+	if !ok {
+		return false
+	}
+	switch config.Flavor {
+	case PraosTiebreakerUnknown:
+		return false
+	case PraosTiebreakerUnrestricted:
+		return true
+	case PraosTiebreakerRestricted:
+		return praosSlotDistance(ours.Slot, cand.Slot) <=
+			config.MaxSlotDistance
+	default:
+		return false
+	}
+}
+
+func praosTiebreakerConfig(
+	ours, cand PraosTiebreakerView,
+) (PraosTiebreakerConfig, bool) {
+	if ours.TiebreakerConfig.known() {
+		return ours.TiebreakerConfig, true
+	}
+	if cand.TiebreakerConfig.known() {
+		return cand.TiebreakerConfig, true
+	}
+	return PraosTiebreakerConfig{}, false
+}
+
+func praosSlotDistance(a, b uint64) uint64 {
+	if a >= b {
+		return a - b
+	}
+	return b - a
 }

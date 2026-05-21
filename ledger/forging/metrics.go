@@ -122,13 +122,13 @@ func initForgingMetrics(
 	// Dingo-specific metrics
 	m.slotBattlesTotal = factory.NewCounter(
 		prometheus.CounterOpts{
-			Name: "cardano_node_metrics_slotBattlesTotal_int",
+			Name: "dingo_metrics_slotBattlesTotal_int",
 			Help: "slot battles detected (competing blocks at same slot)",
 		},
 	)
 	m.blockSizeBytes = factory.NewHistogram(
 		prometheus.HistogramOpts{
-			Name: "cardano_node_metrics_forgedBlockSize_bytes",
+			Name: "dingo_metrics_forgedBlockSize_bytes",
 			Help: "size of forged block bodies in bytes",
 			Buckets: prometheus.ExponentialBuckets(
 				256, 2, 14,
@@ -137,7 +137,7 @@ func initForgingMetrics(
 	)
 	m.blockTxCount = factory.NewHistogram(
 		prometheus.HistogramOpts{
-			Name: "cardano_node_metrics_forgedBlockTxCount_int",
+			Name: "dingo_metrics_forgedBlockTxCount_int",
 			Help: "number of transactions in forged blocks",
 			Buckets: prometheus.LinearBuckets(
 				0, 10, 20,

@@ -15,16 +15,21 @@
 package peergov
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
 
-	"log/slog"
+	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 func TestIsExpectedConnectionCloseError(t *testing.T) {
@@ -259,6 +264,151 @@ func TestIsAddrInUseError(t *testing.T) {
 	}
 }
 
+func TestHandleConnectionClosedEvent_StableOutboundResetsBackoff(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+		ConnectedAt:    time.Now().Add(-minStableConnectionDuration - time.Second),
+		ReconnectCount: 5,
+		ReconnectDelay: 8 * time.Second,
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	pg.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error: errors.New(
+				"protocol error: chain-sync: timeout waiting on transition",
+			),
+		},
+	))
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if peer.Connection != nil {
+		t.Fatal("connection should be cleared")
+	}
+	if peer.State != PeerStateCold {
+		t.Fatalf("state = %s, want cold", peer.State)
+	}
+	if !peer.ConnectedAt.IsZero() {
+		t.Fatalf("ConnectedAt should be reset, got %s", peer.ConnectedAt)
+	}
+	if peer.ReconnectCount != 0 {
+		t.Fatalf("ReconnectCount = %d, want 0", peer.ReconnectCount)
+	}
+	if peer.ReconnectDelay != 0 {
+		t.Fatalf("ReconnectDelay = %s, want 0", peer.ReconnectDelay)
+	}
+}
+
+func TestHandleConnectionClosedEvent_ShortLivedOutboundAppliesBackoff(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+		ConnectedAt:    time.Now().Add(-minStableConnectionDuration / 2),
+		ReconnectDelay: 2 * time.Second,
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	pg.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error:        io.EOF,
+		},
+	))
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if !peer.ConnectedAt.IsZero() {
+		t.Fatalf("ConnectedAt should be reset, got %s", peer.ConnectedAt)
+	}
+	if peer.ReconnectDelay != 4*time.Second {
+		t.Fatalf("ReconnectDelay = %s, want 4s", peer.ReconnectDelay)
+	}
+}
+
+func TestHandleConnectionClosedEvent_NegativeOutboundDurationLogsAndClamps(t *testing.T) {
+	var logBuf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(&logBuf, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateWarm,
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+		ConnectedAt: time.Now().Add(time.Second),
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	pg.handleConnectionClosedEvent(event.NewEvent(
+		connmanager.ConnectionClosedEventType,
+		connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+			Error:        io.EOF,
+		},
+	))
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if !peer.ConnectedAt.IsZero() {
+		t.Fatalf("ConnectedAt should be reset, got %s", peer.ConnectedAt)
+	}
+	if peer.ReconnectDelay != initialReconnectDelay {
+		t.Fatalf(
+			"ReconnectDelay = %s, want %s",
+			peer.ReconnectDelay,
+			initialReconnectDelay,
+		)
+	}
+	if !strings.Contains(
+		logBuf.String(),
+		"connection close timestamp predates connection start, clamping duration",
+	) {
+		t.Fatalf("expected negative duration log, got %s", logBuf.String())
+	}
+}
+
 func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesValency(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -303,5 +453,18 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 	}
 	if topologyPeer.ReconnectCount != 0 {
 		t.Fatalf("reconnect count changed unexpectedly: %d", topologyPeer.ReconnectCount)
+	}
+}
+
+func outboundTestConnId() ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.168.12.201"),
+			Port: 3005,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.168.12.101"),
+			Port: 3003,
+		},
 	}
 }

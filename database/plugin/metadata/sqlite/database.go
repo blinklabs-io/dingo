@@ -700,3 +700,16 @@ func (d *MetadataStoreSqlite) RestoreNormalPragmas() error {
 	d.logger.Info("restored normal PRAGMAs")
 	return nil
 }
+
+func (d *MetadataStoreSqlite) UpdatePlannerStats() error {
+	start := time.Now()
+	d.logger.Info("SQLite ANALYZE: collecting query planner statistics")
+	if result := d.DB().Exec("ANALYZE"); result.Error != nil {
+		return fmt.Errorf("ANALYZE: %w", result.Error)
+	}
+	d.logger.Info(
+		"SQLite ANALYZE: complete",
+		"duration", time.Since(start),
+	)
+	return nil
+}

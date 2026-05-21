@@ -19,6 +19,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -26,6 +28,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -74,6 +77,83 @@ func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+	require.NoError(
+		t,
+		fixture.ls.db.SetSyncState("mithril_ledger_slot", "20", nil),
+	)
+	timer := time.NewTimer(time.Hour)
+	t.Cleanup(func() { timer.Stop() })
+	fixture.ls.activeBlockfetchConnId = fixture.connId
+	fixture.ls.selectedBlockfetchConnId = fixture.connId
+	fixture.ls.shadowBlockfetchConnId = fixture.connId
+	fixture.ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	fixture.ls.chainsyncBlockfetchTimeoutTimer = timer
+	fixture.ls.pendingBlockfetchEvents = []BlockfetchEvent{
+		{Point: fixture.currentTip.Point},
+	}
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	storedBoundary, err := fixture.ls.db.GetSyncState(
+		"mithril_ledger_slot",
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, "20", storedBoundary)
+
+	select {
+	case e := <-resyncCh:
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonRollbackExceedsMithril,
+			e.Reason,
+		)
+		assert.Equal(t, fixture.connId, e.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected Mithril rollback-boundary resync event")
+	}
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.activeBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.selectedBlockfetchConnId)
+	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.shadowBlockfetchConnId)
+	assert.Nil(t, fixture.ls.chainsyncBlockfetchReadyChan)
+	assert.Nil(t, fixture.ls.chainsyncBlockfetchTimeoutTimer)
+	assert.Empty(t, fixture.ls.pendingBlockfetchEvents)
 }
 
 func TestHandleEventChainsyncRollbackPrunesStaleBlockNonces(
@@ -224,10 +304,46 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 			Point:        fixture.ancestorTip.Point,
 		},
 	)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrRollbackLoopDetected)
 
 	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+}
+
+func TestHandleEventChainsyncRollbackExceedsKReconcilesDivergedLedgerTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "live-rollback")
+
+	require.NoError(t, fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        ocommon.Point{},
+		},
+	))
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, SyncingChainsyncState, fixture.ls.chainsyncState)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+1,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
 }
 
 func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
@@ -276,6 +392,243 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestTryResolveForkExceedsKReconcilesDivergedLedgerTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	putPrimaryChainOnForkBeyondK(t, fixture, "live-fork-resolution")
+
+	localTip := fixture.ls.chain.Tip()
+	forkHash := testHashBytes("over-k-fork-resolution-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
+		blockNumber: localTip.BlockNumber + 1,
+		slot:        localTip.Point.Slot + 10,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.NoError(t, err)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Zero(t, fixture.ls.headerMismatchCount)
+	assert.Zero(t, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestTryResolveForkPropagatesAncestorLookupError(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	ancestorLookupErr := errors.New("ancestor lookup failed")
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, ancestorLookupErr
+	}
+
+	forkHash := testHashBytes("lookup-error-fork-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(testHashBytes("lookup-error-ancestor")),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+
+	require.False(t, resolved)
+	require.ErrorIs(t, err, ancestorLookupErr)
+	require.NotErrorIs(t, err, models.ErrBlockNotFound)
+}
+
+func TestHandleEventChainsyncBlockHeaderRestoresMismatchCountOnAncestorLookupError(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	ancestorLookupErr := errors.New("ancestor lookup failed")
+	fixture.ls.lookupBlockByHash = func([]byte) (models.Block, error) {
+		return models.Block{}, ancestorLookupErr
+	}
+	fixture.ls.headerMismatchCount = 7
+
+	forkHash := testHashBytes("handler-lookup-error-fork-block")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(testHashBytes("handler-lookup-error-ancestor")),
+		blockNumber: fixture.currentTip.BlockNumber + 1,
+		slot:        fixture.currentTip.Point.Slot + 10,
+	}
+
+	err := fixture.ls.handleEventChainsyncBlockHeader(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+	)
+
+	require.ErrorIs(t, err, ancestorLookupErr)
+	require.NotErrorIs(t, err, models.ErrBlockNotFound)
+	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
+}
+
+func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	aheadHash := testHashBytes("raw-chain-ahead-of-ledger")
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 10,
+			Hash:        aheadHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.Equal(
+		t,
+		fixture.currentTip.Point.Slot+10,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+
+	// Simulate the raw primary chain being well ahead of the metadata
+	// ledger apply loop during historical catch-up.
+	require.NoError(t, fixture.ls.db.SetTip(fixture.ancestorTip, nil))
+	fixture.ls.currentTip = fixture.ancestorTip
+	fixture.ls.currentTipBlockNonce = append(
+		[]byte(nil),
+		fixture.ancestorNonce...,
+	)
+	preRollbackSeq := fixture.ls.lastLocalRollbackSeq
+
+	forkHash := testHashBytes("ahead-raw-chain-fork")
+	header := mockHeader{
+		hash:        lcommon.NewBlake2b256(forkHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: fixture.currentTip.BlockNumber + 2,
+		slot:        fixture.currentTip.Point.Slot + 20,
+	}
+	err := fixture.ls.chain.AddBlockHeader(header)
+	var notFitErr chain.BlockNotFitChainTipError
+	require.ErrorAs(t, err, &notFitErr)
+
+	resolved, err := fixture.ls.tryResolveFork(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point: ocommon.NewPoint(
+				header.SlotNumber(),
+				header.Hash().Bytes(),
+			),
+			BlockHeader: header,
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					header.SlotNumber(),
+					header.Hash().Bytes(),
+				),
+				BlockNumber: header.BlockNumber(),
+			},
+		},
+		notFitErr,
+	)
+	require.NoError(t, err)
+	require.True(t, resolved)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, preRollbackSeq, fixture.ls.lastLocalRollbackSeq)
+	assert.Equal(t, 1, fixture.ls.chain.HeaderCount())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	select {
+	case resync := <-resyncCh:
+		t.Fatalf("expected no local rollback resync event, got: %#v", resync)
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
@@ -501,7 +854,11 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	select {
 	case resync := <-resyncCh:
 		assert.Equal(t, fixture.connId, resync.ConnectionId)
-		assert.Equal(t, resyncReasonRollbackNotFound, resync.Reason)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonRollbackNotFound,
+			resync.Reason,
+		)
 	case <-time.After(2 * time.Second):
 		t.Fatal("expected chainsync resync event")
 	}
@@ -539,7 +896,11 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 
 	select {
 	case resync := <-resyncCh:
-		assert.Equal(t, "local ledger rollback", resync.Reason)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonLocalLedgerRollback,
+			resync.Reason,
+		)
 		assert.Equal(t, fixture.ancestorTip.Point, resync.Point)
 		assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
 	case <-time.After(2 * time.Second):
@@ -786,6 +1147,74 @@ func TestRecoverAfterLocalRollbackSkipsConnectionCloseWhenPrimaryChainTipPastRol
 	assert.Equal(t, 7, fixture.ls.headerMismatchCount)
 }
 
+// Reproduces a chainsync recovery hang seen during multi-pool DevNet
+// runs. After a slot battle the chain has already extended past `point`
+// with the very block that peer history hands back as the only forkPath
+// entry. The recovery loop must skip events whose slot is at or below
+// the chain's header tip; otherwise AddBlockHeader rejects the duplicate
+// with BlockNotFitChainTipError, clearQueuedHeaders fires, and the
+// chainsync session never re-converges with the peer.
+func TestRecoverPeerHeaderHistoryFromPointSkipsHeadersAlreadyAtChainTip(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	advancedHash := testHashBytes("recovery-already-at-tip")
+	advancedSlot := fixture.currentTip.Point.Slot + 1
+	advancedBlockNumber := fixture.currentTip.BlockNumber + 1
+	require.NoError(
+		t,
+		fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+			{
+				Slot:        advancedSlot,
+				Hash:        advancedHash,
+				BlockNumber: advancedBlockNumber,
+				Type:        1,
+				PrevHash:    fixture.currentTip.Point.Hash,
+				Cbor:        []byte{0x80},
+			},
+		}),
+	)
+	require.Equal(
+		t,
+		advancedSlot,
+		fixture.ls.chain.HeaderTip().Point.Slot,
+		"chain header tip must reflect the post-rollback advance",
+	)
+
+	advancedHeader := mockHeader{
+		hash:        lcommon.NewBlake2b256(advancedHash),
+		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
+		blockNumber: advancedBlockNumber,
+		slot:        advancedSlot,
+	}
+	fixture.ls.recordPeerHeaderHistory(ChainsyncEvent{
+		ConnectionId: fixture.connId,
+		Point: ocommon.NewPoint(
+			advancedHeader.slot,
+			advancedHeader.hash.Bytes(),
+		),
+		Tip: ochainsync.Tip{
+			Point: ocommon.NewPoint(
+				advancedHeader.slot,
+				advancedHeader.hash.Bytes(),
+			),
+			BlockNumber: advancedHeader.blockNumber,
+		},
+		BlockHeader: advancedHeader,
+	})
+
+	fixture.ls.chainsyncMutex.Lock()
+	headerCount, err := fixture.ls.recoverPeerHeaderHistoryFromPointLocked(
+		fixture.connId,
+		fixture.currentTip.Point,
+	)
+	fixture.ls.chainsyncMutex.Unlock()
+
+	require.NoError(t, err)
+	assert.Zero(t, headerCount)
+}
+
 func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	t *testing.T,
 ) {
@@ -863,6 +1292,110 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
+}
+
+func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonAncestor(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	forkHash := testHashBytes("startup-primary-chain-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	require.NoError(t, fixture.ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.chain.Tip())
+
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.ancestorTip, dbTip)
+
+	rows, err := fixture.ls.db.GetBlockNoncesInSlotRange(
+		fixture.ancestorTip.Point.Slot,
+		fixture.currentTip.Point.Slot+1,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+}
+
+func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyondK(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	fixture.ls.currentEra.Id = 1
+	fixture.ls.config.CardanoNodeConfig.ShelleyGenesis().SecurityParam = 2
+	prevHash := fixture.currentTip.Point.Hash
+	blocks := make([]chain.RawBlock, 0, 3)
+	for idx, seed := range []string{
+		"startup-primary-chain-ahead-1",
+		"startup-primary-chain-ahead-2",
+		"startup-primary-chain-ahead-3",
+	} {
+		hash := testHashBytes(seed)
+		blockOffset := uint64(idx + 1)
+		blocks = append(blocks, chain.RawBlock{
+			Slot:        fixture.currentTip.Point.Slot + blockOffset,
+			Hash:        hash,
+			BlockNumber: fixture.currentTip.BlockNumber + blockOffset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        []byte{0x80},
+		})
+		prevHash = hash
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
+	require.Equal(
+		t,
+		fixture.currentTip.Point.Slot+3,
+		fixture.ls.chain.Tip().Point.Slot,
+	)
+
+	require.NoError(t, fixture.ls.reconcilePrimaryChainTipWithLedgerTip())
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	dbTip, err := fixture.ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, fixture.currentTip, dbTip)
+}
+
+func TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	forkHash := testHashBytes("intersect-primary-chain-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+
+	points, err := fixture.ls.IntersectPoints(4)
+	require.NoError(t, err)
+
+	require.Empty(t, points)
 }
 
 func TestProcessChainIteratorRollbackAppliesMatchingRollback(t *testing.T) {
@@ -1048,6 +1581,34 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 		ancestorNonce: ancestorNonce,
 		forkPoint:     ocommon.NewPoint(currentBlock.Slot+10, testHashBytes("fork-point")),
 	}
+}
+
+func putPrimaryChainOnForkBeyondK(
+	t *testing.T,
+	fixture *chainsyncRollbackFixture,
+	seedPrefix string,
+) {
+	t.Helper()
+
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	prevHash := fixture.ancestorTip.Point.Hash
+	blocks := make([]chain.RawBlock, 0, 3)
+	for idx := range 3 {
+		blockOffset := uint64(idx + 1)
+		hash := testHashBytes(fmt.Sprintf("%s-fork-%d", seedPrefix, idx))
+		blocks = append(blocks, chain.RawBlock{
+			Slot:        fixture.currentTip.Point.Slot + blockOffset*5,
+			Hash:        hash,
+			BlockNumber: fixture.ancestorTip.BlockNumber + blockOffset,
+			Type:        1,
+			PrevHash:    prevHash,
+			Cbor:        []byte{0x80},
+		})
+		prevHash = hash
+	}
+	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
+	require.NotEqual(t, fixture.currentTip, fixture.ls.chain.Tip())
+	require.Equal(t, fixture.currentTip, fixture.ls.currentTip)
 }
 
 func testHashBytes(seed string) []byte {

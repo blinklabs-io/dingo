@@ -70,6 +70,7 @@ type Node struct {
 	ctx                              context.Context
 	cancel                           context.CancelFunc
 	shutdownOnce                     sync.Once
+	shutdownErr                      error
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 }
@@ -198,6 +199,10 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	n.eventBus.SubscribeFunc(
+		chain.BlockProposedEventType,
+		n.chainManager.PrimaryChain().HandleBlockProposedEvent,
+	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
@@ -211,6 +216,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectTip:             n.config.intersectTip,
 		IntersectPoints:          n.config.intersectPoints,
 		PromRegistry:             n.config.promRegistry,
+		ChainsyncBlockTimeout:    n.config.chainsyncStallTimeout,
 		EnableLeios:              n.config.runMode == runModeLeios,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
@@ -318,14 +324,18 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkBaseUrl != "" {
-		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
+		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
 			BaseUrl: n.config.barkBaseUrl,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
 			LedgerState: state,
 			Logger:      n.config.logger,
-		}, n.db.Blob()))
+		}, n.db.Blob())
+		if err != nil {
+			return fmt.Errorf("failed to create bark blob store: %w", err)
+		}
+		n.db.SetBlobStore(barkBlobStore)
 
 		prunerFreq := n.config.barkPrunerFrequency
 		if prunerFreq <= 0 {
@@ -367,17 +377,16 @@ func (n *Node) Run(ctx context.Context) error {
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
-		n.config.logger.Warn(
-			"failed to capture genesis snapshot",
-			"error", err,
-		)
+		if err := n.handleGenesisSnapshotError(err); err != nil {
+			return err
+		}
 	}
 	if err := n.snapshotMgr.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
 	// Initialize mempool
-	n.mempool = mempool.NewMempool(mempool.MempoolConfig{
+	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity:    n.config.mempoolCapacity,
 		EvictionWatermark:  n.config.evictionWatermark,
 		RejectionWatermark: n.config.rejectionWatermark,
@@ -388,6 +397,9 @@ func (n *Node) Run(ctx context.Context) error {
 		CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
 	},
 	)
+	if err != nil {
+		return fmt.Errorf("failed to create mempool: %w", err)
+	}
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.mempool.Stop(context.Background()); err != nil {
 			n.config.logger.Error(
@@ -737,7 +749,8 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.barkPort > 0 {
-		n.bark = bark.NewBark(
+		var err error
+		n.bark, err = bark.NewBark(
 			bark.BarkConfig{
 				Logger:          n.config.logger,
 				DB:              db,
@@ -746,6 +759,9 @@ func (n *Node) Run(ctx context.Context) error {
 				Port:            n.config.barkPort,
 			},
 		)
+		if err != nil {
+			return fmt.Errorf("failed to create bark server: %w", err)
+		}
 		if err := n.bark.Start(n.ctx); err != nil { //nolint:contextcheck
 			return fmt.Errorf("failed to start bark server: %w", err)
 		}
@@ -764,6 +780,7 @@ func (n *Node) Run(ctx context.Context) error {
 		)
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
+			n.mempool,
 		)
 		if err != nil {
 			return fmt.Errorf(
@@ -853,6 +870,13 @@ func (n *Node) Run(ctx context.Context) error {
 		creds, err := n.validateBlockProducerStartup()
 		if err != nil {
 			return fmt.Errorf("block producer startup validation failed: %w", err)
+		}
+		// Cross-check loaded credentials against ledger state. Mismatch
+		// against on-chain pool registration is fatal; "not yet
+		// registered" is a warning so operators can stage credentials
+		// before submitting the registration cert.
+		if err := n.validateBlockProducerLedger(creds); err != nil {
+			return fmt.Errorf("block producer credentials failed ledger check: %w", err)
 		}
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx, creds); err != nil {
