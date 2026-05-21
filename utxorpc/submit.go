@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/event"
@@ -78,7 +79,8 @@ func (s *submitServiceServer) SubmitTx(
 
 // WaitForTx subscribes to block events and streams confirmation responses
 // for the requested transaction hashes. It blocks until all requested
-// transactions are confirmed or the client disconnects.
+// transactions are confirmed, the server-side timeout expires, or the client
+// disconnects.
 func (s *submitServiceServer) WaitForTx(
 	ctx context.Context,
 	req *connect.Request[submit.WaitForTxRequest],
@@ -200,8 +202,12 @@ func (s *submitServiceServer) WaitForTx(
 		streamMu.Unlock()
 	}()
 
+	waitTimeout := s.utxorpc.config.WaitForTxTimeout
+	timeout := time.NewTimer(waitTimeout)
+	defer timeout.Stop()
+
 	// Block until all transactions are confirmed, an error
-	// occurs, or the client disconnects
+	// occurs, the server-side timeout expires, or the client disconnects
 	select {
 	case <-doneCh:
 		return nil
@@ -219,6 +225,19 @@ func (s *submitServiceServer) WaitForTx(
 			"WaitForTx client disconnected",
 		)
 		return ctx.Err()
+	case <-timeout.C:
+		mu.Lock()
+		remaining := len(pending)
+		mu.Unlock()
+		s.utxorpc.config.Logger.Warn(
+			"WaitForTx timed out",
+			"timeout", waitTimeout,
+			"pending", remaining,
+		)
+		return connect.NewError(
+			connect.CodeDeadlineExceeded,
+			fmt.Errorf("wait for tx timed out after %s", waitTimeout),
+		)
 	}
 }
 
