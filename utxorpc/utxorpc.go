@@ -47,6 +47,7 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
+	DefaultServerTimeout   = time.Hour
 )
 
 type Utxorpc struct {
@@ -72,6 +73,9 @@ type UtxorpcConfig struct {
 	// max_items uses this cap.
 	MaxHistoryItems int
 	MaxDataKeys     int
+	// ServerTimeout bounds long-running UTxO RPC handlers server-side
+	// (0 = use default).
+	ServerTimeout time.Duration
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -96,6 +100,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
+	}
+	if cfg.ServerTimeout <= 0 {
+		cfg.ServerTimeout = DefaultServerTimeout
 	}
 	return &Utxorpc{
 		config: cfg,

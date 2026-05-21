@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -88,6 +89,7 @@ type utxorpcConnectHarness struct {
 type utxorpcHarnessOptions struct {
 	numBlocks       int
 	maxHistoryItems int
+	serverTimeout   time.Duration
 }
 
 func newConnectH2CClient() *http.Client {
@@ -212,6 +214,7 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		LedgerState:     ls,
 		Mempool:         mp,
 		MaxHistoryItems: maxHist,
+		ServerTimeout:   opts.serverTimeout,
 	})
 
 	srv := httptest.NewServer(testUtxorpcHTTPHandler(u))
@@ -629,6 +632,124 @@ func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
 	require.False(t, stream.Receive(), "no refs means the handler returns without frames")
 	require.NoError(t, stream.Err())
 	cancel()
+}
+
+// Wait until WaitForTx is listening on the fake event bus before the test
+// publishes events.
+func waitForEventSubscriber(
+	t *testing.T,
+	ctx context.Context,
+	eb *event.EventBus,
+	eventType event.EventType,
+) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if eb.HasSubscribers(eventType) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("event subscriber was not registered: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+type waitForTxResult struct {
+	resp *submit.WaitForTxResponse
+	err  error
+}
+
+// Run WaitForTx in the background so the test can cancel the request while
+// the stream is still open.
+func receiveWaitForTx(
+	ctx context.Context,
+	cli submitconnect.SubmitServiceClient,
+	req *submit.WaitForTxRequest,
+) <-chan waitForTxResult {
+	resultCh := make(chan waitForTxResult, 1)
+	go func() {
+		stream, err := cli.WaitForTx(ctx, connect.NewRequest(req))
+		if err != nil {
+			resultCh <- waitForTxResult{err: err}
+			return
+		}
+		if !stream.Receive() {
+			resultCh <- waitForTxResult{err: stream.Err()}
+			return
+		}
+		resp := stream.Msg()
+		if stream.Receive() {
+			resultCh <- waitForTxResult{
+				err: fmt.Errorf("unexpected extra WaitForTx frame"),
+			}
+			return
+		}
+		resultCh <- waitForTxResult{resp: resp, err: stream.Err()}
+	}()
+	return resultCh
+}
+
+// Test that WaitForTx times out when the transaction is never seen.
+func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     5,
+		serverTimeout: 25 * time.Millisecond,
+	})
+	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := receiveWaitForTx(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{bytes.Repeat([]byte{0xaa}, 32)},
+		},
+	)
+	select {
+	case result := <-resultCh:
+		require.Nil(t, result.resp)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(result.err))
+		require.ErrorContains(t, result.err, "wait for tx timed out")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+// Test that WaitForTx stops when the client cancels first.
+func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     5,
+		serverTimeout: time.Hour,
+	})
+	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := receiveWaitForTx(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{bytes.Repeat([]byte{0xbb}, 32)},
+		},
+	)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.BlockfetchEventType)
+
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		require.Nil(t, result.resp)
+		require.Equal(t, connect.CodeCanceled, connect.CodeOf(result.err))
+	case <-waitCtx.Done():
+		t.Fatal(waitCtx.Err())
+	}
 }
 
 func TestConnect_EvalTx(t *testing.T) {
