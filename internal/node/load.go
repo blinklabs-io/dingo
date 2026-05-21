@@ -649,28 +649,46 @@ func immutableUtxoOffsetsComplete(
 	db *database.Database,
 	immutableTipSlot uint64,
 ) (bool, error) {
+	slot, ok, err := ImmutableUtxoOffsetsTipSlot(db)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return slot >= immutableTipSlot, nil
+}
+
+// ImmutableUtxoOffsetsTipSlot reports the latest slot for which the Mithril
+// immutable-copy phase persisted produced-UTxO offset references. The second
+// return value is false when no immutable copy has run (the sync-state key is
+// unset); callers must treat that as "no skip threshold" and write offsets
+// normally.
+func ImmutableUtxoOffsetsTipSlot(
+	db *database.Database,
+) (uint64, bool, error) {
 	val, err := db.GetSyncState(
 		immutableUtxoOffsetsSyncStateKey,
 		nil,
 	)
 	if err != nil {
-		return false, fmt.Errorf(
+		return 0, false, fmt.Errorf(
 			"checking immutable UTxO offset state: %w",
 			err,
 		)
 	}
 	if val == "" {
-		return false, nil
+		return 0, false, nil
 	}
 	slot, err := strconv.ParseUint(val, 10, 64)
 	if err != nil {
-		return false, fmt.Errorf(
+		return 0, false, fmt.Errorf(
 			"parsing immutable UTxO offset state %q: %w",
 			val,
 			err,
 		)
 	}
-	return slot >= immutableTipSlot, nil
+	return slot, true, nil
 }
 
 func markImmutableUtxoOffsetsComplete(
