@@ -755,6 +755,9 @@ func runMithrilSync(
 			"backfilling historical metadata for API mode",
 			"component", "mithril",
 		)
+		if err := node.RunPlannerStats(db, logger); err != nil {
+			return fmt.Errorf("running planner statistics before backfill: %w", err)
+		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
 		bf.DisableNonceComputation()
 		if err := bf.Run(ctx); err != nil {

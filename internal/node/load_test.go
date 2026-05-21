@@ -12,6 +12,9 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -448,4 +451,58 @@ func decodeImmutableBlockHeader(
 		)
 	}
 	return header, nil
+}
+
+// TestRunPlannerStats_WithSQLiteStore verifies that RunPlannerStats succeeds
+// against an in-memory SQLite database and populates sqlite_stat1.
+func TestRunPlannerStats_WithSQLiteStore(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.Metadata().ImportUtxos([]models.Utxo{
+		{
+			TxId:      []byte("run_planner_stats_tx_id_00000001"),
+			OutputIdx: 0,
+			AddedSlot: 1,
+			Amount:    types.Uint64(1),
+		},
+	}, nil))
+
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+
+	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
+	require.True(t, ok, "test database should use SQLite metadata")
+
+	var count int64
+	err := sqliteStore.DB().Raw(
+		"SELECT COUNT(*) FROM sqlite_stat1",
+	).Scan(&count).Error
+	require.NoError(t, err)
+	assert.Positive(t, count, "sqlite_stat1 should be populated")
+}
+
+// TestRunPlannerStats_Idempotent verifies that repeated planner-stat
+// maintenance stays safe for resume/restart paths.
+func TestRunPlannerStats_Idempotent(t *testing.T) {
+	db := newTestDB(t)
+
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+	require.NoError(t, RunPlannerStats(db, slog.Default()))
+
+	sqliteStore, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
+	require.True(t, ok, "test database should use SQLite metadata")
+
+	var count int64
+	err := sqliteStore.DB().Raw(
+		"SELECT COUNT(*) FROM sqlite_stat1",
+	).Scan(&count).Error
+	require.NoError(t, err)
+	assert.Positive(t, count, "sqlite_stat1 should remain populated")
+}
+
+func TestRunPlannerStats_ReturnsErrorWhenUpdaterFails(t *testing.T) {
+	db := newTestDB(t)
+	require.NoError(t, db.Close())
+
+	err := RunPlannerStats(db, slog.Default())
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "planner statistics maintenance")
 }

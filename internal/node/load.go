@@ -122,6 +122,19 @@ func WithBulkLoadPragmas(
 	}
 }
 
+// RunPlannerStats collects query-planner statistics on the metadata store
+// if it implements PlannerStatsUpdater. No-op for non-SQLite stores.
+func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
+	updater, ok := db.Metadata().(metadata.PlannerStatsUpdater)
+	if !ok {
+		return nil
+	}
+	if err := updater.UpdatePlannerStats(); err != nil {
+		return fmt.Errorf("planner statistics maintenance: %w", err)
+	}
+	return nil
+}
+
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
 // a new database connection is opened (and closed on return).
 func LoadWithDB(

@@ -1154,6 +1154,12 @@ type BulkLoadOptimizer interface {
 	RestoreNormalPragmas() error
 }
 
+// PlannerStatsUpdater is an optional interface for metadata stores that can
+// collect query-planner statistics. SQLite runs ANALYZE; other backends no-op.
+type PlannerStatsUpdater interface {
+	UpdatePlannerStats() error
+}
+
 // New creates a new metadata store instance using the specified plugin
 func New(pluginName string) (MetadataStore, error) {
 	// Get and start the plugin
