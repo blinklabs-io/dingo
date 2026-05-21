@@ -88,9 +88,9 @@ type utxorpcConnectHarness struct {
 }
 
 type utxorpcHarnessOptions struct {
-	numBlocks        int
-	maxHistoryItems  int
-	waitForTxTimeout time.Duration
+	numBlocks       int
+	maxHistoryItems int
+	serverTimeout   time.Duration
 }
 
 func newConnectH2CClient() *http.Client {
@@ -210,12 +210,12 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		maxHist = DefaultMaxHistoryItems
 	}
 	u := NewUtxorpc(UtxorpcConfig{
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		EventBus:         apiBus,
-		LedgerState:      ls,
-		Mempool:          mp,
-		MaxHistoryItems:  maxHist,
-		WaitForTxTimeout: opts.waitForTxTimeout,
+		Logger:          slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:        apiBus,
+		LedgerState:     ls,
+		Mempool:         mp,
+		MaxHistoryItems: maxHist,
+		ServerTimeout:   opts.serverTimeout,
 	})
 
 	srv := httptest.NewServer(testUtxorpcHTTPHandler(u))
@@ -695,8 +695,8 @@ func receiveWaitForTx(
 // Test that WaitForTx times out when the transaction is never seen.
 func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
-		numBlocks:        5,
-		waitForTxTimeout: 25 * time.Millisecond,
+		numBlocks:     5,
+		serverTimeout: 25 * time.Millisecond,
 	})
 	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -722,8 +722,8 @@ func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
 // Test that WaitForTx stops when the client cancels first.
 func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
-		numBlocks:        5,
-		waitForTxTimeout: time.Hour,
+		numBlocks:     5,
+		serverTimeout: time.Hour,
 	})
 	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
 	ctx, cancel := context.WithCancel(context.Background())

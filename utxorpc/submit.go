@@ -202,8 +202,8 @@ func (s *submitServiceServer) WaitForTx(
 		streamMu.Unlock()
 	}()
 
-	waitTimeout := s.utxorpc.config.WaitForTxTimeout
-	timeout := time.NewTimer(waitTimeout)
+	serverTimeout := s.utxorpc.config.ServerTimeout
+	timeout := time.NewTimer(serverTimeout)
 	defer timeout.Stop()
 
 	// Block until all transactions are confirmed, an error
@@ -231,12 +231,12 @@ func (s *submitServiceServer) WaitForTx(
 		mu.Unlock()
 		s.utxorpc.config.Logger.Warn(
 			"WaitForTx timed out",
-			"timeout", waitTimeout,
+			"timeout", serverTimeout,
 			"pending", remaining,
 		)
 		return connect.NewError(
 			connect.CodeDeadlineExceeded,
-			fmt.Errorf("wait for tx timed out after %s", waitTimeout),
+			fmt.Errorf("wait for tx timed out after %s", serverTimeout),
 		)
 	}
 }

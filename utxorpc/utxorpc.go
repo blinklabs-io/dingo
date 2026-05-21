@@ -43,11 +43,11 @@ import (
 // Default request size limits to prevent denial-of-service via
 // unbounded request arrays.
 const (
-	DefaultMaxBlockRefs     = 100
-	DefaultMaxUtxoKeys      = 1000
-	DefaultMaxHistoryItems  = 10000
-	DefaultMaxDataKeys      = 1000
-	DefaultWaitForTxTimeout = time.Hour
+	DefaultMaxBlockRefs    = 100
+	DefaultMaxUtxoKeys     = 1000
+	DefaultMaxHistoryItems = 10000
+	DefaultMaxDataKeys     = 1000
+	DefaultServerTimeout   = time.Hour
 )
 
 type Utxorpc struct {
@@ -73,8 +73,9 @@ type UtxorpcConfig struct {
 	// max_items uses this cap.
 	MaxHistoryItems int
 	MaxDataKeys     int
-	// WaitForTxTimeout bounds WaitForTx streams server-side (0 = use default).
-	WaitForTxTimeout time.Duration
+	// ServerTimeout bounds long-running UTxO RPC handlers server-side
+	// (0 = use default).
+	ServerTimeout time.Duration
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -100,8 +101,8 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
 	}
-	if cfg.WaitForTxTimeout <= 0 {
-		cfg.WaitForTxTimeout = DefaultWaitForTxTimeout
+	if cfg.ServerTimeout <= 0 {
+		cfg.ServerTimeout = DefaultServerTimeout
 	}
 	return &Utxorpc{
 		config: cfg,
