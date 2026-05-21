@@ -61,9 +61,15 @@ type Backfill struct {
 
 	// immutableUtxoOffsetsTipSlot is the highest slot for which the Mithril
 	// immutable-copy phase already persisted produced-UTxO offset references.
-	// Blocks at or below this slot can have their per-block produced-UTxO
-	// blob writes elided. Zero (the default) means "no skip threshold".
+	// Blocks at or below this slot have their per-block produced-UTxO blob
+	// writes elided. Zero is a legitimate "no skip" value when explicitly set.
 	immutableUtxoOffsetsTipSlot uint64
+	// immutableUtxoOffsetsTipSet records whether the threshold above was
+	// provided by a caller (true) or should be auto-detected at Run() time
+	// (false). This distinguishes "caller explicitly disabled skipping with
+	// SetImmutableUtxoOffsetsTipSlot(0)" from "caller did not configure the
+	// field; auto-detect from the sync-state key".
+	immutableUtxoOffsetsTipSet bool
 
 	// Counters surfaced in the completion log to make the optimisation
 	// observable.
@@ -96,10 +102,14 @@ func (b *Backfill) DisableNonceComputation() {
 // SetImmutableUtxoOffsetsTipSlot informs the backfill that produced-UTxO
 // offset references have already been persisted by the Mithril immutable-copy
 // phase for every block at or below the given slot. The backfill will then
-// elide the redundant blob writes for those blocks. Passing 0 disables the
-// optimisation. Has no effect if called after Run has started.
+// elide the redundant blob writes for those blocks. Passing 0 explicitly
+// disables the optimisation (every block will write offsets even when a
+// matching sync-state marker exists). Calls take effect at Run() entry and
+// suppress the auto-detect from the sync-state key. Has no effect if invoked
+// after Run has started.
 func (b *Backfill) SetImmutableUtxoOffsetsTipSlot(slot uint64) {
 	b.immutableUtxoOffsetsTipSlot = slot
+	b.immutableUtxoOffsetsTipSet = true
 }
 
 // NeedsBackfill checks if there's an incomplete backfill checkpoint.
@@ -567,13 +577,12 @@ func (b *Backfill) Run(ctx context.Context) error {
 		return nil
 	}
 
-	// Auto-detect the immutable-copy offset tip once. Callers that have
-	// already set a threshold via SetImmutableUtxoOffsetsTipSlot keep
-	// their override; otherwise we read the sync state written by the
-	// Mithril immutable-copy phase so the optimisation works even when
-	// Run is invoked outside the mithril sync command (e.g. a recovery
-	// rerun against an existing data directory).
-	if b.immutableUtxoOffsetsTipSlot == 0 {
+	// Auto-detect the immutable-copy offset tip once unless a caller already
+	// configured it via SetImmutableUtxoOffsetsTipSlot. Explicitly-set
+	// values (including 0) are honored; auto-detect only fills an
+	// unconfigured field. This preserves the documented semantics that
+	// SetImmutableUtxoOffsetsTipSlot(0) disables the optimisation.
+	if !b.immutableUtxoOffsetsTipSet {
 		if slot, ok, tipErr := ImmutableUtxoOffsetsTipSlot(b.db); tipErr != nil {
 			b.logger.Warn(
 				"failed to read immutable UTxO offset tip; "+
@@ -590,6 +599,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"immutable_utxo_offsets_tip_slot", slot,
 			)
 		}
+		b.immutableUtxoOffsetsTipSet = true
 	}
 
 	tipBlocks, err := database.BlocksRecent(b.db, 1)

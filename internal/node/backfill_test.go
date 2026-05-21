@@ -276,6 +276,92 @@ func TestRun_IncompleteCheckpointAtZeroVisitsSlotZero(t *testing.T) {
 		"iterator must also visit slot 1")
 }
 
+// TestBackfill_AutoDetectsImmutableUtxoOffsetsTip ensures that without an
+// explicit setter call, Run() picks up the sync-state marker and applies it
+// as the skip threshold. This is the path Mithril sync depends on.
+func TestBackfill_AutoDetectsImmutableUtxoOffsetsTip(t *testing.T) {
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+
+	require.NoError(t, db.SetSyncState(
+		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+	))
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}, nil,
+	))
+
+	// Empty blob store: Run completes the checkpoint after auto-detect.
+	require.NoError(t, bf.Run(context.Background()))
+	assert.Equal(t, uint64(4242), bf.immutableUtxoOffsetsTipSlot)
+	assert.True(t, bf.immutableUtxoOffsetsTipSet)
+}
+
+// TestBackfill_ExplicitZeroOverridesAutoDetect addresses the reviewer
+// concern that SetImmutableUtxoOffsetsTipSlot(0) is documented as disabling
+// the optimisation. The override bit must beat auto-detection so callers
+// that intentionally need offset repair below the immutable-copy tip cannot
+// have the optimisation silently re-enabled behind their back.
+func TestBackfill_ExplicitZeroOverridesAutoDetect(t *testing.T) {
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+
+	require.NoError(t, db.SetSyncState(
+		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+	))
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}, nil,
+	))
+
+	// Explicit "disable the optimisation" before Run.
+	bf.SetImmutableUtxoOffsetsTipSlot(0)
+	require.NoError(t, bf.Run(context.Background()))
+
+	assert.Equal(
+		t, uint64(0), bf.immutableUtxoOffsetsTipSlot,
+		"explicit SetImmutableUtxoOffsetsTipSlot(0) must beat sync-state auto-detect",
+	)
+}
+
+// TestBackfill_ExplicitNonZeroOverridesAutoDetect rounds out the override
+// semantics: a non-zero explicit value also wins over a different sync-state
+// value, so callers can target a specific threshold (e.g. a unit-test fake
+// or a stricter repair threshold) without depending on what the
+// immutable-copy phase happened to leave behind.
+func TestBackfill_ExplicitNonZeroOverridesAutoDetect(t *testing.T) {
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+
+	require.NoError(t, db.SetSyncState(
+		immutableUtxoOffsetsSyncStateKey, "4242", nil,
+	))
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(
+		&models.BackfillCheckpoint{
+			Phase:      BackfillPhase,
+			LastSlot:   0,
+			TotalSlots: 1,
+			StartedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
+		}, nil,
+	))
+
+	bf.SetImmutableUtxoOffsetsTipSlot(100)
+	require.NoError(t, bf.Run(context.Background()))
+
+	assert.Equal(t, uint64(100), bf.immutableUtxoOffsetsTipSlot)
+}
+
 func TestRun_CancelledContext_WithBlocks(t *testing.T) {
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())
