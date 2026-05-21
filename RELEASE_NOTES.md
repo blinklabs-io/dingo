@@ -1,5 +1,24 @@
 # Dingo Releases
 
+## v0.47.0 (May 21, 2026)
+
+**Title:** Mithril sync resilience, safer chainsync handling, and reverse chain traversal
+
+**Date:** May 21, 2026
+
+**Version:** v0.47.0
+
+Hi folks! Here’s what we shipped in v0.47.0.
+
+### ✨ What's New
+
+* Added **traverse chain history in reverse order:** Operators and integrators can now walk chain history backward more directly, which makes reverse historical inspection and recovery work easier to manage. ([#2318](https://github.com/blinklabs-io/dingo/pull/2318))
+* Introduced **tune chainsync stall timeouts:** Operators can now configure how quickly stalled chainsync work triggers recovery, which makes sync behavior easier to adapt to different network conditions. ([#2319](https://github.com/blinklabs-io/dingo/pull/2319))
+* Expanded **recover Mithril downloads after idle stalls:** Mithril sync can now detect idle download stalls and resume work more safely, which makes long running bootstrap and backfill flows more resilient. ([#2365](https://github.com/blinklabs-io/dingo/pull/2365))
+
+### 💪 Improvements
+
+## v0.46.4 (May 18, 2026)
 ## v0.46.4 (May 18, 2026)
 
 **Title:** Genesis bootstrap expansion, Mithril sync visibility, and sturdier SQLite metadata handling
