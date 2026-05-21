@@ -456,12 +456,7 @@ func runMithrilSync(
 	// Enable bulk-load optimizations before launching parallel
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
-	bulkLoadCleanup := node.WithBulkLoadPragmas(db, logger)
-	defer func() {
-		if bulkLoadCleanup != nil {
-			bulkLoadCleanup()
-		}
-	}()
+	defer node.WithBulkLoadPragmas(db, logger)()
 
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
@@ -760,8 +755,6 @@ func runMithrilSync(
 			"backfilling historical metadata for API mode",
 			"component", "mithril",
 		)
-		bulkLoadCleanup()
-		bulkLoadCleanup = nil
 		if err := node.RunPlannerStats(db, logger); err != nil {
 			return fmt.Errorf("running planner statistics before backfill: %w", err)
 		}
