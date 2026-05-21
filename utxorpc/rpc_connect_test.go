@@ -28,7 +28,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"testing"
 	"time"
 
@@ -644,6 +643,9 @@ func waitForEventSubscriber(
 	eventType event.EventType,
 ) {
 	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
 	for {
 		if eb.HasSubscribers(eventType) {
 			return
@@ -651,8 +653,7 @@ func waitForEventSubscriber(
 		select {
 		case <-ctx.Done():
 			t.Fatalf("event subscriber was not registered: %v", ctx.Err())
-		default:
-			runtime.Gosched()
+		case <-ticker.C:
 		}
 	}
 }
