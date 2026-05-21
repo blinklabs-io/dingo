@@ -25,17 +25,6 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// poolAutoVote enumerates the CIP-1694 reward-account delegation
-// outcomes that produce an implicit SPO vote when the pool itself did
-// not cast an explicit vote.
-type poolAutoVote uint8
-
-const (
-	poolAutoVoteNone poolAutoVote = iota
-	poolAutoVoteAbstain
-	poolAutoVoteNoConfidence
-)
-
 // ProposalTally captures the aggregated vote totals for a governance
 // proposal across DReps, stake pools, and the constitutional committee.
 // Stake values are lovelace; CC counts are member counts.
@@ -294,22 +283,24 @@ func tallyDRepVotes(
 // reward-account delegation rules:
 //
 //   - Pools with an explicit vote in `votes` use that vote.
-//   - Pools without an explicit vote fall back to the DRep delegation
-//     attached to their reward-account stake credential:
-//     AlwaysAbstain      → Abstain (excluded from the active
+//   - Pools without an explicit vote fall back to the auto-vote
+//     pre-computed at snapshot capture time
+//     (PoolStakeSnapshot.RewardAccountAutoVote):
+//     Abstain        → SPOAbstainStake (excluded from the active
 //     denominator via SPOYesRatio).
-//     AlwaysNoConfidence → Yes for NoConfidence actions, No for any
-//     other action type (matches the DRep
+//     NoConfidence   → Yes for NoConfidence actions, No for any
+//     other action type (mirrors the DRep
 //     AlwaysNoConfidence handling).
-//   - Any other delegation (regular DRep, no DRep set, or unregistered
-//     reward account) does NOT auto-vote; the pool's stake remains in
-//     SPOTotalStake and is implicitly "no" under CIP-1694 (in the
-//     denominator, not the numerator).
+//   - Any other delegation (regular DRep, no DRep set, deregistered
+//     reward account, etc.) maps to None at snapshot time; the pool's
+//     stake remains in SPOTotalStake and counts as implicit no under
+//     CIP-1694 (in the denominator, not the numerator).
 //
-// Reward-account → DRep delegation is read from the current Account
-// state. This matches tallyDRepVotes, which also uses live state; a
-// per-snapshot historical lookup would require schema additions Dingo
-// does not yet maintain.
+// Reading the auto-vote off the snapshot row makes the tally
+// snapshot-correct: a pool that re-delegates its reward account or
+// changes its reward account between StakeEpoch and the ratification
+// epoch does not retroactively shift the tally, matching
+// cardano-ledger's ssDelegations/ssDReps semantics.
 func tallySPOVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
@@ -338,15 +329,10 @@ func tallySPOVotes(
 	}
 
 	// Explicit vote precedence: build a pool-keyed view first so we
-	// can short-circuit auto-vote lookup for pools that did vote.
+	// can short-circuit the auto-vote branch for pools that did vote.
 	voteByPool := make(map[string]uint8, len(votes))
 	for _, v := range votes {
 		voteByPool[string(v.VoterCredential)] = v.Vote
-	}
-
-	autoVoteByPool, err := loadPoolAutoVotes(ctx, dist)
-	if err != nil {
-		return fmt.Errorf("load pool reward-account auto-votes: %w", err)
 	}
 
 	isNoConfidenceAction := lcommon.GovActionType(tally.ActionType) ==
@@ -354,9 +340,8 @@ func tallySPOVotes(
 
 	for _, s := range dist {
 		stake := uint64(s.TotalStake)
-		poolKey := string(s.PoolKeyHash)
 
-		if v, voted := voteByPool[poolKey]; voted {
+		if v, voted := voteByPool[string(s.PoolKeyHash)]; voted {
 			switch v {
 			case models.VoteYes:
 				tally.SPOYesStake += stake
@@ -368,77 +353,21 @@ func tallySPOVotes(
 			continue
 		}
 
-		switch autoVoteByPool[poolKey] {
-		case poolAutoVoteAbstain:
+		switch s.RewardAccountAutoVote {
+		case models.PoolRewardAccountAutoVoteAbstain:
 			tally.SPOAbstainStake += stake
-		case poolAutoVoteNoConfidence:
+		case models.PoolRewardAccountAutoVoteNoConfidence:
 			if isNoConfidenceAction {
 				tally.SPOYesStake += stake
 			} else {
 				tally.SPONoStake += stake
 			}
-		case poolAutoVoteNone:
+		case models.PoolRewardAccountAutoVoteNone:
 			// No auto-vote: pool contributes only to SPOTotalStake
 			// (implicit no under CIP-1694).
 		}
 	}
 	return nil
-}
-
-// loadPoolAutoVotes resolves each pool in the snapshot to its
-// reward-account DRep delegation and returns the implied auto-vote.
-// Pools whose reward account is unset, unregistered, or delegated to
-// anything other than the predefined AlwaysAbstain /
-// AlwaysNoConfidence DReps map to poolAutoVoteNone (no auto-vote).
-func loadPoolAutoVotes(
-	ctx *TallyContext,
-	dist []*models.PoolStakeSnapshot,
-) (map[string]poolAutoVote, error) {
-	pkhs := make([]lcommon.PoolKeyHash, 0, len(dist))
-	for _, s := range dist {
-		pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
-	}
-	pools, err := ctx.DB.GetPools(pkhs, ctx.Txn)
-	if err != nil {
-		return nil, fmt.Errorf("get pools: %w", err)
-	}
-
-	rewardAcctByPool := make(map[string][]byte, len(pools))
-	rewardAccounts := make([][]byte, 0, len(pools))
-	for i := range pools {
-		ra := pools[i].RewardAccount
-		if len(ra) == 0 {
-			continue
-		}
-		rewardAcctByPool[string(pools[i].PoolKeyHash)] = ra
-		rewardAccounts = append(rewardAccounts, ra)
-	}
-	if len(rewardAccounts) == 0 {
-		return map[string]poolAutoVote{}, nil
-	}
-
-	// includeInactive=true so a deregistered reward account that still
-	// carries an AlwaysAbstain/AlwaysNoConfidence delegation flag is
-	// not silently dropped before we can decide.
-	accounts, err := ctx.DB.GetAccounts(rewardAccounts, true, ctx.Txn)
-	if err != nil {
-		return nil, fmt.Errorf("get reward accounts: %w", err)
-	}
-
-	out := make(map[string]poolAutoVote, len(rewardAcctByPool))
-	for poolKey, ra := range rewardAcctByPool {
-		acct, ok := accounts[string(ra)]
-		if !ok {
-			continue
-		}
-		switch acct.DrepType {
-		case models.DrepTypeAlwaysAbstain:
-			out[poolKey] = poolAutoVoteAbstain
-		case models.DrepTypeAlwaysNoConfidence:
-			out[poolKey] = poolAutoVoteNoConfidence
-		}
-	}
-	return out, nil
 }
 
 // tallyCCVotes counts per-member votes restricted to currently active

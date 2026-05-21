@@ -1213,6 +1213,21 @@ func persistImportedSnapshot(
 	}
 
 	if len(poolSnapshots) > 0 {
+		// importCertState runs before importSnapShots, so Pool and
+		// Account rows reflect the imported ledger state and the
+		// resolver can classify the CIP-1694 reward-account
+		// auto-vote per snapshot.
+		if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
+			poolSnapshots, txn,
+		); err != nil {
+			return fmt.Errorf(
+				"resolving reward-account auto-votes for "+
+					"%s snapshot epoch %d: %w",
+				st.name,
+				st.targetEpoch,
+				err,
+			)
+		}
 		if err := store.SavePoolStakeSnapshots(
 			poolSnapshots, metaTxn,
 		); err != nil {

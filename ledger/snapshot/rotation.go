@@ -53,6 +53,16 @@ func (m *Manager) saveSnapshot(
 		})
 	}
 
+	// Freeze the CIP-1694 SPO reward-account auto-vote per pool at
+	// the snapshot boundary so governance ratification at epoch N
+	// reads snapshot-era delegation rather than the live, possibly
+	// re-delegated state.
+	if err := m.db.ResolvePoolRewardAccountAutoVotes(
+		snapshots, txn,
+	); err != nil {
+		return fmt.Errorf("resolve reward-account auto-votes: %w", err)
+	}
+
 	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {
 		return fmt.Errorf("save pool snapshots: %w", err)
 	}

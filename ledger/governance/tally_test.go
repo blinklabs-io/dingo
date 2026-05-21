@@ -429,7 +429,9 @@ func testBytes(length int, seed byte) []byte {
 
 // seedPoolWithStake registers a pool with the given reward account
 // stake credential and writes a "mark" stake-snapshot row for the
-// given epoch so tallySPOVotes finds it.
+// given epoch so tallySPOVotes finds it. The snapshot's
+// RewardAccountAutoVote is left at None — callers populate it via
+// resolveSnapshotAutoVotes after seeding any Account delegation.
 func seedPoolWithStake(
 	t *testing.T,
 	store *sqliteplugin.MetadataStoreSqlite,
@@ -472,6 +474,34 @@ func seedRewardAccountDelegation(
 	}).Error)
 }
 
+// resolveSnapshotAutoVotes drives the production snapshot-capture
+// pathway in tests: it fetches the "mark" snapshots at the given
+// epoch, runs ResolvePoolRewardAccountAutoVotes against live Pool +
+// Account state, and writes the resolved auto-vote back. Callers
+// invoke this after seeding both pool and reward-account delegation
+// so the snapshot row carries the same RewardAccountAutoVote value
+// the live rotation/import path would have produced.
+func resolveSnapshotAutoVotes(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+) {
+	t.Helper()
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		epoch, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.NoError(t, db.ResolvePoolRewardAccountAutoVotes(snapshots, nil))
+	for _, s := range snapshots {
+		require.NoError(t, db.Metadata().(*sqliteplugin.MetadataStoreSqlite).
+			DB().
+			Model(&models.PoolStakeSnapshot{}).
+			Where("id = ?", s.ID).
+			Update("reward_account_auto_vote", s.RewardAccountAutoVote).
+			Error)
+	}
+}
+
 // TestTallySPOVotesExplicitVoteWins exercises the original behaviour:
 // pools with an explicit vote bypass the reward-account auto-vote
 // machinery even when their reward account is delegated to
@@ -485,6 +515,7 @@ func TestTallySPOVotesExplicitVoteWins(t *testing.T) {
 	seedRewardAccountDelegation(
 		t, store, rewardAccount, nil, models.DrepTypeAlwaysNoConfidence,
 	)
+	resolveSnapshotAutoVotes(t, db, 5)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -519,6 +550,7 @@ func TestTallySPOVotesAlwaysAbstainDelegation(t *testing.T) {
 	seedRewardAccountDelegation(
 		t, store, rewardAccount, nil, models.DrepTypeAlwaysAbstain,
 	)
+	resolveSnapshotAutoVotes(t, db, 7)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -579,6 +611,7 @@ func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
 				t, store, noConfidenceRewardAcct, nil,
 				models.DrepTypeAlwaysNoConfidence,
 			)
+			resolveSnapshotAutoVotes(t, db, 11)
 
 			tally := &ProposalTally{ActionType: uint8(tc.actionType)}
 			err := tallySPOVotes(
@@ -609,6 +642,7 @@ func TestTallySPOVotesOrdinaryDRepNoAutoVote(t *testing.T) {
 	seedRewardAccountDelegation(
 		t, store, rewardAccount, regularDRep, models.DrepTypeAddrKeyHash,
 	)
+	resolveSnapshotAutoVotes(t, db, 4)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -650,6 +684,7 @@ func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
 		AddedSlot:  1,
 		Active:     true,
 	}).Error)
+	resolveSnapshotAutoVotes(t, db, 8)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -665,6 +700,64 @@ func TestTallySPOVotesNoRewardAccountDelegation(t *testing.T) {
 	assert.Equal(t, uint64(0), tally.SPOYesStake)
 	assert.Equal(t, uint64(0), tally.SPONoStake)
 	assert.Equal(t, uint64(0), tally.SPOAbstainStake)
+}
+
+// TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote asserts
+// that a pool whose reward-account stake credential is deregistered
+// (Account.Active == false) but still carries a stale
+// AlwaysAbstain/AlwaysNoConfidence flag must NOT auto-vote — its
+// stake falls back to implicit no, contributing only to
+// SPOTotalStake. Protects against the active-filter regression flagged
+// in code review.
+func TestTallySPOVotesDeregisteredRewardAccountDoesNotAutoVote(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	abstainPool := testBytes(28, 110)
+	abstainAcct := testBytes(28, 111)
+	noConfidencePool := testBytes(28, 112)
+	noConfidenceAcct := testBytes(28, 113)
+
+	seedPoolWithStake(t, store, abstainPool, abstainAcct, 100, 12)
+	seedPoolWithStake(
+		t, store, noConfidencePool, noConfidenceAcct, 200, 12,
+	)
+	// Both reward accounts carry a predefined-DRep flag but are
+	// flagged inactive (deregistered). The follow-up Update is
+	// needed because models.Account has gorm:"default:true" on
+	// Active, which rewrites a literal-false insert back to true.
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: abstainAcct,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  1,
+	}).Error)
+	require.NoError(t, store.DB().Model(&models.Account{}).
+		Where("staking_key = ?", abstainAcct).
+		Update("active", false).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: noConfidenceAcct,
+		DrepType:   models.DrepTypeAlwaysNoConfidence,
+		AddedSlot:  1,
+	}).Error)
+	require.NoError(t, store.DB().Model(&models.Account{}).
+		Where("staking_key = ?", noConfidenceAcct).
+		Update("active", false).Error)
+	resolveSnapshotAutoVotes(t, db, 12)
+
+	tally := &ProposalTally{
+		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
+	}
+	err := tallySPOVotes(
+		&TallyContext{DB: db, StakeEpoch: 12},
+		nil,
+		tally,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(300), tally.SPOTotalStake)
+	assert.Equal(t, uint64(0), tally.SPOYesStake,
+		"deregistered AlwaysNoConfidence delegation must not auto-Yes on NoConfidence action")
+	assert.Equal(t, uint64(0), tally.SPONoStake)
+	assert.Equal(t, uint64(0), tally.SPOAbstainStake,
+		"deregistered AlwaysAbstain delegation must not auto-abstain")
 }
 
 // TestTallySPOVotesMixedExplicitAndAutoVotes is the end-to-end mix:
@@ -698,6 +791,7 @@ func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
 		models.DrepTypeAlwaysNoConfidence,
 	)
 	// silentAcct: no Account row ⇒ no auto-vote.
+	resolveSnapshotAutoVotes(t, db, 9)
 
 	tally := &ProposalTally{
 		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
@@ -719,4 +813,59 @@ func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
 	assert.Equal(t, uint64(200), tally.SPOAbstainStake)
 	// yes / (total - abstain) = 100 / (375 - 200) = 100 / 175 = 4/7
 	assert.Equal(t, big.NewRat(4, 7), tally.SPOYesRatio())
+}
+
+// TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges proves the
+// snapshot-correctness property that motivated the schema change:
+// once a pool's RewardAccountAutoVote is captured on the snapshot row,
+// later changes to the pool's reward account, the reward-account
+// holder's DRep delegation, or the account's active flag must NOT
+// shift the tally for that epoch. Mirrors the cardano-ledger
+// ssDelegations/ssDReps semantics flagged in the PR review.
+func TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	poolKeyHash := testBytes(28, 120)
+	originalRewardAcct := testBytes(28, 121)
+	rotatedRewardAcct := testBytes(28, 122)
+	regularDRep := testBytes(28, 123)
+
+	// Snapshot-era state: pool reward account delegated to
+	// AlwaysAbstain. Resolver captures Abstain on the snapshot.
+	seedPoolWithStake(
+		t, store, poolKeyHash, originalRewardAcct, 400, 13,
+	)
+	seedRewardAccountDelegation(
+		t, store, originalRewardAcct, nil, models.DrepTypeAlwaysAbstain,
+	)
+	resolveSnapshotAutoVotes(t, db, 13)
+
+	// Post-snapshot mutations: re-delegate the original credential to
+	// a regular DRep AND rotate the pool's reward account to a brand
+	// new credential. Under live-state lookup this would zero out the
+	// abstain bucket; the snapshot-frozen tally must ignore both.
+	require.NoError(t, store.DB().Model(&models.Account{}).
+		Where("staking_key = ?", originalRewardAcct).
+		Updates(map[string]any{
+			"drep":      regularDRep,
+			"drep_type": models.DrepTypeAddrKeyHash,
+		}).Error)
+	require.NoError(t, store.DB().Model(&models.Pool{}).
+		Where("pool_key_hash = ?", poolKeyHash).
+		Update("reward_account", rotatedRewardAcct).Error)
+
+	tally := &ProposalTally{
+		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+	}
+	err := tallySPOVotes(
+		&TallyContext{DB: db, StakeEpoch: 13},
+		nil,
+		tally,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(400), tally.SPOTotalStake)
+	assert.Equal(t, uint64(400), tally.SPOAbstainStake,
+		"snapshot-era AlwaysAbstain must survive a post-snapshot redelegation + reward-account rotation")
+	assert.Equal(t, uint64(0), tally.SPOYesStake)
+	assert.Equal(t, uint64(0), tally.SPONoStake)
 }
