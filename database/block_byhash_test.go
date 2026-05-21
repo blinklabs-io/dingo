@@ -24,6 +24,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// resetBlockByHashStats zeros the hit/miss counters between tests.
+func resetBlockByHashStats() {
+	blockByHashIndexHits.Store(0)
+	blockByHashIndexMisses.Store(0)
+}
+
 // TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
 // unknown hash increments the miss counter (so operators can track the
 // false-fallback rate from #2105) and surfaces ErrBlockNotFound after

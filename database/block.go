@@ -56,12 +56,6 @@ func BlockByHashStats() (hits, misses uint64) {
 	return blockByHashIndexHits.Load(), blockByHashIndexMisses.Load()
 }
 
-// resetBlockByHashStats is a test-only helper to zero the counters.
-func resetBlockByHashStats() {
-	blockByHashIndexHits.Store(0)
-	blockByHashIndexMisses.Store(0)
-}
-
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	owned := false
 	if txn == nil {
