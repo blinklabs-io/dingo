@@ -55,6 +55,71 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	assert.Equal(t, uint64(12), uint64(account.Reward))
 }
 
+func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 2)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	rewardAddrBytes, err := rewardAddr.Bytes()
+	require.NoError(t, err)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(5),
+		Active:     true,
+	}).Error)
+	txHash := testBytes(32, 3)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch: 1,
+		ExpiresEpoch:  4,
+		AnchorURL:     "https://example.invalid/expired",
+		AnchorHash:    testBytes(32, 4),
+		Deposit:       7,
+		ReturnAddress: rewardAddrBytes,
+		AddedSlot:     100,
+	}, nil))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(
+			pparams lcommon.ProtocolParameters,
+			_ any,
+		) (lcommon.ProtocolParameters, error) {
+			return pparams, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 1, out.ExpiredCount)
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(12), uint64(account.Reward))
+
+	proposal, err := db.GetGovernanceProposal(txHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, proposal.ExpiredEpoch)
+	require.NotNil(t, proposal.ExpiredSlot)
+	assert.Equal(t, uint64(5), *proposal.ExpiredEpoch)
+	assert.Equal(t, uint64(500), *proposal.ExpiredSlot)
+}
+
 func TestRewardCreditsRollbackBySlot(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 1)
