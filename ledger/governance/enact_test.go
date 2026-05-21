@@ -280,3 +280,46 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	assert.Equal(t, uint64(93), uint64(state.Treasury))
 	assert.Equal(t, uint64(20), uint64(state.Reserves))
 }
+
+func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 2)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(5),
+		Active:     true,
+	}).Error)
+	require.NoError(t, store.SetNetworkState(6, 20, 1, nil))
+
+	a := &lcommon.TreasuryWithdrawalGovAction{
+		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
+	}
+	err = applyTreasuryWithdrawal(&EnactmentContext{
+		DB:   db,
+		Slot: 123,
+	}, a)
+	require.ErrorContains(
+		t,
+		err,
+		"treasury withdrawal of 7 exceeds tracked treasury balance 6",
+	)
+
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(5), uint64(account.Reward))
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(6), uint64(state.Treasury))
+	assert.Equal(t, uint64(20), uint64(state.Reserves))
+}
