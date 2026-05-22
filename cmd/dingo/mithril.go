@@ -86,6 +86,20 @@ func resolveAggregatorURL(
 	return url, nil
 }
 
+func parseOptionalDuration(
+	name string,
+	value string,
+) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, value, err)
+	}
+	return duration, nil
+}
+
 func mithrilListCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -336,6 +350,13 @@ func runMithrilSync(
 			cfg.DatabasePath, ".mithril-cache",
 		)
 	}
+	downloadIdleTimeout, err := parseOptionalDuration(
+		"Mithril download idle timeout",
+		cfg.Mithril.DownloadIdleTimeout,
+	)
+	if err != nil {
+		return err
+	}
 
 	metrics.setPhaseActive(mithrilSyncPhaseBootstrap, true)
 	result, err := mithril.Bootstrap(
@@ -349,7 +370,9 @@ func runMithrilSync(
 			GenesisVerificationKey: nodeCfg.MithrilGenesisVerificationKey,
 			AncillaryVerificationKey: nodeCfg.
 				MithrilGenesisAncillaryVerificationKey,
-			Logger: logger,
+			Logger:                 logger,
+			DownloadIdleTimeout:    downloadIdleTimeout,
+			DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 			OnProgress: func() func(mithril.DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0

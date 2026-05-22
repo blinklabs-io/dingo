@@ -368,6 +368,14 @@ mithril:
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""
+  # Maximum idle time waiting for snapshot headers or body bytes before retrying
+  # Empty uses the built-in default. A negative duration disables idle detection.
+  # CLI: --mithril-download-idle-timeout
+  # downloadIdleTimeout: ""
+  # Consecutive idle retries allowed without additional downloaded bytes
+  # 0 uses the built-in default
+  # CLI: --mithril-download-max-idle-retries
+  # downloadMaxIdleRetries: 0
   # Remove temporary files after loading completes
   # Default: true
   cleanupAfterLoad: true

@@ -325,6 +325,13 @@ type MithrilConfig struct {
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
+	// DownloadIdleTimeout is the maximum idle time to wait for snapshot
+	// response headers or body bytes before retrying. Empty uses the
+	// downloader default; a negative duration disables idle detection.
+	DownloadIdleTimeout string `yaml:"downloadIdleTimeout" envconfig:"DINGO_MITHRIL_DOWNLOAD_IDLE_TIMEOUT"`
+	// DownloadMaxIdleRetries is the number of consecutive idle retries
+	// allowed without additional bytes. Zero uses the downloader default.
+	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"   envconfig:"DINGO_MITHRIL_CLEANUP"`
