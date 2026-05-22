@@ -357,6 +357,12 @@ func runMithrilSync(
 	if err != nil {
 		return err
 	}
+	if cfg.Mithril.DownloadMaxIdleRetries < 0 {
+		return fmt.Errorf(
+			"invalid Mithril download max idle retries %d: must be >= 0",
+			cfg.Mithril.DownloadMaxIdleRetries,
+		)
+	}
 
 	metrics.setPhaseActive(mithrilSyncPhaseBootstrap, true)
 	result, err := mithril.Bootstrap(
