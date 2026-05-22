@@ -1,0 +1,70 @@
+# Configurator specification for the fork_and_select_v1 scenario.
+#
+# Two pools, both with ~50% stake. The scenario's three-phase forge
+# (configurator.sh) runs:
+#   phase A: pool 1 forges a shared prefix in isolation;
+#   phase B: pool 1 extends the shared prefix to peer A's chain;
+#   phase C: pool 2 extends the shared prefix to peer B's longer chain.
+# At capture time peer A and peer B serve those two chains; the
+# observation node selects between them via Praos longest-chain.
+#
+# Determinism notes:
+#   - VRF/KES seeds are generated fresh per run by testnet-generation-tool;
+#     reproducibility across runs depends on the configurator's polling
+#     behavior more than on the genesis (see "What's still
+#     non-deterministic" in the scenario README).
+#   - systemStart is overridden by configurator.sh after key generation
+#     (key gen takes >5s and the tool's built-in delay is too short).
+#
+# Six YAML documents per the testnet-generation-tool format.
+
+--- # Required Testnet Parameters
+poolCount: 2
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 6
+
+--- # Shelley Genesis Override
+# 1s slots, 75-slot epochs, k=6, f=0.4. With poolCount=2 and equal
+# stake, each pool's expected leadership rate is
+# 1 - (1 - 0.4)^(1/2) ≈ 0.225 — ~17 blocks per pool per 75-slot epoch.
+# Comfortably more than the few-block prefix/extension the scenario
+# captures, even with leadership-lottery variance.
+epochLength: 75
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 6
+maxLovelaceSupply: 2000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+# Start directly in Conway like the smoke-test scenario does.
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

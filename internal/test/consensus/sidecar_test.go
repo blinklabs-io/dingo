@@ -220,6 +220,30 @@ func TestScenarioConversationsParse(t *testing.T) {
 	}
 }
 
+// TestDecodeConversationParsesDrainToTip confirms the drain_to_tip
+// step type round-trips through the conversation loader.
+func TestDecodeConversationParsesDrainToTip(t *testing.T) {
+	raw := []byte(`{
+		"name": "drain",
+		"steps": [
+			{ "type": "find_intersect", "points": ["origin"] },
+			{ "type": "drain_to_tip" }
+		]
+	}`)
+	conv, err := consensus.DecodeConversation(raw)
+	if err != nil {
+		t.Fatalf("DecodeConversation: %v", err)
+	}
+	if len(conv.Steps) != 2 {
+		t.Fatalf("steps = %d, want 2", len(conv.Steps))
+	}
+	if conv.Steps[1].Type() != "drain_to_tip" {
+		t.Fatalf("steps[1].Type = %q, want drain_to_tip",
+			conv.Steps[1].Type(),
+		)
+	}
+}
+
 // TestDecodeConversationRejectsEmptyIntersectPoints prevents an
 // accidental zero-point FindIntersect (which gouroboros would replace
 // with the [origin] default — a foot-gun in test scripts).

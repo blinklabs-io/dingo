@@ -1,0 +1,7 @@
+{
+  "name": "drain_to_tip",
+  "steps": [
+    { "type": "find_intersect", "points": ["origin"] },
+    { "type": "drain_to_tip" }
+  ]
+}

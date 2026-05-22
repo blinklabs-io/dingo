@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/consensus/format"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -121,6 +122,12 @@ func decodeStep(raw json.RawMessage) (Step, error) {
 			return nil, fmt.Errorf("request_next: %w", err)
 		}
 		return &s, nil
+	case stepTypeDrainToTip:
+		var s DrainToTipStep
+		if err := dec.Decode(&s); err != nil {
+			return nil, fmt.Errorf("drain_to_tip: %w", err)
+		}
+		return &s, nil
 	}
 	return nil, fmt.Errorf("unknown step type %q", probe.Type)
 }
@@ -128,6 +135,7 @@ func decodeStep(raw json.RawMessage) (Step, error) {
 const (
 	stepTypeFindIntersect = "find_intersect"
 	stepTypeRequestNext   = "request_next"
+	stepTypeDrainToTip    = "drain_to_tip"
 )
 
 // requestNextWaitDeadline bounds the per-step wait for a roll-forward /
@@ -138,6 +146,20 @@ const (
 // slots) reliably arrives in time, while still failing fast against a
 // stuck cardano-node.
 const requestNextWaitDeadline = 30 * time.Second
+
+// drainInterBlockDeadline is the per-iteration wait inside
+// drain_to_tip. Smaller than requestNextWaitDeadline because once the
+// drain is in progress and the chainsync client's pipeline is primed,
+// successive blocks arrive in tight succession (sub-second). The
+// deadline elapsing without a new message is interpreted as the
+// server having reached its tip and entering AwaitReply.
+const drainInterBlockDeadline = 5 * time.Second
+
+// drainOverallDeadline backstops drain_to_tip against a server that
+// keeps emitting blocks indefinitely (cardano-node still forging into
+// the drain window). Caps the total drain duration so the capture
+// terminates regardless.
+const drainOverallDeadline = 5 * time.Minute
 
 // FindIntersectStep sends FindIntersect with the given points and
 // blocks until the server responds with IntersectFound or
@@ -185,6 +207,67 @@ func (s *RequestNextStep) Run(_ context.Context, sc *Sidecar) error {
 	before := sc.recorder.Count()
 	_ = sc.recorder.WaitForNextOrDeadline(before, requestNextWaitDeadline)
 	return nil
+}
+
+// DrainToTipStep loops "wait for next chainsync message" until the
+// server stops sending — at which point we infer it has reached its
+// tip and entered AwaitReply. Reaching the drainOverallDeadline
+// without seeing a quiescent gap fails the step (server is still
+// forging into the drain window; the scenario's stabilization wait
+// upstream was probably too short).
+//
+// Protocol-level validation: the drain must observe at least one
+// roll_forward before the AwaitReply. A drain that finishes with only
+// roll_backward messages (or with no messages at all) almost certainly
+// means the testnet stood up but the peer served nothing — a silent
+// regression worth surfacing as an explicit error.
+type DrainToTipStep struct {
+	Type_ string `json:"type"`
+}
+
+func (s *DrainToTipStep) Type() string { return stepTypeDrainToTip }
+
+func (s *DrainToTipStep) Run(ctx context.Context, sc *Sidecar) error {
+	deadline := time.Now().Add(drainOverallDeadline)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf(
+				"drain_to_tip: exceeded overall deadline %s "+
+					"without a quiescent gap — server still "+
+					"forging?", drainOverallDeadline,
+			)
+		}
+		before := sc.recorder.Count()
+		got := sc.recorder.WaitForNextOrDeadline(
+			before, drainInterBlockDeadline,
+		)
+		if !got {
+			break // quiescent for drainInterBlockDeadline → AwaitReply
+		}
+	}
+	if !servedHasRollForward(sc.recorder.Snapshot()) {
+		return errors.New(
+			"drain_to_tip: server reached AwaitReply without serving " +
+				"any roll_forward — testnet likely silent",
+		)
+	}
+	return nil
+}
+
+// servedHasRollForward returns true if the trace contains at least
+// one chainsync roll_forward. Used by drain_to_tip's protocol-level
+// validation.
+func servedHasRollForward(served []format.ServedMessage) bool {
+	for _, m := range served {
+		if m.Protocol == format.ProtocolChainSync &&
+			m.MsgType == format.ChainSyncMsgRollForward {
+			return true
+		}
+	}
+	return false
 }
 
 // parsePoints accepts the string-encoded points the scenario JSON

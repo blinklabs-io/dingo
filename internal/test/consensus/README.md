@@ -14,25 +14,30 @@ internal/test/consensus/
   format/                    Go package: TestVector type + JSON codecs
   recorder.go                Recorder: callback-driven capture buffer
   conversation.go            capture-conversation.json loader + steps
+                             (find_intersect / request_next / drain_to_tip)
   sidecar.go                 Sidecar runtime (connection + driver loop)
   emit.go                    WriteVector helper
+  compose.go                 Multi-peer vector composition (used by
+                             cmd/compose-consensus-vector)
+  diff.go                    Structural-tolerance golden diff
   sidecar_test.go            Offline round-trip + recorder tests
-  live_capture_test.go       Build-tag-gated end-to-end test
-  cmd/capture-sidecar/       Binary that does one capture run
+  live_capture_test.go       Build-tag-gated end-to-end smoke test
+  golden_test.go             Build-tag-gated golden-corpus assertions
+  cmd/
+    capture-sidecar/         Binary that does one capture run
+    compose-consensus-vector/ Binary that merges N single-peer captures
+                              into one multi-peer vector + golden diff
   Dockerfile.configurator    Shared base image (genesis toolchain)
-  Dockerfile.capture_sidecar Shared base image (Go build of cmd/)
+  Dockerfile.capture_sidecar Shared base image (Go build of cmd/sidecar)
+  Dockerfile.compose_consensus_vector
+                             Shared base image (Go build of cmd/composer)
   capture-scenario.sh        Dispatcher: forwards to scenarios/<n>/run.sh
   scenarios/
-    intersect_origin_one_rollforward/
-      configurator.sh            Per-scenario genesis/config setup
-      docker-compose.yml         Per-scenario service stack
-      testnet.yaml               Per-scenario testnet shape
-      topology/single.json       Per-scenario topology
-      capture-conversation.json  Per-scenario sidecar-driving script
-      run.sh                     Per-scenario orchestration
-      README.md                  What this scenario tests
+    intersect_origin_one_rollforward/   Single-peer smoke test
+    fork_and_select_v1/                 Two-peer fork-and-select scenario
   testdata/
     fixtures/                Hand-crafted vectors for format/ tests
+    captured/                Committed goldens from live captures
 ```
 
 Adding a scenario means dropping in a new `scenarios/<name>/`
@@ -46,11 +51,22 @@ directory. The shared base does not change.
 
 The dispatcher resolves `scenarios/<name>/run.sh` and execs it. Each
 scenario owns its own orchestration shape (number of cardano peers,
-configurator behavior, number of sidecar invocations) so the
-dispatcher itself stays trivial.
+configurator behavior, number of sidecar invocations, whether a
+composer + golden diff runs at the end) so the dispatcher itself
+stays trivial.
 
 See each scenario's `README.md` for what it captures and how to run it
-directly.
+directly. Existing scenarios:
+
+| Scenario | Peers | What it tests |
+|---|---|---|
+| `intersect_origin_one_rollforward` | 1 | Smoke-test: handshake → find_intersect[origin] → roll_backward → roll_forward |
+| `fork_and_select_v1` | 2 | Praos chain selection + rollback to non-genesis intersect across two divergent chains with a shared prefix |
+
+Multi-peer scenarios use the `cmd/compose-consensus-vector` binary to
+merge per-peer captures into the multi-peer vector and diff against
+the committed golden (structural-tolerance match per
+`internal/test/consensus/diff.go`).
 
 ## Vector format
 
@@ -72,17 +88,22 @@ hand-crafted examples.
 ## Tests
 
 ```bash
-# Fast: offline format + recorder tests.
+# Fast: offline format + recorder + composer + diff tests.
 go test ./internal/test/consensus/...
+
+# Build-tag-gated: golden-corpus assertions (load each committed
+# vector under testdata/captured/ and verify structural invariants).
+go test -tags consensuscapture -run "TestCapturedGoldensDecode|TestForkAndSelectV1SharedPrefix" \
+    ./internal/test/consensus/...
 
 # Slow: live end-to-end capture (docker required).
 go test -tags consensuscapture -run TestCaptureScenarioLiveStack \
     ./internal/test/consensus/...
 ```
 
-The build-tag-gated test brings up a scenario's docker-compose stack,
-runs `capture-scenario.sh`, decodes the produced vector, and asserts
-shape invariants. `make test` does not include it.
+The build-tag-gated tests bring up a scenario's docker-compose stack
+(or load a committed golden) and assert shape invariants. `make test`
+does not include them.
 
 ## Recording layer
 

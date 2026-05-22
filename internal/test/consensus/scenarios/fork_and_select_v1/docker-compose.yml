@@ -1,0 +1,236 @@
+# Copyright 2026 Blink Labs Software
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Consensus capture stack: fork_and_select_v1
+#
+# Services:
+#   - configurator      Generates a 2-pool genesis and runs three
+#                       forge phases (shared prefix → peer A extension
+#                       → peer B extension), populating per-peer chain
+#                       DB volumes. Exits 0 when done.
+#   - cardano-peer-a    Forging cardano-node serving peer A's chain.
+#                       Pool 1 keys.
+#   - cardano-peer-b    Forging cardano-node serving peer B's longer
+#                       chain. Pool 2 keys.
+#   - cardano-observation
+#                       Non-forging cardano-node. Topology pins both
+#                       peers as static localRoots; Praos selects
+#                       between them.
+#   - capture-sidecar   (capture profile) Drives the drain_to_tip
+#                       conversation against one cardano-* address per
+#                       invocation. run.sh fires three back-to-back
+#                       runs (peer A, peer B, observation).
+#   - compose           (capture profile) Merges the three single-peer
+#                       captures into the multi-peer vector and (with
+#                       -golden) diffs against the committed corpus.
+#
+# Subnet 172.24.0.0/24 (smoke scenario uses 172.23; devnet 172.20;
+# antithesis 172.21; erastest 172.22).
+#
+# Environment variables (override or set via .env):
+#   CONSENSUS_CAPTURE_OUTPUT_DIR    host dir that receives the captures
+#                                   and final vector (default: ./output)
+#
+# The capture-sidecar and compose services are gated behind the
+# "capture" profile so a plain `docker compose up` brings only the
+# configurator + cardano-* services online; run.sh starts the
+# capture services separately via `docker compose run --rm` so the
+# configurator's one-shot exit does not abort the stack.
+
+services:
+  configurator:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.configurator
+    container_name: consensus-fork-configurator
+    volumes:
+      - ./testnet.yaml:/testnet.yaml:ro
+      - ./configurator.sh:/configurator.sh:ro
+      - configs:/configs
+      - peer-a-data:/peer-a-data
+      - peer-b-data:/peer-b-data
+
+  cardano-peer-a:
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    container_name: consensus-fork-cardano-peer-a
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      RESTORE_SNAPSHOT: "false"
+    # Non-forging: no --shelley-* key flags. peer-a's chain was forged
+    # by the configurator; at runtime peer-a only serves its static
+    # chain over chainsync. If we mounted pool 1's keys here, cardano-
+    # node would keep extending the chain past the configurator's
+    # baked-in tip — defeating the "two divergent chains with fixed
+    # tips" scenario.
+    command:
+      - "run"
+      - "--config"
+      - "/configs/1/configs/config.json"
+      - "--topology"
+      - "/topology/topology.json"
+      - "--database-path"
+      - "/data/db"
+      - "--socket-path"
+      - "/ipc/node.socket"
+      - "--port"
+      - "3001"
+    volumes:
+      - configs:/configs
+      - peer-a-data:/data/db
+      - peer-a-ipc:/ipc
+      - ./topology/peer-a.json:/topology/topology.json:ro
+    networks:
+      consensus_fork:
+        ipv4_address: 172.24.0.10
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  cardano-peer-b:
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    container_name: consensus-fork-cardano-peer-b
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    environment:
+      RESTORE_SNAPSHOT: "false"
+    # Non-forging — see cardano-peer-a above.
+    command:
+      - "run"
+      - "--config"
+      - "/configs/2/configs/config.json"
+      - "--topology"
+      - "/topology/topology.json"
+      - "--database-path"
+      - "/data/db"
+      - "--socket-path"
+      - "/ipc/node.socket"
+      - "--port"
+      - "3001"
+    volumes:
+      - configs:/configs
+      - peer-b-data:/data/db
+      - peer-b-ipc:/ipc
+      - ./topology/peer-b.json:/topology/topology.json:ro
+    networks:
+      consensus_fork:
+        ipv4_address: 172.24.0.11
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  cardano-observation:
+    image: ghcr.io/blinklabs-io/cardano-node:11.0.1
+    container_name: consensus-fork-cardano-observation
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+      cardano-peer-a:
+        condition: service_healthy
+      cardano-peer-b:
+        condition: service_healthy
+    environment:
+      RESTORE_SNAPSHOT: "false"
+    command:
+      - "run"
+      - "--config"
+      - "/configs/1/configs/config.json"
+      - "--topology"
+      - "/topology/topology.json"
+      - "--database-path"
+      - "/data/db"
+      - "--socket-path"
+      - "/ipc/node.socket"
+      - "--port"
+      - "3001"
+    volumes:
+      - configs:/configs
+      - obs-data:/data/db
+      - obs-ipc:/ipc
+      - ./topology/observation.json:/topology/topology.json:ro
+    networks:
+      consensus_fork:
+        ipv4_address: 172.24.0.12
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/node.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  capture-sidecar:
+    # Profile-gated: `docker compose up` does NOT start this. run.sh
+    # invokes it via `docker compose run --rm capture-sidecar` three
+    # times (peer A, peer B, observation), overriding -address +
+    # -out + -title each time.
+    profiles: ["capture"]
+    build:
+      context: ../../../../..
+      dockerfile: internal/test/consensus/Dockerfile.capture_sidecar
+    depends_on:
+      cardano-peer-a:
+        condition: service_healthy
+      cardano-peer-b:
+        condition: service_healthy
+      cardano-observation:
+        condition: service_healthy
+    # Default command — run.sh overrides -address, -out, -title
+    # per-invocation via the trailing `command` override on
+    # `docker compose run`.
+    command:
+      - "-network-magic"
+      - "42"
+      - "-conversation"
+      - "/scenario/capture-conversation.json"
+      - "-timeout"
+      - "360s"
+    volumes:
+      - ./capture-conversation.json:/scenario/capture-conversation.json:ro
+      - ${CONSENSUS_CAPTURE_OUTPUT_DIR:-./output}:/capture-output
+    networks:
+      - consensus_fork
+
+  composer:
+    profiles: ["capture"]
+    build:
+      context: ../../../../..
+      dockerfile: internal/test/consensus/Dockerfile.compose_consensus_vector
+    # run.sh overrides command per invocation.
+    command: ["--help"]
+    volumes:
+      - ${CONSENSUS_CAPTURE_OUTPUT_DIR:-./output}:/capture-output
+
+networks:
+  consensus_fork:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.24.0.0/24
+
+volumes:
+  configs:
+  peer-a-data:
+  peer-b-data:
+  obs-data:
+  peer-a-ipc:
+  peer-b-ipc:
+  obs-ipc:
