@@ -4318,6 +4318,22 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 	return nil
 }
 
+// ReconcileLivePrimaryChainLedgerDivergence is the exported entry
+// point into the live-divergence reconciler. The plateau watchdog
+// calls this when local tip has not advanced for plateau_duration
+// while peers report a higher tip: if primary chain has advanced but
+// the ledger pipeline is stuck on an abandoned same-slot fork, this
+// rolls back the ledger to the latest common ancestor so forward
+// application from the canonical chain can resume without a process
+// or container restart. Returns (true, nil) when reconciliation
+// happened, (false, nil) when no divergence was found.
+func (ls *LedgerState) ReconcileLivePrimaryChainLedgerDivergence(
+	reason string,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	return ls.reconcileLivePrimaryChainLedgerDivergence(reason, connId)
+}
+
 func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 	reason string,
 	connId ouroboros.ConnectionId,

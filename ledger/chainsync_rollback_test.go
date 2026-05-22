@@ -1334,6 +1334,64 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonA
 	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
 }
 
+// TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFork
+// pins the wire-in the plateau-watchdog path depends on
+// (node_chainsync_recycler.go). Sub-K same-slot fork resolutions can
+// advance chain.Tip() to the canonical hash while leaving the ledger
+// pipeline pinned on the abandoned hash, with no error returned and
+// therefore no caller of the existing in-package live-reconciler.
+// The exported wrapper is what node-level watchdog code can invoke
+// to repair the divergence in place — without it, the plateau path
+// can only recycle the upstream peer, which does not unstick a
+// locally-pinned ledger.
+func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFork(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	forkHash := testHashBytes("live-sub-k-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotEqual(
+		t,
+		fixture.ls.chain.Tip(),
+		fixture.ls.currentTip,
+		"test setup must produce a chain/ledger tip divergence",
+	)
+	require.Equal(
+		t,
+		fixture.currentTip,
+		fixture.ls.currentTip,
+		"currentTip must remain at the post-switch abandoned hash",
+	)
+
+	reconciled, err := fixture.ls.ReconcileLivePrimaryChainLedgerDivergence(
+		"local tip plateau",
+		fixture.connId,
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		reconciled,
+		"exported reconciler must report success",
+	)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
+}
+
 func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyondK(
 	t *testing.T,
 ) {
