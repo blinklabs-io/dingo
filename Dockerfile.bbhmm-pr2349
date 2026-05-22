@@ -1,8 +1,0 @@
-# Overlay image for testing fix/2349-reconcile-chain-ahead.
-# Copies a locally-built patched dingo binary over the v0.46.4 release.
-#
-# Build:
-#   GOOS=linux GOARCH=amd64 go build -trimpath -ldflags='-s -w' -o dingo ./cmd/dingo
-#   docker build -f Dockerfile.bbhmm-pr2349 -t bbhmm-local/dingo:0.46.4-pr2349 .
-FROM ghcr.io/blinklabs-io/dingo:0.46.4
-COPY --chown=root:root dingo /bin/dingo
