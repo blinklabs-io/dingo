@@ -20,7 +20,7 @@ Hi folks! Here’s what we shipped in v0.47.1.
 
 ### 🔧 Fixes
 
-* Corrected **preserve snapshot imported UTxO history during bulk import:** Snapshot imports now keep the origin and added slot details for imported UTxOs, which makes historical lookups and ordering more accurate after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
+* Corrected **preserve snapshot imported transaction output history during bulk import:** Snapshot imports now keep the origin and added slot details for imported transaction outputs, which makes historical lookups and ordering more accurate after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
 * Strengthened **recover same slot fork plateaus without manual restarts:** Nodes now reconcile live ledger divergence before recycling peers, which helps same slot fork stalls recover more safely without requiring a manual restart. ([#2377](https://github.com/blinklabs-io/dingo/pull/2377))
 
 ### 📋 What You Need to Know
@@ -28,7 +28,7 @@ Hi folks! Here’s what we shipped in v0.47.1.
 * Clarified **follow normal patch release upgrade steps:** Normal patch release upgrade steps are generally sufficient for this release.
 * Highlighted **expect safer recovery from same slot fork plateaus:** Nodes can now recover from same slot fork plateaus more safely without manual restarts because live ledger reconciliation happens before peer recycling. ([#2377](https://github.com/blinklabs-io/dingo/pull/2377))
 * Emphasized **trust corrected governance refunds and treasury handling:** Missing or inactive reward accounts no longer receive governance rewards or expired proposal deposit refunds, and unclaimed amounts return to treasury while treasury withdrawal limits stay enforced across the epoch. ([#2371](https://github.com/blinklabs-io/dingo/pull/2371))
-* Summarized **expect more accurate snapshot imported history after bulk import:** Snapshot imported UTxOs now keep provenance and added slot details more accurately, which improves historical behavior after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
+* Summarized **expect more accurate snapshot imported history after bulk import:** Snapshot imported transaction outputs now keep provenance and added slot details more accurately, which improves historical behavior after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
 
 ### Recommended Network Compatibility ⚠️
 
