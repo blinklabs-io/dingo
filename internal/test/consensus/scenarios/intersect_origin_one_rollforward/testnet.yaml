@@ -1,0 +1,60 @@
+# Configurator specification for the intersect_origin_one_rollforward
+# scenario.
+#
+# Single-pool testnet that forges briefly so the capture-sidecar's
+# request_next has at least one block to roll forward over. The
+# scenario's protocol-level coverage is the absolute minimum smoke
+# test: handshake → find_intersect[origin] → request_next → roll_forward.
+#
+# Format mirrors internal/test/devnet/testnet.yaml and
+# internal/test/erastest/testnet.yaml: 6 YAML documents.
+
+--- # Required Testnet Parameters
+poolCount: 1
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+delegatedSupply: 2000000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 6
+
+--- # Shelley Genesis Override
+# 1s slots, 75-slot epochs, k=6, f=0.4. Per-pool block expectation per
+# epoch with poolCount=1 is ~0.4 * 75 = 30 blocks per epoch — comfortably
+# more than the "one rollforward" the scenario asserts on, even with
+# leader-election variance over the first ~30s of forging.
+epochLength: 75
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 6
+maxLovelaceSupply: 2000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+# Skip the era staircase: start directly in Conway like devnet does.
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

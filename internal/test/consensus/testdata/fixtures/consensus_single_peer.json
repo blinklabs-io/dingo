@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "title": "consensus_single_peer",
+  "category": "consensus",
+  "capture": {
+    "peers": [
+      {
+        "peer_id": 0,
+        "served": [
+          {
+            "protocol": "chainsync",
+            "msg_type": "roll_backward",
+            "point": {
+              "slot": 0,
+              "hash": ""
+            },
+            "tip": {
+              "slot": 8,
+              "hash": "abcdef0123456789"
+            }
+          },
+          {
+            "protocol": "chainsync",
+            "msg_type": "roll_forward",
+            "era": 6,
+            "header_cbor": "8301aabb",
+            "tip": {
+              "slot": 8,
+              "hash": "abcdef0123456789"
+            }
+          }
+        ]
+      }
+    ],
+    "expected_output": {
+      "downstream_chainsync": [
+        {
+          "protocol": "chainsync",
+          "msg_type": "roll_forward",
+          "era": 6,
+          "header_cbor": "8301aabb",
+          "tip": {
+            "slot": 110,
+            "hash": "abcdef0123456789"
+          }
+        }
+      ],
+      "final_tip": {
+        "slot": 110,
+        "hash": "abcdef0123456789"
+      }
+    }
+  }
+}

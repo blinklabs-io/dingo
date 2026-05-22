@@ -1,0 +1,42 @@
+# Consensus shared configurator image.
+#
+# Provides the cardano-node + cardano-cli + bash + jq toolchain plus
+# the cardano-foundation testnet-generation-tool. Per-scenario
+# configurator.sh is mounted into the container at runtime (see each
+# scenarios/<name>/docker-compose.yml), so the image itself is
+# scenario-agnostic. Adding a new scenario does not require rebuilding
+# this image.
+#
+# Modeled on internal/test/devnet/Dockerfile.configurator and
+# internal/test/erastest/Dockerfile.configurator.
+
+# Pin to same version used downstream in scenario docker-compose files.
+FROM ghcr.io/blinklabs-io/cardano-node:11.0.1
+
+USER root
+
+RUN apt update && \
+    apt install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        tar \
+        tree \
+        python3 \
+        python3-pip \
+        jq
+
+RUN python3 -m pip install --break-system-packages uv
+
+RUN install --directory --owner=root --group=root --mode=0755 /usr/local/src/cardano-node
+
+WORKDIR /usr/local/src
+# Pin to v0.1.0 (abab0b3ce616928cae4ea5c36a41654ec068e2e4)
+RUN git clone --branch v0.1.0 --depth 1 https://github.com/cardano-foundation/testnet-generation-tool.git
+
+WORKDIR /usr/local/src/testnet-generation-tool
+RUN uv sync && mkdir -p cardano-node && ln -sf /usr/local/bin ./cardano-node/bin
+
+# No COPY of configurator.sh — each scenario mounts its own at
+# /configurator.sh via docker-compose volumes:.
+ENTRYPOINT ["/configurator.sh"]

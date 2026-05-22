@@ -1,0 +1,9 @@
+{
+  "name": "intersect_origin_one_rollforward",
+  "steps": [
+    { "type": "find_intersect", "points": ["origin"] },
+    { "type": "request_next" },
+    { "type": "request_next" }
+  ]
+}
+
