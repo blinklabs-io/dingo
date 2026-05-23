@@ -16,11 +16,11 @@
 // subscribe primitive that lets components communicate without
 // holding references to each other.
 //
-// Components never call each other directly across package
-// boundaries. Instead, they publish typed events to the bus and
-// subscribe to event types they care about. This keeps package
-// dependencies acyclic and lets tests exercise individual components
-// in isolation.
+// Components use typed events for asynchronous cross-component
+// notifications. Synchronous state reads still use direct calls,
+// callbacks, or narrow interfaces supplied by the node composition
+// layer. This keeps event traffic explicit without forcing every
+// query through the bus.
 //
 // # Publishing
 //
