@@ -28,6 +28,27 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
+	return hash[:]
+}
+
+func ledgerHashPrefix(hash lcommon.Blake2b256) []byte {
+	return hash[:8]
+}
+
+func ledgerInputIDBytes(input lcommon.TransactionInput) []byte {
+	id := input.Id()
+	return id[:]
+}
+
+func bytePrefix(data []byte) []byte {
+	const count = 8
+	if len(data) < count {
+		return data
+	}
+	return data[:count]
+}
+
 func (d *Database) SetTransaction(
 	tx lcommon.Transaction,
 	point ocommon.Point,
@@ -56,13 +77,14 @@ func (d *Database) SetTransaction(
 
 	// Store transaction CBOR offset - offsets MUST be available
 	txHash := tx.Hash()
+	txHashBytes := ledgerHashBytes(txHash)
 	var txHashArray [32]byte
-	copy(txHashArray[:], txHash.Bytes())
+	copy(txHashArray[:], txHashBytes)
 
 	if offsets == nil {
 		return fmt.Errorf(
 			"missing offsets for transaction %s at slot %d: offsets must be computed",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
@@ -70,13 +92,13 @@ func (d *Database) SetTransaction(
 	if !ok {
 		return fmt.Errorf(
 			"missing TX offset for %s at slot %d: offset must be computed by block indexer",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
 	// Store offset reference
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
+	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set tx offset: %w", err)
 	}
 
@@ -88,12 +110,12 @@ func (d *Database) SetTransaction(
 	if len(produced) == 0 {
 		d.logger.Warn(
 			"transaction has no produced outputs",
-			"txHash", hex.EncodeToString(txHash.Bytes()[:8]),
+			"txHash", hex.EncodeToString(ledgerHashPrefix(txHash)),
 			"slot", point.Slot,
 		)
 	}
 	for _, utxo := range produced {
-		txId := utxo.Id.Id().Bytes()
+		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
 
 		ref := UtxoRef{
@@ -104,7 +126,7 @@ func (d *Database) SetTransaction(
 		if !ok {
 			return fmt.Errorf(
 				"missing UTxO offset for %s#%d at slot %d: offset must be computed by block indexer",
-				hex.EncodeToString(txId[:8]),
+				hex.EncodeToString(bytePrefix(txId)),
 				outputIdx,
 				point.Slot,
 			)
@@ -114,7 +136,7 @@ func (d *Database) SetTransaction(
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
 				"set utxo offset %x#%d: %w",
-				txId[:8],
+				bytePrefix(txId),
 				outputIdx,
 				err,
 			)
@@ -174,13 +196,14 @@ func (d *Database) SetGapBlockTransaction(
 	}
 
 	txHash := tx.Hash()
+	txHashBytes := ledgerHashBytes(txHash)
 	var txHashArray [32]byte
-	copy(txHashArray[:], txHash.Bytes())
+	copy(txHashArray[:], txHashBytes)
 
 	if offsets == nil {
 		return fmt.Errorf(
 			"missing offsets for gap block transaction %s at slot %d",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
@@ -188,18 +211,18 @@ func (d *Database) SetGapBlockTransaction(
 	if !ok {
 		return fmt.Errorf(
 			"missing TX offset for gap block %s at slot %d",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
+	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set gap block tx offset: %w", err)
 	}
 
 	// Store UTxO offsets for produced outputs
 	for _, utxo := range tx.Produced() {
-		txId := utxo.Id.Id().Bytes()
+		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
 		ref := UtxoRef{
 			TxId:      txHashArray,
@@ -209,7 +232,7 @@ func (d *Database) SetGapBlockTransaction(
 		if !ok {
 			return fmt.Errorf(
 				"missing UTxO offset for gap block %s#%d at slot %d",
-				hex.EncodeToString(txId[:8]),
+				hex.EncodeToString(bytePrefix(txId)),
 				outputIdx,
 				point.Slot,
 			)
@@ -218,7 +241,7 @@ func (d *Database) SetGapBlockTransaction(
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
 				"set gap block utxo offset %x#%d: %w",
-				txId[:8], outputIdx, err,
+				bytePrefix(txId), outputIdx, err,
 			)
 		}
 	}
@@ -256,11 +279,11 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	if len(consumed) == 0 {
 		return nil
 	}
-	spenderTxHash := tx.Hash().Bytes()
+	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
 	for _, input := range consumed {
-		inputTxId := input.Id().Bytes()
+		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
 		if _, ok := seen[inputKey]; ok {
 			continue
@@ -345,11 +368,11 @@ func (d *Database) ensureGapConsumedUtxos(
 	if len(consumed) == 0 {
 		return nil
 	}
-	spenderTxHash := tx.Hash().Bytes()
+	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
 	for _, input := range consumed {
-		inputTxId := input.Id().Bytes()
+		inputTxId := ledgerInputIDBytes(input)
 		inputKey := fmt.Sprintf("%x:%d", inputTxId, input.Index())
 		if _, ok := seen[inputKey]; ok {
 			continue
@@ -462,7 +485,7 @@ func (d *Database) recoverConsumedUtxo(
 	}
 	utxoData, err := blob.GetUtxo(
 		blobTxn,
-		input.Id().Bytes(),
+		ledgerInputIDBytes(input),
 		input.Index(),
 	)
 	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
@@ -506,7 +529,7 @@ func (d *Database) recoverConsumedUtxo(
 		slot, found, slotErr := utxoRecoverySlotForTx(
 			txn.DB(),
 			txn,
-			input.Id().Bytes(),
+			ledgerInputIDBytes(input),
 		)
 		if slotErr != nil {
 			return nil, fmt.Errorf(
@@ -522,7 +545,7 @@ func (d *Database) recoverConsumedUtxo(
 		block, err := utxoRecoveryBlockForTx(
 			txn.DB(),
 			txn,
-			input.Id().Bytes(),
+			ledgerInputIDBytes(input),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("lookup producer block: %w", err)
@@ -540,7 +563,7 @@ func (d *Database) recoverConsumedUtxo(
 		}
 		outputCbor, err = utxoCborFromDecodedBlock(
 			decodedBlock,
-			input.Id().Bytes(),
+			ledgerInputIDBytes(input),
 			input.Index(),
 		)
 		if err != nil {
@@ -551,13 +574,13 @@ func (d *Database) recoverConsumedUtxo(
 		offsets, indexErr := indexer.ComputeOffsets(block.Cbor, decodedBlock)
 		if indexErr == nil {
 			var txHashArray [32]byte
-			copy(txHashArray[:], input.Id().Bytes())
+			copy(txHashArray[:], ledgerInputIDBytes(input))
 			ref := UtxoRef{TxId: txHashArray, OutputIdx: input.Index()}
 			if offset, ok := offsets.UtxoOffsets[ref]; ok {
 				if repairErr := repairUtxoBlob(
 					txn.DB(),
 					txn,
-					input.Id().Bytes(),
+					ledgerInputIDBytes(input),
 					input.Index(),
 					&offset,
 				); repairErr != nil {
@@ -591,7 +614,7 @@ func (d *Database) recoverConsumedUtxo(
 	// the FK nil and the row stays unjoinable until backfilled by a
 	// later path that has the producer.
 	producerID, found, lookupErr := d.metadata.GetTransactionIDByHash(
-		input.Id().Bytes(),
+		ledgerInputIDBytes(input),
 		txn.Metadata(),
 	)
 	if lookupErr != nil {
@@ -640,7 +663,7 @@ func (d *Database) SetGenesisTransaction(
 
 	utxoModels := make([]models.Utxo, len(outputs))
 	for i, utxo := range outputs {
-		txId := utxo.Id.Id().Bytes()
+		txId := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
 
 		ref := UtxoRef{
@@ -652,7 +675,7 @@ func (d *Database) SetGenesisTransaction(
 		if !ok {
 			return fmt.Errorf(
 				"missing offset for genesis utxo %x:%d",
-				txId[:8],
+				bytePrefix(txId),
 				outputIdx,
 			)
 		}
@@ -662,7 +685,7 @@ func (d *Database) SetGenesisTransaction(
 		if err := blob.SetUtxo(blobTxn, txId, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
 				"set genesis utxo offset %x#%d: %w",
-				txId[:8],
+				bytePrefix(txId),
 				outputIdx,
 				err,
 			)

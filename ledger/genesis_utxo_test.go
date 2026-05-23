@@ -93,8 +93,9 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 		default:
 			t.Fatalf("Unexpected output type: %T", utxo.Output)
 		}
+		utxoTxID := utxo.Id.Id()
 		t.Logf("Encoded UTxO %x#%d: %d bytes",
-			utxo.Id.Id().Bytes()[:8], utxo.Id.Index(), len(cborData))
+			utxoTxID[:8], utxo.Id.Index(), len(cborData))
 	}
 
 	// Get the Byron genesis hash to use as the synthetic block hash
@@ -203,7 +204,9 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 	// Now try to retrieve each genesis UTxO
 	t.Log("Retrieving genesis UTxOs...")
 	for _, utxo := range byronGenesisUtxos {
-		txId := utxo.Id.Id().Bytes()
+		txIDHash := utxo.Id.Id()
+		txId := txIDHash[:]
+		txIDPrefix := txIDHash[:8]
 		outputIdx := utxo.Id.Index()
 
 		// Try to get the UTxO from blob store
@@ -216,14 +219,14 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 		data, err := blob.GetUtxo(blobTxn, txId, outputIdx)
 		if err != nil {
 			t.Errorf("Failed to get UTxO %s#%d from blob: %v",
-				hex.EncodeToString(txId[:8]), outputIdx, err)
+				hex.EncodeToString(txIDPrefix), outputIdx, err)
 			readTxn.Rollback() //nolint:errcheck
 			continue
 		}
 
 		t.Logf(
 			"Retrieved data for %x#%d: %d bytes, first bytes: %s",
-			txId[:8],
+			txIDPrefix,
 			outputIdx,
 			len(data),
 			hex.EncodeToString(data[:min(20, len(data))]),
@@ -239,7 +242,7 @@ func TestGenesisUtxoStorageAndRetrieval(t *testing.T) {
 				t,
 				err,
 				"Failed to decode offset for %x#%d",
-				txId[:8],
+				txIDPrefix,
 				outputIdx,
 			)
 

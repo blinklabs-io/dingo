@@ -172,6 +172,7 @@ func TestStartPrometheusMetricsServerWithHandlerServesMetrics(t *testing.T) {
 	client := http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://" + server.addr + "/metrics")
 	require.NoError(t, err)
+	require.NotNil(t, resp)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 

@@ -84,7 +84,11 @@ func newChainIterator(
 }
 
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
-	return ci.chain.iterNext(ci, blocking)
+	ret, err := ci.chain.iterNext(ci, blocking)
+	if ret == nil && err == nil {
+		return nil, ErrIteratorChainTip
+	}
+	return ret, err
 }
 
 func (ci *ChainIterator) Cancel() {

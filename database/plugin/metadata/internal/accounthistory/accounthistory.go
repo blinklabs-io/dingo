@@ -174,7 +174,7 @@ func DelegationTableCertTypes(table string) []uint {
 			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
 		}
 	default:
-		return nil
+		return []uint{}
 	}
 }
 
@@ -279,7 +279,7 @@ func RegistrationTableCertTypes(
 			uint(lcommon.CertificateTypeDeregistration),
 		}
 	default:
-		return nil
+		return []uint{}
 	}
 }
 

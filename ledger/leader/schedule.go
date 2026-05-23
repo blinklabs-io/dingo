@@ -88,6 +88,9 @@ func (s *Schedule) IsLeaderForSlot(slot uint64) bool {
 
 // SlotCount returns the number of slots where this pool is leader.
 func (s *Schedule) SlotCount() int {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.LeaderSlots)
@@ -95,6 +98,9 @@ func (s *Schedule) SlotCount() int {
 
 // LeaderSlotsSnapshot returns a copy of the leader slot list.
 func (s *Schedule) LeaderSlotsSnapshot() []uint64 {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]uint64(nil), s.LeaderSlots...)

@@ -263,7 +263,7 @@ func utxoRecoverySlotForTx(
 	if err != nil {
 		return 0, false, fmt.Errorf(
 			"lookup producer tx metadata for utxo recovery %x: %w",
-			txId[:8],
+			bytePrefix(txId),
 			err,
 		)
 	}
@@ -294,7 +294,7 @@ func fetchTxBlobSlotAndHash(
 		}
 		return 0, blockHash, false, fmt.Errorf(
 			"lookup tx blob for utxo recovery %x: %w",
-			txId[:8],
+			bytePrefix(txId),
 			err,
 		)
 	}
@@ -304,7 +304,7 @@ func fetchTxBlobSlotAndHash(
 		if err != nil {
 			return 0, blockHash, false, fmt.Errorf(
 				"decode tx offset for utxo recovery %x: %w",
-				txId[:8],
+				bytePrefix(txId),
 				err,
 			)
 		}
@@ -314,7 +314,7 @@ func fetchTxBlobSlotAndHash(
 		if err != nil {
 			return 0, blockHash, false, fmt.Errorf(
 				"decode tx parts for utxo recovery %x: %w",
-				txId[:8],
+				bytePrefix(txId),
 				err,
 			)
 		}
@@ -344,7 +344,7 @@ func utxoRecoveryBlockForTx(
 		if err != nil {
 			return nil, fmt.Errorf(
 				"lookup producer block from tx blob %x: %w",
-				txId[:8],
+				bytePrefix(txId),
 				err,
 			)
 		}
@@ -354,7 +354,7 @@ func utxoRecoveryBlockForTx(
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup producer tx metadata for utxo recovery %x: %w",
-			txId[:8],
+			bytePrefix(txId),
 			err,
 		)
 	}
@@ -368,7 +368,7 @@ func utxoRecoveryBlockForTx(
 	if err != nil {
 		return nil, fmt.Errorf(
 			"lookup producer block from tx metadata %x: %w",
-			txId[:8],
+			bytePrefix(txId),
 			err,
 		)
 	}

@@ -3364,10 +3364,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	var intraBlockUtxos map[string]lcommon.Utxo
-	if shouldValidate {
-		intraBlockUtxos = make(map[string]lcommon.Utxo)
-	}
+	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -4619,7 +4616,7 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 	points []ocommon.Point,
 	count int,
 ) []ocommon.Point {
-	if count <= 0 {
+	if count <= 0 || len(points) == 0 {
 		return points
 	}
 	point, ok := ls.mithrilTrustBoundaryPoint()

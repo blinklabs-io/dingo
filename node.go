@@ -199,9 +199,10 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	primaryChain := n.chainManager.PrimaryChain()
 	n.eventBus.SubscribeFunc(
 		chain.BlockProposedEventType,
-		n.chainManager.PrimaryChain().HandleBlockProposedEvent,
+		primaryChain.HandleBlockProposedEvent,
 	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,

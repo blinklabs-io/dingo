@@ -232,6 +232,7 @@ func waitForSchedule(
 		schedule = election.CurrentSchedule()
 		return schedule != nil
 	}, timeout, 50*time.Millisecond, "schedule should be computed")
+	require.NotNil(t, schedule)
 	return schedule
 }
 
@@ -452,6 +453,7 @@ func TestElectionPersistsComputedSchedule(t *testing.T) {
 		require.NoError(t, err)
 		return persisted != nil
 	}, 2*time.Second, 50*time.Millisecond)
+	require.NotNil(t, persisted)
 	assert.Equal(
 		t,
 		schedule.LeaderSlotsSnapshot(),
@@ -977,6 +979,7 @@ func TestElectionRollbackKeepsPrecomputedNextSchedule(t *testing.T) {
 		nextBefore = election.ScheduleForEpoch(11)
 		return nextBefore != nil
 	}, 30*time.Second, 100*time.Millisecond)
+	require.NotNil(t, nextBefore)
 	expectedSlots := nextBefore.LeaderSlotsSnapshot()
 	expectedNonce := append([]byte(nil), nextBefore.EpochNonce...)
 

@@ -248,11 +248,13 @@ func ValidateTxAlonzo(
 		}
 		scripts[tmpScript.Hash()] = tmpScript
 	}
-	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
-		scripts[tmpScript.Hash()] = tmpScript
-	}
-	for _, tmpScript := range tx.Witnesses().NativeScripts() {
-		scripts[tmpScript.Hash()] = tmpScript
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		for _, tmpScript := range witnesses.PlutusV1Scripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
+		for _, tmpScript := range witnesses.NativeScripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
 	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfo
@@ -385,11 +387,13 @@ func EvaluateTxAlonzo(
 		}
 		scripts[tmpScript.Hash()] = tmpScript
 	}
-	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
-		scripts[tmpScript.Hash()] = tmpScript
-	}
-	for _, tmpScript := range tx.Witnesses().NativeScripts() {
-		scripts[tmpScript.Hash()] = tmpScript
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		for _, tmpScript := range witnesses.PlutusV1Scripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
+		for _, tmpScript := range witnesses.NativeScripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
 	}
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
