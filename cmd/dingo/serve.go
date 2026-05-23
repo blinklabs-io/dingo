@@ -170,6 +170,13 @@ func resumeBackfill(
 	defer db.Close()
 
 	bf := node.NewBackfill(db, nodeCfg, logger)
+	if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
+		return fmt.Errorf(
+			"invalid BackfillBatchSize %d in SetBatchSize: %w",
+			cfg.BackfillBatchSize,
+			err,
+		)
+	}
 	bf.DisableNonceComputation()
 	needed, err := bf.NeedsBackfill()
 	if err != nil {
