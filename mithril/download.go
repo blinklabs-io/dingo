@@ -49,7 +49,7 @@ type ProgressFunc func(DownloadProgress)
 
 const (
 	defaultDownloadIdleTimeout = 2 * time.Minute
-	defaultDownloadIdleRetries = 3
+	defaultDownloadIdleRetries = 12
 )
 
 var errDownloadIdleTimeout = errors.New("download idle timeout")
@@ -87,8 +87,9 @@ type DownloadConfig struct {
 	// or body bytes before retrying. If zero, a conservative default
 	// is used. If negative, idle detection is disabled.
 	IdleTimeout time.Duration
-	// MaxIdleRetries is the number of retry attempts after an idle
-	// timeout. If zero, a conservative default is used.
+	// MaxIdleRetries is the number of consecutive retry attempts
+	// after idle timeouts that make no additional download progress.
+	// If zero, a conservative default is used.
 	MaxIdleRetries int
 }
 
@@ -233,6 +234,34 @@ func downloadIdleTimeoutCause(timeout time.Duration) error {
 	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
 }
 
+func downloadDestinationPath(cfg DownloadConfig) string {
+	filename := filepath.Base(cfg.Filename)
+	if filename == "." || filename == "/" {
+		filename = "snapshot.tar.zst"
+	}
+	return filepath.Join(cfg.DestDir, filename)
+}
+
+func downloadFileSize(filename string) int64 {
+	fi, err := os.Stat(filename)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func newDownloadTransport() *http.Transport {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport := base.Clone()
+		transport.DisableKeepAlives = true
+		return transport
+	}
+	return &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		DisableKeepAlives: true,
+	}
+}
+
 // progressWriter wraps an io.Writer to track bytes written and
 // report download progress.
 type progressWriter struct {
@@ -333,27 +362,43 @@ func DownloadSnapshot(
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	maxAttempts := cfg.maxIdleRetries() + 1
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
+	maxIdleRetries := cfg.maxIdleRetries()
+	destPath := downloadDestinationPath(cfg)
+	lastObservedSize := downloadFileSize(destPath)
+	consecutiveIdleRetries := 0
+	for attempt := 1; ; attempt++ {
+		startSize := downloadFileSize(destPath)
 		path, err := downloadSnapshotOnce(ctx, cfg)
 		if err == nil {
 			return path, nil
 		}
-		if !errors.Is(err, errDownloadIdleTimeout) ||
-			attempt == maxAttempts ||
-			ctx.Err() != nil {
+		if !errors.Is(err, errDownloadIdleTimeout) || ctx.Err() != nil {
+			return "", err
+		}
+		currentSize := downloadFileSize(destPath)
+		madeProgress := currentSize > startSize ||
+			currentSize > lastObservedSize
+		if madeProgress {
+			consecutiveIdleRetries = 0
+			lastObservedSize = currentSize
+		} else {
+			consecutiveIdleRetries++
+		}
+		if consecutiveIdleRetries > maxIdleRetries {
 			return "", err
 		}
 		cfg.Logger.Warn(
 			"snapshot download stalled, retrying",
 			"component", "mithril",
 			"attempt", attempt,
-			"max_attempts", maxAttempts,
+			"consecutive_idle_retries", consecutiveIdleRetries,
+			"max_idle_retries", maxIdleRetries,
 			"idle_timeout", cfg.idleTimeout(),
+			"partial_bytes", currentSize,
+			"made_progress", madeProgress,
 			"error", err,
 		)
 	}
-	return "", errors.New("download retry loop exhausted")
 }
 
 func downloadSnapshotOnce(
@@ -378,11 +423,7 @@ func downloadSnapshotOnce(
 		)
 	}
 
-	filename := filepath.Base(cfg.Filename)
-	if filename == "." || filename == "/" {
-		filename = "snapshot.tar.zst"
-	}
-	destPath := filepath.Join(cfg.DestDir, filename)
+	destPath := downloadDestinationPath(cfg)
 
 	// Check for partial download to support resume
 	var existingSize int64
@@ -408,8 +449,11 @@ func downloadSnapshotOnce(
 		)
 	}
 
+	transport := newDownloadTransport()
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Timeout:       0, // No timeout for large downloads
+		Transport:     transport,
 		CheckRedirect: httpsOnlyRedirect,
 	}
 	var headerTimer *idleTimer

@@ -200,6 +200,99 @@ func TestDownloadSnapshotIdleTimeoutRetriesAndResumes(t *testing.T) {
 	require.Equal(t, fullContent, data)
 }
 
+func TestDownloadSnapshotIdleRetriesResetAfterProgress(t *testing.T) {
+	fullContent := []byte("AAABBBCCC")
+	var requestCount atomic.Int32
+	rangeCh := make(chan string, 2)
+
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch requestCount.Add(1) {
+			case 1:
+				w.Header().Set(
+					"Content-Length",
+					fmt.Sprintf("%d", len(fullContent)),
+				)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(fullContent[:3])
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			case 2:
+				select {
+				case rangeCh <- r.Header.Get("Range"):
+				default:
+				}
+				w.Header().Set("Content-Range", "bytes 3-8/9")
+				w.Header().Set("Content-Length", "6")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(fullContent[3:6])
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+				<-r.Context().Done()
+			default:
+				select {
+				case rangeCh <- r.Header.Get("Range"):
+				default:
+				}
+				w.Header().Set("Content-Range", "bytes 6-8/9")
+				w.Header().Set("Content-Length", "3")
+				w.WriteHeader(http.StatusPartialContent)
+				_, _ = w.Write(fullContent[6:])
+			}
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	destDir := t.TempDir()
+	cfg := DownloadConfig{
+		URL:            server.URL + "/snapshot.tar.zst",
+		DestDir:        destDir,
+		Filename:       "idle-progress-reset.tar.zst",
+		ExpectedSize:   int64(len(fullContent)),
+		IdleTimeout:    50 * time.Millisecond,
+		MaxIdleRetries: 1,
+	}
+	timeout := 3*cfg.IdleTimeout + 500*time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	path, err := DownloadSnapshot(ctx, cfg)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		filepath.Join(destDir, "idle-progress-reset.tar.zst"),
+		path,
+	)
+	require.Equal(t, int32(3), requestCount.Load())
+	require.Equal(
+		t,
+		"bytes=3-",
+		testutil.RequireReceive(
+			t,
+			rangeCh,
+			time.Second,
+			"first retry resume range",
+		),
+	)
+	require.Equal(
+		t,
+		"bytes=6-",
+		testutil.RequireReceive(
+			t,
+			rangeCh,
+			time.Second,
+			"second retry resume range",
+		),
+	)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, fullContent, data)
+}
+
 func TestDownloadSnapshotRejectsNegativeMaxIdleRetries(t *testing.T) {
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
 		URL:            "http://example.invalid/snapshot.tar.zst",

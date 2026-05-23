@@ -97,6 +97,8 @@ mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
   downloadDir: "/tmp/mithril"
+  downloadIdleTimeout: "5m"
+  downloadMaxIdleRetries: 9
   cleanupAfterLoad: false
   verifyCertificates: false
 `
@@ -150,11 +152,13 @@ mithril:
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
-			Enabled:            false,
-			AggregatorURL:      "https://mithril.example.net",
-			DownloadDir:        "/tmp/mithril",
-			CleanupAfterLoad:   false,
-			VerifyCertificates: false,
+			Enabled:                false,
+			AggregatorURL:          "https://mithril.example.net",
+			DownloadDir:            "/tmp/mithril",
+			DownloadIdleTimeout:    "5m",
+			DownloadMaxIdleRetries: 9,
+			CleanupAfterLoad:       false,
+			VerifyCertificates:     false,
 		},
 	}
 

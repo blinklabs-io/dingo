@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // BootstrapConfig holds configuration for the Mithril bootstrap
@@ -57,6 +58,13 @@ type BootstrapConfig struct {
 	Logger *slog.Logger
 	// OnProgress is called during download with progress updates.
 	OnProgress ProgressFunc
+	// DownloadIdleTimeout is the maximum time to wait for download
+	// response headers or body bytes before retrying. Zero uses the
+	// downloader default; negative disables idle detection.
+	DownloadIdleTimeout time.Duration
+	// DownloadMaxIdleRetries is the number of consecutive idle retries
+	// allowed without additional bytes. Zero uses the downloader default.
+	DownloadMaxIdleRetries int
 }
 
 // VerificationMode selects the level of Mithril certificate verification.
@@ -330,12 +338,14 @@ func Bootstrap(
 		for i, loc := range snapshot.Locations {
 			archivePath, dlErr = DownloadSnapshot(
 				ctx, DownloadConfig{
-					URL:          loc,
-					DestDir:      downloadDir,
-					Filename:     archiveFilename,
-					ExpectedSize: snapshot.Size,
-					Logger:       cfg.Logger,
-					OnProgress:   cfg.OnProgress,
+					URL:            loc,
+					DestDir:        downloadDir,
+					Filename:       archiveFilename,
+					ExpectedSize:   snapshot.Size,
+					Logger:         cfg.Logger,
+					OnProgress:     cfg.OnProgress,
+					IdleTimeout:    cfg.DownloadIdleTimeout,
+					MaxIdleRetries: cfg.DownloadMaxIdleRetries,
 				},
 			)
 			if dlErr == nil {
@@ -514,12 +524,14 @@ func downloadAncillary(
 	for i, loc := range snapshot.AncillaryLocations {
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:          loc,
-				DestDir:      downloadDir,
-				Filename:     ancillaryFilename,
-				ExpectedSize: snapshot.AncillarySize,
-				Logger:       cfg.Logger,
-				OnProgress:   cfg.OnProgress,
+				URL:            loc,
+				DestDir:        downloadDir,
+				Filename:       ancillaryFilename,
+				ExpectedSize:   snapshot.AncillarySize,
+				Logger:         cfg.Logger,
+				OnProgress:     cfg.OnProgress,
+				IdleTimeout:    cfg.DownloadIdleTimeout,
+				MaxIdleRetries: cfg.DownloadMaxIdleRetries,
 			},
 		)
 		if err == nil {
