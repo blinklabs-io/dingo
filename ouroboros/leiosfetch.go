@@ -15,8 +15,10 @@
 package ouroboros
 
 import (
+	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -107,8 +109,15 @@ func (o *Ouroboros) leiosfetchServerBlockRequest(
 	ctx oleiosfetch.CallbackContext,
 	point ocommon.Point,
 ) (protocol.Message, error) {
-	// TODO
-	return nil, nil
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	if !ok {
+		return nil, fmt.Errorf(
+			"leios endorser block not found: %d.%x",
+			point.Slot,
+			point.Hash,
+		)
+	}
+	return oleiosfetch.NewMsgBlock(cbor.RawMessage(data.blockRaw)), nil
 }
 
 func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
@@ -116,8 +125,29 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	point ocommon.Point,
 	txBitmap map[uint16]uint64,
 ) (protocol.Message, error) {
-	// TODO
-	return nil, nil
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	if !ok {
+		return nil, fmt.Errorf(
+			"leios endorser block txs not found: %d.%x",
+			point.Slot,
+			point.Hash,
+		)
+	}
+	if !data.completeTxCache() {
+		return nil, fmt.Errorf(
+			"leios endorser block tx cache incomplete: %d.%x: have %d txs for %d refs",
+			point.Slot,
+			point.Hash,
+			len(data.txsRaw),
+			len(data.refs),
+		)
+	}
+	if err := validateLeiosTxBitmap(len(data.txsRaw), txBitmap); err != nil {
+		return nil, err
+	}
+	return oleiosfetch.NewMsgBlockTxs(
+		leiosTxsFromBitmap(data.txsRaw, txBitmap),
+	), nil
 }
 
 func (o *Ouroboros) leiosfetchServerVotesRequest(
