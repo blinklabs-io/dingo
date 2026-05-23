@@ -20,7 +20,18 @@ internal/test/consensus/
   compose.go                 Multi-peer vector composition (used by
                              cmd/compose-consensus-vector)
   diff.go                    Structural-tolerance golden diff
+  dispatch.go                Replay entry point: LoadVector + RunVector
+                             (routes consensus/ledger by category)
+  consensus_runner.go        Consensus-category replay driver
+                             (drives chainselection.ChainSelector)
+  ledger_runner.go           Ledger-category replay driver (stub —
+                             awaits the conversion tool + an exported
+                             final-state comparison helper)
   sidecar_test.go            Offline round-trip + recorder tests
+  consensus_test.go          Walks testdata/captured/ + testdata/converted/
+                             and replays each vector through RunVector
+  runner_test.go             Dispatch + per-driver unit tests on
+                             synthetic vectors
   live_capture_test.go       Build-tag-gated end-to-end smoke test
   golden_test.go             Build-tag-gated golden-corpus assertions
   cmd/
@@ -88,11 +99,13 @@ hand-crafted examples.
 ## Tests
 
 ```bash
-# Fast: offline format + recorder + composer + diff tests.
+# Fast: offline format + recorder + composer + diff + runner tests.
+# Also walks testdata/captured/ and testdata/converted/ via the
+# replay runner — each committed vector becomes a subtest.
 go test ./internal/test/consensus/...
 
-# Build-tag-gated: golden-corpus assertions (load each committed
-# vector under testdata/captured/ and verify structural invariants).
+# Build-tag-gated: golden-corpus structural assertions (load each
+# committed vector under testdata/captured/ and verify shape).
 go test -tags consensuscapture -run "TestCapturedGoldensDecode|TestForkAndSelectV1SharedPrefix" \
     ./internal/test/consensus/...
 
@@ -101,9 +114,38 @@ go test -tags consensuscapture -run TestCaptureScenarioLiveStack \
     ./internal/test/consensus/...
 ```
 
-The build-tag-gated tests bring up a scenario's docker-compose stack
-(or load a committed golden) and assert shape invariants. `make test`
-does not include them.
+The replay runner (`TestConsensusConformanceVectors` /
+`TestLedgerConformanceVectorsNewFormat`) runs in plain `go test` —
+no build tag — so every PR exercises the committed corpus against
+dingo's chain-selection logic.
+
+## Replay runner
+
+`dispatch.go` is the entry point: `LoadVector(path)` decodes a JSON
+vector, `RunVector(t, v)` dispatches on `v.Category` to either the
+consensus driver (`consensus_runner.go`) or the ledger driver
+(`ledger_runner.go`).
+
+Today's consensus driver is scoped to **chain selection**: for each
+peer in the vector it derives the last `roll_forward`'s tip from the
+served trace and feeds it to `chainselection.ChainSelector` via
+`UpdatePeerTip`, then asserts the selector's chosen peer's tip
+matches `expected_output.final_tip`. That's the meaningful question
+the `fork_and_select_v1` scenario exists to answer ("did Praos pick
+the longer chain?"); extending the driver to drive
+`chain.Manager` + full chainsync handler dispatch is a later step
+once captures carry block bodies (currently only headers).
+
+The ledger driver is a stub: it returns a clear "not yet wired"
+error rather than silently passing. It will fill in once the
+Amaru-corpus conversion tool populates `testdata/converted/` and an
+exported final-state comparison helper lands in ouroboros-mock.
+
+When a replay fails, the runner returns a structured error
+(`tip slot mismatch: got X, want Y`, etc.). The build-tag-gated
+golden tests in `golden_test.go` also validate the committed corpus
+shape independently of the replay runner so a corrupt vector
+surfaces both ways.
 
 ## Recording layer
 
