@@ -43,6 +43,8 @@ internal/test/consensus/
   Dockerfile.compose_consensus_vector
                              Shared base image (Go build of cmd/composer)
   capture-scenario.sh        Dispatcher: forwards to scenarios/<n>/run.sh
+  capture-all.sh             Bulk wrapper: runs every scenario, writes
+                             each to testdata/captured/<n>.json
   scenarios/
     intersect_origin_one_rollforward/   Single-peer smoke test
     fork_and_select_v1/                 Two-peer fork-and-select scenario
@@ -78,6 +80,20 @@ Multi-peer scenarios use the `cmd/compose-consensus-vector` binary to
 merge per-peer captures into the multi-peer vector and diff against
 the committed golden (structural-tolerance match per
 `internal/test/consensus/diff.go`).
+
+To regenerate the entire committed corpus in one go (every scenario,
+each writing to `testdata/captured/<name>.json`), use the bulk
+wrapper:
+
+```bash
+./capture-all.sh                                   # all scenarios
+./capture-all.sh --only intersect_origin_one_rollforward
+./capture-all.sh --fail-fast                       # stop on first failure
+```
+
+The wrapper passes `--skip-golden` to every scenario so existing
+goldens don't block regeneration — that's the whole point of running
+it. Scenarios with no golden accept the flag as a no-op.
 
 ## Vector format
 

@@ -51,13 +51,20 @@ while [[ $# -gt 0 ]]; do
             OUT_PATH="$2"; shift 2;;
         --keep-up)
             KEEP_UP=true; shift;;
+        --skip-golden)
+            # No-op here — this scenario has no committed golden to
+            # diff against. Accepted so the bulk capture-all.sh
+            # wrapper can pass --skip-golden uniformly to every
+            # scenario's run.sh without per-scenario branching.
+            shift;;
         -h|--help)
             cat <<USAGE
-usage: $0 [-out <path>] [--keep-up]
+usage: $0 [-out <path>] [--keep-up] [--skip-golden]
 
-  -out <path>   Destination path for the captured vector.
-                Defaults to ${SCRIPT_DIR}/output/vector.json.
-  --keep-up     Leave the docker-compose stack running on success.
+  -out <path>     Destination path for the captured vector.
+                  Defaults to ${SCRIPT_DIR}/output/vector.json.
+  --keep-up       Leave the docker-compose stack running on success.
+  --skip-golden   No-op; accepted for bulk-wrapper compatibility.
 USAGE
             exit 0;;
         *)
