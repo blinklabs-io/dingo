@@ -43,21 +43,21 @@ func (r *importSQLRecorder) LogMode(
 func (*importSQLRecorder) Info(
 	context.Context,
 	string,
-	...interface{},
+	...any,
 ) {
 }
 
 func (*importSQLRecorder) Warn(
 	context.Context,
 	string,
-	...interface{},
+	...any,
 ) {
 }
 
 func (*importSQLRecorder) Error(
 	context.Context,
 	string,
-	...interface{},
+	...any,
 ) {
 }
 
