@@ -31,7 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"google.golang.org/protobuf/proto"
 )
 
 // archiveFetchTimeout bounds a single archive round-trip (signed-URL request
@@ -259,8 +258,8 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 			&archivev1alpha1.FetchBlockRequest{
 				Blocks: []*archivev1alpha1.BlockRef{
 					{
-						Slot: proto.Uint64(slot),
-						Hash: proto.String(hex.EncodeToString(hash)),
+						Slot: new(slot),
+						Hash: new(hex.EncodeToString(hash)),
 					},
 				},
 			},

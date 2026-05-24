@@ -46,8 +46,10 @@ func newMockEventBus() *event.EventBus {
 
 // boolPtr returns a pointer to the given bool value.
 // Used for config fields that use *bool to distinguish nil from explicit false.
+//
+//go:fix inline
 func boolPtr(v bool) *bool {
-	return &v
+	return new(v)
 }
 
 func requirePendingEventData[T any](
@@ -6518,7 +6520,7 @@ func TestPeerGovernor_BootstrapRecovery(t *testing.T) {
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:              eventBus,
 		MinHotPeers:           3,
-		AutoBootstrapRecovery: boolPtr(true), // Explicitly enable
+		AutoBootstrapRecovery: new(true), // Explicitly enable
 	})
 
 	// Start with bootstrap exited
@@ -6556,7 +6558,7 @@ func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
-		AutoBootstrapRecovery: boolPtr(true),
+		AutoBootstrapRecovery: new(true),
 	})
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
@@ -6609,7 +6611,7 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
-		AutoBootstrapRecovery: boolPtr(true),
+		AutoBootstrapRecovery: new(true),
 	})
 
 	// Start with bootstrap exited
@@ -6648,7 +6650,7 @@ func TestPeerGovernor_BootstrapRecovery_IgnoresResponderOnlyWarmCandidates(
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           3,
-		AutoBootstrapRecovery: boolPtr(true),
+		AutoBootstrapRecovery: new(true),
 	})
 
 	pg.mu.Lock()
@@ -6681,7 +6683,7 @@ func TestPeerGovernor_BootstrapRecovery_NotNeededWithEnoughHotPeers(
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		MinHotPeers:           2,
-		AutoBootstrapRecovery: boolPtr(true),
+		AutoBootstrapRecovery: new(true),
 	})
 
 	// Start with bootstrap exited
@@ -6729,8 +6731,8 @@ func TestPeerGovernor_Reconcile_ExitsBootstrap(t *testing.T) {
 		Logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		SyncProgressProvider:  mockSync,
 		SyncProgressForExit:   0.95,
-		AutoBootstrapRecovery: boolPtr(false), // Disable recovery for this test
-		MinHotPeers:           1,              // Low threshold to avoid recovery
+		AutoBootstrapRecovery: new(false), // Disable recovery for this test
+		MinHotPeers:           1,          // Low threshold to avoid recovery
 	})
 
 	// Add bootstrap peer

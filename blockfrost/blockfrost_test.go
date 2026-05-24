@@ -29,8 +29,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+//go:fix inline
 func intPtr(v int) *int {
-	return &v
+	return new(v)
 }
 
 // mockNode implements BlockfrostNode for testing.
@@ -826,7 +827,7 @@ func TestHandlePoolsExtended(t *testing.T) {
 					{
 						IPv4: "192.168.0.1",
 						DNS:  "relay-two.example",
-						Port: intPtr(3002),
+						Port: new(3002),
 					},
 				},
 			},
@@ -843,7 +844,7 @@ func TestHandlePoolsExtended(t *testing.T) {
 					{
 						IPv6: "2001:db8::1",
 						DNS:  "relay-one.example",
-						Port: intPtr(3001),
+						Port: new(3001),
 					},
 					{
 						DNS: "relay-no-port.example",
