@@ -760,7 +760,6 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonRollbackLoop,
 	}
 	for _, reason := range reasons {
-		reason := reason
 		t.Run(reason, func(t *testing.T) {
 			logBuf := &lockedBuffer{}
 			logger := slog.New(
