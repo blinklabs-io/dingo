@@ -2300,8 +2300,7 @@ func snapshotEpochAnchorSlot(
 		)
 		return 0
 	}
-	for eraIndex := len(cfg.State.EraBounds) - 1; eraIndex >= 0; eraIndex-- {
-		bound := cfg.State.EraBounds[eraIndex]
+	for eraIndex, bound := range slices.Backward(cfg.State.EraBounds) {
 		if epoch < bound.Epoch {
 			continue
 		}

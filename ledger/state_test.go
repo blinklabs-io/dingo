@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2853,9 +2854,9 @@ func TestDensityWindow(t *testing.T) {
 	// Test rollback: roll back to slot 199000
 	rollbackSlot := uint64(199000)
 	rollbackBlock := uint64(0)
-	for i := len(ls.densityWindow) - 1; i >= 0; i-- {
-		if ls.densityWindow[i].slot <= rollbackSlot {
-			rollbackBlock = ls.densityWindow[i].blockNum
+	for _, v := range slices.Backward(ls.densityWindow) {
+		if v.slot <= rollbackSlot {
+			rollbackBlock = v.blockNum
 			break
 		}
 	}

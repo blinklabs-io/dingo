@@ -17,6 +17,7 @@ package ledger
 import (
 	"encoding/hex"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -99,13 +100,13 @@ func (ls *LedgerState) emitTransactionRollbackEvents(
 		if len(txs) == 0 {
 			continue
 		}
-		for i := len(txs) - 1; i >= 0; i-- {
+		for i, tx := range slices.Backward(txs) {
 			ls.config.EventBus.PublishAsync(
 				TransactionEventType,
 				event.NewEvent(
 					TransactionEventType,
 					TransactionEvent{
-						Transaction: txs[i],
+						Transaction: tx,
 						Point:       blockPoint,
 						BlockNumber: block.Number,
 						TxIndex:     uint32(i), //nolint:gosec

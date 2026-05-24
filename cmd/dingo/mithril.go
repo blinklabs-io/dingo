@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -1774,21 +1775,21 @@ func gapBlockEpoch(
 	epochs []models.Epoch,
 	slot uint64,
 ) (models.Epoch, error) {
-	for i := len(epochs) - 1; i >= 0; i-- {
-		if slot < epochs[i].StartSlot {
+	for _, epoch := range slices.Backward(epochs) {
+		if slot < epoch.StartSlot {
 			continue
 		}
-		end := epochs[i].StartSlot + uint64(epochs[i].LengthInSlots)
-		if epochs[i].LengthInSlots > 0 && slot >= end {
+		end := epoch.StartSlot + uint64(epoch.LengthInSlots)
+		if epoch.LengthInSlots > 0 && slot >= end {
 			return models.Epoch{}, fmt.Errorf(
 				"slot %d is past the end of the last known epoch %d (slots %d..%d)",
 				slot,
-				epochs[i].EpochId,
-				epochs[i].StartSlot,
+				epoch.EpochId,
+				epoch.StartSlot,
 				end,
 			)
 		}
-		return epochs[i], nil
+		return epoch, nil
 	}
 	return models.Epoch{}, fmt.Errorf("no epoch found for slot %d", slot)
 }

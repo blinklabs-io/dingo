@@ -566,8 +566,8 @@ func (m *Mempool) rebuildOverlay() error {
 			hashSet[h] = struct{}{}
 		}
 		m.consumersMutex.Lock()
-		for i := len(m.transactions) - 1; i >= 0; i-- {
-			h := m.transactions[i].Hash
+		for i, v := range slices.Backward(m.transactions) {
+			h := v.Hash
 			if _, found := hashSet[h]; found {
 				evt := m.removeTransactionByIndexLocked(i)
 				if evt != nil {
@@ -644,8 +644,8 @@ func (m *Mempool) removeExpiredTransactions() {
 			expiredHashes[h] = struct{}{}
 		}
 		// Remove all from transactions list (backward for safe index handling)
-		for i := len(m.transactions) - 1; i >= 0; i-- {
-			if _, ok := expiredHashes[m.transactions[i].Hash]; ok {
+		for i, v := range slices.Backward(m.transactions) {
+			if _, ok := expiredHashes[v.Hash]; ok {
 				evt := m.removeTransactionByIndexLocked(i)
 				removedCount++
 				if evt != nil {
@@ -868,8 +868,8 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 	}
 	// Remove all from transactions list (backward for safe index handling)
 	var removed bool
-	for i := len(m.transactions) - 1; i >= 0; i-- {
-		if _, ok := toRemove[m.transactions[i].Hash]; ok {
+	for i, v := range slices.Backward(m.transactions) {
+		if _, ok := toRemove[v.Hash]; ok {
 			evt := m.removeTransactionByIndexLocked(i)
 			removed = true
 			if evt != nil {
@@ -1015,8 +1015,8 @@ func (m *Mempool) evictOldestLocked(targetBytes int64) []event.Event {
 		for _, h := range pruned {
 			prunedSet[h] = struct{}{}
 		}
-		for i := len(m.transactions) - 1; i >= 0; i-- {
-			if _, ok := prunedSet[m.transactions[i].Hash]; ok {
+		for i, v := range slices.Backward(m.transactions) {
+			if _, ok := prunedSet[v.Hash]; ok {
 				evt := m.removeTransactionByIndexLocked(i)
 				if evt != nil {
 					events = append(events, *evt)

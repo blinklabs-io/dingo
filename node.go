@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -121,8 +122,8 @@ func (n *Node) Run(ctx context.Context) error {
 				n.cancel()
 			}
 			// Cleanup on panic, then re-panic
-			for i := len(started) - 1; i >= 0; i-- {
-				started[i]()
+			for _, s := range slices.Backward(started) {
+				s()
 			}
 			panic(r)
 		} else if !success {
@@ -130,8 +131,8 @@ func (n *Node) Run(ctx context.Context) error {
 				n.cancel()
 			}
 			// Cleanup on failure (non-panic)
-			for i := len(started) - 1; i >= 0; i-- {
-				started[i]()
+			for _, s := range slices.Backward(started) {
+				s()
 			}
 		}
 	}()
