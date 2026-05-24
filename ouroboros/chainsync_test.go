@@ -19,6 +19,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -199,9 +200,7 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	originalStateMap := ochainsync.StateMapNtN.Copy()
 	t.Cleanup(func() {
 		clear(ochainsync.StateMapNtN)
-		for state, entry := range originalStateMap {
-			ochainsync.StateMapNtN[state] = entry
-		}
+		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
 	})
 
 	before := snapshotChainsyncNtNTimeouts()
