@@ -788,6 +788,13 @@ func runMithrilSync(
 			return fmt.Errorf("running planner statistics before backfill: %w", err)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
+			return fmt.Errorf(
+				"invalid backfill batch size %d in SetBatchSize: %w",
+				cfg.BackfillBatchSize,
+				err,
+			)
+		}
 		bf.DisableNonceComputation()
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)

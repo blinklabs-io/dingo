@@ -54,6 +54,7 @@ func resetGlobalConfig() {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
@@ -83,6 +84,7 @@ relayPort: 4000
 utxorpcPort: 9940
 databaseWorkers: 11
 databaseQueueSize: 77
+backfillBatchSize: 200
 immutableDbPath: "/tmp/immutable"
 shutdownTimeout: "45s"
 ledgerCatchupTimeout: "90m"
@@ -144,6 +146,7 @@ mithril:
 		LedgerCatchupTimeout: "90m",
 		DatabaseWorkers:      11,
 		DatabaseQueueSize:    77,
+		BackfillBatchSize:    200,
 		GenesisBootstrap: GenesisBootstrapConfig{
 			Enabled:                     false,
 			WindowSlots:                 4321,
@@ -214,6 +217,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,

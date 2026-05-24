@@ -71,6 +71,7 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
+	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -94,12 +95,19 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.DatabaseWorkers,
 		)
 	}
+	if cfg.BackfillBatchSize != 50 {
+		t.Fatalf(
+			"expected env var to set backfillBatchSize=50, got %d",
+			cfg.BackfillBatchSize,
+		)
+	}
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
 	if err := cmd.ParseFlags([]string{
 		"--mempool-capacity=7890",
 		"--data-dir=/tmp/override",
+		"--backfill-batch-size=200",
 	}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
@@ -124,6 +132,12 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf(
 			"expected --data-dir to set databasePath, got %q",
 			cfg.DatabasePath,
+		)
+	}
+	if cfg.BackfillBatchSize != 200 {
+		t.Fatalf(
+			"expected --backfill-batch-size to set backfillBatchSize=200, got %d",
+			cfg.BackfillBatchSize,
 		)
 	}
 }
