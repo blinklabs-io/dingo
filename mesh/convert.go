@@ -401,18 +401,20 @@ func convertParsedTransaction(
 	var signers []*AccountIdentifier
 	if signed {
 		witnesses := tx.Witnesses()
-		for _, vkw := range witnesses.Vkey() {
-			keyHash := lcommon.Blake2b224Hash(
-				vkw.Vkey,
-			)
-			signers = append(
-				signers,
-				&AccountIdentifier{
-					Address: hex.EncodeToString(
-						keyHash[:],
-					),
-				},
-			)
+		if witnesses != nil {
+			for _, vkw := range witnesses.Vkey() {
+				keyHash := lcommon.Blake2b224Hash(
+					vkw.Vkey,
+				)
+				signers = append(
+					signers,
+					&AccountIdentifier{
+						Address: hex.EncodeToString(
+							keyHash[:],
+						),
+					},
+				)
+			}
 		}
 	}
 

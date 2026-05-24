@@ -68,6 +68,9 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 		return nil, fmt.Errorf("compute current KES period: %w", err)
 	}
 	opCert := creds.GetOpCert()
+	if opCert == nil {
+		return nil, errors.New("block producer operational certificate is nil")
+	}
 	n.config.logger.Info(
 		"block producer credentials validated",
 		"component", "node",

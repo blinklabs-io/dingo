@@ -351,6 +351,7 @@ func TestBlockCache_PrometheusMetric(t *testing.T) {
 	require.NoError(t, err)
 	for _, mf := range metrics {
 		if mf.GetName() == "dingo_chain_manager_cached_blocks" {
+			require.NotEmpty(t, mf.GetMetric())
 			assert.Equal(
 				t,
 				float64(1),

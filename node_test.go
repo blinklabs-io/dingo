@@ -89,11 +89,15 @@ func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
 
 	active := state.GetClientConnId()
 	require.NotNil(t, active)
+	clientA := state.GetTrackedClient(connA)
+	clientB := state.GetTrackedClient(connB)
+	require.NotNil(t, clientA)
+	require.NotNil(t, clientB)
 	assert.Equal(t, connB, *active)
-	assert.Equal(t, pointA, state.GetTrackedClient(connA).Cursor)
-	assert.Equal(t, pointB, state.GetTrackedClient(connB).Cursor)
-	assert.Equal(t, uint64(1), state.GetTrackedClient(connA).HeadersRecv)
-	assert.Equal(t, uint64(1), state.GetTrackedClient(connB).HeadersRecv)
+	assert.Equal(t, pointA, clientA.Cursor)
+	assert.Equal(t, pointB, clientB.Cursor)
+	assert.Equal(t, uint64(1), clientA.HeadersRecv)
+	assert.Equal(t, uint64(1), clientB.HeadersRecv)
 }
 
 func TestChainsyncIngressEligibilityCacheDefaultsAndUpdates(t *testing.T) {

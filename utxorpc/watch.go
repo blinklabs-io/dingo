@@ -163,6 +163,10 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if err != nil {
 			return nil, err
 		}
+		if len(appliedTxs) == 0 {
+			hash = append([]byte(nil), block.PrevHash...)
+			continue
+		}
 		for j := len(appliedTxs) - 1; j >= 0; j-- {
 			out = append(out, &watch.WatchTxResponse{
 				Action: &watch.WatchTxResponse_Undo{

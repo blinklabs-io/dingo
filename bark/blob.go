@@ -294,6 +294,10 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed downloading block from bark supplied url: %w", err)
 	}
+	if blockResp == nil {
+		return nil, types.BlockMetadata{},
+			errors.New("bark supplied url returned nil response")
+	}
 	defer blockResp.Body.Close()
 
 	if blockResp.StatusCode != http.StatusOK {

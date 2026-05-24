@@ -306,18 +306,22 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// Pull ExUnits from redeemers in the witness set
 		var estimatedTxExUnits lcommon.ExUnits
 		var exUnitsErr error
-		for _, redeemer := range fullTx.Witnesses().Redeemers().Iter() {
-			estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
-				estimatedTxExUnits,
-				redeemer.ExUnits,
-			)
-			if exUnitsErr != nil {
-				b.logger.Debug(
-					"skipping transaction - ExUnits overflow",
-					"component", "forging",
-					"error", exUnitsErr,
-				)
-				break
+		if witnesses := fullTx.Witnesses(); witnesses != nil {
+			if redeemers := witnesses.Redeemers(); redeemers != nil {
+				for _, redeemer := range redeemers.Iter() {
+					estimatedTxExUnits, exUnitsErr = eras.SafeAddExUnits(
+						estimatedTxExUnits,
+						redeemer.ExUnits,
+					)
+					if exUnitsErr != nil {
+						b.logger.Debug(
+							"skipping transaction - ExUnits overflow",
+							"component", "forging",
+							"error", exUnitsErr,
+						)
+						break
+					}
+				}
 			}
 		}
 		if exUnitsErr != nil {

@@ -150,6 +150,7 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 	t.Cleanup(func() { _ = db.Close() })
 
 	blocks := loadTestChainBlocks(t, opts.numBlocks)
+	require.NotEmpty(t, blocks)
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
@@ -381,6 +382,7 @@ func TestConnect_DumpHistory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	blocks := loadTestChainBlocks(t, 25)
+	require.NotEmpty(t, blocks)
 	out, err := cli.DumpHistory(
 		ctx,
 		connect.NewRequest(&sync.DumpHistoryRequest{
@@ -788,6 +790,7 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	const n = 8
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: n})
 	blocks := loadTestChainBlocks(t, n)
+	require.Len(t, blocks, n)
 	inter := blocks[5]
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
 	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
@@ -861,8 +864,14 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 		break
 	}
 	require.True(t, found, "no suitable empty block in fixture scan")
+	if cut < 2 {
+		t.Fatalf("empty block cut must include a parent, got %d", cut)
+	}
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: cut})
 	blocks := loadTestChainBlocks(t, cut)
+	if len(blocks) < cut {
+		t.Fatalf("expected at least %d blocks, got %d", cut, len(blocks))
+	}
 	parent := blocks[cut-2]
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)

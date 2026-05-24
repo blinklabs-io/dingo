@@ -132,13 +132,14 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 
 	txHash := tx.Hash()
+	txHashBytes := ledgerHashBytes(txHash)
 	var txHashArray [32]byte
-	copy(txHashArray[:], txHash.Bytes())
+	copy(txHashArray[:], txHashBytes)
 
 	if offsets == nil {
 		return fmt.Errorf(
 			"missing offsets for transaction %s at slot %d: offsets must be computed",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
@@ -146,17 +147,17 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if !ok {
 		return fmt.Errorf(
 			"missing TX offset for %s at slot %d: offset must be computed by block indexer",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
 	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
+	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
 		return fmt.Errorf("set tx offset: %w", err)
 	}
 
 	for _, utxo := range tx.Produced() {
-		txID := utxo.Id.Id().Bytes()
+		txID := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
 		ref := UtxoRef{
 			TxId:      txHashArray,
@@ -166,7 +167,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		if !ok {
 			return fmt.Errorf(
 				"missing UTxO offset for %s#%d at slot %d: offset must be computed by block indexer",
-				hex.EncodeToString(txID[:8]),
+				hex.EncodeToString(bytePrefix(txID)),
 				outputIdx,
 				point.Slot,
 			)
@@ -182,7 +183,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		if err := blob.SetUtxo(blobTxn, txID, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
 				"set utxo offset %x#%d: %w",
-				txID[:8],
+				bytePrefix(txID),
 				outputIdx,
 				err,
 			)

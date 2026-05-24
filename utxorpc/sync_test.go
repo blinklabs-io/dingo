@@ -264,6 +264,7 @@ func TestFollowTip_RollbackToOrigin(t *testing.T) {
 	}
 
 	// Verify Reset action for origin
+	require.NotNil(t, resp)
 	reset, ok := resp.Action.(*sync.FollowTipResponse_Reset_)
 	require.True(t, ok, "should be Reset action")
 	require.NotNil(t, reset.Reset_, "Reset_ should not be nil")

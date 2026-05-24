@@ -1428,11 +1428,11 @@ func loadGapBlocksFromBlob(
 	endSlot uint64,
 ) ([]models.Block, error) {
 	if startSlot > endSlot {
-		return nil, nil
+		return []models.Block{}, nil
 	}
 	iter := db.BlocksInRange(startSlot, endSlot)
 	defer iter.Close()
-	var ret []models.Block
+	ret := make([]models.Block, 0)
 	for {
 		next, err := iter.NextRaw()
 		if err != nil {
@@ -1503,6 +1503,12 @@ func validateStoredGapBlocks(
 ) error {
 	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
 		return err
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"stored volatile gap is empty after immutable tip slot %d",
+			immutableTip.Slot,
+		)
 	}
 	last := blocks[len(blocks)-1]
 	if !bytes.Equal(last.Hash, ledgerStateHash) {
