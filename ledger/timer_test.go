@@ -23,7 +23,7 @@ import (
 )
 
 func TestScheduler_RegistersAndRunsTask(t *testing.T) {
-	var counter int32
+	var counter atomic.Int32
 
 	// Create a Scheduler with 10ms tick interval
 	timer := NewScheduler(10 * time.Millisecond)
@@ -32,19 +32,19 @@ func TestScheduler_RegistersAndRunsTask(t *testing.T) {
 
 	// Registering task to execute every 3 ticks
 	timer.Register(3, func() {
-		atomic.AddInt32(&counter, 1)
+		counter.Add(1)
 	}, nil)
 
 	// Wait for task to run at least 2 times (polls instead of fixed sleep)
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&counter) >= 2
+		return counter.Load() >= 2
 	}, 2*time.Second, 10*time.Millisecond,
 		"expected task to run at least 2 times",
 	)
 }
 
 func TestScheduler_ChangeInterval(t *testing.T) {
-	var counter int32
+	var counter atomic.Int32
 
 	// Create a Scheduler with 50ms tick interval
 	timer := NewScheduler(50 * time.Millisecond)
@@ -53,16 +53,16 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 
 	// Registering task with 50ms tick interval to execute for every 1 tick
 	timer.Register(1, func() {
-		atomic.AddInt32(&counter, 1)
+		counter.Add(1)
 	}, nil)
 
 	// Wait for at least 2 executions before changing interval
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&counter) >= 2
+		return counter.Load() >= 2
 	}, 2*time.Second, 10*time.Millisecond,
 		"expected at least 2 executions before interval change",
 	)
-	beforeChange := atomic.LoadInt32(&counter)
+	beforeChange := counter.Load()
 
 	// Change interval to 200ms
 	err := timer.ChangeInterval(200 * time.Millisecond)
@@ -70,7 +70,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 
 	// Wait for at least 1 execution after interval change
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&counter)-beforeChange >= 1
+		return counter.Load()-beforeChange >= 1
 	}, 2*time.Second, 10*time.Millisecond,
 		"expected at least 1 execution after interval change",
 	)
@@ -78,7 +78,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 	// Allow enough time for potential additional ticks
 	time.Sleep(500 * time.Millisecond)
 
-	secondCount := atomic.LoadInt32(&counter)
+	secondCount := counter.Load()
 	afterChange := secondCount - beforeChange
 
 	if afterChange < 1 || afterChange > 3 {
@@ -90,7 +90,7 @@ func TestScheduler_ChangeInterval(t *testing.T) {
 }
 
 func TestSchedulerRunFailFunc(t *testing.T) {
-	var failCounter int32
+	var failCounter atomic.Int32
 
 	// Create a Scheduler with 50ms tick interval
 	timer := NewScheduler(50 * time.Millisecond)
@@ -109,13 +109,13 @@ func TestSchedulerRunFailFunc(t *testing.T) {
 		},
 		// Run fail func
 		func() {
-			atomic.AddInt32(&failCounter, 1)
+			failCounter.Add(1)
 		},
 	)
 
 	// Wait for the fail function to be called at least 3 times
 	require.Eventually(t, func() bool {
-		return atomic.LoadInt32(&failCounter) >= 3
+		return failCounter.Load() >= 3
 	}, 10*time.Second, 50*time.Millisecond,
 		"expected failure to run task at least 3 times",
 	)

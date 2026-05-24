@@ -17,7 +17,6 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -374,26 +373,26 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 
 			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
-			total := atomic.AddInt64(&o.blockfetchMetrics.totalBlocksFetched, 1)
+			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.
 			if delaySeconds < 1.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder1s, 1)
+				o.blockfetchMetrics.blocksUnder1s.Add(1)
 			}
 			if delaySeconds < 3.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder3s, 1)
+				o.blockfetchMetrics.blocksUnder3s.Add(1)
 			}
 			if delaySeconds < 5.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder5s, 1)
+				o.blockfetchMetrics.blocksUnder5s.Add(1)
 			} else {
 				o.blockfetchMetrics.lateBlocks.Inc()
 			}
 			if total == 1 ||
 				total%blockfetchMetricsCdfUpdateInterval == 0 ||
 				delaySeconds >= 5.0 {
-				under1 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder1s)
-				under3 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder3s)
-				under5 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder5s)
+				under1 := o.blockfetchMetrics.blocksUnder1s.Load()
+				under3 := o.blockfetchMetrics.blocksUnder3s.Load()
+				under5 := o.blockfetchMetrics.blocksUnder5s.Load()
 				o.blockfetchMetrics.blockDelayCdfOne.Set(
 					float64(under1) / float64(total) * 100,
 				)
