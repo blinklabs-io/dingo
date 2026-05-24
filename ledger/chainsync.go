@@ -1708,8 +1708,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"connection_id", e.ConnectionId.String(),
 	)
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
-		var notFitErr chain.BlockNotFitChainTipError
-		if errors.As(err, &notFitErr) {
+		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
 			localTip := ls.chain.Tip()
 			// A header behind the local tip is stale only if the
 			// Praos comparison also says it cannot beat the local

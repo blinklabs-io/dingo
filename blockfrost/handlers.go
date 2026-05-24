@@ -852,8 +852,7 @@ func (b *Blockfrost) handleTransactionSubmit(
 	r.Body = http.MaxBytesReader(w, r.Body, maxTxBodySize)
 	txCbor, err := io.ReadAll(r.Body)
 	if err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			writeError(
 				w,
 				http.StatusRequestEntityTooLarge,
