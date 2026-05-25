@@ -38,6 +38,9 @@ internal/test/consensus/
     capture-sidecar/         Binary that does one capture run
     compose-consensus-vector/ Binary that merges N single-peer captures
                               into one multi-peer vector + golden diff
+    convert-amaru-vector/    Binary that rewraps the ouroboros-mock
+                              Amaru ledger corpus into ledger-category
+                              JSON vectors under testdata/converted/
   Dockerfile.configurator    Shared base image (genesis toolchain)
   Dockerfile.capture_sidecar Shared base image (Go build of cmd/sidecar)
   Dockerfile.compose_consensus_vector
@@ -51,6 +54,8 @@ internal/test/consensus/
   testdata/
     fixtures/                Hand-crafted vectors for format/ tests
     captured/                Committed goldens from live captures
+    converted/               Committed ledger vectors from the Amaru
+                             corpus (regenerated via cmd/convert-amaru-vector)
 ```
 
 Adding a scenario means dropping in a new `scenarios/<name>/`
@@ -152,16 +157,35 @@ the longer chain?"); extending the driver to drive
 `chain.Manager` + full chainsync handler dispatch is a later step
 once captures carry block bodies (currently only headers).
 
-The ledger driver is a stub: it returns a clear "not yet wired"
-error rather than silently passing. It will fill in once the
-Amaru-corpus conversion tool populates `testdata/converted/` and an
-exported final-state comparison helper lands in ouroboros-mock.
+The ledger driver is wired end-to-end via ouroboros-mock's existing
+conformance harness. It reconstructs the Amaru-shape CBOR vector
+from the new-format `LedgerPhase`, writes it to a temp file, and
+runs the harness against dingo's `DingoStateManager` (the same
+state-manager the existing `internal/test/conformance/` tests use).
+The harness's per-event validation and final-state oracle do the
+heavy lifting; the W3 ledger driver is a thin envelope-unwrap layer.
 
 When a replay fails, the runner returns a structured error
 (`tip slot mismatch: got X, want Y`, etc.). The build-tag-gated
 golden tests in `golden_test.go` also validate the committed corpus
 shape independently of the replay runner so a corrupt vector
 surfaces both ways.
+
+## Regenerating the converted ledger corpus
+
+`testdata/converted/` is regenerated whenever the ouroboros-mock
+dependency bumps. The bump PR runs the converter and includes the
+diff:
+
+```bash
+go run ./internal/test/consensus/cmd/convert-amaru-vector
+```
+
+Defaults extract the ouroboros-mock embedded corpus to a temp dir
+and write the JSON output to `testdata/converted/`. Override with
+`-in <path>` and `-out <path>` for other sources / destinations.
+Pre-commit lossless tests under `cmd/convert-amaru-vector/` guard
+that the rewrap is byte-for-byte on the opaque blobs.
 
 ## Recording layer
 

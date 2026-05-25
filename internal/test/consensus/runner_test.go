@@ -23,38 +23,16 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/consensus/format"
 )
 
-// TestRunVectorRoutesByCategory confirms RunVector hands off
-// consensus vectors to the consensus driver (which runs to
-// completion on a synthetic two-peer fixture) and ledger vectors to
-// the ledger driver (which returns its "not yet wired" stub error).
-// The dispatch + format-validation paths are what we're exercising;
-// the per-driver behavior is covered by their own dedicated tests.
-func TestRunVectorRoutesByCategory(t *testing.T) {
-	t.Run("consensus", func(t *testing.T) {
-		v := syntheticConsensusVector(t)
-		if err := consensus.RunVector(t, v); err != nil {
-			t.Fatalf("RunVector(consensus): %v", err)
-		}
-	})
-
-	t.Run("ledger", func(t *testing.T) {
-		v := format.TestVector{
-			SchemaVersion: format.CurrentSchemaVersion,
-			Title:         "ledger-stub",
-			Category:      format.CategoryLedger,
-			LedgerPhase:   &format.LedgerPhase{},
-		}
-		err := consensus.RunVector(t, v)
-		if err == nil {
-			t.Fatal(
-				"expected ledger driver to surface its " +
-					"not-yet-wired error",
-			)
-		}
-		if !strings.Contains(err.Error(), "ledger driver") {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
+// TestRunVectorRoutesConsensus confirms dispatch routes a
+// consensus-category vector to the consensus driver and the driver
+// runs to completion. The ledger-category dispatch path is
+// exercised end-to-end by TestLedgerConformanceVectorsNewFormat
+// against the committed converted corpus.
+func TestRunVectorRoutesConsensus(t *testing.T) {
+	v := syntheticConsensusVector(t)
+	if err := consensus.RunVector(t, v); err != nil {
+		t.Fatalf("RunVector(consensus): %v", err)
+	}
 }
 
 // TestRunVectorRejectsMismatchedPayload guards against vectors that
