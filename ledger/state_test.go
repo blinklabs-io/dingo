@@ -82,9 +82,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		for i := range 100 {
 			ls.Lock()
@@ -96,12 +94,10 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 			ls.Unlock()
 		}
 		close(done)
-	}()
+	})
 
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for {
 				select {
@@ -111,7 +107,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 					_ = ls.calculateStabilityWindow()
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)
