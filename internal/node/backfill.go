@@ -37,9 +37,17 @@ import (
 // backfill checkpoint.
 const BackfillPhase = "metadata"
 
-// backfillBatchSize controls how many processed blocks are accumulated
+// DefaultBackfillBatchSize controls how many processed blocks are accumulated
 // before deferred metadata rows are flushed.
-const backfillBatchSize = 100
+const DefaultBackfillBatchSize = 100
+
+// DefaultBackfillBatchRows caps the accumulated metadata row count before a
+// flush so dense eras do not hold oversized batches in memory.
+const DefaultBackfillBatchRows = 5000
+
+type backfillBatchSizer interface {
+	Len() int
+}
 
 // Backfill replays stored blocks to populate historical metadata.
 // It is triggered automatically during Mithril sync when
@@ -50,6 +58,7 @@ type Backfill struct {
 	logger       *slog.Logger
 	epochs       []models.Epoch
 	pparamsCache map[uint64]lcommon.ProtocolParameters
+	batchSize    int
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -87,8 +96,19 @@ func NewBackfill(
 		db:            db,
 		nodeCfg:       nodeCfg,
 		logger:        logger,
+		batchSize:     DefaultBackfillBatchSize,
 		computeNonces: nodeCfg != nil,
 	}
+}
+
+// SetBatchSize overrides the number of processed blocks accumulated before
+// deferred metadata rows are flushed.
+func (b *Backfill) SetBatchSize(size int) error {
+	if size <= 0 {
+		return fmt.Errorf("backfill batch size must be positive: %d", size)
+	}
+	b.batchSize = size
+	return nil
 }
 
 // DisableNonceComputation skips historical block nonce reconstruction.
@@ -669,6 +689,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 			"starting metadata backfill",
 			"component", "backfill",
 			"tip_slot", tipSlot,
+			"batch_size", b.batchSize,
+			"batch_row_limit", DefaultBackfillBatchRows,
 		)
 		// Fresh start: reset epoch/era tracking to the
 		// first epoch so processEpochBoundary doesn't
@@ -688,6 +710,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"component", "backfill",
 				"tip_slot", tipSlot,
 				"restart_from_first_block", true,
+				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			b.initializeFromFirstEpoch()
 		} else {
@@ -696,6 +720,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"component", "backfill",
 				"resume_from_slot", cp.LastSlot,
 				"tip_slot", tipSlot,
+				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			// Recover running nonce from the last processed
 			// block so nonce computation can continue.
@@ -896,9 +922,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		processedBlocks++
 		batchBlockCount++
 
-		// Flush once the current batch reaches the configured block
-		// window.
-		if batchBlockCount >= backfillBatchSize {
+		batchRows := 0
+		if sizer, ok := acc.(backfillBatchSizer); ok {
+			batchRows = sizer.Len()
+		}
+		// Flush once the current batch reaches the configured block window
+		// or the plugin reports enough accumulated rows to fill efficient
+		// bulk SQL batches.
+		if batchBlockCount >= b.batchSize ||
+			batchRows >= DefaultBackfillBatchRows {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -910,7 +942,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if processedBlocks%1000 == 0 {
 			// Periodic checkpoints must only record durable progress.
 			// Flush any partial batch first so checkpoint safety does
-			// not depend on backfillBatchSize dividing 1000.
+			// not depend on the configured batch size dividing 1000.
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -949,6 +981,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"blocks_processed", processedBlocks,
 		"transactions_stored", processedTxs,
 		"elapsed", elapsed.Round(time.Second),
+		"batch_size", b.batchSize,
+		"batch_row_limit", DefaultBackfillBatchRows,
 		"skipped_utxo_offset_block_writes", b.skippedBlocks,
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)

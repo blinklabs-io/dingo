@@ -30,8 +30,11 @@ const (
 	testDataDir = "testdata"
 )
 
-func ptrBool(v bool) *bool       { return &v }
-func ptrUint64(v uint64) *uint64 { return &v }
+//go:fix inline
+func ptrBool(v bool) *bool { return new(v) }
+
+//go:fix inline
+func ptrUint64(v uint64) *uint64 { return new(v) }
 
 var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	path:                                       testDataDir,
@@ -47,7 +50,7 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	MithrilGenesisAncillaryVerificationKeyFile: "ancillary.vkey",
 	ShelleyGenesisFile:                         "shelley-genesis.json",
 	ShelleyGenesisHash:                         "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
-	ExperimentalHardForksEnabled:               ptrBool(false),
+	ExperimentalHardForksEnabled:               new(false),
 	TestShelleyHardForkAtEpoch:                 ptrUint64(0),
 	TestAllegraHardForkAtEpoch:                 ptrUint64(0),
 	TestMaryHardForkAtEpoch:                    ptrUint64(0),
@@ -265,8 +268,8 @@ func TestCardanoNodeConfigPeerSharing(t *testing.T) {
 		want *bool
 	}{
 		{name: "absent", body: `{}`, want: nil},
-		{name: "true", body: `{"PeerSharing": true}`, want: ptrBool(true)},
-		{name: "false", body: `{"PeerSharing": false}`, want: ptrBool(false)},
+		{name: "true", body: `{"PeerSharing": true}`, want: new(true)},
+		{name: "false", body: `{"PeerSharing": false}`, want: new(false)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -343,7 +346,7 @@ func TestGenesisHashMismatchConway(t *testing.T) {
 func TestHardForkEpoch(t *testing.T) {
 	t.Run("enabled with all eras at epoch 0", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: ptrBool(true),
+			ExperimentalHardForksEnabled: new(true),
 			TestShelleyHardForkAtEpoch:   ptrUint64(0),
 			TestAllegraHardForkAtEpoch:   ptrUint64(0),
 			TestMaryHardForkAtEpoch:      ptrUint64(0),
@@ -366,7 +369,7 @@ func TestHardForkEpoch(t *testing.T) {
 
 	t.Run("disabled ignores all epochs", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: ptrBool(false),
+			ExperimentalHardForksEnabled: new(false),
 			TestShelleyHardForkAtEpoch:   ptrUint64(0),
 			TestConwayHardForkAtEpoch:    ptrUint64(0),
 		}
@@ -386,7 +389,7 @@ func TestHardForkEpoch(t *testing.T) {
 
 	t.Run("partial configuration", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: ptrBool(true),
+			ExperimentalHardForksEnabled: new(true),
 			TestShelleyHardForkAtEpoch:   ptrUint64(0),
 			// Conway not set
 		}
@@ -399,7 +402,7 @@ func TestHardForkEpoch(t *testing.T) {
 
 	t.Run("unknown era", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: ptrBool(true),
+			ExperimentalHardForksEnabled: new(true),
 		}
 		_, ok := cfg.HardForkEpoch("unknown")
 		assert.False(t, ok, "unknown era should not be configured")
@@ -407,7 +410,7 @@ func TestHardForkEpoch(t *testing.T) {
 
 	t.Run("non-zero epoch", func(t *testing.T) {
 		cfg := &CardanoNodeConfig{
-			ExperimentalHardForksEnabled: ptrBool(true),
+			ExperimentalHardForksEnabled: new(true),
 			TestConwayHardForkAtEpoch:    ptrUint64(5),
 		}
 		epoch, ok := cfg.HardForkEpoch("conway")

@@ -1668,10 +1668,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		// the trust anchor — we never rewind below it — so the
 		// authoritative deletion slot is the rollback target or the
 		// Mithril boundary, whichever is later.
-		deleteSlot := point.Slot
-		if ls.mithrilLedgerSlot > deleteSlot {
-			deleteSlot = ls.mithrilLedgerSlot
-		}
+		deleteSlot := max(ls.mithrilLedgerSlot, point.Slot)
 		err := ls.db.UtxosDeleteRolledback(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
@@ -3364,10 +3361,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	var intraBlockUtxos map[string]lcommon.Utxo
-	if shouldValidate {
-		intraBlockUtxos = make(map[string]lcommon.Utxo)
-	}
+	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -4619,7 +4613,7 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 	points []ocommon.Point,
 	count int,
 ) []ocommon.Point {
-	if count <= 0 {
+	if count <= 0 || len(points) == 0 {
 		return points
 	}
 	point, ok := ls.mithrilTrustBoundaryPoint()

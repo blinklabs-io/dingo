@@ -235,6 +235,7 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	BackfillBatchSize int `yaml:"backfillBatchSize" envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -434,9 +435,10 @@ var globalConfig = &Config{
 	ImmutableDbPath:      "",
 	ShutdownTimeout:      DefaultShutdownTimeout,
 	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-	// Defaults for database worker pool tuning
+	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
+	BackfillBatchSize: 100,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults

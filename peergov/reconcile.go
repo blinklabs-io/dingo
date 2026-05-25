@@ -746,11 +746,9 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 		return false, "", "", 0, false
 	}
 	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
-		cooldownDuration = p.config.InboundCooldown * time.Duration(multiplier)
-		// Keep cooldown at least as long as the normal deny duration.
-		if cooldownDuration < p.config.DenyDuration {
-			cooldownDuration = p.config.DenyDuration
-		}
+		cooldownDuration = max(
+			// Keep cooldown at least as long as the normal deny duration.
+			p.config.InboundCooldown*time.Duration(multiplier), p.config.DenyDuration)
 		reason = "inbound flapping cooldown"
 		reasonLabel = "flapping_cooldown"
 		applyCooldown = true

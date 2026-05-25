@@ -275,6 +275,7 @@ func TestTxPredicateFromSubmit_nonCardanoMatchSetsUnevaluable(t *testing.T) {
 	node := txPredicateFromSubmit(&submit.TxPredicate{
 		Match: &submit.AnyChainTxPattern{},
 	})
+	require.NotNil(t, node)
 	require.True(t, node.matchNonCardano)
 	require.Nil(t, node.match)
 }

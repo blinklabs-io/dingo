@@ -456,6 +456,7 @@ func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 				i+1,
 			)
 		}
+		require.NotNil(t, next)
 		if next.IsEbb {
 			continue
 		}
@@ -605,6 +606,7 @@ func TestLoadGapBlocksFromBlob(t *testing.T) {
 				i+1,
 			)
 		}
+		require.NotNil(t, next)
 		if next.IsEbb {
 			continue
 		}

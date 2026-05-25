@@ -280,7 +280,7 @@ func (s *State) RemoveClientConnId(
 	tc, exists := s.trackedClients[connId]
 	wasPrimary := s.activeClientConnId != nil &&
 		*s.activeClientConnId == connId
-	wasEligible := exists && !tc.ObservabilityOnly
+	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
 	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {

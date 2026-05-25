@@ -240,6 +240,7 @@ func TestCopyBlocksRawWithCallback_StoresUtxoOffsets(t *testing.T) {
 				i+1,
 			)
 		}
+		require.NotNil(t, next)
 		if next.IsEbb {
 			continue
 		}

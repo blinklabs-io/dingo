@@ -55,18 +55,7 @@ type BatchAccumulator struct {
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{
-		KeyWitnesses:   make([]models.KeyWitness, 0, batchChunkRows),
-		WitnessScripts: make([]models.WitnessScripts, 0, batchChunkRows),
-		Scripts:        make([]models.Script, 0, batchChunkRows),
-		PlutusData:     make([]models.PlutusData, 0, batchChunkRows),
-		Redeemers:      make([]models.Redeemer, 0, batchChunkRows),
-		AddressTxs:     make([]models.AddressTransaction, 0, batchChunkRows),
-		UtxoOutputs:    make([]models.Utxo, 0, batchChunkRows),
-		UtxoSpends:     make([]utxoSpend, 0, batchChunkRows),
-		CollateralRets: make([]models.Utxo, 0, batchChunkRows),
-		DeleteTxIDs:    make([]uint, 0, batchChunkRows),
-	}
+	return &BatchAccumulator{}
 }
 
 // NewBatchAccumulator creates an accumulator for this metadata store.
@@ -138,6 +127,24 @@ func (b *BatchAccumulator) Reset() {
 	b.UtxoSpends = b.UtxoSpends[:0]
 	b.CollateralRets = b.CollateralRets[:0]
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
+}
+
+// Len returns the number of accumulated metadata rows. It is intentionally a
+// simple row-count estimate used by backfill to bound batch memory.
+func (b *BatchAccumulator) Len() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.KeyWitnesses) +
+		len(b.WitnessScripts) +
+		len(b.Scripts) +
+		len(b.PlutusData) +
+		len(b.Redeemers) +
+		len(b.AddressTxs) +
+		len(b.UtxoOutputs) +
+		len(b.UtxoSpends) +
+		len(b.CollateralRets) +
+		len(b.DeleteTxIDs)
 }
 
 // MergeFrom appends all records from other into b.

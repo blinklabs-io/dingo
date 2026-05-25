@@ -35,6 +35,16 @@ make golines
 - Stake snapshots: mark/set/go rotation at epoch boundaries (Praos). `LedgerView.GetStakeDistribution(epoch)` for leader election. Per-pool stake in `PoolStakeSnapshot`; aggregates in `EpochSummary`.
 - Plugins (`database/plugin/`): blob = `badger` | `gcs` | `s3`; metadata = `sqlite` | `mysql` | `postgres`.
 
+## Isolation requirements
+
+- Composition belongs in `node.go`, root-package helpers, `cmd/dingo`, or `internal/node`; do not make domain packages start, stop, or configure unrelated subsystems.
+- Use EventBus for async notifications only. For synchronous state reads, inject narrow interfaces or callbacks through constructors instead of importing a sibling package just to call one method.
+- Keep dependency direction stable: `database/` and storage plugins must not import ledger, mempool, networking, node, or API packages; `connmanager/` must not know Ouroboros or ledger semantics; `chainselection/` must not validate blocks or mutate ledger state.
+- Ledger owns validation, rollback repair, nonce/epoch logic, and ledger queries. It should not directly trigger connection-manager or peer-governance actions; emit a neutral event/callback and let node/network wiring translate it.
+- Peer governance policy types should not leak into ledger data extraction. Put adapters at the composition boundary or behind neutral DTOs/interfaces.
+- API packages should expose server behavior through package-local interfaces. Keep concrete adapters to `ledger`, `database`, and `mempool` narrow, and require an explicit architecture review before adding new root-level API packages.
+- Tests may use `internal/test/testutil`, but production packages must not import `internal/test` or duplicate fixtures that belong in `ouroboros-mock`.
+
 ## Key events
 
 | Event | Meaning |

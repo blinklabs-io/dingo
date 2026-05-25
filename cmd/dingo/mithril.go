@@ -320,6 +320,48 @@ func runMithrilSync(
 			}
 		}()
 	}
+	debugServer, debugErr := startDebugPprofServer(
+		logger,
+		cfg.BindAddr,
+		cfg.DebugPort,
+		"mithril",
+	)
+	if debugErr != nil {
+		logger.Warn(
+			"failed to start pprof debug server; continuing",
+			"component", "mithril",
+			"port", cfg.DebugPort,
+			"error", debugErr,
+		)
+	}
+	defer func() {
+		if debugServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := debugServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop pprof debug server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if debugServer != nil {
+		go func() {
+			if serverErr := <-debugServer.Err(); serverErr != nil {
+				logger.Error(
+					"pprof debug server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
 
 	cardanoConfigPath := cfg.CardanoConfig
 	if cardanoConfigPath == "" {
@@ -788,6 +830,13 @@ func runMithrilSync(
 			return fmt.Errorf("running planner statistics before backfill: %w", err)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
+			return fmt.Errorf(
+				"invalid backfill batch size %d in SetBatchSize: %w",
+				cfg.BackfillBatchSize,
+				err,
+			)
+		}
 		bf.DisableNonceComputation()
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)
@@ -1428,11 +1477,11 @@ func loadGapBlocksFromBlob(
 	endSlot uint64,
 ) ([]models.Block, error) {
 	if startSlot > endSlot {
-		return nil, nil
+		return []models.Block{}, nil
 	}
 	iter := db.BlocksInRange(startSlot, endSlot)
 	defer iter.Close()
-	var ret []models.Block
+	ret := make([]models.Block, 0)
 	for {
 		next, err := iter.NextRaw()
 		if err != nil {
@@ -1503,6 +1552,12 @@ func validateStoredGapBlocks(
 ) error {
 	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
 		return err
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"stored volatile gap is empty after immutable tip slot %d",
+			immutableTip.Slot,
+		)
 	}
 	last := blocks[len(blocks)-1]
 	if !bytes.Equal(last.Hash, ledgerStateHash) {

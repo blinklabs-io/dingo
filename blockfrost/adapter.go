@@ -1757,8 +1757,7 @@ func (a *NodeAdapter) TransactionSubmit(
 		)
 	}
 	if err := a.submitter.AddTransaction(txType, txCbor); err != nil {
-		var mempoolFull *mempool.MempoolFullError
-		if errors.As(err, &mempoolFull) {
+		if _, ok := errors.AsType[*mempool.MempoolFullError](err); ok {
 			return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrMempoolFull)
 		}
 		return "", fmt.Errorf("submit transaction to mempool: %w: %w", err, ErrInvalidTransaction)

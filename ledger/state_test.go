@@ -84,7 +84,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 
 	wg.Go(func() {
 		<-start
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			ls.Lock()
 			if i%2 == 0 {
 				ls.currentEra = eras.BabbageEraDesc
@@ -96,7 +96,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 		close(done)
 	})
 
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Go(func() {
 			<-start
 			for {
@@ -2405,6 +2405,7 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
 		db: db,
@@ -2449,6 +2450,7 @@ func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
 		db: db,
@@ -2552,6 +2554,7 @@ func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	boundarySlot := uint64(5)
 	ls := &LedgerState{
@@ -2964,7 +2967,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -2995,7 +2998,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -3024,7 +3027,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -3047,7 +3050,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			// tipSlot past the safe-zone boundary → would normally trigger Impossible
@@ -3072,7 +3075,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
@@ -3094,7 +3097,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(999_999, []byte("tip")),
@@ -3150,7 +3153,7 @@ func newTestLedgerStateWithTrigger(
 		cfg.TestConwayHardForkAtEpoch = overrideEpoch
 	}
 	return &LedgerState{
-		currentEra:     *eras.GetEraById(currentEraId),
+		currentEra:     requireEraDesc(t, currentEraId),
 		currentEpoch:   newTestEpoch(currentEpochId, 0, 432_000, currentEraId),
 		transitionInfo: initialTI,
 		config: LedgerStateConfig{
@@ -3284,7 +3287,7 @@ func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
 // TransitionUnknown so the new epoch starts fresh.
 func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
 		// Simulate state at end of epoch 500: TransitionImpossible was set
 		// because the tip's safe zone reached the epoch end.
@@ -3294,7 +3297,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 501, StartSlot: 532_000, LengthInSlots: 432_000},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
 		HardFork:          nil,
@@ -3328,13 +3331,13 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 // era-transition block" case).
 func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionKnown(500),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: babbagePParams(9),
 	}
 
@@ -3354,13 +3357,13 @@ func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 // no-op for the State field (still TransitionUnknown).
 func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: babbagePParams(9),
 	}
 
@@ -3379,13 +3382,13 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 	newPParams := babbagePParams(9)
 
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: lcommon.ProtocolParameters(oldPParams),
 		transitionInfo: hardfork.NewTransitionKnown(500),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: lcommon.ProtocolParameters(newPParams),
 	}
 
@@ -3408,18 +3411,18 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 // transitionInfo, and the final state is TransitionUnknown.
 func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.AlonzoEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.AlonzoEraDesc.Id),
 		currentPParams: babbagePParams(6),
 		transitionInfo: hardfork.NewTransitionKnown(300),
 	}
 
 	steps := []*EraTransitionResult{
 		{
-			NewEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 			NewPParams: babbagePParams(8),
 		},
 		{
-			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 			NewPParams: babbagePParams(9),
 		},
 	}
@@ -3441,20 +3444,20 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 // is also set (should not happen in practice, but the logic must be safe).
 func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionKnown(499),
 	}
 
 	eraTransitions := []*EraTransitionResult{
 		{
-			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 			NewPParams: babbagePParams(9),
 		},
 	}
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 500}},
 		HardFork: &HardForkInfo{
@@ -3486,7 +3489,7 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 // transition happened (the normal epoch-boundary version-bump window).
 func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
@@ -3494,7 +3497,7 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	var eraTransitions []*EraTransitionResult // empty — no standalone transition
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 500}},
 		HardFork: &HardForkInfo{
@@ -3525,7 +3528,7 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 // epoch rollover (no HardFork, no era transition) leaves transitionInfo alone.
 func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
@@ -3533,7 +3536,7 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 501},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
 		HardFork:          nil,

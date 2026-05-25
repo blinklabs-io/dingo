@@ -44,6 +44,24 @@ func newTestDB(t *testing.T) *database.Database {
 	return db
 }
 
+func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+
+	require.Equal(t, DefaultBackfillBatchSize, bf.batchSize)
+	require.NoError(t, bf.SetBatchSize(200))
+	require.Equal(t, 200, bf.batchSize)
+}
+
+func TestBackfillSetBatchSizeRejectsInvalid(t *testing.T) {
+	db := newTestDB(t)
+	bf := NewBackfill(db, nil, slog.Default())
+
+	require.Error(t, bf.SetBatchSize(0))
+	require.Error(t, bf.SetBatchSize(-1))
+	require.Equal(t, DefaultBackfillBatchSize, bf.batchSize)
+}
+
 func TestNeedsBackfill_NoCheckpoint(t *testing.T) {
 	db := newTestDB(t)
 	bf := NewBackfill(db, nil, slog.Default())

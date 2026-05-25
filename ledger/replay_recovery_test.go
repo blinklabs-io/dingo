@@ -768,7 +768,9 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
 
-	producerTx := producerBlock.block.Transactions()[0]
+	producerTxs := producerBlock.block.Transactions()
+	require.NotEmpty(t, producerTxs)
+	producerTx := producerTxs[0]
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
 			BlockPoint: currentTip.Point,

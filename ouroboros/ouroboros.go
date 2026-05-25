@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -113,10 +114,10 @@ type blockfetchMetrics struct {
 	blockDelayCdfOne   prometheus.Gauge
 	blockDelayCdfThree prometheus.Gauge
 	blockDelayCdfFive  prometheus.Gauge
-	totalBlocksFetched int64
-	blocksUnder1s      int64
-	blocksUnder3s      int64
-	blocksUnder5s      int64
+	totalBlocksFetched atomic.Int64
+	blocksUnder1s      atomic.Int64
+	blocksUnder3s      atomic.Int64
+	blocksUnder5s      atomic.Int64
 }
 
 func NewOuroboros(cfg OuroborosConfig) *Ouroboros {

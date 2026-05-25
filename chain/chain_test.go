@@ -311,6 +311,9 @@ func TestChainIteratorReverseFromTipNonInclusive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error from reverse iterator: %s", err)
 	}
+	if next == nil {
+		t.Fatal("reverse iterator returned nil result")
+	}
 	want := testBlocks[len(testBlocks)-2].MockHash
 	got := hex.EncodeToString(next.Block.Hash)
 	if got != want {
@@ -1364,7 +1367,7 @@ func generateTestChain(
 ) []ledger.Block {
 	t.Helper()
 	if count <= 0 {
-		return nil
+		return []ledger.Block{}
 	}
 	// All generated blocks have identical empty bodies, so the four
 	// component CBORs and the resulting block body hash are constant.
@@ -1947,6 +1950,9 @@ func TestChainIterateNonPrimaryAfterPrimaryRollbackPastFork(t *testing.T) {
 	}
 
 	const forkIdx = 2 // primary block 3 (0-based index 2)
+	if len(primaryBlocks) <= forkIdx {
+		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
 		Hash: primaryBlocks[forkIdx].Hash().Bytes(),
@@ -2053,6 +2059,9 @@ func TestChainRollbackNonPrimaryAfterPrimaryRollback(t *testing.T) {
 	}
 
 	const forkIdx = 2 // primary block 3
+	if len(primaryBlocks) <= forkIdx {
+		t.Fatalf("expected at least %d primary blocks, got %d", forkIdx+1, len(primaryBlocks))
+	}
 	forkPoint := ocommon.Point{
 		Slot: primaryBlocks[forkIdx].SlotNumber(),
 		Hash: primaryBlocks[forkIdx].Hash().Bytes(),

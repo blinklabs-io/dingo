@@ -306,6 +306,5 @@ func BlockTombstone() []byte {
 // treated as a tombstone — a partial or unexpectedly extended marker
 // must never be misread as block CBOR.
 func IsBlockTombstone(data []byte) bool {
-	return len(data) >= len(BlockTombstoneMagic) &&
-		bytes.Equal(data[:len(BlockTombstoneMagic)], BlockTombstoneMagic[:])
+	return bytes.HasPrefix(data, BlockTombstoneMagic[:])
 }
