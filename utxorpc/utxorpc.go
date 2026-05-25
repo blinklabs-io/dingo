@@ -36,8 +36,6 @@ import (
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // Default request size limits to prevent denial-of-service via
@@ -206,8 +204,8 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 				u.config.Host,
 				u.config.Port,
 			),
-			// Use h2c so we can serve HTTP/2 without TLS
-			Handler:           h2c.NewHandler(mux, &http2.Server{}),
+			Handler:           mux,
+			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
 			IdleTimeout:       120 * time.Second,
@@ -253,6 +251,13 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func unencryptedHTTP2Protocols() *http.Protocols {
+	protocols := &http.Protocols{}
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return protocols
 }
 
 func (u *Utxorpc) Stop(ctx context.Context) error {
