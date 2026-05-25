@@ -138,4 +138,3 @@ func TestCurrentKESPeriod_NilSlotLengthRat(t *testing.T) {
 		t.Fatal("expected error for nil SlotLength.Rat")
 	}
 }
-
