@@ -25,7 +25,6 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/protocol/common"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -67,13 +66,13 @@ func (a *archiveServiceHandler) FetchBlock(
 			Block: &archive.BlockRef{
 				Hash:   b.Hash,
 				Slot:   b.Slot,
-				Height: proto.Uint64(metadata.Height),
+				Height: new(metadata.Height),
 			},
 			Url:       signedURL.URL.String(),
 			ExpiresAt: timestamppb.New(signedURL.Expires),
 			Meta: &archive.BlockMeta{
 				Type:     (archive.BlockType)(blockType).Enum(),
-				PrevHash: proto.String(hex.EncodeToString(metadata.PrevHash)),
+				PrevHash: new(hex.EncodeToString(metadata.PrevHash)),
 			},
 		})
 	}

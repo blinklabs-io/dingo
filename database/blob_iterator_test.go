@@ -129,7 +129,7 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 		{
 			name:     "BlocksInRange/inclusive",
 			start:    20,
-			end:      ptr(uint64(40)),
+			end:      new(uint64(40)),
 			expected: []uint64{20, 30, 40},
 		},
 	}
@@ -159,7 +159,9 @@ func TestBlobBlockIterator_SlotRanges(t *testing.T) {
 }
 
 // ptr returns a pointer to the given value.
-func ptr[T any](v T) *T { return &v }
+//
+//go:fix inline
+func ptr[T any](v T) *T { return new(v) }
 
 func TestBlobBlockIterator_Progress(t *testing.T) {
 	db := newTestDB(t)
