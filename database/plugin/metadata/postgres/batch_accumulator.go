@@ -126,6 +126,24 @@ func (b *BatchAccumulator) Reset() {
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
 }
 
+// Len returns the number of accumulated metadata rows. It is intentionally a
+// simple row-count estimate used by backfill to bound batch memory.
+func (b *BatchAccumulator) Len() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.KeyWitnesses) +
+		len(b.WitnessScripts) +
+		len(b.Scripts) +
+		len(b.PlutusData) +
+		len(b.Redeemers) +
+		len(b.AddressTxs) +
+		len(b.UtxoOutputs) +
+		len(b.UtxoSpends) +
+		len(b.CollateralRets) +
+		len(b.DeleteTxIDs)
+}
+
 // MergeFrom appends all records from other into b.
 // It is a no-op when other is nil or other == b.
 func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {

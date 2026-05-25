@@ -41,6 +41,14 @@ const BackfillPhase = "metadata"
 // before deferred metadata rows are flushed.
 const DefaultBackfillBatchSize = 100
 
+// DefaultBackfillBatchRows caps the accumulated metadata row count before a
+// flush so dense eras do not hold oversized batches in memory.
+const DefaultBackfillBatchRows = 5000
+
+type backfillBatchSizer interface {
+	Len() int
+}
+
 // Backfill replays stored blocks to populate historical metadata.
 // It is triggered automatically during Mithril sync when
 // storageMode is "api".
@@ -682,6 +690,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			"component", "backfill",
 			"tip_slot", tipSlot,
 			"batch_size", b.batchSize,
+			"batch_row_limit", DefaultBackfillBatchRows,
 		)
 		// Fresh start: reset epoch/era tracking to the
 		// first epoch so processEpochBoundary doesn't
@@ -702,6 +711,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"tip_slot", tipSlot,
 				"restart_from_first_block", true,
 				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			b.initializeFromFirstEpoch()
 		} else {
@@ -711,6 +721,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"resume_from_slot", cp.LastSlot,
 				"tip_slot", tipSlot,
 				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			// Recover running nonce from the last processed
 			// block so nonce computation can continue.
@@ -911,8 +922,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		processedBlocks++
 		batchBlockCount++
 
-		// Flush once the current batch reaches the configured block window.
-		if batchBlockCount >= b.batchSize {
+		batchRows := 0
+		if sizer, ok := acc.(backfillBatchSizer); ok {
+			batchRows = sizer.Len()
+		}
+		// Flush once the current batch reaches the configured block window
+		// or the plugin reports enough accumulated rows to fill efficient
+		// bulk SQL batches.
+		if batchBlockCount >= b.batchSize ||
+			batchRows >= DefaultBackfillBatchRows {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -964,6 +982,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"transactions_stored", processedTxs,
 		"elapsed", elapsed.Round(time.Second),
 		"batch_size", b.batchSize,
+		"batch_row_limit", DefaultBackfillBatchRows,
 		"skipped_utxo_offset_block_writes", b.skippedBlocks,
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)

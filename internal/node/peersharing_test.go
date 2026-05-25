@@ -21,7 +21,8 @@ import (
 	"testing"
 )
 
-func boolPtr(v bool) *bool { return &v }
+//go:fix inline
+func boolPtr(v bool) *bool { return new(v) }
 
 func TestResolvePeerSharing(t *testing.T) {
 	tests := []struct {
@@ -34,7 +35,7 @@ func TestResolvePeerSharing(t *testing.T) {
 	}{
 		{
 			name:            "explicit true on BP warns and stays true",
-			dingoNative:     boolPtr(true),
+			dingoNative:     new(true),
 			blockProducer:   true,
 			cardanoNode:     nil,
 			want:            true,
@@ -42,30 +43,30 @@ func TestResolvePeerSharing(t *testing.T) {
 		},
 		{
 			name:          "explicit true off BP stays true",
-			dingoNative:   boolPtr(true),
+			dingoNative:   new(true),
 			blockProducer: false,
 			cardanoNode:   nil,
 			want:          true,
 		},
 		{
 			name:          "explicit false on BP stays false",
-			dingoNative:   boolPtr(false),
+			dingoNative:   new(false),
 			blockProducer: true,
-			cardanoNode:   boolPtr(true),
+			cardanoNode:   new(true),
 			want:          false,
 		},
 		{
 			name:          "explicit false off BP stays false",
-			dingoNative:   boolPtr(false),
+			dingoNative:   new(false),
 			blockProducer: false,
-			cardanoNode:   boolPtr(true),
+			cardanoNode:   new(true),
 			want:          false,
 		},
 		{
 			name:            "unset on BP defaults off, ignores cardano-node",
 			dingoNative:     nil,
 			blockProducer:   true,
-			cardanoNode:     boolPtr(true),
+			cardanoNode:     new(true),
 			want:            false,
 			wantLogContains: "disabled by default on block producer",
 		},
@@ -73,7 +74,7 @@ func TestResolvePeerSharing(t *testing.T) {
 			name:            "unset off BP, cardano-node true falls through",
 			dingoNative:     nil,
 			blockProducer:   false,
-			cardanoNode:     boolPtr(true),
+			cardanoNode:     new(true),
 			want:            true,
 			wantLogContains: "cardano-node config.json PeerSharing",
 		},
@@ -81,7 +82,7 @@ func TestResolvePeerSharing(t *testing.T) {
 			name:          "unset off BP, cardano-node false falls through",
 			dingoNative:   nil,
 			blockProducer: false,
-			cardanoNode:   boolPtr(false),
+			cardanoNode:   new(false),
 			want:          false,
 		},
 		{
@@ -124,9 +125,9 @@ func TestResolvePeerSharingNilLogger(t *testing.T) {
 		blockProducer bool
 		cardanoNode   *bool
 	}{
-		{boolPtr(true), true, nil},
+		{new(true), true, nil},
 		{nil, true, nil},
-		{nil, false, boolPtr(true)},
+		{nil, false, new(true)},
 		{nil, false, nil},
 	}
 	for _, tc := range cases {
