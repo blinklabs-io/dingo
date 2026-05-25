@@ -86,7 +86,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			ls.Lock()
 			if i%2 == 0 {
 				ls.currentEra = eras.BabbageEraDesc
@@ -98,7 +98,7 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 		close(done)
 	}()
 
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()

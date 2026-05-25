@@ -104,7 +104,7 @@ func TestCalculateSchedule_TPraosErasMatchGouroborosTPraos(t *testing.T) {
 	tpraosLeaders := map[uint64]struct{}{}
 	signer, err := consensus.NewSimpleVRFSigner(vrfSeed)
 	require.NoError(t, err)
-	for slot := epoch * slotsPerEpoch; slot < (epoch+1)*slotsPerEpoch; slot++ {
+	for slot := range (epoch + 1) * slotsPerEpoch {
 		res, err := consensus.IsSlotLeaderWithMode(
 			slot,
 			epochNonce,
