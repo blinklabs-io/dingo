@@ -166,8 +166,8 @@ func collectExportedLeafFields(
 	prefix string,
 	out map[string]struct{},
 ) {
-	for i := 0; i < t.NumField(); i++ {
-		field := t.Field(i)
+	for field := range t.Fields() {
+		field := field
 		if !field.IsExported() {
 			continue
 		}
