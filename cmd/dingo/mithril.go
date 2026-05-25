@@ -320,6 +320,48 @@ func runMithrilSync(
 			}
 		}()
 	}
+	debugServer, debugErr := startDebugPprofServer(
+		logger,
+		cfg.BindAddr,
+		cfg.DebugPort,
+		"mithril",
+	)
+	if debugErr != nil {
+		logger.Warn(
+			"failed to start pprof debug server; continuing",
+			"component", "mithril",
+			"port", cfg.DebugPort,
+			"error", debugErr,
+		)
+	}
+	defer func() {
+		if debugServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := debugServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop pprof debug server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if debugServer != nil {
+		go func() {
+			if serverErr := <-debugServer.Err(); serverErr != nil {
+				logger.Error(
+					"pprof debug server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
 
 	cardanoConfigPath := cfg.CardanoConfig
 	if cardanoConfigPath == "" {
