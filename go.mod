@@ -6,7 +6,7 @@ toolchain go1.26.1
 
 require (
 	cloud.google.com/go/storage v1.62.1
-	connectrpc.com/connect v1.19.2
+	connectrpc.com/connect v1.20.0
 	connectrpc.com/grpchealth v1.4.0
 	connectrpc.com/grpcreflect v1.3.0
 	github.com/Microsoft/go-winio v0.6.2
@@ -35,7 +35,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
-	github.com/utxorpc/go-codegen v0.19.0
+	github.com/utxorpc/go-codegen v0.19.2
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.43.0
 	go.opentelemetry.io/otel/exporters/stdout/stdouttrace v1.43.0
