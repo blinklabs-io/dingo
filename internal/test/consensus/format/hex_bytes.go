@@ -22,9 +22,17 @@ import (
 
 // HexBytes is a []byte that marshals to/from a JSON hex string. nil and
 // empty both round-trip as "".
+//
+// Note that the type intentionally collapses nil and empty-slice into
+// a single on-disk representation (the empty hex string). A round-trip
+// through Marshal/Unmarshal always yields nil for both inputs. If a
+// future caller needs to distinguish "field present but empty" from
+// "field absent," this type isn't the right tool — use a *HexBytes
+// or an explicit `omitempty`-paired flag.
 type HexBytes []byte
 
-// MarshalJSON encodes the bytes as a lowercase hex string.
+// MarshalJSON encodes the bytes as a lowercase hex string. See the
+// type docstring on the nil-vs-empty collapse.
 func (h HexBytes) MarshalJSON() ([]byte, error) {
 	return json.Marshal(hex.EncodeToString(h))
 }

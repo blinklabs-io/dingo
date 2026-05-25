@@ -43,9 +43,8 @@ type Conversation struct {
 
 // Step is a single tagged-union step in the conversation. Tagged-union
 // shape: every concrete step type has a "type" field, plus its own
-// type-specific fields. Adding a new step type (e.g. W2's
-// drain_to_tip) is a mechanical addition to decodeStep and to the Step
-// implementation set.
+// type-specific fields. Adding a new step type is a mechanical
+// addition to decodeStep and to the Step implementation set.
 type Step interface {
 	// Type returns the step's discriminant, matching the "type" JSON
 	// field. Used in error messages and protocol-level validation

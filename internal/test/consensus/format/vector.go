@@ -119,6 +119,15 @@ type PeerInput struct {
 // diff-readable and the format does not depend on gouroboros's wire
 // re-encoding being byte-for-byte stable.
 //
+// The full schema below covers chainsync + blockfetch, but the
+// current capture-sidecar only populates roll_forward and
+// roll_backward via the two callbacks registered in Sidecar.Connect.
+// The other msg_types are recognized by the decoder so a future
+// scenario that records them (or a hand-crafted fixture) parses
+// cleanly without a format bump. A capture's served trace today
+// will therefore contain at most {roll_forward, roll_backward} —
+// not the full chainsync conversation.
+//
 // Field population per msg_type:
 //
 //	chainsync/request_next        — no fields
@@ -180,15 +189,21 @@ type ExpectedOutput struct {
 }
 
 // Tip is a structured chain tip suitable for fast equality checks. Hash
-// is hex-encoded into a JSON string at marshal time.
+// is hex-encoded into a JSON string at marshal time. BlockNumber is
+// the chain-length count cardano-node reports alongside the tip and
+// is what Praos compares on for chain-selection — never derive it
+// from the served-trace length when feeding into chain selection,
+// because chainsync starting from a non-origin intersect would
+// undercount.
 type Tip struct {
-	Slot uint64   `json:"slot"`
-	Hash HexBytes `json:"hash"`
+	Slot        uint64   `json:"slot"`
+	Hash        HexBytes `json:"hash"`
+	BlockNumber uint64   `json:"block_number"`
 }
 
 // LedgerPhase is the payload for ledger-category vectors. Mirrors the
-// Amaru-supplied corpus shape so W4's conversion tool is a mechanical
-// rewrap of the existing per-vector content.
+// Amaru-supplied corpus shape so cmd/convert-amaru-vector's rewrap
+// of the existing per-vector content stays mechanical.
 type LedgerPhase struct {
 	Config       HexBytes      `json:"config"`
 	InitialState HexBytes      `json:"initial_state"`

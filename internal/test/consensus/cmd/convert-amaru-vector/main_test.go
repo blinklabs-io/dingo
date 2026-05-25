@@ -24,14 +24,11 @@ import (
 	"github.com/blinklabs-io/ouroboros-mock/conformance"
 )
 
-// sampleSize bounds how many vectors the lossless test exercises.
-// The full corpus has ~315 entries; checking all of them takes ~1s
-// here but the sample is enough to catch a mapping regression — the
-// vectors differ in event content, not envelope structure, so a
-// structural-conversion bug trips on any of them.
-const sampleSize = 25
-
-func TestLosslessConversionSample(t *testing.T) {
+// TestLosslessConversion exercises the full corpus (314 vectors at
+// time of writing). Runs in ~1s; the cost is well below the budget
+// where sampling would matter, and full coverage means a
+// per-vector mapping regression can't hide in the unsampled tail.
+func TestLosslessConversion(t *testing.T) {
 	corpusRoot := resolveCorpusRootForTest(t)
 	vectors, err := conformance.CollectVectorFiles(corpusRoot)
 	if err != nil {
@@ -39,11 +36,6 @@ func TestLosslessConversionSample(t *testing.T) {
 	}
 	if len(vectors) == 0 {
 		t.Fatalf("no vectors under %s", corpusRoot)
-	}
-	// Stable order from CollectVectorFiles + bounded slice = stable
-	// sample across runs.
-	if len(vectors) > sampleSize {
-		vectors = vectors[:sampleSize]
 	}
 
 	for _, srcPath := range vectors {

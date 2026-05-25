@@ -24,6 +24,11 @@ go.work
 /dingo
 /bin/dingo
 
+# Stray `go build` outputs at repo root (binaries named after cmd dirs)
+/capture-sidecar
+/compose-consensus-vector
+/convert-amaru-vector
+
 # Local data directory
 /.dingo
 /.devnet

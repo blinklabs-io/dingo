@@ -56,7 +56,8 @@ const FinalTipSlotTolerance = 20
 // The diff catches structural regressions (peer count drops, peers
 // fall silent, observation tip lands way outside the forge-duration
 // window) without tripping on the forge nondeterminism that
-// CONSENSUS_W2.md §5 "Golden tolerance" calls out.
+// forge nondeterminism (different VRF wins across runs ⇒ different
+// block counts and tip slots) inherently produces.
 func DiffAgainstGolden(
 	goldenPath string,
 	fresh format.TestVector,
@@ -105,14 +106,30 @@ func diffVectors(golden, fresh format.TestVector) DiffResult {
 		}
 	}
 
-	dc := fresh.Capture.ExpectedOutput.DownstreamChainSync
-	if len(dc) == 0 {
+	// Validate both sides' downstream_chainsync. A degenerate
+	// golden (someone hand-edited it into a roll_forward-free shape)
+	// would otherwise silently approve any fresh capture against
+	// that broken baseline.
+	gd := golden.Capture.ExpectedOutput.DownstreamChainSync
+	switch {
+	case len(gd) == 0:
 		diffs = append(diffs,
-			"expected_output.downstream_chainsync: empty",
+			"expected_output.downstream_chainsync: golden empty",
 		)
-	} else if !servedHasRollForward(dc) {
+	case !servedHasRollForward(gd):
 		diffs = append(diffs,
-			"expected_output.downstream_chainsync: no roll_forward",
+			"expected_output.downstream_chainsync: golden has no roll_forward",
+		)
+	}
+	fd := fresh.Capture.ExpectedOutput.DownstreamChainSync
+	switch {
+	case len(fd) == 0:
+		diffs = append(diffs,
+			"expected_output.downstream_chainsync: fresh empty",
+		)
+	case !servedHasRollForward(fd):
+		diffs = append(diffs,
+			"expected_output.downstream_chainsync: fresh has no roll_forward",
 		)
 	}
 

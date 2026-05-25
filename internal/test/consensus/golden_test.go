@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build consensuscapture
-
 package consensus_test
 
 import (
@@ -30,10 +28,8 @@ import (
 // non-zero final_tip. Catches the case where someone hand-edits a
 // committed vector in a way that breaks the format contract.
 //
-// Build-tag-gated under //go:build consensuscapture for symmetry with
-// the live-stack test; the goldens are static so this could run in
-// `make test`, but keeping the consensus-capture corpus checks under
-// one tag keeps the CLI surface predictable.
+// Runs in plain `go test` — no docker dependency. The assertions
+// are static reads of committed JSON.
 func TestCapturedGoldensDecode(t *testing.T) {
 	dir := filepath.Join("testdata", "captured")
 	entries, err := os.ReadDir(dir)

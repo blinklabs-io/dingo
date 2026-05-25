@@ -100,7 +100,7 @@ func syntheticConsensusVector(t *testing.T) format.TestVector {
 				Era:        &era,
 				HeaderCbor: format.HexBytes{0x01},
 				Tip: &format.Tip{
-					Slot: 10, Hash: hashA,
+					Slot: 10, Hash: hashA, BlockNumber: 1,
 				},
 			},
 		},
@@ -114,7 +114,7 @@ func syntheticConsensusVector(t *testing.T) format.TestVector {
 				Era:        &era,
 				HeaderCbor: format.HexBytes{0x02},
 				Tip: &format.Tip{
-					Slot: 20, Hash: hashB,
+					Slot: 20, Hash: hashB, BlockNumber: 1,
 				},
 			},
 			{
@@ -123,7 +123,7 @@ func syntheticConsensusVector(t *testing.T) format.TestVector {
 				Era:        &era,
 				HeaderCbor: format.HexBytes{0x03},
 				Tip: &format.Tip{
-					Slot: 30, Hash: hashBTip,
+					Slot: 30, Hash: hashBTip, BlockNumber: 2,
 				},
 			},
 		},
@@ -137,7 +137,7 @@ func syntheticConsensusVector(t *testing.T) format.TestVector {
 			ExpectedOutput: format.ExpectedOutput{
 				DownstreamChainSync: peerB.Served,
 				FinalTip: format.Tip{
-					Slot: 30, Hash: hashBTip,
+					Slot: 30, Hash: hashBTip, BlockNumber: 2,
 				},
 			},
 		},

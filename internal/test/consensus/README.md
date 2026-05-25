@@ -1,8 +1,13 @@
 # consensus
 
 Consensus-conformance capture harness. Records cardano-node's served
-chainsync / blockfetch traces into JSON test vectors. cardano-node is
-the oracle.
+chainsync `roll_forward` and `roll_backward` responses into JSON test
+vectors. cardano-node is the oracle. The format defines schema for
+`find_intersect`, `intersect_found`, `await_reply`, blockfetch
+messages, etc., but the recorder only wires the two `RollForward*` /
+`RollBackward*` chainsync callbacks today — the additional schema
+exists for the eventual scenarios that need to assert on intersect
+responses or blockfetch behavior. Today's scenarios don't.
 
 ## Layout
 
@@ -42,9 +47,11 @@ internal/test/consensus/
                               Amaru ledger corpus into ledger-category
                               JSON vectors under testdata/converted/
   Dockerfile.configurator    Shared base image (genesis toolchain)
-  Dockerfile.capture_sidecar Shared base image (Go build of cmd/sidecar)
+  Dockerfile.capture_sidecar Shared base image (Go build of
+                             cmd/capture-sidecar)
   Dockerfile.compose_consensus_vector
-                             Shared base image (Go build of cmd/composer)
+                             Shared base image (Go build of
+                             cmd/compose-consensus-vector)
   capture-scenario.sh        Dispatcher: forwards to scenarios/<n>/run.sh
   capture-all.sh             Bulk wrapper: runs every scenario, writes
                              each to testdata/captured/<n>.json
@@ -120,15 +127,12 @@ hand-crafted examples.
 ## Tests
 
 ```bash
-# Fast: offline format + recorder + composer + diff + runner tests.
-# Also walks testdata/captured/ and testdata/converted/ via the
-# replay runner — each committed vector becomes a subtest.
+# Fast: offline format + recorder + composer + diff + runner tests
+# plus the golden-corpus structural assertions (TestCapturedGoldens-
+# Decode + TestForkAndSelectV1SharedPrefix). Also walks
+# testdata/captured/ and testdata/converted/ via the replay runner —
+# each committed vector becomes a subtest.
 go test ./internal/test/consensus/...
-
-# Build-tag-gated: golden-corpus structural assertions (load each
-# committed vector under testdata/captured/ and verify shape).
-go test -tags consensuscapture -run "TestCapturedGoldensDecode|TestForkAndSelectV1SharedPrefix" \
-    ./internal/test/consensus/...
 
 # Slow: live end-to-end capture (docker required).
 go test -tags consensuscapture -run TestCaptureScenarioLiveStack \
@@ -138,7 +142,12 @@ go test -tags consensuscapture -run TestCaptureScenarioLiveStack \
 The replay runner (`TestConsensusConformanceVectors` /
 `TestLedgerConformanceVectorsNewFormat`) runs in plain `go test` —
 no build tag — so every PR exercises the committed corpus against
-dingo's chain-selection logic.
+dingo's chain-selection logic (for consensus vectors) and dingo's
+ledger machinery via `DingoStateManager` (for ledger vectors).
+The consensus driver is scoped to chain selection only today — the
+captured trace doesn't carry block bodies yet, so full chain.Manager
+replay is out of scope until either captures grow blockfetch bodies
+or a header-only adoption path lands in dingo.
 
 ## Replay runner
 
@@ -163,7 +172,7 @@ from the new-format `LedgerPhase`, writes it to a temp file, and
 runs the harness against dingo's `DingoStateManager` (the same
 state-manager the existing `internal/test/conformance/` tests use).
 The harness's per-event validation and final-state oracle do the
-heavy lifting; the W3 ledger driver is a thin envelope-unwrap layer.
+heavy lifting; the ledger driver is a thin envelope-unwrap layer.
 
 When a replay fails, the runner returns a structured error
 (`tip slot mismatch: got X, want Y`, etc.). The build-tag-gated

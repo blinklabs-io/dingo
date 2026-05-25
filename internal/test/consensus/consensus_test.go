@@ -36,13 +36,19 @@ func TestConsensusConformanceVectors(t *testing.T) {
 }
 
 // TestLedgerConformanceVectorsNewFormat walks ledger-category
-// vectors under testdata/converted/. Today the directory is empty
-// (the Amaru-corpus conversion tool isn't built yet); when it
-// populates the directory the test loop picks the new vectors up
-// automatically. The existing internal/test/conformance/
-// TestRulesConformanceVectors continues to run against the
-// un-converted Amaru corpus in the meantime.
+// vectors under testdata/converted/ and replays each through dingo's
+// DingoStateManager via the ouroboros-mock harness. The harness
+// needs the un-converted Amaru corpus on disk for its
+// pparams-by-hash lookups, so we extract it into a parent-test-
+// scoped TempDir before iterating subtests — `PrimeMockTestdata`
+// caches the path for runLedgerVector to find. Doing the extraction
+// here (rather than lazily inside runLedgerVector with sync.Once)
+// keeps the cleanup tied to the parent's testing.T lifetime, which
+// spans all subtests AND survives `go test -count=N` correctly.
 func TestLedgerConformanceVectorsNewFormat(t *testing.T) {
+	if err := consensus.PrimeMockTestdata(t); err != nil {
+		t.Fatalf("PrimeMockTestdata: %v", err)
+	}
 	runVectorDir(t, filepath.Join("testdata", "converted"))
 }
 

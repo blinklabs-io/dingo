@@ -143,10 +143,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 }
 
 // Vector builds a category=consensus TestVector from the recorded
-// state. For a single-peer capture, ExpectedOutput.DownstreamChainSync
+// state. One Sidecar emits exactly one peer's worth of recordings,
+// so the returned vector always has len(Capture.Peers) == 1. For
+// multi-peer scenarios, run one Sidecar per upstream peer and merge
+// the resulting single-peer vectors with cmd/compose-consensus-vector
+// (which assigns peer_id by argument order and lifts the observation
+// node's served trace into ExpectedOutput.DownstreamChainSync).
+//
+// For a single-peer capture, ExpectedOutput.DownstreamChainSync
 // mirrors the peer's served trace verbatim (no chain-selection
-// ambiguity with one upstream); the multi-peer composer replaces this
-// with the observation-node capture.
+// ambiguity with one upstream); the composer replaces this with the
+// observation-node capture.
 func (s *Sidecar) Vector() format.TestVector {
 	served := s.recorder.Snapshot()
 	final := lastRollForwardTip(served)
@@ -201,8 +208,9 @@ func lastRollForwardTip(served []format.ServedMessage) format.Tip {
 			continue
 		}
 		return format.Tip{
-			Slot: m.Tip.Slot,
-			Hash: append(format.HexBytes(nil), m.Tip.Hash...),
+			Slot:        m.Tip.Slot,
+			Hash:        append(format.HexBytes(nil), m.Tip.Hash...),
+			BlockNumber: m.Tip.BlockNumber,
 		}
 	}
 	return format.Tip{}

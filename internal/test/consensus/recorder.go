@@ -125,10 +125,7 @@ func (r *Recorder) OnRollForwardRaw(
 		MsgType:    format.ChainSyncMsgRollForward,
 		Era:        &e,
 		HeaderCbor: format.HexBytes(headerCbor),
-		Tip: &format.Tip{
-			Slot: tip.Point.Slot,
-			Hash: format.HexBytes(tip.Point.Hash),
-		},
+		Tip:        formatTip(tip),
 	})
 	return nil
 }
@@ -146,12 +143,23 @@ func (r *Recorder) OnRollBackward(
 			Slot: point.Slot,
 			Hash: format.HexBytes(point.Hash),
 		},
-		Tip: &format.Tip{
-			Slot: tip.Point.Slot,
-			Hash: format.HexBytes(tip.Point.Hash),
-		},
+		Tip: formatTip(tip),
 	})
 	return nil
+}
+
+// formatTip projects a gouroboros chainsync.Tip into the format's
+// Tip type, preserving all three fields (slot, hash, block number).
+// BlockNumber matters at replay time: Praos chain selection
+// compares chains by block count, not slot, so dropping it would
+// silently route a future intersect-from-mid-chain scenario to the
+// wrong peer.
+func formatTip(tip chainsync.Tip) *format.Tip {
+	return &format.Tip{
+		Slot:        tip.Point.Slot,
+		Hash:        format.HexBytes(tip.Point.Hash),
+		BlockNumber: tip.BlockNumber,
+	}
 }
 
 // cloneServedMessage deep-copies the byte / slice / pointer payload

@@ -110,6 +110,13 @@ func runConsensusVector(
 // testConnectionID synthesizes a deterministic ConnectionId from a
 // peer id. Distinct peer ids yield distinct conn ids; the same peer
 // id always yields the same conn id within a single test run.
+//
+// peerID is expected to be small (committed scenarios use 0..N where
+// N is the peer count, currently ≤ 2). A peerID larger than ~55000
+// would overflow the 16-bit TCP port space below; the function would
+// still produce *some* ConnectionId via net.ResolveTCPAddr error
+// fall-through but the result wouldn't be unique. Add a bounds
+// check here if a future scenario starts assigning large peer ids.
 func testConnectionID(peerID uint64) ouroboros.ConnectionId {
 	local, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
 	// 10000 + peerID stays in the ephemeral port range and keeps
@@ -122,22 +129,12 @@ func testConnectionID(peerID uint64) ouroboros.ConnectionId {
 }
 
 // lastServedTip walks served in reverse and returns the tip of the
-// most recent roll_forward. blockNumber is derived from the count of
-// roll_forwards in the trace because format.Tip doesn't currently
-// carry block_number; for a chainsync stream from origin this is
-// equivalent (each roll_forward extends the chain by one block).
+// most recent roll_forward. Returns the captured Tip's slot + hash +
+// block_number verbatim — the recorder copies all three off the
+// gouroboros chainsync.Tip callback argument at capture time.
 func lastServedTip(
 	served []format.ServedMessage,
 ) (ochainsync.Tip, bool) {
-	var blockCount uint64
-	for _, m := range served {
-		if m.MsgType == format.ChainSyncMsgRollForward {
-			blockCount++
-		}
-	}
-	if blockCount == 0 {
-		return ochainsync.Tip{}, false
-	}
 	for _, m := range slices.Backward(served) {
 		if m.MsgType != format.ChainSyncMsgRollForward || m.Tip == nil {
 			continue
@@ -147,17 +144,18 @@ func lastServedTip(
 				Slot: m.Tip.Slot,
 				Hash: append([]byte(nil), m.Tip.Hash...),
 			},
-			BlockNumber: blockCount,
+			BlockNumber: m.Tip.BlockNumber,
 		}, true
 	}
 	return ochainsync.Tip{}, false
 }
 
 // assertTipMatches compares the selected chain's tip against the
-// vector's recorded final_tip on slot + hash. Block number is not
-// compared because the captured format.Tip doesn't carry it and the
-// derived value (count of roll_forwards) is an artifact of the
-// runner, not the on-disk vector.
+// vector's recorded final_tip on slot + hash + block number. Block
+// number comparison catches a vector that records the right hash
+// but wrong chain-length count, which would silently desync chain
+// selection in any multi-peer scenario where peers tie on slot but
+// differ on block count.
 func assertTipMatches(got ochainsync.Tip, want format.Tip) error {
 	if got.Point.Slot != want.Slot {
 		return fmt.Errorf(
@@ -169,6 +167,12 @@ func assertTipMatches(got ochainsync.Tip, want format.Tip) error {
 		return fmt.Errorf(
 			"tip hash mismatch: got %x, want %x",
 			got.Point.Hash, []byte(want.Hash),
+		)
+	}
+	if got.BlockNumber != want.BlockNumber {
+		return fmt.Errorf(
+			"tip block_number mismatch: got %d, want %d",
+			got.BlockNumber, want.BlockNumber,
 		)
 	}
 	return nil

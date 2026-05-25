@@ -13,9 +13,17 @@ The configurator drives cardano-node through three forge phases
 
 | Phase | Forging pool | Starting DB | Kill slot | Snapshot to |
 |---|---|---|---|---|
-| A | pool 1 | fresh | `PREFIX_KILL_SLOT` (50) | `shared-prefix-db/` |
-| B | pool 1 | copy of shared prefix | `+ PEER_A_EXTENSION_SLOTS` (+50 ⇒ 100) | `peer-a-data/` |
-| C | pool 2 | copy of shared prefix | `+ PEER_B_EXTENSION_SLOTS` (+150 ⇒ 200) | `peer-b-data/` |
+| A | pool 1 | fresh | `PREFIX_KILL_SLOT` (default 10) | `shared-prefix-db/` |
+| B | pool 1 | copy of shared prefix | `+ PEER_A_EXTENSION_SLOTS` (default +15 ⇒ ~25) | `peer-a-data/` |
+| C | pool 2 | copy of shared prefix | `+ PEER_B_EXTENSION_SLOTS` (default +80 ⇒ ~90) | `peer-b-data/` |
+
+Slot counts are deliberately small so each phase's wall-clock-vs-chain
+gap stays inside cardano-node's Genesis State Machine "CaughtUp"
+tolerance (~3k/f = ~45 slots at k=6, f=0.4). The forging cardano-node
+refuses to produce blocks when the gap is wider, and rewriting
+`systemStart` between phases to close the gap would invalidate the
+Byron genesis hash. See `configurator.sh` for the tunable defaults
+and the comment above them.
 
 Both pools are registered block producers in the genesis from slot 0
 onward. Whether a pool wins a given slot depends on its VRF; whether
@@ -30,19 +38,30 @@ No key rotation, no block splicing, no hand-synthesized blocks. Just
 running cardano-node with different key mounts at different times
 against the same genesis.
 
-`PEER_B_EXTENSION_SLOTS` is ~3× `PEER_A_EXTENSION_SLOTS` so peer B
-reliably wins Praos longest-chain selection.
+`PEER_B_EXTENSION_SLOTS` is sized so peer B's expected **block count**
+substantially exceeds peer A's. Praos longest-chain selection is by
+block count, not slot number, so picking similar slot counts for the
+two extensions can let leadership-lottery variance flip which peer
+wins on a given run. With the defaults (15 vs 80) peer B's expected
+block lead is ~14 blocks — robustly outside reasonable variance.
 
 ## Stack contents
 
 | Service | Role |
 |---|---|
 | `configurator` | Genesis generation + three-phase forge. Exits 0 when done. |
-| `cardano-peer-a` | Forging cardano-node serving peer A's chain. Pool 1 keys. |
-| `cardano-peer-b` | Forging cardano-node serving peer B's longer chain. Pool 2 keys. |
+| `cardano-peer-a` | Non-forging cardano-node serving peer A's pre-forged chain. |
+| `cardano-peer-b` | Non-forging cardano-node serving peer B's pre-forged chain (the longer one). |
 | `cardano-observation` | Non-forging cardano-node with both peers as static localRoots. |
 | `capture-sidecar` (capture profile) | Runs the drain_to_tip conversation; invoked 3× by `run.sh`. |
-| `compose` (capture profile) | Merges the three single-peer captures into the multi-peer vector. |
+| `composer` (capture profile) | Merges the three single-peer captures into the multi-peer vector. |
+
+The runtime peer-a / peer-b services **do not mount pool keys** — if
+they did, cardano-node would keep extending the chain past the
+configurator's baked-in tip the moment wall-clock advanced past it,
+defeating the "two divergent chains with fixed tips" model. The
+configurator does all the forging up front; the runtime nodes just
+serve.
 
 Subnet: `172.24.0.0/24`.
 
@@ -67,7 +86,7 @@ when poking the cardano-* services by hand.
 
 ## Why this scenario
 
-The vector exercises three things at W3 replay time:
+The vector exercises three things at replay time:
 
 1. **Praos longest-chain selection** with two upstream peers serving
    divergent chains.
@@ -82,11 +101,18 @@ The vector exercises three things at W3 replay time:
 
 ## Determinism caveats
 
-`tip.slot >= KILL_SLOT` polling makes each phase reproducible up to
-cardano-node startup jitter (one run may land at slot 51, another at
-slot 53). Block content drifts when the kill slot lands on a different
-winning-slot boundary. The composer's golden-diff (`run.sh` step 6)
-checks structural equivalence — same per-peer message types in order,
-same `final_tip.slot` — not byte equality on `header_cbor` / hashes.
-If the structural diff trips during a regeneration, that's a sign the
-testnet shape has drifted; rerun and inspect.
+`tip.slot >= KILL_SLOT` polling is reproducible up to cardano-node
+startup jitter plus the 2-second poll cadence in `run_forge_phase`.
+At PREFIX_KILL_SLOT=10 the per-phase tip-slot variance is intrinsically
+±2-3 slots, and that variance **compounds** across phases (phase B
+and phase C both target `phase-A-tip + N` rather than an absolute
+slot, so phase A's overshoot drags both downstream targets forward).
+The composer's golden-diff in `internal/test/consensus/diff.go` sets
+`FinalTipSlotTolerance = 20` to absorb compounded variance without
+masking a real chain-selection flip.
+
+The diff checks structural equivalence — peer count, presence of
+roll_forwards per peer, `final_tip.slot` within tolerance — not byte
+equality on `header_cbor` / hashes. If the diff trips during a
+regeneration, that's a sign the testnet shape has drifted (or the
+selector picked the wrong peer); rerun and inspect.
