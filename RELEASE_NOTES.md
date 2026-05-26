@@ -65,6 +65,21 @@ Thank you for trying!
 
 ---
 
+## v0.48.0 (May 26, 2026)
+
+**Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
+
+**Date:** May 26, 2026
+
+**Version:** v0.48.0
+
+Hi folks! Here’s what we shipped in v0.48.0.
+
+### ✨ What's New
+
+* Added **tune historical backfill batch size more directly:** Operators can now adjust backfill batch size to better balance throughput and memory usage during historical indexing. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389))
+* Introduced **inspect Mithril sync with a dedicated debug port:** Operators can now use a debug and profiling port during Mithril sync, which makes long running sync behavior easier to inspect and troubleshoot. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413))
+
 ## v0.47.1 (May 22, 2026)
 
 **Title:** Safer plateau recovery, correct governance refunds, and hydrated snapshot imports
