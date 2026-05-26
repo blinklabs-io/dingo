@@ -158,8 +158,7 @@ func TestDecodeRejectsUnknownMsgType(t *testing.T) {
 		"schema_version": 1, "title": "x", "category": "consensus",
 		"capture": {
 			"peers": [{"peer_id": 0, "served": [
-				{"protocol": "chainsync", "msg_type": "nope",
-				 "msg_bytes": ""}
+				{"protocol": "chainsync", "msg_type": "nope"}
 			]}],
 			"expected_output": {"downstream_chainsync": [],
 			"final_tip": {"slot": 0, "hash": ""}}

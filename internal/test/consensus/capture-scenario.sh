@@ -40,6 +40,14 @@ if [[ -z "${SCENARIO}" ]]; then
 fi
 shift
 
+# Reject anything that could escape the scenarios/ subtree before we
+# resolve a path or exec under it. First char must be alphanumeric so
+# names like ".." or "-foo" can't slip through the character class.
+if [[ ! "${SCENARIO}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "capture-scenario: invalid scenario name: ${SCENARIO}" >&2
+    exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCENARIO_DIR="${SCRIPT_DIR}/scenarios/${SCENARIO}"
 

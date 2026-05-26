@@ -48,7 +48,13 @@ KEEP_UP=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -out|--out)
-            OUT_PATH="$2"; shift 2;;
+            if [[ $# -lt 2 || "${2:-}" == -* ]]; then
+                echo "$1 requires a path" >&2
+                exit 2
+            fi
+            OUT_PATH="$2"
+            shift 2
+            ;;
         --keep-up)
             KEEP_UP=true; shift;;
         --skip-golden)

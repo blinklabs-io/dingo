@@ -19,10 +19,11 @@
 #                       forge phases (shared prefix → peer A extension
 #                       → peer B extension), populating per-peer chain
 #                       DB volumes. Exits 0 when done.
-#   - cardano-peer-a    Forging cardano-node serving peer A's chain.
-#                       Pool 1 keys.
-#   - cardano-peer-b    Forging cardano-node serving peer B's longer
-#                       chain. Pool 2 keys.
+#   - cardano-peer-a    Non-forging cardano-node serving peer A's
+#                       pre-forged chain (no pool keys mounted; the
+#                       configurator baked the chain into peer-a-data).
+#   - cardano-peer-b    Non-forging cardano-node serving peer B's
+#                       pre-forged longer chain.
 #   - cardano-observation
 #                       Non-forging cardano-node. Topology pins both
 #                       peers as static localRoots; Praos selects
@@ -31,7 +32,7 @@
 #                       conversation against one cardano-* address per
 #                       invocation. run.sh fires three back-to-back
 #                       runs (peer A, peer B, observation).
-#   - compose           (capture profile) Merges the three single-peer
+#   - composer          (capture profile) Merges the three single-peer
 #                       captures into the multi-peer vector and (with
 #                       -golden) diffs against the committed corpus.
 #

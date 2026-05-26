@@ -93,15 +93,17 @@ func diffVectors(golden, fresh format.TestVector) DiffResult {
 			"peers: count golden=%d fresh=%d", len(gp), len(fp),
 		))
 	}
-	for i, p := range fp {
-		label := fmt.Sprintf("peers[%d].served", i)
-		if len(p.Served) == 0 {
-			diffs = append(diffs, label+": empty")
-			continue
-		}
-		if !servedHasRollForward(p.Served) {
+	for i, p := range gp {
+		if d := servedShapeIssue(p.Served); d != "" {
 			diffs = append(diffs,
-				label+": no roll_forward (silent capture?)",
+				fmt.Sprintf("golden.peers[%d].served: %s", i, d),
+			)
+		}
+	}
+	for i, p := range fp {
+		if d := servedShapeIssue(p.Served); d != "" {
+			diffs = append(diffs,
+				fmt.Sprintf("fresh.peers[%d].served: %s", i, d),
 			)
 		}
 	}
@@ -150,4 +152,24 @@ func slotDelta(a, b uint64) uint64 {
 		return a - b
 	}
 	return b - a
+}
+
+// servedShapeIssue returns a short human description of the first
+// shape problem found in a peer's served trace, or "" if it satisfies
+// the documented invariants: non-empty, starts with roll_backward,
+// contains at least one roll_forward.
+func servedShapeIssue(served []format.ServedMessage) string {
+	if len(served) == 0 {
+		return "empty"
+	}
+	if served[0].MsgType != format.ChainSyncMsgRollBackward {
+		return fmt.Sprintf(
+			"first msg is %q, want roll_backward",
+			served[0].MsgType,
+		)
+	}
+	if !servedHasRollForward(served) {
+		return "no roll_forward (silent capture?)"
+	}
+	return ""
 }

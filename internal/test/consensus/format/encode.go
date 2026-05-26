@@ -106,9 +106,9 @@ func (l *LedgerPhase) validate() error {
 	for i, e := range l.Events {
 		switch e.Type {
 		case LedgerEventTransaction:
-			if e.Success == nil || e.Slot == nil {
+			if len(e.TxCbor) == 0 || e.Success == nil || e.Slot == nil {
 				return fmt.Errorf(
-					"events[%d] (transaction): missing success/slot",
+					"events[%d] (transaction): missing tx_cbor/success/slot",
 					i,
 				)
 			}

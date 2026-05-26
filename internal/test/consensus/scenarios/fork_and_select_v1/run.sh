@@ -50,7 +50,14 @@ KEEP_UP=false
 SKIP_GOLDEN=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -out|--out)        OUT_PATH="$2"; shift 2;;
+        -out|--out)
+            if [[ $# -lt 2 || "${2:-}" == -* ]]; then
+                echo "$1 requires a path" >&2
+                exit 2
+            fi
+            OUT_PATH="$2"
+            shift 2
+            ;;
         --keep-up)         KEEP_UP=true; shift;;
         --skip-golden)     SKIP_GOLDEN=true; shift;;
         -h|--help)
@@ -74,7 +81,6 @@ if [[ -z "${OUT_PATH}" ]]; then
 fi
 mkdir -p "$(dirname "${OUT_PATH}")"
 OUT_DIR="$(cd "$(dirname "${OUT_PATH}")" && pwd)"
-OUT_BASENAME="$(basename "${OUT_PATH}")"
 
 export CONSENSUS_CAPTURE_OUTPUT_DIR="${OUT_DIR}"
 

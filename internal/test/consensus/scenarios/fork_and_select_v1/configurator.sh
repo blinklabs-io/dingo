@@ -64,8 +64,11 @@ PEER_B_DATA_DIR=/peer-b-data
 
 # ─── helpers ────────────────────────────────────────────────────────
 
+# mktemp (rather than tr|head) avoids a SIGPIPE-induced exit-141
+# under set -euo pipefail.
 write_file() {
-    local tmp_file="${1}_$(tr </dev/urandom -dc A-Za-z0-9 | head -c16)"
+    local tmp_file
+    tmp_file="$(mktemp "${1}.tmp.XXXXXXXX")"
     cat >"${tmp_file}"
     mv --force "${tmp_file}" "${1}"
 }

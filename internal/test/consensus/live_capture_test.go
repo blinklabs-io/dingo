@@ -17,6 +17,8 @@
 package consensus_test
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,26 +50,26 @@ func TestCaptureScenarioLiveStack(t *testing.T) {
 		t.Fatalf("resolve capture-scenario.sh: %v", err)
 	}
 
-	// Up to 4 minutes for the whole lifecycle: image build (cached
+	// Up to 6 minutes for the whole lifecycle: image build (cached
 	// after first run) + 60s system-start delay + a few seconds to
 	// forge + sidecar handshake + capture + teardown.
-	cmd := exec.Command(
+	ctx, cancel := context.WithTimeout(
+		context.Background(), 6*time.Minute,
+	)
+	defer cancel()
+	cmd := exec.CommandContext(
+		ctx,
 		scriptPath,
 		"intersect_origin_one_rollforward",
 		"-out", outPath,
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("capture-scenario.sh: %v", err)
+	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatal("capture-scenario.sh: timed out after 6 minutes")
 		}
-	case <-time.After(6 * time.Minute):
-		_ = cmd.Process.Kill()
-		t.Fatal("capture-scenario.sh: timed out after 6 minutes")
+		t.Fatalf("capture-scenario.sh: %v", err)
 	}
 
 	raw, err := os.ReadFile(outPath)

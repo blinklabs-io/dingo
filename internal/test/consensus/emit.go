@@ -22,7 +22,7 @@ import (
 )
 
 // WriteVector encodes v via format.EncodeTestVector and writes the
-// result to path with mode 0o644. Errors wrap with the destination
+// result to path with mode 0o600. Errors wrap with the destination
 // path for easier triage.
 func WriteVector(path string, v format.TestVector) error {
 	raw, err := format.EncodeTestVector(v)

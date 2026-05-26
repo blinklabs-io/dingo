@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // DecodeTestVector parses raw JSON into a TestVector. Unknown fields
@@ -31,9 +32,19 @@ func DecodeTestVector(raw []byte) (TestVector, error) {
 	if err := dec.Decode(&v); err != nil {
 		return TestVector{}, fmt.Errorf("test vector: decode: %w", err)
 	}
-	if dec.More() {
-		return TestVector{}, errors.New(
-			"test vector: trailing JSON after vector",
+	// dec.More() only reports tokens inside the current container,
+	// not whether a second top-level JSON value follows. Attempting
+	// a second Decode and requiring io.EOF is the canonical way to
+	// reject trailing top-level input.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return TestVector{}, errors.New(
+				"test vector: trailing JSON after vector",
+			)
+		}
+		return TestVector{}, fmt.Errorf(
+			"test vector: trailing JSON after vector: %w", err,
 		)
 	}
 	if err := v.validate(); err != nil {

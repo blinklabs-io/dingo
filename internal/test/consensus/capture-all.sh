@@ -49,7 +49,14 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --fail-fast)   FAIL_FAST=true; shift;;
         --keep-going)  FAIL_FAST=false; shift;;
-        --only)        ONLY="$2"; shift 2;;
+        --only)
+            if [[ $# -lt 2 || "${2:-}" == --* ]]; then
+                echo "--only requires a scenario name" >&2
+                exit 2
+            fi
+            ONLY="$2"
+            shift 2
+            ;;
         -h|--help)
             cat <<USAGE
 usage: $0 [--fail-fast | --keep-going] [--only <scenario>]
