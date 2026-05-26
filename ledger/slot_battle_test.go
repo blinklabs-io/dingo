@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 )
 
@@ -77,18 +78,19 @@ func TestCheckSlotBattle_DetectsConflict(t *testing.T) {
 	ls.checkSlotBattle(e, errors.New("block rejected"))
 
 	// Verify the event was emitted
-	select {
-	case evt := <-evtCh:
-		battle, ok := evt.Data.(forging.SlotBattleEvent)
-		require.True(t, ok, "event data should be SlotBattleEvent")
-		assert.Equal(t, uint64(1000), battle.Slot)
-		assert.Equal(t, localHash, battle.LocalBlockHash)
-		assert.Equal(t, remoteHash, battle.RemoteBlockHash)
-		assert.True(t, battle.Won,
-			"local should win when remote block is rejected")
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SlotBattleEvent")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		2*time.Second,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok, "event data should be SlotBattleEvent")
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.Equal(t, localHash, battle.LocalBlockHash)
+	assert.Equal(t, remoteHash, battle.RemoteBlockHash)
+	assert.True(t, battle.Won,
+		"local should win when remote block is rejected")
 }
 
 func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
@@ -124,16 +126,17 @@ func TestCheckSlotBattle_RemoteWinsWhenAccepted(t *testing.T) {
 	}
 	ls.checkSlotBattle(e, nil)
 
-	select {
-	case evt := <-evtCh:
-		battle, ok := evt.Data.(forging.SlotBattleEvent)
-		require.True(t, ok)
-		assert.Equal(t, uint64(1000), battle.Slot)
-		assert.False(t, battle.Won,
-			"local should lose when remote block is accepted")
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SlotBattleEvent")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		2*time.Second,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.False(t, battle.Won,
+		"local should lose when remote block is accepted")
 }
 
 func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
@@ -166,12 +169,12 @@ func TestCheckSlotBattle_NoConflictDifferentSlot(t *testing.T) {
 	ls.checkSlotBattle(e, nil)
 
 	// Verify no event was emitted
-	select {
-	case evt := <-evtCh:
-		t.Fatalf("unexpected SlotBattleEvent: %+v", evt)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: no event emitted
-	}
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"unexpected SlotBattleEvent",
+	)
 }
 
 func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
@@ -205,12 +208,12 @@ func TestCheckSlotBattle_SameHashIsNotBattle(t *testing.T) {
 	}
 	ls.checkSlotBattle(e, nil)
 
-	select {
-	case evt := <-evtCh:
-		t.Fatalf("same-hash block should not trigger slot battle: %+v", evt)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: no event for same-hash block
-	}
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"same-hash block should not trigger slot battle",
+	)
 }
 
 func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
@@ -235,12 +238,12 @@ func TestCheckSlotBattle_NilCheckerSkips(t *testing.T) {
 	}
 	ls.checkSlotBattle(e, nil)
 
-	select {
-	case evt := <-evtCh:
-		t.Fatalf("nil checker should not emit events: %+v", evt)
-	case <-time.After(50 * time.Millisecond):
-		// Expected: no event when checker is nil
-	}
+	testutil.RequireNoReceive(
+		t,
+		evtCh,
+		50*time.Millisecond,
+		"nil checker should not emit events",
+	)
 }
 
 func TestCheckSlotBattle_NilEventBus(t *testing.T) {
@@ -315,22 +318,23 @@ func TestCheckSlotBattle_UnderWriteLock(t *testing.T) {
 		ls.Unlock()
 	}()
 
-	select {
-	case <-done:
-		// OK — no deadlock
-	case <-time.After(2 * time.Second):
-		t.Fatal("checkSlotBattle deadlocked under write lock")
-	}
+	testutil.RequireReceive(
+		t,
+		done,
+		2*time.Second,
+		"checkSlotBattle deadlocked under write lock",
+	)
 
-	select {
-	case evt := <-evtCh:
-		battle, ok := evt.Data.(forging.SlotBattleEvent)
-		require.True(t, ok)
-		assert.Equal(t, uint64(1000), battle.Slot)
-		assert.True(t, battle.Won)
-	case <-time.After(2 * time.Second):
-		t.Fatal("timeout waiting for SlotBattleEvent")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		evtCh,
+		2*time.Second,
+		"timeout waiting for SlotBattleEvent",
+	)
+	battle, ok := evt.Data.(forging.SlotBattleEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(1000), battle.Slot)
+	assert.True(t, battle.Won)
 }
 
 func TestSetForgedBlockChecker(t *testing.T) {
