@@ -23,30 +23,29 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/consensus/format"
 )
 
-// TestRunVectorRoutesConsensus confirms dispatch routes a
-// consensus-category vector to the consensus driver and the driver
-// runs to completion. The ledger-category dispatch path is
-// exercised end-to-end by TestLedgerConformanceVectorsNewFormat
+// TestRunConsensusVectorOnSynthetic confirms the consensus driver
+// runs a synthetic two-peer vector to completion. The ledger driver
+// is exercised end-to-end by TestLedgerConformanceVectorsNewFormat
 // against the committed converted corpus.
-func TestRunVectorRoutesConsensus(t *testing.T) {
+func TestRunConsensusVectorOnSynthetic(t *testing.T) {
 	v := syntheticConsensusVector(t)
-	if err := consensus.RunVector(t, v); err != nil {
-		t.Fatalf("RunVector(consensus): %v", err)
+	if err := consensus.RunConsensusVector(t, v); err != nil {
+		t.Fatalf("RunConsensusVector: %v", err)
 	}
 }
 
-// TestRunVectorRejectsMismatchedPayload guards against vectors that
-// claim category=consensus but omit Capture (or vice versa). The
-// format decoder catches this at load time, but RunVector also
-// double-checks because callers can synthesize TestVectors directly.
-func TestRunVectorRejectsMismatchedPayload(t *testing.T) {
+// TestRunConsensusVectorRejectsMissingCapture guards against vectors
+// that claim category=consensus but omit Capture. The format decoder
+// catches this at load time; the runner double-checks because
+// callers can synthesize TestVectors directly.
+func TestRunConsensusVectorRejectsMissingCapture(t *testing.T) {
 	v := format.TestVector{
 		SchemaVersion: format.CurrentSchemaVersion,
 		Title:         "broken",
 		Category:      format.CategoryConsensus,
 		Capture:       nil,
 	}
-	if err := consensus.RunVector(t, v); err == nil {
+	if err := consensus.RunConsensusVector(t, v); err == nil {
 		t.Fatal("expected error for consensus vector with no capture")
 	}
 }
@@ -60,7 +59,7 @@ func TestConsensusRunnerDetectsTipMismatch(t *testing.T) {
 	// peer's tip (which equals one of the served traces' tips) no
 	// longer matches.
 	v.Capture.ExpectedOutput.FinalTip.Slot++
-	err := consensus.RunVector(t, v)
+	err := consensus.RunConsensusVector(t, v)
 	if err == nil {
 		t.Fatal("expected tip-slot mismatch")
 	}

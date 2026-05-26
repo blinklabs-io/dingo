@@ -39,32 +39,41 @@ func LoadVector(path string) (format.TestVector, error) {
 	return v, nil
 }
 
-// RunVector dispatches v on its category to the appropriate driver
-// and returns nil on conformance, or an error describing the
-// divergence. Schema-version validation already happened at decode
-// time (format.DecodeTestVector rejects unknown versions), so the
-// dispatch here is just category routing.
-func RunVector(t *testing.T, v format.TestVector) error {
+// RunConsensusVector runs a consensus-category vector through the
+// chain-selection driver and returns nil on conformance, or an error
+// describing the divergence.
+func RunConsensusVector(t *testing.T, v format.TestVector) error {
 	t.Helper()
-	switch v.Category {
-	case format.CategoryConsensus:
-		if v.Capture == nil {
-			return fmt.Errorf(
-				"consensus vector %q has no capture", v.Title,
-			)
-		}
-		return runConsensusVector(t, v.Title, v.Capture)
-	case format.CategoryLedger:
-		if v.LedgerPhase == nil {
-			return fmt.Errorf(
-				"ledger vector %q has no ledger_phase", v.Title,
-			)
-		}
-		return runLedgerVector(t, v.Title, v.LedgerPhase)
-	default:
+	if v.Category != format.CategoryConsensus {
 		return fmt.Errorf(
-			"vector %q has unknown category %q",
-			v.Title, v.Category,
+			"vector %q: expected category %q, got %q",
+			v.Title, format.CategoryConsensus, v.Category,
 		)
 	}
+	if v.Capture == nil {
+		return fmt.Errorf(
+			"consensus vector %q has no capture", v.Title,
+		)
+	}
+	return runConsensusVector(t, v.Title, v.Capture)
+}
+
+// RunLedgerVector runs a ledger-category vector against
+// DingoStateManager via the ouroboros-mock conformance harness.
+// pparams blobs the harness needs by hash are committed in-tree
+// under testdata/mock-pparams.
+func RunLedgerVector(t *testing.T, v format.TestVector) error {
+	t.Helper()
+	if v.Category != format.CategoryLedger {
+		return fmt.Errorf(
+			"vector %q: expected category %q, got %q",
+			v.Title, format.CategoryLedger, v.Category,
+		)
+	}
+	if v.LedgerPhase == nil {
+		return fmt.Errorf(
+			"ledger vector %q has no ledger_phase", v.Title,
+		)
+	}
+	return runLedgerVector(t, v.Title, v.LedgerPhase)
 }

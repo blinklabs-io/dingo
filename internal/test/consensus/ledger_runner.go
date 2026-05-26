@@ -28,43 +28,44 @@ import (
 	mockconf "github.com/blinklabs-io/ouroboros-mock/conformance"
 )
 
+// mockPParamsRoot is where the harness finds the pparams-by-hash
+// blobs the converted vectors reference. The harness builds the
+// lookup path as <root>/eras/conway/impl/dump/pparams-by-hash/<hash>
+// internally, so this directory mirrors that nesting. See
+// testdata/mock-pparams/README.md for what's committed and why.
+//
+// Path is relative to the consensus package's test working
+// directory (the package dir, per Go's testing convention).
+const mockPParamsRoot = "testdata/mock-pparams"
+
 // runLedgerVector replays a ledger-category vector against dingo's
-// DingoStateManager via ouroboros-mock's existing conformance
-// Harness.
+// DingoStateManager via ouroboros-mock's conformance Harness.
 //
 // The harness expects vectors in the Amaru CBOR shape and reads
-// protocol-parameter blobs from its TestdataRoot. The driver:
+// pparams blobs from disk by hash. The driver:
 //
 //  1. Reconstructs an Amaru-shape *mockconf.TestVector from the
 //     new-format LedgerPhase (mechanical inverse of the
 //     cmd/convert-amaru-vector tool's rewrap).
 //  2. Re-encodes it to CBOR and writes to a temp file the harness
 //     can read.
-//  3. Resolves the ouroboros-mock corpus root so the harness's
-//     pparams-by-hash lookups still work.
-//  4. Wires DingoStateManager into a fresh Harness and runs the
-//     vector. Harness assertions fail via t.Errorf — the failure
-//     propagates back through the testing.T the caller passed in.
+//  3. Wires DingoStateManager into a fresh Harness pointed at the
+//     in-tree mock-pparams dir, and runs the vector.
 //
 // Return-value contract — asymmetric with runConsensusVector, which
 // returns its assertion failures as errors:
 //
-//   - **Setup-level failures** (corpus root not resolvable, temp-file
-//     write failure, etc.) return a non-nil error. The caller in
+//   - **Setup-level failures** (re-encode, temp-file write, state
+//     manager init) return a non-nil error. The caller in
 //     consensus_test.go converts these into t.Fatalf.
 //   - **Assertion failures inside the harness** do NOT come back as
 //     an error. The harness reports them via t.Errorf on the *same*
 //     testing.T the caller passed in, which marks the subtest as
-//     failed and surfaces the per-event diagnostic the harness
-//     emitted. The return value is nil in this case.
+//     failed and surfaces the per-event diagnostic. Return value is
+//     nil in this case.
 //
-// So a nil return doesn't mean "passed" — it means "the harness
-// reached the end of its event loop." Pass/fail is carried by the
-// testing.T. The asymmetry exists because the harness API is
-// testing.T-driven and rewiring it through an error channel would
-// duplicate state. The consensus driver is the odd one out; here
-// (and any future driver that wraps the harness) the testing.T
-// is the authoritative outcome carrier.
+// A nil return means "the harness reached the end of its event
+// loop." Pass/fail is carried by the testing.T.
 func runLedgerVector(
 	t *testing.T,
 	title string,
@@ -74,16 +75,6 @@ func runLedgerVector(
 	if phase == nil {
 		return errors.New("runLedgerVector: nil LedgerPhase")
 	}
-
-	if mockTestdataPath == "" {
-		return errors.New(
-			"runLedgerVector: PrimeMockTestdata must be called from " +
-				"the parent test before any ledger subtest runs " +
-				"(extracts the ouroboros-mock corpus the harness " +
-				"needs for pparams-by-hash lookups)",
-		)
-	}
-	testdataRoot := mockTestdataPath
 
 	tmpPath, err := writeAmaruShapeVector(t, title, phase)
 	if err != nil {
@@ -97,7 +88,7 @@ func runLedgerVector(
 	defer func() { _ = sm.Close() }()
 
 	h := mockconf.NewHarness(sm, mockconf.HarnessConfig{
-		TestdataRoot: testdataRoot,
+		TestdataRoot: mockPParamsRoot,
 	})
 	h.RunVector(t, tmpPath)
 	return nil
@@ -202,38 +193,3 @@ func sanitizeTitle(title string) string {
 	)
 	return r.Replace(title)
 }
-
-// PrimeMockTestdata extracts ouroboros-mock's conformance testdata
-// into a t.TempDir scoped to the supplied testing.T and caches the
-// path so subsequent runLedgerVector calls can find it. Call from
-// the parent test before iterating ledger subtests; the extracted
-// dir is cleaned up by Go's testing framework when t (the parent)
-// completes, which is after all its subtests have completed.
-//
-// Idempotent: each call re-extracts and overwrites the cached path.
-// That's deliberate — `go test -count=N` reruns the parent test
-// multiple times; a sync.Once-gated cache would leave the cached
-// path pointing at an already-cleaned-up TempDir on the second run.
-// Re-extraction takes ~1s and only happens once per parent-test
-// invocation, so the cost is negligible.
-//
-// Concurrency: subtests today don't call t.Parallel, so the read of
-// mockTestdataPath in runLedgerVector is serialised after the
-// parent's write here. If parallel subtests are added later, swap
-// for an atomic.Pointer.
-func PrimeMockTestdata(t *testing.T) error {
-	t.Helper()
-	dir := t.TempDir()
-	root, err := mockconf.ExtractEmbeddedTestdata(dir)
-	if err != nil {
-		return fmt.Errorf("ExtractEmbeddedTestdata: %w", err)
-	}
-	mockTestdataPath = root
-	return nil
-}
-
-// mockTestdataPath holds the extracted ouroboros-mock testdata root.
-// Set by PrimeMockTestdata; read by runLedgerVector. Zero value
-// triggers a clear error in runLedgerVector if the parent test
-// forgot to prime.
-var mockTestdataPath string

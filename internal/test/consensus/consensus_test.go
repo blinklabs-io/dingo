@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/internal/test/consensus"
+	"github.com/blinklabs-io/dingo/internal/test/consensus/format"
 )
 
 // TestConsensusConformanceVectors walks every committed
@@ -32,27 +33,39 @@ import (
 // committed (a vacuous pass would silently hide a regression that
 // removes the corpus).
 func TestConsensusConformanceVectors(t *testing.T) {
-	runVectorDir(t, filepath.Join("testdata", "captured"))
+	paths := loadVectorPaths(t, filepath.Join("testdata", "captured"))
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			v := loadVector(t, path)
+			if err := consensus.RunConsensusVector(t, v); err != nil {
+				t.Fatalf("%s: %v", v.Title, err)
+			}
+		})
+	}
 }
 
 // TestLedgerConformanceVectorsNewFormat walks ledger-category
 // vectors under testdata/converted/ and replays each through dingo's
-// DingoStateManager via the ouroboros-mock harness. The harness
-// needs the un-converted Amaru corpus on disk for its
-// pparams-by-hash lookups, so we extract it into a parent-test-
-// scoped TempDir before iterating subtests — `PrimeMockTestdata`
-// caches the path for runLedgerVector to find. Doing the extraction
-// here (rather than lazily inside runLedgerVector with sync.Once)
-// keeps the cleanup tied to the parent's testing.T lifetime, which
-// spans all subtests AND survives `go test -count=N` correctly.
+// DingoStateManager via the ouroboros-mock harness. pparams blobs
+// the harness needs by hash are committed in-tree under
+// testdata/mock-pparams; nothing else has to be staged at test time.
 func TestLedgerConformanceVectorsNewFormat(t *testing.T) {
-	if err := consensus.PrimeMockTestdata(t); err != nil {
-		t.Fatalf("PrimeMockTestdata: %v", err)
+	paths := loadVectorPaths(t, filepath.Join("testdata", "converted"))
+	for _, path := range paths {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			v := loadVector(t, path)
+			if err := consensus.RunLedgerVector(t, v); err != nil {
+				t.Fatalf("%s: %v", v.Title, err)
+			}
+		})
 	}
-	runVectorDir(t, filepath.Join("testdata", "converted"))
 }
 
-func runVectorDir(t *testing.T, dir string) {
+// loadVectorPaths collects every committed vector under dir,
+// soft-skipping the calling test if the directory is empty (a
+// vacuous pass would silently hide a regression that removes the
+// corpus).
+func loadVectorPaths(t *testing.T, dir string) []string {
 	t.Helper()
 	paths, err := collectVectorPaths(dir)
 	if err != nil {
@@ -61,17 +74,16 @@ func runVectorDir(t *testing.T, dir string) {
 	if len(paths) == 0 {
 		t.Skipf("no vectors under %s", dir)
 	}
-	for _, path := range paths {
-		t.Run(filepath.Base(path), func(t *testing.T) {
-			v, err := consensus.LoadVector(path)
-			if err != nil {
-				t.Fatalf("load %s: %v", path, err)
-			}
-			if err := consensus.RunVector(t, v); err != nil {
-				t.Fatalf("%s: %v", v.Title, err)
-			}
-		})
+	return paths
+}
+
+func loadVector(t *testing.T, path string) format.TestVector {
+	t.Helper()
+	v, err := consensus.LoadVector(path)
+	if err != nil {
+		t.Fatalf("load %s: %v", path, err)
 	}
+	return v
 }
 
 // collectVectorPaths returns every .json file beneath root,
