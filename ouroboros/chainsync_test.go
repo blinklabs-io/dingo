@@ -297,6 +297,14 @@ func newChainsyncAsyncSendFailureHarness(
 			Logger:   logger,
 		},
 	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
 	serverPipe, clientPipe := net.Pipe()
 	t.Cleanup(func() {
 		_ = serverPipe.Close()
@@ -342,10 +350,7 @@ func newChainsyncAsyncSendFailureHarness(
 		connManager.AddConnection(conn, false, conn.Id().RemoteAddr.String()),
 	)
 	t.Cleanup(func() {
-		select {
-		case conn.ErrorChan() <- context.Canceled:
-		default:
-		}
+		sendChainsyncTestConnError(conn.ErrorChan(), context.Canceled)
 	})
 
 	server := conn.ChainSync().Server
@@ -366,6 +371,16 @@ func newChainsyncAsyncSendFailureHarness(
 		server:      server,
 		ledgerState: ledgerState,
 		closedCh:    closedCh,
+	}
+}
+
+func sendChainsyncTestConnError(errCh chan error, err error) {
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case errCh <- err:
+	default:
 	}
 }
 
