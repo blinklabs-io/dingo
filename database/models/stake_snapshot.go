@@ -60,10 +60,20 @@ type PoolStakeSnapshot struct {
 	// RewardAccountAutoVote captures the CIP-1694 SPO auto-vote
 	// outcome implied by the pool's reward-account DRep delegation at
 	// the snapshot epoch. Values come from PoolRewardAccountAutoVote*.
-	// Zero is the safe default both for "no auto-vote" and for
-	// snapshots written by pre-CIP-1694 code (before the column
-	// existed) — both cases behave identically at tally time.
+	// This field is only meaningful when RewardAccountAutoVoteResolved
+	// is true; otherwise its value is undefined and must not be read
+	// by the tally.
 	RewardAccountAutoVote uint8 `gorm:"not null;default:0"`
+	// RewardAccountAutoVoteResolved disambiguates "resolved as none"
+	// from "never resolved". The resolver sets this to true after it
+	// has computed RewardAccountAutoVote against snapshot-era state.
+	// Rows imported by Mithril for set/go rotations (which only have
+	// live state available at import time and cannot be faithfully
+	// resolved against historical boundaries) intentionally leave this
+	// false; the tally treats them as PoolRewardAccountAutoVoteNone,
+	// matching pre-CIP-1694 behaviour for those rows. Pre-CIP-1694
+	// rows in upgraded databases also remain false until re-resolved.
+	RewardAccountAutoVoteResolved bool `gorm:"not null;default:false"`
 }
 
 // TableName returns the table name

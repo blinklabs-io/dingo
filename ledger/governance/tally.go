@@ -353,6 +353,15 @@ func tallySPOVotes(
 			continue
 		}
 
+		// Only trust RewardAccountAutoVote when the row is flagged
+		// as resolved. Unresolved rows (Mithril-imported set/go
+		// rotations, or rows written by pre-CIP-1694 code) fall
+		// back to PoolRewardAccountAutoVoteNone — implicit no — so
+		// stale or never-computed values can never silently bucket
+		// stake into Abstain or NoConfidence.
+		if !s.RewardAccountAutoVoteResolved {
+			continue
+		}
 		switch s.RewardAccountAutoVote {
 		case models.PoolRewardAccountAutoVoteAbstain:
 			tally.SPOAbstainStake += stake

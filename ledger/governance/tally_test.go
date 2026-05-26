@@ -497,7 +497,10 @@ func resolveSnapshotAutoVotes(
 			DB().
 			Model(&models.PoolStakeSnapshot{}).
 			Where("id = ?", s.ID).
-			Update("reward_account_auto_vote", s.RewardAccountAutoVote).
+			Updates(map[string]any{
+				"reward_account_auto_vote":          s.RewardAccountAutoVote,
+				"reward_account_auto_vote_resolved": s.RewardAccountAutoVoteResolved,
+			}).
 			Error)
 	}
 }
@@ -813,6 +816,53 @@ func TestTallySPOVotesMixedExplicitAndAutoVotes(t *testing.T) {
 	assert.Equal(t, uint64(200), tally.SPOAbstainStake)
 	// yes / (total - abstain) = 100 / (375 - 200) = 100 / 175 = 4/7
 	assert.Equal(t, big.NewRat(4, 7), tally.SPOYesRatio())
+}
+
+// TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo asserts
+// that a snapshot row with RewardAccountAutoVoteResolved=false is
+// treated as PoolRewardAccountAutoVoteNone regardless of what
+// RewardAccountAutoVote happens to contain — covering the Mithril
+// set/go import path that intentionally skips resolution, plus any
+// pre-CIP-1694 row left over from an upgrade. Without this guard, a
+// stale or never-resolved Abstain/NoConfidence value would silently
+// flip the tally.
+func TestTallySPOVotesUnresolvedSnapshotRowFallsBackToImplicitNo(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	poolKeyHash := testBytes(28, 130)
+	rewardAccount := testBytes(28, 131)
+
+	// Write a snapshot row directly with RewardAccountAutoVote set to
+	// Abstain but Resolved=false. This mimics either a Mithril-imported
+	// set/go row that the import path declined to resolve, or a row
+	// from a pre-flag schema where the column happens to be non-zero.
+	require.NoError(t, store.DB().Create(&models.Pool{
+		PoolKeyHash:   poolKeyHash,
+		RewardAccount: rewardAccount,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:                 15,
+		SnapshotType:          "mark",
+		PoolKeyHash:           poolKeyHash,
+		TotalStake:            types.Uint64(500),
+		RewardAccountAutoVote: models.PoolRewardAccountAutoVoteAbstain,
+		// RewardAccountAutoVoteResolved intentionally zero-value (false).
+	}).Error)
+
+	tally := &ProposalTally{
+		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+	}
+	err := tallySPOVotes(
+		&TallyContext{DB: db, StakeEpoch: 15},
+		nil,
+		tally,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(500), tally.SPOTotalStake)
+	assert.Equal(t, uint64(0), tally.SPOAbstainStake,
+		"unresolved row must not bucket stake into Abstain even when the column says Abstain")
+	assert.Equal(t, uint64(0), tally.SPOYesStake)
+	assert.Equal(t, uint64(0), tally.SPONoStake)
 }
 
 // TestTallySPOVotesSnapshotIsFrozenAgainstLiveStateChanges proves the

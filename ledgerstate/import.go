@@ -1213,20 +1213,32 @@ func persistImportedSnapshot(
 	}
 
 	if len(poolSnapshots) > 0 {
-		// importCertState runs before importSnapShots, so Pool and
-		// Account rows reflect the imported ledger state and the
-		// resolver can classify the CIP-1694 reward-account
-		// auto-vote per snapshot.
-		if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
-			poolSnapshots, txn,
-		); err != nil {
-			return fmt.Errorf(
-				"resolving reward-account auto-votes for "+
-					"%s snapshot epoch %d: %w",
-				st.name,
-				st.targetEpoch,
-				err,
-			)
+		// CIP-1694 reward-account auto-vote can only be faithfully
+		// resolved when live Pool/Account state matches the row's
+		// target boundary. All three import targets are persisted as
+		// "mark" rows (only the target epoch differs: N, N-1, N-2),
+		// so gating on the source rotation name would be fragile —
+		// every row's SnapshotType is "mark" by the time it reaches
+		// this function. The correct semantic check is "is the
+		// target epoch equal to the current import-time epoch?"
+		// Only that one row's boundary matches the live state we'd
+		// read; the other two represent older boundaries and must be
+		// left RewardAccountAutoVoteResolved=false so the tally
+		// treats them as PoolRewardAccountAutoVoteNone (implicit no)
+		// instead of freezing today's delegation map onto an older
+		// boundary.
+		if st.targetEpoch == cfg.State.Epoch {
+			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
+				poolSnapshots, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"resolving reward-account auto-votes for "+
+						"%s snapshot epoch %d: %w",
+					st.name,
+					st.targetEpoch,
+					err,
+				)
+			}
 		}
 		if err := store.SavePoolStakeSnapshots(
 			poolSnapshots, metaTxn,

@@ -63,10 +63,16 @@ func (d *MetadataStorePostgres) SavePoolStakeSnapshots(
 				{Name: "snapshot_type"},
 				{Name: "pool_key_hash"},
 			},
+			// reward_account_auto_vote{,_resolved} must be assigned
+			// on conflict so a re-save of an existing snapshot row
+			// does not silently revert a freshly resolved Always*
+			// auto-vote back to the previous (often default-0) value.
 			DoUpdates: clause.AssignmentColumns([]string{
 				"total_stake",
 				"delegator_count",
 				"captured_slot",
+				"reward_account_auto_vote",
+				"reward_account_auto_vote_resolved",
 			}),
 		},
 	).Create(snapshots).Error; err != nil {

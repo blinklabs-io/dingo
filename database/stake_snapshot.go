@@ -56,7 +56,12 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	for _, s := range snapshots {
 		// Reset to ensure callers can re-run resolution without
 		// stale values leaking through from a previous attempt.
+		// Mark the row as resolved up-front: every snapshot passed
+		// to this resolver runs against snapshot-era state by
+		// contract, so the absence of an Always{Abstain,NoConfidence}
+		// delegation is a real "none" answer, not "unknown".
 		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
+		s.RewardAccountAutoVoteResolved = true
 		key := string(s.PoolKeyHash)
 		if _, seen := snapshotsByPool[key]; !seen {
 			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))

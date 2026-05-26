@@ -25,12 +25,25 @@ import (
 )
 
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
+//
+// resolveAutoVote controls whether the CIP-1694 reward-account
+// auto-vote is computed against the live Pool/Account tables and
+// frozen onto the snapshot rows. It MUST be true only when the
+// caller knows that live state matches the target epoch boundary
+// (e.g. the normal epoch-transition call at the boundary moment, or
+// a genesis bootstrap). For historical seed writes — most notably
+// the post-Mithril N-1 / N-2 seeding loop — pass false: those rows
+// represent older boundaries than the live state and resolving them
+// would silently freeze today's delegation map onto a historical
+// snapshot. They are stored with RewardAccountAutoVoteResolved=false
+// so the tally treats them as PoolRewardAccountAutoVoteNone.
 func (m *Manager) saveSnapshot(
 	ctx context.Context,
 	epoch uint64,
 	snapshotType string,
 	distribution *StakeDistribution,
 	evt event.EpochTransitionEvent,
+	resolveAutoVote bool,
 ) error {
 	_ = ctx
 	txn := m.db.Transaction(true) // read-write transaction
@@ -56,11 +69,15 @@ func (m *Manager) saveSnapshot(
 	// Freeze the CIP-1694 SPO reward-account auto-vote per pool at
 	// the snapshot boundary so governance ratification at epoch N
 	// reads snapshot-era delegation rather than the live, possibly
-	// re-delegated state.
-	if err := m.db.ResolvePoolRewardAccountAutoVotes(
-		snapshots, txn,
-	); err != nil {
-		return fmt.Errorf("resolve reward-account auto-votes: %w", err)
+	// re-delegated state. Skipped (rows left Resolved=false) when
+	// the caller is seeding historical epochs where live state does
+	// not match the target boundary.
+	if resolveAutoVote {
+		if err := m.db.ResolvePoolRewardAccountAutoVotes(
+			snapshots, txn,
+		); err != nil {
+			return fmt.Errorf("resolve reward-account auto-votes: %w", err)
+		}
 	}
 
 	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {

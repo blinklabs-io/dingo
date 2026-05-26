@@ -63,10 +63,20 @@ func (d *MetadataStoreSqlite) SavePoolStakeSnapshots(
 				{Name: "snapshot_type"},
 				{Name: "pool_key_hash"},
 			},
+			// All non-key columns must be in DoUpdates so a re-save
+			// for an existing (epoch, snapshot_type, pool_key_hash)
+			// row carries every freshly computed value. Notably the
+			// CIP-1694 reward_account_auto_vote{,_resolved} pair: if
+			// it were missing here, a resolved Always{Abstain,
+			// NoConfidence} would silently revert to the previous
+			// row's (often default 0 / false) values and the tally
+			// would misclassify the pool as implicit no.
 			DoUpdates: clause.AssignmentColumns([]string{
 				"total_stake",
 				"delegator_count",
 				"captured_slot",
+				"reward_account_auto_vote",
+				"reward_account_auto_vote_resolved",
 			}),
 		},
 	).Create(snapshots).Error; err != nil {

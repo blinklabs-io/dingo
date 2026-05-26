@@ -78,6 +78,104 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	}
 }
 
+// TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch
+// asserts the CIP-1694 reward-account auto-vote resolution gate on
+// the post-Mithril seeding loop: live Pool/Account state at bootstrap
+// time matches only the current epoch's boundary, so only the
+// currentEpochId mark row should land with
+// RewardAccountAutoVoteResolved=true. The N-1 and N-2 mark rows seeded
+// in the same loop represent older boundaries — resolving them would
+// freeze today's delegation map into a historical snapshot, so those
+// rows must keep Resolved=false and the tally must treat them as
+// implicit no.
+func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(t *testing.T) {
+	db, sqliteStore := setupTestDB(t)
+	gormDB := sqliteStore.DB()
+
+	for _, e := range []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	} {
+		require.NoError(t, gormDB.Create(&e).Error)
+	}
+
+	poolHash := []byte("poolM_12345678901234567890CD")
+	rewardAccount := []byte("rewardCD_12345678901234567890")
+	seedPoolAndDelegations(t, sqliteStore, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  []byte("aliceCD_staking_key_1234567890"),
+			utxoAmounts: []types.Uint64{50000000},
+		},
+	}, 64800000)
+
+	// Overwrite the pool's reward account to a credential we control
+	// and seed an AlwaysAbstain delegation for that credential. The
+	// resolver, if it runs, will produce Abstain. We then verify it
+	// only ran for the currentEpoch row.
+	require.NoError(t, gormDB.Model(&models.Pool{}).
+		Where("pool_key_hash = ?", poolHash).
+		Update("reward_account", rewardAccount).Error)
+	require.NoError(t, gormDB.Create(&models.Account{
+		StakingKey: rewardAccount,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  64800000,
+		Active:     true,
+	}).Error)
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	cases := []struct {
+		epoch        uint64
+		wantResolved bool
+		wantAutoVote uint8
+		note         string
+	}{
+		{
+			epoch:        150,
+			wantResolved: true,
+			wantAutoVote: models.PoolRewardAccountAutoVoteAbstain,
+			note:         "current epoch: live state == boundary, resolver runs",
+		},
+		{
+			epoch:        149,
+			wantResolved: false,
+			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
+			note:         "N-1 seed: live state too new, resolver skipped",
+		},
+		{
+			epoch:        148,
+			wantResolved: false,
+			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
+			note:         "N-2 seed: live state too new, resolver skipped",
+		},
+	}
+	for _, tc := range cases {
+		snapshot, sErr := db.Metadata().GetPoolStakeSnapshot(
+			tc.epoch, "mark", poolHash, nil,
+		)
+		require.NoError(t, sErr, "epoch %d", tc.epoch)
+		require.NotNil(t, snapshot, "epoch %d snapshot must exist", tc.epoch)
+		require.Equal(
+			t, tc.wantResolved, snapshot.RewardAccountAutoVoteResolved,
+			"epoch %d (%s): RewardAccountAutoVoteResolved mismatch",
+			tc.epoch, tc.note,
+		)
+		require.Equal(
+			t, tc.wantAutoVote, snapshot.RewardAccountAutoVote,
+			"epoch %d (%s): RewardAccountAutoVote mismatch",
+			tc.epoch, tc.note,
+		)
+	}
+}
+
 // TestCaptureGenesisSnapshot_FreshSync verifies that on a fresh sync
 // (no Mithril), only epoch 0 gets a snapshot and no extra epochs are
 // seeded.
