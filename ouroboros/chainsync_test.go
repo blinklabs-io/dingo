@@ -453,8 +453,6 @@ func TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection(
 	}
 	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
 	requestNextIntoAsyncAwait(t, h)
-	// The existing block is delivered synchronously; this extra request parks
-	// the server back in AwaitReply before the rollback arrives.
 	ctx := ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
