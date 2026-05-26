@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -102,10 +103,10 @@ func watchTxBuildRollbackMessages(
 			found = true
 			break
 		}
-		for i := len(last.appliedTxs) - 1; i >= 0; i-- {
+		for _, v := range slices.Backward(last.appliedTxs) {
 			out = append(out, &watch.WatchTxResponse{
 				Action: &watch.WatchTxResponse_Undo{
-					Undo: last.appliedTxs[i],
+					Undo: v,
 				},
 			})
 		}
@@ -163,14 +164,10 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if err != nil {
 			return nil, err
 		}
-		if len(appliedTxs) == 0 {
-			hash = append([]byte(nil), block.PrevHash...)
-			continue
-		}
-		for j := len(appliedTxs) - 1; j >= 0; j-- {
+		for _, appliedTx := range slices.Backward(appliedTxs) {
 			out = append(out, &watch.WatchTxResponse{
 				Action: &watch.WatchTxResponse_Undo{
-					Undo: appliedTxs[j],
+					Undo: appliedTx,
 				},
 			})
 		}

@@ -16,6 +16,7 @@ package database
 
 import (
 	"maps"
+	"slices"
 	"sort"
 	"sync/atomic"
 )
@@ -249,9 +250,7 @@ func (c *HotCache) maybeEvict() {
 		keptSize := 0
 		var keptBytes int64
 
-		for i := len(entriesList) - 1; i >= 0; i-- {
-			e := entriesList[i]
-
+		for _, e := range slices.Backward(entriesList) {
 			wouldExceedSize := c.maxSize > 0 && keptSize >= targetSize
 			wouldExceedBytes := c.maxBytes > 0 && keptBytes+e.size > targetBytes
 

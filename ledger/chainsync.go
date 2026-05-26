@@ -1461,8 +1461,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
-	for i := len(history.order) - 1; i >= 0; i-- {
-		record, ok := history.byHash[history.order[i]]
+	for _, v := range slices.Backward(history.order) {
+		record, ok := history.byHash[v]
 		if !ok || record.event.Point.Slot <= point.Slot {
 			continue
 		}

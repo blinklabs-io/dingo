@@ -648,8 +648,8 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	// Check headers for rollback point without mutating them
 	if len(c.headers) > 0 {
 		var header queuedHeader
-		for i := len(c.headers) - 1; i >= 0; i-- {
-			header = c.headers[i]
+		for _, v := range slices.Backward(c.headers) {
+			header = v
 			if header.point.Slot > point.Slot {
 				continue
 			}
@@ -715,8 +715,8 @@ func (c *Chain) rollbackLocked(
 	if len(c.headers) > 0 {
 		// Iterate backwards to make deletion safe
 		var header queuedHeader
-		for i := len(c.headers) - 1; i >= 0; i-- {
-			header = c.headers[i]
+		for i, v := range slices.Backward(c.headers) {
+			header = v
 			// Remove headers after rollback slot
 			if header.point.Slot > point.Slot {
 				c.headers = slices.Delete(c.headers, i, i+1)
@@ -1287,27 +1287,24 @@ func (c *Chain) reconcile() error {
 	if primaryChain == nil {
 		return models.ErrBlockNotFound
 	}
-	for i := len(c.blocks) - 1; i >= 0; i-- {
-		tmpBlock, err := primaryChain.blockByIndex(
-			// Add 1 to prevent off-by-one error
-			c.lastCommonBlockIndex + uint64(i) + 1,
-		)
-		if err != nil {
-			if errors.Is(err, models.ErrBlockNotFound) {
-				continue
-			}
+	blockIndex := c.tipBlockIndex
+	for i, v := range slices.Backward(c.blocks) {
+		tmpBlock, err := primaryChain.blockByIndex(blockIndex)
+		if err != nil && !errors.Is(err, models.ErrBlockNotFound) {
 			return err
 		}
-		if c.blocks[i].Slot != tmpBlock.Slot {
-			continue
+		if err == nil &&
+			v.Slot == tmpBlock.Slot &&
+			bytes.Equal(v.Hash, tmpBlock.Hash) {
+			// Adjust our chain-local blocks and offset point from primary chain
+			c.blocks = slices.Delete(c.blocks, 0, i+1)
+			c.lastCommonBlockIndex = tmpBlock.ID
+			return nil
 		}
-		if !bytes.Equal(c.blocks[i].Hash, tmpBlock.Hash) {
-			continue
+		if blockIndex == 0 {
+			break
 		}
-		// Adjust our chain-local blocks and offset point from primary chain
-		c.blocks = slices.Delete(c.blocks, 0, i+1)
-		c.lastCommonBlockIndex = tmpBlock.ID
-		return nil
+		blockIndex--
 	}
 	// Determine prev-hash from earliest known good block
 	knownPoint := c.currentTip.Point

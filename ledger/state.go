@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -4014,8 +4015,7 @@ func (ls *LedgerState) computePParams(
 	if len(epochCache) == 0 {
 		return pparams, prevEraPParams, nil
 	}
-	for i := len(epochCache) - 1; i >= 0; i-- {
-		ep := epochCache[i]
+	for _, ep := range slices.Backward(epochCache) {
 		if ep.EraId != era.Id {
 			prevEra := eras.GetEraById(ep.EraId)
 			if prevEra != nil &&
