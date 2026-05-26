@@ -54,7 +54,6 @@ import (
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // --- harness (preview fixture + h2c server) --------------------------------
@@ -126,7 +125,7 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	mux.Handle(sp, sh)
 	mux.Handle(yp, yh)
 	mux.Handle(wp, wh)
-	return h2c.NewHandler(mux, &http2.Server{})
+	return mux
 }
 
 func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpcConnectHarness {
@@ -218,7 +217,9 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		ServerTimeout:   opts.serverTimeout,
 	})
 
-	srv := httptest.NewServer(testUtxorpcHTTPHandler(u))
+	srv := httptest.NewUnstartedServer(testUtxorpcHTTPHandler(u))
+	srv.Config.Protocols = unencryptedHTTP2Protocols()
+	srv.Start()
 	t.Cleanup(srv.Close)
 
 	return &utxorpcConnectHarness{
