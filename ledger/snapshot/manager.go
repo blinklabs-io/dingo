@@ -429,9 +429,16 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		BoundarySlot: 0,
 		SnapshotSlot: 0,
 	}
+	// Same rule as the seeding loop below: resolveAutoVote only when
+	// the target epoch matches the current live-state epoch. For a
+	// true fresh-sync currentEpochId is 0 and live Pool/Account state
+	// IS the genesis boundary, so resolving is correct. For post-
+	// Mithril bootstrap currentEpochId > 0 and `distribution` plus
+	// the live tables reflect that later epoch — passing true here
+	// would freeze today's delegation map onto an epoch-0 row.
 	if err := m.saveSnapshot(
 		ctx, 0, "mark", distribution, evt,
-		true, // resolveAutoVote: live state == genesis boundary
+		currentEpochId == 0,
 	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()

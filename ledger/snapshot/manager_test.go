@@ -156,6 +156,14 @@ func TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch(t *tes
 			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
 			note:         "N-2 seed: live state too new, resolver skipped",
 		},
+		{
+			epoch:        0,
+			wantResolved: false,
+			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
+			note: "epoch 0 in post-Mithril bootstrap is a historical " +
+				"boundary, not the current one — live state must not " +
+				"be frozen onto the genesis row",
+		},
 	}
 	for _, tc := range cases {
 		snapshot, sErr := db.Metadata().GetPoolStakeSnapshot(
@@ -216,6 +224,15 @@ func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, snapshot, "epoch 0 must have a snapshot")
 	require.NotZero(t, snapshot.TotalStake)
+	// Fresh-sync: live state IS the genesis boundary, so the
+	// CIP-1694 reward-account auto-vote resolver runs and the row
+	// must come out flagged Resolved. Symmetric with the
+	// post-Mithril case where epoch 0 stays unresolved.
+	require.True(
+		t,
+		snapshot.RewardAccountAutoVoteResolved,
+		"fresh-sync epoch 0 row must be resolved",
+	)
 
 	// No spurious snapshots for epochs that don't exist
 	snapshot2, err := db.Metadata().GetPoolStakeSnapshot(
