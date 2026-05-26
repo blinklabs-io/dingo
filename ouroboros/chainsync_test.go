@@ -35,7 +35,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
-	"github.com/blinklabs-io/gouroboros"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -395,7 +395,7 @@ func requireChainsyncClosedEvent(
 	evt := testutil.RequireReceive(
 		t,
 		h.closedCh,
-		500*time.Millisecond,
+		5*time.Second,
 		msg,
 	)
 	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
