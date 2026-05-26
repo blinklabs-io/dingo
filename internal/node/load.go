@@ -915,15 +915,24 @@ func storeRawBlockUtxoOffsets(
 }
 
 func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
-	var blockArray []gcbor.RawMessage
-	if _, err := gcbor.Decode(blockCbor, &blockArray); err != nil {
+	decoder, err := gcbor.NewStreamDecoder(blockCbor)
+	if err != nil {
 		return nil, err
 	}
-	if len(blockArray) < 5 {
+	blockLen, _, _, err := decoder.DecodeArrayHeader()
+	if err != nil {
+		return nil, err
+	}
+	if blockLen < 5 {
 		return nil, nil
 	}
+	for i := 0; i < 4; i++ {
+		if _, _, err := decoder.Skip(); err != nil {
+			return nil, err
+		}
+	}
 	var invalidTxs []uint
-	if _, err := gcbor.Decode([]byte(blockArray[4]), &invalidTxs); err != nil {
+	if _, _, err := decoder.Decode(&invalidTxs); err != nil {
 		return nil, err
 	}
 	if len(invalidTxs) == 0 {
