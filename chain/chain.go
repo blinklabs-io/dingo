@@ -1241,15 +1241,18 @@ func (c *Chain) iterNext(
 			c.manager.mutex.RUnlock()
 			return nil, ErrIteratorChainTip
 		}
-		c.mutex.Unlock()
-		c.manager.mutex.RUnlock()
-		// Wait for chain update
+		// Register the wait channel before releasing c.mutex. Otherwise
+		// a concurrent AddBlock can commit and notify in the gap between
+		// the at-tip check above and this iterator joining the waiter set,
+		// stranding ChainSync peers until a later chain event.
 		c.waitingChanMutex.Lock()
 		if c.waitingChan == nil {
 			c.waitingChan = make(chan struct{})
 		}
 		waitChan := c.waitingChan
 		c.waitingChanMutex.Unlock()
+		c.mutex.Unlock()
+		c.manager.mutex.RUnlock()
 
 		select {
 		case <-waitChan:
