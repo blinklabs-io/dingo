@@ -40,6 +40,13 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Equal(t, lcommon.RewardSnapshot{}, snapshot)
 
+	adaPots, err := lv.GetAdaPotsWithError()
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Equal(t, lcommon.AdaPots{}, adaPots)
+	require.PanicsWithValue(t, ErrNotImplemented, func() {
+		_ = lv.GetAdaPots()
+	})
+
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
 

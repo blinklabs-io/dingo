@@ -1633,6 +1633,17 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete reward-state rows captured at epoch boundaries that no
+		// longer exist on the selected chain.
+		if err := ls.db.DeleteRewardStateAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete reward state after rollback: %w",
+				err,
+			)
+		}
 		// Delete block nonce rows from the abandoned fork. Epoch
 		// nonces are derived from slot-range block_nonce lookups, so
 		// same-slot competitors and later fork rows must not survive

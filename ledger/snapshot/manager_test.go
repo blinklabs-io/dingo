@@ -16,6 +16,7 @@ package snapshot
 
 import (
 	"context"
+	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -126,6 +127,92 @@ func TestCaptureGenesisSnapshot_FreshSync(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, snapshot2,
 		"epoch 1 should not have a snapshot on fresh sync")
+}
+
+func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
+	db, sqliteStore := setupTestDB(t)
+	gormDB := sqliteStore.DB()
+
+	require.NoError(t, gormDB.Create(&models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 432000,
+	}).Error)
+
+	poolHash := []byte("poolR_12345678901234567890AB")
+	seedPoolAndDelegations(t, sqliteStore, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  []byte("reward_staking_key_123456789"),
+			utxoAmounts: []types.Uint64{50_000_000},
+		},
+	}, 500)
+	var pool models.Pool
+	require.NoError(t, gormDB.Where("pool_key_hash = ?", poolHash).First(&pool).Error)
+	require.NoError(t, gormDB.Create(&models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolHash,
+		AddedSlot:   2000,
+		Pledge:      2_000_000,
+		Cost:        500_000_000,
+		Margin:      &types.Rat{Rat: big.NewRat(1, 10)},
+	}).Error)
+	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
+		PoolKeyHash: poolHash,
+		Slot:        600,
+		Sequence:    1,
+	}).Error)
+	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
+		PoolKeyHash: []byte("other_12345678901234567890AB"),
+		Slot:        700,
+		Sequence:    1,
+	}).Error)
+	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
+		PoolKeyHash: poolHash,
+		Slot:        432000,
+		Sequence:    2,
+	}).Error)
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    432000,
+		EpochNonce:      []byte{0x01, 0x02, 0x03},
+		ProtocolVersion: 8,
+		SnapshotSlot:    1000,
+	}
+	require.NoError(t, mgr.handleEpochTransition(context.Background(), evt))
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardSnapshot)
+	require.Equal(t, uint64(50_000_000), uint64(rewardSnapshot.TotalActiveStake))
+	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)
+	require.Equal(t, uint64(1), rewardSnapshot.TotalDelegators)
+	require.Equal(t, uint64(1000), rewardSnapshot.CapturedSlot)
+	require.Equal(t, uint64(432000), rewardSnapshot.BoundarySlot)
+	require.Equal(t, []byte{0x01, 0x02, 0x03}, rewardSnapshot.EpochNonce)
+	require.Equal(t, uint(8), rewardSnapshot.ProtocolVersion)
+
+	inputs, err := db.Metadata().GetRewardPoolInputs(1, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, poolHash, inputs[0].PoolKeyHash)
+	require.NotNil(t, inputs[0].BlocksProduced)
+	require.Equal(t, uint64(1), *inputs[0].BlocksProduced)
+	require.NotNil(t, inputs[0].TotalBlocksInEpoch)
+	require.Equal(t, uint64(2), *inputs[0].TotalBlocksInEpoch)
+	require.Equal(t, uint64(1_000_000), uint64(inputs[0].Pledge))
+	require.Equal(t, uint64(50_000_000), uint64(inputs[0].DelegatedStake))
+	require.Equal(t, uint64(340_000_000), uint64(inputs[0].Cost))
+	require.Equal(t, "1/100", inputs[0].Margin.String())
+	require.Equal(t, uint64(1), inputs[0].DelegatorCount)
+	require.Equal(t, uint64(1000), inputs[0].CapturedSlot)
+	require.Equal(t, uint64(432000), inputs[0].BoundarySlot)
 }
 
 // TestCaptureGenesisSnapshot_NoPools verifies that when no pools exist

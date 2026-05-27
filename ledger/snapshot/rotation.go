@@ -16,9 +16,12 @@ package snapshot
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"math/big"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -72,7 +75,190 @@ func (m *Manager) saveSnapshot(
 		return fmt.Errorf("save epoch summary: %w", err)
 	}
 
+	if err := m.saveRewardStateInputs(
+		epoch,
+		snapshotType,
+		distribution,
+		evt,
+		meta,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf("save reward state inputs: %w", err)
+	}
+
 	return txn.Commit()
+}
+
+func (m *Manager) saveRewardStateInputs(
+	epoch uint64,
+	snapshotType string,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+) error {
+	snapshot := &models.RewardSnapshot{
+		Epoch:            epoch,
+		SnapshotType:     snapshotType,
+		TotalActiveStake: types.Uint64(distribution.TotalStake),
+		TotalPoolCount:   distribution.TotalPools,
+		TotalDelegators:  sumDelegators(distribution.DelegatorCount),
+		CapturedSlot:     distribution.Slot,
+		BoundarySlot:     evt.BoundarySlot,
+		EpochNonce:       evt.EpochNonce,
+		ProtocolVersion:  evt.ProtocolVersion,
+	}
+	if err := meta.SaveRewardSnapshot(snapshot, metaTxn); err != nil {
+		return fmt.Errorf("save reward snapshot: %w", err)
+	}
+
+	inputs, err := m.rewardPoolInputs(
+		epoch,
+		distribution,
+		evt,
+		meta,
+		metaTxn,
+	)
+	if err != nil {
+		return err
+	}
+	if err := meta.SaveRewardPoolInputs(inputs, metaTxn); err != nil {
+		return fmt.Errorf("save reward pool inputs: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) rewardPoolInputs(
+	epoch uint64,
+	distribution *StakeDistribution,
+	evt event.EpochTransitionEvent,
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+) ([]*models.RewardPoolInput, error) {
+	if len(distribution.PoolStakes) == 0 {
+		return nil, nil
+	}
+
+	poolKeys := make([]lcommon.PoolKeyHash, 0, len(distribution.PoolStakes))
+	for poolKey := range distribution.PoolStakes {
+		poolKeys = append(poolKeys, poolKey)
+	}
+	blockCounts, totalBlocks, err := rewardPoolBlockCounts(
+		meta,
+		metaTxn,
+		poolKeys,
+		evt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	registrations, err := meta.GetPoolRegistrationsAtSlot(
+		poolKeys,
+		distribution.Slot,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get reward input pool registrations: %w", err)
+	}
+	registrationByHash := make(
+		map[string]models.PoolRegistration,
+		len(registrations),
+	)
+	for _, registration := range registrations {
+		registrationByHash[string(registration.PoolKeyHash)] = registration
+	}
+
+	inputs := make([]*models.RewardPoolInput, 0, len(distribution.PoolStakes))
+	for poolKey, stake := range distribution.PoolStakes {
+		poolKeyHash := make([]byte, len(poolKey))
+		copy(poolKeyHash, poolKey[:])
+		input := &models.RewardPoolInput{
+			Epoch:          epoch,
+			PoolKeyHash:    poolKeyHash,
+			DelegatedStake: types.Uint64(stake),
+			DelegatorCount: distribution.DelegatorCount[poolKey],
+			CapturedSlot:   distribution.Slot,
+			BoundarySlot:   evt.BoundarySlot,
+		}
+		if totalBlocks != nil {
+			input.TotalBlocksInEpoch = uint64Ptr(*totalBlocks)
+		}
+		if blockCounts != nil {
+			input.BlocksProduced = uint64Ptr(blockCounts[string(poolKey[:])])
+		}
+		if registration, ok := registrationByHash[string(poolKey[:])]; ok {
+			input.Pledge = registration.Pledge
+			input.Cost = registration.Cost
+			input.Margin = cloneRat(registration.Margin)
+		} else {
+			m.logger.Warn(
+				"missing pool registration while saving reward inputs",
+				"component", "snapshot",
+				"epoch", epoch,
+				"snapshot_slot", distribution.Slot,
+				"pool_key_hash", hex.EncodeToString(poolKey[:]),
+			)
+		}
+		inputs = append(inputs, input)
+	}
+	return inputs, nil
+}
+
+func rewardPoolBlockCounts(
+	meta metadata.MetadataStore,
+	metaTxn types.Txn,
+	poolKeys []lcommon.PoolKeyHash,
+	evt event.EpochTransitionEvent,
+) (map[string]uint64, *uint64, error) {
+	if evt.BoundarySlot == 0 {
+		return nil, nil, nil
+	}
+	epoch, err := meta.GetEpoch(evt.PreviousEpoch, metaTxn)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"get previous epoch for reward performance: %w",
+			err,
+		)
+	}
+	if epoch == nil || epoch.LengthInSlots == 0 {
+		return nil, nil, nil
+	}
+
+	startSlot := epoch.StartSlot
+	endSlot := startSlot + uint64(epoch.LengthInSlots) - 1
+	boundaryEndSlot := evt.BoundarySlot - 1
+	if boundaryEndSlot < endSlot {
+		endSlot = boundaryEndSlot
+	}
+	if endSlot < startSlot {
+		return nil, nil, nil
+	}
+
+	counts, total, err := meta.CountPoolBlocksInSlotRange(
+		poolKeys,
+		startSlot,
+		endSlot,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"count reward pool blocks in epoch %d: %w",
+			evt.PreviousEpoch,
+			err,
+		)
+	}
+	return counts, &total, nil
+}
+
+func uint64Ptr(v uint64) *uint64 {
+	return &v
+}
+
+func cloneRat(r *types.Rat) *types.Rat {
+	if r == nil || r.Rat == nil {
+		return nil
+	}
+	return &types.Rat{Rat: new(big.Rat).Set(r.Rat)}
 }
 
 // rotateSnapshots promotes Mark→Set→Go for the new epoch.
@@ -146,6 +332,13 @@ func (m *Manager) cleanupOldSnapshots(
 		metaTxn,
 	); err != nil {
 		return fmt.Errorf("cleanup epoch summaries: %w", err)
+	}
+
+	if err := meta.DeleteRewardStateBeforeEpoch(
+		deleteBeforeEpoch,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf("cleanup reward state: %w", err)
 	}
 
 	m.logger.Debug(

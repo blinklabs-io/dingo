@@ -290,7 +290,12 @@ func (lv *LedgerView) CalculateRewards(
 // TODO: implement Ada pots retrieval. Requires tracking of treasury, reserves,
 // fees, and rewards pots which are not yet stored in the database.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	return lcommon.AdaPots{}
+	panic(ErrNotImplemented)
+}
+
+// GetAdaPotsWithError returns the current Ada pots.
+func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
+	return lcommon.AdaPots{}, ErrNotImplemented
 }
 
 // GetRewardSnapshot returns the current reward snapshot.
