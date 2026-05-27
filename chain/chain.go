@@ -1059,8 +1059,7 @@ func (c *Chain) FromPoint(
 	return c.FromPointContext(context.Background(), point, inclusive)
 }
 
-// FromPointContext returns a ChainIterator that inherits cancellation from
-// ctx.
+// FromPointContext returns a ChainIterator that inherits cancellation from ctx.
 func (c *Chain) FromPointContext(
 	ctx context.Context,
 	point ocommon.Point,
@@ -1098,8 +1097,7 @@ func (c *Chain) FromPointReverse(
 	return c.FromPointReverseContext(context.Background(), point, inclusive)
 }
 
-// FromPointReverseContext returns a reverse ChainIterator that inherits
-// cancellation from ctx.
+// FromPointReverseContext returns a reverse ChainIterator that inherits cancellation from ctx.
 func (c *Chain) FromPointReverseContext(
 	ctx context.Context,
 	point ocommon.Point,

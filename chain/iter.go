@@ -48,6 +48,9 @@ func newChainIteratorWithContext(
 	inclusive bool,
 	reverse bool,
 ) (*ChainIterator, error) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	iterCtx, cancel := context.WithCancel(parentCtx)
 	ci := &ChainIterator{
 		chain:          chain,
