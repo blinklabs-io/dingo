@@ -304,13 +304,16 @@ func (m *Manager) captureMarkSnapshot(
 		return fmt.Errorf("calculate stake distribution: %w", err)
 	}
 
-	// Save as Mark snapshot for the new epoch
+	// Save as Mark snapshot for the new epoch. At a normal epoch
+	// transition live Pool/Account state matches the boundary, so
+	// the CIP-1694 reward-account auto-vote resolves correctly.
 	if err := m.saveSnapshot(
 		ctx,
 		evt.NewEpoch,
 		"mark",
 		distribution,
 		evt,
+		true, // resolveAutoVote: live state == boundary at this call site
 	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
@@ -426,7 +429,17 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		BoundarySlot: 0,
 		SnapshotSlot: 0,
 	}
-	if err := m.saveSnapshot(ctx, 0, "mark", distribution, evt); err != nil {
+	// Same rule as the seeding loop below: resolveAutoVote only when
+	// the target epoch matches the current live-state epoch. For a
+	// true fresh-sync currentEpochId is 0 and live Pool/Account state
+	// IS the genesis boundary, so resolving is correct. For post-
+	// Mithril bootstrap currentEpochId > 0 and `distribution` plus
+	// the live tables reflect that later epoch — passing true here
+	// would freeze today's delegation map onto an epoch-0 row.
+	if err := m.saveSnapshot(
+		ctx, 0, "mark", distribution, evt,
+		currentEpochId == 0,
+	); err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
 			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
@@ -450,8 +463,17 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			seedEvt := event.EpochTransitionEvent{
 				NewEpoch: seedEpoch,
 			}
+			// resolveAutoVote only on offset==0 (seedEpoch ==
+			// currentEpochId) — that's the one iteration where live
+			// Pool/Account state matches the target boundary. For
+			// offset 1 and 2 we are seeding boundaries that predate
+			// the live state by 1–2 epochs, so resolving would freeze
+			// today's delegation map onto a historical row. Those
+			// rows go in with RewardAccountAutoVoteResolved=false and
+			// the tally treats them as implicit no.
 			if err := m.saveSnapshot(
 				ctx, seedEpoch, "mark", distribution, seedEvt,
+				offset == 0,
 			); err != nil {
 				if m.metrics != nil {
 					m.metrics.captureFailureTotal.Inc()
