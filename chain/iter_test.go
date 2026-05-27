@@ -95,7 +95,7 @@ func TestIteratorCancelMultiple(t *testing.T) {
 	c.mutex.RLock()
 	assert.Equal(t, 2, len(c.iterators))
 	for _, it := range c.iterators {
-		assert.NotEqual(t, iter2, it)
+		assert.False(t, it == iter2)
 	}
 	c.mutex.RUnlock()
 
