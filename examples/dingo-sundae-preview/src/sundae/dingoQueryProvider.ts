@@ -1,5 +1,4 @@
 import { Core } from "@blaze-cardano/sdk";
-import { Buffer } from "buffer";
 import {
   DatumBuilderV3,
   EContractVersion,
@@ -15,7 +14,7 @@ import {
   type TUTXO,
 } from "@sundaeswap/core";
 import type { U5C } from "@utxorpc/blaze-provider";
-import type { CardanoQueryClient, CardanoUtxo } from "@utxorpc/sdk";
+import type { DingoQueryClient, DingoUtxo } from "../dingo/utxorpcTypes";
 import { assetIdFromTuple, metadataFor, unitFromAssetId, type AssetHint } from "./assets";
 import { SUNDAE_V3_PROTOCOL } from "./protocol";
 
@@ -237,7 +236,7 @@ export class DingoSundaeQueryProvider extends QueryProviderSundaeSwap {
       keys: [this.hexBytes(datumHash)],
     });
     const resolved = response.values.find((value) => {
-      return Buffer.from(value.key).toString("hex") === datumHash;
+      return bytesToHex(value.key) === datumHash;
     });
     if (!resolved || resolved.nativeBytes.length === 0) {
       throw new Error(`Pool ${ident} datum ${datumHash} was not found in Dingo.`);
@@ -290,30 +289,30 @@ export class DingoSundaeQueryProvider extends QueryProviderSundaeSwap {
     return 0n;
   }
 
-  private getQueryClient(): CardanoQueryClient {
-    const providerWithClient = this.provider as unknown as { queryClient?: CardanoQueryClient };
+  private getQueryClient(): DingoQueryClient {
+    const providerWithClient = this.provider as unknown as { queryClient?: DingoQueryClient };
     if (!providerWithClient.queryClient) {
       throw new Error("Blaze U5C query client is not available for pool discovery.");
     }
     return providerWithClient.queryClient;
   }
 
-  private inputFromRpcUtxo(utxo: CardanoUtxo): Core.TransactionInput {
+  private inputFromRpcUtxo(utxo: DingoUtxo): Core.TransactionInput {
     return new Core.TransactionInput(
-      Core.TransactionId(Buffer.from(utxo.txoRef.hash).toString("hex")),
+      Core.TransactionId(bytesToHex(utxo.txoRef.hash)),
       BigInt(utxo.txoRef.index),
     );
   }
 
-  private poolIdentFromRpcUtxo(utxo: CardanoUtxo): string | undefined {
+  private poolIdentFromRpcUtxo(utxo: DingoUtxo): string | undefined {
     const poolPolicy = this.validatorHash("pool.mint");
     for (const multiAsset of utxo.parsedValued?.assets ?? []) {
-      if (Buffer.from(multiAsset.policyId).toString("hex") !== poolPolicy) {
+      if (bytesToHex(multiAsset.policyId) !== poolPolicy) {
         continue;
       }
 
       for (const asset of multiAsset.assets) {
-        const name = Buffer.from(asset.name).toString("hex");
+        const name = bytesToHex(asset.name);
         const ident = identFromPoolNftName(name);
         if (ident) {
           return ident;
@@ -337,8 +336,28 @@ export class DingoSundaeQueryProvider extends QueryProviderSundaeSwap {
   }
 
   private hexBytes(hex: string): Uint8Array<ArrayBuffer> {
-    return new Uint8Array(Buffer.from(hex, "hex")) as Uint8Array<ArrayBuffer>;
+    return hexToBytes(hex);
   }
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex: string): Uint8Array<ArrayBuffer> {
+  if (hex.length % 2 !== 0) {
+    throw new Error("Hex string must have an even number of characters.");
+  }
+
+  const bytes = new Uint8Array(hex.length / 2) as Uint8Array<ArrayBuffer>;
+  for (let offset = 0; offset < hex.length; offset += 2) {
+    const byte = Number.parseInt(hex.slice(offset, offset + 2), 16);
+    if (Number.isNaN(byte)) {
+      throw new Error("Hex string contains invalid characters.");
+    }
+    bytes[offset / 2] = byte;
+  }
+  return bytes;
 }
 
 function identFromPoolNftName(assetName: string): string | undefined {

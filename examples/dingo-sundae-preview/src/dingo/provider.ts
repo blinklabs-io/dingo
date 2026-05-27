@@ -1,6 +1,6 @@
 import { Core } from "@blaze-cardano/sdk";
 import { U5C } from "@utxorpc/blaze-provider";
-import type { CardanoQueryClient } from "@utxorpc/sdk";
+import type { DingoQueryClient, UtxoRpcBytes } from "./utxorpcTypes";
 
 export function createDingoProvider(): U5C {
   const url = import.meta.env.VITE_UTXORPC_URL || window.location.origin;
@@ -20,14 +20,14 @@ export async function assertDingoReady(provider: U5C): Promise<string> {
 }
 
 type QueryClientHost = {
-  queryClient?: CardanoQueryClient;
+  queryClient?: DingoQueryClient;
 };
 
-type SearchByAsset = CardanoQueryClient["searchUtxosByAsset"];
-type SearchByAddressWithAsset = CardanoQueryClient["searchUtxosByAddressWithAsset"];
+type SearchByAsset = DingoQueryClient["searchUtxosByAsset"];
+type SearchByAddressWithAsset = DingoQueryClient["searchUtxosByAddressWithAsset"];
 type AssetPattern =
   | { kind: "coin" }
-  | { kind: "native"; policyId: NonNullable<Parameters<SearchByAsset>[0]>; assetName?: Parameters<SearchByAsset>[1] };
+  | { kind: "native"; policyId: UtxoRpcBytes; assetName?: UtxoRpcBytes };
 
 const POLICY_ID_BYTES = 28;
 const MAX_ASSET_NAME_BYTES = 32;
@@ -53,13 +53,13 @@ function installDingoAssetSearchCompatibility(provider: U5C): void {
   queryClient.searchUtxosByAddressWithAsset = ((address, policyId, name) => {
     const asset = normalizeAssetPattern(policyId, name);
     if (asset.kind === "coin") {
-      return searchUtxosByAddress(address);
+      return searchUtxosByAddress(address as UtxoRpcBytes);
     }
     return searchUtxosByAddressWithAsset(address, asset.policyId, asset.assetName);
   }) as SearchByAddressWithAsset;
 }
 
-function normalizeAssetPattern(policyId?: Uint8Array<ArrayBuffer>, name?: Uint8Array<ArrayBuffer>): AssetPattern {
+function normalizeAssetPattern(policyId?: UtxoRpcBytes, name?: UtxoRpcBytes): AssetPattern {
   if (policyId && policyId.length > 0) {
     if (policyId.length !== POLICY_ID_BYTES) {
       throw new Error(`Native asset policy ID must be ${POLICY_ID_BYTES} bytes.`);
