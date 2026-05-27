@@ -15,6 +15,7 @@
 package chainsync_test
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"testing"
@@ -1045,6 +1046,105 @@ func TestClearSeenHeadersFrom(t *testing.T) {
 		ocommon.NewPoint(150, []byte("replay")),
 		ochainsync.Tip{Point: ocommon.NewPoint(150, []byte("replay"))})
 	require.True(t, isNew)
+}
+
+// --- Automatic pruning on the progress path ---
+
+// feedHeader records a header for conn at the given slot and returns
+// whether it was treated as new (not a duplicate).
+func feedHeader(
+	s *chainsync.State,
+	conn ouroboros.ConnectionId,
+	slot uint64,
+	hash string,
+) bool {
+	p := ocommon.NewPoint(slot, []byte(hash))
+	return s.UpdateClientTip(conn, p, ochainsync.Tip{Point: p})
+}
+
+// TestSeenHeadersPrunedOnProgress proves that ordinary ChainSync progress
+// (UpdateClientTip) prunes header observations that fall outside the
+// retention window, while observations within the window remain available
+// for duplicate detection.
+func TestSeenHeadersPrunedOnProgress(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.DefaultConfig()
+	cfg.SeenHeadersRetention = 500
+	s := newTestState(t, bus, cfg)
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	s.AddClientConnId(connA)
+	s.AddClientConnId(connB)
+
+	// Observe an old header, then advance the frontier far enough that a
+	// prune scan runs (>= seenHeadersPruneInterval of progress) and the old
+	// slot falls outside the 500-slot retention window.
+	require.True(t, feedHeader(s, connA, 100, "old"))
+	require.True(t, feedHeader(s, connA, 1600, "recent"))
+
+	// The stale observation was pruned; only the recent slot remains.
+	require.Equal(t, 1, s.SeenHeadersLen())
+
+	// The pruned slot is treated as new again when re-offered...
+	require.True(t, feedHeader(s, connB, 100, "old"))
+	// ...while the recent observation is still detected as a duplicate,
+	// confirming pruning does not weaken near-tip dedup.
+	require.False(t, feedHeader(s, connB, 1600, "recent"))
+}
+
+// TestSeenHeadersForkDetectionSurvivesPruning confirms that duplicate and
+// fork detection on recent slots keep working once auto-pruning is active.
+func TestSeenHeadersForkDetectionSurvivesPruning(t *testing.T) {
+	bus := newTestEventBus(t)
+	_, ch := bus.Subscribe(chainsync.ForkDetectedEventType)
+	cfg := chainsync.DefaultConfig()
+	cfg.SeenHeadersRetention = 500
+	s := newTestState(t, bus, cfg)
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	s.AddClientConnId(connA)
+	s.AddClientConnId(connB)
+
+	// Drive the frontier past the prune interval so pruning is active.
+	require.True(t, feedHeader(s, connA, 100, "stale"))
+	require.True(t, feedHeader(s, connA, 2000, "tip_a"))
+
+	// A competing hash at the recent slot is still flagged as a fork.
+	require.True(t, feedHeader(s, connB, 2000, "tip_b"))
+	evt := testutil.RequireReceive(
+		t, ch, 2*time.Second, "expected fork detection event",
+	)
+	forkEvt, ok := evt.Data.(chainsync.ForkDetectedEvent)
+	require.True(t, ok)
+	require.Equal(t, uint64(2000), forkEvt.Slot)
+}
+
+// TestSeenHeadersBoundedOverLongRun proves the dedup cache stays bounded by
+// the retention window over a long run instead of growing with every slot
+// observed (the unbounded-growth leak this addresses).
+func TestSeenHeadersBoundedOverLongRun(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.DefaultConfig()
+	cfg.SeenHeadersRetention = 2000
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(1)
+	s.AddClientConnId(conn)
+
+	const step = 50
+	for slot := uint64(0); slot <= 100_000; slot += step {
+		feedHeader(s, conn, slot, fmt.Sprintf("h-%d", slot))
+	}
+
+	// Retained slots stay near retention + one prune interval rather than
+	// scaling with the 100k slots observed. The interval mirrors the
+	// package-internal seenHeadersPruneInterval (1000 slots).
+	const pruneInterval = 1000
+	maxSlots := int((cfg.SeenHeadersRetention+pruneInterval)/step) + 2
+	require.LessOrEqual(t, s.SeenHeadersLen(), maxSlots)
+	require.Positive(t, s.SeenHeadersLen())
 }
 
 // --- Config tests ---
