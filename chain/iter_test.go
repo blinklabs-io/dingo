@@ -131,6 +131,8 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 	c.mutex.RUnlock()
 }
 
+// TestIteratorParentContextCancelUnblocksNext verifies that a blocking
+// iterator created with a parent context exits when that parent is canceled.
 func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
 	eventBus := event.NewEventBus(nil, nil)
 	cm, err := NewManager(nil, eventBus)
