@@ -70,6 +70,11 @@ type Ouroboros struct {
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
+	// Cached Leios EB material fetched from peers. This lets NtC
+	// ChainSync serve merged RB+EB blocks without coupling the chain
+	// package to Leios prototype protocols.
+	leiosEndorserBlocks map[string]*leiosEndorserBlockData
+	leiosMu             sync.RWMutex
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -129,11 +134,12 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:           cfg,
-		EventBus:         cfg.EventBus,
-		ConnManager:      cfg.ConnManager,
-		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
-		chainsyncStats:   make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		config:              cfg,
+		EventBus:            cfg.EventBus,
+		ConnManager:         cfg.ConnManager,
+		blockFetchStarts:    make(map[ouroboros.ConnectionId]time.Time),
+		chainsyncStats:      make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

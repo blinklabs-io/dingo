@@ -461,7 +461,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		} else {
 			err = ctx.Server.RollForward(
 				next.Block.Type,
-				next.Block.Cbor,
+				o.chainsyncServerBlockCbor(ctx, next.Block),
 				tip,
 			)
 		}
@@ -531,7 +531,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		} else {
 			if err := ctx.Server.RollForward(
 				next.Block.Type,
-				next.Block.Cbor,
+				o.chainsyncServerBlockCbor(ctx, next.Block),
 				tip,
 			); err != nil {
 				o.config.Logger.Error(
