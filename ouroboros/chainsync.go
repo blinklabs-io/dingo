@@ -523,9 +523,11 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				next.Point,
 				tip,
 			); err != nil {
-				o.config.Logger.Error(
-					"failed to roll backward",
-					"error", err,
+				o.reportChainsyncServerAsyncError(
+					conn,
+					ctx.ConnectionId.String(),
+					"RollBackward",
+					err,
 				)
 			}
 		} else {
@@ -534,14 +536,54 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				o.chainsyncServerBlockCbor(ctx, next.Block),
 				tip,
 			); err != nil {
-				o.config.Logger.Error(
-					"failed to roll forward",
-					"error", err,
+				o.reportChainsyncServerAsyncError(
+					conn,
+					ctx.ConnectionId.String(),
+					"RollForward",
+					err,
 				)
 			}
 		}
 	}()
 	return nil
+}
+
+func (o *Ouroboros) reportChainsyncServerAsyncError(
+	conn *ouroboros.Connection,
+	connectionID string,
+	operation string,
+	err error,
+) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	o.config.Logger.Error(
+		"chainsync server: async send failed",
+		"connection_id", connectionID,
+		"operation", operation,
+		"error", err,
+	)
+	if !sendChainsyncConnError(conn.ErrorChan(), err) {
+		o.config.Logger.Debug(
+			"chainsync server: failed to forward async send error to connection error channel",
+			"connection_id", connectionID,
+			"operation", operation,
+		)
+	}
+}
+
+func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	select {
+	case errCh <- err:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *Ouroboros) chainsyncClientRollBackward(
