@@ -16,6 +16,7 @@ package chain
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -49,7 +50,7 @@ func newChainIteratorWithContext(
 	reverse bool,
 ) (*ChainIterator, error) {
 	if parentCtx == nil {
-		parentCtx = context.Background()
+		return nil, errors.New("chain iterator context is nil")
 	}
 	iterCtx, cancel := context.WithCancel(parentCtx)
 	ci := &ChainIterator{
