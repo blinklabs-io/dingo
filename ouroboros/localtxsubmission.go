@@ -15,9 +15,12 @@
 package ouroboros
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
 )
 
@@ -63,7 +66,106 @@ func (o *Ouroboros) localtxsubmissionServerSubmitTx(
 			"role", "server",
 			"connection_id", ctx.ConnectionId.String(),
 		)
-		return err
+		return newLocalTxSubmissionRejectReason(tx.EraId, err)
 	}
 	return nil
+}
+
+type cborRejectReason interface {
+	error
+	MarshalCBOR() ([]byte, error)
+}
+
+type hardForkApplyTxError struct {
+	era uint8
+	err error
+}
+
+func newLocalTxSubmissionRejectReason(
+	eraId uint16,
+	err error,
+) error {
+	var typed cborRejectReason
+	if errors.As(err, &typed) {
+		return err
+	}
+	return &hardForkApplyTxError{
+		era: uint8(eraId), //nolint:gosec // Cardano era IDs fit in uint8
+		err: err,
+	}
+}
+
+func (e *hardForkApplyTxError) Error() string {
+	return e.err.Error()
+}
+
+func (e *hardForkApplyTxError) Unwrap() error {
+	return e.err
+}
+
+func (e *hardForkApplyTxError) MarshalCBOR() ([]byte, error) {
+	return cbor.Encode([]any{
+		[]any{
+			e.era,
+			[]any{
+				[]any{
+					gledger.ApplyTxErrorUtxowFailure,
+					e.utxowFailure(),
+				},
+			},
+		},
+	})
+}
+
+func (e *hardForkApplyTxError) utxowFailure() []any {
+	utxoFailure := []any{
+		e.era,
+		e.inputSetEmptyFailure(),
+	}
+
+	switch e.era {
+	case gledger.EraIdShelley, gledger.EraIdAllegra, gledger.EraIdMary:
+		return []any{
+			gledger.ShelleyUtxowUtxoFailure,
+			utxoFailure,
+		}
+	case gledger.EraIdAlonzo:
+		return []any{
+			gledger.AlonzoUtxowShelleyInAlonzo,
+			[]any{
+				gledger.ShelleyUtxowUtxoFailure,
+				utxoFailure,
+			},
+		}
+	case gledger.EraIdBabbage:
+		return []any{
+			gledger.BabbageUtxowUtxoFailure,
+			[]any{
+				gledger.BabbageUtxoAlonzoInBabbage,
+				utxoFailure,
+			},
+		}
+	case gledger.EraIdConway:
+		return []any{
+			gledger.ConwayUtxowUtxoFailure,
+			utxoFailure,
+		}
+	default:
+		return []any{
+			gledger.ConwayUtxowUtxoFailure,
+			[]any{
+				gledger.EraIdConway,
+				[]any{gledger.ConwayUtxoInputSetEmptyUTxO},
+			},
+		}
+	}
+}
+
+func (e *hardForkApplyTxError) inputSetEmptyFailure() []any {
+	switch e.era {
+	case gledger.EraIdConway:
+		return []any{gledger.ConwayUtxoInputSetEmptyUTxO}
+	default:
+		return []any{gledger.UtxoFailureInputSetEmpty}
+	}
 }
