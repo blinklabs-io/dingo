@@ -152,11 +152,32 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
+	// inclusive slot range, grouped by pool key hash. The total return value
+	// counts all observed pool blocks in the range, not only the requested
+	// pools.
+	CountPoolBlocksInSlotRange(
+		[]lcommon.PoolKeyHash,
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (map[string]uint64, uint64, error)
+
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
 		[]lcommon.PoolKeyHash,
 		types.Txn,
 	) ([]models.Pool, error)
+
+	// GetPoolRegistrationsAtSlot retrieves the latest registration for each
+	// requested pool at or before the supplied slot. Same-slot ordering must
+	// use block_index and cert_index so reward inputs reflect the historical
+	// epoch boundary, not the current denormalized pool row.
+	GetPoolRegistrationsAtSlot(
+		[]lcommon.PoolKeyHash,
+		uint64, // slot
+		types.Txn,
+	) ([]models.PoolRegistration, error)
 
 	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
 	// Returns nil if no active pool uses this VRF key.
@@ -726,6 +747,53 @@ type MetadataStore interface {
 		refs []types.UtxoKey,
 		atSlot uint64,
 	) error
+
+	// Reward state methods
+
+	// SaveRewardAdaPots saves reward-related ADA pots for an epoch.
+	SaveRewardAdaPots(
+		*models.RewardAdaPots,
+		types.Txn,
+	) error
+
+	// GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
+	GetRewardAdaPots(
+		uint64, // epoch
+		types.Txn,
+	) (*models.RewardAdaPots, error)
+
+	// SaveRewardSnapshot saves reward snapshot metadata for an epoch.
+	SaveRewardSnapshot(
+		*models.RewardSnapshot,
+		types.Txn,
+	) error
+
+	// GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
+	GetRewardSnapshot(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (*models.RewardSnapshot, error)
+
+	// SaveRewardPoolInputs saves per-pool reward inputs for an epoch.
+	SaveRewardPoolInputs(
+		[]*models.RewardPoolInput,
+		types.Txn,
+	) error
+
+	// GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
+	GetRewardPoolInputs(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.RewardPoolInput, error)
+
+	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
+	// rolled-back blocks.
+	DeleteRewardStateAfterSlot(uint64, types.Txn) error
+
+	// DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
+	// retained snapshot window.
+	DeleteRewardStateBeforeEpoch(uint64, types.Txn) error
 
 	// Stake snapshot methods
 

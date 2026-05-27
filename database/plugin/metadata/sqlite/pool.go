@@ -332,6 +332,68 @@ func (d *MetadataStoreSqlite) LatestPoolOpCertSequence(
 	return ret.Sequence, ret.Count > 0, nil
 }
 
+// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
+// inclusive slot range, grouped by pool key hash.
+func (d *MetadataStoreSqlite) CountPoolBlocksInSlotRange(
+	pkhs []lcommon.PoolKeyHash,
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (map[string]uint64, uint64, error) {
+	counts := make(map[string]uint64, len(pkhs))
+	for _, pkh := range pkhs {
+		counts[string(pkh.Bytes())] = 0
+	}
+	if endSlot < startSlot {
+		return counts, 0, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var totalRows int64
+	if err := db.Model(&models.PoolOpCertSequence{}).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Count(&totalRows).Error; err != nil {
+		return nil, 0, fmt.Errorf("count pool blocks in slot range: %w", err)
+	}
+	total := uint64(totalRows) // #nosec G115 -- COUNT(*) is non-negative.
+
+	type poolBlockCount struct {
+		PoolKeyHash []byte
+		Count       uint64
+	}
+	for start := 0; start < len(pkhs); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(pkhs))
+		hashes := make([][]byte, 0, end-start)
+		for _, pkh := range pkhs[start:end] {
+			hashes = append(hashes, pkh.Bytes())
+		}
+		var rows []poolBlockCount
+		if err := db.Model(&models.PoolOpCertSequence{}).
+			Select("pool_key_hash, COUNT(*) AS count").
+			Where(
+				"pool_key_hash IN ? AND slot >= ? AND slot <= ?",
+				hashes,
+				startSlot,
+				endSlot,
+			).
+			Group("pool_key_hash").
+			Scan(&rows).Error; err != nil {
+			return nil, 0, fmt.Errorf(
+				"count pool blocks by pool in slot range: %w",
+				err,
+			)
+		}
+		for _, row := range rows {
+			counts[string(row.PoolKeyHash)] = row.Count
+		}
+	}
+
+	return counts, total, nil
+}
+
 // GetPools gets pools by key hash.
 func (d *MetadataStoreSqlite) GetPools(
 	pkhs []lcommon.PoolKeyHash,
@@ -367,6 +429,58 @@ func (d *MetadataStoreSqlite) GetPools(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// GetPoolRegistrationsAtSlot retrieves the latest registration for each pool
+// at or before the supplied slot.
+func (d *MetadataStoreSqlite) GetPoolRegistrationsAtSlot(
+	pkhs []lcommon.PoolKeyHash,
+	slot uint64,
+	txn types.Txn,
+) ([]models.PoolRegistration, error) {
+	if len(pkhs) == 0 {
+		return []models.PoolRegistration{}, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	query := `
+		WITH ranked AS (
+			SELECT pr.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY pr.pool_key_hash
+					ORDER BY pr.added_slot DESC,
+						COALESCE(t.block_index, 0) DESC,
+						COALESCE(c.cert_index, 0) DESC,
+						pr.id DESC
+				) AS rn
+			FROM pool_registration pr
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+			WHERE pr.pool_key_hash IN ? AND pr.added_slot <= ?
+		)
+		SELECT * FROM ranked WHERE rn = 1`
+
+	registrations := make([]models.PoolRegistration, 0, len(pkhs))
+	for start := 0; start < len(pkhs); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(pkhs))
+		hashes := make([][]byte, 0, end-start)
+		for _, pkh := range pkhs[start:end] {
+			hashes = append(hashes, pkh.Bytes())
+		}
+		var chunk []models.PoolRegistration
+		if err := db.Raw(query, hashes, slot).Scan(&chunk).Error; err != nil {
+			return nil, fmt.Errorf(
+				"GetPoolRegistrationsAtSlot: query registrations: %w",
+				err,
+			)
+		}
+		registrations = append(registrations, chunk...)
+	}
+
+	return registrations, nil
 }
 
 // GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
