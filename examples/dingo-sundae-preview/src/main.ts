@@ -1,6 +1,4 @@
 import "./styles.css";
-import { Buffer } from "buffer";
-import process from "process";
 import { Blaze, Core, WebWallet, type Wallet } from "@blaze-cardano/sdk";
 import { ADA_METADATA, type IPoolData, type IPoolDataAsset } from "@sundaeswap/core";
 import type { U5C } from "@utxorpc/blaze-provider";
@@ -10,9 +8,6 @@ import { DingoSundaeQueryProvider } from "./sundae/dingoQueryProvider";
 import { DEFAULT_POOL, POOL_PRESETS, type PoolPreset } from "./sundae/protocol";
 import { buildSwapOrder, type SwapDirection } from "./sundae/swap";
 import type { Cip30Wallet, Cip30WalletApi } from "./types/cip30";
-
-(globalThis as typeof globalThis & { Buffer: typeof Buffer; process: typeof process }).Buffer = Buffer;
-(globalThis as typeof globalThis & { Buffer: typeof Buffer; process: typeof process }).process = process;
 
 const originalFetch = window.fetch.bind(window);
 window.fetch = (input, init) => {

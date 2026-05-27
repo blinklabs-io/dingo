@@ -1,7 +1,10 @@
+import { fileURLToPath, URL } from "node:url";
 import { defineConfig } from "vite";
 import { nodePolyfills } from "vite-plugin-node-polyfills";
-import topLevelAwait from "vite-plugin-top-level-await";
-import wasm from "vite-plugin-wasm";
+
+const messageSigningShim = fileURLToPath(
+  new URL("./src/shims/cardanoMessageSigning.ts", import.meta.url),
+);
 
 const dingoTarget = process.env.DINGO_UTXORPC_URL ?? "http://127.0.0.1:9090";
 
@@ -13,10 +16,8 @@ const rpcProxy = {
 
 export default defineConfig({
   plugins: [
-    wasm(),
-    topLevelAwait(),
     nodePolyfills({
-      include: ["buffer", "process"],
+      include: ["buffer", "process", "util"],
       globals: {
         Buffer: true,
         global: true,
@@ -26,6 +27,12 @@ export default defineConfig({
   ],
   define: {
     global: "globalThis",
+  },
+  resolve: {
+    alias: {
+      "@emurgo/cardano-message-signing-browser": messageSigningShim,
+      "@emurgo/cardano-message-signing-nodejs": messageSigningShim,
+    },
   },
   server: {
     host: "0.0.0.0",
