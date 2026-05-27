@@ -243,8 +243,8 @@ func NewStateWithConfig(
 	// registering it, so this is safe when PromRegistry is unset.
 	s.seenHeadersGauge = promauto.With(cfg.PromRegistry).NewGauge(
 		prometheus.GaugeOpts{
-			Name: "cardano_node_metrics_chainsync_seenHeaders_int",
-			Help: "number of slots currently retained in the chainsync header deduplication cache",
+			Name: "dingo_chainsync_seen_headers",
+			Help: "current number of slots retained in the chainsync header deduplication cache",
 		},
 	)
 	return s
