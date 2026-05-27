@@ -41,38 +41,23 @@ type ChainIteratorResult struct {
 	Rollback bool
 }
 
-func newChainIterator(
-	chain *Chain,
-	startPoint ocommon.Point,
-	inclusive bool,
-	reverse bool,
-) (*ChainIterator, error) {
-	return newChainIteratorWithContext(
-		context.Background(),
-		chain,
-		startPoint,
-		inclusive,
-		reverse,
-	)
-}
-
 func newChainIteratorWithContext(
-	ctx context.Context,
+	parentCtx context.Context,
 	chain *Chain,
 	startPoint ocommon.Point,
 	inclusive bool,
 	reverse bool,
 ) (*ChainIterator, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	if parentCtx == nil {
+		parentCtx = context.Background()
 	}
-	ctx, cancel := context.WithCancel(ctx)
+	iterCtx, cancel := context.WithCancel(parentCtx)
 	ci := &ChainIterator{
 		chain:          chain,
 		startPoint:     startPoint,
 		nextBlockIndex: initialBlockIndex,
 		reverse:        reverse,
-		ctx:            ctx,
+		ctx:            iterCtx,
 		cancel:         cancel,
 	}
 	// Lookup start block in metadata DB if not origin
