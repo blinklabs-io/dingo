@@ -238,7 +238,8 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	// Create our chain iterator
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPointContext(
+		ctx,
 		*point,
 		false,
 	)
@@ -251,13 +252,6 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	defer chainIter.Cancel()
-
-	// Cancel the chain iterator when the gRPC stream context is
-	// done so that blocking Next() calls unblock immediately.
-	go func() {
-		<-ctx.Done()
-		chainIter.Cancel()
-	}()
 
 	shouldSend := func(tx ledger.Transaction) bool {
 		if predicate == nil {

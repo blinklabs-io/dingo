@@ -15,6 +15,8 @@
 package chain
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -127,6 +129,55 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 	c.mutex.RLock()
 	assert.Equal(t, 0, len(c.iterators))
 	c.mutex.RUnlock()
+}
+
+func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := NewManager(nil, eventBus)
+	require.NoError(t, err)
+
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	iter, err := c.FromPointContext(ctx, ocommon.Point{}, true)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	type iterResult struct {
+		result *ChainIteratorResult
+		err    error
+	}
+	resultCh := make(chan iterResult, 1)
+
+	go func() {
+		res, err := iter.Next(true)
+		resultCh <- iterResult{result: res, err: err}
+	}()
+
+	testutil.WaitForCondition(t, func() bool {
+		c.waitingChanMutex.Lock()
+		defer c.waitingChanMutex.Unlock()
+		return c.waitingChan != nil
+	}, 2*time.Second, "iterator should block waiting for a chain update")
+
+	cancel()
+
+	r := testutil.RequireReceive(
+		t,
+		resultCh,
+		2*time.Second,
+		"parent context cancellation should unblock iterator",
+	)
+	require.Nil(t, r.result)
+	require.Error(t, r.err)
+	require.True(t, errors.Is(r.err, context.Canceled))
+
+	testutil.WaitForCondition(t, func() bool {
+		c.mutex.RLock()
+		defer c.mutex.RUnlock()
+		return len(c.iterators) == 0
+	}, 2*time.Second, "parent context cancellation should remove iterator")
 }
 
 // TestIterNextSpuriousWakeups verifies that the blocking

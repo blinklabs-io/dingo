@@ -138,7 +138,8 @@ func (s *syncServiceServer) DumpHistory(
 		inclusive = false
 	}
 
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPointContext(
+		ctx,
 		startPoint,
 		inclusive,
 	)
@@ -218,7 +219,8 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	// Create our chain iterator
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPointContext(
+		ctx,
 		*point,
 		false,
 	)
@@ -231,13 +233,6 @@ func (s *syncServiceServer) FollowTip(
 	}
 
 	defer chainIter.Cancel()
-
-	// Cancel the chain iterator when the gRPC stream context is
-	// done so that blocking Next() calls unblock immediately.
-	go func() {
-		<-ctx.Done()
-		chainIter.Cancel()
-	}()
 
 	for {
 		// Check for available block

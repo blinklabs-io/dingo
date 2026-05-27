@@ -16,6 +16,7 @@ package chain
 
 import (
 	"context"
+	"sync"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -31,6 +32,7 @@ type ChainIterator struct {
 	reverse        bool
 	ctx            context.Context
 	cancel         context.CancelFunc
+	cancelOnce     sync.Once
 }
 
 type ChainIteratorResult struct {
@@ -45,7 +47,26 @@ func newChainIterator(
 	inclusive bool,
 	reverse bool,
 ) (*ChainIterator, error) {
-	ctx, cancel := context.WithCancel(context.Background())
+	return newChainIteratorWithContext(
+		context.Background(),
+		chain,
+		startPoint,
+		inclusive,
+		reverse,
+	)
+}
+
+func newChainIteratorWithContext(
+	ctx context.Context,
+	chain *Chain,
+	startPoint ocommon.Point,
+	inclusive bool,
+	reverse bool,
+) (*ChainIterator, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	ci := &ChainIterator{
 		chain:          chain,
 		startPoint:     startPoint,
@@ -83,6 +104,13 @@ func newChainIterator(
 	return ci, nil
 }
 
+func (ci *ChainIterator) startCancelWatcher() {
+	go func() {
+		<-ci.ctx.Done()
+		ci.Cancel()
+	}()
+}
+
 func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 	ret, err := ci.chain.iterNext(ci, blocking)
 	if ret == nil && err == nil {
@@ -92,11 +120,13 @@ func (ci *ChainIterator) Next(blocking bool) (*ChainIteratorResult, error) {
 }
 
 func (ci *ChainIterator) Cancel() {
-	if ci.cancel != nil {
-		ci.cancel()
-	}
-	// Remove from chain's iterator list to prevent memory leak
-	if ci.chain != nil {
-		ci.chain.removeIterator(ci)
-	}
+	ci.cancelOnce.Do(func() {
+		if ci.cancel != nil {
+			ci.cancel()
+		}
+		// Remove from chain's iterator list to prevent memory leak
+		if ci.chain != nil {
+			ci.chain.removeIterator(ci)
+		}
+	})
 }
