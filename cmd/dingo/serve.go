@@ -75,6 +75,7 @@ func checkSyncState(
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: 1,
 		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
 	})
 	if err != nil {
 		// A commit-timestamp mismatch is recoverable downstream in
@@ -149,6 +150,7 @@ func resumeBackfill(
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
 	})
 	if err != nil {
 		// Backfill writes through full transactions which heal a
