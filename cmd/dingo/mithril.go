@@ -472,6 +472,7 @@ func runMithrilSync(
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
 	})
 	if err != nil {
 		// Tolerate a recoverable commit-timestamp mismatch carried
