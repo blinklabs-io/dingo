@@ -133,8 +133,8 @@ github.com/blinklabs-io/bursa v0.16.0 h1:EyiEJIvRo5u2nxYQAILUNaCpubUuBrCgnWxIHI1
 github.com/blinklabs-io/bursa v0.16.0/go.mod h1:QushjySLaOipI158YageIEIRksjCxGpAwtM1WbYx4Qo=
 github.com/blinklabs-io/go-bip39 v0.2.0 h1:rHYih+JzqaFVuP+UfvByKTAdJPeYtlvZu49yUGrZUk8=
 github.com/blinklabs-io/go-bip39 v0.2.0/go.mod h1:9Bp7a+XDc/KTPOqNnS7T/v1vH2lDXpmjM0GArwvOQL4=
-github.com/blinklabs-io/gouroboros v0.170.1 h1:Jt3q0z0cy+ffRcfTS/jnP/Ib9Hc/LYKiYbJYaRTb8sE=
-github.com/blinklabs-io/gouroboros v0.170.1/go.mod h1:c0G+azc7ERyK4Oy8/TnrrrbQmePw5+rtcY8kyjSfmGI=
+github.com/blinklabs-io/gouroboros v0.179.0 h1:7dV2VOcn1aFYthWdkkIL1NTtJVABA5RQ+Xmcv60C9Og=
+github.com/blinklabs-io/gouroboros v0.179.0/go.mod h1:ak4QeoTYngpViTYIHNTzG0+ChkNAgdp80T8ewljW7yc=
 github.com/blinklabs-io/ouroboros-mock v0.11.0 h1:4Y2lFL+eCA1dNOKQqSVNQQPxjpoDoJ1jwzmm6VsYSNQ=
 github.com/blinklabs-io/ouroboros-mock v0.11.0/go.mod h1:CSlsrVl4qAh8UG0uClYqoOTCeZeyuO/Wv34GSOkBhTo=
 github.com/blinklabs-io/plutigo v0.1.13 h1:1NiHdu8thqVT72MFnWQljnDefSR9g4Q3Qx5Dkhjeyuk=
@@ -544,8 +544,8 @@ golang.org/x/crypto v0.0.0-20200622213623-75b288015ac9/go.mod h1:LzIPMQfyMNhhGPh
 golang.org/x/crypto v0.0.0-20201012173705-84dcc777aaee/go.mod h1:LzIPMQfyMNhhGPhUkYOs5KpL4U8rLKemX1yGLhDgUto=
 golang.org/x/crypto v0.0.0-20210921155107-089bfa567519/go.mod h1:GvvjBRRGRdwPK5ydBHafDWAxML/pGHZbMvKqRZ5+Abc=
 golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d/go.mod h1:IxCIyHEi3zRg3s0A5j5BB6A9Jmi73HwBIUl50j+osU4=
-golang.org/x/crypto v0.51.0 h1:IBPXwPfKxY7cWQZ38ZCIRPI50YLeevDLlLnyC5wRGTI=
-golang.org/x/crypto v0.51.0/go.mod h1:8AdwkbraGNABw2kOX6YFPs3WM22XqI4EXEd8g+x7Oc8=
+golang.org/x/crypto v0.52.0 h1:RMs7fP2rXdep0CftQlK8Uf+kibLm7qkCcradZWYz988=
+golang.org/x/crypto v0.52.0/go.mod h1:1QgfPxDqh0T2M/elOJtp9RvuR95kVjir0e6/BvEmGbc=
 golang.org/x/exp v0.0.0-20190121172915-509febef88a4/go.mod h1:CJ0aWSM057203Lf6IL+f9T1iT9GByDxfZKAQTCR3kQA=
 golang.org/x/lint v0.0.0-20181026193005-c67002cb31c3/go.mod h1:UVdnD1Gm6xHRNCYTkRU2/jEulfH38KcIWyp/GAMgvoE=
 golang.org/x/lint v0.0.0-20190227174305-5b3e6a55c961/go.mod h1:wehouNa3lNwaWXcvxsM5YxQ5yQlVC4a0KAMCusXpPoU=

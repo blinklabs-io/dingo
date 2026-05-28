@@ -17,7 +17,7 @@ require (
 	github.com/aws/smithy-go v1.25.1
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.170.1
+	github.com/blinklabs-io/gouroboros v0.179.0
 	github.com/blinklabs-io/ouroboros-mock v0.11.0
 	github.com/blinklabs-io/plutigo v0.1.13
 	github.com/blockfrost/blockfrost-go v0.4.0
@@ -42,7 +42,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.43.0
 	go.uber.org/automaxprocs v1.6.0
 	go.uber.org/goleak v1.3.0
-	golang.org/x/crypto v0.51.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.55.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
