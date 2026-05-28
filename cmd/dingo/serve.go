@@ -56,6 +56,19 @@ func serveRun(
 		}
 	}
 
+	// Last line of defense for Core mode: API mode already runs
+	// the rebuild at the end of resumeBackfill, but Core mode
+	// has no backfill step. If a Mithril sync interrupted between
+	// drop and rebuild here, repair before exposing the node so
+	// secondary-index-backed queries return correct cardinalities.
+	if err := repairDeferredIndexes(cfg, logger); err != nil {
+		slog.Error(
+			"deferred-index repair failed",
+			"error", err,
+		)
+		os.Exit(1)
+	}
+
 	// Run node
 	if err := node.Run(cfg, logger); err != nil {
 		slog.Error(err.Error())
@@ -100,6 +113,12 @@ func checkSyncState(
 		return fmt.Errorf("checking sync state: %w", err)
 	}
 	if val == "" || val == syncStatusBackfill {
+		// metadata_indexes_pending can still be set if a prior
+		// run dropped the deferred indexes and crashed before
+		// the rebuild. The repair is handled below (Core mode)
+		// or inside resumeBackfill (API mode) so the operator
+		// does not have to re-bootstrap just to recreate
+		// secondary indexes.
 		return nil
 	}
 	return fmt.Errorf(
@@ -108,6 +127,33 @@ func checkSyncState(
 			"Mithril bootstrap) to resume before starting the node",
 		val,
 	)
+}
+
+// repairDeferredIndexes rebuilds any deferred metadata indexes left
+// outstanding by a prior interrupted bulk-load run. This is the
+// "repair" path the issue references: API/query paths cannot be
+// exposed with a partial index set, so serve waits for the rebuild
+// instead of immediately exposing the node.
+func repairDeferredIndexes(
+	cfg *config.Config, logger *slog.Logger,
+) error {
+	db, err := database.New(&database.Config{
+		DataDir:        cfg.DatabasePath,
+		Logger:         logger,
+		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
+		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: cfg.DatabaseWorkers,
+		StorageMode:    cfg.StorageMode,
+	})
+	if err != nil {
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+	}
+	defer db.Close()
+	return node.RepairDeferredIndexes(db, logger)
 }
 
 // resumeBackfill checks whether metadata backfill is needed and
@@ -185,6 +231,13 @@ func resumeBackfill(
 		return fmt.Errorf("checking backfill state: %w", err)
 	}
 	if !needed {
+		// Still rebuild deferred indexes if a prior bulk-load
+		// run left them pending — the previous backfill may
+		// have completed but crashed before BuildDeferredIndexes
+		// ran.
+		if err := node.RepairDeferredIndexes(db, logger); err != nil {
+			return err
+		}
 		return clearBackfillSyncStatus(db)
 	}
 
@@ -202,6 +255,12 @@ func resumeBackfill(
 	)
 	if err := bf.Run(ctx); err != nil {
 		return fmt.Errorf("backfill: %w", err)
+	}
+	// Rebuild deferred indexes before clearing sync_status so a
+	// crash between the two leaves both markers set and the next
+	// startup re-runs the rebuild.
+	if err := node.RepairDeferredIndexes(db, logger); err != nil {
+		return err
 	}
 	if err := clearBackfillSyncStatus(db); err != nil {
 		return err

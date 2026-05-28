@@ -531,6 +531,15 @@ func runMithrilSync(
 	// share the same pragma settings without racing.
 	defer node.WithBulkLoadPragmas(db, logger)()
 
+	// Drop the deferred-index manifest BEFORE inserting any rows
+	// so secondary indexes are not maintained during ledger-state
+	// import, immutable blob load, or API backfill. The rebuild is
+	// triggered explicitly below — before updateMithrilReadyState
+	// clears sync_status — so a crash between drop and rebuild
+	// leaves sync_status set and triggers the recovery path on
+	// the next startup.
+	rebuildDeferredIndexes := node.WithDeferredIndexes(db, logger)
+
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
 	// store (Badger) — completely independent data stores.
@@ -844,6 +853,14 @@ func runMithrilSync(
 			return fmt.Errorf("backfill: %w", err)
 		}
 		metrics.setPhaseActive(mithrilSyncPhaseBackfill, false)
+	}
+
+	// Rebuild deferred indexes BEFORE clearing sync_status so a
+	// crash here leaves sync_status set (serve refuses to start)
+	// and metadata_indexes_pending set (next mithril sync rebuilds
+	// before re-running anything else).
+	if err := rebuildDeferredIndexes(); err != nil {
+		return err
 	}
 
 	if err := updateMithrilReadyState(
