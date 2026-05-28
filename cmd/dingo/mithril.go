@@ -849,6 +849,7 @@ func runMithrilSync(
 			)
 		}
 		bf.DisableNonceComputation()
+		bf.SetProgressFunc(metrics.recordBackfillProgress)
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)
 		}
