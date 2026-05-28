@@ -1,5 +1,55 @@
 # Dingo Releases
 
+## v0.49.0 (May 27, 2026)
+
+**Title:** Leios merged delivery, reward-state persistence, and sturdier sync handling
+
+**Date:** May 27, 2026
+
+**Version:** v0.49.0
+
+Hi folks! Here’s what we shipped in v0.49.0.
+
+### ✨ What's New
+
+* Added **deliver merged Leios data to local integrations:** Integrators can now receive merged Leios input data through local integrations, which makes Leios data access more complete. ([#2392](https://github.com/blinklabs-io/dingo/pull/2392))
+* Introduced **keep reward state across restarts:** Nodes now preserve reward state across restarts, which makes recovery and ongoing operations more dependable. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426))
+* Expanded **honor CIP-1694 reward account delegation semantics:** Governance and reward handling now follow CIP-1694 stake pool operator reward account delegation semantics more closely, which keeps delegation behavior aligned with current expectations. ([#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+
+### 💪 Improvements
+
+* Improved **show Dingoswap flows with a practical integration example:** Example guidance now demonstrates a Dingoswap integration path more clearly, which makes common integration patterns easier to understand and reuse. ([#2390](https://github.com/blinklabs-io/dingo/pull/2390))
+* Refined **keep the preview example stack current:** The Dingo Sundae preview example now uses refreshed build dependencies, which helps example runs stay smoother and easier to maintain. ([#2431](https://github.com/blinklabs-io/dingo/pull/2431))
+* Enhanced **publish the v0.48.0 release history entry:** The published release history now includes the previous v0.48.0 entry, which keeps recent release context easier to review. ([#2423](https://github.com/blinklabs-io/dingo/pull/2423))
+
+### 🔧 Fixes
+
+* Fixed **keep transaction submission responses compatible with cardano cli 10.x:** Transaction submission rejections now return a format that works more reliably with cardano cli 10.x, which makes submission troubleshooting clearer. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Corrected **clear stale header tracking during normal chainsync work:** Normal chainsync operation now clears stale header tracking more consistently, which helps sync behavior stay steadier over time. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428))
+* Strengthened **surface async chainsync failures more clearly:** Roll forward and roll backward failures now surface more directly, which makes chainsync problems easier to detect and diagnose. ([#2419](https://github.com/blinklabs-io/dingo/pull/2419))
+
+### 📋 What You Need to Know
+
+* Clarified **expect normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **expect better cardano cli 10.x submission compatibility:** Transaction submission rejection handling now works more cleanly with cardano cli 10.x, which reduces avoidable submission confusion. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Emphasized **trust sturdier chainsync behavior and clearer failure reporting:** Chainsync now clears stale header tracking during normal operation and surfaces async sync failures more clearly, which supports steadier recovery and troubleshooting. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428), [#2419](https://github.com/blinklabs-io/dingo/pull/2419))
+* Summarized **rely on persisted rewards and updated delegation semantics:** Reward state now persists across restarts, and reward account delegation handling now follows CIP-1694 semantics more closely. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426), [#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+* Reviewed **use the refreshed example and release history updates:** The Dingoswap example and the published v0.48.0 release history entry make current integration guidance and recent release context easier to follow. ([#2390](https://github.com/blinklabs-io/dingo/pull/2390), [#2423](https://github.com/blinklabs-io/dingo/pull/2423), [#2431](https://github.com/blinklabs-io/dingo/pull/2431))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.48.0 (May 26, 2026)
 
 **Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
