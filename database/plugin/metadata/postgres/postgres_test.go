@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/blinklabs-io/plutigo/data"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
 
@@ -40,6 +41,8 @@ type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	certificates []lcommon.Certificate
 	isValid      bool
+	produced     []lcommon.Utxo
+	collReturn   lcommon.TransactionOutput
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -79,11 +82,11 @@ func (m *mockTransaction) RawAuxiliaryData() []byte {
 }
 
 func (m *mockTransaction) CollateralReturn() lcommon.TransactionOutput {
-	return nil
+	return m.collReturn
 }
 
 func (m *mockTransaction) Produced() []lcommon.Utxo {
-	return nil
+	return m.produced
 }
 
 func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
@@ -172,6 +175,75 @@ func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {
 
 func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
+}
+
+type mockTransactionInput struct {
+	hash  lcommon.Blake2b256
+	index uint32
+}
+
+func (m mockTransactionInput) Id() lcommon.Blake2b256 {
+	return m.hash
+}
+
+func (m mockTransactionInput) Index() uint32 {
+	return m.index
+}
+
+func (m mockTransactionInput) String() string {
+	return m.hash.String()
+}
+
+func (m mockTransactionInput) Utxorpc() (*cardano.TxInput, error) {
+	return nil, nil
+}
+
+func (m mockTransactionInput) ToPlutusData() data.PlutusData {
+	return nil
+}
+
+type mockTransactionOutput struct {
+	amount *big.Int
+}
+
+func (m *mockTransactionOutput) Address() lcommon.Address {
+	return lcommon.Address{}
+}
+
+func (m *mockTransactionOutput) Amount() *big.Int {
+	return m.amount
+}
+
+func (m *mockTransactionOutput) Assets() *lcommon.MultiAsset[lcommon.MultiAssetTypeOutput] {
+	return nil
+}
+
+func (m *mockTransactionOutput) Datum() *lcommon.Datum {
+	return nil
+}
+
+func (m *mockTransactionOutput) DatumHash() *lcommon.Blake2b256 {
+	return nil
+}
+
+func (m *mockTransactionOutput) Cbor() []byte {
+	return nil
+}
+
+func (m *mockTransactionOutput) Utxorpc() (*cardano.TxOutput, error) {
+	return nil, nil
+}
+
+func (m *mockTransactionOutput) ScriptRef() lcommon.Script {
+	return nil
+}
+
+func (m *mockTransactionOutput) ToPlutusData() data.PlutusData {
+	return nil
+}
+
+func (m *mockTransactionOutput) String() string {
+	return ""
 }
 
 // isPostgresConfigured checks if postgres is configured via cmdlineOptions or environment variables.
