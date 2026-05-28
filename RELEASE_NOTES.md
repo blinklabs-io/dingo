@@ -12,9 +12,9 @@ Hi folks! Here’s what we shipped in v0.49.0.
 
 ### ✨ What's New
 
-* Added **deliver merged Leios data over N2C:** Integrators can now receive merged Leios RB and EB data over N2C, which makes Leios-aware data access more complete. ([#2392](https://github.com/blinklabs-io/dingo/pull/2392))
+* Added **deliver merged Leios data over local client connections:** Integrators can now receive merged Leios input data over local client connections, which makes Leios data access more complete. ([#2392](https://github.com/blinklabs-io/dingo/pull/2392))
 * Introduced **keep reward state across restarts:** Nodes now preserve reward state across restarts, which makes recovery and ongoing operations more dependable. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426))
-* Expanded **honor CIP-1694 reward-account delegation semantics:** Governance and reward handling now follow CIP-1694 stake pool operator reward-account delegation semantics more closely, which keeps delegation behavior aligned with current expectations. ([#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+* Expanded **honor CIP-1694 reward account delegation semantics:** Governance and reward handling now follow CIP-1694 stake pool operator reward account delegation semantics more closely, which keeps delegation behavior aligned with current expectations. ([#2378](https://github.com/blinklabs-io/dingo/pull/2378))
 
 ### 💪 Improvements
 
@@ -24,16 +24,16 @@ Hi folks! Here’s what we shipped in v0.49.0.
 
 ### 🔧 Fixes
 
-* Fixed **keep LocalTxSubmission responses compatible with cardano-cli 10.x:** Transaction submission rejections now return a format that works more reliably with cardano-cli 10.x, which makes submission troubleshooting clearer. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
-* Corrected **prune seen headers during normal chainsync work:** Normal chainsync operation now clears stale header tracking more consistently, which helps sync behavior stay steadier over time. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428))
+* Fixed **keep LocalTxSubmission responses compatible with cardano cli 10.x:** Transaction submission rejections now return a format that works more reliably with cardano cli 10.x, which makes submission troubleshooting clearer. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Corrected **clear stale header tracking during normal chainsync work:** Normal chainsync operation now clears stale header tracking more consistently, which helps sync behavior stay steadier over time. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428))
 * Strengthened **surface async chainsync failures more clearly:** Roll forward and roll backward failures now surface more directly, which makes chainsync problems easier to detect and diagnose. ([#2419](https://github.com/blinklabs-io/dingo/pull/2419))
 
 ### 📋 What You Need to Know
 
 * Clarified **expect normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
-* Highlighted **expect better cardano-cli 10.x submission compatibility:** LocalTxSubmission rejection handling now works more cleanly with cardano-cli 10.x, which reduces avoidable submission confusion. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
-* Emphasized **trust sturdier chainsync behavior and clearer failure reporting:** Chainsync now prunes stale seen-header state during normal operation and surfaces async sync failures more clearly, which supports steadier recovery and troubleshooting. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428), [#2419](https://github.com/blinklabs-io/dingo/pull/2419))
-* Summarized **rely on persisted rewards and updated delegation semantics:** Reward state now persists across restarts, and reward-account delegation handling now follows CIP-1694 semantics more closely. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426), [#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+* Highlighted **expect better cardano cli 10.x submission compatibility:** LocalTxSubmission rejection handling now works more cleanly with cardano cli 10.x, which reduces avoidable submission confusion. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Emphasized **trust sturdier chainsync behavior and clearer failure reporting:** Chainsync now clears stale header tracking during normal operation and surfaces async sync failures more clearly, which supports steadier recovery and troubleshooting. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428), [#2419](https://github.com/blinklabs-io/dingo/pull/2419))
+* Summarized **rely on persisted rewards and updated delegation semantics:** Reward state now persists across restarts, and reward account delegation handling now follows CIP-1694 semantics more closely. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426), [#2378](https://github.com/blinklabs-io/dingo/pull/2378))
 * Reviewed **use the refreshed example and release history updates:** The Dingoswap UTxO RPC example and the published v0.48.0 release history entry make current integration guidance and recent release context easier to follow. ([#2390](https://github.com/blinklabs-io/dingo/pull/2390), [#2423](https://github.com/blinklabs-io/dingo/pull/2423), [#2431](https://github.com/blinklabs-io/dingo/pull/2431))
 
 ### Recommended Network Compatibility ⚠️
