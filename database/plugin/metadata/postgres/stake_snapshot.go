@@ -200,7 +200,9 @@ func (d *MetadataStorePostgres) SaveEpochSummary(
 				}),
 				clause.Assignment{
 					Column: clause.Column{Name: "snapshot_ready"},
-					Value:  clause.Expr{SQL: "snapshot_ready OR excluded.snapshot_ready"},
+					Value: clause.Expr{
+						SQL: `"epoch_summary"."snapshot_ready" OR excluded.snapshot_ready`,
+					},
 				},
 			),
 		},
