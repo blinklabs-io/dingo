@@ -13,6 +13,13 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 - Mock fixtures come from `github.com/blinklabs-io/ouroboros-mock` (`fixtures/`, `ledger/`, `conformance/`). Never add local ledger/consensus/network mocks — extend the shared library.
 - DevNet (`internal/test/devnet/run-tests.sh`, see `internal/test/devnet/README.md`): use to validate any change that touches consensus, block production, header/VRF/KES/OpCert verification, chain selection, mempool, tx submission, NtN/NtC protocols, epoch boundaries, or nonce computation. Brings up Dingo + cardano-node side by side with `txpump` feeding the mempool, so it surfaces divergence from the reference implementation that unit and conformance tests miss. Run conformance (`internal/test/conformance/`) after every change; run DevNet additionally for consensus-affecting work.
 
+## Documentation
+
+- Treat `DATABASE.md` and `ARCHITECTURE.md` as part of the change bar, like tests. Before finishing any code change, decide whether either document needs an update; update it in the same change when it does.
+- Update `DATABASE.md` for any change to GORM models, migrated tables, table relationships, SQL query/API surfaces in `metadata.MetadataStore`, blob-store key layout, CBOR/offset encodings, storage plugins, pruning/tombstone behavior, or anything external Postgres/MySQL/SQLite/blob users rely on.
+- Update `ARCHITECTURE.md` for any change to component responsibilities, package boundaries, startup/composition, EventBus topics/payloads, plugin interfaces, lifecycle/concurrency behavior, or cross-component flows among ledger, database, mempool, networking, API, and node wiring.
+- In final responses, report documentation status the same way tests are reported: either list the docs updated or explicitly state that `DATABASE.md`/`ARCHITECTURE.md` were checked and not affected.
+
 ## Pre-commit
 
 ```shell
