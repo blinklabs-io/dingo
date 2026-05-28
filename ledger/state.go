@@ -2287,7 +2287,7 @@ func (ls *LedgerState) ledgerReadChain(
 		startPoint := ls.currentTip.Point
 		ls.RUnlock()
 		// Create chain iterator
-		iter, err := ls.chain.FromPoint(startPoint, false)
+		iter, err := ls.chain.FromPointContext(ctx, startPoint, false)
 		if err != nil {
 			if !errors.Is(err, models.ErrBlockNotFound) {
 				ls.config.Logger.Warn(
@@ -4823,6 +4823,16 @@ func (ls *LedgerState) GetChainFromPoint(
 	return ls.chain.FromPoint(point, inclusive)
 }
 
+// GetChainFromPointContext returns a ChainIterator that inherits cancellation
+// from ctx.
+func (ls *LedgerState) GetChainFromPointContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointContext(ctx, point, inclusive)
+}
+
 // GetChainFromPointReverse returns a ChainIterator that walks backward from
 // the specified point toward chain origin. If inclusive is true the iterator
 // yields the start point first; otherwise it yields the preceding block.
@@ -4831,6 +4841,16 @@ func (ls *LedgerState) GetChainFromPointReverse(
 	inclusive bool,
 ) (*chain.ChainIterator, error) {
 	return ls.chain.FromPointReverse(point, inclusive)
+}
+
+// GetChainFromPointReverseContext returns a reverse ChainIterator that
+// inherits cancellation from ctx.
+func (ls *LedgerState) GetChainFromPointReverseContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointReverseContext(ctx, point, inclusive)
 }
 
 // Tip returns the current chain tip

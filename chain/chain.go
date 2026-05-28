@@ -16,6 +16,7 @@ package chain
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1055,12 +1056,22 @@ func (c *Chain) FromPoint(
 	point ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	return c.FromPointContext(context.Background(), point, inclusive)
+}
+
+// FromPointContext returns a ChainIterator that inherits cancellation from ctx.
+func (c *Chain) FromPointContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	iter, err := newChainIterator(
+	iter, err := newChainIteratorWithContext(
+		ctx,
 		c,
 		point,
 		inclusive,
@@ -1070,6 +1081,7 @@ func (c *Chain) FromPoint(
 		return nil, err
 	}
 	c.iterators = append(c.iterators, iter)
+	iter.startCancelWatcher()
 	return iter, nil
 }
 
@@ -1082,12 +1094,22 @@ func (c *Chain) FromPointReverse(
 	point ocommon.Point,
 	inclusive bool,
 ) (*ChainIterator, error) {
+	return c.FromPointReverseContext(context.Background(), point, inclusive)
+}
+
+// FromPointReverseContext returns a reverse ChainIterator that inherits cancellation from ctx.
+func (c *Chain) FromPointReverseContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*ChainIterator, error) {
 	if c == nil {
 		return nil, errors.New("chain is nil")
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	iter, err := newChainIterator(
+	iter, err := newChainIteratorWithContext(
+		ctx,
 		c,
 		point,
 		inclusive,
@@ -1097,6 +1119,7 @@ func (c *Chain) FromPointReverse(
 		return nil, err
 	}
 	c.iterators = append(c.iterators, iter)
+	iter.startCancelWatcher()
 	return iter, nil
 }
 
