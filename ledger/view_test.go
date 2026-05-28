@@ -59,6 +59,14 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	require.Zero(t, treasury)
 }
 
+func TestLedgerViewSkipPhase2Validation(t *testing.T) {
+	lv := &LedgerView{}
+	require.False(t, lv.SkipPhase2Validation())
+
+	lv.skipPhase2Validation = true
+	require.True(t, lv.SkipPhase2Validation())
+}
+
 func TestExtractCostModelsFromPParams_Nil(t *testing.T) {
 	result := extractCostModelsFromPParams(nil)
 	require.Empty(t, result)

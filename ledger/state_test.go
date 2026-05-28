@@ -115,6 +115,110 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	wg.Wait()
 }
 
+func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
+	const securityParam uint64 = 37
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	const referenceBlockNumber uint64 = 1000
+	immutableTipBlockNumber := referenceBlockNumber - securityParam
+
+	require.True(t, ls.shouldSkipPhase2ValidationForBlock(
+		immutableTipBlockNumber,
+		referenceBlockNumber,
+		eras.ShelleyEraDesc.Id,
+	))
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		immutableTipBlockNumber+1,
+		referenceBlockNumber,
+		eras.ShelleyEraDesc.Id,
+	))
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		0,
+		securityParam-1,
+		eras.ShelleyEraDesc.Id,
+	))
+}
+
+func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		0,
+		1000,
+		eras.ShelleyEraDesc.Id,
+	))
+}
+
+func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
+	t *testing.T,
+) {
+	const securityParam uint64 = 2
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{
+			securityParam: int(securityParam),
+		}),
+	)
+
+	rawBlocks := make([]chain.RawBlock, 0, 5)
+	var prevHash []byte
+	for blockNumber := uint64(1); blockNumber <= 5; blockNumber++ {
+		block := makeTestBlock(blockNumber*10, blockNumber)
+		block.PrevHash = prevHash
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        block.Slot,
+			Hash:        block.Hash,
+			BlockNumber: block.Number,
+			Type:        block.Type,
+			PrevHash:    block.PrevHash,
+			Cbor:        block.Cbor,
+		})
+		prevHash = block.Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+
+	ls := &LedgerState{
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	require.True(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+		3,
+		eras.ShelleyEraDesc.Id,
+	))
+
+	rollbackPoint := ocommon.NewPoint(
+		rawBlocks[3].Slot,
+		rawBlocks[3].Hash,
+	)
+	require.NoError(t, cm.PrimaryChain().Rollback(rollbackPoint))
+
+	require.False(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+		3,
+		eras.ShelleyEraDesc.Id,
+	))
+}
+
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
 func TestCalculateStabilityWindow_ByronEra(t *testing.T) {
 	testCases := []struct {
@@ -3646,6 +3750,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			txn,
 			ocommon.Point{Slot: 10},
 			block,
+			false,
 			false,
 			nil,
 			nil,
