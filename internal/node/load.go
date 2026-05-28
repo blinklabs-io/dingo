@@ -168,23 +168,6 @@ func WithDeferredIndexes(
 	}
 }
 
-// HasDeferredIndexesPending probes the metadata store's
-// DeferredIndexManager interface and reports whether a previous
-// bulk-load run left indexes in a half-built state. Callers like
-// `dingo serve` use this to decide between refusing startup or
-// repairing the schema.
-//
-// Returns (false, nil) for stores that don't implement the
-// interface — those stores never defer indexes, so they cannot be
-// in a pending state.
-func HasDeferredIndexesPending(db *database.Database) (bool, error) {
-	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
-	if !ok {
-		return false, nil
-	}
-	return manager.HasDeferredIndexesPending()
-}
-
 // RepairDeferredIndexes rebuilds any deferred indexes that were
 // recorded as pending by a prior interrupted run. It is safe to call
 // when no rebuild is outstanding: BuildDeferredIndexes is itself

@@ -44,6 +44,9 @@ func serveRun(
 	}
 
 	// Historical metadata backfill is only needed for API mode.
+	// API mode rebuilds any pending deferred indexes at the end of
+	// resumeBackfill; Core mode has no backfill step, so it falls
+	// through to the explicit repair below.
 	if dingo.StorageMode(cfg.StorageMode).IsAPI() {
 		if err := resumeBackfill(
 			cmd.Context(), cfg, logger,
@@ -54,19 +57,18 @@ func serveRun(
 			)
 			os.Exit(1)
 		}
-	}
-
-	// Last line of defense for Core mode: API mode already runs
-	// the rebuild at the end of resumeBackfill, but Core mode
-	// has no backfill step. If a Mithril sync interrupted between
-	// drop and rebuild here, repair before exposing the node so
-	// secondary-index-backed queries return correct cardinalities.
-	if err := repairDeferredIndexes(cfg, logger); err != nil {
-		slog.Error(
-			"deferred-index repair failed",
-			"error", err,
-		)
-		os.Exit(1)
+	} else {
+		// Core mode: if a Mithril sync interrupted between drop
+		// and rebuild, repair before exposing the node so
+		// secondary-index-backed queries return correct
+		// cardinalities.
+		if err := repairDeferredIndexes(cfg, logger); err != nil {
+			slog.Error(
+				"deferred-index repair failed",
+				"error", err,
+			)
+			os.Exit(1)
+		}
 	}
 
 	// Run node
@@ -140,6 +142,7 @@ func repairDeferredIndexes(
 	db, err := database.New(&database.Config{
 		DataDir:        cfg.DatabasePath,
 		Logger:         logger,
+		Network:        cfg.Network,
 		BlobPlugin:     cfg.BlobPlugin,
 		RunMode:        string(cfg.RunMode),
 		MetadataPlugin: cfg.MetadataPlugin,

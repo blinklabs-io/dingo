@@ -17,6 +17,7 @@ package sqlite
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/deferred"
 )
 
@@ -153,23 +154,60 @@ func TestDropDeferredIndexesIsIdempotent(t *testing.T) {
 }
 
 // TestCrashRecoveryDetectedAcrossReopen simulates a crash by
-// running DropDeferredIndexes against one MetadataStoreSqlite
-// instance and then asking a fresh instance — pointed at the same
-// in-memory cache=shared backing — whether indexes are pending.
-//
-// We can't use a temp dir + Close/reopen reliably in a unit test
-// (the file-based path requires WAL settle), so we rely on the
-// in-memory shared cache to share state across two Start() calls.
+// running DropDeferredIndexes, closing the store, opening a fresh
+// MetadataStoreSqlite against the same on-disk file, and asking the
+// new instance whether indexes are pending. This is the crash
+// recovery contract that `dingo serve` and `dingo mithril sync`
+// rely on: the pending marker must survive a process exit.
 func TestCrashRecoveryDetectedAcrossReopen(t *testing.T) {
-	d := setupTestDB(t)
-	if err := d.DropDeferredIndexes(); err != nil {
+	dataDir := t.TempDir()
+
+	first, err := NewWithOptions(WithDataDir(dataDir))
+	if err != nil {
+		t.Fatalf("open first store: %v", err)
+	}
+	if err := first.Start(); err != nil {
+		t.Fatalf("start first store: %v", err)
+	}
+	if err := first.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("migrate first store: %v", err)
+	}
+	if err := first.DropDeferredIndexes(); err != nil {
 		t.Fatalf("DropDeferredIndexes: %v", err)
 	}
-	pending, err := d.HasDeferredIndexesPending()
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first store: %v", err)
+	}
+
+	// Re-open the same on-disk database and confirm the pending
+	// marker persisted across the close/reopen.
+	second, err := NewWithOptions(WithDataDir(dataDir))
 	if err != nil {
-		t.Fatalf("HasDeferredIndexesPending: %v", err)
+		t.Fatalf("reopen store: %v", err)
+	}
+	if err := second.Start(); err != nil {
+		t.Fatalf("start reopened store: %v", err)
+	}
+	t.Cleanup(func() { second.Close() }) //nolint:errcheck
+
+	pending, err := second.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after reopen: %v", err)
 	}
 	if !pending {
-		t.Fatal("expected indexes_pending=true after crash simulation")
+		t.Fatal("indexes_pending marker did not survive reopen")
+	}
+
+	// And the rebuild path on the new instance clears the marker
+	// — i.e. the recovery flow actually completes.
+	if err := second.BuildDeferredIndexes(); err != nil {
+		t.Fatalf("BuildDeferredIndexes after reopen: %v", err)
+	}
+	pending, err = second.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after rebuild: %v", err)
+	}
+	if pending {
+		t.Fatal("indexes_pending should be false after rebuild on reopened store")
 	}
 }
