@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -38,16 +37,11 @@ const (
 	BlockInitialIndex uint64 = 1
 )
 
-var (
-	blockByHashScanDeadline               = 100 * time.Millisecond
-	blockByHashScanDeadlineExceededWarned atomic.Bool
-)
-
 // blockByHashIndexHits and blockByHashIndexMisses track how often
-// BlockByHashTxn resolves via the O(1) hash index versus falling through
-// to the time-bounded prefix scan. A non-trivial miss rate on a healthy
-// node is the load-only signal that operators can use to justify a
-// hash-index back-fill for pre-#1915 blocks (see #2105).
+// BlockByHashTxn resolves via the O(1) hash index versus returning a
+// hard miss. A non-trivial miss rate on a healthy node is the load-only
+// signal that operators can use to justify a hash-index back-fill for
+// pre-#1915 blocks (see #2105).
 var (
 	blockByHashIndexHits   atomic.Uint64
 	blockByHashIndexMisses atomic.Uint64
@@ -397,61 +391,10 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if blockByHashMissesCounter != nil {
 		blockByHashMissesCounter.Inc()
 	}
-	// Fallback to sequential scan for blocks written before the index
-	// existed. Time-bounded: a Mithril-bootstrapped node carries
-	// millions of blob entries and chainsync intersect-point lookups
-	// (buildDefaultChainsyncIntersectPoints, RecentChainPoints,
-	// BlockByHash) call this per peer connection. An unbounded scan
-	// can pin one CPU per ongoing inbound chainsync handshake; with
-	// peer-sharing or a busy listener the node wedges and stops both
-	// chain extension and block production. Treating the hash as not
-	// found after the deadline lets fork recovery and intersect-point
-	// callers fall back to alternative paths (PeerHeaderLookupFunc,
-	// chainsync resync), which is fast.
-	scanDeadline := time.Now().Add(blockByHashScanDeadline)
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
-	}
-	it := blob.NewIterator(blobTxn, iterOpts)
-	if it == nil {
-		return models.Block{}, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		if time.Now().After(scanDeadline) {
-			if blockByHashScanDeadlineExceededWarned.CompareAndSwap(false, true) {
-				txn.DB().logger.Warn(
-					"block hash fallback scan deadline exceeded; returning not found",
-					"deadline", blockByHashScanDeadline.String(),
-					"hash", hex.EncodeToString(hash),
-				)
-			}
-			return models.Block{}, models.ErrBlockNotFound
-		}
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil {
-			continue
-		}
-		// Skip the metadata key
-		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		// Validate key length and hash segment before comparing.
-		if len(key) < 10+len(hash) {
-			continue
-		}
-		if !bytes.Equal(key[10:10+len(hash)], hash) {
-			continue
-		}
-		return blockByKey(txn, key)
-	}
-	if err := it.Err(); err != nil {
-		return models.Block{}, err
-	}
+	// Index miss is a hard miss (#2105). Per-peer chainsync /
+	// intersect-point callers should fall back to PeerHeaderLookupFunc
+	// rather than scan the bp prefix on every miss; legacy blocks
+	// predating the hash index need an offline backfill.
 	return models.Block{}, models.ErrBlockNotFound
 }
 
