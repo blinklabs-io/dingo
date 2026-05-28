@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -29,6 +30,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -48,7 +51,32 @@ var (
 var (
 	blockByHashIndexHits   atomic.Uint64
 	blockByHashIndexMisses atomic.Uint64
+
+	// Prometheus counters; nil until RegisterBlockByHashMetrics is called.
+	blockByHashHitsCounter   prometheus.Counter
+	blockByHashMissesCounter prometheus.Counter
+	blockByHashMetricsOnce   sync.Once
 )
+
+// RegisterBlockByHashMetrics wires the block-hash index hit/miss counters
+// into the given Prometheus registry. It is idempotent; subsequent calls
+// after the first successful registration are no-ops.
+func RegisterBlockByHashMetrics(reg prometheus.Registerer) {
+	if reg == nil {
+		return
+	}
+	blockByHashMetricsOnce.Do(func() {
+		factory := promauto.With(reg)
+		blockByHashHitsCounter = factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_database_block_hash_index_hits_total",
+			Help: "Total block-hash index lookups resolved via the O(1) fast path",
+		})
+		blockByHashMissesCounter = factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_database_block_hash_index_misses_total",
+			Help: "Total block-hash index lookups that fell through to the prefix scan",
+		})
+	})
+}
 
 // BlockByHashStats returns the cumulative hit/miss counts for the
 // hash-index fast path used by BlockByHashTxn.
@@ -349,6 +377,9 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	blockKey, err := blob.Get(blobTxn, hashIndexKey)
 	if err == nil && len(blockKey) > 0 {
 		blockByHashIndexHits.Add(1)
+		if blockByHashHitsCounter != nil {
+			blockByHashHitsCounter.Inc()
+		}
 		return blockByKey(txn, blockKey)
 	}
 	if err == nil && len(blockKey) == 0 {
@@ -363,6 +394,9 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return models.Block{}, err
 	}
 	blockByHashIndexMisses.Add(1)
+	if blockByHashMissesCounter != nil {
+		blockByHashMissesCounter.Inc()
+	}
 	// Fallback to sequential scan for blocks written before the index
 	// existed. Time-bounded: a Mithril-bootstrapped node carries
 	// millions of blob entries and chainsync intersect-point lookups
