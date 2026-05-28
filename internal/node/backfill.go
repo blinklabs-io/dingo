@@ -989,7 +989,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		b.maybeLogProgress(
 			cp, processedBlocks, processedTxs,
 			tipSlot, startSlot, startTime, &lastLogTime,
-			&intervalStats,
+			&intervalStats, false,
 		)
 	}
 
@@ -998,6 +998,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
+	b.maybeLogProgress(
+		cp, processedBlocks, processedTxs,
+		tipSlot, startSlot, startTime, &lastLogTime,
+		&intervalStats, true,
+	)
 
 	cp.Completed = true
 	cp.UpdatedAt = time.Now()
@@ -1096,7 +1101,7 @@ func (b *Backfill) saveCheckpoint(cp *models.BackfillCheckpoint) {
 }
 
 // maybeLogProgress logs backfill progress with rate and ETA,
-// throttled to at most once every 10 seconds.
+// throttled to at most once every 10 seconds unless force is true.
 func (b *Backfill) maybeLogProgress(
 	cp *models.BackfillCheckpoint,
 	processedBlocks int,
@@ -1106,9 +1111,10 @@ func (b *Backfill) maybeLogProgress(
 	startTime time.Time,
 	lastLogTime *time.Time,
 	stats *dbtypes.BackfillHotPathStats,
+	force bool,
 ) {
 	now := time.Now()
-	if now.Sub(*lastLogTime) < 10*time.Second {
+	if !force && now.Sub(*lastLogTime) < 10*time.Second {
 		return
 	}
 	*lastLogTime = now

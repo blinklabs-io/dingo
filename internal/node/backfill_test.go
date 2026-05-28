@@ -241,6 +241,46 @@ func TestRun_IncompleteCheckpointAtZeroStartsAtSlotZero(t *testing.T) {
 	require.Equal(t, uint64(1), got.LastSlot)
 }
 
+// TestRun_EmitsFinalProgressForShortRun ensures final interval metrics are
+// published even when the run finishes before the normal 10s progress tick.
+func TestRun_EmitsFinalProgressForShortRun(t *testing.T) {
+	db := newTestDB(t)
+
+	now := time.Now()
+	cp := &models.BackfillCheckpoint{
+		Phase:      BackfillPhase,
+		LastSlot:   0,
+		TotalSlots: 1,
+		StartedAt:  now,
+		UpdatedAt:  now,
+		Completed:  false,
+	}
+	require.NoError(t, db.Metadata().SetBackfillCheckpoint(cp, nil))
+
+	for _, slot := range []uint64{0, 1} {
+		hash := make([]byte, 32)
+		hash[0] = byte(slot + 1)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot: slot,
+			Hash: hash,
+			Cbor: []byte{0x82, 0x01},
+			Type: 1,
+		}, nil))
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	bf := NewBackfill(db, nil, logger)
+	var progress []BackfillProgress
+	bf.SetProgressFunc(func(p BackfillProgress) {
+		progress = append(progress, p)
+	})
+
+	require.NoError(t, bf.Run(context.Background()))
+	require.Len(t, progress, 1)
+	assert.Equal(t, uint64(1), progress[0].Slot)
+	assert.Equal(t, uint64(2), progress[0].Stats.Blocks)
+}
+
 // TestRun_IncompleteCheckpointAtZeroVisitsSlotZero proves the iterator
 // actually starts at slot 0 (rather than LastSlot+1 = 1). Asserting only
 // the final cp.LastSlot is too weak: it's left at 1 in both the correct
