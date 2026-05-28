@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -369,6 +370,8 @@ func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
 		Slot: 999,
 	}
 	acc := NewBatchAccumulator()
+	var stats dbtypes.BackfillHotPathStats
+	acc.SetBackfillStats(&stats)
 
 	require.NoError(
 		t,
@@ -390,6 +393,7 @@ func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
 	// ------------------------------------------------------------------ //
 	assert.Len(t, acc.KeyWitnesses, 1, "one vkey witness expected in accumulator")
 	assert.Equal(t, models.KeyWitnessTypeVkey, acc.KeyWitnesses[0].Type)
+	assert.Equal(t, uint64(1), stats.Witnesses)
 
 	var witnessCount int64
 	require.NoError(

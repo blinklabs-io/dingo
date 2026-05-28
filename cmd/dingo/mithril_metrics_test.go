@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
 	"github.com/blinklabs-io/dingo/mithril"
@@ -67,6 +68,34 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 		Percent:         97.2,
 	})
 	metrics.recordGapBlocks(3)
+	metrics.recordBackfillProgress(node.BackfillProgress{
+		Slot:            1200,
+		TipSlot:         2400,
+		BlocksPerSecond: 25,
+		ProgressPercent: 50,
+		Stats: dbtypes.BackfillHotPathStats{
+			Blocks:                10,
+			Txs:                   20,
+			Utxos:                 30,
+			InputRefs:             40,
+			AddressTxs:            50,
+			Witnesses:             60,
+			Scripts:               70,
+			Redeemers:             80,
+			BlobTxOffsetWrites:    20,
+			BlobUtxoOffsetWrites:  30,
+			SkippedUtxoOffsets:    5,
+			BlockReadDecode:       100 * time.Millisecond,
+			OffsetComputation:     200 * time.Millisecond,
+			BlobOffsetWrites:      300 * time.Millisecond,
+			SetTransactionBatched: 400 * time.Millisecond,
+			ConsumedInputRecovery: 500 * time.Millisecond,
+			UtxoAddressLookup:     600 * time.Millisecond,
+			AddressIndex:          700 * time.Millisecond,
+			FlushBatch:            800 * time.Millisecond,
+			CheckpointWrites:      900 * time.Millisecond,
+		},
+	})
 	metrics.markComplete()
 	metrics.recordError()
 
@@ -141,6 +170,35 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 		promtestutil.ToFloat64(metrics.immutableBlocksPerSec),
 	)
 	require.Equal(t, float64(3), promtestutil.ToFloat64(metrics.gapBlocks))
+	require.Equal(t, float64(1200), promtestutil.ToFloat64(metrics.backfillCurrentSlot))
+	require.Equal(t, float64(2400), promtestutil.ToFloat64(metrics.backfillTipSlot))
+	require.Equal(t, float64(25), promtestutil.ToFloat64(metrics.backfillBlocksPerSec))
+	require.Equal(t, float64(50), promtestutil.ToFloat64(metrics.backfillPercent))
+	require.Equal(
+		t,
+		float64(0.4),
+		promtestutil.ToFloat64(
+			metrics.backfillStageDuration.WithLabelValues(
+				"set_transaction_batched",
+			),
+		),
+	)
+	require.Equal(
+		t,
+		float64(50),
+		promtestutil.ToFloat64(
+			metrics.backfillIntervalCounts.WithLabelValues("address_txs"),
+		),
+	)
+	require.Equal(
+		t,
+		float64(5),
+		promtestutil.ToFloat64(
+			metrics.backfillIntervalCounts.WithLabelValues(
+				"skipped_utxo_offsets",
+			),
+		),
+	)
 	require.Equal(t, float64(1), promtestutil.ToFloat64(metrics.completed))
 	require.Equal(t, float64(1), promtestutil.ToFloat64(metrics.errors))
 }

@@ -132,6 +132,13 @@ type mithrilSyncMetrics struct {
 	immutableBlocksPerSec prometheus.Gauge
 
 	gapBlocks prometheus.Gauge
+
+	backfillCurrentSlot    prometheus.Gauge
+	backfillTipSlot        prometheus.Gauge
+	backfillBlocksPerSec   prometheus.Gauge
+	backfillPercent        prometheus.Gauge
+	backfillStageDuration  *prometheus.GaugeVec
+	backfillIntervalCounts *prometheus.GaugeVec
 }
 
 func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
@@ -240,6 +247,36 @@ func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
 			Name: "dingo_mithril_sync_gap_blocks",
 			Help: "Volatile gap blocks fetched or reused during Mithril sync.",
 		}),
+		backfillCurrentSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_mithril_sync_backfill_current_slot",
+			Help: "Current slot processed by API-mode Mithril metadata backfill.",
+		}),
+		backfillTipSlot: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_mithril_sync_backfill_tip_slot",
+			Help: "Target tip slot for API-mode Mithril metadata backfill.",
+		}),
+		backfillBlocksPerSec: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_mithril_sync_backfill_blocks_per_second",
+			Help: "Current API-mode Mithril metadata backfill block rate.",
+		}),
+		backfillPercent: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_mithril_sync_backfill_percent",
+			Help: "Completion percentage for API-mode Mithril metadata backfill.",
+		}),
+		backfillStageDuration: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "dingo_mithril_sync_backfill_stage_duration_seconds",
+				Help: "Interval duration spent in an API-mode Mithril backfill hot-path stage.",
+			},
+			[]string{"stage"},
+		),
+		backfillIntervalCounts: factory.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Name: "dingo_mithril_sync_backfill_interval_count",
+				Help: "Interval row and item counts for API-mode Mithril metadata backfill.",
+			},
+			[]string{"kind"},
+		),
 	}
 	m.startedAt.SetToCurrentTime()
 	return m
@@ -340,6 +377,61 @@ func (m *mithrilSyncMetrics) recordGapBlocks(count int) {
 		return
 	}
 	m.gapBlocks.Set(float64(count))
+}
+
+// recordBackfillProgress publishes the latest backfill interval snapshot.
+func (m *mithrilSyncMetrics) recordBackfillProgress(
+	p node.BackfillProgress,
+) {
+	if m == nil {
+		return
+	}
+	m.backfillCurrentSlot.Set(float64(p.Slot))
+	m.backfillTipSlot.Set(float64(p.TipSlot))
+	m.backfillBlocksPerSec.Set(p.BlocksPerSecond)
+	m.backfillPercent.Set(p.ProgressPercent)
+
+	stats := p.Stats
+	m.backfillStageDuration.WithLabelValues("block_read_decode").
+		Set(stats.BlockReadDecode.Seconds())
+	m.backfillStageDuration.WithLabelValues("offset_compute").
+		Set(stats.OffsetComputation.Seconds())
+	m.backfillStageDuration.WithLabelValues("blob_offset_write").
+		Set(stats.BlobOffsetWrites.Seconds())
+	m.backfillStageDuration.WithLabelValues("set_transaction_batched").
+		Set(stats.SetTransactionBatched.Seconds())
+	m.backfillStageDuration.WithLabelValues("consumed_input_recovery").
+		Set(stats.ConsumedInputRecovery.Seconds())
+	m.backfillStageDuration.WithLabelValues("utxo_address_lookup").
+		Set(stats.UtxoAddressLookup.Seconds())
+	m.backfillStageDuration.WithLabelValues("address_index").
+		Set(stats.AddressIndex.Seconds())
+	m.backfillStageDuration.WithLabelValues("flush_batch").
+		Set(stats.FlushBatch.Seconds())
+	m.backfillStageDuration.WithLabelValues("checkpoint_write").
+		Set(stats.CheckpointWrites.Seconds())
+
+	m.backfillIntervalCounts.WithLabelValues("blocks").Set(float64(stats.Blocks))
+	m.backfillIntervalCounts.WithLabelValues("txs").Set(float64(stats.Txs))
+	m.backfillIntervalCounts.WithLabelValues("utxos").Set(float64(stats.Utxos))
+	m.backfillIntervalCounts.WithLabelValues("input_refs").Set(float64(stats.InputRefs))
+	m.backfillIntervalCounts.WithLabelValues("address_txs").Set(float64(stats.AddressTxs))
+	m.backfillIntervalCounts.WithLabelValues("witnesses").Set(float64(stats.Witnesses))
+	m.backfillIntervalCounts.WithLabelValues("witness_scripts").Set(float64(stats.WitnessScripts))
+	m.backfillIntervalCounts.WithLabelValues("scripts").Set(float64(stats.Scripts))
+	m.backfillIntervalCounts.WithLabelValues("plutus_data").Set(float64(stats.PlutusData))
+	m.backfillIntervalCounts.WithLabelValues("redeemers").Set(float64(stats.Redeemers))
+	m.backfillIntervalCounts.WithLabelValues("utxo_spends").Set(float64(stats.UtxoSpends))
+	m.backfillIntervalCounts.WithLabelValues("collateral_returns").Set(float64(stats.CollateralRets))
+	m.backfillIntervalCounts.WithLabelValues("certificates").Set(float64(stats.Certificates))
+	m.backfillIntervalCounts.WithLabelValues("metadata_labels").Set(float64(stats.MetadataLabels))
+	m.backfillIntervalCounts.WithLabelValues("pparam_updates").Set(float64(stats.PParamUpdates))
+	m.backfillIntervalCounts.WithLabelValues("blob_tx_offset_writes").
+		Set(float64(stats.BlobTxOffsetWrites))
+	m.backfillIntervalCounts.WithLabelValues("blob_utxo_offset_writes").
+		Set(float64(stats.BlobUtxoOffsetWrites))
+	m.backfillIntervalCounts.WithLabelValues("skipped_utxo_offsets").
+		Set(float64(stats.SkippedUtxoOffsets))
 }
 
 func (m *mithrilSyncMetrics) markComplete() {

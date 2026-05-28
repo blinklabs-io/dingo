@@ -51,6 +51,7 @@ type BatchAccumulator struct {
 	UtxoSpends     []utxoSpend
 	CollateralRets []models.Utxo
 	DeleteTxIDs    []uint
+	stats          *types.BackfillHotPathStats
 }
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
@@ -127,6 +128,16 @@ func (b *BatchAccumulator) Reset() {
 	b.UtxoSpends = b.UtxoSpends[:0]
 	b.CollateralRets = b.CollateralRets[:0]
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
+	b.stats = nil
+}
+
+// SetBackfillStats attaches the current backfill interval stats collector.
+func (b *BatchAccumulator) SetBackfillStats(
+	stats *types.BackfillHotPathStats,
+) {
+	if b != nil {
+		b.stats = stats
+	}
 }
 
 // Len returns the number of accumulated metadata rows. It is intentionally a
@@ -163,6 +174,23 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
 	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
 	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+}
+
+// addPendingCountsToStats reports rows buffered for the next batch flush.
+func (b *BatchAccumulator) addPendingCountsToStats() {
+	if b == nil || b.stats == nil {
+		return
+	}
+	// Count deferred metadata rows accumulated for the next FlushBatch.
+	b.stats.Witnesses += uint64(len(b.KeyWitnesses))
+	b.stats.WitnessScripts += uint64(len(b.WitnessScripts))
+	b.stats.Scripts += uint64(len(b.Scripts))
+	b.stats.PlutusData += uint64(len(b.PlutusData))
+	b.stats.Redeemers += uint64(len(b.Redeemers))
+	b.stats.AddressTxs += uint64(len(b.AddressTxs))
+	b.stats.UtxoSpends += uint64(len(b.UtxoSpends))
+	b.stats.CollateralRets += uint64(len(b.CollateralRets))
+	b.stats.DeleteTxIDs += uint64(len(b.DeleteTxIDs))
 }
 
 // FlushBatch writes all accumulated records in a deterministic order.
