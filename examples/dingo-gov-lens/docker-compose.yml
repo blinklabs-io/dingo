@@ -24,8 +24,6 @@ services:
       dockerfile: Dockerfile
       target: final
     image: ${DINGO_IMAGE:-dingo-gov-lens-dingo:local}
-    profiles:
-      - sync
     restart: "no"
     depends_on:
       postgres:
@@ -60,6 +58,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dingo-sync:
+        condition: service_completed_successfully
     command: ["-n", "preview", "serve"]
     environment:
       <<: *dingo-env
@@ -78,6 +78,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dingo-sync:
+        condition: service_completed_successfully
     environment:
       ADDR: 0.0.0.0:8088
       GOVTOOL_BASE_URL: ${GOVTOOL_BASE_URL:-https://preview.gov.tools}
