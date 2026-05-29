@@ -55,9 +55,11 @@ cp .env.example .env
 
 # This is the full bootstrap path; Mithril gets to tip quickly, then API-mode
 # historical metadata backfill continues from the snapshot/checkpoint.
-docker compose up -d postgres
-docker compose --profile sync run --rm dingo-sync
-docker compose up -d dingo app
+#
+# dingo-sync is a one-shot `dingo mithril sync` job. The dingo service waits
+# for it to complete successfully (depends_on service_completed_successfully)
+# before running `dingo serve`, so a single `up` orchestrates the full order.
+docker compose up -d
 ```
 
 Open `http://127.0.0.1:8088`.

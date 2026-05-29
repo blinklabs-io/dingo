@@ -8,9 +8,9 @@ POSTGRES_DB="${POSTGRES_DB:-dingo_metadata}"
 POSTGRES_USER="${POSTGRES_USER:-dingo}"
 APP_PORT="${APP_PORT:-8088}"
 
-docker compose up -d postgres
-docker compose --profile sync run --rm dingo-sync
-docker compose up -d dingo app
+# dingo waits for the one-shot dingo-sync job to complete successfully before
+# starting `dingo serve`, so a single `up` brings the whole stack up in order.
+docker compose up -d
 
 for _ in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:${APP_PORT}/api/status" >/tmp/dingo-gov-lens-status.json; then
