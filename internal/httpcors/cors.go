@@ -41,9 +41,14 @@ func Handler(next http.Handler, cfg Config) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
+		h := w.Header()
+		if origin != "" {
+			h.Add("Vary", "Origin")
+			h.Add("Vary", "Access-Control-Request-Method")
+			h.Add("Vary", "Access-Control-Request-Headers")
+		}
 		allowedOrigin, ok := allowedOrigin(origin, allowedOrigins)
 		if ok {
-			h := w.Header()
 			h.Set("Access-Control-Allow-Origin", allowedOrigin)
 			h.Set("Access-Control-Allow-Methods", allowMethods)
 			h.Set("Access-Control-Allow-Headers", allowHeaders)
@@ -53,9 +58,6 @@ func Handler(next http.Handler, cfg Config) http.Handler {
 				h.Set("Access-Control-Allow-Headers", requestedHeaders)
 			}
 			h.Set("Access-Control-Expose-Headers", exposeHeaders)
-			h.Add("Vary", "Origin")
-			h.Add("Vary", "Access-Control-Request-Method")
-			h.Add("Vary", "Access-Control-Request-Headers")
 		}
 		if r.Method == http.MethodOptions &&
 			origin != "" &&

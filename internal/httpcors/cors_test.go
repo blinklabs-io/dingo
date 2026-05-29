@@ -84,6 +84,10 @@ func TestHandlerRejectsDisallowedPreflight(t *testing.T) {
 	if got := rec.Code; got != http.StatusForbidden {
 		t.Fatalf("unexpected status: %d", got)
 	}
+	vary := rec.Header().Values("Vary")
+	if len(vary) != 3 {
+		t.Fatalf("unexpected Vary headers: %v", vary)
+	}
 }
 
 func TestHandlerEmptyConfigDisablesCORS(t *testing.T) {
