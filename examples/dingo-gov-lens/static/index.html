@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dingo Gov Lens</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Dingo Gov Lens</h1>
+        <p>Preview governance, read directly from Dingo Postgres metadata.</p>
+      </div>
+      <a class="external-link" href="https://preview.gov.tools" target="_blank" rel="noreferrer">GovTool</a>
+    </header>
+
+    <main>
+      <section class="status-grid" id="status"></section>
+      <section class="notice" id="metadata-notice" hidden></section>
+
+      <section class="toolbar">
+        <div class="tabs" role="tablist">
+          <button class="tab active" id="tab-proposals" data-view="proposals" type="button" role="tab" aria-selected="true" aria-controls="panel-proposals">Actions</button>
+          <button class="tab" id="tab-dreps" data-view="dreps" type="button" role="tab" aria-selected="false" aria-controls="panel-dreps">DReps</button>
+          <button class="tab" id="tab-stake" data-view="stake" type="button" role="tab" aria-selected="false" aria-controls="panel-stake">Stake Lookup</button>
+        </div>
+        <button class="icon-button" id="refresh" type="button" title="Refresh">Refresh</button>
+      </section>
+
+      <section class="view active" id="panel-proposals" role="tabpanel" aria-labelledby="tab-proposals" aria-hidden="false">
+        <div class="filters">
+          <label>
+            Lifecycle
+            <select id="proposal-lifecycle">
+              <option value="active">Active</option>
+              <option value="">All</option>
+              <option value="ratified">Ratified</option>
+              <option value="enacted">Enacted</option>
+              <option value="expired">Expired</option>
+            </select>
+          </label>
+          <label>
+            Action type
+            <select id="proposal-type">
+              <option value="">Any</option>
+              <option value="0">Parameter Change</option>
+              <option value="1">Hard Fork</option>
+              <option value="2">Treasury Withdrawal</option>
+              <option value="3">No Confidence</option>
+              <option value="4">Update Committee</option>
+              <option value="5">New Constitution</option>
+              <option value="6">Info</option>
+            </select>
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>Type</th>
+                <th>State</th>
+                <th>Epochs</th>
+                <th>Votes</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="proposal-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="panel-dreps" role="tabpanel" aria-labelledby="tab-dreps" aria-hidden="true">
+        <div class="filters">
+          <label>
+            Activity
+            <select id="drep-active">
+              <option value="true">Active</option>
+              <option value="">All</option>
+              <option value="false">Inactive</option>
+            </select>
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>DRep</th>
+                <th>Status</th>
+                <th>Epochs</th>
+                <th>Delegators</th>
+                <th>Votes</th>
+              </tr>
+            </thead>
+            <tbody id="drep-rows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="view" id="panel-stake" role="tabpanel" aria-labelledby="tab-stake" aria-hidden="true">
+        <div class="wallet-row">
+          <label>
+            Wallet
+            <select id="wallet-select"></select>
+          </label>
+          <button id="wallet-connect" type="button">Connect Wallet</button>
+        </div>
+        <form id="stake-form" class="lookup-form">
+          <label>
+            Stake credential hex
+            <input id="stake-credential" placeholder="28-byte credential as hex" spellcheck="false" />
+          </label>
+          <button type="submit">Lookup</button>
+        </form>
+        <div id="stake-result" class="lookup-result"></div>
+      </section>
+    </main>
+
+    <dialog id="detail-dialog">
+      <form method="dialog">
+        <button class="close-button" aria-label="Close">Close</button>
+      </form>
+      <div id="detail-content"></div>
+    </dialog>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

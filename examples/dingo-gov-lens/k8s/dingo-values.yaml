@@ -1,0 +1,42 @@
+image:
+  repository: ghcr.io/blinklabs-io/dingo
+  tag: "0.49.0"
+  pullPolicy: IfNotPresent
+
+mithril:
+  enabled: true
+  cleanupAfterLoad: true
+  verifyCertificates: true
+
+environment:
+  CARDANO_NETWORK: "preview"
+  CARDANO_DATABASE_PATH: "/data"
+  DINGO_STORAGE_MODE: "api"
+  DINGO_DATABASE_METADATA_PLUGIN: "postgres"
+  DINGO_DATABASE_METADATA_POSTGRES_DSN: "host=postgres.example.svc port=5432 user=dingo password=change-me dbname=dingo_metadata sslmode=verify-full sslrootcert=/etc/postgres-ca/ca.crt TimeZone=UTC"
+  DINGO_DATABASE_BLOB_PLUGIN: "badger"
+  DINGO_UTXORPC_PORT: "0"
+  DINGO_BLOCKFROST_PORT: "0"
+  DINGO_MESH_PORT: "0"
+
+persistence:
+  accessMode: ReadWriteOnce
+  size: 80Gi
+
+service:
+  type: ClusterIP
+  ports:
+    private: 3002
+    relay: 3001
+    metrics: 12798
+    utxorpc: 0
+    blockfrost: 0
+    mesh: 0
+
+resources:
+  requests:
+    cpu: 1
+    memory: 4Gi
+  limits:
+    cpu: 4
+    memory: 12Gi
