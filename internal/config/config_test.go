@@ -41,6 +41,7 @@ func resetGlobalConfig() {
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
 		UtxorpcPort:                 9090,
+		CORSAllowedOrigins:          []string{"*"},
 		BlockfrostPort:              3000,
 		MeshPort:                    8080,
 		Topology:                    "",
@@ -133,6 +134,7 @@ mithril:
 		PrivatePort:          8000,
 		RelayPort:            4000,
 		UtxorpcPort:          9940, // explicit override from YAML
+		CORSAllowedOrigins:   []string{"*"},
 		BlockfrostPort:       3000, // default
 		MeshPort:             8080, // default
 		Topology:             "",
@@ -204,6 +206,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
 		UtxorpcPort:                 9090,
+		CORSAllowedOrigins:          []string{"*"},
 		BlockfrostPort:              3000,
 		MeshPort:                    8080,
 		Topology:                    "",

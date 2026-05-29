@@ -30,6 +30,7 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
@@ -74,6 +75,9 @@ type UtxorpcConfig struct {
 	// ServerTimeout bounds long-running UTxO RPC handlers server-side
 	// (0 = use default).
 	ServerTimeout time.Duration
+	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
+	// Empty disables CORS.
+	CORSAllowedOrigins []string
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -168,6 +172,12 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			compress1KB,
 		),
 	)
+	handler := httpcors.Handler(
+		mux,
+		httpcors.Config{
+			AllowedOrigins: u.config.CORSAllowedOrigins,
+		},
+	)
 	var server *http.Server
 	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 		u.config.Logger.Info(
@@ -183,7 +193,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 				u.config.Host,
 				u.config.Port,
 			),
-			Handler:           mux,
+			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
 			IdleTimeout:       120 * time.Second,
@@ -204,7 +214,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 				u.config.Host,
 				u.config.Port,
 			),
-			Handler:           mux,
+			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,

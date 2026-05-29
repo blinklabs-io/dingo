@@ -727,14 +727,15 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
 			utxorpc.UtxorpcConfig{
-				Logger:          n.config.logger,
-				EventBus:        n.eventBus,
-				LedgerState:     n.ledgerState,
-				Mempool:         n.mempool,
-				Host:            n.config.bindAddr,
-				Port:            n.config.utxorpcPort,
-				TlsCertFilePath: n.config.tlsCertFilePath,
-				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+				Logger:             n.config.logger,
+				EventBus:           n.eventBus,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Port:               n.config.utxorpcPort,
+				TlsCertFilePath:    n.config.tlsCertFilePath,
+				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -755,11 +756,12 @@ func (n *Node) Run(ctx context.Context) error {
 		var err error
 		n.bark, err = bark.NewBark(
 			bark.BarkConfig{
-				Logger:          n.config.logger,
-				DB:              db,
-				TlsCertFilePath: n.config.tlsCertFilePath,
-				TlsKeyFilePath:  n.config.tlsKeyFilePath,
-				Port:            n.config.barkPort,
+				Logger:             n.config.logger,
+				DB:                 db,
+				TlsCertFilePath:    n.config.tlsCertFilePath,
+				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				Port:               n.config.barkPort,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err != nil {
@@ -793,7 +795,8 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
-				ListenAddress: listenAddr,
+				ListenAddress:      listenAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 			adapter,
 			n.config.logger,
@@ -846,6 +849,7 @@ func (n *Node) Run(ctx context.Context) error {
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
 				GenesisStartTimeSec: genesisStartTimeSec,
+				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
 			},
 		)
 		if meshErr != nil {

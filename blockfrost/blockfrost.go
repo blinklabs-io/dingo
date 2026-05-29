@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
 // Blockfrost is the Blockfrost-compatible REST API server.
@@ -214,7 +216,12 @@ func (b *Blockfrost) Start(
 	// Wrap handler with a request body size limit (1 MB)
 	// as defense-in-depth against oversized payloads.
 	const maxRequestBodyBytes int64 = 1 << 20 // 1 MB
-	handler := http.MaxBytesHandler(mux, maxRequestBodyBytes)
+	handler := httpcors.Handler(
+		http.MaxBytesHandler(mux, maxRequestBodyBytes),
+		httpcors.Config{
+			AllowedOrigins: b.config.CORSAllowedOrigins,
+		},
+	)
 
 	server := &http.Server{
 		Addr:              b.config.ListenAddress,

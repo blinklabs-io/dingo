@@ -75,6 +75,7 @@ var flagSpecs = []flagSpec{
 	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
 	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
 	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
+	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive base URL"),
@@ -206,6 +207,28 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 				return err
 			}
 			targetValue(cfg, field).SetString(v)
+			return nil
+		},
+	}
+}
+
+func stringSliceFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet) {
+			def := defaultValue(field).Interface().([]string)
+			f.StringSlice(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetStringSlice(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(v))
 			return nil
 		},
 	}
