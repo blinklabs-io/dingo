@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-05-22
+Last reviewed: 2026-05-29
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -96,10 +96,14 @@ graph TB
         Bark["Bark<br/><i>bark/</i>"]
     end
 
+    subgraph "Archive Support"
+        BPruner["Bark Pruner<br/><i>bark/pruner.go</i>"]
+    end
+
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & BPruner
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -109,6 +113,7 @@ graph TB
     LS -->|"validate txs"| MP
     ChM --> DB
     DB --> Blob & Meta
+    BPruner --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
     CSel -->|"switch active peer"| CS
@@ -521,7 +526,8 @@ dingo/
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
-│   └── blob.go          # Remote archive blob adapter with security window
+│   ├── blob.go          # Remote archive blob adapter
+│   └── pruner.go        # Ledger-window-based local block pruning
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -718,6 +724,25 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+
+### Archive And Pruning Topology
+
+Dingo's blob-store abstraction supports an archive/pruning deployment pattern:
+
+- An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
+  `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
+  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
+  a signed object URL plus compact block metadata.
+- A pruning node keeps its local blob plugin, configures `barkBaseUrl`, and is
+  wired by `node.go` with a `bark.BlobStoreBark` wrapper plus
+  `bark.Pruner`. Normal block writes still go to the local blob plugin. Reads
+  first check local storage; tombstoned or missing historical blocks fall back
+  to the remote Bark archive and download the signed URL response.
+- The pruner derives its safety window from `LedgerState.StabilityWindow()` and
+  scans only blocks older than that window. `Database.PruneBlock` materializes
+  any UTxO CBOR still stored as block offsets before replacing the block CBOR
+  value with a tombstone, leaving block indexes and metadata intact for archive
+  resolution.
 
 ### Tiered CBOR Cache
 
@@ -1052,7 +1077,23 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 
 ### Bark (`bark/`)
 
-Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive services. It exposes archive access over Connect/gRPC and also supplies a remote archive adapter with a configurable security window, allowing Dingo to fetch historical blocks from a remote Bark instance instead of storing them locally.
+Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
+services. It exposes archive access over Connect/gRPC and supplies the remote
+archive adapter used by pruning nodes.
+
+The server side (`bark.Bark`) registers the archive service, health endpoint,
+and gRPC reflection. Archive fetches validate the requested block hash, ask the
+active blob plugin for a signed block URL, and return that URL with block type,
+height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
+archive-node blob backends because they can sign object-storage URLs.
+
+The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
+`GetBlock` and block iterators pass through local values, but resolve
+`types.ErrBlockTombstoned` or missing historical block CBOR by calling the
+remote Bark archive and downloading the signed URL. `bark.Pruner` runs only
+when `barkBaseUrl` is configured; it uses the ledger-derived stability window,
+not a separate operator-supplied security-window value, to decide which local
+blocks are safe to tombstone.
 
 ## Architectural Boundaries
 
