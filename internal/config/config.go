@@ -226,6 +226,7 @@ type Config struct {
 	BarkPort             uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	BarkPrunerFrequency  time.Duration `yaml:"barkPrunerFrequency" envconfig:"DINGO_BARK_PRUNER_FREQUENCY"`
 	UtxorpcPort          uint          `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	CORSAllowedOrigins   []string      `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	MetricsPort          uint          `yaml:"metricsPort"                                                      split_words:"true"`
 	DebugPort            uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
 	IntersectTip         bool          `yaml:"intersectTip"                                                     split_words:"true"`
@@ -423,6 +424,7 @@ var globalConfig = &Config{
 	BarkPort:             0,
 	BarkPrunerFrequency:  time.Hour,
 	UtxorpcPort:          9090,
+	CORSAllowedOrigins:   []string{"*"},
 	BlockfrostPort:       3000,
 	MeshPort:             8080,
 	Topology:             "",

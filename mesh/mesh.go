@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -70,6 +71,9 @@ type ServerConfig struct {
 	// of slot 0 for the configured network. Used to
 	// convert slot numbers to absolute timestamps.
 	GenesisStartTimeSec int64
+	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
+	// Empty disables CORS.
+	CORSAllowedOrigins []string
 }
 
 // Server is the Mesh-compatible REST API server.
@@ -178,8 +182,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.registerRoutes(mux)
 
 	server := &http.Server{
-		Addr:              s.config.ListenAddress,
-		Handler:           mux,
+		Addr: s.config.ListenAddress,
+		Handler: httpcors.Handler(
+			mux,
+			httpcors.Config{
+				AllowedOrigins: s.config.CORSAllowedOrigins,
+			},
+		),
 		ReadHeaderTimeout: 60 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,

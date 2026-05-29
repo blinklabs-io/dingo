@@ -31,6 +31,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/httpcors"
 )
 
 type Bark struct {
@@ -46,6 +47,9 @@ type BarkConfig struct {
 	TlsKeyFilePath  string
 	Host            string
 	Port            uint
+	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
+	// Empty disables CORS.
+	CORSAllowedOrigins []string
 }
 
 func NewBark(cfg BarkConfig) (*Bark, error) {
@@ -97,6 +101,12 @@ func (b *Bark) Start(ctx context.Context) error {
 		),
 	)
 
+	handler := httpcors.Handler(
+		mux,
+		httpcors.Config{
+			AllowedOrigins: b.config.CORSAllowedOrigins,
+		},
+	)
 	var server *http.Server
 	if b.config.TlsCertFilePath != "" && b.config.TlsKeyFilePath != "" {
 		b.config.Logger.Info(
@@ -112,7 +122,7 @@ func (b *Bark) Start(ctx context.Context) error {
 				b.config.Host,
 				b.config.Port,
 			),
-			Handler:           mux,
+			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
 			WriteTimeout:      30 * time.Second,
 			IdleTimeout:       120 * time.Second,
@@ -130,7 +140,7 @@ func (b *Bark) Start(ctx context.Context) error {
 				b.config.Host,
 				b.config.Port,
 			),
-			Handler:           mux,
+			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
 			WriteTimeout:      30 * time.Second,
