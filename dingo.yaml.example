@@ -182,13 +182,23 @@ blockfrostPort: 3000
 # CLI: --mesh-port
 meshPort: 8080
 
-# base url of bark archive server
+# Base URL of a remote Bark archive server. When set, this node keeps using
+# its configured local blob plugin but wraps it with Bark archive fallback and
+# starts the background pruner.
+# Can be overridden with DINGO_BARK_BASE_URL
 # CLI: --bark-url
 barkBaseUrl: ""
 
-# TCP port bind for listening for bark RPC calls
+# TCP port bind for listening for Bark RPC calls. Enable this on archive nodes.
+# Can be overridden with DINGO_BARK_PORT
 # CLI: --bark-port
 barkPort: 0
+
+# How often a Bark-backed pruning node scans for blocks older than the
+# ledger-derived stability window. Default: 1h.
+# Can be overridden with DINGO_BARK_PRUNER_FREQUENCY
+# CLI: --bark-pruner-frequency
+barkPrunerFrequency: 1h
 
 # ---
 # Deployment pattern examples (uncomment one block):
@@ -221,6 +231,25 @@ barkPort: 0
 #   # Optional forging tolerances (0 = defaults)
 #   forgeSyncToleranceSlots: 0
 #   forgeStaleGapThresholdSlots: 0
+#
+# Archive node (full immutable block history in object storage, Bark enabled):
+#   storageMode: "core"
+#   database:
+#     blob:
+#       plugin: "s3" # or "gcs"
+#       s3:
+#         bucket: "dingo-archive"
+#         region: "us-east-1"
+#         prefix: "preview"
+#   barkPort: 9091
+#
+# Pruning node (local blobs plus remote archive fallback):
+#   storageMode: "core"
+#   database:
+#     blob:
+#       plugin: "badger"
+#   barkBaseUrl: "http://archive.example.internal:9091"
+#   barkPrunerFrequency: 1h
 #
 # Dev mode (isolated, forge blocks, no outbound):
 #   runMode: "dev"

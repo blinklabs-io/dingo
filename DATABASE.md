@@ -291,7 +291,30 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
-Pruning can replace a block's `bp...` value with `DBT1`. The SQL metadata rows remain, and the blob store returns `types.ErrBlockTombstoned` with the slot/hash so an archive proxy can fetch the CBOR elsewhere.
+### Archive And Pruning Contract
+
+Archive nodes and pruning nodes use the same logical blob keys. The difference
+is where immutable block CBOR is expected to live after the block is older than
+the ledger stability window:
+
+- Archive nodes keep block CBOR in a signed-URL-capable blob backend. The `s3`
+  and `gcs` plugins implement `GetBlockURL` by reading the block's
+  `bp..._metadata` value and generating a one-hour signed URL for the `bp...`
+  object. Bark's archive service exposes that URL and metadata to other Dingo
+  nodes. The local Badger plugin does not implement `GetBlockURL`, so it is not
+  suitable as the backing store for a Bark archive node.
+- Pruning nodes keep their normal local blob plugin, wrap it with the Bark
+  archive adapter, and run the Bark pruner when `barkBaseUrl` is configured.
+  The pruner calls `Database.PruneBlock` for blocks below
+  `current_slot - ledger.StabilityWindow()`. `PruneBlock` first materializes
+  UTxO CBOR entries that still point into the block by `DOFF` offset, then
+  replaces the block's `bp...` value with tombstone marker `DBT1` in the same
+  blob transaction.
+- Tombstoned blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries.
+  SQL metadata rows also remain. Blob readers return
+  `types.ErrBlockTombstoned` with the slot/hash, allowing the Bark wrapper to
+  fetch the CBOR from the archive while preserving local block indexes and
+  iteration semantics.
 
 ## SQL Examples Mirroring the Go API
 
