@@ -24,7 +24,7 @@ import (
 type Asset struct {
 	Name        []byte       `gorm:"uniqueIndex:idx_asset_unique;size:32"`
 	NameHex     []byte       `gorm:"index;size:64"`
-	PolicyId    []byte       `gorm:"index;uniqueIndex:idx_asset_unique;size:28"`
+	PolicyId    []byte       `gorm:"index:idx_asset_policy_id;uniqueIndex:idx_asset_unique;size:28"`
 	Fingerprint []byte       `gorm:"index;size:48"`
 	ID          uint         `gorm:"primaryKey"`
 	UtxoID      uint         `gorm:"index;uniqueIndex:idx_asset_unique"`
