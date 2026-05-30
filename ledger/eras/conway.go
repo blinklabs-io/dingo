@@ -188,12 +188,16 @@ func ValidateTxConway(
 	// These must run even for isValid=false transactions, which still
 	// require valid structure, fees, and UTxO references for collateral.
 	errs := []error{}
-	for idx, validationFunc := range conway.UtxoValidationRules {
-		err = validationFunc(tx, slot, ls, pp)
+	for _, validationRule := range conwayValidationRules(ls) {
+		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
 				errs,
-				fmt.Errorf("conway utxo validation rule %d: %w", idx, err),
+				fmt.Errorf(
+					"conway utxo validation rule %d: %w",
+					validationRule.index,
+					err,
+				),
 			)
 		}
 	}
@@ -207,6 +211,39 @@ func ValidateTxConway(
 		return nil
 	}
 	return nil
+}
+
+var (
+	conwayUtxoValidationRules       = buildConwayValidationRules(false)
+	conwayPhase1UtxoValidationRules = buildConwayValidationRules(true)
+)
+
+func conwayValidationRules(
+	ls lcommon.LedgerState,
+) []indexedUtxoValidationRule {
+	if shouldSkipPhase2Validation(ls) {
+		return conwayPhase1UtxoValidationRules
+	}
+	return conwayUtxoValidationRules
+}
+
+func buildConwayValidationRules(
+	skipPhase2 bool,
+) []indexedUtxoValidationRule {
+	if skipPhase2 {
+		return buildIndexedUtxoValidationRules(
+			conway.UtxoValidationRules,
+			conwayUtxoValidatePlutusScriptsRuleIndex,
+			conway.UtxoValidatePlutusScripts,
+			"conway.UtxoValidatePlutusScripts",
+		)
+	}
+	return buildIndexedUtxoValidationRules(
+		conway.UtxoValidationRules,
+		noUtxoValidationRuleIndex,
+		nil,
+		"",
+	)
 }
 
 func EvaluateTxConway(

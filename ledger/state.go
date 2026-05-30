@@ -2193,46 +2193,101 @@ func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {
 	return ti
 }
 
-// SecurityParam returns the security parameter for the current era
-func (ls *LedgerState) SecurityParam() int {
+func (ls *LedgerState) securityParamForEra(eraId uint) (uint64, bool) {
 	if ls.config.CardanoNodeConfig == nil {
-		ls.config.Logger.Warn(
-			"CardanoNodeConfig is nil, using default security parameter",
-		)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"CardanoNodeConfig is nil, security parameter unavailable",
+			)
+		}
+		return 0, false
 	}
 	// Byron era only needs Byron genesis
-	if ls.currentEra.Id == 0 {
+	if eraId == 0 {
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		if byronGenesis == nil {
-			return blockfetchBatchSlotThresholdDefault
+			return 0, false
 		}
 		k := byronGenesis.ProtocolConsts.K
 		if k < 0 {
-			ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"invalid negative security parameter",
+					"k", k,
+				)
+			}
+			return 0, false
 		}
 		if k == 0 {
-			ls.config.Logger.Warn("security parameter is zero", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn("security parameter is zero", "k", k)
+			}
+			return 0, false
 		}
-		return int(k) // #nosec G115
+		return uint64(k), true // #nosec G115
 	}
 	// Shelley+ eras only need Shelley genesis
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return blockfetchBatchSlotThresholdDefault
+		return 0, false
 	}
 	k := shelleyGenesis.SecurityParam
 	if k < 0 {
-		ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"invalid negative security parameter",
+				"k", k,
+			)
+		}
+		return 0, false
 	}
 	if k == 0 {
-		ls.config.Logger.Warn("security parameter is zero", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn("security parameter is zero", "k", k)
+		}
+		return 0, false
 	}
-	return int(k)
+	return uint64(k), true
+}
+
+// SecurityParam returns the security parameter for the current era
+func (ls *LedgerState) SecurityParam() int {
+	if k, ok := ls.securityParamForEra(ls.currentEra.Id); ok {
+		return int(k) // #nosec G115 -- k came from a non-negative int genesis field
+	}
+	return blockfetchBatchSlotThresholdDefault
+}
+
+// shouldSkipPhase2ValidationForBlock reports whether a block is deep enough
+// behind the reference tip that its producer-supplied isValid flag can be
+// trusted for replay-only Plutus Phase 2 results.
+func (ls *LedgerState) shouldSkipPhase2ValidationForBlock(
+	blockNumber uint64,
+	referenceBlockNumber uint64,
+	eraId uint,
+) bool {
+	securityParam, ok := ls.securityParamForEra(eraId)
+	if !ok || referenceBlockNumber < securityParam {
+		return false
+	}
+	immutableBlockNumber := referenceBlockNumber - securityParam
+	return blockNumber <= immutableBlockNumber
+}
+
+// shouldSkipPhase2ValidationForBlockAtCurrentTip samples the primary chain tip
+// for this specific block. The chain can advance or roll back while ledger
+// processing drains a read batch, so callers must not reuse a sub-batch-start
+// reference tip for all blocks in the transaction.
+func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
+	blockNumber uint64,
+	eraId uint,
+) bool {
+	referenceTip := ls.chain.Tip()
+	return ls.shouldSkipPhase2ValidationForBlock(
+		blockNumber,
+		referenceTip.BlockNumber,
+		eraId,
+	)
 }
 
 // StabilityWindow returns the Ouroboros security stability window for the
@@ -2981,7 +3036,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
 			snapshotValidationEnabled := ls.validationEnabled
 			snapshotChainsyncState := ls.chainsyncState
-			chainTipSlot := ls.chain.Tip().Point.Slot
+			chainTip := ls.chain.Tip()
+			chainTipSlot := chainTip.Point.Slot
 			snapshotMithrilSlot := ls.mithrilLedgerSlot
 			ls.RUnlock()
 
@@ -3135,11 +3191,17 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						continue
 					}
 					// Process block
+					skipPhase2Validation := shouldValidateBlock &&
+						ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+							next.BlockNumber(),
+							snapshotEra.Id,
+						)
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
 						next,
 						shouldValidateBlock,
+						skipPhase2Validation,
 						expectedPrevHash,
 						blockOffsets,
 						snapshotEra,
@@ -3337,6 +3399,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	point ocommon.Point,
 	block ledger.Block,
 	shouldValidate bool,
+	skipPhase2Validation bool,
 	expectedPrevHash []byte,
 	offsets *database.BlockIngestionResult,
 	currentEra eras.EraDesc,
@@ -3408,9 +3471,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp = prevEraPParams
 				}
 				lv := &LedgerView{
-					txn:             txn,
-					ls:              ls,
-					intraBlockUtxos: intraBlockUtxos,
+					txn:                  txn,
+					ls:                   ls,
+					intraBlockUtxos:      intraBlockUtxos,
+					skipPhase2Validation: skipPhase2Validation,
 				}
 				err := validationEra.ValidateTxFunc(
 					tx,

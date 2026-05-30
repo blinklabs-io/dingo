@@ -841,6 +841,8 @@ The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era (Byron through Conway). Each era implements protocol parameter extraction, fee calculation, and era-specific transaction rules.
 
+During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
+
 ### Block Header Validation
 
 `ledger/verify_header.go` performs cryptographic validation of block headers:

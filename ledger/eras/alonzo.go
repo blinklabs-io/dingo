@@ -178,8 +178,8 @@ func ValidateTxAlonzo(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationFunc := range alonzo.UtxoValidationRules {
-		err = validationFunc(tx, slot, ls, pp)
+	for _, validationRule := range alonzoUtxoValidationRules {
+		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
 				errs,
@@ -213,6 +213,9 @@ func ValidateTxAlonzo(
 	}
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
+		return nil
+	}
+	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
 	// Resolve inputs
@@ -343,6 +346,17 @@ func ValidateTxAlonzo(
 		}
 	}
 	return nil
+}
+
+var alonzoUtxoValidationRules = buildAlonzoValidationRules()
+
+func buildAlonzoValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRules(
+		alonzo.UtxoValidationRules,
+		alonzoUtxoValidatePlutusScriptsRuleIndex,
+		alonzo.UtxoValidatePlutusScripts,
+		"alonzo.UtxoValidatePlutusScripts",
+	)
 }
 
 func EvaluateTxAlonzo(

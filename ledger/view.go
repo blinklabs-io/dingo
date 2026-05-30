@@ -48,6 +48,13 @@ type LedgerView struct {
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	// Key format: hex(txId) + ":" + outputIdx
 	consumedUtxos map[string]struct{}
+	// skipPhase2Validation is set for accepted block replay, where
+	// the producer's isValid flag is authoritative for Phase-2 results.
+	skipPhase2Validation bool
+}
+
+func (lv *LedgerView) SkipPhase2Validation() bool {
+	return lv.skipPhase2Validation
 }
 
 func (lv *LedgerView) NetworkId() uint {

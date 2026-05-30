@@ -209,8 +209,8 @@ func ValidateTxBabbage(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationFunc := range babbage.UtxoValidationRules {
-		err = validationFunc(tx, slot, ls, pp)
+	for _, validationRule := range babbageUtxoValidationRules {
+		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
 				errs,
@@ -226,6 +226,9 @@ func ValidateTxBabbage(
 	// to script execution compatibility.
 	// Skip script evaluation if TX is marked as not valid
 	if !tx.IsValid() {
+		return nil
+	}
+	if shouldSkipPhase2Validation(ls) {
 		return nil
 	}
 	// Resolve inputs
@@ -433,6 +436,17 @@ func ValidateTxBabbage(
 		}
 	}
 	return nil
+}
+
+var babbageUtxoValidationRules = buildBabbageValidationRules()
+
+func buildBabbageValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRules(
+		babbage.UtxoValidationRules,
+		babbageUtxoValidatePlutusScriptsRuleIndex,
+		babbage.UtxoValidatePlutusScripts,
+		"babbage.UtxoValidatePlutusScripts",
+	)
 }
 
 func EvaluateTxBabbage(
