@@ -44,7 +44,7 @@ func TestConsensusConformanceVectors(t *testing.T) {
 	}
 	for _, cv := range vectors {
 		t.Run(cv.Name, func(t *testing.T) {
-			a := newReplayAdapter(t)
+			a := newReplayAdapter(t, cv.Vector.Capture)
 			if err := consensus.RunConsensusVector(
 				t, cv.Vector, a,
 			); err != nil {
@@ -63,6 +63,47 @@ func TestConsensusConformanceVectors(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestConsensusConformanceKGuardIsLive proves the k configuration is
+// genuinely applied (not silently k=0): replaying a vector that carries
+// security_param>0 with local_tip *cleared* must reject the far-ahead peer
+// and fail the final_tip assertion. If this passed, the main conformance
+// run would be a vacuous k=0 test in disguise.
+func TestConsensusConformanceKGuardIsLive(t *testing.T) {
+	vectors, err := consensus.CapturedVectors()
+	if err != nil {
+		t.Fatalf("CapturedVectors: %v", err)
+	}
+	exercised := 0
+	for _, cv := range vectors {
+		if cv.Vector.Capture == nil ||
+			cv.Vector.Capture.SecurityParam == 0 ||
+			cv.Vector.Capture.LocalTip == nil {
+			continue // only vectors whose pass depends on local_tip
+		}
+		exercised++
+		// Same vector, but with local_tip removed: the implausibility
+		// guard must now reject the peer leading by more than k.
+		capNoLocal := *cv.Vector.Capture
+		capNoLocal.LocalTip = nil
+		v := cv.Vector
+		v.Capture = &capNoLocal
+		a := newReplayAdapter(t, &capNoLocal)
+		if err := consensus.RunConsensusVector(t, v, a); err == nil {
+			t.Fatalf(
+				"%s: k=%d replay passed with local_tip cleared — "+
+					"SecurityParam is not actually being applied",
+				cv.Name, capNoLocal.SecurityParam,
+			)
+		} else {
+			t.Logf("%s: k=%d without local_tip fails as expected: %v",
+				cv.Name, capNoLocal.SecurityParam, err)
+		}
+	}
+	if exercised == 0 {
+		t.Skip("no vector carries both security_param>0 and local_tip")
 	}
 }
 
@@ -88,13 +129,27 @@ type replayAdapter struct {
 	tipEventsSeen int
 }
 
-func newReplayAdapter(t *testing.T) *replayAdapter {
+func newReplayAdapter(
+	t *testing.T, capture *format.ConsensusCapture,
+) *replayAdapter {
 	t.Helper()
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(bus.Close)
+	// SecurityParam (k) and LocalTip come from the vector, not from
+	// adapter constants, so each scenario replays under the SUT
+	// configuration it was forged for (W5.2). k=0 / nil LocalTip — the
+	// default for older vectors — reproduces the prior k-disabled
+	// behaviour.
 	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
-		EventBus: bus,
+		EventBus:      bus,
+		SecurityParam: capture.SecurityParam,
 	})
+	if capture.LocalTip != nil {
+		// Arms the implausibility-guard catch-up relaxation so a peer
+		// leading by more than k is not rejected as a spoof — see the
+		// LocalTip doc in the format package.
+		cs.SetLocalTip(toGouroborosTip(*capture.LocalTip))
+	}
 	// Subscribe to the selector's input (peer tip updates) and output
 	// (chain switches) with our own channels so Stabilize can drive the
 	// selector synchronously, rather than racing the async SubscribeFunc
