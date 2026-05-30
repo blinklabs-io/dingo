@@ -58,9 +58,10 @@ import (
 //     yes, leave it out of the manifest.
 //  2. Does the index only serve API/query/rollback paths that do
 //     not run during Mithril sync? If yes, add it here.
-//  3. Composite indexes share state with their constituent
-//     columns; name the index exactly as it appears in the struct
-//     tag.
+//  3. Composite indexes share state with their constituent columns. If a field
+//     has both a deferrable single-column query index and a protected composite
+//     unique index, give the single-column index an explicit name and list that
+//     name here instead of the field.
 //
 // See deferred_test.go for the regression test that walks every
 // model field and asserts the classification.
@@ -179,8 +180,8 @@ var Manifest = []Index{
 		Notes: "Hex name lookup; query-only",
 	},
 	{
-		Model: &models.Asset{}, Field: "PolicyId", Table: "asset",
-		Notes: "Policy-id lookup; query-only (composite uniqueIndex covers insert)",
+		Model: &models.Asset{}, Name: "idx_asset_policy_id", Table: "asset",
+		Notes: "Policy-id lookup; query-only; idx_asset_unique still covers import",
 	},
 	{
 		Model: &models.Asset{}, Field: "Fingerprint", Table: "asset",

@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -109,6 +110,72 @@ func TestDropAndBuildDeferredIndexesRoundTrip(t *testing.T) {
 				idx.ResolvedName(), idx.Table,
 			)
 		}
+	}
+}
+
+// TestDropDeferredIndexesPreservesAssetImportConflictTarget covers the
+// #2457 failure mode: dropping the asset policy-id query index must not drop
+// idx_asset_unique, because ledger-state UTxO import uses it as the
+// ON CONFLICT target for asset inserts.
+func TestDropDeferredIndexesPreservesAssetImportConflictTarget(t *testing.T) {
+	d := setupTestDB(t)
+	migrator := d.DB().Migrator()
+
+	if !migrator.HasIndex(&models.Asset{}, "idx_asset_policy_id") {
+		t.Fatal("asset policy-id query index missing before drop")
+	}
+	if !migrator.HasIndex(&models.Asset{}, "idx_asset_unique") {
+		t.Fatal("asset unique import index missing before drop")
+	}
+
+	if err := d.DropDeferredIndexes(); err != nil {
+		t.Fatalf("DropDeferredIndexes: %v", err)
+	}
+
+	if migrator.HasIndex(&models.Asset{}, "idx_asset_policy_id") {
+		t.Fatal("asset policy-id query index still present after drop")
+	}
+	if !migrator.HasIndex(&models.Asset{}, "idx_asset_unique") {
+		t.Fatal("asset unique import index was dropped")
+	}
+
+	txID := bytes.Repeat([]byte{0x11}, 32)
+	policyID := bytes.Repeat([]byte{0x22}, 28)
+	utxo := models.Utxo{
+		TxId:      txID,
+		OutputIdx: 0,
+		AddedSlot: 100,
+		Amount:    10,
+		Assets: []models.Asset{{
+			PolicyId:    policyID,
+			Name:        []byte("asset-a"),
+			NameHex:     []byte("61737365742d61"),
+			Fingerprint: []byte("asset-fingerprint"),
+			Amount:      1,
+		}},
+	}
+
+	if err := d.ImportUtxos([]models.Utxo{utxo}, nil); err != nil {
+		t.Fatalf("ImportUtxos after deferred index drop: %v", err)
+	}
+	if err := d.ImportUtxos([]models.Utxo{utxo}, nil); err != nil {
+		t.Fatalf("duplicate ImportUtxos after deferred index drop: %v", err)
+	}
+
+	var assetCount int64
+	if err := d.DB().Model(&models.Asset{}).Where(
+		"policy_id = ? AND name = ?",
+		policyID,
+		[]byte("asset-a"),
+	).Count(&assetCount).Error; err != nil {
+		t.Fatalf("count assets: %v", err)
+	}
+	if assetCount != 1 {
+		t.Fatalf("duplicate asset rows inserted: got %d, want 1", assetCount)
+	}
+
+	if err := d.BuildDeferredIndexes(); err != nil {
+		t.Fatalf("BuildDeferredIndexes: %v", err)
 	}
 }
 
