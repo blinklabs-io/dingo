@@ -137,7 +137,7 @@ func newReplayAdapter(
 	t.Cleanup(bus.Close)
 	// SecurityParam (k) and LocalTip come from the vector, not from
 	// adapter constants, so each scenario replays under the SUT
-	// configuration it was forged for (W5.2). k=0 / nil LocalTip — the
+	// configuration it was forged for. k=0 / nil LocalTip — the
 	// default for older vectors — reproduces the prior k-disabled
 	// behaviour.
 	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
