@@ -2040,7 +2040,7 @@ func (ls *LedgerState) transitionToEra(
 	currentPParams lcommon.ProtocolParameters,
 ) (*EraTransitionResult, error) {
 	nextEraPtr, ok := ls.eraById(nextEraId)
-	if !ok {
+	if !ok || nextEraPtr == nil {
 		return nil, fmt.Errorf("unknown era ID %d", nextEraId)
 	}
 	nextEra := *nextEraPtr
@@ -3291,7 +3291,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					var blockNonce []byte
 					if snapshotEra.CalculateEtaVFunc != nil {
 						tmpEra, ok := ls.eraById(uint(next.Era().Id))
-						if ok && tmpEra.CalculateEtaVFunc != nil {
+						if ok && tmpEra != nil && tmpEra.CalculateEtaVFunc != nil {
 							tmpNonce, err := tmpEra.CalculateEtaVFunc(
 								ls.config.CardanoNodeConfig,
 								runningNonce,
@@ -5107,7 +5107,7 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 		}
 		nextID := eraID + 1
 		nextEraPtr, ok := ls.eraById(nextID)
-		if !ok {
+		if !ok || nextEraPtr == nil {
 			break
 		}
 		nextEra := *nextEraPtr
