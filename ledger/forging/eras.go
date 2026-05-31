@@ -200,3 +200,35 @@ func decodeBlockFromCbor(era eraKind, blockCbor []byte) (ledger.Block, error) {
 		return nil, fmt.Errorf("unknown era kind: %d", era)
 	}
 }
+
+// forgedBlockDiagnostics renders a freshly-encoded block in Cardano-aware
+// CBOR diagnostic notation, for logging when the re-decode in BuildBlock
+// fails. The notation labels each top-level block field — header,
+// transaction_bodies, transaction_witnesses, auxiliary_data_set,
+// invalid_transactions — and shows its CBOR shape, so a structural
+// encoder/decoder mismatch (e.g. a field serialized as a map where the
+// decoder expects an array, the failure mode in issue #2063) is visible
+// at a glance instead of hidden behind a generic unmarshal error.
+//
+// Array fan-out and nesting depth are capped to keep the dump bounded;
+// this runs only on the (expected-never) decode-failure path. Any error
+// from the formatter is folded into the returned string so logging the
+// diagnostics can never itself fail the forge.
+func forgedBlockDiagnostics(blockCbor []byte) string {
+	opts := cbor.DiagnosticOptions{
+		CardanoAware:  true,
+		MaxArrayItems: 8,
+		MaxDepth:      6,
+		MaxByteLength: 64,
+	}
+	if diag, err := cbor.FormatBlockDiagnostic(blockCbor, opts); err == nil {
+		return diag
+	}
+	// The block-aware formatter rejects a malformed envelope outright;
+	// fall back to a generic diagnostic so we still learn the shape.
+	if res, err := cbor.Diagnose(blockCbor, opts); err == nil &&
+		res.Root != nil {
+		return res.Root.FormatDiagnosticPretty(opts)
+	}
+	return fmt.Sprintf("<diagnostics unavailable for %d-byte block>", len(blockCbor))
+}
