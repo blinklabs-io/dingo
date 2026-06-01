@@ -1355,10 +1355,10 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 	}
 
 	readyEpoch := currentEpoch.EpochId + 1
-	if len(ls.EpochNonce(readyEpoch)) == 0 {
+	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
 		return
 	}
-	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
+	if len(ls.EpochNonce(readyEpoch)) == 0 {
 		return
 	}
 	ls.nextNonceReadyEpoch.Store(readyEpoch)
