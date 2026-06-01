@@ -16,10 +16,12 @@ package badger
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	badger "github.com/dgraph-io/badger/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -98,6 +100,7 @@ func TestBlobStoreBadger_NewIteratorAfterCloseDoesNotPanic(t *testing.T) {
 
 	// Create a transaction from that store.
 	txn := store.NewTransaction(false)
+	defer func() { require.NoError(t, txn.Rollback()) }()
 
 	// Close the store.
 	require.NoError(t, store.Close())
@@ -112,5 +115,6 @@ func TestBlobStoreBadger_NewIteratorAfterCloseDoesNotPanic(t *testing.T) {
 
 	// Expect an iterator object and to contain an error.
 	require.NotNil(t, iter)
-	require.Error(t, iter.Err())
+	require.ErrorIs(t, iter.Err(), types.ErrBlobStoreUnavailable)
+	require.True(t, errors.Is(iter.Err(), badger.ErrDBClosed))
 }
