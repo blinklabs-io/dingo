@@ -63,7 +63,7 @@ type Ouroboros struct {
 	protocolMetrics          *protocolMetrics
 	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
 	blockFetchMutex          sync.Mutex
-	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]map[blockfetchNoBlocksPoint]int
+	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -139,7 +139,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		EventBus:                 cfg.EventBus,
 		ConnManager:              cfg.ConnManager,
 		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
-		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]map[blockfetchNoBlocksPoint]int),
+		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 	}

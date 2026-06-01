@@ -43,11 +43,16 @@ const MaxBlockFetchRange = 129600
 // responses for the same (connId, start) tuple before closing the connection.
 const blockfetchMaxConsecutiveNoBlocks = 5
 
-// blockfetchNoBlocksPoint is the map key for tracking consecutive NoBlocks
-// responses per (slot, hash) start-point tuple.
+// blockfetchNoBlocksPoint identifies the start point used by the last
+// NoBlocks response tracked for a connection.
 type blockfetchNoBlocksPoint struct {
 	Slot uint64
 	Hash string
+}
+
+type blockfetchNoBlocksState struct {
+	Point blockfetchNoBlocksPoint
+	Count int
 }
 
 type blockfetchRangeIterator interface {
@@ -125,23 +130,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
-		if o.blockfetchRecordNoBlocks(ctx.ConnectionId, start) {
-			o.config.Logger.Warn(
-				"blockfetch: closing stuck peer after repeated oversized range requests",
-				"connection_id", ctx.ConnectionId.String(),
-				"start_slot", start.Slot,
-			)
-			if o.ConnManager != nil {
-				conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
-				if conn != nil {
-					o.closeBlockfetchConnection(
-						conn,
-						ctx.ConnectionId.String(),
-						"blockfetch: peer stuck on oversized range",
-					)
-				}
-			}
-		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated oversized range requests",
+			"blockfetch: peer stuck on oversized range",
+		)
 		return nil
 	}
 	// Validate that the start point exists in our chain (#397)
@@ -159,23 +153,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
-		if o.blockfetchRecordNoBlocks(ctx.ConnectionId, start) {
-			o.config.Logger.Warn(
-				"blockfetch: closing stuck peer after repeated missing-point requests",
-				"connection_id", ctx.ConnectionId.String(),
-				"start_slot", start.Slot,
-			)
-			if o.ConnManager != nil {
-				conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
-				if conn != nil {
-					o.closeBlockfetchConnection(
-						conn,
-						ctx.ConnectionId.String(),
-						"blockfetch: peer stuck on missing point",
-					)
-				}
-			}
-		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated missing-point requests",
+			"blockfetch: peer stuck on missing point",
+		)
 		return nil
 	}
 	o.blockfetchResetNoBlocks(ctx.ConnectionId)
@@ -357,6 +340,30 @@ func (o *Ouroboros) closeBlockfetchConnection(
 	}
 }
 
+func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+	logMessage string,
+	closeReason string,
+) {
+	if !o.blockfetchRecordNoBlocks(connId, start) {
+		return
+	}
+	o.config.Logger.Warn(
+		logMessage,
+		"connection_id", connId.String(),
+		"start_slot", start.Slot,
+	)
+	if o.ConnManager == nil {
+		return
+	}
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	o.closeBlockfetchConnection(conn, connId.String(), closeReason)
+}
+
 // blockfetchRecordNoBlocks increments the consecutive NoBlocks counter for
 // (connId, start) and returns true when blockfetchMaxConsecutiveNoBlocks is reached.
 func (o *Ouroboros) blockfetchRecordNoBlocks(
@@ -366,11 +373,17 @@ func (o *Ouroboros) blockfetchRecordNoBlocks(
 	key := blockfetchNoBlocksPoint{Slot: start.Slot, Hash: string(start.Hash)}
 	o.blockFetchMutex.Lock()
 	defer o.blockFetchMutex.Unlock()
-	if o.blockfetchNoBlocksCounts[connId] == nil {
-		o.blockfetchNoBlocksCounts[connId] = make(map[blockfetchNoBlocksPoint]int)
+	state, ok := o.blockfetchNoBlocksCounts[connId]
+	if !ok || state.Point != key {
+		o.blockfetchNoBlocksCounts[connId] = blockfetchNoBlocksState{
+			Point: key,
+			Count: 1,
+		}
+		return false
 	}
-	o.blockfetchNoBlocksCounts[connId][key]++
-	return o.blockfetchNoBlocksCounts[connId][key] >= blockfetchMaxConsecutiveNoBlocks
+	state.Count++
+	o.blockfetchNoBlocksCounts[connId] = state
+	return state.Count >= blockfetchMaxConsecutiveNoBlocks
 }
 
 func (o *Ouroboros) blockfetchResetNoBlocks(connId ouroboros.ConnectionId) {

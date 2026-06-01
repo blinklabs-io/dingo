@@ -448,10 +448,10 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should need another full sequence after progress")
 }
 
-// TestBlockfetchRecordNoBlocks_IndependentPoints verifies NoBlocks counts are
-// tracked separately for each requested start point on the same connection.
+// TestBlockfetchRecordNoBlocks_IndependentPoints verifies changing start
+// points resets the consecutive NoBlocks count on the same connection.
 func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
-	// Tracks counters independently per start point for the same connection.
+	// Only consecutive NoBlocks for the same start point should accumulate.
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	o := NewOuroboros(OuroborosConfig{
 		Logger:   logger,
@@ -465,6 +465,7 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
 	}
 	assert.False(t, o.blockfetchRecordNoBlocks(connId, startB), "different start point should not inherit count")
+	assert.False(t, o.blockfetchRecordNoBlocks(connId, startA), "interleaved start point should reset consecutive count")
 }
 
 // TestBlockfetchRecordNoBlocks_IndependentConns verifies NoBlocks counts are
