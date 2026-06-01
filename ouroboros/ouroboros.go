@@ -52,17 +52,18 @@ import (
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 type Ouroboros struct {
-	ConnManager       *connmanager.ConnectionManager
-	PeerGov           *peergov.PeerGovernor
-	ChainsyncState    *chainsync.State
-	EventBus          *event.EventBus
-	Mempool           *mempool.Mempool
-	LedgerState       *ledger.LedgerState
-	config            OuroborosConfig
-	blockfetchMetrics *blockfetchMetrics
-	protocolMetrics   *protocolMetrics
-	blockFetchStarts  map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex   sync.Mutex
+	ConnManager              *connmanager.ConnectionManager
+	PeerGov                  *peergov.PeerGovernor
+	ChainsyncState           *chainsync.State
+	EventBus                 *event.EventBus
+	Mempool                  *mempool.Mempool
+	LedgerState              *ledger.LedgerState
+	config                   OuroborosConfig
+	blockfetchMetrics        *blockfetchMetrics
+	protocolMetrics          *protocolMetrics
+	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
+	blockFetchMutex          sync.Mutex
+	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]map[blockfetchNoBlocksPoint]int
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -134,12 +135,13 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:              cfg,
-		EventBus:            cfg.EventBus,
-		ConnManager:         cfg.ConnManager,
-		blockFetchStarts:    make(map[ouroboros.ConnectionId]time.Time),
-		chainsyncStats:      make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
-		leiosEndorserBlocks: make(map[string]*leiosEndorserBlockData),
+		config:                   cfg,
+		EventBus:                 cfg.EventBus,
+		ConnManager:              cfg.ConnManager,
+		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]map[blockfetchNoBlocksPoint]int),
+		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -381,9 +383,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.Mempool != nil {
 		o.Mempool.RemoveConsumer(connId)
 	}
-	// Clean up any pending block fetch start times
+	// Clean up any pending block fetch start times and NoBlocks counters
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, connId)
+	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()

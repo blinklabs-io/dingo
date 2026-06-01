@@ -39,6 +39,17 @@ const blockfetchMetricsCdfUpdateInterval = 32
 // corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
 const MaxBlockFetchRange = 129600
 
+// blockfetchMaxConsecutiveNoBlocks is the number of consecutive NoBlocks
+// responses for the same (connId, start) tuple before closing the connection.
+const blockfetchMaxConsecutiveNoBlocks = 5
+
+// blockfetchNoBlocksPoint is the map key for tracking consecutive NoBlocks
+// responses per (slot, hash) start-point tuple.
+type blockfetchNoBlocksPoint struct {
+	Slot uint64
+	Hash string
+}
+
 type blockfetchRangeIterator interface {
 	Next(bool) (*chain.ChainIteratorResult, error)
 	Cancel()
@@ -114,6 +125,23 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		if o.blockfetchRecordNoBlocks(ctx.ConnectionId, start) {
+			o.config.Logger.Warn(
+				"blockfetch: closing stuck peer after repeated oversized range requests",
+				"connection_id", ctx.ConnectionId.String(),
+				"start_slot", start.Slot,
+			)
+			if o.ConnManager != nil {
+				conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+				if conn != nil {
+					o.closeBlockfetchConnection(
+						conn,
+						ctx.ConnectionId.String(),
+						"blockfetch: peer stuck on oversized range",
+					)
+				}
+			}
+		}
 		return nil
 	}
 	// Validate that the start point exists in our chain (#397)
@@ -131,8 +159,26 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		if o.blockfetchRecordNoBlocks(ctx.ConnectionId, start) {
+			o.config.Logger.Warn(
+				"blockfetch: closing stuck peer after repeated missing-point requests",
+				"connection_id", ctx.ConnectionId.String(),
+				"start_slot", start.Slot,
+			)
+			if o.ConnManager != nil {
+				conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
+				if conn != nil {
+					o.closeBlockfetchConnection(
+						conn,
+						ctx.ConnectionId.String(),
+						"blockfetch: peer stuck on missing point",
+					)
+				}
+			}
+		}
 		return nil
 	}
+	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
 		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
@@ -309,6 +355,28 @@ func (o *Ouroboros) closeBlockfetchConnection(
 			"error", err,
 		)
 	}
+}
+
+// blockfetchRecordNoBlocks increments the consecutive NoBlocks counter for
+// (connId, start) and returns true when blockfetchMaxConsecutiveNoBlocks is reached.
+func (o *Ouroboros) blockfetchRecordNoBlocks(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+) bool {
+	key := blockfetchNoBlocksPoint{Slot: start.Slot, Hash: string(start.Hash)}
+	o.blockFetchMutex.Lock()
+	defer o.blockFetchMutex.Unlock()
+	if o.blockfetchNoBlocksCounts[connId] == nil {
+		o.blockfetchNoBlocksCounts[connId] = make(map[blockfetchNoBlocksPoint]int)
+	}
+	o.blockfetchNoBlocksCounts[connId][key]++
+	return o.blockfetchNoBlocksCounts[connId][key] >= blockfetchMaxConsecutiveNoBlocks
+}
+
+func (o *Ouroboros) blockfetchResetNoBlocks(connId ouroboros.ConnectionId) {
+	o.blockFetchMutex.Lock()
+	delete(o.blockfetchNoBlocksCounts, connId)
+	o.blockFetchMutex.Unlock()
 }
 
 // BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies

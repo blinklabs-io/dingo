@@ -389,6 +389,139 @@ func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
 	})
 }
 
+// TestBlockfetchRecordNoBlocks_BelowThreshold verifies repeated NoBlocks stay
+// below the close threshold until the configured limit is reached.
+func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
+	// Returns false for each of the first four identical NoBlocks requests.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connId := testConnId()
+	start := ocommon.NewPoint(100, []byte{0x01})
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "should not trigger before threshold")
+	}
+}
+
+// TestBlockfetchRecordNoBlocks_ReachesThreshold verifies the stuck-peer
+// detector triggers on the configured consecutive NoBlocks threshold.
+func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
+	// Returns true on the fifth consecutive NoBlocks for the same start point.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connId := testConnId()
+	start := ocommon.NewPoint(100, []byte{0x01})
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		o.blockfetchRecordNoBlocks(connId, start)
+	}
+	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger on 5th consecutive request")
+}
+
+// TestBlockfetchRecordNoBlocks_ProgressResetsCounter verifies valid progress
+// clears prior NoBlocks counts for the connection.
+func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
+	// Valid blockfetch progress clears prior NoBlocks counts for the connection.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connId := testConnId()
+	start := ocommon.NewPoint(100, []byte{0x01})
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, start))
+	}
+
+	o.blockfetchResetNoBlocks(connId)
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after progress")
+	}
+	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should need another full sequence after progress")
+}
+
+// TestBlockfetchRecordNoBlocks_IndependentPoints verifies NoBlocks counts are
+// tracked separately for each requested start point on the same connection.
+func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
+	// Tracks counters independently per start point for the same connection.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connId := testConnId()
+	startA := ocommon.NewPoint(100, []byte{0x01})
+	startB := ocommon.NewPoint(200, []byte{0x02})
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
+	}
+	assert.False(t, o.blockfetchRecordNoBlocks(connId, startB), "different start point should not inherit count")
+}
+
+// TestBlockfetchRecordNoBlocks_IndependentConns verifies NoBlocks counts are
+// tracked separately for each connection.
+func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
+	// Tracks counters independently per connection for the same start point.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connA := ouroboros_conn.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	connB := ouroboros_conn.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3003},
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		o.blockfetchRecordNoBlocks(connA, start)
+	}
+	// Different connId at the same point must have its own independent counter
+	assert.False(t, o.blockfetchRecordNoBlocks(connB, start), "different connId should not inherit count")
+}
+
+// TestBlockfetchRecordNoBlocks_CleanupResetsCounter verifies connection-close
+// cleanup clears stuck-peer state before a reconnect starts fresh.
+func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
+	// Resets the counter after connection close so the peer gets a fresh count on reconnect.
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	connId := testConnId()
+	start := ocommon.NewPoint(100, []byte{0x01})
+
+	// Drive counter to threshold
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks; i++ {
+		o.blockfetchRecordNoBlocks(connId, start)
+	}
+
+	// Simulate connection close cleanup
+	o.blockFetchMutex.Lock()
+	delete(o.blockfetchNoBlocksCounts, connId)
+	o.blockFetchMutex.Unlock()
+
+	// Counter should be reset — needs another full sequence to trigger
+	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after cleanup")
+	}
+	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger again after reset")
+}
+
 func BenchmarkBlockfetchClientBlockMetrics(b *testing.B) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	eventBus := event.NewEventBus(nil, logger)
