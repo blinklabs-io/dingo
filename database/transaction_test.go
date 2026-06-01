@@ -178,6 +178,11 @@ func (m *mockBlobTxn) Rollback() error {
 	return nil
 }
 
+// alwaysValidIterator is a test-only helper whose Valid() and
+// ValidForPrefix() methods always return true. That would normally cause
+// infinite iteration; it is safe here only because the test uses an
+// expired/negative deadline to force an immediate timeout. Do not use it where
+// Valid() must eventually transition to false.
 type alwaysValidIterator struct{}
 
 func (it *alwaysValidIterator) Rewind()                    {}

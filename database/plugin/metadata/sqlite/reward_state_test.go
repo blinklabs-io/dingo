@@ -386,6 +386,108 @@ func TestGetPoolRegistrationsAtSlot(t *testing.T) {
 	require.Equal(t, "1/10", registrations[0].Margin.String())
 }
 
+func TestGetPoolRegistrationsAtSlotTieBreaksSameAddedSlot(t *testing.T) {
+	store := setupTestDB(t)
+	poolKeyHash := rewardStateTestHash(0xcc)
+	poolHash := rewardStateTestPoolKeyHash(0xcc)
+
+	pools := []*models.Pool{
+		{PoolKeyHash: rewardStateTestHash(0xc1)},
+		{PoolKeyHash: rewardStateTestHash(0xc2)},
+		{PoolKeyHash: rewardStateTestHash(0xc3)},
+	}
+	for _, pool := range pools {
+		require.NoError(t, store.DB().Create(pool).Error)
+	}
+
+	txLowBlock := &models.Transaction{
+		Hash:       rewardStateTestHash(0x11),
+		Slot:       50,
+		BlockIndex: 1,
+		Valid:      true,
+	}
+	txHighBlock := &models.Transaction{
+		Hash:       rewardStateTestHash(0x22),
+		Slot:       50,
+		BlockIndex: 2,
+		Valid:      true,
+	}
+	txHighCert := &models.Transaction{
+		Hash:       rewardStateTestHash(0x33),
+		Slot:       50,
+		BlockIndex: 2,
+		Valid:      true,
+	}
+	require.NoError(t, store.DB().Create(txLowBlock).Error)
+	require.NoError(t, store.DB().Create(txHighBlock).Error)
+	require.NoError(t, store.DB().Create(txHighCert).Error)
+
+	certLowBlock := &models.Certificate{
+		TransactionID: txLowBlock.ID,
+		Slot:          50,
+		CertIndex:     99,
+		CertType:      uint(lcommon.CertificateTypePoolRegistration),
+	}
+	certHighBlockLowCert := &models.Certificate{
+		TransactionID: txHighBlock.ID,
+		Slot:          50,
+		CertIndex:     1,
+		CertType:      uint(lcommon.CertificateTypePoolRegistration),
+	}
+	certHighBlockHighCert := &models.Certificate{
+		TransactionID: txHighCert.ID,
+		Slot:          50,
+		CertIndex:     2,
+		CertType:      uint(lcommon.CertificateTypePoolRegistration),
+	}
+	require.NoError(t, store.DB().Create(certLowBlock).Error)
+	require.NoError(t, store.DB().Create(certHighBlockLowCert).Error)
+	require.NoError(t, store.DB().Create(certHighBlockHighCert).Error)
+
+	for _, reg := range []*models.PoolRegistration{
+		{
+			PoolID:        pools[0].ID,
+			PoolKeyHash:   poolKeyHash,
+			CertificateID: certLowBlock.ID,
+			AddedSlot:     50,
+			Pledge:        1_000,
+			Cost:          100,
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+		},
+		{
+			PoolID:        pools[1].ID,
+			PoolKeyHash:   poolKeyHash,
+			CertificateID: certHighBlockHighCert.ID,
+			AddedSlot:     50,
+			Pledge:        3_000,
+			Cost:          300,
+			Margin:        &types.Rat{Rat: big.NewRat(3, 100)},
+		},
+		{
+			PoolID:        pools[2].ID,
+			PoolKeyHash:   poolKeyHash,
+			CertificateID: certHighBlockLowCert.ID,
+			AddedSlot:     50,
+			Pledge:        2_000,
+			Cost:          200,
+			Margin:        &types.Rat{Rat: big.NewRat(2, 100)},
+		},
+	} {
+		require.NoError(t, store.DB().Create(reg).Error)
+	}
+
+	registrations, err := store.GetPoolRegistrationsAtSlot(
+		[]lcommon.PoolKeyHash{poolHash},
+		50,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	require.Equal(t, uint64(3_000), uint64(registrations[0].Pledge))
+	require.Equal(t, uint64(300), uint64(registrations[0].Cost))
+	require.Equal(t, "3/100", registrations[0].Margin.String())
+}
+
 func rewardStateTestHash(fill byte) []byte {
 	hash := make([]byte, 28)
 	for i := range hash {

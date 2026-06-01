@@ -537,8 +537,24 @@ func (d *BlobStoreBadger) NewIterator(
 	}
 	defer func() {
 		if r := recover(); r != nil {
-			err, ok := r.(error)
-			if ok && errors.Is(err, badger.ErrDBClosed) {
+			var err error
+			switch v := r.(type) {
+			case error:
+				err = v
+			case string:
+				err = errors.New(v)
+				if v == badger.ErrDBClosed.Error() {
+					err = fmt.Errorf("%w: %s", badger.ErrDBClosed, v)
+				}
+			default:
+				panic(r)
+			}
+			d.logger.Warn(
+				"iterator creation failed during shutdown",
+				"panic", r,
+				"error", err,
+			)
+			if errors.Is(err, badger.ErrDBClosed) {
 				iter = &errorIterator{
 					err: fmt.Errorf("%w: %w", types.ErrBlobStoreUnavailable, err),
 				}
