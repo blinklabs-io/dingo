@@ -661,6 +661,22 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	// matching era's block decoder.
 	ledgerBlock, err := decodeBlockFromCbor(limits.era, blockCbor)
 	if err != nil {
+		// The forged block failed to round-trip through its own era
+		// decoder, so this winning slot would be silently dropped. Dump
+		// the generated block in Cardano-aware CBOR diagnostic notation
+		// so the encoder/decoder wire-shape mismatch is diagnosable from
+		// the logs rather than only via the opaque unmarshal error
+		// (issue #2063).
+		b.logger.Error(
+			"forged block failed to re-decode; dumping CBOR diagnostics",
+			"component", "forging",
+			"era", limits.era,
+			"proto_major", limits.protoMajor,
+			"tx_count", len(transactionBodies),
+			"block_cbor_len", len(blockCbor),
+			"error", err,
+			"diagnostics", forgedBlockDiagnostics(blockCbor),
+		)
 		return nil, nil, fmt.Errorf(
 			"failed to unmarshal forged block from generated CBOR: %w",
 			err,
