@@ -2,7 +2,7 @@
 
 ## v0.50.0 (June 1, 2026)
 
-**Title:** Add API CORS controls, improve Mithril visibility, and fix storage reliability
+**Title:** Add browser-friendly APIs, improve catch-up visibility, and strengthen reliability
 
 **Date:** June 1, 2026
 
@@ -15,12 +15,12 @@ Hi folks! Here’s what we shipped in v0.50.0.
 * Added **configure CORS behavior for Dingo APIs:** API operators can now manage cross origin access more directly, which makes browser based integrations easier to expose with the intended policy. ([#2456](https://github.com/blinklabs-io/dingo/pull/2456))
 * Introduced **measure backfill progress with clearer timing signals:** Operators can now see timing counters for critical backfill work, which makes catch up behavior easier to observe and tune. ([#2449](https://github.com/blinklabs-io/dingo/pull/2449))
 * Expanded **speed large Mithril imports by delaying heavy lookup preparation:** Large Mithril imports now postpone expensive lookup preparation until the right point in the load process, which helps imports move more smoothly. ([#2450](https://github.com/blinklabs-io/dingo/pull/2450))
-* Delivered **show clearer diagnostics when forged blocks fail readback checks:** Forging logs now surface clearer diagnostics when a newly forged block cannot be read back successfully, which makes failure analysis faster. ([#2464](https://github.com/blinklabs-io/dingo/pull/2464))
+* Delivered **show clearer diagnostics when block production checks fail:** Forging logs now surface clearer diagnostics when a newly forged block fails a final verification step, which makes failure analysis faster. ([#2464](https://github.com/blinklabs-io/dingo/pull/2464))
 
 ### 💪 Improvements
 
 * Improved **refresh example dependencies for smoother setup:** Example projects now use refreshed npm dependencies, which helps local setup and repeatable example runs stay current. ([#2451](https://github.com/blinklabs-io/dingo/pull/2451))
-* Refined **use Postgres storage in the governance example stack:** The governance example now uses Postgres for stored chain data, which makes the example closer to practical deployments. ([#2447](https://github.com/blinklabs-io/dingo/pull/2447))
+* Refined **use production-style storage in the governance example stack:** The governance example now uses Postgres for stored chain data, which makes the example closer to practical deployments. ([#2447](https://github.com/blinklabs-io/dingo/pull/2447))
 * Enhanced **wait for Mithril before starting the governance example stack:** The governance example compose flow now waits for Mithril readiness, which makes example startup more dependable. ([#2454](https://github.com/blinklabs-io/dingo/pull/2454))
 * Updated **clarify archive and pruning modes with fresher usage guidance:** Archive and pruning documentation now explains operational choices more clearly, which makes deployment planning easier. ([#2455](https://github.com/blinklabs-io/dingo/pull/2455))
 * Modernized **streamline publish automation around supported artifacts:** Release automation no longer packages npm artifacts, which keeps publish work aligned with the current distribution model. ([#2452](https://github.com/blinklabs-io/dingo/pull/2452))
@@ -29,8 +29,8 @@ Hi folks! Here’s what we shipped in v0.50.0.
 ### 🔧 Fixes
 
 * Fixed **delay asset indexing more safely during historical catch up:** Asset indexing now follows a safer delayed path, which reduces indexing trouble during heavy historical processing. ([#2461](https://github.com/blinklabs-io/dingo/pull/2461))
-* Corrected **keep Plutus budget accounting aligned with actual execution:** Plutus budget handling now tracks execution costs more accurately, which improves result correctness for affected transactions. ([#2453](https://github.com/blinklabs-io/dingo/pull/2453))
-* Stabilized **recover Badger storage more reliably after problems:** Local storage recovery now handles damaged or interrupted states more defensively, which improves restart reliability. ([#2472](https://github.com/blinklabs-io/dingo/pull/2472))
+* Corrected **keep transaction execution limits aligned with actual work:** Transaction budget handling now tracks execution costs more accurately, which improves result correctness for affected transactions. ([#2453](https://github.com/blinklabs-io/dingo/pull/2453))
+* Stabilized **recover local storage more reliably after problems:** Local storage recovery now handles damaged or interrupted states more defensively, which improves restart reliability. ([#2472](https://github.com/blinklabs-io/dingo/pull/2472))
 
 ### 📋 What You Need to Know
 
