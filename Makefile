@@ -1,8 +1,9 @@
 # Determine root directory
 ROOT_DIR=$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
-# Gather all .go files for use in dependencies below
-GO_FILES=$(shell find $(ROOT_DIR) -name '*.go')
+# Gather all .go files for use in dependencies below. Exclude local git
+# worktrees so sibling checkouts do not affect formatting or rebuild inputs.
+GO_FILES=$(shell find $(ROOT_DIR) -path '$(ROOT_DIR)/.worktrees' -prune -o -name '*.go' -print)
 
 # Gather list of expected binaries
 BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
