@@ -91,16 +91,38 @@ func TestConsensusConformanceKGuardIsLive(t *testing.T) {
 		v := cv.Vector
 		v.Capture = &capNoLocal
 		a := newReplayAdapter(t, &capNoLocal)
-		if err := consensus.RunConsensusVector(t, v, a); err == nil {
+		err := consensus.RunConsensusVector(t, v, a)
+		if err == nil {
 			t.Fatalf(
 				"%s: k=%d replay passed with local_tip cleared — "+
 					"SecurityParam is not actually being applied",
 				cv.Name, capNoLocal.SecurityParam,
 			)
-		} else {
-			t.Logf("%s: k=%d without local_tip fails as expected: %v",
-				cv.Name, capNoLocal.SecurityParam, err)
 		}
+		// A non-nil error on its own is not proof the k-guard fired: an
+		// unrelated failure (e.g. a header that fails to decode) also
+		// errors, but RunConsensusVector returns at that header — before it
+		// reaches Stabilize and the chain selector — so headersFed and
+		// tipEventsSeen stay at zero. Require that every header was ingested
+		// and the selector actually evaluated the peer tips; the only
+		// failure left once selection has run is the selector declining to
+		// adopt the far-ahead peer, which is exactly the k-guard rejection
+		// this test asserts. Without this gate an incidental ingestion
+		// regression could masquerade as a live k-guard.
+		if a.headersFed == 0 || a.tipEventsSeen == 0 {
+			t.Fatalf(
+				"%s: k=%d replay errored before reaching chain selection "+
+					"(headersFed=%d tipEventsSeen=%d) — not evidence the "+
+					"k-guard rejected the peer: %v",
+				cv.Name, capNoLocal.SecurityParam,
+				a.headersFed, a.tipEventsSeen, err,
+			)
+		}
+		t.Logf(
+			"%s: k=%d without local_tip rejected by the k-guard as "+
+				"expected: %v",
+			cv.Name, capNoLocal.SecurityParam, err,
+		)
 	}
 	if exercised == 0 {
 		t.Skip("no vector carries both security_param>0 and local_tip")
