@@ -488,8 +488,7 @@ type LedgerState struct {
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
-	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
-	densityWindow                 []densityEntry // sliding window for chain density metric
+	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery             *atTipRecoveryAttempt
 	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	lastLocalRollbackSeq          uint64
@@ -1822,6 +1821,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			newPrevPParams = prevPP
 		}
 	}
+	newTipDensity := ls.chainFragmentDensity(
+		newTip,
+		ls.securityParamForEraOrDefault(newCurrentEra.Id),
+	)
 	// Transaction committed successfully - now update all
 	// in-memory state atomically so readers see a consistent
 	// snapshot.
@@ -1894,7 +1897,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Allow the nonce-ready event to be emitted again if replay crosses
 	// the cutoff on a different fork after rollback.
 	ls.resetNextEpochNonceReady()
-	ls.updateTipMetrics()
+	ls.updateTipMetrics(newTipDensity)
 	ls.Unlock()
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
@@ -2252,10 +2255,21 @@ func (ls *LedgerState) securityParamForEra(eraId uint) (uint64, bool) {
 
 // SecurityParam returns the security parameter for the current era
 func (ls *LedgerState) SecurityParam() int {
-	if k, ok := ls.securityParamForEra(ls.currentEra.Id); ok {
+	return ls.securityParamForEraOrDefault(ls.currentEra.Id)
+}
+
+func (ls *LedgerState) securityParamForEraOrDefault(eraId uint) int {
+	if k, ok := ls.securityParamForEra(eraId); ok {
 		return int(k) // #nosec G115 -- k came from a non-negative int genesis field
 	}
 	return blockfetchBatchSlotThresholdDefault
+}
+
+func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
+	ls.RLock()
+	eraId := ls.currentEra.Id
+	ls.RUnlock()
+	return ls.securityParamForEraOrDefault(eraId)
 }
 
 // shouldSkipPhase2ValidationForBlock reports whether a block is deep enough
@@ -3322,6 +3336,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Transaction committed successfully - now update in-memory state.
 			// Only update if blocks were actually processed to avoid resetting tip to zero.
 			if blocksProcessed > 0 {
+				tipDensity := ls.chainFragmentDensity(
+					pendingTip,
+					ls.securityParamForCurrentEraSnapshot(),
+				)
 				// Brief lock to ensure readers see consistent state.
 				ls.Lock()
 				ls.currentTip = pendingTip
@@ -3333,7 +3351,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.validationEnabled = true
 					ls.reachedTip = true
 				}
-				ls.updateTipMetrics()
+				ls.updateTipMetrics(tipDensity)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then check whether the stability window reaches or exceeds
@@ -3630,71 +3648,78 @@ func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
 	}
 }
 
-// densityEntry records a block's slot and block number for the chain density
-// sliding window calculation.
-type densityEntry struct {
-	slot     uint64
-	blockNum uint64
-}
-
-func (ls *LedgerState) updateTipMetrics() {
+// updateTipMetrics updates gauges from in-memory state. Call under ls.Lock().
+// The density value must be computed before taking the lock because fragment
+// density can require database lookups.
+func (ls *LedgerState) updateTipMetrics(density float64) {
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
 	ls.metrics.slotInEpoch.Set(
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
-	tipSlot := ls.currentTip.Point.Slot
-	tipBlockNum := ls.currentTip.BlockNumber
+	ls.metrics.density.Set(density)
+}
 
-	// Trim entries beyond current tip (rollbacks)
-	for len(ls.densityWindow) > 0 &&
-		ls.densityWindow[len(ls.densityWindow)-1].slot > tipSlot {
-		ls.densityWindow = ls.densityWindow[:len(ls.densityWindow)-1]
+// chainFragmentDensity matches cardano-node's ChainDB fragment density:
+// block delta divided by slot delta over the selected chain fragment.
+func (ls *LedgerState) chainFragmentDensity(
+	tip ochainsync.Tip,
+	securityParam int,
+) float64 {
+	tipSlot := tip.Point.Slot
+	tipBlockNum := tip.BlockNumber
+	if tipSlot == 0 || tipBlockNum == 0 {
+		return 0
 	}
-	// Append current tip if new
-	if len(ls.densityWindow) == 0 ||
-		ls.densityWindow[len(ls.densityWindow)-1].slot < tipSlot {
-		ls.densityWindow = append(ls.densityWindow, densityEntry{
-			slot:     tipSlot,
-			blockNum: tipBlockNum,
-		})
+	if ls.db == nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
 	}
+	if securityParam <= 0 {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	tipBlock, err := database.BlockByPoint(ls.db, tip.Point)
+	if err != nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	oldestIndex := database.BlockInitialIndex
+	if tipBlock.ID > uint64(securityParam) {
+		oldestIndex = tipBlock.ID - uint64(securityParam)
+	}
+	oldestBlock, err := ls.db.BlockByIndex(oldestIndex, nil)
+	if err != nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	return fragmentDensity(
+		tipBlock.Slot,
+		tipBlock.Number,
+		oldestBlock.Slot,
+		oldestBlock.Number,
+	)
+}
 
-	// Chain density over a 3k/f sliding window (matches cardano-node)
-	k := ls.SecurityParam()
-	f := ls.ActiveSlotCoeff()
-	if k > 0 && f > 0 && tipSlot > 0 {
-		windowSize := uint64(float64(3*k) / f)
-		cutoff := uint64(0)
-		if tipSlot > windowSize {
-			cutoff = tipSlot - windowSize
-		}
-		// Prune entries outside the window
-		pruneIdx := 0
-		for pruneIdx < len(ls.densityWindow) &&
-			ls.densityWindow[pruneIdx].slot < cutoff {
-			pruneIdx++
-		}
-		if pruneIdx > 0 {
-			ls.densityWindow = ls.densityWindow[pruneIdx:]
-		}
-		if len(ls.densityWindow) > 0 {
-			blocksInWindow := tipBlockNum -
-				ls.densityWindow[0].blockNum + 1
-			ls.metrics.density.Set(
-				float64(blocksInWindow) / float64(windowSize),
-			)
-		} else {
-			ls.metrics.density.Set(0)
-		}
-	} else if tipSlot > 0 {
-		// Fallback before protocol params are available
-		ls.metrics.density.Set(
-			float64(tipBlockNum) / float64(tipSlot),
-		)
-	} else {
-		ls.metrics.density.Set(0)
+func totalChainDensity(tipSlot, tipBlockNum uint64) float64 {
+	if tipSlot == 0 {
+		return 0
 	}
+	return float64(tipBlockNum) / float64(tipSlot)
+}
+
+func fragmentDensity(
+	tipSlot, tipBlockNum, oldestSlot, oldestBlockNum uint64,
+) float64 {
+	if tipSlot <= oldestSlot {
+		return 0
+	}
+	firstBlockNum := oldestBlockNum
+	if firstBlockNum == 0 {
+		// cardano-node ignores Byron EBB block number 0 in this metric.
+		firstBlockNum = 1
+	}
+	if tipBlockNum <= firstBlockNum {
+		return 0
+	}
+	return float64(tipBlockNum-firstBlockNum) /
+		float64(tipSlot-oldestSlot)
 }
 
 // loadPParams reads currentEpoch, currentEra, and epochCache and writes
@@ -4267,13 +4292,17 @@ func (ls *LedgerState) loadTip() error {
 			return err
 		}
 	}
+	tipDensity := ls.chainFragmentDensity(
+		tmpTip,
+		ls.securityParamForCurrentEraSnapshot(),
+	)
 	// Lock only for in-memory state updates
 	ls.Lock()
 	ls.currentTip = tmpTip
 	if tmpTip.Point.Slot > 0 {
 		ls.currentTipBlockNonce = tipNonce
 	}
-	ls.updateTipMetrics()
+	ls.updateTipMetrics(tipDensity)
 	ls.Unlock()
 	return nil
 }
