@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +33,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -2904,10 +2904,10 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 	assert.True(t, hasPreviousDenseSlot)
 }
 
-func TestDensityWindow(t *testing.T) {
+func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 2160
+		"securityParam": 3
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
@@ -2915,60 +2915,113 @@ func TestDensityWindow(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := []models.Block{
+		makeTestBlock(10, 1),
+		makeTestBlock(20, 2),
+		makeTestBlock(100, 3),
+		makeTestBlock(190, 4),
+		makeTestBlock(210, 5),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	tipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(tipBlock),
+			BlockNumber: tipBlock.Number,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	density := ls.chainFragmentDensity(ls.currentTip, ls.SecurityParam())
+	ls.Lock()
+	ls.updateTipMetrics(density)
+	ls.Unlock()
+
+	// cardano-node computes density over the ChainDB fragment as:
+	// (tip block - oldest fragment block) / (tip slot - oldest fragment slot).
+	// With k=3 and tip block index 5, the oldest fragment block is index 2.
+	assert.InDelta(
+		t,
+		3.0/190.0,
+		promtestutil.ToFloat64(ls.metrics.density),
+		1e-12,
+	)
+}
+
+func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 3
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := []models.Block{
+		makeTestBlock(10, 1),
+		makeTestBlock(20, 2),
+		makeTestBlock(100, 3),
+		makeTestBlock(190, 4),
+		makeTestBlock(210, 5),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	tipBlock := blocks[len(blocks)-1]
+	require.NoError(t, db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       makeTestPoint(tipBlock),
+		BlockNumber: tipBlock.Number,
+	}, nil))
+
+	ls := &LedgerState{
+		db:         db,
 		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	reg := prometheus.NewRegistry()
-	ls.metrics.init(reg)
+	ls.metrics.init(prometheus.NewRegistry())
 
-	// Window size = 3*2160/0.05 = 129600
+	require.NoError(t, ls.loadTip())
 
-	// Simulate extending to slot 200000, block 6000
-	// with blocks every ~33 slots (approx 3% density)
-	slot := uint64(70000)
-	blockNum := uint64(2100)
-	for slot <= 200000 {
-		ls.currentTip = ochainsync.Tip{
-			Point:       ocommon.Point{Slot: slot},
-			BlockNumber: blockNum,
-		}
-		ls.updateTipMetrics()
-		slot += 33
-		blockNum++
-	}
+	assert.InDelta(
+		t,
+		3.0/190.0,
+		promtestutil.ToFloat64(ls.metrics.density),
+		1e-12,
+	)
+}
 
-	// The window covers slots [200000-129600, 200000] = [70400, 200000]
-	// First entry in window should be around slot 70400
-	require.Greater(t, len(ls.densityWindow), 0)
-	assert.GreaterOrEqual(t, ls.densityWindow[0].slot, uint64(70390))
-
-	// Verify density is in a reasonable range for ~3% active slots
-	blocksInWindow := ls.currentTip.BlockNumber - ls.densityWindow[0].blockNum + 1
-	calculatedDensity := float64(blocksInWindow) / 129600.0
-	assert.InDelta(t, 0.03, calculatedDensity, 0.005)
-
-	// Test rollback: roll back to slot 199000
-	rollbackSlot := uint64(199000)
-	rollbackBlock := uint64(0)
-	for _, v := range slices.Backward(ls.densityWindow) {
-		if v.slot <= rollbackSlot {
-			rollbackBlock = v.blockNum
-			break
-		}
-	}
-	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.Point{Slot: rollbackSlot},
-		BlockNumber: rollbackBlock,
-	}
-	ls.updateTipMetrics()
-
-	// Window should have trimmed entries past rollback slot
-	lastEntry := ls.densityWindow[len(ls.densityWindow)-1]
-	assert.LessOrEqual(t, lastEntry.slot, rollbackSlot)
+func TestFragmentDensityIgnoresByronEbbBlockNumber(t *testing.T) {
+	assert.InDelta(t, 9.0/100.0, fragmentDensity(100, 10, 0, 0), 1e-12)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
