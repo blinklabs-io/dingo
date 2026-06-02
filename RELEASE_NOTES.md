@@ -12,26 +12,26 @@ Hi folks! Here’s what we shipped in v0.50.1.
 
 ### ✨ What's New
 
-* Noted **no new features in this patch release:** This patch release focuses on reliability, correctness, and maintenance updates.
+* Noted **no new features in this patch release:** This patch release focuses on improvements and fixes.
 
 ### 💪 Improvements
 
-* Improved **keep sibling worktrees out of routine project commands:** Routine format and build commands now ignore `.worktrees` directories, which helps local worktrees avoid interfering with normal project maintenance. ([#2478](https://github.com/blinklabs-io/dingo/pull/2478))
-* Updated **publish the v0.50.0 release history entry:** The published release history now includes the v0.50.0 notes, which keeps recent upgrade context easier to review. ([#2474](https://github.com/blinklabs-io/dingo/pull/2474))
+* Improved **keep sibling worktrees out of routine project commands:** Routine format and build commands now ignore sibling `.worktrees` directories, which keeps local maintenance behavior more predictable. ([#2478](https://github.com/blinklabs-io/dingo/pull/2478))
+* Updated **publish the v0.50.0 release history entry:** The published release history now includes the v0.50.0 notes, which keeps recent release context easier to review. ([#2474](https://github.com/blinklabs-io/dingo/pull/2474))
 
 ### 🔧 Fixes
 
-* Fixed **recover more cleanly from peers that stop serving blocks:** Nodes can now disconnect or slow peers that repeat empty blockfetch responses for the same point, which helps sync escape stuck-peer loops more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
-* Corrected **avoid repeated next epoch readiness work after it already completes:** Next epoch readiness now avoids repeating the same recomputation after readiness has already been emitted, which keeps slot driven processing steadier. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
-* Stabilized **report chain density more accurately across restart and rollback:** Chain density now stays aligned with the active chain fragment, which keeps this health signal steadier after restart and rollback events. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
+* Fixed **recover more cleanly from peers that stop serving blocks:** Nodes can now disconnect or slow peers that repeat empty block responses for the same point, which helps sync escape stuck-peer loops more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
+* Corrected **avoid repeated next epoch readiness work after it already completes:** Next epoch readiness now avoids repeating the same work after readiness has already been emitted, which keeps slot progress steadier. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
+* Stabilized **report chain density more accurately across restart and rollback:** Chain density now stays aligned with the active chain, which keeps this health signal steadier after restart and rollback events. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
 
 ### 📋 What You Need to Know
 
 * Clarified **expect smoother local maintenance when using multiple worktrees:** Local format and build commands now avoid picking up files from sibling `.worktrees` directories, which keeps routine maintenance behavior more predictable. ([#2478](https://github.com/blinklabs-io/dingo/pull/2478))
 * Highlighted **review the published v0.50.0 notes alongside this patch:** The release history now includes the v0.50.0 entry, which makes recent patch context easier to follow. ([#2474](https://github.com/blinklabs-io/dingo/pull/2474))
-* Emphasized **expect safer recovery when a peer keeps returning no blocks:** Nodes can now move away from peers that get stuck in repeated empty blockfetch loops, which helps sync resume more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
-* Summarized **trust steadier next epoch readiness handling during slot progress:** Next epoch readiness work no longer repeats after the node has already signaled readiness, which reduces avoidable repeated work during slot ticks. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
-* Reviewed **rely on more accurate chain density signals after recovery events:** Chain density reporting now stays more accurate through restart and rollback paths, which makes operational monitoring easier to trust. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
+* Emphasized **expect safer recovery when a peer keeps returning no blocks:** Nodes can now move away from peers that get stuck in repeated empty block loops, which helps sync resume more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
+* Summarized **trust steadier next epoch readiness handling during slot progress:** Next epoch readiness work no longer repeats after the node has already signaled readiness, which reduces avoidable repeated work during slot progress. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
+* Reviewed **rely on more accurate chain density signals after recovery events:** Chain density reporting now stays more accurate through restart and rollback paths, which makes health monitoring easier to trust. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
 
 ### Recommended Network Compatibility ⚠️
 
