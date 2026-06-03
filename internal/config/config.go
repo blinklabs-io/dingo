@@ -100,6 +100,14 @@ const (
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 )
 
+// StartEra controls experimental direct startup in a later ledger era.
+type StartEra string
+
+const (
+	StartEraDefault  StartEra = ""
+	StartEraDijkstra StartEra = "dijkstra"
+)
+
 // Valid returns true if the RunMode is a known valid mode
 func (m RunMode) Valid() bool {
 	switch m {
@@ -114,6 +122,19 @@ func (m RunMode) Valid() bool {
 // (forge blocks, disable outbound, skip topology)
 func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
+}
+
+func (e StartEra) Valid() bool {
+	switch e {
+	case StartEraDefault, StartEraDijkstra:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e StartEra) IsDijkstra() bool {
+	return e == StartEraDijkstra
 }
 
 type tempConfig struct {
@@ -250,6 +271,7 @@ type Config struct {
 	IntersectTip         bool          `yaml:"intersectTip"                                                     split_words:"true"`
 	ValidateHistorical   bool          `yaml:"validateHistorical"                                               split_words:"true"`
 	RunMode              RunMode       `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	StartEra             StartEra      `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
 	ImmutableDbPath      string        `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
@@ -455,6 +477,7 @@ var globalConfig = &Config{
 	MetadataPlugin:       DefaultMetadataPlugin,
 	StorageMode:          "core",
 	RunMode:              RunModeServe,
+	StartEra:             StartEraDefault,
 	ImmutableDbPath:      "",
 	ShutdownTimeout:      DefaultShutdownTimeout,
 	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
@@ -652,6 +675,12 @@ func LoadConfig(configFile string) (*Config, error) {
 	}
 	if globalConfig.RunMode == "" {
 		globalConfig.RunMode = RunModeServe
+	}
+	if !globalConfig.StartEra.Valid() {
+		return nil, fmt.Errorf(
+			"invalid startEra: %q (must be empty or 'dijkstra')",
+			globalConfig.StartEra,
+		)
 	}
 
 	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have

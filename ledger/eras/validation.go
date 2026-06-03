@@ -48,10 +48,11 @@ const (
 	// Positions in gouroboros v0.179.0 UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// function pointers before filtering by index.
-	alonzoUtxoValidatePlutusScriptsRuleIndex  = 26
-	babbageUtxoValidatePlutusScriptsRuleIndex = 30
-	conwayUtxoValidateExUnitsTooBigRuleIndex  = 34
-	conwayUtxoValidatePlutusScriptsRuleIndex  = 38
+	alonzoUtxoValidatePlutusScriptsRuleIndex   = 26
+	babbageUtxoValidatePlutusScriptsRuleIndex  = 30
+	conwayUtxoValidateExUnitsTooBigRuleIndex   = 34
+	conwayUtxoValidatePlutusScriptsRuleIndex   = 38
+	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
 )
 
 func shouldSkipPhase2Validation(

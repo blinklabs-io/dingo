@@ -37,6 +37,7 @@ import (
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
+	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -50,6 +51,16 @@ import (
 // available. Uses the same value as chainsync.DefaultMaxClients
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
+
+func blockfetchConfig(
+	opts ...oblockfetch.BlockFetchOptionFunc,
+) oblockfetch.Config {
+	cfg, err := oblockfetch.NewConfig(opts...)
+	if err != nil {
+		panic(fmt.Sprintf("invalid blockfetch config: %v", err))
+	}
+	return cfg
+}
 
 type Ouroboros struct {
 	ConnManager              *connmanager.ConnectionManager
@@ -258,7 +269,7 @@ func (o *Ouroboros) ConfigureListeners(
 					),
 				),
 				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
+					blockfetchConfig(
 						slices.Concat(
 							o.blockfetchClientConnOpts(),
 							o.blockfetchServerConnOpts(),
@@ -282,6 +293,14 @@ func (o *Ouroboros) ConfigureListeners(
 							slices.Concat(
 								o.leiosnotifyClientConnOpts(),
 								o.leiosnotifyServerConnOpts(),
+							)...,
+						),
+					),
+					ouroboros.WithLeiosVotesConfig(
+						oleiosvotes.NewConfig(
+							slices.Concat(
+								o.leiosvotesClientConnOpts(),
+								o.leiosvotesServerConnOpts(),
 							)...,
 						),
 					),
@@ -323,7 +342,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 			),
 		),
 		ouroboros.WithBlockFetchConfig(
-			oblockfetch.NewConfig(
+			blockfetchConfig(
 				slices.Concat(
 					o.blockfetchClientConnOpts(),
 					o.blockfetchServerConnOpts(),
@@ -347,6 +366,14 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 					slices.Concat(
 						o.leiosnotifyClientConnOpts(),
 						o.leiosnotifyServerConnOpts(),
+					)...,
+				),
+			),
+			ouroboros.WithLeiosVotesConfig(
+				oleiosvotes.NewConfig(
+					slices.Concat(
+						o.leiosvotesClientConnOpts(),
+						o.leiosvotesServerConnOpts(),
 					)...,
 				),
 			),

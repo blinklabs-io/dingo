@@ -50,6 +50,7 @@ func resetGlobalConfig() {
 		BlobPlugin:                  DefaultBlobPlugin,
 		MetadataPlugin:              DefaultMetadataPlugin,
 		RunMode:                     RunModeServe,
+		StartEra:                    StartEraDefault,
 		ImmutableDbPath:             "",
 		ShutdownTimeout:             DefaultShutdownTimeout,
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
@@ -143,6 +144,7 @@ mithril:
 		BlobPlugin:           DefaultBlobPlugin,
 		MetadataPlugin:       DefaultMetadataPlugin,
 		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
 		ImmutableDbPath:      "/tmp/immutable",
 		ShutdownTimeout:      "45s",
 		LedgerCatchupTimeout: "90m",
@@ -215,6 +217,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		BlobPlugin:                  DefaultBlobPlugin,
 		MetadataPlugin:              DefaultMetadataPlugin,
 		RunMode:                     RunModeServe,
+		StartEra:                    StartEraDefault,
 		ImmutableDbPath:             "",
 		ShutdownTimeout:             DefaultShutdownTimeout,
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
@@ -311,6 +314,7 @@ func TestRunMode_Validation(t *testing.T) {
 		{RunModeServe, true},
 		{RunModeLoad, true},
 		{RunModeDev, true},
+		{RunModeLeios, true},
 		{"", true}, // empty is valid (defaults to serve)
 		{"invalid", false},
 	}
@@ -334,6 +338,7 @@ func TestRunMode_IsDevMode(t *testing.T) {
 		{RunModeServe, false},
 		{RunModeLoad, false},
 		{RunModeDev, true},
+		{RunModeLeios, false},
 		{"", false},
 	}
 	for _, tt := range tests {
@@ -345,6 +350,56 @@ func TestRunMode_IsDevMode(t *testing.T) {
 				tt.isDevMode,
 			)
 		}
+	}
+}
+
+func TestStartEra_Validation(t *testing.T) {
+	tests := []struct {
+		era   StartEra
+		valid bool
+	}{
+		{StartEraDefault, true},
+		{StartEraDijkstra, true},
+		{"invalid", false},
+	}
+	for _, tt := range tests {
+		if got := tt.era.Valid(); got != tt.valid {
+			t.Errorf(
+				"StartEra(%q).Valid() = %v, want %v",
+				tt.era,
+				got,
+				tt.valid,
+			)
+		}
+	}
+}
+
+func TestLoad_WithStartEraConfig(t *testing.T) {
+	resetGlobalConfig()
+
+	yamlContent := `
+startEra: "dijkstra"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-start-era.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.StartEra != StartEraDijkstra {
+		t.Errorf("expected StartEra to be 'dijkstra', got: %v", cfg.StartEra)
+	}
+	if !cfg.StartEra.IsDijkstra() {
+		t.Error("expected IsDijkstra() to return true for 'dijkstra'")
 	}
 }
 

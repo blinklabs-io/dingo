@@ -42,6 +42,27 @@ func FuzzNormalizeRunMode(f *testing.F) {
 	})
 }
 
+func FuzzNormalizeStartEra(f *testing.F) {
+	f.Add("")
+	f.Add("dijkstra")
+	f.Add("DIJKSTRA")
+
+	f.Fuzz(func(t *testing.T, value string) {
+		normalized, err := normalizeStartEra(value)
+		if err != nil {
+			return
+		}
+		if normalized != strings.ToLower(value) {
+			t.Fatalf("normalizeStartEra(%q) = %q, want lowercase input", value, normalized)
+		}
+		switch normalized {
+		case string(StartEraDefault), string(StartEraDijkstra):
+		default:
+			t.Fatalf("normalizeStartEra accepted unknown era %q", normalized)
+		}
+	})
+}
+
 func FuzzNormalizeStorageMode(f *testing.F) {
 	f.Add("")
 	f.Add("core")

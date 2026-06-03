@@ -303,6 +303,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
+			dingo.WithStartEra(string(cfg.StartEra)),
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -61,6 +62,43 @@ func TestWithStorageMode(t *testing.T) {
 	// Apply core mode
 	WithStorageMode(StorageModeCore)(cfg)
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
+}
+
+func TestExperimentalDijkstraEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      Config
+		expected bool
+	}{
+		{name: "default", cfg: Config{}, expected: false},
+		{
+			name:     "leios run mode",
+			cfg:      Config{runMode: runModeLeios},
+			expected: true,
+		},
+		{
+			name:     "dijkstra start era",
+			cfg:      Config{startEra: internalconfig.StartEraDijkstra},
+			expected: true,
+		},
+		{
+			name: "leios and dijkstra",
+			cfg: Config{
+				runMode:  runModeLeios,
+				startEra: internalconfig.StartEraDijkstra,
+			},
+			expected: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(
+				t,
+				tt.expected,
+				tt.cfg.experimentalDijkstraEnabled(),
+			)
+		})
+	}
 }
 
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {

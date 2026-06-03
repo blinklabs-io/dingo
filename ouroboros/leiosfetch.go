@@ -135,11 +135,11 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	}
 	if !data.completeTxCache() {
 		return nil, fmt.Errorf(
-			"leios endorser block tx cache incomplete: %d.%x: have %d txs for %d refs",
+			"leios endorser block tx cache incomplete: %d.%x: have %d txs for %d cached txs",
 			point.Slot,
 			point.Hash,
 			len(data.txsRaw),
-			len(data.refs),
+			data.txCount,
 		)
 	}
 	if err := validateLeiosTxBitmap(len(data.txsRaw), txBitmap); err != nil {

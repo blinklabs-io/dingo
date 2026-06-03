@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -171,10 +170,11 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	if len(shape.Eras) == 0 {
 		return nil, errors.New("era history: shape unavailable")
 	}
-	if len(shape.Eras) != len(eras.Eras) {
+	activeEras := ls.eraList()
+	if len(shape.Eras) != len(activeEras) {
 		return nil, fmt.Errorf(
-			"era history: shape has %d eras, eras.Eras has %d",
-			len(shape.Eras), len(eras.Eras),
+			"era history: shape has %d eras, active era table has %d",
+			len(shape.Eras), len(activeEras),
 		)
 	}
 
@@ -183,7 +183,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	currentIdx := -1
 
 	for i, entry := range shape.Eras {
-		eraDesc := eras.Eras[i]
+		eraDesc := activeEras[i]
 		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, nil)
 		if dbErr != nil {
 			return nil, dbErr
@@ -256,7 +256,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				lastEp.EpochId, verErr,
 			)
 		}
-		pparamsEraId, ok := EraForVersion(ver.Major)
+		pparamsEraId, ok := ls.eraForVersion(ver.Major)
 		if !ok || pparamsEraId <= entry.EraID {
 			continue
 		}

@@ -17,9 +17,9 @@ require (
 	github.com/aws/smithy-go v1.26.0
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.179.0
+	github.com/blinklabs-io/gouroboros v0.180.0
 	github.com/blinklabs-io/ouroboros-mock v0.12.0
-	github.com/blinklabs-io/plutigo v0.1.13
+	github.com/blinklabs-io/plutigo v0.1.14
 	github.com/blockfrost/blockfrost-go v0.4.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.20.1
@@ -110,8 +110,9 @@ require (
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blang/semver v3.5.1+incompatible // indirect
 	github.com/blinklabs-io/go-bip39 v0.2.0 // indirect
-	github.com/btcsuite/btcd/btcec/v2 v2.3.6 // indirect
-	github.com/btcsuite/btcd/chaincfg/chainhash v1.1.0 // indirect
+	github.com/btcsuite/btcd/btcec/v2 v2.5.0 // indirect
+	github.com/btcsuite/btcd/chaincfg/chainhash v1.2.0 // indirect
+	github.com/btcsuite/btcd/chainhash/v2 v2.0.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -125,7 +126,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
-	github.com/ethereum/go-ethereum v1.17.2 // indirect
+	github.com/ethereum/go-ethereum v1.17.3 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e // indirect

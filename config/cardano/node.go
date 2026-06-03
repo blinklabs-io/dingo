@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"gopkg.in/yaml.v3"
 )
@@ -39,6 +40,7 @@ type CardanoNodeConfig struct {
 	alonzoGenesis                              *alonzo.AlonzoGenesis
 	byronGenesis                               *byron.ByronGenesis
 	conwayGenesis                              *conway.ConwayGenesis
+	dijkstraGenesis                            *dijkstra.DijkstraGenesis
 	shelleyGenesis                             *shelley.ShelleyGenesis
 	path                                       string
 	AlonzoGenesisFile                          string `yaml:"AlonzoGenesisFile"`
@@ -47,6 +49,8 @@ type CardanoNodeConfig struct {
 	ByronGenesisHash                           string `yaml:"ByronGenesisHash"`
 	ConwayGenesisFile                          string `yaml:"ConwayGenesisFile"`
 	ConwayGenesisHash                          string `yaml:"ConwayGenesisHash"`
+	DijkstraGenesisFile                        string `yaml:"DijkstraGenesisFile"`
+	DijkstraGenesisHash                        string `yaml:"DijkstraGenesisHash"`
 	MithrilGenesisVerificationKey              string `yaml:"MithrilGenesisVerificationKey"`
 	MithrilGenesisVerificationKeyFile          string `yaml:"MithrilGenesisVerificationKeyFile"`
 	MithrilGenesisAncillaryVerificationKey     string `yaml:"MithrilGenesisAncillaryVerificationKey"`
@@ -66,6 +70,7 @@ type CardanoNodeConfig struct {
 	TestAlonzoHardForkAtEpoch    *uint64 `yaml:"TestAlonzoHardForkAtEpoch"`
 	TestBabbageHardForkAtEpoch   *uint64 `yaml:"TestBabbageHardForkAtEpoch"`
 	TestConwayHardForkAtEpoch    *uint64 `yaml:"TestConwayHardForkAtEpoch"`
+	TestDijkstraHardForkAtEpoch  *uint64 `yaml:"TestDijkstraHardForkAtEpoch"`
 
 	// P2P peer target configuration from cardano-node config.json.
 	// These are read but only used as fallback defaults when the
@@ -257,6 +262,36 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 			return err
 		}
 		c.conwayGenesis = &conwayGenesis
+	}
+	// Load Dijkstra genesis
+	if c.DijkstraGenesisFile != "" {
+		dijkstraGenesisPath := c.DijkstraGenesisFile
+		if !filepath.IsAbs(dijkstraGenesisPath) {
+			dijkstraGenesisPath = filepath.Join(c.path, dijkstraGenesisPath)
+		}
+		dijkstraGenesisBytes, err := os.ReadFile(dijkstraGenesisPath)
+		if err != nil {
+			return err
+		}
+		dijkstraGenesisHashBytes := replaceGenesisLineEndings(
+			dijkstraGenesisBytes,
+		)
+		dijkstraHash, err := validateGenesisHash(
+			"Dijkstra",
+			c.DijkstraGenesisHash,
+			dijkstraGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.DijkstraGenesisHash = dijkstraHash
+		dijkstraGenesis, err := dijkstra.NewDijkstraGenesisFromFile(
+			dijkstraGenesisPath,
+		)
+		if err != nil {
+			return err
+		}
+		c.dijkstraGenesis = &dijkstraGenesis
 	}
 	if err := c.loadMithrilVerificationKeysFromDisk(); err != nil {
 		return err
@@ -516,6 +551,35 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		}
 		c.conwayGenesis = &conwayGenesis
 	}
+	// Load Dijkstra genesis
+	if f, err := c.loadGenesisFromEmbedFS(c.DijkstraGenesisFile); err != nil {
+		return err
+	} else if f != nil {
+		defer f.Close()
+		dijkstraGenesisBytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		dijkstraGenesisHashBytes := replaceGenesisLineEndings(
+			dijkstraGenesisBytes,
+		)
+		dijkstraHash, err := validateGenesisHash(
+			"Dijkstra",
+			c.DijkstraGenesisHash,
+			dijkstraGenesisHashBytes,
+		)
+		if err != nil {
+			return err
+		}
+		c.DijkstraGenesisHash = dijkstraHash
+		dijkstraGenesis, err := dijkstra.NewDijkstraGenesisFromReader(
+			bytes.NewReader(dijkstraGenesisBytes),
+		)
+		if err != nil {
+			return err
+		}
+		c.dijkstraGenesis = &dijkstraGenesis
+	}
 	c.MithrilGenesisVerificationKeyFile = c.resolveOptionalConfigFileFromEmbedFS(
 		c.MithrilGenesisVerificationKeyFile,
 		defaultMithrilGenesisVerificationKeyFile,
@@ -612,6 +676,23 @@ func (c *CardanoNodeConfig) LoadConwayGenesisFromReader(r io.Reader) error {
 	return nil
 }
 
+// DijkstraGenesis returns the Dijkstra genesis config specified in the
+// cardano-node config.
+func (c *CardanoNodeConfig) DijkstraGenesis() *dijkstra.DijkstraGenesis {
+	return c.dijkstraGenesis
+}
+
+// LoadDijkstraGenesisFromReader loads a Dijkstra genesis config from an
+// io.Reader. This is useful mostly for tests.
+func (c *CardanoNodeConfig) LoadDijkstraGenesisFromReader(r io.Reader) error {
+	dijkstraGenesis, err := dijkstra.NewDijkstraGenesisFromReader(r)
+	if err != nil {
+		return err
+	}
+	c.dijkstraGenesis = &dijkstraGenesis
+	return nil
+}
+
 // P2PTargets returns the peer target values from the cardano-node
 // config.json. Values of 0 mean the field was not present.
 func (c *CardanoNodeConfig) P2PTargets() (
@@ -646,6 +727,8 @@ func (c *CardanoNodeConfig) HardForkEpoch(era string) (uint64, bool) {
 		p = c.TestBabbageHardForkAtEpoch
 	case "conway":
 		p = c.TestConwayHardForkAtEpoch
+	case "dijkstra":
+		p = c.TestDijkstraHardForkAtEpoch
 	default:
 		return 0, false
 	}

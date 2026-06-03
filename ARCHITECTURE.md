@@ -305,7 +305,7 @@ graph TB
             TXs["TxSubmission2<br/>bidirectional"]
             KA["KeepAlive"]
             PS["PeerSharing<br/>client + server"]
-            Leios["LeiosFetch / Notify<br/>(experimental)"]
+            Leios["LeiosFetch / Notify / Votes<br/>(experimental)"]
         end
         subgraph "Node-to-Client (N2C)"
             CSn2c["ChainSync<br/>server"]
@@ -329,7 +329,7 @@ graph TB
     Outbound -->|"TCP dial"| ConnTrack
     Listeners -->|"TCP accept"| ConnTrack
 
-    ConnTrack -->|"handshake"| CSc & BFc & TXs & KA & PS
+    ConnTrack -->|"handshake"| CSc & BFc & TXs & KA & PS & Leios
     ConnTrack -->|"N2C handshake"| CSn2c & LSQ & LTM & LTS
 
     CSc -->|"headers"| CSel
@@ -839,7 +839,11 @@ The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
 ### Era-Specific Validation
 
-The `ledger/eras/` package provides era-specific validation rules for each Cardano era (Byron through Conway). Each era implements protocol parameter extraction, fee calculation, and era-specific transaction rules.
+The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table only when Dingo starts with `runMode: "leios"` or `startEra: "dijkstra"`; the Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra` from gouroboros v0.180.0, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+
+Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+
+When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and the scaffolded LeiosVotes mini-protocol; vote generation/storage is not implemented yet, so LeiosVotes can receive/log votes but returns an explicit unavailable error when peers request locally generated votes.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 

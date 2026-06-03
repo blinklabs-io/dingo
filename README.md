@@ -91,7 +91,9 @@ The following environment variables modify Dingo's behavior:
   - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
   - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
-  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
+  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios/Dijkstra protocol support)
+- `DINGO_START_ERA`
+  - Experimental startup era override. Set to `dijkstra` only for Dijkstra/Leios test networks; leave empty to follow genesis protocol version.
 - `DINGO_LOGGING_FORMAT`
   - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
 - `DINGO_LOGGING_LEVEL`

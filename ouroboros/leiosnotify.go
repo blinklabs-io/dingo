@@ -24,7 +24,6 @@ import (
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
@@ -124,27 +123,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				resp,
 			)
 		}
-		txsRaw, err := o.fetchLeiosEndorserBlockTxs(
-			conn,
-			m.Point,
-			respBlock.BlockRaw,
-		)
-		if err != nil {
-			o.config.Logger.Warn(
-				"failed to fetch Leios EB transactions",
-				"component", "network",
-				"protocol", "leios-fetch",
-				"role", "client",
-				"connection_id", connId,
-				"slot", m.Point.Slot,
-				"hash", hex.EncodeToString(m.Point.Hash),
-				"error", err,
-			)
-		}
 		if err := o.storeLeiosEndorserBlock(
 			m.Point,
 			respBlock.BlockRaw,
-			txsRaw,
+			nil,
 		); err != nil {
 			return err
 		}
@@ -154,7 +136,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				m.Point.Slot,
 				m.Point.Hash,
 				len(respBlock.BlockRaw),
-				len(txsRaw),
+				0,
 			),
 			"component", "network",
 			"protocol", "leios-fetch",
@@ -162,7 +144,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			"connection_id", connId,
 		)
 	case *oleiosnotify.MsgBlockTxsOffer:
-		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(conn, m.Point)
+		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(m.Point)
 		if err != nil {
 			level := slog.LevelWarn
 			msg := "failed to fetch Leios EB transactions"
@@ -199,7 +181,6 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 }
 
 func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
-	conn *ouroboros.Connection,
 	point ocommon.Point,
 ) ([]cbor.RawMessage, error) {
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
@@ -211,61 +192,10 @@ func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 			point.Hash,
 		)
 	}
-	if data.completeTxCache() {
-		return cloneRawMessages(data.txsRaw), nil
-	}
-	txsRaw, err := o.fetchLeiosEndorserBlockTxs(
-		conn,
-		point,
-		cbor.RawMessage(data.blockRaw),
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := o.storeLeiosEndorserBlock(point, data.blockRaw, txsRaw); err != nil {
-		return nil, err
-	}
-	return txsRaw, nil
-}
-
-func (o *Ouroboros) fetchLeiosEndorserBlockTxs(
-	conn *ouroboros.Connection,
-	point ocommon.Point,
-	blockRaw cbor.RawMessage,
-) ([]cbor.RawMessage, error) {
-	if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
-		return nil, errors.New("leios-fetch client unavailable")
-	}
-	block, err := gleios.NewLeiosEndorserBlockFromCbor(blockRaw)
-	if err != nil {
-		return nil, err
-	}
-	if block.Body == nil || len(block.Body.TxReferences) == 0 {
-		return nil, nil
-	}
-	bitmaps, err := leiosAllTxBitmap(len(block.Body.TxReferences))
-	if err != nil {
-		return nil, err
-	}
-	resp, err := conn.LeiosFetch().Client.BlockTxsRequest(point, bitmaps)
-	if err != nil {
-		return nil, err
-	}
-	respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
-	if !ok {
-		return nil, fmt.Errorf(
-			"unexpected leios-fetch BlockTxs response type %T",
-			resp,
-		)
-	}
-	if len(respTxs.TxsRaw) != len(block.Body.TxReferences) {
-		return nil, fmt.Errorf(
-			"leios-fetch BlockTxs returned %d txs for %d references",
-			len(respTxs.TxsRaw),
-			len(block.Body.TxReferences),
-		)
-	}
-	return cloneRawMessages(respTxs.TxsRaw), nil
+	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
+	// The current Dijkstra CDDL has no transaction-reference list, so there
+	// is no extra BlockTxsRequest to make here.
+	return cloneRawMessages(data.txsRaw), nil
 }
 
 func (o *Ouroboros) leiosnotifyServerRequestNext(

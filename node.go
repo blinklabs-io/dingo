@@ -208,6 +208,7 @@ func (n *Node) Run(ctx context.Context) error {
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
+	enableDijkstra := n.config.experimentalDijkstraEnabled()
 	// Initialize Ouroboros
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:                   n.config.logger,
@@ -219,7 +220,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectPoints:          n.config.intersectPoints,
 		PromRegistry:             n.config.promRegistry,
 		ChainsyncBlockTimeout:    n.config.chainsyncStallTimeout,
-		EnableLeios:              n.config.runMode == runModeLeios,
+		EnableLeios:              enableDijkstra,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
 	// Load state
@@ -233,6 +234,8 @@ func (n *Node) Run(ctx context.Context) error {
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.isDevMode(),
 			ValidateHistorical:         n.config.validateHistorical,
+			EnableDijkstra:             enableDijkstra,
+			StartInDijkstra:            n.config.startEra.IsDijkstra(),
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

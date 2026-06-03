@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -88,6 +89,11 @@ func GetProtocolVersion(
 			Major: pp.ProtocolVersion.Major,
 			Minor: pp.ProtocolVersion.Minor,
 		}, nil
+	case *dijkstra.DijkstraProtocolParameters:
+		return ProtocolVersion{
+			Major: pp.ProtocolVersion.Major,
+			Minor: pp.ProtocolVersion.Minor,
+		}, nil
 	default:
 		return ProtocolVersion{}, fmt.Errorf(
 			"unsupported protocol parameters type: %T",
@@ -97,10 +103,10 @@ func GetProtocolVersion(
 }
 
 // EraForVersion returns the era ID for a given protocol major version,
-// resolved against the static era table in ledger/eras/. Returns false
-// if no era covers the given version.
-func EraForVersion(majorVersion uint) (uint, bool) {
-	eraDesc, ok := eras.EraForVersion(majorVersion)
+// resolved against the provided runtime era table. Returns false if no era
+// covers the given version.
+func EraForVersion(eraList []eras.EraDesc, majorVersion uint) (uint, bool) {
+	eraDesc, ok := eras.EraForVersionIn(eraList, majorVersion)
 	if !ok {
 		return 0, false
 	}
@@ -110,10 +116,11 @@ func EraForVersion(majorVersion uint) (uint, bool) {
 // IsHardForkTransition returns true if the new protocol
 // version triggers an era change compared to the old version.
 func IsHardForkTransition(
+	eraList []eras.EraDesc,
 	oldVersion, newVersion ProtocolVersion,
 ) bool {
-	oldEra, oldOk := EraForVersion(oldVersion.Major)
-	newEra, newOk := EraForVersion(newVersion.Major)
+	oldEra, oldOk := EraForVersion(eraList, oldVersion.Major)
+	newEra, newOk := EraForVersion(eraList, newVersion.Major)
 	if !oldOk || !newOk {
 		return false
 	}
