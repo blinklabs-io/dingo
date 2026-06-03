@@ -17,12 +17,12 @@ Hi folks! Here’s what we shipped in v0.50.2.
 ### 💪 Improvements
 
 * Improved **speed leader scheduling checks during block production planning:** Leader schedule lookups now finish faster, which keeps block production planning more responsive. ([#2493](https://github.com/blinklabs-io/dingo/pull/2493))
-* Refined **replay recovery coverage through real chain behavior:** Regression checks now cover real ingestion and chain decision paths more directly, which increases confidence in recovery behavior. ([#2479](https://github.com/blinklabs-io/dingo/pull/2479))
+* Refined **strengthen recovery coverage with real chain replay paths:** Regression checks now cover real chain replay paths more directly, which increases confidence in recovery behavior. ([#2479](https://github.com/blinklabs-io/dingo/pull/2479))
 * Updated **keep the published v0.50.1 release history current:** The release history now includes the v0.50.1 notes, which makes recent release context easier to review. ([#2480](https://github.com/blinklabs-io/dingo/pull/2480))
 
 ### 🔧 Fixes
 
-* Fixed **preserve backfill provenance more reliably during historical recovery:** Historical backfill now keeps output history aligned more reliably during resumed recovery, which improves tracking accuracy after interruptions. ([#2481](https://github.com/blinklabs-io/dingo/pull/2481))
+* Fixed **preserve backfill history more reliably during historical recovery:** Historical backfill now keeps output history aligned more reliably during resumed recovery, which improves tracking accuracy after interruptions. ([#2481](https://github.com/blinklabs-io/dingo/pull/2481))
 * Corrected **fail oversized sync intersection requests earlier:** Oversized sync intersection requests now stop sooner, which avoids unnecessary intersection work and keeps sync behavior safer. ([#2494](https://github.com/blinklabs-io/dingo/pull/2494))
 
 ### 📋 What You Need to Know
