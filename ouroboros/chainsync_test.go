@@ -1524,3 +1524,76 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 		)
 	}
 }
+
+// newFindIntersectTestOuroboros builds an Ouroboros wired with a fresh,
+// empty LedgerState (tip at origin) and ChainsyncState. With the chain at
+// origin, GetIntersectPoint returns the origin point for any in-bounds point
+// list, so a successful FindIntersect proves the cap did not reject the
+// request.
+func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	ledgerState := newTestLedgerState(t)
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.LedgerState = ledgerState
+	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	return o
+}
+
+func makeFindIntersectPoints(n int) []ocommon.Point {
+	points := make([]ocommon.Point, n)
+	for i := range points {
+		points[i] = ocommon.NewPoint(
+			uint64(i+1),
+			[]byte{byte(i), byte(i >> 8)},
+		)
+	}
+	return points
+}
+
+func TestChainsyncServerFindIntersect_AtLimitAccepted(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	// An empty chain intersects every in-bounds request at origin, so a
+	// point list at the limit must be accepted (no error).
+	require.NoError(t, err)
+}
+
+func TestChainsyncServerFindIntersect_OverLimitRejected(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints + 1)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	// Over-limit lists are rejected before any intersection lookup. On an
+	// empty chain the lookup would otherwise return origin, so receiving
+	// ErrIntersectNotFound here proves the cap short-circuited the request.
+	require.ErrorIs(t, err, ochainsync.ErrIntersectNotFound)
+}
+
+func TestChainsyncServerFindIntersect_NormalPointListAccepted(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	// A typical client sends at most chainsyncIntersectPointCount points.
+	points := makeFindIntersectPoints(chainsyncIntersectPointCount)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	require.NoError(t, err)
+}
