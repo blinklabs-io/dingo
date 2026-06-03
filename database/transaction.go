@@ -291,15 +291,6 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			continue
 		}
 		seen[inputKey] = struct{}{}
-		// An output produced earlier in this same batch has not been
-		// flushed yet, so the metadata lookup below would miss and fall
-		// through to expensive blob recovery. FlushBatch creates the
-		// producer row before applying spends, and SetTransactionBatched
-		// records the spend independently, so we can skip recovery here.
-		if inFlight != nil &&
-			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
-			continue
-		}
 		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),
@@ -337,6 +328,20 @@ func (d *Database) ensureTransactionConsumedUtxos(
 					)
 				}
 			}
+			continue
+		}
+		// The row is absent from the store. If it was produced earlier in
+		// this same batch it has not been flushed yet: FlushBatch creates the
+		// producer row before applying spends, and SetTransactionBatched
+		// records the spend independently, so skip the expensive blob
+		// recovery rather than reconstructing a row the flush will write.
+		// This check is deliberately after the existing-row repair above so a
+		// partially-written row from a resumed backfill (DeletedSlot ==
+		// point.Slot, SpentAtTxId == nil) still gets its spender link
+		// backfilled — batchSpendUtxos only updates rows where deleted_slot
+		// = 0 and would not fix it later.
+		if inFlight != nil &&
+			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
 		recoveredUtxo, err := d.recoverConsumedUtxo(
