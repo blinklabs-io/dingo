@@ -36,6 +36,15 @@ import (
 const (
 	chainsyncIntersectPointCount = 100
 
+	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
+	// send in a single FindIntersect request. Honest clients send a small,
+	// bounded bisection list (our own client sends at most
+	// chainsyncIntersectPointCount). This generous cap protects against a
+	// malicious or buggy peer forcing avoidable intersection lookups against
+	// the ledger until the protocol timeout fires, while leaving ample
+	// headroom so legitimate sync is never rejected.
+	chainsyncMaxFindIntersectPoints = 1000
+
 	// chainsyncRestartTimeout bounds how long the restart of a
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
@@ -364,6 +373,22 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		"component", "ouroboros",
 		"tip_slot", tip.Point.Slot,
 	)
+	// Reject oversized point lists before performing any intersection
+	// lookup. Without this cap a peer could send an arbitrarily large list
+	// and force avoidable CPU/database work until the protocol timeout. We
+	// respond with IntersectNotFound (via ErrIntersectNotFound) rather than
+	// tearing down the connection, which keeps the failure cheap and avoids
+	// reconnect churn.
+	if len(points) > chainsyncMaxFindIntersectPoints {
+		o.config.Logger.Warn(
+			"chainsync server: rejecting FindIntersect with too many points",
+			"component", "ouroboros",
+			"connection_id", ctx.ConnectionId.String(),
+			"num_points", len(points),
+			"max_points", chainsyncMaxFindIntersectPoints,
+		)
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
+	}
 	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
 	if err != nil {
 		o.config.Logger.Error(
