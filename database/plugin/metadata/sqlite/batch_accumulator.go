@@ -22,7 +22,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -306,22 +305,22 @@ func (d *MetadataStoreSqlite) FlushBatch(
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
 		}
 
-		if err := batchCreate(db, batch.KeyWitnesses); err != nil {
+		if err := insertKeyWitnesses(db, batch.KeyWitnesses); err != nil {
 			return fmt.Errorf("flush batch: create key witnesses: %w", err)
 		}
-		if err := batchCreate(db, batch.WitnessScripts); err != nil {
+		if err := insertWitnessScripts(db, batch.WitnessScripts); err != nil {
 			return fmt.Errorf("flush batch: create witness scripts: %w", err)
 		}
-		if err := batchCreateScripts(db, batch.Scripts); err != nil {
+		if err := insertScripts(db, batch.Scripts); err != nil {
 			return fmt.Errorf("flush batch: create scripts: %w", err)
 		}
-		if err := batchCreate(db, batch.PlutusData); err != nil {
+		if err := insertPlutusData(db, batch.PlutusData); err != nil {
 			return fmt.Errorf("flush batch: create plutus data: %w", err)
 		}
-		if err := batchCreate(db, batch.Redeemers); err != nil {
+		if err := insertRedeemers(db, batch.Redeemers); err != nil {
 			return fmt.Errorf("flush batch: create redeemers: %w", err)
 		}
-		if err := batchCreate(db, batch.AddressTxs); err != nil {
+		if err := insertAddressTxs(db, batch.AddressTxs); err != nil {
 			return fmt.Errorf("flush batch: create address txs: %w", err)
 		}
 		return nil
@@ -338,34 +337,11 @@ func (d *MetadataStoreSqlite) FlushBatch(
 	return nil
 }
 
-func batchCreate[T any](db *gorm.DB, items []T) error {
-	if len(items) == 0 {
-		return nil
-	}
-	if result := db.CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
 func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
 	}
 	return importUtxosWithDB(db, items)
-}
-
-func batchCreateScripts(db *gorm.DB, items []models.Script) error {
-	if len(items) == 0 {
-		return nil
-	}
-	if result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "hash"}},
-		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
 }
 
 func batchDeleteByTxIDs(db *gorm.DB, table string, ids []uint) error {
