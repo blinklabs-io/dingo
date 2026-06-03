@@ -59,6 +59,11 @@ func ipv6Relay(ip string, port uint) models.PoolRegistrationRelay {
 	return models.PoolRegistrationRelay{Ipv6: &parsed, Port: port}
 }
 
+// atSlot builds a WithOrigin SlotNo for a real (non-origin) slot.
+func atSlot(slot uint64) olocalstatequery.WithOriginSlot {
+	return olocalstatequery.WithOriginSlot{HasSlot: true, Slot: slot}
+}
+
 // --- dispatch + empty snapshot --------------------------------------------
 
 // TestQueryLedgerPeerSnapshotDispatch proves the query routes through
@@ -66,12 +71,13 @@ func ipv6Relay(ip string, port uint) models.PoolRegistrationRelay {
 // a well-formed empty (V1) result against an empty database, with the slot
 // taken from the current tip.
 func TestQueryLedgerPeerSnapshotDispatch(t *testing.T) {
-	ls := &LedgerState{
-		db: newTestDB(t),
-		currentTip: ochainsync.Tip{
-			Point: ocommon.NewPoint(4242, []byte("tip")),
-		},
-	}
+	ls := &LedgerState{db: newTestDB(t)}
+	// The handler reads the snapshot slot from the same DB transaction as the
+	// pool data, so seed the tip in the database rather than in-memory state.
+	require.NoError(t, ls.db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(4242, []byte("tip"))},
+		nil,
+	))
 
 	query := &olocalstatequery.BlockQuery{
 		Query: &olocalstatequery.ShelleyQuery{
@@ -105,13 +111,30 @@ func TestQueryLedgerPeerSnapshotEmptyAtOrigin(t *testing.T) {
 	assert.Empty(t, snapshot.Pools)
 }
 
+// TestQueryLedgerPeerSnapshotRealSlotZero proves a real slot-0 block (slot 0
+// with a non-empty hash) is reported as At slot 0, not collapsed to Origin.
+func TestQueryLedgerPeerSnapshotRealSlotZero(t *testing.T) {
+	ls := &LedgerState{db: newTestDB(t)}
+	require.NoError(t, ls.db.SetTip(
+		ochainsync.Tip{Point: ocommon.NewPoint(0, []byte("genesis-block"))},
+		nil,
+	))
+
+	result, err := ls.queryLedgerPeerSnapshot(olocalstatequery.LedgerPeerKindAll)
+	require.NoError(t, err)
+
+	snapshot := result.(olocalstatequery.LedgerPeerSnapshotResult)
+	assert.True(t, snapshot.Slot.HasSlot, "slot 0 with a hash is a real point")
+	assert.Equal(t, uint64(0), snapshot.Slot.Slot)
+}
+
 func TestAssembleLedgerPeerSnapshotNoStake(t *testing.T) {
 	// Pools exist with relays but no delegated stake -> empty weighted set.
 	pools := []models.Pool{
 		poolWithRelays(poolKeyHash28(0x01), ipv4Relay("1.2.3.4", 3001)),
 	}
 	snapshot := assembleLedgerPeerSnapshot(
-		100,
+		atSlot(100),
 		map[string]uint64{},
 		pools,
 		olocalstatequery.LedgerPeerKindAll,
@@ -140,7 +163,7 @@ func TestAssembleLedgerPeerSnapshotStakeAndOrdering(t *testing.T) {
 	} // total = 40
 
 	snapshot := assembleLedgerPeerSnapshot(
-		500,
+		atSlot(500),
 		stake,
 		pools,
 		olocalstatequery.LedgerPeerKindAll,
@@ -177,7 +200,7 @@ func TestAssembleLedgerPeerSnapshotRelaylessPoolCounted(t *testing.T) {
 	} // total = 100
 
 	snapshot := assembleLedgerPeerSnapshot(
-		1,
+		atSlot(1),
 		stake,
 		pools,
 		olocalstatequery.LedgerPeerKindAll,
@@ -209,16 +232,49 @@ func TestAssembleLedgerPeerSnapshotBigPeerQuota(t *testing.T) {
 	} // total = 100
 
 	all := assembleLedgerPeerSnapshot(
-		1, stake, pools, olocalstatequery.LedgerPeerKindAll,
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindAll,
 	)
 	require.Len(t, all.Pools, 3, "All returns every relay-advertising pool")
 
 	big := assembleLedgerPeerSnapshot(
-		1, stake, pools, olocalstatequery.LedgerPeerKindBig,
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindBig,
 	)
 	// 0.95 already exceeds the 0.9 quota, so only the top pool is big.
 	require.Len(t, big.Pools, 1)
 	assert.Equal(t, "19/20", big.Pools[0].Detail.PoolStake.String())
+}
+
+// TestAssembleLedgerPeerSnapshotBigPeerExactThreshold proves that a pool which
+// lands the cumulative stake exactly on the 0.9 quota terminates the big set:
+// pools after it (including same-stake or zero-stake relayed pools) are
+// excluded rather than admitted by an off-by-one boundary.
+func TestAssembleLedgerPeerSnapshotBigPeerExactThreshold(t *testing.T) {
+	khA := poolKeyHash28(0xA0) // 80%
+	khB := poolKeyHash28(0xB0) // 10% -> cumulative exactly 0.9
+	khC := poolKeyHash28(0xC0) // 10% -> must be excluded
+	pools := []models.Pool{
+		poolWithRelays(khA, ipv4Relay("10.0.0.1", 3001)),
+		poolWithRelays(khB, ipv4Relay("10.0.0.2", 3001)),
+		poolWithRelays(khC, ipv4Relay("10.0.0.3", 3001)),
+	}
+	stake := map[string]uint64{
+		string(khA): 80,
+		string(khB): 10,
+		string(khC): 10,
+	} // total = 100
+
+	big := assembleLedgerPeerSnapshot(
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindBig,
+	)
+	require.Len(t, big.Pools, 2, "exact 0.9 boundary terminates the big set")
+	// The second (boundary) pool's cumulative stake is exactly 9/10.
+	assert.Equal(t, "9/10", big.Pools[1].AccumulatedStake.String())
+
+	// LedgerPeerKindAll still returns all three relay-advertising pools.
+	all := assembleLedgerPeerSnapshot(
+		atSlot(1), stake, pools, olocalstatequery.LedgerPeerKindAll,
+	)
+	require.Len(t, all.Pools, 3)
 }
 
 // --- relay-kind mapping ----------------------------------------------------
@@ -245,7 +301,7 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	stake := map[string]uint64{string(kh): 1}
 
 	snapshot := assembleLedgerPeerSnapshot(
-		1, stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
+		atSlot(1), stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
 	)
 	require.Len(t, snapshot.Pools, 1)
 	relays := snapshot.Pools[0].Detail.Relays
@@ -300,7 +356,7 @@ func TestAssembleLedgerPeerSnapshotMalformedPort(t *testing.T) {
 	stake := map[string]uint64{string(kh): 1}
 
 	snapshot := assembleLedgerPeerSnapshot(
-		1, stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
+		atSlot(1), stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
 	)
 	require.Len(t, snapshot.Pools, 1)
 	relays := snapshot.Pools[0].Detail.Relays
@@ -318,7 +374,7 @@ func TestAssembleLedgerPeerSnapshotResultEncodes(t *testing.T) {
 	kh := poolKeyHash28(0x01)
 	pool := poolWithRelays(kh, ipv4Relay("1.2.3.4", 3001))
 	snapshot := assembleLedgerPeerSnapshot(
-		7, map[string]uint64{string(kh): 1}, []models.Pool{pool},
+		atSlot(7), map[string]uint64{string(kh): 1}, []models.Pool{pool},
 		olocalstatequery.LedgerPeerKindAll,
 	)
 

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -23,17 +24,19 @@ import (
 	"sort"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
 // bigLedgerPeerQuota is the cumulative relative-stake threshold that
 // delimits the "big" ledger peers: walking pools from highest to lowest
 // stake, a pool belongs to the big set while the stake accumulated by the
-// pools before it has not yet exceeded this quota (so the first pool that
-// crosses the quota is still included). The value mirrors the
-// bigLedgerPeerQuota default (0.9) used by ouroboros-network's
+// pools before it has not yet reached this quota (so the first pool that
+// reaches or crosses the quota is the last one included). The value mirrors
+// the bigLedgerPeerQuota default (0.9) used by ouroboros-network's
 // PeerSelection.LedgerPeers. It is applied only when a client requests
 // LedgerPeerKindBig; LedgerPeerKindAll returns every relay-advertising pool.
 //
@@ -56,13 +59,25 @@ var bigLedgerPeerQuota = big.NewRat(9, 10)
 func (ls *LedgerState) queryLedgerPeerSnapshot(
 	peerKind olocalstatequery.LedgerPeerKind,
 ) (any, error) {
-	slot := ls.ChainTipSlot()
-
 	txn := ls.db.Transaction(false)
 	defer txn.Release()
 
+	// Read the tip from the same read transaction as the pool/stake data so
+	// the reported snapshot slot describes the exact point the relays and
+	// stake were observed at, even under a concurrent block apply or rollback.
+	tip, err := ls.db.GetTip(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetLedgerPeerSnapshot: get tip: %w", err)
+	}
+	slot := withOriginSlot(tip.Point)
+
 	pkhBytes, err := ls.db.Metadata().GetActivePoolKeyHashes(txn.Metadata())
 	if err != nil {
+		// Epoch data may not be synced yet for the current tip (early sync);
+		// there are simply no ledger peers to report at that point.
+		if errors.Is(err, types.ErrNoEpochData) {
+			return emptyLedgerPeerSnapshot(slot), nil
+		}
 		return nil, fmt.Errorf(
 			"GetLedgerPeerSnapshot: get active pools: %w",
 			err,
@@ -95,22 +110,25 @@ func (ls *LedgerState) queryLedgerPeerSnapshot(
 	return assembleLedgerPeerSnapshot(slot, stakeByPool, pools, peerKind), nil
 }
 
-// emptyLedgerPeerSnapshot builds a well-formed empty (V1) snapshot for the
-// given tip slot. A node with no active pools still returns a valid result.
-func emptyLedgerPeerSnapshot(slot uint64) olocalstatequery.LedgerPeerSnapshotResult {
+// emptyLedgerPeerSnapshot builds a well-formed empty (V1) snapshot at the
+// given point. A node with no active pools still returns a valid result.
+func emptyLedgerPeerSnapshot(
+	slot olocalstatequery.WithOriginSlot,
+) olocalstatequery.LedgerPeerSnapshotResult {
 	return olocalstatequery.LedgerPeerSnapshotResult{
 		Version: 0, // LedgerPeerSnapshotV1
-		Slot:    withOriginSlot(slot),
+		Slot:    slot,
 		Pools:   []olocalstatequery.PoolLedgerPeers{},
 	}
 }
 
-// withOriginSlot encodes a tip slot as a WithOrigin SlotNo. Slot 0 means the
-// chain is still at origin (no block applied), which maps to Origin.
-func withOriginSlot(slot uint64) olocalstatequery.WithOriginSlot {
+// withOriginSlot encodes a chain point as a WithOrigin SlotNo. The origin
+// point (slot 0 with an empty hash) maps to Origin; a real slot-0 block
+// (slot 0 with a non-empty hash) is reported as At slot 0.
+func withOriginSlot(point ocommon.Point) olocalstatequery.WithOriginSlot {
 	return olocalstatequery.WithOriginSlot{
-		HasSlot: slot > 0,
-		Slot:    slot,
+		HasSlot: point.Slot != 0 || len(point.Hash) > 0,
+		Slot:    point.Slot,
 	}
 }
 
@@ -138,7 +156,7 @@ type poolLedgerPeer struct {
 // still contribute to the total-stake denominator, matching the Cardano
 // ledger's pool-distribution semantics.
 func assembleLedgerPeerSnapshot(
-	slot uint64,
+	slot olocalstatequery.WithOriginSlot,
 	stakeByPool map[string]uint64,
 	pools []models.Pool,
 	peerKind olocalstatequery.LedgerPeerKind,
@@ -180,10 +198,12 @@ func assembleLedgerPeerSnapshot(
 	acc := new(big.Rat)
 	for _, e := range entries {
 		// For the big-peer set, stop once the stake accumulated by the
-		// preceding pools has exceeded the quota. The pool that first crosses
-		// the quota is still included (takeWhilePrev semantics).
+		// preceding pools has reached the quota. The pool that first reaches
+		// or crosses the quota is the last one included; pools after it
+		// (including zero-stake relayed pools sitting exactly on a 0.9
+		// boundary) are excluded.
 		if peerKind == olocalstatequery.LedgerPeerKindBig &&
-			acc.Cmp(bigLedgerPeerQuota) > 0 {
+			acc.Cmp(bigLedgerPeerQuota) >= 0 {
 			break
 		}
 		poolStake := new(big.Rat).SetFrac(
