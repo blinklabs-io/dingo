@@ -99,10 +99,9 @@ type Index struct {
 	//     (DeleteXAfterSlot), since rollbacks can occur as soon
 	//     as live sync resumes.
 	//
-	// Everything else is lazy: FK reverse-lookups, consumer-tx
-	// back-references (SpentAtTxId, ReferencedByTxId,
-	// CollateralByTxId), witness/redeemer secondary indexes, and
-	// any column that is only SELECTed or SET but never filtered.
+	// Everything else is lazy: FK reverse-lookups,
+	// witness/redeemer secondary indexes, and any column that is
+	// only SELECTed or SET but never filtered.
 	Critical bool
 }
 
@@ -169,15 +168,18 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Utxo{}, Field: "SpentAtTxId", Table: "utxo",
-		Notes: "Consumer-tx query; rollback only — not used by spend predicate",
+		Notes:    "Consumer-tx query and rollback repair (DeleteTransactionsAfterSlot); not used by spend predicate",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "ReferencedByTxId", Table: "utxo",
-		Notes: "Reference-input query; not used by insert path",
+		Notes:    "Reference-input query and rollback repair (DeleteTransactionsAfterSlot); not used by insert path",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "CollateralByTxId", Table: "utxo",
-		Notes: "Collateral query; not used by insert path",
+		Notes:    "Collateral query and rollback repair (DeleteTransactionsAfterSlot); not used by insert path",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "AddedSlot", Table: "utxo",

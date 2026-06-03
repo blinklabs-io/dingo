@@ -184,10 +184,10 @@ func WithDeferredIndexes(
 	if err := manager.DropDeferredIndexes(); err != nil {
 		logger.Warn(
 			"failed to drop deferred metadata indexes; "+
-				"continuing with full schema",
+				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return &DeferredIndexRebuilder{}
+		return &DeferredIndexRebuilder{manager: manager}
 	}
 	return &DeferredIndexRebuilder{manager: manager}
 }
