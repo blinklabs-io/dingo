@@ -67,7 +67,7 @@ func RegisterBlockByHashMetrics(reg prometheus.Registerer) {
 		})
 		blockByHashMissesCounter = factory.NewCounter(prometheus.CounterOpts{
 			Name: "dingo_database_block_hash_index_misses_total",
-			Help: "Total block-hash index lookups that fell through to the prefix scan",
+			Help: "Total block-hash index lookups that were a hard miss (ErrBlockNotFound)",
 		})
 	})
 }

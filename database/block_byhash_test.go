@@ -32,8 +32,8 @@ func resetBlockByHashStats() {
 
 // TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound verifies that an
 // unknown hash increments the miss counter (so operators can track the
-// false-fallback rate from #2105) and surfaces ErrBlockNotFound after
-// the time-bounded fallback scan finds nothing.
+// index miss rate from #2105) and returns ErrBlockNotFound directly on
+// the index miss, without any fallback scan.
 func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	db := newTestDB(t)
 	resetBlockByHashStats()
