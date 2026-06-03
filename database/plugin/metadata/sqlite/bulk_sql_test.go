@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm/schema"
@@ -44,6 +45,8 @@ func TestBulkInsertColumnsMatchSchema(t *testing.T) {
 		{"plutus_data", &models.PlutusData{}, plutusDataCols},
 		{"redeemer", &models.Redeemer{}, redeemerCols},
 		{"address_transaction", &models.AddressTransaction{}, addressTxCols},
+		{"utxo", &models.Utxo{}, utxoCols},
+		{"asset", &models.Asset{}, assetCols},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -128,6 +131,71 @@ func TestInsertScripts_ConflictDoNothing(t *testing.T) {
 	require.NoError(t, store.DB().Where("hash = ?", hash).Find(&got).Error)
 	require.Len(t, got, 1)
 	assert.Equal(t, []byte{0x01}, got[0].Content)
+}
+
+// TestImportUtxos_FixedShapeRoundTrip inserts a fully-populated UTxO with an
+// asset through the fixed-shape path and reads every column back. A swapped
+// column in utxoCols/assetCols (which the set-based schema guard would miss)
+// corrupts a value here. It also exercises asset linking, which depends on
+// BatchRefetchUtxoIDs recovering the utxo ID after a raw INSERT.
+func TestImportUtxos_FixedShapeRoundTrip(t *testing.T) {
+	store := setupTestDBWithMode(t, "api")
+	txid := bytes.Repeat([]byte{0x11}, 32)
+	in := models.Utxo{
+		TxId:       txid,
+		OutputIdx:  2,
+		PaymentKey: bytes.Repeat([]byte{0x22}, 28),
+		StakingKey: bytes.Repeat([]byte{0x33}, 28),
+		AddedSlot:  42,
+		Amount:     types.Uint64(1234567),
+		Assets: []models.Asset{{
+			Name:        []byte("TOKEN"),
+			NameHex:     []byte("544f4b454e"),
+			PolicyId:    bytes.Repeat([]byte{0x44}, 28),
+			Fingerprint: []byte("asset1xyz"),
+			Amount:      types.Uint64(999),
+		}},
+	}
+	require.NoError(t, store.ImportUtxos([]models.Utxo{in}, nil))
+
+	var got models.Utxo
+	require.NoError(t, store.DB().
+		Where("tx_id = ? AND output_idx = ?", txid, uint32(2)).
+		First(&got).Error)
+	assert.Equal(t, in.PaymentKey, got.PaymentKey)
+	assert.Equal(t, in.StakingKey, got.StakingKey)
+	assert.Equal(t, uint64(42), got.AddedSlot)
+	assert.Equal(t, types.Uint64(1234567), got.Amount)
+	assert.Equal(t, uint32(2), got.OutputIdx)
+
+	var assets []models.Asset
+	require.NoError(t, store.DB().Where("utxo_id = ?", got.ID).Find(&assets).Error)
+	require.Len(t, assets, 1)
+	assert.Equal(t, []byte("TOKEN"), assets[0].Name)
+	assert.Equal(t, bytes.Repeat([]byte{0x44}, 28), assets[0].PolicyId)
+	assert.Equal(t, []byte("asset1xyz"), assets[0].Fingerprint)
+	assert.Equal(t, types.Uint64(999), assets[0].Amount)
+}
+
+// TestImportUtxos_ConflictDoNothingIdempotent confirms the
+// ON CONFLICT(tx_id,output_idx) DO NOTHING semantics survive the conversion:
+// re-importing the same ref keeps the original row.
+func TestImportUtxos_ConflictDoNothingIdempotent(t *testing.T) {
+	store := setupTestDBWithMode(t, "api")
+	txid := bytes.Repeat([]byte{0xAA}, 32)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: txid, OutputIdx: 0, AddedSlot: 1, Amount: types.Uint64(10),
+	}}, nil))
+	// Same ref, different payload: must be ignored, not overwritten or errored.
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: txid, OutputIdx: 0, AddedSlot: 2, Amount: types.Uint64(20),
+	}}, nil))
+
+	var got []models.Utxo
+	require.NoError(t, store.DB().Where("tx_id = ?", txid).Find(&got).Error)
+	require.Len(t, got, 1)
+	assert.Equal(t, uint64(1), got[0].AddedSlot)
+	assert.Equal(t, types.Uint64(10), got[0].Amount)
 }
 
 func newBenchStore(b *testing.B) *MetadataStoreSqlite {

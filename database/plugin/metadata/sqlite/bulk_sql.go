@@ -49,7 +49,39 @@ var (
 	addressTxCols = []string{
 		"payment_key", "staking_key", "transaction_id", "slot", "tx_index",
 	}
+	utxoCols = []string{
+		"transaction_id", "collateral_return_for_tx_id", "tx_id",
+		"payment_key", "staking_key", "datum_hash", "spent_at_tx_id",
+		"referenced_by_tx_id", "collateral_by_tx_id", "added_slot",
+		"deleted_slot", "amount", "output_idx",
+	}
+	assetCols = []string{
+		"name", "name_hex", "policy_id", "fingerprint", "utxo_id", "amount",
+	}
 )
+
+// Conflict clauses preserved verbatim from the prior GORM clause.OnConflict
+// targets; their unique indexes are the idempotency contract for resumed
+// backfill.
+const (
+	utxoConflictClause  = `ON CONFLICT ("tx_id","output_idx") DO NOTHING`
+	assetConflictClause = `ON CONFLICT ("utxo_id","policy_id","name") DO NOTHING`
+)
+
+func appendUtxoRow(dst []any, u *models.Utxo) []any {
+	return append(dst,
+		u.TransactionID, u.CollateralReturnForTxID, u.TxId,
+		u.PaymentKey, u.StakingKey, u.DatumHash, u.SpentAtTxId,
+		u.ReferencedByTxId, u.CollateralByTxId, u.AddedSlot,
+		u.DeletedSlot, u.Amount, u.OutputIdx,
+	)
+}
+
+func appendAssetRow(dst []any, a *models.Asset) []any {
+	return append(dst,
+		a.Name, a.NameHex, a.PolicyId, a.Fingerprint, a.UtxoID, a.Amount,
+	)
+}
 
 // buildBulkInsertSQL returns a multi-row INSERT for nRows rows. For a given
 // (table, cols, conflict, nRows) the result is byte-identical on every call,
@@ -99,17 +131,26 @@ func buildBulkInsertSQL(
 }
 
 // execRawOnConn runs query on the transaction's underlying connection pool,
-// bypassing GORM's clause builder. GORM's positional-var path expands a []byte
-// argument into one bound value per byte; database/sql binds it as a single
-// blob. The conn pool is the active transaction's, and (with PrepareStmt on)
-// caches the compiled statement keyed by the stable query string.
-func execRawOnConn(db *gorm.DB, query string, args []any) error {
+// bypassing GORM's clause builder, and returns the affected-row count. GORM's
+// positional-var path expands a []byte argument into one bound value per byte;
+// database/sql binds it as a single blob. The conn pool is the active
+// transaction's, and (with PrepareStmt on) caches the compiled statement keyed
+// by the stable query string. For INSERT ... ON CONFLICT DO NOTHING the count
+// is the number of rows actually inserted (skipped conflicts are not counted).
+func execRawOnConn(db *gorm.DB, query string, args []any) (int64, error) {
 	ctx := db.Statement.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	_, err := db.Statement.ConnPool.ExecContext(ctx, query, args...)
-	return err
+	res, err := db.Statement.ConnPool.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // execBulkInsert writes nRows rows to table in fixed-size chunks. Full chunks
@@ -139,7 +180,7 @@ func execBulkInsert(
 		for j := i; j < i+chunkRows; j++ {
 			args = appendRow(args, j)
 		}
-		if err := execRawOnConn(db, fullSQL, args); err != nil {
+		if _, err := execRawOnConn(db, fullSQL, args); err != nil {
 			return err
 		}
 	}
@@ -149,7 +190,7 @@ func execBulkInsert(
 		for j := i; j < nRows; j++ {
 			args = appendRow(args, j)
 		}
-		if err := execRawOnConn(db, remSQL, args); err != nil {
+		if _, err := execRawOnConn(db, remSQL, args); err != nil {
 			return err
 		}
 	}
