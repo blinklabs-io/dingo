@@ -443,6 +443,8 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			q.Creds.Items(),
 		)
+	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
+		return ls.queryLedgerPeerSnapshot(q.PeerKind)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
