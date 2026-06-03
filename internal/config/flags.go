@@ -124,6 +124,10 @@ var flagSpecs = []flagSpec{
 	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
 
+	// Logging
+	stringFlag("Logging.Format", "logging-format", "", "log output format: text (default) or json"),
+	stringFlag("Logging.Level", "logging-level", "", "log level: debug, info (default), warn, or error"),
+
 	// Database workers and API backfill
 	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
 	intFlag("DatabaseQueueSize", "db-queue-size", "database worker pool task queue size"),

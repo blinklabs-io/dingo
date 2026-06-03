@@ -258,7 +258,7 @@ func mithrilSyncRunE(
 	if cfg == nil {
 		return errors.New("no config found in context")
 	}
-	logger := commonRun()
+	logger := commonRun(cfg)
 	network := cfg.Network
 	if network == "" {
 		network = "preview"

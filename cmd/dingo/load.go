@@ -39,7 +39,7 @@ func loadRun(ctx context.Context, args []string, cfg *config.Config) {
 		os.Exit(1)
 	}
 
-	logger := commonRun()
+	logger := commonRun(cfg)
 	if err := node.Load(ctx, cfg, logger, immutablePath); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)

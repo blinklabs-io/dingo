@@ -92,6 +92,10 @@ The following environment variables modify Dingo's behavior:
   - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
   - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
+- `DINGO_LOGGING_FORMAT`
+  - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
+- `DINGO_LOGGING_LEVEL`
+  - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
