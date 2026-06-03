@@ -39,6 +39,7 @@ const (
 	mithrilSyncPhaseGapBlocks     = "gap_blocks"
 	mithrilSyncPhasePostLedger    = "post_ledger_state"
 	mithrilSyncPhaseBackfill      = "backfill"
+	mithrilSyncPhaseIndexRebuild  = "index_rebuild"
 	mithrilSyncPhaseComplete      = "complete"
 )
 
@@ -139,6 +140,8 @@ type mithrilSyncMetrics struct {
 	backfillPercent        prometheus.Gauge
 	backfillStageDuration  *prometheus.GaugeVec
 	backfillIntervalCounts *prometheus.GaugeVec
+
+	indexRebuildDuration prometheus.Gauge
 }
 
 func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
@@ -277,6 +280,10 @@ func newMithrilSyncMetrics(reg prometheus.Registerer) *mithrilSyncMetrics {
 			},
 			[]string{"kind"},
 		),
+		indexRebuildDuration: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_mithril_sync_index_rebuild_duration_seconds",
+			Help: "Duration spent rebuilding critical deferred metadata indexes during Mithril sync.",
+		}),
 	}
 	m.startedAt.SetToCurrentTime()
 	return m
@@ -432,6 +439,13 @@ func (m *mithrilSyncMetrics) recordBackfillProgress(
 		Set(float64(stats.BlobUtxoOffsetWrites))
 	m.backfillIntervalCounts.WithLabelValues("skipped_utxo_offsets").
 		Set(float64(stats.SkippedUtxoOffsets))
+}
+
+func (m *mithrilSyncMetrics) recordIndexRebuildDuration(duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.indexRebuildDuration.Set(duration.Seconds())
 }
 
 func (m *mithrilSyncMetrics) markComplete() {

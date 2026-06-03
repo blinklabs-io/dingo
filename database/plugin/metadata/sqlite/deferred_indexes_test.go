@@ -113,6 +113,57 @@ func TestDropAndBuildDeferredIndexesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildCriticalDeferredIndexesOnlyRebuildsCriticalSubset verifies the
+// split rebuild contract: critical indexes are restored first, lazy indexes
+// remain missing, and the pending marker is not cleared until the full rebuild.
+func TestBuildCriticalDeferredIndexesOnlyRebuildsCriticalSubset(t *testing.T) {
+	d := setupTestDB(t)
+	if err := d.DropDeferredIndexes(); err != nil {
+		t.Fatalf("DropDeferredIndexes: %v", err)
+	}
+
+	if err := d.BuildCriticalDeferredIndexes(); err != nil {
+		t.Fatalf("BuildCriticalDeferredIndexes: %v", err)
+	}
+
+	pending, err := d.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after critical build: %v", err)
+	}
+	if !pending {
+		t.Fatal("indexes_pending should remain true after critical-only build")
+	}
+
+	critical := map[string]bool{}
+	for _, idx := range deferred.CriticalManifest() {
+		critical[idx.Table+"\x00"+idx.ResolvedName()] = true
+	}
+
+	migrator := d.DB().Migrator()
+	for _, idx := range deferred.Manifest {
+		name := idx.ResolvedName()
+		hasIndex := migrator.HasIndex(idx.Model, name)
+		isCritical := critical[idx.Table+"\x00"+name]
+		switch {
+		case isCritical && !hasIndex:
+			t.Errorf("critical index %q on %q missing after critical rebuild", name, idx.Table)
+		case !isCritical && hasIndex:
+			t.Errorf("lazy index %q on %q rebuilt during critical rebuild", name, idx.Table)
+		}
+	}
+
+	if err := d.BuildDeferredIndexes(); err != nil {
+		t.Fatalf("BuildDeferredIndexes after critical build: %v", err)
+	}
+	pending, err = d.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after full build: %v", err)
+	}
+	if pending {
+		t.Fatal("indexes_pending should be false after full rebuild")
+	}
+}
+
 // TestDropDeferredIndexesPreservesAssetImportConflictTarget covers the
 // #2457 failure mode: dropping the asset policy-id query index must not drop
 // idx_asset_unique, because ledger-state UTxO import uses it as the

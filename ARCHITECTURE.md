@@ -1054,6 +1054,18 @@ ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+In API storage mode, the SQLite metadata plugin can defer selected query indexes
+during bulk load. Deferred indexes are classified as critical or lazy in
+`database/plugin/metadata/deferred`: critical indexes cover startup API queries
+and rollback predicates, while lazy indexes cover secondary query paths. The
+metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
+and `BuildDeferredIndexes` for the full manifest. Mithril sync rebuilds the
+critical subset before clearing `sync_status`, then leaves the pending
+sync-state marker set. API-mode `serve` verifies the critical subset before
+startup and runs the full lazy rebuild as background maintenance; the marker is
+cleared only after the full manifest has been rebuilt. Core-mode startup still
+repairs the full manifest synchronously before serving.
+
 ## External Interfaces
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.

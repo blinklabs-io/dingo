@@ -65,6 +65,15 @@ func (d *MetadataStoreSqlite) DropDeferredIndexes() error {
 	return nil
 }
 
+// BuildCriticalDeferredIndexes recreates only the manifest entries
+// marked Critical=true. It does NOT clear the sync_state marker,
+// because the lazy remainder still needs to be built.
+// Call this before marking the API ready; follow up with
+// BuildDeferredIndexes to finish the remaining lazy indexes.
+func (d *MetadataStoreSqlite) BuildCriticalDeferredIndexes() error {
+	return d.buildIndexSubset(deferred.CriticalManifest(), false)
+}
+
 // BuildDeferredIndexes recreates every index in deferred.Manifest
 // that is missing from the schema and, once every manifest entry is
 // present, clears the sync_state marker. The operation is
@@ -74,10 +83,14 @@ func (d *MetadataStoreSqlite) DropDeferredIndexes() error {
 // slow builds with specific indexes (the utxo composite index, in
 // particular, can take several minutes on mainnet).
 func (d *MetadataStoreSqlite) BuildDeferredIndexes() error {
+	return d.buildIndexSubset(deferred.Manifest, true)
+}
+
+func (d *MetadataStoreSqlite) buildIndexSubset(subset []deferred.Index, clearMarker bool) error {
 	migrator := d.DB().Migrator()
 	overallStart := time.Now()
 	built := 0
-	for _, idx := range deferred.Manifest {
+	for _, idx := range subset {
 		name := idx.ResolvedName()
 		if migrator.HasIndex(idx.Model, name) {
 			continue
@@ -104,11 +117,7 @@ func (d *MetadataStoreSqlite) BuildDeferredIndexes() error {
 			"duration", time.Since(entryStart),
 		)
 	}
-	// Sanity check: every manifest entry must now exist before we
-	// declare the database ready. A missing index here would mean
-	// either a stale manifest entry (the index no longer maps to
-	// a real field) or a CREATE that silently no-op'd.
-	for _, idx := range deferred.Manifest {
+	for _, idx := range subset {
 		name := idx.ResolvedName()
 		if !migrator.HasIndex(idx.Model, name) {
 			return fmt.Errorf(
@@ -118,13 +127,16 @@ func (d *MetadataStoreSqlite) BuildDeferredIndexes() error {
 			)
 		}
 	}
-	if err := d.clearIndexesPending(); err != nil {
-		return fmt.Errorf("clearing indexes-pending marker: %w", err)
+	if clearMarker {
+		if err := d.clearIndexesPending(); err != nil {
+			return fmt.Errorf("clearing indexes-pending marker: %w", err)
+		}
 	}
 	d.logger.Info(
 		"rebuilt deferred metadata indexes",
 		"component", "database",
 		"built", built,
+		"subset_size", len(subset),
 		"manifest_size", len(deferred.Manifest),
 		"duration", time.Since(overallStart),
 	)

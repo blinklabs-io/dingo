@@ -87,6 +87,23 @@ type Index struct {
 	// in the manifest test failure message when the
 	// classification is questioned.
 	Notes string
+	// Critical marks indexes that must be present before the API
+	// can serve traffic. Critical indexes are rebuilt first so
+	// that the node can accept queries while the remaining lazy
+	// indexes finish in the background.
+	//
+	// Criteria for Critical=true:
+	//   - Any WHERE predicate on the index column used by a live
+	//     API query path (blockfrost, utxorpc, ledger queries).
+	//   - Any WHERE predicate used by the rollback path
+	//     (DeleteXAfterSlot), since rollbacks can occur as soon
+	//     as live sync resumes.
+	//
+	// Everything else is lazy: FK reverse-lookups, consumer-tx
+	// back-references (SpentAtTxId, ReferencedByTxId,
+	// CollateralByTxId), witness/redeemer secondary indexes, and
+	// any column that is only SELECTed or SET but never filtered.
+	Critical bool
 }
 
 // ResolvedName returns the GORM-visible name for the index — the
@@ -97,6 +114,19 @@ func (i Index) ResolvedName() string {
 		return i.Name
 	}
 	return i.Field
+}
+
+// CriticalManifest returns the subset of Manifest entries that are
+// marked Critical=true. These are the indexes that must be present
+// before the API can serve traffic.
+func CriticalManifest() []Index {
+	var out []Index
+	for _, idx := range Manifest {
+		if idx.Critical {
+			out = append(out, idx)
+		}
+	}
+	return out
 }
 
 // SyncStateKey is the sync_state row that marks an in-flight (or
@@ -129,11 +159,13 @@ var Manifest = []Index{
 	// spend predicate, which uses tx_id_output_idx exclusively.
 	{
 		Model: &models.Utxo{}, Field: "PaymentKey", Table: "utxo",
-		Notes: "API address lookup; not touched by UTxO insert or spend",
+		Notes:    "API address lookup; not touched by UTxO insert or spend",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "StakingKey", Table: "utxo",
-		Notes: "API stake lookup; not touched by UTxO insert or spend",
+		Notes:    "API stake lookup; not touched by UTxO insert or spend",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "SpentAtTxId", Table: "utxo",
@@ -149,7 +181,8 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Utxo{}, Field: "AddedSlot", Table: "utxo",
-		Notes: "Range scan; not used by insert or spend",
+		Notes:    "Rollback range scan (DeleteUtxosAfterSlot); not used by insert or spend",
+		Critical: true,
 	},
 	{
 		Model: &models.Utxo{}, Field: "TransactionID", Table: "utxo",
@@ -157,7 +190,8 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Utxo{}, Name: "idx_utxo_deleted_staking_amount", Table: "utxo",
-		Notes: "Composite SearchUtxos index; query-only path",
+		Notes:    "Composite SearchUtxos index; primary utxorpc query path",
+		Critical: true,
 	},
 
 	// transaction: BlockHash/Slot are query indexes; the
@@ -165,11 +199,13 @@ var Manifest = []Index{
 	// stays.
 	{
 		Model: &models.Transaction{}, Field: "BlockHash", Table: "transaction",
-		Notes: "Block-tx grouping query; not used by tx upsert",
+		Notes:    "Block-tx grouping query (blockfrost /blocks/{id}/txs); not used by tx upsert",
+		Critical: true,
 	},
 	{
 		Model: &models.Transaction{}, Field: "Slot", Table: "transaction",
-		Notes: "Slot range scan; not used by tx upsert",
+		Notes:    "Rollback range scan (DeleteTransactionsAfterSlot) and tx history ordering; not used by tx upsert",
+		Critical: true,
 	},
 
 	// asset: idx_asset_unique (Name + PolicyId + UtxoID) is the
@@ -177,15 +213,16 @@ var Manifest = []Index{
 	// per-column indexes are deferable.
 	{
 		Model: &models.Asset{}, Field: "NameHex", Table: "asset",
-		Notes: "Hex name lookup; query-only",
+		Notes: "Hex name lookup; query-only; no current WHERE name_hex=? path in API",
 	},
 	{
 		Model: &models.Asset{}, Name: "idx_asset_policy_id", Table: "asset",
-		Notes: "Policy-id lookup; query-only; idx_asset_unique still covers import",
+		Notes:    "Policy-id lookup (GetAssetsByPolicy); query-only; idx_asset_unique still covers import",
+		Critical: true,
 	},
 	{
 		Model: &models.Asset{}, Field: "Fingerprint", Table: "asset",
-		Notes: "Fingerprint lookup; query-only",
+		Notes: "Fingerprint lookup; query-only; returned as response field, not a WHERE predicate",
 	},
 	{
 		Model: &models.Asset{}, Field: "Amount", Table: "asset",
@@ -212,7 +249,8 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Certificate{}, Field: "Slot", Table: "certs",
-		Notes: "Slot range scan; not used by cert insert",
+		Notes:    "Rollback range scan (DeleteCertificatesAfterSlot); not used by cert insert",
+		Critical: true,
 	},
 	{
 		Model: &models.Certificate{}, Field: "CertType", Table: "certs",

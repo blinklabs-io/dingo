@@ -57,6 +57,7 @@ func serveRun(
 			)
 			os.Exit(1)
 		}
+		startDeferredIndexMaintenance(cfg, logger)
 	} else {
 		// Core mode: if a Mithril sync interrupted between drop
 		// and rebuild, repair before exposing the node so
@@ -132,10 +133,7 @@ func checkSyncState(
 }
 
 // repairDeferredIndexes rebuilds any deferred metadata indexes left
-// outstanding by a prior interrupted bulk-load run. This is the
-// "repair" path the issue references: API/query paths cannot be
-// exposed with a partial index set, so serve waits for the rebuild
-// instead of immediately exposing the node.
+// outstanding by a prior interrupted bulk-load run.
 func repairDeferredIndexes(
 	cfg *config.Config, logger *slog.Logger,
 ) error {
@@ -157,6 +155,27 @@ func repairDeferredIndexes(
 	}
 	defer db.Close()
 	return node.RepairDeferredIndexes(db, logger)
+}
+
+// startDeferredIndexMaintenance finishes lazy deferred-index rebuilds
+// in the background for API mode. The critical subset has already
+// been rebuilt by resumeBackfill, so API traffic can start while this
+// maintenance step restores secondary query indexes and clears the
+// pending marker. If the process exits mid-rebuild, the marker remains
+// and the next serve run retries the same maintenance path.
+func startDeferredIndexMaintenance(
+	cfg *config.Config, logger *slog.Logger,
+) {
+	go func() {
+		if err := repairDeferredIndexes(cfg, logger); err != nil {
+			logger.Error(
+				"deferred-index maintenance failed",
+				"error", err,
+			)
+			return
+		}
+		logger.Info("deferred-index maintenance complete")
+	}()
 }
 
 // resumeBackfill checks whether metadata backfill is needed and
@@ -236,9 +255,10 @@ func resumeBackfill(
 	if !needed {
 		// Still rebuild deferred indexes if a prior bulk-load
 		// run left them pending — the previous backfill may
-		// have completed but crashed before BuildDeferredIndexes
-		// ran.
-		if err := node.RepairDeferredIndexes(db, logger); err != nil {
+		// have completed but crashed before the critical rebuild
+		// ran. The lazy remainder is handled by background
+		// maintenance after the API starts.
+		if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 			return err
 		}
 		return clearBackfillSyncStatus(db)
@@ -259,10 +279,10 @@ func resumeBackfill(
 	if err := bf.Run(ctx); err != nil {
 		return fmt.Errorf("backfill: %w", err)
 	}
-	// Rebuild deferred indexes before clearing sync_status so a
+	// Rebuild critical deferred indexes before clearing sync_status so a
 	// crash between the two leaves both markers set and the next
 	// startup re-runs the rebuild.
-	if err := node.RepairDeferredIndexes(db, logger); err != nil {
+	if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 		return err
 	}
 	if err := clearBackfillSyncStatus(db); err != nil {
