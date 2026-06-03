@@ -143,7 +143,7 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil); err != nil {
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
@@ -274,11 +274,13 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txn *Txn,
+	acc BatchAccumulator,
 ) error {
 	consumed := tx.Consumed()
 	if len(consumed) == 0 {
 		return nil
 	}
+	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
@@ -289,6 +291,15 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			continue
 		}
 		seen[inputKey] = struct{}{}
+		// An output produced earlier in this same batch has not been
+		// flushed yet, so the metadata lookup below would miss and fall
+		// through to expensive blob recovery. FlushBatch creates the
+		// producer row before applying spends, and SetTransactionBatched
+		// records the spend independently, so we can skip recovery here.
+		if inFlight != nil &&
+			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
+			continue
+		}
 		existingUtxo, err := d.metadata.GetUtxoIncludingSpent(
 			inputTxId,
 			input.Index(),

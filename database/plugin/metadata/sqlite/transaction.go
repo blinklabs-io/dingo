@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
 	"time"
@@ -2733,25 +2734,38 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			local.AddDeleteTxID(tmpTx.ID)
 		}
 
-		// Fetch input address keys for address-indexing below.
+		// Fetch input address keys for address-indexing below. Outputs
+		// produced earlier in this same batch are not yet in the database,
+		// so resolve those from the in-flight accumulator and only query the
+		// store for the remaining (cross-batch) refs.
+		inputAddressKeys := make(map[string]UtxoAddressKeys, len(tx.Inputs()))
 		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
 		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			if keys, ok := batch.InFlightAddressKeys(inTxId, inIdx); ok {
+				inputAddressKeys[fmt.Sprintf("%x:%d", inTxId, inIdx)] = keys
+				continue
+			}
 			inputRefs = append(inputRefs, UtxoRef{
-				TxId:      input.Id().Bytes(),
-				OutputIdx: input.Index(),
+				TxId:      inTxId,
+				OutputIdx: inIdx,
 			})
 		}
-		lookupStart := time.Now()
-		inputAddressKeys, err := d.GetUtxoAddressKeysBatch(inputRefs, txn)
-		if batch.stats != nil {
-			// Track regular input address-key lookup for address indexing.
-			batch.stats.UtxoAddressLookup += time.Since(lookupStart)
-		}
-		if err != nil {
-			return fmt.Errorf(
-				"failed to batch fetch input UTXO address keys (batched): %w",
-				err,
-			)
+		if len(inputRefs) > 0 {
+			lookupStart := time.Now()
+			dbKeys, err := d.GetUtxoAddressKeysBatch(inputRefs, txn)
+			if batch.stats != nil {
+				// Track regular input address-key lookup for address indexing.
+				batch.stats.UtxoAddressLookup += time.Since(lookupStart)
+			}
+			if err != nil {
+				return fmt.Errorf(
+					"failed to batch fetch input UTXO address keys (batched): %w",
+					err,
+				)
+			}
+			maps.Copy(inputAddressKeys, dbKeys)
 		}
 
 		// Address-transaction index.

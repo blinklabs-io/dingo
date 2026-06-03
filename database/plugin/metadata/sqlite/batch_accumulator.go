@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -52,11 +53,25 @@ type BatchAccumulator struct {
 	CollateralRets []models.Utxo
 	DeleteTxIDs    []uint
 	stats          *types.BackfillHotPathStats
+	// producedByRef indexes produced outputs and collateral returns by their
+	// "%x:%d" tx-id/output-index ref so a later transaction in the same batch
+	// can resolve provenance and address keys for an output that has not yet
+	// been flushed to the database. Eagerly allocated so the Add/lookup
+	// methods never need a nil check.
+	producedByRef map[string]models.Utxo
+}
+
+// utxoRefKey builds the "%x:%d" lookup key shared by the in-flight index,
+// GetUtxoAddressKeysBatch's result map, and the consumed-input dedup loops.
+func utxoRefKey(txId []byte, outputIdx uint32) string {
+	return fmt.Sprintf("%x:%d", txId, outputIdx)
 }
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{}
+	return &BatchAccumulator{
+		producedByRef: make(map[string]models.Utxo),
+	}
 }
 
 // NewBatchAccumulator creates an accumulator for this metadata store.
@@ -97,6 +112,7 @@ func (b *BatchAccumulator) AddAddressTx(at models.AddressTransaction) {
 // AddUtxoOutput appends a produced UTxO record to the batch.
 func (b *BatchAccumulator) AddUtxoOutput(u models.Utxo) {
 	b.UtxoOutputs = append(b.UtxoOutputs, u)
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
 // AddUtxoSpend appends a consumed UTxO record to the batch.
@@ -107,6 +123,32 @@ func (b *BatchAccumulator) AddUtxoSpend(s utxoSpend) {
 // AddCollateralReturn appends a collateral return UTxO to the batch.
 func (b *BatchAccumulator) AddCollateralReturn(u models.Utxo) {
 	b.CollateralRets = append(b.CollateralRets, u)
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
+}
+
+// InFlightAddressKeys returns the address-key projection for an output
+// produced earlier in the current batch (and not yet flushed), so a later
+// transaction can resolve it without a database round trip.
+func (b *BatchAccumulator) InFlightAddressKeys(
+	txId []byte,
+	outputIdx uint32,
+) (UtxoAddressKeys, bool) {
+	u, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	if !ok {
+		return UtxoAddressKeys{}, false
+	}
+	return utxoAddressKeysFromUtxo(u), true
+}
+
+// HasInFlightProducer reports whether an output produced earlier in the
+// current batch (and not yet flushed) matches the given ref. The database
+// layer uses this to skip blob recovery for same-batch provenance.
+func (b *BatchAccumulator) HasInFlightProducer(
+	txId []byte,
+	outputIdx uint32,
+) bool {
+	_, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	return ok
 }
 
 // AddDeleteTxID appends a transaction ID scheduled for idempotent
@@ -128,6 +170,7 @@ func (b *BatchAccumulator) Reset() {
 	b.UtxoSpends = b.UtxoSpends[:0]
 	b.CollateralRets = b.CollateralRets[:0]
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
+	clear(b.producedByRef)
 	b.stats = nil
 }
 
@@ -174,6 +217,7 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
 	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
 	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+	maps.Copy(b.producedByRef, other.producedByRef)
 }
 
 // addPendingCountsToStats reports rows buffered for the next batch flush.
