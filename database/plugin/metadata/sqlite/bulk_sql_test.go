@@ -198,6 +198,43 @@ func TestImportUtxos_ConflictDoNothingIdempotent(t *testing.T) {
 	assert.Equal(t, types.Uint64(10), got[0].Amount)
 }
 
+// TestBatchSpendUtxos_GuardSkipsAlreadySpent confirms the per-row UPDATE keeps
+// the deleted_slot = 0 idempotency guard: a second spend of an already-spent
+// row (e.g. on retry, or a different tx) is a no-op and leaves the first
+// spender's slot/hash intact.
+func TestBatchSpendUtxos_GuardSkipsAlreadySpent(t *testing.T) {
+	store := setupTestDBWithMode(t, "api")
+	txid := bytes.Repeat([]byte{0x55}, 32)
+	spender1 := bytes.Repeat([]byte{0x66}, 32)
+	spender2 := bytes.Repeat([]byte{0x77}, 32)
+
+	// spent_at_tx_id has an FK to transactions.hash; create the spenders.
+	require.NoError(t, store.DB().Create(
+		&models.Transaction{Hash: spender1, Slot: 100, Valid: true},
+	).Error)
+	require.NoError(t, store.DB().Create(
+		&models.Transaction{Hash: spender2, Slot: 200, Valid: true},
+	).Error)
+	require.NoError(t, store.ImportUtxos([]models.Utxo{{
+		TxId: txid, OutputIdx: 0, AddedSlot: 1, Amount: types.Uint64(5),
+	}}, nil))
+
+	require.NoError(t, batchSpendUtxos(store.DB(), []utxoSpend{{
+		TxId: txid, OutputIdx: 0, Slot: 100, SpentByTxHash: spender1,
+	}}))
+	// Second spend must be skipped (deleted_slot != 0).
+	require.NoError(t, batchSpendUtxos(store.DB(), []utxoSpend{{
+		TxId: txid, OutputIdx: 0, Slot: 200, SpentByTxHash: spender2,
+	}}))
+
+	var got models.Utxo
+	require.NoError(t, store.DB().
+		Where("tx_id = ? AND output_idx = ?", txid, uint32(0)).
+		First(&got).Error)
+	assert.Equal(t, uint64(100), got.DeletedSlot)
+	assert.Equal(t, spender1, got.SpentAtTxId)
+}
+
 func newBenchStore(b *testing.B) *MetadataStoreSqlite {
 	b.Helper()
 	store, err := NewWithOptions(WithStorageMode("api"))
