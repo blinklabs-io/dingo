@@ -21,6 +21,8 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
@@ -138,6 +140,154 @@ func (m *mockRedeemers) Iter() iter.Seq2[lcommon.RedeemerKey, lcommon.RedeemerVa
 				return
 			}
 		}
+	}
+}
+
+func TestAlonzoValidationRulesUseLocalPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		alonzo.UtxoValidationRules,
+		alonzoUtxoValidatePlutusScriptsRuleIndex,
+		alonzo.UtxoValidatePlutusScripts,
+		"alonzo.UtxoValidatePlutusScripts",
+	)
+	require.Len(t, alonzoUtxoValidationRules, len(alonzo.UtxoValidationRules)-1)
+	requireIndexedRulesExcludeFunc(
+		t,
+		alonzoUtxoValidationRules,
+		alonzo.UtxoValidatePlutusScripts,
+		"Alonzo validation must use Dingo's local Plutus execution path",
+	)
+}
+
+func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		babbage.UtxoValidationRules,
+		babbageUtxoValidatePlutusScriptsRuleIndex,
+		babbage.UtxoValidatePlutusScripts,
+		"babbage.UtxoValidatePlutusScripts",
+	)
+	require.Len(t, babbageUtxoValidationRules, len(babbage.UtxoValidationRules)-1)
+	requireIndexedRulesExcludeFunc(
+		t,
+		babbageUtxoValidationRules,
+		babbage.UtxoValidatePlutusScripts,
+		"Babbage validation must use Dingo's local Plutus execution path",
+	)
+}
+
+func TestConwayValidationRulesIncludePlutusExecutionByDefault(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidatePlutusScriptsRuleIndex,
+		conway.UtxoValidatePlutusScripts,
+		"conway.UtxoValidatePlutusScripts",
+	)
+	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules))
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidatePlutusScripts,
+		"Conway validation should include gouroboros Plutus execution by default",
+	)
+}
+
+func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateExUnitsTooBigRuleIndex,
+		conway.UtxoValidateExUnitsTooBigUtxo,
+		"conway.UtxoValidateExUnitsTooBigUtxo",
+	)
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidatePlutusScriptsRuleIndex,
+		conway.UtxoValidatePlutusScripts,
+		"conway.UtxoValidatePlutusScripts",
+	)
+	require.Len(
+		t,
+		conwayPhase1UtxoValidationRules,
+		len(conway.UtxoValidationRules)-1,
+	)
+	requireIndexedRulesIncludeFunc(
+		t,
+		conwayPhase1UtxoValidationRules,
+		conway.UtxoValidateExUnitsTooBigUtxo,
+		"Conway phase-1 replay must still enforce ExUnits limits",
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayPhase1UtxoValidationRules,
+		conway.UtxoValidatePlutusScripts,
+		"Conway phase-1 replay must not execute Plutus scripts",
+	)
+}
+
+func TestBuildIndexedUtxoValidationRulesPanicsForStaleSkipIndex(t *testing.T) {
+	require.PanicsWithValue(
+		t,
+		"test.UtxoValidatePlutusScripts hardcoded rule index 25 no longer resolves to the expected function",
+		func() {
+			buildIndexedUtxoValidationRules(
+				alonzo.UtxoValidationRules,
+				alonzoUtxoValidatePlutusScriptsRuleIndex-1,
+				alonzo.UtxoValidatePlutusScripts,
+				"test.UtxoValidatePlutusScripts",
+			)
+		},
+	)
+}
+
+func requireRuleIndexResolvesToFunc(
+	t *testing.T,
+	rules []lcommon.UtxoValidationRuleFunc,
+	index int,
+	want lcommon.UtxoValidationRuleFunc,
+	name string,
+) {
+	t.Helper()
+	require.GreaterOrEqual(t, index, 0, "%s rule index must be non-negative", name)
+	require.Less(t, index, len(rules), "%s rule index must be within upstream rules", name)
+	require.Equal(
+		t,
+		utxoValidationRulePtr(want),
+		utxoValidationRulePtr(rules[index]),
+		"%s hardcoded rule index no longer resolves to the expected function",
+		name,
+	)
+}
+
+func requireIndexedRulesIncludeFunc(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	want lcommon.UtxoValidationRuleFunc,
+	message string,
+) {
+	t.Helper()
+	wantPtr := utxoValidationRulePtr(want)
+	for _, rule := range rules {
+		if utxoValidationRulePtr(rule.validationFunc) == wantPtr {
+			return
+		}
+	}
+	require.Fail(t, message)
+}
+
+func requireIndexedRulesExcludeFunc(
+	t *testing.T,
+	rules []indexedUtxoValidationRule,
+	want lcommon.UtxoValidationRuleFunc,
+	message string,
+) {
+	t.Helper()
+	wantPtr := utxoValidationRulePtr(want)
+	for _, rule := range rules {
+		require.NotEqual(t, wantPtr, utxoValidationRulePtr(rule.validationFunc), message)
 	}
 }
 

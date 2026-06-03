@@ -39,6 +39,11 @@ import (
 // exceeding SQLite's max bind variable limit (default 999).
 const sqliteBindVarLimit = 400
 
+// sqlitePrepareStmtMaxSize bounds GORM's prepared statement cache. The default
+// is effectively unbounded, which performs poorly for API backfill because many
+// bulk INSERT/UPDATE statements have batch-dependent SQL text.
+const sqlitePrepareStmtMaxSize = 1024
+
 // sqliteTxn wraps a gorm transaction and implements types.Txn
 type sqliteTxn struct {
 	beginErr error
@@ -262,6 +267,7 @@ func (d *MetadataStoreSqlite) Start() error {
 				Logger:                 d.gormLogger(),
 				SkipDefaultTransaction: true,
 				PrepareStmt:            true,
+				PrepareStmtMaxSize:     sqlitePrepareStmtMaxSize,
 			},
 		)
 		if err != nil {
@@ -341,6 +347,7 @@ func (d *MetadataStoreSqlite) Start() error {
 				Logger:                 d.gormLogger(),
 				SkipDefaultTransaction: true,
 				PrepareStmt:            true,
+				PrepareStmtMaxSize:     sqlitePrepareStmtMaxSize,
 			},
 		)
 		if err != nil {
@@ -360,6 +367,7 @@ func (d *MetadataStoreSqlite) Start() error {
 				Logger:                 gormlogger.Discard,
 				SkipDefaultTransaction: true,
 				PrepareStmt:            true,
+				PrepareStmtMaxSize:     sqlitePrepareStmtMaxSize,
 			},
 		)
 		if err != nil {

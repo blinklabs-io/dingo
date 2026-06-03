@@ -48,6 +48,13 @@ type LedgerView struct {
 	// consumedUtxos tracks inputs consumed by pending mempool transactions.
 	// Key format: hex(txId) + ":" + outputIdx
 	consumedUtxos map[string]struct{}
+	// skipPhase2Validation is set for accepted block replay, where
+	// the producer's isValid flag is authoritative for Phase-2 results.
+	skipPhase2Validation bool
+}
+
+func (lv *LedgerView) SkipPhase2Validation() bool {
+	return lv.skipPhase2Validation
 }
 
 func (lv *LedgerView) NetworkId() uint {
@@ -290,7 +297,12 @@ func (lv *LedgerView) CalculateRewards(
 // TODO: implement Ada pots retrieval. Requires tracking of treasury, reserves,
 // fees, and rewards pots which are not yet stored in the database.
 func (lv *LedgerView) GetAdaPots() lcommon.AdaPots {
-	return lcommon.AdaPots{}
+	panic(ErrNotImplemented)
+}
+
+// GetAdaPotsWithError returns the current Ada pots.
+func (lv *LedgerView) GetAdaPotsWithError() (lcommon.AdaPots, error) {
+	return lcommon.AdaPots{}, ErrNotImplemented
 }
 
 // GetRewardSnapshot returns the current reward snapshot.

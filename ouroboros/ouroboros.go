@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -51,17 +52,18 @@ import (
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
 type Ouroboros struct {
-	ConnManager       *connmanager.ConnectionManager
-	PeerGov           *peergov.PeerGovernor
-	ChainsyncState    *chainsync.State
-	EventBus          *event.EventBus
-	Mempool           *mempool.Mempool
-	LedgerState       *ledger.LedgerState
-	config            OuroborosConfig
-	blockfetchMetrics *blockfetchMetrics
-	protocolMetrics   *protocolMetrics
-	blockFetchStarts  map[ouroboros.ConnectionId]time.Time
-	blockFetchMutex   sync.Mutex
+	ConnManager              *connmanager.ConnectionManager
+	PeerGov                  *peergov.PeerGovernor
+	ChainsyncState           *chainsync.State
+	EventBus                 *event.EventBus
+	Mempool                  *mempool.Mempool
+	LedgerState              *ledger.LedgerState
+	config                   OuroborosConfig
+	blockfetchMetrics        *blockfetchMetrics
+	protocolMetrics          *protocolMetrics
+	blockFetchStarts         map[ouroboros.ConnectionId]time.Time
+	blockFetchMutex          sync.Mutex
+	blockfetchNoBlocksCounts map[ouroboros.ConnectionId]blockfetchNoBlocksState
 	// ChainSync measurement tracking for peer scoring
 	chainsyncStats map[ouroboros.ConnectionId]*chainsyncPeerStats
 	chainsyncMutex sync.Mutex
@@ -69,6 +71,11 @@ type Ouroboros struct {
 	restartMu sync.Map // ouroboros.ConnectionId → *sync.Mutex
 	// Per-peer rate limiter for TxSubmission server
 	txSubmissionRateLimiter *txSubmissionRateLimiter
+	// Cached Leios EB material fetched from peers. This lets NtC
+	// ChainSync serve merged RB+EB blocks without coupling the chain
+	// package to Leios prototype protocols.
+	leiosEndorserBlocks map[string]*leiosEndorserBlockData
+	leiosMu             sync.RWMutex
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -113,10 +120,10 @@ type blockfetchMetrics struct {
 	blockDelayCdfOne   prometheus.Gauge
 	blockDelayCdfThree prometheus.Gauge
 	blockDelayCdfFive  prometheus.Gauge
-	totalBlocksFetched int64
-	blocksUnder1s      int64
-	blocksUnder3s      int64
-	blocksUnder5s      int64
+	totalBlocksFetched atomic.Int64
+	blocksUnder1s      atomic.Int64
+	blocksUnder3s      atomic.Int64
+	blocksUnder5s      atomic.Int64
 }
 
 func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
@@ -128,11 +135,13 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		cfg.ChainsyncBlockTimeout,
 	)
 	o := &Ouroboros{
-		config:           cfg,
-		EventBus:         cfg.EventBus,
-		ConnManager:      cfg.ConnManager,
-		blockFetchStarts: make(map[ouroboros.ConnectionId]time.Time),
-		chainsyncStats:   make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		config:                   cfg,
+		EventBus:                 cfg.EventBus,
+		ConnManager:              cfg.ConnManager,
+		blockFetchStarts:         make(map[ouroboros.ConnectionId]time.Time),
+		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
+		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
+		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -374,9 +383,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.Mempool != nil {
 		o.Mempool.RemoveConsumer(connId)
 	}
-	// Clean up any pending block fetch start times
+	// Clean up any pending block fetch start times and NoBlocks counters
 	o.blockFetchMutex.Lock()
 	delete(o.blockFetchStarts, connId)
+	delete(o.blockfetchNoBlocksCounts, connId)
 	o.blockFetchMutex.Unlock()
 	// Clean up chainsync stats
 	o.chainsyncMutex.Lock()

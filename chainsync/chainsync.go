@@ -29,6 +29,8 @@ import (
 	"github.com/blinklabs-io/gouroboros/connection"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // DefaultMaxClients is the default maximum number of concurrent
@@ -40,6 +42,19 @@ const DefaultMaxClients = 3
 // must stay in sync with config.DefaultChainsyncConfig() and
 // the fallback in internal/node/node.go.
 const DefaultStallTimeout = 2 * time.Minute
+
+// defaultSeenHeadersRetention is the fallback retention window, in slots,
+// for the header deduplication cache when no stability window is available
+// (e.g. before ledger state is wired). It mirrors the ledger's default
+// stability window (2500 * 20).
+const defaultSeenHeadersRetention = 2500 * 20
+
+// seenHeadersPruneInterval bounds how often the header deduplication cache
+// is scanned for pruning. A prune runs at most once per this many slots of
+// forward progress, keeping the per-header cost negligible while capping
+// the retained cache at roughly retentionWindow + seenHeadersPruneInterval
+// slots of observed headers.
+const seenHeadersPruneInterval = 1000
 
 // ClientStatus represents the sync status of a chainsync client.
 type ClientStatus int
@@ -116,6 +131,14 @@ type TrackedClient struct {
 type Config struct {
 	MaxClients   int
 	StallTimeout time.Duration
+	// SeenHeadersRetention overrides the retention window, in slots, for
+	// the header deduplication cache. When zero, the retention window is
+	// derived from the ledger's current stability window (falling back to
+	// defaultSeenHeadersRetention when no ledger state is available).
+	SeenHeadersRetention uint64
+	// PromRegistry, when non-nil, is used to register chainsync metrics
+	// such as the current header deduplication cache size.
+	PromRegistry prometheus.Registerer
 }
 
 // DefaultConfig returns the default chainsync configuration.
@@ -146,6 +169,17 @@ type State struct {
 	// block hashes seen at that slot
 	seenHeaders      map[uint64][]headerRecord
 	seenHeadersMutex sync.Mutex
+	// seenHeadersMaxSlot is the highest slot recorded in seenHeaders. It
+	// is the frontier against which the retention window is applied when
+	// pruning old observations.
+	seenHeadersMaxSlot uint64
+	// seenHeadersLastPruneCheck records the frontier slot at the last
+	// prune attempt, rate-limiting prune scans to once per
+	// seenHeadersPruneInterval slots of progress.
+	seenHeadersLastPruneCheck uint64
+	// seenHeadersGauge tracks the current number of slots retained in the
+	// deduplication cache. Never nil; unregistered when PromRegistry is nil.
+	seenHeadersGauge prometheus.Gauge
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
 	observedHeadersMutex sync.RWMutex
@@ -205,6 +239,14 @@ func NewStateWithConfig(
 			map[ouroboros.ConnectionId]*observedHeaderChain,
 		),
 	}
+	// promauto.With(nil) returns a factory that creates the gauge without
+	// registering it, so this is safe when PromRegistry is unset.
+	s.seenHeadersGauge = promauto.With(cfg.PromRegistry).NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_chainsync_seen_headers",
+			Help: "current number of slots retained in the chainsync header deduplication cache",
+		},
+	)
 	return s
 }
 
@@ -280,7 +322,7 @@ func (s *State) RemoveClientConnId(
 	tc, exists := s.trackedClients[connId]
 	wasPrimary := s.activeClientConnId != nil &&
 		*s.activeClientConnId == connId
-	wasEligible := exists && !tc.ObservabilityOnly
+	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
 	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
@@ -791,7 +833,11 @@ func (s *State) updateClientTip(
 		return true
 	}
 	// Header deduplication and fork detection
-	return s.processHeader(connId, point)
+	isNew := s.processHeader(connId, point)
+	// Prune stale observations on the normal progress path so the dedup
+	// cache stays bounded over long-running nodes.
+	s.maybePruneSeenHeaders()
+	return isNew
 }
 
 // processHeader checks whether the header at the given point
@@ -820,6 +866,10 @@ func (s *State) processHeader(
 		connId: connId,
 	}
 	s.seenHeaders[point.Slot] = append(records, newRec)
+	if point.Slot > s.seenHeadersMaxSlot {
+		s.seenHeadersMaxSlot = point.Slot
+	}
+	s.updateSeenHeadersGaugeLocked()
 	// If there was already a different hash at this slot,
 	// emit a fork detection event against the first record.
 	// Clone the Point.Hash to avoid aliasing the caller's
@@ -1007,6 +1057,9 @@ func (s *State) ClearSeenHeaders() {
 	s.seenHeadersMutex.Lock()
 	defer s.seenHeadersMutex.Unlock()
 	s.seenHeaders = make(map[uint64][]headerRecord)
+	s.seenHeadersMaxSlot = 0
+	s.seenHeadersLastPruneCheck = 0
+	s.updateSeenHeadersGaugeLocked()
 }
 
 // ClearSeenHeadersFrom removes entries from the header deduplication cache
@@ -1021,6 +1074,16 @@ func (s *State) ClearSeenHeadersFrom(fromSlot uint64) {
 			delete(s.seenHeaders, slot)
 		}
 	}
+	// The frontier and prune-check marker must not sit above the highest
+	// remaining slot, or the retention window would be measured from a
+	// slot that no longer has an observation.
+	if s.seenHeadersMaxSlot > fromSlot {
+		s.seenHeadersMaxSlot = fromSlot
+	}
+	if s.seenHeadersLastPruneCheck > s.seenHeadersMaxSlot {
+		s.seenHeadersLastPruneCheck = s.seenHeadersMaxSlot
+	}
+	s.updateSeenHeadersGaugeLocked()
 }
 
 // cloneBytes returns a copy of the byte slice, or nil if the
@@ -1044,6 +1107,79 @@ func (s *State) PruneSeenHeaders(beforeSlot uint64) {
 			delete(s.seenHeaders, slot)
 		}
 	}
+	s.updateSeenHeadersGaugeLocked()
+}
+
+// seenHeadersRetention returns the retention window, in slots, for the
+// header deduplication cache. A configured override wins; otherwise the
+// ledger's current stability window is used, falling back to
+// defaultSeenHeadersRetention when no ledger state is available.
+func (s *State) seenHeadersRetention() uint64 {
+	if s.config.SeenHeadersRetention > 0 {
+		return s.config.SeenHeadersRetention
+	}
+	if s.ledgerState != nil {
+		if w := s.ledgerState.StabilityWindow(); w > 0 {
+			return w
+		}
+	}
+	return defaultSeenHeadersRetention
+}
+
+// maybePruneSeenHeaders drops header deduplication entries for slots that
+// have fallen behind the retention window (the Ouroboros stability window
+// by default) relative to the highest slot observed. It is invoked on the
+// normal header-progress path so a long-running node does not accumulate
+// seenHeaders entries without bound. Slots within the retention window are
+// always kept so recent duplicate and fork detection are unaffected.
+//
+// Pruning is rate-limited by seenHeadersPruneInterval: the cache is only
+// rescanned after the frontier advances by at least that many slots, which
+// keeps the amortized per-header cost negligible and bounds the retained
+// cache at roughly retention + seenHeadersPruneInterval slots.
+func (s *State) maybePruneSeenHeaders() {
+	s.seenHeadersMutex.Lock()
+	frontier := s.seenHeadersMaxSlot
+	// Rate-limit rescans. The first comparison also guards the unsigned
+	// subtraction against a frontier that moved backwards after a clear.
+	if frontier >= s.seenHeadersLastPruneCheck &&
+		frontier-s.seenHeadersLastPruneCheck < seenHeadersPruneInterval {
+		s.seenHeadersMutex.Unlock()
+		return
+	}
+	s.seenHeadersLastPruneCheck = frontier
+	s.seenHeadersMutex.Unlock()
+
+	// Resolve the retention window outside seenHeadersMutex: it may take
+	// the ledger read lock, and we must not nest locks in that order.
+	retention := s.seenHeadersRetention()
+	if retention == 0 || frontier <= retention {
+		return
+	}
+	cutoff := frontier - retention
+
+	s.seenHeadersMutex.Lock()
+	defer s.seenHeadersMutex.Unlock()
+	for slot := range s.seenHeaders {
+		if slot < cutoff {
+			delete(s.seenHeaders, slot)
+		}
+	}
+	s.updateSeenHeadersGaugeLocked()
+}
+
+// SeenHeadersLen returns the number of slots currently retained in the
+// header deduplication cache. Primarily useful for metrics and tests.
+func (s *State) SeenHeadersLen() int {
+	s.seenHeadersMutex.Lock()
+	defer s.seenHeadersMutex.Unlock()
+	return len(s.seenHeaders)
+}
+
+// updateSeenHeadersGaugeLocked refreshes the dedup cache size gauge.
+// Caller must hold seenHeadersMutex.
+func (s *State) updateSeenHeadersGaugeLocked() {
+	s.seenHeadersGauge.Set(float64(len(s.seenHeaders)))
 }
 
 func (s *State) eligibleClientCountLocked() int {

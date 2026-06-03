@@ -17,7 +17,6 @@ package ouroboros
 import (
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -39,6 +38,22 @@ const blockfetchMetricsCdfUpdateInterval = 32
 // would cause the server to iterate the entire chain. The value of 129600
 // corresponds to the stability window (3k/f) on mainnet (k=2160, f=0.05).
 const MaxBlockFetchRange = 129600
+
+// blockfetchMaxConsecutiveNoBlocks is the number of consecutive NoBlocks
+// responses for the same (connId, start) tuple before closing the connection.
+const blockfetchMaxConsecutiveNoBlocks = 5
+
+// blockfetchNoBlocksPoint identifies the start point used by the last
+// NoBlocks response tracked for a connection.
+type blockfetchNoBlocksPoint struct {
+	Slot uint64
+	Hash string
+}
+
+type blockfetchNoBlocksState struct {
+	Point blockfetchNoBlocksPoint
+	Count int
+}
 
 type blockfetchRangeIterator interface {
 	Next(bool) (*chain.ChainIteratorResult, error)
@@ -115,6 +130,12 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated oversized range requests",
+			"blockfetch: peer stuck on oversized range",
+		)
 		return nil
 	}
 	// Validate that the start point exists in our chain (#397)
@@ -132,8 +153,15 @@ func (o *Ouroboros) blockfetchServerRequestRange(
 				err,
 			)
 		}
+		o.blockfetchRecordNoBlocksAndMaybeClose(
+			ctx.ConnectionId,
+			start,
+			"blockfetch: closing stuck peer after repeated missing-point requests",
+			"blockfetch: peer stuck on missing point",
+		)
 		return nil
 	}
+	o.blockfetchResetNoBlocks(ctx.ConnectionId)
 	// Start async process to send requested block range
 	go func() {
 		conn := o.ConnManager.GetConnectionById(ctx.ConnectionId)
@@ -312,6 +340,58 @@ func (o *Ouroboros) closeBlockfetchConnection(
 	}
 }
 
+func (o *Ouroboros) blockfetchRecordNoBlocksAndMaybeClose(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+	logMessage string,
+	closeReason string,
+) {
+	if !o.blockfetchRecordNoBlocks(connId, start) {
+		return
+	}
+	o.config.Logger.Warn(
+		logMessage,
+		"connection_id", connId.String(),
+		"start_slot", start.Slot,
+	)
+	if o.ConnManager == nil {
+		return
+	}
+	conn := o.ConnManager.GetConnectionById(connId)
+	if conn == nil {
+		return
+	}
+	o.closeBlockfetchConnection(conn, connId.String(), closeReason)
+}
+
+// blockfetchRecordNoBlocks increments the consecutive NoBlocks counter for
+// (connId, start) and returns true when blockfetchMaxConsecutiveNoBlocks is reached.
+func (o *Ouroboros) blockfetchRecordNoBlocks(
+	connId ouroboros.ConnectionId,
+	start ocommon.Point,
+) bool {
+	key := blockfetchNoBlocksPoint{Slot: start.Slot, Hash: string(start.Hash)}
+	o.blockFetchMutex.Lock()
+	defer o.blockFetchMutex.Unlock()
+	state, ok := o.blockfetchNoBlocksCounts[connId]
+	if !ok || state.Point != key {
+		o.blockfetchNoBlocksCounts[connId] = blockfetchNoBlocksState{
+			Point: key,
+			Count: 1,
+		}
+		return false
+	}
+	state.Count++
+	o.blockfetchNoBlocksCounts[connId] = state
+	return state.Count >= blockfetchMaxConsecutiveNoBlocks
+}
+
+func (o *Ouroboros) blockfetchResetNoBlocks(connId ouroboros.ConnectionId) {
+	o.blockFetchMutex.Lock()
+	delete(o.blockfetchNoBlocksCounts, connId)
+	o.blockFetchMutex.Unlock()
+}
+
 // BlockfetchClientRequestRange is called by the ledger when it needs to request a range of block bodies
 func (o *Ouroboros) BlockfetchClientRequestRange(
 	connId ouroboros.ConnectionId,
@@ -374,26 +454,26 @@ func (o *Ouroboros) blockfetchClientBlock(
 			}
 
 			o.blockfetchMetrics.blockDelay.Set(delaySeconds)
-			total := atomic.AddInt64(&o.blockfetchMetrics.totalBlocksFetched, 1)
+			total := o.blockfetchMetrics.totalBlocksFetched.Add(1)
 			// Cumulative CDF buckets: each counter includes all
 			// blocks at or below its threshold.
 			if delaySeconds < 1.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder1s, 1)
+				o.blockfetchMetrics.blocksUnder1s.Add(1)
 			}
 			if delaySeconds < 3.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder3s, 1)
+				o.blockfetchMetrics.blocksUnder3s.Add(1)
 			}
 			if delaySeconds < 5.0 {
-				atomic.AddInt64(&o.blockfetchMetrics.blocksUnder5s, 1)
+				o.blockfetchMetrics.blocksUnder5s.Add(1)
 			} else {
 				o.blockfetchMetrics.lateBlocks.Inc()
 			}
 			if total == 1 ||
 				total%blockfetchMetricsCdfUpdateInterval == 0 ||
 				delaySeconds >= 5.0 {
-				under1 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder1s)
-				under3 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder3s)
-				under5 := atomic.LoadInt64(&o.blockfetchMetrics.blocksUnder5s)
+				under1 := o.blockfetchMetrics.blocksUnder1s.Load()
+				under3 := o.blockfetchMetrics.blocksUnder3s.Load()
+				under5 := o.blockfetchMetrics.blocksUnder5s.Load()
 				o.blockfetchMetrics.blockDelayCdfOne.Set(
 					float64(under1) / float64(total) * 100,
 				)

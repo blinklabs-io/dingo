@@ -226,6 +226,7 @@ type Config struct {
 	BarkPort             uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
 	BarkPrunerFrequency  time.Duration `yaml:"barkPrunerFrequency" envconfig:"DINGO_BARK_PRUNER_FREQUENCY"`
 	UtxorpcPort          uint          `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	CORSAllowedOrigins   []string      `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
 	MetricsPort          uint          `yaml:"metricsPort"                                                      split_words:"true"`
 	DebugPort            uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
 	IntersectTip         bool          `yaml:"intersectTip"                                                     split_words:"true"`
@@ -235,6 +236,7 @@ type Config struct {
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
+	BackfillBatchSize int `yaml:"backfillBatchSize" envconfig:"DINGO_BACKFILL_BATCH_SIZE"`
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	TargetNumberOfKnownPeers       int `yaml:"targetNumberOfKnownPeers"       envconfig:"DINGO_TARGET_KNOWN_PEERS"`
@@ -325,6 +327,13 @@ type MithrilConfig struct {
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
+	// DownloadIdleTimeout is the maximum idle time to wait for snapshot
+	// response headers or body bytes before retrying. Empty uses the
+	// downloader default; a negative duration disables idle detection.
+	DownloadIdleTimeout string `yaml:"downloadIdleTimeout" envconfig:"DINGO_MITHRIL_DOWNLOAD_IDLE_TIMEOUT"`
+	// DownloadMaxIdleRetries is the number of consecutive idle retries
+	// allowed without additional bytes. Zero uses the downloader default.
+	DownloadMaxIdleRetries int `yaml:"downloadMaxIdleRetries" envconfig:"DINGO_MITHRIL_DOWNLOAD_MAX_IDLE_RETRIES"`
 	// CleanupAfterLoad controls whether temporary files are removed
 	// after the ImmutableDB has been loaded.
 	CleanupAfterLoad bool `yaml:"cleanupAfterLoad"   envconfig:"DINGO_MITHRIL_CLEANUP"`
@@ -415,6 +424,7 @@ var globalConfig = &Config{
 	BarkPort:             0,
 	BarkPrunerFrequency:  time.Hour,
 	UtxorpcPort:          9090,
+	CORSAllowedOrigins:   []string{"*"},
 	BlockfrostPort:       3000,
 	MeshPort:             8080,
 	Topology:             "",
@@ -427,9 +437,10 @@ var globalConfig = &Config{
 	ImmutableDbPath:      "",
 	ShutdownTimeout:      DefaultShutdownTimeout,
 	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-	// Defaults for database worker pool tuning
+	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
+	BackfillBatchSize: 100,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults

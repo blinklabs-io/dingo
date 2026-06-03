@@ -1,5 +1,381 @@
 # Dingo Releases
 
+## v0.50.1 (June 2, 2026)
+
+**Title:** Stuck-peer recovery, corrected chain density, and maintenance polish
+
+**Date:** June 2, 2026
+
+**Version:** v0.50.1
+
+Hi folks! Here’s what we shipped in v0.50.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements and fixes.
+
+### 💪 Improvements
+
+* Improved **keep sibling worktrees out of routine project commands:** Routine format and build commands now ignore sibling `.worktrees` directories, which keeps local maintenance behavior more predictable. ([#2478](https://github.com/blinklabs-io/dingo/pull/2478))
+* Updated **publish the v0.50.0 release history entry:** The published release history now includes the v0.50.0 notes, which keeps recent release context easier to review. ([#2474](https://github.com/blinklabs-io/dingo/pull/2474))
+
+### 🔧 Fixes
+
+* Fixed **recover more cleanly from peers that stop serving blocks:** Nodes can now disconnect or slow peers that repeat empty block responses for the same point, which helps sync escape stuck-peer loops more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
+* Corrected **avoid repeated next epoch readiness work after it already completes:** Next epoch readiness now avoids repeating the same work after readiness has already been emitted, which keeps slot progress steadier. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
+* Stabilized **report chain density more accurately across restart and rollback:** Chain density now stays aligned with the active chain, which keeps this health signal steadier after restart and rollback events. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
+
+### 📋 What You Need to Know
+
+* Clarified **expect smoother local maintenance when using multiple worktrees:** Local format and build commands now avoid picking up files from sibling `.worktrees` directories, which keeps routine maintenance behavior more predictable. ([#2478](https://github.com/blinklabs-io/dingo/pull/2478))
+* Highlighted **review the published v0.50.0 notes alongside this patch:** The release history now includes the v0.50.0 entry, which makes recent patch context easier to follow. ([#2474](https://github.com/blinklabs-io/dingo/pull/2474))
+* Emphasized **expect safer recovery when a peer keeps returning no blocks:** Nodes can now move away from peers that get stuck in repeated empty block loops, which helps sync resume more reliably. ([#2473](https://github.com/blinklabs-io/dingo/pull/2473))
+* Summarized **trust steadier next epoch readiness handling during slot progress:** Next epoch readiness work no longer repeats after the node has already signaled readiness, which reduces avoidable repeated work during slot progress. ([#2475](https://github.com/blinklabs-io/dingo/pull/2475))
+* Reviewed **rely on more accurate chain density signals after recovery events:** Chain density reporting now stays more accurate through restart and rollback paths, which makes health monitoring easier to trust. ([#2477](https://github.com/blinklabs-io/dingo/pull/2477))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.50.0 (June 1, 2026)
+
+**Title:** Add browser-friendly APIs, improve catch-up visibility, and strengthen reliability
+
+**Date:** June 1, 2026
+
+**Version:** v0.50.0
+
+Hi folks! Here’s what we shipped in v0.50.0.
+
+### ✨ What's New
+
+* Added **configure CORS behavior for Dingo APIs:** API operators can now manage cross origin access more directly, which makes browser based integrations easier to expose with the intended policy. ([#2456](https://github.com/blinklabs-io/dingo/pull/2456))
+* Introduced **measure backfill progress with clearer timing signals:** Operators can now see timing counters for critical backfill work, which makes catch up behavior easier to observe and tune. ([#2449](https://github.com/blinklabs-io/dingo/pull/2449))
+* Expanded **speed large Mithril imports by delaying heavy lookup preparation:** Large Mithril imports now postpone expensive lookup preparation until the right point in the load process, which helps imports move more smoothly. ([#2450](https://github.com/blinklabs-io/dingo/pull/2450))
+* Delivered **show clearer diagnostics when block production checks fail:** Forging logs now surface clearer diagnostics when a newly forged block fails a final verification step, which makes failure analysis faster. ([#2464](https://github.com/blinklabs-io/dingo/pull/2464))
+
+### 💪 Improvements
+
+* Improved **refresh example dependencies for smoother setup:** Example projects now use refreshed npm dependencies, which helps local setup and repeatable example runs stay current. ([#2451](https://github.com/blinklabs-io/dingo/pull/2451))
+* Refined **use production-style storage in the governance example stack:** The governance example now uses Postgres for stored chain data, which makes the example closer to practical deployments. ([#2447](https://github.com/blinklabs-io/dingo/pull/2447))
+* Enhanced **wait for Mithril before starting the governance example stack:** The governance example compose flow now waits for Mithril readiness, which makes example startup more dependable. ([#2454](https://github.com/blinklabs-io/dingo/pull/2454))
+* Updated **clarify archive and pruning modes with fresher usage guidance:** Archive and pruning documentation now explains operational choices more clearly, which makes deployment planning easier. ([#2455](https://github.com/blinklabs-io/dingo/pull/2455))
+* Modernized **streamline publish automation around supported artifacts:** Release automation no longer packages npm artifacts, which keeps publish work aligned with the current distribution model. ([#2452](https://github.com/blinklabs-io/dingo/pull/2452))
+* Strengthened **refresh routine dependency maintenance across the project:** Routine dependency updates keep build, runtime, and integration support current for steadier ongoing compatibility. ([#2465](https://github.com/blinklabs-io/dingo/pull/2465), [#2466](https://github.com/blinklabs-io/dingo/pull/2466), [#2467](https://github.com/blinklabs-io/dingo/pull/2467), [#2468](https://github.com/blinklabs-io/dingo/pull/2468), [#2469](https://github.com/blinklabs-io/dingo/pull/2469), [#2470](https://github.com/blinklabs-io/dingo/pull/2470), [#2471](https://github.com/blinklabs-io/dingo/pull/2471))
+
+### 🔧 Fixes
+
+* Fixed **delay asset indexing more safely during historical catch up:** Asset indexing now follows a safer delayed path, which reduces indexing trouble during heavy historical processing. ([#2461](https://github.com/blinklabs-io/dingo/pull/2461))
+* Corrected **keep transaction execution limits aligned with actual work:** Transaction budget handling now tracks execution costs more accurately, which improves result correctness for affected transactions. ([#2453](https://github.com/blinklabs-io/dingo/pull/2453))
+* Stabilized **recover local storage more reliably after problems:** Local storage recovery now handles damaged or interrupted states more defensively, which improves restart reliability. ([#2472](https://github.com/blinklabs-io/dingo/pull/2472))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **configure browser access for API deployments more directly:** API users can now configure CORS support, which makes browser based integrations easier to expose with the intended access policy. ([#2456](https://github.com/blinklabs-io/dingo/pull/2456))
+* Emphasized **expect better visibility and smoother behavior during Mithril and API catch up:** Large Mithril imports now delay heavy lookup preparation, and API backfill exposes timing counters that make import and catch up work easier to understand. ([#2450](https://github.com/blinklabs-io/dingo/pull/2450), [#2449](https://github.com/blinklabs-io/dingo/pull/2449))
+* Summarized **review refreshed examples and archive guidance before deployment changes:** The governance example stack, archive and pruning documentation, and publish workflow guidance were refreshed, which makes current operational guidance easier to follow. ([#2447](https://github.com/blinklabs-io/dingo/pull/2447), [#2454](https://github.com/blinklabs-io/dingo/pull/2454), [#2455](https://github.com/blinklabs-io/dingo/pull/2455), [#2452](https://github.com/blinklabs-io/dingo/pull/2452))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.49.0 (May 27, 2026)
+
+**Title:** Leios merged delivery, reward-state persistence, and sturdier sync handling
+
+**Date:** May 27, 2026
+
+**Version:** v0.49.0
+
+Hi folks! Here’s what we shipped in v0.49.0.
+
+### ✨ What's New
+
+* Added **deliver merged Leios data to local integrations:** Integrators can now receive merged Leios input data through local integrations, which makes Leios data access more complete. ([#2392](https://github.com/blinklabs-io/dingo/pull/2392))
+* Introduced **keep reward state across restarts:** Nodes now preserve reward state across restarts, which makes recovery and ongoing operations more dependable. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426))
+* Expanded **honor CIP-1694 reward account delegation semantics:** Governance and reward handling now follow CIP-1694 stake pool operator reward account delegation semantics more closely, which keeps delegation behavior aligned with current expectations. ([#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+
+### 💪 Improvements
+
+* Improved **show Dingoswap flows with a practical integration example:** Example guidance now demonstrates a Dingoswap integration path more clearly, which makes common integration patterns easier to understand and reuse. ([#2390](https://github.com/blinklabs-io/dingo/pull/2390))
+* Refined **keep the preview example stack current:** The Dingo Sundae preview example now uses refreshed build dependencies, which helps example runs stay smoother and easier to maintain. ([#2431](https://github.com/blinklabs-io/dingo/pull/2431))
+* Enhanced **publish the v0.48.0 release history entry:** The published release history now includes the previous v0.48.0 entry, which keeps recent release context easier to review. ([#2423](https://github.com/blinklabs-io/dingo/pull/2423))
+
+### 🔧 Fixes
+
+* Fixed **keep transaction submission responses compatible with cardano cli 10.x:** Transaction submission rejections now return a format that works more reliably with cardano cli 10.x, which makes submission troubleshooting clearer. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Corrected **clear stale header tracking during normal chainsync work:** Normal chainsync operation now clears stale header tracking more consistently, which helps sync behavior stay steadier over time. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428))
+* Strengthened **surface async chainsync failures more clearly:** Roll forward and roll backward failures now surface more directly, which makes chainsync problems easier to detect and diagnose. ([#2419](https://github.com/blinklabs-io/dingo/pull/2419))
+
+### 📋 What You Need to Know
+
+* Clarified **expect normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **expect better cardano cli 10.x submission compatibility:** Transaction submission rejection handling now works more cleanly with cardano cli 10.x, which reduces avoidable submission confusion. ([#2427](https://github.com/blinklabs-io/dingo/pull/2427))
+* Emphasized **trust sturdier chainsync behavior and clearer failure reporting:** Chainsync now clears stale header tracking during normal operation and surfaces async sync failures more clearly, which supports steadier recovery and troubleshooting. ([#2428](https://github.com/blinklabs-io/dingo/pull/2428), [#2419](https://github.com/blinklabs-io/dingo/pull/2419))
+* Summarized **rely on persisted rewards and updated delegation semantics:** Reward state now persists across restarts, and reward account delegation handling now follows CIP-1694 semantics more closely. ([#2426](https://github.com/blinklabs-io/dingo/pull/2426), [#2378](https://github.com/blinklabs-io/dingo/pull/2378))
+* Reviewed **use the refreshed example and release history updates:** The Dingoswap example and the published v0.48.0 release history entry make current integration guidance and recent release context easier to follow. ([#2390](https://github.com/blinklabs-io/dingo/pull/2390), [#2423](https://github.com/blinklabs-io/dingo/pull/2423), [#2431](https://github.com/blinklabs-io/dingo/pull/2431))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.48.0 (May 26, 2026)
+
+**Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
+
+**Date:** May 26, 2026
+
+**Version:** v0.48.0
+
+Hi folks! Here’s what we shipped in v0.48.0.
+
+### ✨ What's New
+
+* Added **tune historical backfill batch size more directly:** Operators can now adjust backfill batch size to better balance throughput and memory usage during historical indexing. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389))
+* Introduced **inspect Mithril sync with a dedicated debug port:** Operators can now use a debug and profiling port during Mithril sync, which makes long running sync behavior easier to inspect and troubleshoot. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413))
+
+## v0.48.0 (May 26, 2026)
+
+**Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
+
+**Date:** May 26, 2026
+
+**Version:** v0.48.0
+
+Hi folks! Here’s what we shipped in v0.48.0.
+
+### ✨ What's New
+
+* Added **tune historical backfill batch size more directly:** Operators can now adjust backfill batch size to better balance throughput and memory usage during historical indexing. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389))
+* Introduced **inspect Mithril sync with a dedicated debug port:** Operators can now use a debug and profiling port during Mithril sync, which makes long running sync behavior easier to inspect and troubleshoot. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413))
+
+### 💪 Improvements
+
+* Improved **keep architecture guidance aligned with the current system:** Refreshed architecture documentation makes contributor and operator guidance easier to follow as the system evolves. ([#2391](https://github.com/blinklabs-io/dingo/pull/2391))
+* Refined **keep HTTP handling aligned with current upstream expectations:** Updated HTTP handling now stays aligned with current upstream behavior, which supports steadier service operation. ([#2417](https://github.com/blinklabs-io/dingo/pull/2417))
+* Enhanced **refresh build, runtime, and release dependencies:** Routine maintenance updates keep core build and runtime components current, which supports steadier compatibility across release workflows and supported integrations. ([#2405](https://github.com/blinklabs-io/dingo/pull/2405), [#2411](https://github.com/blinklabs-io/dingo/pull/2411), [#2406](https://github.com/blinklabs-io/dingo/pull/2406), [#2407](https://github.com/blinklabs-io/dingo/pull/2407), [#2412](https://github.com/blinklabs-io/dingo/pull/2412), [#2410](https://github.com/blinklabs-io/dingo/pull/2410), [#2409](https://github.com/blinklabs-io/dingo/pull/2409), [#2345](https://github.com/blinklabs-io/dingo/pull/2345))
+
+### 🔧 Fixes
+
+* Fixed **make Mithril downloads recover more defensively:** Mithril download handling now responds more safely to failure conditions, which helps long running sync work recover more reliably. ([#2387](https://github.com/blinklabs-io/dingo/pull/2387))
+* Corrected **reduce memory pressure during heavier backfill work:** Database backfill now uses memory more efficiently, which helps heavier historical indexing runs behave more smoothly. ([#2415](https://github.com/blinklabs-io/dingo/pull/2415))
+* Strengthened **keep ledger state reads more reliable during table parsing:** Ledger UTxO table parsing now behaves more reliably, which improves ledger state correctness during recovery and indexing flows. ([#2414](https://github.com/blinklabs-io/dingo/pull/2414))
+* Stabilized **extract invalid transaction indexes during streaming work:** Invalid transaction index extraction now completes more reliably during streamed processing. ([#2416](https://github.com/blinklabs-io/dingo/pull/2416))
+* Hardened **avoid races near the chain tip iterator:** Near tip chain traversal now behaves more steadily, which improves stability during recovery and indexing close to the tip. ([#2422](https://github.com/blinklabs-io/dingo/pull/2422))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **tune backfill work for smoother historical indexing:** Operators can now adjust backfill batch size to balance resource usage more directly, and reduced backfill memory pressure should help heavier historical runs stay smoother. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389), [#2415](https://github.com/blinklabs-io/dingo/pull/2415))
+* Emphasized **troubleshoot Mithril sync with clearer visibility:** Mithril sync is easier to inspect because a dedicated debug port is available during sync, and download handling is more defensive during recovery. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413), [#2387](https://github.com/blinklabs-io/dingo/pull/2387))
+* Summarized **expect steadier ledger, backfill, and near tip recovery behavior:** Iterator, ledger parsing, and invalid index extraction fixes reduce several common sources of recovery and indexing trouble. ([#2422](https://github.com/blinklabs-io/dingo/pull/2422), [#2414](https://github.com/blinklabs-io/dingo/pull/2414), [#2416](https://github.com/blinklabs-io/dingo/pull/2416))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.48.0 (May 26, 2026)
+
+**Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
+
+**Date:** May 26, 2026
+
+**Version:** v0.48.0
+
+Hi folks! Here’s what we shipped in v0.48.0.
+
+### ✨ What's New
+
+* Added **tune historical backfill batch size more directly:** Operators can now adjust backfill batch size to better balance throughput and memory usage during historical indexing. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389))
+* Introduced **inspect Mithril sync with a dedicated debug port:** Operators can now use a debug and profiling port during Mithril sync, which makes long running sync behavior easier to inspect and troubleshoot. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413))
+
+## v0.48.0 (May 26, 2026)
+
+**Title:** Backfill tuning, Mithril diagnostics, and sturdier sync recovery
+
+**Date:** May 26, 2026
+
+**Version:** v0.48.0
+
+Hi folks! Here’s what we shipped in v0.48.0.
+
+### ✨ What's New
+
+* Added **tune historical backfill batch size more directly:** Operators can now adjust backfill batch size to better balance throughput and memory usage during historical indexing. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389))
+* Introduced **inspect Mithril sync with a dedicated debug port:** Operators can now use a debug and profiling port during Mithril sync, which makes long running sync behavior easier to inspect and troubleshoot. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413))
+
+### 💪 Improvements
+
+* Improved **keep architecture guidance aligned with the current system:** Refreshed architecture documentation keeps contributor and operator guidance aligned with the current system. ([#2391](https://github.com/blinklabs-io/dingo/pull/2391))
+* Refined **keep HTTP handling aligned with current upstream expectations:** Updated HTTP handling stays aligned with current upstream expectations, which supports steadier service behavior. ([#2417](https://github.com/blinklabs-io/dingo/pull/2417))
+* Enhanced **refresh build and runtime maintenance dependencies:** Dependency and CI maintenance updates keep important build and runtime components current, which supports steadier maintenance and release workflows. ([#2405](https://github.com/blinklabs-io/dingo/pull/2405), [#2411](https://github.com/blinklabs-io/dingo/pull/2411), [#2406](https://github.com/blinklabs-io/dingo/pull/2406), [#2407](https://github.com/blinklabs-io/dingo/pull/2407), [#2412](https://github.com/blinklabs-io/dingo/pull/2412), [#2410](https://github.com/blinklabs-io/dingo/pull/2410), [#2409](https://github.com/blinklabs-io/dingo/pull/2409), [#2345](https://github.com/blinklabs-io/dingo/pull/2345))
+
+### 🔧 Fixes
+
+* Fixed **make Mithril downloads more defensive during recovery:** Mithril download handling now behaves more defensively, which helps long running sync work recover more reliably. ([#2387](https://github.com/blinklabs-io/dingo/pull/2387))
+* Corrected **reduce memory pressure during heavier backfill work:** Database backfill now uses memory more efficiently, which helps heavier historical indexing runs behave more smoothly. ([#2415](https://github.com/blinklabs-io/dingo/pull/2415))
+* Strengthened **keep ledger state parsing more reliable during recovery:** Ledger UTxO table parsing now behaves more reliably, which improves ledger state correctness during recovery and indexing work. ([#2414](https://github.com/blinklabs-io/dingo/pull/2414))
+* Stabilized **extract invalid transaction indexes during streamed processing:** Invalid transaction index extraction now behaves more reliably during streamed processing. ([#2416](https://github.com/blinklabs-io/dingo/pull/2416))
+* Hardened **avoid races near the chain tip iterator:** Near tip chain traversal now behaves more steadily, which improves stability during recovery and indexing close to the tip. ([#2422](https://github.com/blinklabs-io/dingo/pull/2422))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **tune backfill work to balance resource usage more directly:** Operators can now adjust backfill batch size to better balance resource usage during historical indexing, and reduced backfill memory pressure should help heavier runs behave more smoothly. ([#2389](https://github.com/blinklabs-io/dingo/pull/2389), [#2415](https://github.com/blinklabs-io/dingo/pull/2415))
+* Emphasized **inspect Mithril sync with clearer troubleshooting visibility:** Mithril troubleshooting is easier because a dedicated debug and profiling port is available during sync, and download handling is more defensive during recovery. ([#2413](https://github.com/blinklabs-io/dingo/pull/2413), [#2387](https://github.com/blinklabs-io/dingo/pull/2387))
+* Summarized **expect steadier near tip and ledger backfill behavior:** Iterator, parsing, and invalid-index extraction fixes reduce several common sources of recovery and indexing trouble around near tip and ledger backfill work. ([#2422](https://github.com/blinklabs-io/dingo/pull/2422), [#2414](https://github.com/blinklabs-io/dingo/pull/2414), [#2416](https://github.com/blinklabs-io/dingo/pull/2416))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.47.1 (May 22, 2026)
+
+**Title:** Safer plateau recovery, correct governance refunds, and hydrated snapshot imports
+
+**Date:** May 22, 2026
+
+**Version:** v0.47.1
+
+Hi folks! Here’s what we shipped in v0.47.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on reliability and correctness updates. ([#2377](https://github.com/blinklabs-io/dingo/pull/2377))
+
+### 💪 Improvements
+
+* Improved **keep governance rewards and refunds on active reward accounts only:** Governance reward payouts and expired proposal deposit refunds now credit only active existing reward accounts, while unclaimed amounts return safely to treasury and treasury withdrawal capacity stays enforced across the epoch. ([#2371](https://github.com/blinklabs-io/dingo/pull/2371))
+
+### 🔧 Fixes
+
+* Corrected **preserve snapshot imported transaction output history during bulk import:** Snapshot imports now keep the origin and added slot details for imported transaction outputs, which makes historical lookups and ordering more accurate after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
+* Strengthened **recover same slot fork plateaus without manual restarts:** Nodes now reconcile live ledger divergence before recycling peers, which helps same slot fork stalls recover more safely without requiring a manual restart. ([#2377](https://github.com/blinklabs-io/dingo/pull/2377))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps:** Normal patch release upgrade steps are generally sufficient for this release.
+* Highlighted **expect safer recovery from same slot fork plateaus:** Nodes can now recover from same slot fork plateaus more safely without manual restarts because live ledger reconciliation happens before peer recycling. ([#2377](https://github.com/blinklabs-io/dingo/pull/2377))
+* Emphasized **trust corrected governance refunds and treasury handling:** Missing or inactive reward accounts no longer receive governance rewards or expired proposal deposit refunds, and unclaimed amounts return to treasury while treasury withdrawal limits stay enforced across the epoch. ([#2371](https://github.com/blinklabs-io/dingo/pull/2371))
+* Summarized **expect more accurate snapshot imported history after bulk import:** Snapshot imported transaction outputs now keep provenance and added slot details more accurately, which improves historical behavior after bulk import. ([#2364](https://github.com/blinklabs-io/dingo/pull/2364))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.47.0 (May 21, 2026)
+
+**Title:** Mithril sync resilience, safer chainsync handling, and reverse chain traversal
+
+**Date:** May 21, 2026
+
+**Version:** v0.47.0
+
+Hi folks! Here’s what we shipped in v0.47.0.
+
+### ✨ What's New
+
+* Added **traverse chain history in reverse order:** Operators and integrators can now walk chain history backward more directly, which makes historical inspection and recovery work easier to manage. ([#2318](https://github.com/blinklabs-io/dingo/pull/2318))
+* Introduced **tune chainsync stall timeouts:** Operators can now configure how quickly stalled chainsync work triggers recovery, which makes sync behavior easier to adapt to different network conditions. ([#2319](https://github.com/blinklabs-io/dingo/pull/2319))
+* Expanded **recover Mithril downloads after idle stalls:** Mithril sync can now detect idle download stalls and resume work more safely, which makes long running bootstrap and backfill flows more resilient. ([#2365](https://github.com/blinklabs-io/dingo/pull/2365))
+
+### 💪 Improvements
+
+* Improved **speed address lookup work during API backfill:** API mode backfill now finds input addresses with less overhead, which helps historical indexing move more efficiently. ([#2363](https://github.com/blinklabs-io/dingo/pull/2363))
+* Refined **surface SQLite planning details before and during resumed backfill:** Operators can now see SQLite planning statistics before API mode backfill starts and when it resumes, which makes backfill behavior easier to understand and troubleshoot. ([#2367](https://github.com/blinklabs-io/dingo/pull/2367))
+* Enhanced **avoid duplicate transaction output offset writes during Mithril backfill:** Mithril API mode backfill now skips repeated produced transaction output offset writes, which reduces unnecessary storage work during historical catch up. ([#2368](https://github.com/blinklabs-io/dingo/pull/2368))
+* Updated **broaden governance tally and enactment regression coverage:** Governance related validation now checks tally and enactment behavior more thoroughly, which increases confidence in governance tracking during upgrades. ([#2370](https://github.com/blinklabs-io/dingo/pull/2370))
+* Modernized **publish the v0.46.4 release history entry:** The repository now includes the v0.46.4 release notes entry in its published release history, which keeps recent patch context easier to review. ([#2362](https://github.com/blinklabs-io/dingo/pull/2362))
+
+### 🔧 Fixes
+
+* Fixed **preserve ordering for ledger sync events:** Ordering critical ledger sync events now arrive through blocking delivery, which makes downstream consumers less likely to miss important sequence changes. ([#2366](https://github.com/blinklabs-io/dingo/pull/2366))
+* Corrected **end stalled transaction wait streams with a clear deadline:** Transaction wait requests now stop with a server side timeout instead of hanging indefinitely, which makes stalled request handling easier to detect. ([#2379](https://github.com/blinklabs-io/dingo/pull/2379))
+* Strengthened **choose Mithril trust boundary intersect points more reliably:** Mithril recovery now includes the trust boundary intersect point when picking where to resume, which makes restore and recovery decisions safer. ([#2358](https://github.com/blinklabs-io/dingo/pull/2358))
+* Stabilized **retain spent transaction outputs for historical queries during pruning:** API storage mode now keeps spent transaction outputs available through pruning, which helps historical queries remain reliable over time. ([#2361](https://github.com/blinklabs-io/dingo/pull/2361))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal upgrade steps for this release:** Normal upgrade steps are generally sufficient for this release.
+* Highlighted **expect steadier Mithril and API backfill behavior:** Mithril and API mode backfill should be more resilient and more efficient because downloads recover from stalls, SQLite planning improves before backfill, and redundant transaction output offset writes are avoided.
+* Emphasized **trust safer sync recovery and event handling:** Operators and integrators should expect safer sync behavior because chainsync stall detection is configurable, ordering critical ledger sync events no longer rely on lossy delivery, and Mithril trust boundary point selection is more reliable.
+* Summarized **rely on stronger historical query behavior:** API mode historical queries should remain more reliable because spent transaction outputs stay available through pruning, and transaction wait requests now fail with a clear server side deadline instead of hanging indefinitely.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.46.4 (May 18, 2026)
 
 **Title:** Genesis bootstrap expansion, Mithril sync visibility, and sturdier SQLite metadata handling

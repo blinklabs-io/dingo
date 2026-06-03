@@ -745,12 +745,18 @@ func (d *MetadataStoreMysql) SetGapBlockTransaction(
 		m := models.UtxoLedgerToModel(utxo, point.Slot)
 		tmpTx.Outputs = append(tmpTx.Outputs, m)
 	}
+	outputsToCreate := tmpTx.Outputs
+	collateralReturnToCreate := tmpTx.CollateralReturn
+	tmpTx.Outputs = nil
+	tmpTx.CollateralReturn = nil
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}},
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"block_hash", "block_index", "slot"},
 		),
 	}).Create(tmpTx)
+	tmpTx.Outputs = outputsToCreate
+	tmpTx.CollateralReturn = collateralReturnToCreate
 	if result.Error != nil {
 		return fmt.Errorf(
 			"create gap block transaction at slot %d: %w",
@@ -772,6 +778,31 @@ func (d *MetadataStoreMysql) SetGapBlockTransaction(
 			)
 		}
 		tmpTx.ID = existingTx.ID
+	}
+	for i := range tmpTx.Outputs {
+		tmpTx.Outputs[i].ID = 0
+		tmpTx.Outputs[i].TransactionID = &tmpTx.ID
+	}
+	if len(tmpTx.Outputs) > 0 {
+		if err := d.ImportUtxos(tmpTx.Outputs, txn); err != nil {
+			return fmt.Errorf(
+				"create gap block utxo outputs for tx %x: %w",
+				txHash, err,
+			)
+		}
+	}
+	if tmpTx.CollateralReturn != nil {
+		tmpTx.CollateralReturn.ID = 0
+		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
+		if err := d.ImportUtxos(
+			[]models.Utxo{*tmpTx.CollateralReturn},
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"create gap block collateral return for tx %x: %w",
+				txHash, err,
+			)
+		}
 	}
 	return nil
 }

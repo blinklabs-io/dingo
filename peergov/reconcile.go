@@ -52,8 +52,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	var coldPromotions, warmPromotions, warmDemotions, knownRemoved, activeIncreased, activeDecreased int
 
 	// Demotion/Promotion Logic
-	for i := len(p.peers) - 1; i >= 0; i-- {
-		peer := p.peers[i]
+	for i, peer := range slices.Backward(p.peers) {
 		if peer == nil {
 			continue
 		}
@@ -67,8 +66,8 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				(peer.Source != PeerSourceTopologyLocalRoot &&
 					now.Sub(peer.LastActivity) > p.config.InactivityTimeout)
 			if demoteForInactivity {
-				p.recordPeerStateChange(p.peers[i].State, PeerStateWarm)
-				p.peers[i].State = PeerStateWarm
+				p.recordPeerStateChange(peer.State, PeerStateWarm)
+				peer.State = PeerStateWarm
 				warmDemotions++
 				activeDecreased++
 				p.config.Logger.Debug(
@@ -120,9 +119,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 						peer,
 					)
 				} else {
-					p.recordPeerStateChange(p.peers[i].State, PeerStateWarm)
-					p.peers[i].State = PeerStateWarm
-					if p.peers[i].Source == PeerSourceInboundConn {
+					p.recordPeerStateChange(peer.State, PeerStateWarm)
+					peer.State = PeerStateWarm
+					if peer.Source == PeerSourceInboundConn {
 						p.recordInboundLifecycle("warmed")
 					}
 					coldPromotions++
@@ -665,8 +664,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 	removedCount *int,
 ) []pendingEvent {
 	var events []pendingEvent
-	for i := len(p.peers) - 1; i >= 0; i-- {
-		peer := p.peers[i]
+	for i, peer := range slices.Backward(p.peers) {
 		if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
 			continue
 		}
@@ -746,11 +744,9 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 		return false, "", "", 0, false
 	}
 	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
-		cooldownDuration = p.config.InboundCooldown * time.Duration(multiplier)
-		// Keep cooldown at least as long as the normal deny duration.
-		if cooldownDuration < p.config.DenyDuration {
-			cooldownDuration = p.config.DenyDuration
-		}
+		cooldownDuration = max(
+			// Keep cooldown at least as long as the normal deny duration.
+			p.config.InboundCooldown*time.Duration(multiplier), p.config.DenyDuration)
 		reason = "inbound flapping cooldown"
 		reasonLabel = "flapping_cooldown"
 		applyCooldown = true

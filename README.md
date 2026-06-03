@@ -79,6 +79,12 @@ The following environment variables modify Dingo's behavior:
   - TCP port for the Mesh (Coinbase Rosetta) API (default: `0`, disabled)
 - `DINGO_BARK_PORT`
   - TCP port for the Bark block archive API (default: `0`, disabled)
+- `DINGO_BARK_BASE_URL`
+  - Base URL of a remote Bark archive node used for archive-backed local pruning
+    (default: empty, disabled)
+- `DINGO_BARK_PRUNER_FREQUENCY`
+  - How often an archive-backed pruning node scans for old local blocks to
+    prune (default: `1h`)
 - `DINGO_STORAGE_MODE`
   - Storage mode: `core` (default) or `api`
   - `core` stores only consensus data (UTxOs, certs, pools, protocol params)
@@ -192,6 +198,51 @@ blockfrostPort: 3100
 utxorpcPort: 9090
 ```
 
+### Archive And Pruning Nodes
+
+Dingo can be deployed as an archive node that keeps immutable block CBOR in
+cloud-native object storage, and paired pruning nodes can then remove old block
+CBOR from their own local blob stores while still serving historical block
+requests through the archive.
+
+An archive node uses a signed-URL-capable blob plugin (`s3` or `gcs`) and
+enables Bark with `barkPort`. Bark answers Dingo-to-Dingo archive requests by
+returning a signed object-storage URL plus block metadata. Badger is valid for a
+normal local blob store, but it does not provide signed URLs and should not be
+used as the Bark archive backend.
+
+```yaml
+storageMode: "core"
+database:
+  blob:
+    plugin: "s3"
+    s3:
+      bucket: "dingo-archive"
+      region: "us-east-1"
+      prefix: "preview"
+barkPort: 9091
+```
+
+A pruning node keeps its normal local blob store, sets `barkBaseUrl` to the
+archive node, and optionally tunes `barkPrunerFrequency`. Dingo wraps the local
+blob store with the Bark archive adapter, starts a background pruner, and prunes
+blocks older than the ledger-derived stability window. Pruned blocks keep their
+local indexes and a tombstone marker, so block fetches and block iterators can
+transparently retrieve the CBOR from the archive when needed.
+
+```yaml
+storageMode: "core"
+database:
+  blob:
+    plugin: "badger"
+barkBaseUrl: "http://archive.example.internal:9091"
+barkPrunerFrequency: 1h
+```
+
+The runnable demonstration in `internal/test/archive-demo/` brings up an S3
+compatible Minio archive node, a local Badger pruning node, and an end-to-end
+BlockFetch check through Bark.
+
 ### Deployment Patterns
 
 **Relay node** (consensus only, no APIs):
@@ -202,6 +253,16 @@ utxorpcPort: 9090
 **API / data node** (full indexing, one or more APIs):
 ```bash
 DINGO_STORAGE_MODE=api DINGO_BLOCKFROST_PORT=3100 ./dingo
+```
+
+**Archive node** (cloud object storage plus Bark archive service):
+```bash
+DINGO_DATABASE_BLOB_PLUGIN=s3 DINGO_BARK_PORT=9091 ./dingo
+```
+
+**Pruning node** (local storage plus a remote Bark archive):
+```bash
+DINGO_BARK_BASE_URL=http://archive.example.internal:9091 ./dingo
 ```
 
 **Block producer** (consensus only, with SPO keys):

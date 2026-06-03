@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"connectrpc.com/connect"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -102,10 +103,10 @@ func watchTxBuildRollbackMessages(
 			found = true
 			break
 		}
-		for i := len(last.appliedTxs) - 1; i >= 0; i-- {
+		for _, v := range slices.Backward(last.appliedTxs) {
 			out = append(out, &watch.WatchTxResponse{
 				Action: &watch.WatchTxResponse_Undo{
-					Undo: last.appliedTxs[i],
+					Undo: v,
 				},
 			})
 		}
@@ -163,10 +164,10 @@ func (s *watchServiceServer) watchTxFetchRollbackUndoFromBlocks(
 		if err != nil {
 			return nil, err
 		}
-		for j := len(appliedTxs) - 1; j >= 0; j-- {
+		for _, appliedTx := range slices.Backward(appliedTxs) {
 			out = append(out, &watch.WatchTxResponse{
 				Action: &watch.WatchTxResponse_Undo{
-					Undo: appliedTxs[j],
+					Undo: appliedTx,
 				},
 			})
 		}
@@ -237,7 +238,8 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	// Create our chain iterator
-	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPoint(
+	chainIter, err := s.utxorpc.config.LedgerState.GetChainFromPointContext(
+		ctx,
 		*point,
 		false,
 	)
@@ -250,13 +252,6 @@ func (s *watchServiceServer) WatchTx(
 	}
 
 	defer chainIter.Cancel()
-
-	// Cancel the chain iterator when the gRPC stream context is
-	// done so that blocking Next() calls unblock immediately.
-	go func() {
-		<-ctx.Done()
-		chainIter.Cancel()
-	}()
 
 	shouldSend := func(tx ledger.Transaction) bool {
 		if predicate == nil {

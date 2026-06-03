@@ -31,9 +31,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
-	"google.golang.org/protobuf/proto"
 )
 
 // fakeArchive serves FetchBlock responses pointing at downloadURL, where
@@ -64,12 +61,12 @@ func (a *fakeArchive) FetchBlock(
 			Block: &archive.BlockRef{
 				Hash:   b.Hash,
 				Slot:   b.Slot,
-				Height: proto.Uint64(a.height),
+				Height: new(a.height),
 			},
 			Url: a.downloadURL + "?hash=" + hashHex,
 			Meta: &archive.BlockMeta{
 				Type:     a.blockType.Enum(),
-				PrevHash: proto.String(hex.EncodeToString(a.prevHash)),
+				PrevHash: new(hex.EncodeToString(a.prevHash)),
 			},
 		})
 	}
@@ -110,9 +107,8 @@ func startFakeArchive(
 	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(a)
 	mux.Handle(archivePath, archiveHandler)
 
-	srv := httptest.NewUnstartedServer(
-		h2c.NewHandler(mux, &http2.Server{}),
-	)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.Protocols = unencryptedHTTP2Protocols()
 	srv.Start()
 	t.Cleanup(srv.Close)
 

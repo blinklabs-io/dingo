@@ -33,6 +33,7 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	pcommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -82,11 +83,9 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
-		for i := 0; i < 100; i++ {
+		for i := range 100 {
 			ls.Lock()
 			if i%2 == 0 {
 				ls.currentEra = eras.BabbageEraDesc
@@ -96,12 +95,10 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 			ls.Unlock()
 		}
 		close(done)
-	}()
+	})
 
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 8 {
+		wg.Go(func() {
 			<-start
 			for {
 				select {
@@ -111,11 +108,115 @@ func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
 					_ = ls.calculateStabilityWindow()
 				}
 			}
-		}()
+		})
 	}
 
 	close(start)
 	wg.Wait()
+}
+
+func TestShouldSkipPhase2ValidationForBlockUsesSecurityParam(t *testing.T) {
+	const securityParam uint64 = 37
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
+
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	const referenceBlockNumber uint64 = 1000
+	immutableTipBlockNumber := referenceBlockNumber - securityParam
+
+	require.True(t, ls.shouldSkipPhase2ValidationForBlock(
+		immutableTipBlockNumber,
+		referenceBlockNumber,
+		eras.ShelleyEraDesc.Id,
+	))
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		immutableTipBlockNumber+1,
+		referenceBlockNumber,
+		eras.ShelleyEraDesc.Id,
+	))
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		0,
+		securityParam-1,
+		eras.ShelleyEraDesc.Id,
+	))
+}
+
+func TestShouldSkipPhase2ValidationForBlockRequiresSecurityParam(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	require.False(t, ls.shouldSkipPhase2ValidationForBlock(
+		0,
+		1000,
+		eras.ShelleyEraDesc.Id,
+	))
+}
+
+func TestShouldSkipPhase2ValidationForBlockAtCurrentTipRefreshesChainTip(
+	t *testing.T,
+) {
+	const securityParam uint64 = 2
+	cfg := newTestShelleyGenesisCfg(t)
+	cfg.ShelleyGenesis().SecurityParam = int(securityParam)
+
+	db := newTestDB(t)
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{
+			securityParam: int(securityParam),
+		}),
+	)
+
+	rawBlocks := make([]chain.RawBlock, 0, 5)
+	var prevHash []byte
+	for blockNumber := uint64(1); blockNumber <= 5; blockNumber++ {
+		block := makeTestBlock(blockNumber*10, blockNumber)
+		block.PrevHash = prevHash
+		rawBlocks = append(rawBlocks, chain.RawBlock{
+			Slot:        block.Slot,
+			Hash:        block.Hash,
+			BlockNumber: block.Number,
+			Type:        block.Type,
+			PrevHash:    block.PrevHash,
+			Cbor:        block.Cbor,
+		})
+		prevHash = block.Hash
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks(rawBlocks))
+
+	ls := &LedgerState{
+		chain: cm.PrimaryChain(),
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	require.True(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+		3,
+		eras.ShelleyEraDesc.Id,
+	))
+
+	rollbackPoint := ocommon.NewPoint(
+		rawBlocks[3].Slot,
+		rawBlocks[3].Hash,
+	)
+	require.NoError(t, cm.PrimaryChain().Rollback(rollbackPoint))
+
+	require.False(t, ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+		3,
+		eras.ShelleyEraDesc.Id,
+	))
 }
 
 // TestCalculateStabilityWindow_ByronEra tests the stability window calculation for Byron era
@@ -2409,6 +2510,7 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
 		db: db,
@@ -2453,6 +2555,7 @@ func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
 		db: db,
@@ -2556,6 +2659,7 @@ func TestIntersectPointsSkipsMissingMithrilTrustBoundaryBlock(
 		require.NoError(t, db.BlockCreate(block, nil))
 	}
 
+	require.NotEmpty(t, blocks)
 	ledgerTipBlock := blocks[len(blocks)-1]
 	boundarySlot := uint64(5)
 	ls := &LedgerState{
@@ -2800,10 +2904,10 @@ func TestIntersectPointsSkipsMissingDenseBlockIndex(t *testing.T) {
 	assert.True(t, hasPreviousDenseSlot)
 }
 
-func TestDensityWindow(t *testing.T) {
+func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 	shelleyGenesisJSON := `{
 		"activeSlotsCoeff": 0.05,
-		"securityParam": 2160
+		"securityParam": 3
 	}`
 	cfg := &cardano.CardanoNodeConfig{}
 	require.NoError(
@@ -2811,60 +2915,113 @@ func TestDensityWindow(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := []models.Block{
+		makeTestBlock(10, 1),
+		makeTestBlock(20, 2),
+		makeTestBlock(100, 3),
+		makeTestBlock(190, 4),
+		makeTestBlock(210, 5),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	tipBlock := blocks[len(blocks)-1]
 	ls := &LedgerState{
+		db:         db,
+		currentEra: eras.ShelleyEraDesc,
+		currentTip: ochainsync.Tip{
+			Point:       makeTestPoint(tipBlock),
+			BlockNumber: tipBlock.Number,
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+
+	density := ls.chainFragmentDensity(ls.currentTip, ls.SecurityParam())
+	ls.Lock()
+	ls.updateTipMetrics(density)
+	ls.Unlock()
+
+	// cardano-node computes density over the ChainDB fragment as:
+	// (tip block - oldest fragment block) / (tip slot - oldest fragment slot).
+	// With k=3 and tip block index 5, the oldest fragment block is index 2.
+	assert.InDelta(
+		t,
+		3.0/190.0,
+		promtestutil.ToFloat64(ls.metrics.density),
+		1e-12,
+	)
+}
+
+func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 3
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	blocks := []models.Block{
+		makeTestBlock(10, 1),
+		makeTestBlock(20, 2),
+		makeTestBlock(100, 3),
+		makeTestBlock(190, 4),
+		makeTestBlock(210, 5),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+	tipBlock := blocks[len(blocks)-1]
+	require.NoError(t, db.SetBlockNonce(tipBlock.Hash, tipBlock.Slot, []byte{1}, false, nil))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       makeTestPoint(tipBlock),
+		BlockNumber: tipBlock.Number,
+	}, nil))
+
+	ls := &LedgerState{
+		db:         db,
 		currentEra: eras.ShelleyEraDesc,
 		config: LedgerStateConfig{
 			CardanoNodeConfig: cfg,
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
-	reg := prometheus.NewRegistry()
-	ls.metrics.init(reg)
+	ls.metrics.init(prometheus.NewRegistry())
 
-	// Window size = 3*2160/0.05 = 129600
+	require.NoError(t, ls.loadTip())
 
-	// Simulate extending to slot 200000, block 6000
-	// with blocks every ~33 slots (approx 3% density)
-	slot := uint64(70000)
-	blockNum := uint64(2100)
-	for slot <= 200000 {
-		ls.currentTip = ochainsync.Tip{
-			Point:       ocommon.Point{Slot: slot},
-			BlockNumber: blockNum,
-		}
-		ls.updateTipMetrics()
-		slot += 33
-		blockNum++
-	}
+	assert.InDelta(
+		t,
+		3.0/190.0,
+		promtestutil.ToFloat64(ls.metrics.density),
+		1e-12,
+	)
+}
 
-	// The window covers slots [200000-129600, 200000] = [70400, 200000]
-	// First entry in window should be around slot 70400
-	require.Greater(t, len(ls.densityWindow), 0)
-	assert.GreaterOrEqual(t, ls.densityWindow[0].slot, uint64(70390))
-
-	// Verify density is in a reasonable range for ~3% active slots
-	blocksInWindow := ls.currentTip.BlockNumber - ls.densityWindow[0].blockNum + 1
-	calculatedDensity := float64(blocksInWindow) / 129600.0
-	assert.InDelta(t, 0.03, calculatedDensity, 0.005)
-
-	// Test rollback: roll back to slot 199000
-	rollbackSlot := uint64(199000)
-	rollbackBlock := uint64(0)
-	for i := len(ls.densityWindow) - 1; i >= 0; i-- {
-		if ls.densityWindow[i].slot <= rollbackSlot {
-			rollbackBlock = ls.densityWindow[i].blockNum
-			break
-		}
-	}
-	ls.currentTip = ochainsync.Tip{
-		Point:       ocommon.Point{Slot: rollbackSlot},
-		BlockNumber: rollbackBlock,
-	}
-	ls.updateTipMetrics()
-
-	// Window should have trimmed entries past rollback slot
-	lastEntry := ls.densityWindow[len(ls.densityWindow)-1]
-	assert.LessOrEqual(t, lastEntry.slot, rollbackSlot)
+func TestFragmentDensityIgnoresByronEbbBlockNumber(t *testing.T) {
+	assert.InDelta(t, 9.0/100.0, fragmentDensity(100, 10, 0, 0), 1e-12)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
@@ -2968,7 +3125,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneReachesEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -2999,7 +3156,7 @@ func TestEvaluateTransitionImpossible_SetWhenSafeZoneExceedsEpochEnd(t *testing.
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -3028,7 +3185,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, epochStart, epochLen, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(tipSlot, []byte("tip")),
@@ -3051,7 +3208,7 @@ func TestEvaluateTransitionImpossible_NotSetWhenSafeZoneInsideEpoch(t *testing.T
 func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			// tipSlot past the safe-zone boundary → would normally trigger Impossible
@@ -3076,7 +3233,7 @@ func TestEvaluateTransitionImpossible_NoOpWhenTransitionKnown(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: newTestEpoch(500, 100_000, 432_000, eras.ConwayEraDesc.Id),
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(520_000, []byte("tip")),
@@ -3098,7 +3255,7 @@ func TestEvaluateTransitionImpossible_NoOpAlreadyImpossible(t *testing.T) {
 func TestEvaluateTransitionImpossible_NoOpWhenEpochLengthZero(t *testing.T) {
 	cfg := newTestEraHistoryCfg(t)
 	ls := &LedgerState{
-		currentEra:   *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:   requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentEpoch: models.Epoch{EpochId: 0, LengthInSlots: 0},
 		currentTip: ochainsync.Tip{
 			Point: ocommon.NewPoint(999_999, []byte("tip")),
@@ -3154,7 +3311,7 @@ func newTestLedgerStateWithTrigger(
 		cfg.TestConwayHardForkAtEpoch = overrideEpoch
 	}
 	return &LedgerState{
-		currentEra:     *eras.GetEraById(currentEraId),
+		currentEra:     requireEraDesc(t, currentEraId),
 		currentEpoch:   newTestEpoch(currentEpochId, 0, 432_000, currentEraId),
 		transitionInfo: initialTI,
 		config: LedgerStateConfig{
@@ -3288,7 +3445,7 @@ func TestEvaluateTriggerAtEpoch_NoOpWithoutOverride(t *testing.T) {
 // TransitionUnknown so the new epoch starts fresh.
 func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
 		// Simulate state at end of epoch 500: TransitionImpossible was set
 		// because the tip's safe zone reached the epoch end.
@@ -3298,7 +3455,7 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 501, StartSlot: 532_000, LengthInSlots: 432_000},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
 		HardFork:          nil,
@@ -3332,13 +3489,13 @@ func TestRolloverCommit_ResetsTransitionImpossible(t *testing.T) {
 // era-transition block" case).
 func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionKnown(500),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: babbagePParams(9),
 	}
 
@@ -3358,13 +3515,13 @@ func TestApplyEraTransition_ClearsTransitionKnown(t *testing.T) {
 // no-op for the State field (still TransitionUnknown).
 func TestApplyEraTransition_ClearsTransitionUnknown(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: babbagePParams(9),
 	}
 
@@ -3383,13 +3540,13 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 	newPParams := babbagePParams(9)
 
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: lcommon.ProtocolParameters(oldPParams),
 		transitionInfo: hardfork.NewTransitionKnown(500),
 	}
 
 	result := &EraTransitionResult{
-		NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewPParams: lcommon.ProtocolParameters(newPParams),
 	}
 
@@ -3412,18 +3569,18 @@ func TestApplyEraTransition_PreservesAndUpdatesFields(t *testing.T) {
 // transitionInfo, and the final state is TransitionUnknown.
 func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.AlonzoEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.AlonzoEraDesc.Id),
 		currentPParams: babbagePParams(6),
 		transitionInfo: hardfork.NewTransitionKnown(300),
 	}
 
 	steps := []*EraTransitionResult{
 		{
-			NewEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 			NewPParams: babbagePParams(8),
 		},
 		{
-			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 			NewPParams: babbagePParams(9),
 		},
 	}
@@ -3445,20 +3602,20 @@ func TestApplyEraTransition_MultipleSteps_AllCleared(t *testing.T) {
 // is also set (should not happen in practice, but the logic must be safe).
 func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionKnown(499),
 	}
 
 	eraTransitions := []*EraTransitionResult{
 		{
-			NewEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+			NewEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 			NewPParams: babbagePParams(9),
 		},
 	}
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 500}},
 		HardFork: &HardForkInfo{
@@ -3490,7 +3647,7 @@ func TestRolloverCommit_EraTransitionClearsTransitionInfo(t *testing.T) {
 // transition happened (the normal epoch-boundary version-bump window).
 func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		currentPParams: babbagePParams(8),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
@@ -3498,7 +3655,7 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 	var eraTransitions []*EraTransitionResult // empty — no standalone transition
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 500},
-		NewCurrentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.BabbageEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 500}},
 		HardFork: &HardForkInfo{
@@ -3529,7 +3686,7 @@ func TestRolloverCommit_HardForkWithoutEraTransition(t *testing.T) {
 // epoch rollover (no HardFork, no era transition) leaves transitionInfo alone.
 func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	ls := &LedgerState{
-		currentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		currentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		currentPParams: babbagePParams(9),
 		transitionInfo: hardfork.NewTransitionUnknown(),
 	}
@@ -3537,7 +3694,7 @@ func TestRolloverCommit_NoHardFork_TransitionInfoUnchanged(t *testing.T) {
 	var eraTransitions []*EraTransitionResult
 	rolloverResult := &EpochRolloverResult{
 		NewCurrentEpoch:   models.Epoch{EpochId: 501},
-		NewCurrentEra:     *eras.GetEraById(eras.ConwayEraDesc.Id),
+		NewCurrentEra:     requireEraDesc(t, eras.ConwayEraDesc.Id),
 		NewCurrentPParams: babbagePParams(9),
 		NewEpochCache:     []models.Epoch{{EpochId: 501}},
 		HardFork:          nil,
@@ -3646,6 +3803,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			txn,
 			ocommon.Point{Slot: 10},
 			block,
+			false,
 			false,
 			nil,
 			nil,

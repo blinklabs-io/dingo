@@ -85,6 +85,7 @@ func TestParseSearchUtxosStartToken_Valid(t *testing.T) {
 	t.Parallel()
 	cur, err := parseSearchUtxosStartToken("1:2:3")
 	require.NoError(t, err)
+	require.NotNil(t, cur)
 	require.Equal(t, uint64(1), cur.Slot)
 	require.Equal(t, uint32(2), cur.BlockIndex)
 	require.Equal(t, uint32(3), cur.OutputIdx)

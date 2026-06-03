@@ -213,7 +213,7 @@ func (d *BlobStoreS3) Delete(txn types.Txn, key []byte) error {
 	defer cancel()
 	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(key))),
+		Key:    new(d.fullKey(string(key))),
 	})
 	if err != nil {
 		if isS3NotFound(err) {
@@ -364,28 +364,28 @@ func (d *BlobStoreS3) DeleteBlock(
 	key := types.BlockBlobKey(slot, hash)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(key))),
+		Key:    new(d.fullKey(string(key))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
 	indexKey := types.BlockBlobIndexKey(id)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(indexKey))),
+		Key:    new(d.fullKey(string(indexKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(metadataKey))),
+		Key:    new(d.fullKey(string(metadataKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
 	hashIndexKey := types.BlockHashIndexKey(hash)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(hashIndexKey))),
+		Key:    new(d.fullKey(string(hashIndexKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
@@ -429,7 +429,7 @@ func (d *BlobStoreS3) TombstoneBlock(
 	metadataKey := types.BlockBlobMetadataKey(key)
 	if _, err := d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(metadataKey))),
+		Key:    new(d.fullKey(string(metadataKey))),
 	}); err != nil && !isS3NotFound(err) {
 		return err
 	}
@@ -496,7 +496,7 @@ func (d *BlobStoreS3) DeleteUtxo(
 	key := types.UtxoBlobKey(txId, outputIdx)
 	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(key))),
+		Key:    new(d.fullKey(string(key))),
 	})
 	if err != nil && !isS3NotFound(err) {
 		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
@@ -565,7 +565,7 @@ func (d *BlobStoreS3) DeleteTx(
 	key := types.TxBlobKey(txHash)
 	_, err = d.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(d.bucket),
-		Key:    awsString(d.fullKey(string(key))),
+		Key:    new(d.fullKey(string(key))),
 	})
 	if err != nil && !isS3NotFound(err) {
 		d.logger.Errorf("s3 delete %q failed: %v", string(key), err)
@@ -778,10 +778,6 @@ func (d *BlobStoreS3) fullKey(key string) string {
 	return d.prefix + hex.EncodeToString([]byte(key))
 }
 
-func awsString(s string) *string {
-	return &s
-}
-
 // getInternal reads the value at key.
 func (d *BlobStoreS3) getInternal(
 	ctx context.Context,
@@ -789,7 +785,7 @@ func (d *BlobStoreS3) getInternal(
 ) ([]byte, error) {
 	out, err := d.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: &d.bucket,
-		Key:    awsString(d.fullKey(key)),
+		Key:    new(d.fullKey(key)),
 	})
 	if err != nil {
 		if !isS3NotFound(err) {
@@ -812,7 +808,7 @@ func (d *BlobStoreS3) getInternal(
 func (d *BlobStoreS3) Put(ctx context.Context, key string, value []byte) error {
 	_, err := d.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: &d.bucket,
-		Key:    awsString(d.fullKey(key)),
+		Key:    new(d.fullKey(key)),
 		Body:   bytes.NewReader(value),
 	})
 	if err != nil {
@@ -915,7 +911,7 @@ func (d *BlobStoreS3) GetBlockURL(
 		ctx,
 		&s3.HeadObjectInput{
 			Bucket: &d.bucket,
-			Key:    awsString(d.fullKey(string(key))),
+			Key:    new(d.fullKey(string(key))),
 		})
 	if isS3NotFound(err) {
 		return types.SignedURL{}, types.BlockMetadata{},
@@ -934,7 +930,7 @@ func (d *BlobStoreS3) GetBlockURL(
 		ctx,
 		&s3.GetObjectInput{
 			Bucket: &d.bucket,
-			Key:    awsString(d.fullKey(string(key))),
+			Key:    new(d.fullKey(string(key))),
 		},
 		s3.WithPresignExpires(time.Hour))
 	if err != nil {

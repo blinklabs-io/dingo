@@ -40,6 +40,13 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Equal(t, lcommon.RewardSnapshot{}, snapshot)
 
+	adaPots, err := lv.GetAdaPotsWithError()
+	require.ErrorIs(t, err, ErrNotImplemented)
+	require.Equal(t, lcommon.AdaPots{}, adaPots)
+	require.PanicsWithValue(t, ErrNotImplemented, func() {
+		_ = lv.GetAdaPots()
+	})
+
 	err = lv.UpdateAdaPots(lcommon.AdaPots{})
 	require.ErrorIs(t, err, ErrNotImplemented)
 
@@ -50,6 +57,14 @@ func TestLedgerViewUnimplementedMethodsReturnSentinelError(t *testing.T) {
 	treasury, err := lv.TreasuryValue()
 	require.ErrorIs(t, err, ErrNotImplemented)
 	require.Zero(t, treasury)
+}
+
+func TestLedgerViewSkipPhase2Validation(t *testing.T) {
+	lv := &LedgerView{}
+	require.False(t, lv.SkipPhase2Validation())
+
+	lv.skipPhase2Validation = true
+	require.True(t, lv.SkipPhase2Validation())
 }
 
 func TestExtractCostModelsFromPParams_Nil(t *testing.T) {

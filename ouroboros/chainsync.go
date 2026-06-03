@@ -36,6 +36,15 @@ import (
 const (
 	chainsyncIntersectPointCount = 100
 
+	// chainsyncMaxFindIntersectPoints bounds how many points a peer may
+	// send in a single FindIntersect request. Honest clients send a small,
+	// bounded bisection list (our own client sends at most
+	// chainsyncIntersectPointCount). This generous cap protects against a
+	// malicious or buggy peer forcing avoidable intersection lookups against
+	// the ledger until the protocol timeout fires, while leaving ample
+	// headroom so legitimate sync is never rejected.
+	chainsyncMaxFindIntersectPoints = 1000
+
 	// chainsyncRestartTimeout bounds how long the restart of a
 	// chainsync client can take before we give up and close the
 	// connection. Increase this for slow or congested networks.
@@ -364,6 +373,22 @@ func (o *Ouroboros) chainsyncServerFindIntersect(
 		"component", "ouroboros",
 		"tip_slot", tip.Point.Slot,
 	)
+	// Reject oversized point lists before performing any intersection
+	// lookup. Without this cap a peer could send an arbitrarily large list
+	// and force avoidable CPU/database work until the protocol timeout. We
+	// respond with IntersectNotFound (via ErrIntersectNotFound) rather than
+	// tearing down the connection, which keeps the failure cheap and avoids
+	// reconnect churn.
+	if len(points) > chainsyncMaxFindIntersectPoints {
+		o.config.Logger.Warn(
+			"chainsync server: rejecting FindIntersect with too many points",
+			"component", "ouroboros",
+			"connection_id", ctx.ConnectionId.String(),
+			"num_points", len(points),
+			"max_points", chainsyncMaxFindIntersectPoints,
+		)
+		return retPoint, tip, ochainsync.ErrIntersectNotFound
+	}
 	intersectPoint, err := o.LedgerState.GetIntersectPoint(points)
 	if err != nil {
 		o.config.Logger.Error(
@@ -461,7 +486,7 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 		} else {
 			err = ctx.Server.RollForward(
 				next.Block.Type,
-				next.Block.Cbor,
+				o.chainsyncServerBlockCbor(ctx, next.Block),
 				tip,
 			)
 		}
@@ -523,25 +548,67 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				next.Point,
 				tip,
 			); err != nil {
-				o.config.Logger.Error(
-					"failed to roll backward",
-					"error", err,
+				o.reportChainsyncServerAsyncError(
+					conn,
+					ctx.ConnectionId.String(),
+					"RollBackward",
+					err,
 				)
 			}
 		} else {
 			if err := ctx.Server.RollForward(
 				next.Block.Type,
-				next.Block.Cbor,
+				o.chainsyncServerBlockCbor(ctx, next.Block),
 				tip,
 			); err != nil {
-				o.config.Logger.Error(
-					"failed to roll forward",
-					"error", err,
+				o.reportChainsyncServerAsyncError(
+					conn,
+					ctx.ConnectionId.String(),
+					"RollForward",
+					err,
 				)
 			}
 		}
 	}()
 	return nil
+}
+
+func (o *Ouroboros) reportChainsyncServerAsyncError(
+	conn *ouroboros.Connection,
+	connectionID string,
+	operation string,
+	err error,
+) {
+	if errors.Is(err, context.Canceled) {
+		return
+	}
+	o.config.Logger.Error(
+		"chainsync server: async send failed",
+		"connection_id", connectionID,
+		"operation", operation,
+		"error", err,
+	)
+	if !sendChainsyncConnError(conn.ErrorChan(), err) {
+		o.config.Logger.Debug(
+			"chainsync server: failed to forward async send error to connection error channel",
+			"connection_id", connectionID,
+			"operation", operation,
+		)
+	}
+}
+
+func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
+	defer func() {
+		if recover() != nil {
+			sent = false
+		}
+	}()
+	select {
+	case errCh <- err:
+		return true
+	default:
+		return false
+	}
 }
 
 func (o *Ouroboros) chainsyncClientRollBackward(
@@ -555,8 +622,10 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
-	// Generate event
-	o.EventBus.Publish(
+	// Generate event. This stream is ordering-critical: dropping a
+	// rollback/header event can strand the ledger pipeline, so use blocking
+	// delivery to apply backpressure instead of lossy buffer overflow.
+	if err := o.EventBus.PublishBlocking(
 		ledger.ChainsyncEventType,
 		event.NewEvent(
 			ledger.ChainsyncEventType,
@@ -567,7 +636,9 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 				Tip:          tip,
 			},
 		),
-	)
+	); err != nil {
+		return err
+	}
 	o.EventBus.Publish(
 		chainselection.PeerRollbackEventType,
 		event.NewEvent(
@@ -705,7 +776,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				return nil
 			}
 		}
-		o.EventBus.Publish(
+		if err := o.EventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
 				ledger.ChainsyncEventType,
@@ -717,7 +788,9 @@ func (o *Ouroboros) chainsyncClientRollForward(
 					Tip:          tip,
 				},
 			),
-		)
+		); err != nil {
+			return err
+		}
 		if point.Slot == tip.Point.Slot &&
 			bytes.Equal(point.Hash, tip.Point.Hash) {
 			if o.ChainsyncState != nil {

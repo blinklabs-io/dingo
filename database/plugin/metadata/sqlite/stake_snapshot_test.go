@@ -336,26 +336,39 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 	defer store.Close() //nolint:errcheck
 
 	poolKeyHash := []byte("pool_key_hash_12345678901234")
+	// Initial row: unresolved auto-vote (typical Mithril import for
+	// an N-1 / N-2 seed row). Tally would treat as implicit no.
 	initial := []*models.PoolStakeSnapshot{
 		{
-			Epoch:          100,
-			SnapshotType:   "mark",
-			PoolKeyHash:    poolKeyHash,
-			TotalStake:     1,
-			DelegatorCount: 1,
-			CapturedSlot:   100,
+			Epoch:                         100,
+			SnapshotType:                  "mark",
+			PoolKeyHash:                   poolKeyHash,
+			TotalStake:                    1,
+			DelegatorCount:                1,
+			CapturedSlot:                  100,
+			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteNone,
+			RewardAccountAutoVoteResolved: false,
 		},
 	}
 	require.NoError(t, store.SavePoolStakeSnapshots(initial, nil))
 
+	// Re-save: stake numbers change AND the row is now resolved
+	// against snapshot-era state as AlwaysAbstain (e.g. the live
+	// epoch boundary catches up to this target epoch and the
+	// resolver runs). The upsert must carry every non-key column
+	// through — if reward_account_auto_vote{,_resolved} are missing
+	// from DoUpdates, the row keeps the initial (None, false) pair
+	// and the tally silently misclassifies the pool as implicit no.
 	updated := []*models.PoolStakeSnapshot{
 		{
-			Epoch:          100,
-			SnapshotType:   "mark",
-			PoolKeyHash:    poolKeyHash,
-			TotalStake:     999,
-			DelegatorCount: 9,
-			CapturedSlot:   200,
+			Epoch:                         100,
+			SnapshotType:                  "mark",
+			PoolKeyHash:                   poolKeyHash,
+			TotalStake:                    999,
+			DelegatorCount:                9,
+			CapturedSlot:                  200,
+			RewardAccountAutoVote:         models.PoolRewardAccountAutoVoteAbstain,
+			RewardAccountAutoVoteResolved: true,
 		},
 	}
 	require.NoError(t, store.SavePoolStakeSnapshots(updated, nil))
@@ -366,6 +379,17 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 	assert.Equal(t, uint64(999), uint64(retrieved.TotalStake))
 	assert.Equal(t, uint64(9), retrieved.DelegatorCount)
 	assert.Equal(t, uint64(200), retrieved.CapturedSlot)
+	assert.Equal(
+		t,
+		models.PoolRewardAccountAutoVoteAbstain,
+		retrieved.RewardAccountAutoVote,
+		"resolved RewardAccountAutoVote must survive an upsert",
+	)
+	assert.True(
+		t,
+		retrieved.RewardAccountAutoVoteResolved,
+		"RewardAccountAutoVoteResolved must survive an upsert",
+	)
 }
 
 func TestSaveEpochSummaryUpsertsExistingRow(t *testing.T) {

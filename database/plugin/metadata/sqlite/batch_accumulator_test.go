@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -146,6 +147,81 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 	})
 	assert.Len(t, ba.KeyWitnesses, 1)
 	assert.Equal(t, []byte{0xff}, ba.KeyWitnesses[0].Vkey)
+}
+
+func TestBatchAccumulator_InFlightProducerIndex(t *testing.T) {
+	ba := NewBatchAccumulator()
+
+	producerTx := bytes.Repeat([]byte{0xaa}, 32)
+	paymentKey := []byte{0x11}
+	stakingKey := []byte{0x22}
+	ba.AddUtxoOutput(models.Utxo{
+		TxId:       producerTx,
+		OutputIdx:  3,
+		PaymentKey: paymentKey,
+		StakingKey: stakingKey,
+		AddedSlot:  100,
+	})
+
+	colRetTx := bytes.Repeat([]byte{0xcc}, 32)
+	ba.AddCollateralReturn(models.Utxo{
+		TxId:       colRetTx,
+		OutputIdx:  0,
+		PaymentKey: []byte{0x33},
+		StakingKey: []byte{0x44},
+		AddedSlot:  100,
+	})
+
+	// Produced output is resolvable with its address keys.
+	assert.True(t, ba.HasInFlightProducer(producerTx, 3))
+	keys, ok := ba.InFlightAddressKeys(producerTx, 3)
+	require.True(t, ok)
+	assert.Equal(t, producerTx, keys.TxId)
+	assert.Equal(t, uint32(3), keys.OutputIdx)
+	assert.Equal(t, paymentKey, keys.PaymentKey)
+	assert.Equal(t, stakingKey, keys.StakingKey)
+
+	// Collateral returns are indexed too.
+	assert.True(t, ba.HasInFlightProducer(colRetTx, 0))
+
+	// Misses: wrong index, wrong tx id.
+	assert.False(t, ba.HasInFlightProducer(producerTx, 4))
+	assert.False(t, ba.HasInFlightProducer(bytes.Repeat([]byte{0x99}, 32), 3))
+	_, ok = ba.InFlightAddressKeys(producerTx, 4)
+	assert.False(t, ok)
+
+	// Reset clears the index along with the slices.
+	ba.Reset()
+	assert.False(t, ba.HasInFlightProducer(producerTx, 3))
+	assert.False(t, ba.HasInFlightProducer(colRetTx, 0))
+
+	// The index is reusable after reset.
+	ba.AddUtxoOutput(models.Utxo{TxId: producerTx, OutputIdx: 3})
+	assert.True(t, ba.HasInFlightProducer(producerTx, 3))
+}
+
+func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
+	dst := NewBatchAccumulator()
+	src := NewBatchAccumulator()
+
+	dstTx := bytes.Repeat([]byte{0x01}, 32)
+	dst.AddUtxoOutput(
+		models.Utxo{TxId: dstTx, OutputIdx: 0, PaymentKey: []byte{0x10}},
+	)
+
+	srcTx := bytes.Repeat([]byte{0x02}, 32)
+	src.AddUtxoOutput(
+		models.Utxo{TxId: srcTx, OutputIdx: 1, PaymentKey: []byte{0x20}},
+	)
+
+	dst.MergeFrom(src)
+
+	// Both the destination's own and the merged-in producers resolve.
+	assert.True(t, dst.HasInFlightProducer(dstTx, 0))
+	assert.True(t, dst.HasInFlightProducer(srcTx, 1))
+	keys, ok := dst.InFlightAddressKeys(srcTx, 1)
+	require.True(t, ok)
+	assert.Equal(t, []byte{0x20}, keys.PaymentKey)
 }
 
 func TestFlushBatch_Witnesses(t *testing.T) {
@@ -369,6 +445,8 @@ func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
 		Slot: 999,
 	}
 	acc := NewBatchAccumulator()
+	var stats dbtypes.BackfillHotPathStats
+	acc.SetBackfillStats(&stats)
 
 	require.NoError(
 		t,
@@ -390,6 +468,7 @@ func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
 	// ------------------------------------------------------------------ //
 	assert.Len(t, acc.KeyWitnesses, 1, "one vkey witness expected in accumulator")
 	assert.Equal(t, models.KeyWitnessTypeVkey, acc.KeyWitnesses[0].Type)
+	assert.Equal(t, uint64(1), stats.Witnesses)
 
 	var witnessCount int64
 	require.NoError(

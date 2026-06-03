@@ -15,14 +15,18 @@
 package chain
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 func TestIteratorCancelRemovesFromChain(t *testing.T) {
@@ -91,7 +95,7 @@ func TestIteratorCancelMultiple(t *testing.T) {
 	c.mutex.RLock()
 	assert.Equal(t, 2, len(c.iterators))
 	for _, it := range c.iterators {
-		assert.NotEqual(t, iter2, it)
+		assert.False(t, it == iter2)
 	}
 	c.mutex.RUnlock()
 
@@ -125,6 +129,57 @@ func TestIteratorCancelIdempotent(t *testing.T) {
 	c.mutex.RLock()
 	assert.Equal(t, 0, len(c.iterators))
 	c.mutex.RUnlock()
+}
+
+// TestIteratorParentContextCancelUnblocksNext verifies that a blocking
+// iterator created with a parent context exits when that parent is canceled.
+func TestIteratorParentContextCancelUnblocksNext(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := NewManager(nil, eventBus)
+	require.NoError(t, err)
+
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	iter, err := c.FromPointContext(ctx, ocommon.Point{}, true)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	type iterResult struct {
+		result *ChainIteratorResult
+		err    error
+	}
+	resultCh := make(chan iterResult, 1)
+
+	go func() {
+		res, err := iter.Next(true)
+		resultCh <- iterResult{result: res, err: err}
+	}()
+
+	testutil.WaitForCondition(t, func() bool {
+		c.waitingChanMutex.Lock()
+		defer c.waitingChanMutex.Unlock()
+		return c.waitingChan != nil
+	}, 2*time.Second, "iterator should block waiting for a chain update")
+
+	cancel()
+
+	r := testutil.RequireReceive(
+		t,
+		resultCh,
+		2*time.Second,
+		"parent context cancellation should unblock iterator",
+	)
+	require.Nil(t, r.result)
+	require.Error(t, r.err)
+	require.True(t, errors.Is(r.err, context.Canceled))
+
+	testutil.WaitForCondition(t, func() bool {
+		c.mutex.RLock()
+		defer c.mutex.RUnlock()
+		return len(c.iterators) == 0
+	}, 2*time.Second, "parent context cancellation should remove iterator")
 }
 
 // TestIterNextSpuriousWakeups verifies that the blocking
@@ -221,4 +276,89 @@ func TestIterNextSpuriousWakeups(t *testing.T) {
 	require.Error(t, r.err,
 		"cancelled iterator should return an error",
 	)
+}
+
+func TestIterNextRegistersWaitBeforeChainUpdateCanCommit(t *testing.T) {
+	eventBus := event.NewEventBus(nil, nil)
+	cm, err := NewManager(nil, eventBus)
+	require.NoError(t, err)
+
+	c := cm.PrimaryChain()
+	require.NotNil(t, c)
+
+	iter, err := c.FromPoint(ocommon.Point{}, true)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	type iterResult struct {
+		result *ChainIteratorResult
+		err    error
+	}
+	resultCh := make(chan iterResult, 1)
+	addDone := make(chan error, 1)
+
+	c.waitingChanMutex.Lock()
+	waitMutexLocked := true
+	defer func() {
+		if waitMutexLocked {
+			c.waitingChanMutex.Unlock()
+		}
+	}()
+
+	go func() {
+		res, err := iter.Next(true)
+		resultCh <- iterResult{result: res, err: err}
+	}()
+
+	testutil.WaitForCondition(t, func() bool {
+		if c.mutex.TryLock() {
+			c.mutex.Unlock()
+			return false
+		}
+		return true
+	}, 2*time.Second, "iterator should hold chain lock at tip")
+
+	blockFixture, err := mockfixtures.NewHarness(
+		mockfixtures.HarnessConfig{},
+	).Fixture(
+		"ouroboros-consensus/ouroboros-consensus-cardano/" +
+			"golden/cardano/CardanoNodeToNodeVersion2/Block_Conway",
+	)
+	require.NoError(t, err)
+	block, err := blockFixture.DecodeLedgerBlock()
+	require.NoError(t, err)
+	blockHash := block.Hash().Bytes()
+
+	go func() {
+		addDone <- c.AddBlock(block, nil)
+	}()
+
+	testutil.RequireNoReceive(
+		t,
+		addDone,
+		50*time.Millisecond,
+		"chain update committed before iterator registered wait channel",
+	)
+
+	c.waitingChanMutex.Unlock()
+	waitMutexLocked = false
+
+	addErr := testutil.RequireReceive(
+		t,
+		addDone,
+		2*time.Second,
+		"chain update should complete after wait registration",
+	)
+	require.NoError(t, addErr)
+
+	r := testutil.RequireReceive(
+		t,
+		resultCh,
+		2*time.Second,
+		"iterator should receive newly added block",
+	)
+	require.NoError(t, r.err)
+	require.NotNil(t, r.result)
+	assert.Equal(t, block.BlockNumber(), r.result.Block.Number)
+	assert.Equal(t, blockHash, r.result.Point.Hash)
 }

@@ -202,31 +202,74 @@ func (n *Node) processChainsyncRecyclerTick(
 						// instead of every tick.
 						*lastProgressAt = now
 					} else {
-						n.config.logger.Warn(
-							"local tip plateau detected, resyncing chainsync client",
-							"connection_id", connKey,
-							"local_tip_slot", localTipSlot,
-							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-							"plateau_duration", now.Sub(*lastProgressAt),
-						)
-						n.eventBus.Publish(
-							event.ChainsyncResyncEventType,
-							event.NewEvent(
+						// Before recycling the upstream peer, give the
+						// live reconciler a chance to repair a silent
+						// primary-chain / ledger divergence. The two
+						// existing call sites in ledger/chainsync.go
+						// only fire on ErrRollbackExceedsSecurityParam;
+						// sub-K same-slot fork resolutions can advance
+						// chain.Tip() while leaving the ledger pipeline
+						// pinned on the abandoned hash with no error to
+						// trigger reconcile. The plateau is the symptom
+						// — recycle the connection and the new peer
+						// will hand back the same canonical headers
+						// the ledger already refused to follow.
+						reconciledByLedger := false
+						if n.ledgerState != nil {
+							reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
+								"local tip plateau",
+								*targetConn,
+							)
+							if err != nil {
+								n.config.logger.Warn(
+									"plateau reconcile failed, falling through to peer recycle",
+									"connection_id", connKey,
+									"error", err.Error(),
+								)
+							} else if reconciled {
+								n.config.logger.Warn(
+									"local tip plateau resolved via ledger reconcile, skipping peer recycle",
+									"connection_id", connKey,
+									"local_tip_slot", localTipSlot,
+									"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+									"plateau_duration", now.Sub(*lastProgressAt),
+								)
+								// Reset the plateau clock so we don't
+								// immediately re-trigger on the next
+								// tick before forward application has
+								// had a chance to advance the ledger.
+								*lastProgressAt = now
+								lastRecycled[connKey] = now
+								reconciledByLedger = true
+							}
+						}
+						if !reconciledByLedger {
+							n.config.logger.Warn(
+								"local tip plateau detected, resyncing chainsync client",
+								"connection_id", connKey,
+								"local_tip_slot", localTipSlot,
+								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+								"plateau_duration", now.Sub(*lastProgressAt),
+							)
+							n.eventBus.Publish(
 								event.ChainsyncResyncEventType,
-								event.ChainsyncResyncEvent{
-									ConnectionId: *targetConn,
-									Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
-								},
-							),
-						)
-						n.realignOtherPeersAfterPlateau(
-							*targetConn,
-							trackedClients,
-							localTipSlot,
-						)
-						delete(recycleAt, connKey)
-						lastRecycled[connKey] = now
-						*lastProgressAt = now
+								event.NewEvent(
+									event.ChainsyncResyncEventType,
+									event.ChainsyncResyncEvent{
+										ConnectionId: *targetConn,
+										Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
+									},
+								),
+							)
+							n.realignOtherPeersAfterPlateau(
+								*targetConn,
+								trackedClients,
+								localTipSlot,
+							)
+							delete(recycleAt, connKey)
+							lastRecycled[connKey] = now
+							*lastProgressAt = now
+						}
 					}
 				}
 			}

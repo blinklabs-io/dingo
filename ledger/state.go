@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -487,8 +488,7 @@ type LedgerState struct {
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
-	inRecovery                    bool           // guards against recursive recovery in SubmitAsyncDBTxn
-	densityWindow                 []densityEntry // sliding window for chain density metric
+	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery             *atTipRecoveryAttempt
 	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
 	lastLocalRollbackSeq          uint64
@@ -1358,10 +1358,10 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 	}
 
 	readyEpoch := currentEpoch.EpochId + 1
-	if len(ls.EpochNonce(readyEpoch)) == 0 {
+	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
 		return
 	}
-	if ls.nextNonceReadyEpoch.Load() == readyEpoch {
+	if len(ls.EpochNonce(readyEpoch)) == 0 {
 		return
 	}
 	ls.nextNonceReadyEpoch.Store(readyEpoch)
@@ -1632,6 +1632,17 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete reward-state rows captured at epoch boundaries that no
+		// longer exist on the selected chain.
+		if err := ls.db.DeleteRewardStateAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete reward state after rollback: %w",
+				err,
+			)
+		}
 		// Delete block nonce rows from the abandoned fork. Epoch
 		// nonces are derived from slot-range block_nonce lookups, so
 		// same-slot competitors and later fork rows must not survive
@@ -1668,10 +1679,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		// the trust anchor — we never rewind below it — so the
 		// authoritative deletion slot is the rollback target or the
 		// Mithril boundary, whichever is later.
-		deleteSlot := point.Slot
-		if ls.mithrilLedgerSlot > deleteSlot {
-			deleteSlot = ls.mithrilLedgerSlot
-		}
+		deleteSlot := max(ls.mithrilLedgerSlot, point.Slot)
 		err := ls.db.UtxosDeleteRolledback(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)
@@ -1813,6 +1821,10 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 			newPrevPParams = prevPP
 		}
 	}
+	newTipDensity := ls.chainFragmentDensity(
+		newTip,
+		ls.securityParamForEraOrDefault(newCurrentEra.Id),
+	)
 	// Transaction committed successfully - now update all
 	// in-memory state atomically so readers see a consistent
 	// snapshot.
@@ -1885,7 +1897,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// Allow the nonce-ready event to be emitted again if replay crosses
 	// the cutoff on a different fork after rollback.
 	ls.resetNextEpochNonceReady()
-	ls.updateTipMetrics()
+	ls.updateTipMetrics(newTipDensity)
 	ls.Unlock()
 	if ls.config.EventBus != nil {
 		ls.config.EventBus.Publish(
@@ -2184,46 +2196,112 @@ func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {
 	return ti
 }
 
-// SecurityParam returns the security parameter for the current era
-func (ls *LedgerState) SecurityParam() int {
+func (ls *LedgerState) securityParamForEra(eraId uint) (uint64, bool) {
 	if ls.config.CardanoNodeConfig == nil {
-		ls.config.Logger.Warn(
-			"CardanoNodeConfig is nil, using default security parameter",
-		)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"CardanoNodeConfig is nil, security parameter unavailable",
+			)
+		}
+		return 0, false
 	}
 	// Byron era only needs Byron genesis
-	if ls.currentEra.Id == 0 {
+	if eraId == 0 {
 		byronGenesis := ls.config.CardanoNodeConfig.ByronGenesis()
 		if byronGenesis == nil {
-			return blockfetchBatchSlotThresholdDefault
+			return 0, false
 		}
 		k := byronGenesis.ProtocolConsts.K
 		if k < 0 {
-			ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn(
+					"invalid negative security parameter",
+					"k", k,
+				)
+			}
+			return 0, false
 		}
 		if k == 0 {
-			ls.config.Logger.Warn("security parameter is zero", "k", k)
-			return blockfetchBatchSlotThresholdDefault
+			if ls.config.Logger != nil {
+				ls.config.Logger.Warn("security parameter is zero", "k", k)
+			}
+			return 0, false
 		}
-		return int(k) // #nosec G115
+		return uint64(k), true // #nosec G115
 	}
 	// Shelley+ eras only need Shelley genesis
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil {
-		return blockfetchBatchSlotThresholdDefault
+		return 0, false
 	}
 	k := shelleyGenesis.SecurityParam
 	if k < 0 {
-		ls.config.Logger.Warn("invalid negative security parameter", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"invalid negative security parameter",
+				"k", k,
+			)
+		}
+		return 0, false
 	}
 	if k == 0 {
-		ls.config.Logger.Warn("security parameter is zero", "k", k)
-		return blockfetchBatchSlotThresholdDefault
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn("security parameter is zero", "k", k)
+		}
+		return 0, false
 	}
-	return int(k)
+	return uint64(k), true
+}
+
+// SecurityParam returns the security parameter for the current era
+func (ls *LedgerState) SecurityParam() int {
+	return ls.securityParamForEraOrDefault(ls.currentEra.Id)
+}
+
+func (ls *LedgerState) securityParamForEraOrDefault(eraId uint) int {
+	if k, ok := ls.securityParamForEra(eraId); ok {
+		return int(k) // #nosec G115 -- k came from a non-negative int genesis field
+	}
+	return blockfetchBatchSlotThresholdDefault
+}
+
+func (ls *LedgerState) securityParamForCurrentEraSnapshot() int {
+	ls.RLock()
+	eraId := ls.currentEra.Id
+	ls.RUnlock()
+	return ls.securityParamForEraOrDefault(eraId)
+}
+
+// shouldSkipPhase2ValidationForBlock reports whether a block is deep enough
+// behind the reference tip that its producer-supplied isValid flag can be
+// trusted for replay-only Plutus Phase 2 results.
+func (ls *LedgerState) shouldSkipPhase2ValidationForBlock(
+	blockNumber uint64,
+	referenceBlockNumber uint64,
+	eraId uint,
+) bool {
+	securityParam, ok := ls.securityParamForEra(eraId)
+	if !ok || referenceBlockNumber < securityParam {
+		return false
+	}
+	immutableBlockNumber := referenceBlockNumber - securityParam
+	return blockNumber <= immutableBlockNumber
+}
+
+// shouldSkipPhase2ValidationForBlockAtCurrentTip samples the primary chain tip
+// for this specific block. The chain can advance or roll back while ledger
+// processing drains a read batch, so callers must not reuse a sub-batch-start
+// reference tip for all blocks in the transaction.
+func (ls *LedgerState) shouldSkipPhase2ValidationForBlockAtCurrentTip(
+	blockNumber uint64,
+	eraId uint,
+) bool {
+	referenceTip := ls.chain.Tip()
+	return ls.shouldSkipPhase2ValidationForBlock(
+		blockNumber,
+		referenceTip.BlockNumber,
+		eraId,
+	)
 }
 
 // StabilityWindow returns the Ouroboros security stability window for the
@@ -2278,7 +2356,7 @@ func (ls *LedgerState) ledgerReadChain(
 		startPoint := ls.currentTip.Point
 		ls.RUnlock()
 		// Create chain iterator
-		iter, err := ls.chain.FromPoint(startPoint, false)
+		iter, err := ls.chain.FromPointContext(ctx, startPoint, false)
 		if err != nil {
 			if !errors.Is(err, models.ErrBlockNotFound) {
 				ls.config.Logger.Warn(
@@ -2972,7 +3050,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
 			snapshotValidationEnabled := ls.validationEnabled
 			snapshotChainsyncState := ls.chainsyncState
-			chainTipSlot := ls.chain.Tip().Point.Slot
+			chainTip := ls.chain.Tip()
+			chainTipSlot := chainTip.Point.Slot
 			snapshotMithrilSlot := ls.mithrilLedgerSlot
 			ls.RUnlock()
 
@@ -3126,11 +3205,17 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						continue
 					}
 					// Process block
+					skipPhase2Validation := shouldValidateBlock &&
+						ls.shouldSkipPhase2ValidationForBlockAtCurrentTip(
+							next.BlockNumber(),
+							snapshotEra.Id,
+						)
 					delta, err = ls.ledgerProcessBlock(
 						txn,
 						tmpPoint,
 						next,
 						shouldValidateBlock,
+						skipPhase2Validation,
 						expectedPrevHash,
 						blockOffsets,
 						snapshotEra,
@@ -3251,6 +3336,10 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			// Transaction committed successfully - now update in-memory state.
 			// Only update if blocks were actually processed to avoid resetting tip to zero.
 			if blocksProcessed > 0 {
+				tipDensity := ls.chainFragmentDensity(
+					pendingTip,
+					ls.securityParamForCurrentEraSnapshot(),
+				)
 				// Brief lock to ensure readers see consistent state.
 				ls.Lock()
 				ls.currentTip = pendingTip
@@ -3262,7 +3351,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					ls.validationEnabled = true
 					ls.reachedTip = true
 				}
-				ls.updateTipMetrics()
+				ls.updateTipMetrics(tipDensity)
 				// After advancing the tip, first honor any TestXHardForkAtEpoch
 				// override so queries surface the pinned epoch ahead of time;
 				// then check whether the stability window reaches or exceeds
@@ -3328,6 +3417,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	point ocommon.Point,
 	block ledger.Block,
 	shouldValidate bool,
+	skipPhase2Validation bool,
 	expectedPrevHash []byte,
 	offsets *database.BlockIngestionResult,
 	currentEra eras.EraDesc,
@@ -3364,10 +3454,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
 	// dependencies only when TX validation is enabled.
-	var intraBlockUtxos map[string]lcommon.Utxo
-	if shouldValidate {
-		intraBlockUtxos = make(map[string]lcommon.Utxo)
-	}
+	intraBlockUtxos := make(map[string]lcommon.Utxo)
 	for i, tx := range block.Transactions() {
 		if delta == nil {
 			delta = NewLedgerDelta(
@@ -3402,9 +3489,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 					pp = prevEraPParams
 				}
 				lv := &LedgerView{
-					txn:             txn,
-					ls:              ls,
-					intraBlockUtxos: intraBlockUtxos,
+					txn:                  txn,
+					ls:                   ls,
+					intraBlockUtxos:      intraBlockUtxos,
+					skipPhase2Validation: skipPhase2Validation,
 				}
 				err := validationEra.ValidateTxFunc(
 					tx,
@@ -3560,71 +3648,78 @@ func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
 	}
 }
 
-// densityEntry records a block's slot and block number for the chain density
-// sliding window calculation.
-type densityEntry struct {
-	slot     uint64
-	blockNum uint64
-}
-
-func (ls *LedgerState) updateTipMetrics() {
+// updateTipMetrics updates gauges from in-memory state. Call under ls.Lock().
+// The density value must be computed before taking the lock because fragment
+// density can require database lookups.
+func (ls *LedgerState) updateTipMetrics(density float64) {
 	ls.metrics.blockNum.Set(float64(ls.currentTip.BlockNumber))
 	ls.metrics.slotNum.Set(float64(ls.currentTip.Point.Slot))
 	ls.metrics.slotInEpoch.Set(
 		float64(ls.currentTip.Point.Slot - ls.currentEpoch.StartSlot),
 	)
-	tipSlot := ls.currentTip.Point.Slot
-	tipBlockNum := ls.currentTip.BlockNumber
+	ls.metrics.density.Set(density)
+}
 
-	// Trim entries beyond current tip (rollbacks)
-	for len(ls.densityWindow) > 0 &&
-		ls.densityWindow[len(ls.densityWindow)-1].slot > tipSlot {
-		ls.densityWindow = ls.densityWindow[:len(ls.densityWindow)-1]
+// chainFragmentDensity matches cardano-node's ChainDB fragment density:
+// block delta divided by slot delta over the selected chain fragment.
+func (ls *LedgerState) chainFragmentDensity(
+	tip ochainsync.Tip,
+	securityParam int,
+) float64 {
+	tipSlot := tip.Point.Slot
+	tipBlockNum := tip.BlockNumber
+	if tipSlot == 0 || tipBlockNum == 0 {
+		return 0
 	}
-	// Append current tip if new
-	if len(ls.densityWindow) == 0 ||
-		ls.densityWindow[len(ls.densityWindow)-1].slot < tipSlot {
-		ls.densityWindow = append(ls.densityWindow, densityEntry{
-			slot:     tipSlot,
-			blockNum: tipBlockNum,
-		})
+	if ls.db == nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
 	}
+	if securityParam <= 0 {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	tipBlock, err := database.BlockByPoint(ls.db, tip.Point)
+	if err != nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	oldestIndex := database.BlockInitialIndex
+	if tipBlock.ID > uint64(securityParam) {
+		oldestIndex = tipBlock.ID - uint64(securityParam)
+	}
+	oldestBlock, err := ls.db.BlockByIndex(oldestIndex, nil)
+	if err != nil {
+		return totalChainDensity(tipSlot, tipBlockNum)
+	}
+	return fragmentDensity(
+		tipBlock.Slot,
+		tipBlock.Number,
+		oldestBlock.Slot,
+		oldestBlock.Number,
+	)
+}
 
-	// Chain density over a 3k/f sliding window (matches cardano-node)
-	k := ls.SecurityParam()
-	f := ls.ActiveSlotCoeff()
-	if k > 0 && f > 0 && tipSlot > 0 {
-		windowSize := uint64(float64(3*k) / f)
-		cutoff := uint64(0)
-		if tipSlot > windowSize {
-			cutoff = tipSlot - windowSize
-		}
-		// Prune entries outside the window
-		pruneIdx := 0
-		for pruneIdx < len(ls.densityWindow) &&
-			ls.densityWindow[pruneIdx].slot < cutoff {
-			pruneIdx++
-		}
-		if pruneIdx > 0 {
-			ls.densityWindow = ls.densityWindow[pruneIdx:]
-		}
-		if len(ls.densityWindow) > 0 {
-			blocksInWindow := tipBlockNum -
-				ls.densityWindow[0].blockNum + 1
-			ls.metrics.density.Set(
-				float64(blocksInWindow) / float64(windowSize),
-			)
-		} else {
-			ls.metrics.density.Set(0)
-		}
-	} else if tipSlot > 0 {
-		// Fallback before protocol params are available
-		ls.metrics.density.Set(
-			float64(tipBlockNum) / float64(tipSlot),
-		)
-	} else {
-		ls.metrics.density.Set(0)
+func totalChainDensity(tipSlot, tipBlockNum uint64) float64 {
+	if tipSlot == 0 {
+		return 0
 	}
+	return float64(tipBlockNum) / float64(tipSlot)
+}
+
+func fragmentDensity(
+	tipSlot, tipBlockNum, oldestSlot, oldestBlockNum uint64,
+) float64 {
+	if tipSlot <= oldestSlot {
+		return 0
+	}
+	firstBlockNum := oldestBlockNum
+	if firstBlockNum == 0 {
+		// cardano-node ignores Byron EBB block number 0 in this metric.
+		firstBlockNum = 1
+	}
+	if tipBlockNum <= firstBlockNum {
+		return 0
+	}
+	return float64(tipBlockNum-firstBlockNum) /
+		float64(tipSlot-oldestSlot)
 }
 
 // loadPParams reads currentEpoch, currentEra, and epochCache and writes
@@ -4020,8 +4115,7 @@ func (ls *LedgerState) computePParams(
 	if len(epochCache) == 0 {
 		return pparams, prevEraPParams, nil
 	}
-	for i := len(epochCache) - 1; i >= 0; i-- {
-		ep := epochCache[i]
+	for _, ep := range slices.Backward(epochCache) {
 		if ep.EraId != era.Id {
 			prevEra := eras.GetEraById(ep.EraId)
 			if prevEra != nil &&
@@ -4198,13 +4292,17 @@ func (ls *LedgerState) loadTip() error {
 			return err
 		}
 	}
+	tipDensity := ls.chainFragmentDensity(
+		tmpTip,
+		ls.securityParamForCurrentEraSnapshot(),
+	)
 	// Lock only for in-memory state updates
 	ls.Lock()
 	ls.currentTip = tmpTip
 	if tmpTip.Point.Slot > 0 {
 		ls.currentTipBlockNonce = tipNonce
 	}
-	ls.updateTipMetrics()
+	ls.updateTipMetrics(tipDensity)
 	ls.Unlock()
 	return nil
 }
@@ -4316,6 +4414,22 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		)
 	}
 	return nil
+}
+
+// ReconcileLivePrimaryChainLedgerDivergence is the exported entry
+// point into the live-divergence reconciler. The plateau watchdog
+// calls this when local tip has not advanced for plateau_duration
+// while peers report a higher tip: if primary chain has advanced but
+// the ledger pipeline is stuck on an abandoned same-slot fork, this
+// rolls back the ledger to the latest common ancestor so forward
+// application from the canonical chain can resume without a process
+// or container restart. Returns (true, nil) when reconciliation
+// happened, (false, nil) when no divergence was found.
+func (ls *LedgerState) ReconcileLivePrimaryChainLedgerDivergence(
+	reason string,
+	connId ouroboros.ConnectionId,
+) (bool, error) {
+	return ls.reconcileLivePrimaryChainLedgerDivergence(reason, connId)
 }
 
 func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
@@ -4603,7 +4717,7 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 	points []ocommon.Point,
 	count int,
 ) []ocommon.Point {
-	if count <= 0 {
+	if count <= 0 || len(points) == 0 {
 		return points
 	}
 	point, ok := ls.mithrilTrustBoundaryPoint()
@@ -4802,6 +4916,16 @@ func (ls *LedgerState) GetChainFromPoint(
 	return ls.chain.FromPoint(point, inclusive)
 }
 
+// GetChainFromPointContext returns a ChainIterator that inherits cancellation
+// from ctx.
+func (ls *LedgerState) GetChainFromPointContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointContext(ctx, point, inclusive)
+}
+
 // GetChainFromPointReverse returns a ChainIterator that walks backward from
 // the specified point toward chain origin. If inclusive is true the iterator
 // yields the start point first; otherwise it yields the preceding block.
@@ -4810,6 +4934,16 @@ func (ls *LedgerState) GetChainFromPointReverse(
 	inclusive bool,
 ) (*chain.ChainIterator, error) {
 	return ls.chain.FromPointReverse(point, inclusive)
+}
+
+// GetChainFromPointReverseContext returns a reverse ChainIterator that
+// inherits cancellation from ctx.
+func (ls *LedgerState) GetChainFromPointReverseContext(
+	ctx context.Context,
+	point ocommon.Point,
+	inclusive bool,
+) (*chain.ChainIterator, error) {
+	return ls.chain.FromPointReverseContext(ctx, point, inclusive)
 }
 
 // Tip returns the current chain tip

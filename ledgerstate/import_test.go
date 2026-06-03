@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -303,6 +304,117 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	require.True(t, summary.SnapshotReady)
 	require.Equal(t, existingSummary.BoundarySlot, summary.BoundarySlot)
 	require.True(t, bytes.Equal(existingSummary.EpochNonce, summary.EpochNonce))
+}
+
+// TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark verifies the
+// CIP-1694 reward-account auto-vote resolver runs against live Pool /
+// Account state for the "mark" rotation (whose target epoch equals
+// the import-time epoch and therefore matches the live state) but is
+// SKIPPED for "set" and "go" rotations (whose target epochs are
+// older than the live state). The set/go rows are still written but
+// must carry RewardAccountAutoVoteResolved=false so the tally
+// fallback treats them as implicit no rather than freezing today's
+// delegation map into a historical boundary.
+func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x42
+	rewardAccount := make([]byte, 28)
+	rewardAccount[0] = 0x43
+
+	// Seed Pool + Account state so the resolver, if called, would
+	// produce a non-default outcome (Abstain). Set/go must NOT pick
+	// this up — that's the regression we're guarding against.
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires the sqlite metadata backend")
+	require.NoError(t, store.DB().Create(&models.Pool{
+		PoolKeyHash:   poolKeyHash,
+		RewardAccount: rewardAccount,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: rewardAccount,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  1,
+		Active:     true,
+	}).Error)
+
+	mkSnapshot := func(epoch uint64) []*models.PoolStakeSnapshot {
+		return []*models.PoolStakeSnapshot{
+			{
+				Epoch:          epoch,
+				SnapshotType:   "mark",
+				PoolKeyHash:    poolKeyHash,
+				TotalStake:     100,
+				DelegatorCount: 1,
+				CapturedSlot:   55,
+			},
+		}
+	}
+
+	cases := []struct {
+		name           string
+		targetEpoch    uint64
+		wantResolved   bool
+		wantAutoVote   uint8
+	}{
+		{
+			name:         "mark",
+			targetEpoch:  102,
+			wantResolved: true,
+			wantAutoVote: models.PoolRewardAccountAutoVoteAbstain,
+		},
+		{
+			name:         "set",
+			targetEpoch:  101,
+			wantResolved: false,
+			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
+		},
+		{
+			name:         "go",
+			targetEpoch:  100,
+			wantResolved: false,
+			wantAutoVote: models.PoolRewardAccountAutoVoteNone,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := persistImportedSnapshot(
+				ImportConfig{
+					Database: db,
+					State: &RawLedgerState{
+						Epoch:      102,
+						EpochNonce: []byte{0x01},
+					},
+				},
+				999,
+				snapshotImportTarget{
+					name:        tc.name,
+					targetEpoch: tc.targetEpoch,
+				},
+				mkSnapshot(tc.targetEpoch),
+			)
+			require.NoError(t, err)
+
+			stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+				tc.targetEpoch, "mark", nil,
+			)
+			require.NoError(t, err)
+			require.Len(t, stored, 1)
+			require.Equal(
+				t, tc.wantResolved, stored[0].RewardAccountAutoVoteResolved,
+				"RewardAccountAutoVoteResolved mismatch for %s", tc.name,
+			)
+			require.Equal(
+				t, tc.wantAutoVote, stored[0].RewardAccountAutoVote,
+				"RewardAccountAutoVote mismatch for %s", tc.name,
+			)
+		})
+	}
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {

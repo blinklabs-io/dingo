@@ -19,6 +19,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"strings"
 	"sync"
@@ -31,15 +32,17 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
-	"github.com/blinklabs-io/gouroboros"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	ouroboros_mock "github.com/blinklabs-io/ouroboros-mock"
 	"github.com/stretchr/testify/require"
+	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
 
 type lockedBuffer struct {
@@ -86,6 +89,14 @@ type testBlockHeader struct {
 	bodyHash    gledger.Blake2b256
 }
 
+// testBlock is the smallest block implementation needed to wake a server-side
+// ChainIterator and drive the async RollForward path.
+type testBlock struct {
+	*testBlockHeader
+	blockType int
+	cbor      []byte
+}
+
 func (h *testBlockHeader) Hash() gledger.Blake2b256 {
 	return h.hash
 }
@@ -122,6 +133,26 @@ func (h *testBlockHeader) BlockBodyHash() gledger.Blake2b256 {
 	return h.bodyHash
 }
 
+func (b *testBlock) Header() gledger.BlockHeader {
+	return b.testBlockHeader
+}
+
+func (b *testBlock) Type() int {
+	return b.blockType
+}
+
+func (b *testBlock) Transactions() []gledger.Transaction {
+	return nil
+}
+
+func (b *testBlock) Utxorpc() (*utxorpc.Block, error) {
+	return nil, nil
+}
+
+func (b *testBlock) Cbor() []byte {
+	return b.cbor
+}
+
 func newTestBlockHeader(slot, block uint64, hashByte byte) gledger.BlockHeader {
 	var hash gledger.Blake2b256
 	hash[0] = hashByte
@@ -147,6 +178,14 @@ func newTestConnId(local, remote string) ouroboros.ConnectionId {
 	}
 }
 
+type testSecurityParamLedger struct {
+	securityParam int
+}
+
+func (l testSecurityParamLedger) SecurityParam() int {
+	return l.securityParam
+}
+
 func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 	t.Helper()
 
@@ -160,6 +199,7 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2160}))
 
 	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
 		Database:     db,
@@ -199,9 +239,7 @@ func TestNewOuroborosDoesNotMutateChainsyncNtNTimeouts(t *testing.T) {
 	originalStateMap := ochainsync.StateMapNtN.Copy()
 	t.Cleanup(func() {
 		clear(ochainsync.StateMapNtN)
-		for state, entry := range originalStateMap {
-			ochainsync.StateMapNtN[state] = entry
-		}
+		maps.Copy(ochainsync.StateMapNtN, originalStateMap)
 	})
 
 	before := snapshotChainsyncNtNTimeouts()
@@ -229,6 +267,224 @@ func TestChainsyncConnOptsUseConfiguredBlockTimeout(t *testing.T) {
 
 	require.Equal(t, blockTimeout, clientCfg.BlockTimeout)
 	require.Equal(t, blockTimeout, serverCfg.BlockTimeout)
+}
+
+type chainsyncAsyncSendFailureHarness struct {
+	o           *Ouroboros
+	conn        *ouroboros.Connection
+	server      *ochainsync.Server
+	ledgerState *ledger.LedgerState
+	closedCh    <-chan event.Event
+}
+
+// newChainsyncAsyncSendFailureHarness creates a real in-memory Ouroboros
+// connection registered with connmanager, so async send errors must flow
+// through conn.ErrorChan() to produce connmanager.conn_closed.
+func newChainsyncAsyncSendFailureHarness(
+	t *testing.T,
+) chainsyncAsyncSendFailureHarness {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+
+	_, closedCh := bus.Subscribe(connmanager.ConnectionClosedEventType)
+	ledgerState := newTestLedgerState(t)
+	chainsyncState := dchainsync.NewState(bus, ledgerState)
+	connManager := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{
+			EventBus: bus,
+			Logger:   logger,
+		},
+	)
+	t.Cleanup(func() {
+		stopCtx, stopCancel := context.WithTimeout(
+			context.Background(),
+			5*time.Second,
+		)
+		defer stopCancel()
+		_ = connManager.Stop(stopCtx)
+	})
+	serverPipe, clientPipe := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverPipe.Close()
+		_ = clientPipe.Close()
+	})
+
+	serverConnCh := make(chan *ouroboros.Connection, 1)
+	serverErrCh := make(chan error, 1)
+	go func() {
+		conn, err := ouroboros.New(
+			ouroboros.WithConnection(serverPipe),
+			ouroboros.WithServer(true),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithDelayProtocolStart(true),
+			ouroboros.WithLogger(logger),
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		serverConnCh <- conn
+	}()
+	clientConn, err := ouroboros.New(
+		ouroboros.WithConnection(clientPipe),
+		ouroboros.WithNetworkMagic(42),
+		ouroboros.WithDelayProtocolStart(true),
+		ouroboros.WithLogger(logger),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientConn.Close() })
+	var conn *ouroboros.Connection
+	select {
+	case err := <-serverErrCh:
+		t.Fatalf("server connection setup failed: %v", err)
+	case conn = <-serverConnCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server connection setup")
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	require.True(
+		t,
+		connManager.AddConnection(conn, false, conn.Id().RemoteAddr.String()),
+	)
+	t.Cleanup(func() {
+		sendChainsyncTestConnError(conn.ErrorChan(), context.Canceled)
+	})
+
+	server := conn.ChainSync().Server
+	server.Start()
+	t.Cleanup(server.Stop)
+
+	o := NewOuroboros(OuroborosConfig{
+		ConnManager: connManager,
+		EventBus:    bus,
+		Logger:      logger,
+	})
+	o.LedgerState = ledgerState
+	o.ChainsyncState = chainsyncState
+
+	return chainsyncAsyncSendFailureHarness{
+		o:           o,
+		conn:        conn,
+		server:      server,
+		ledgerState: ledgerState,
+		closedCh:    closedCh,
+	}
+}
+
+func sendChainsyncTestConnError(errCh chan error, err error) {
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case errCh <- err:
+	default:
+	}
+}
+
+// requireChainsyncClosedEvent verifies that the async send failure reached
+// connmanager's lifecycle path instead of being logged and dropped.
+func requireChainsyncClosedEvent(
+	t *testing.T,
+	h chainsyncAsyncSendFailureHarness,
+	msg string,
+) {
+	t.Helper()
+	evt := testutil.RequireReceive(
+		t,
+		h.closedCh,
+		5*time.Second,
+		msg,
+	)
+	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	require.True(t, ok)
+	require.Equal(t, h.conn.Id(), closed.ConnectionId)
+	require.Error(t, closed.Error)
+}
+
+// requestNextIntoAsyncAwait performs the initial rollback handshake and then
+// parks the server in AwaitReply, which is the async path covered by H6.
+func requestNextIntoAsyncAwait(
+	t *testing.T,
+	h chainsyncAsyncSendFailureHarness,
+) {
+	t.Helper()
+	ctx := ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	}
+	require.NoError(t, h.o.chainsyncServerRequestNext(ctx))
+	require.NoError(t, h.o.chainsyncServerRequestNext(ctx))
+}
+
+// TestChainsyncServerRequestNext_AsyncRollForwardErrorClosesConnection
+// reproduces H6 for the async RollForward path: once AwaitReply has returned,
+// a later send failure must still close through connmanager lifecycle handling.
+func TestChainsyncServerRequestNext_AsyncRollForwardErrorClosesConnection(
+	t *testing.T,
+) {
+	h := newChainsyncAsyncSendFailureHarness(t)
+	requestNextIntoAsyncAwait(t, h)
+
+	// Stop the protocol before waking the iterator so the goroutine's
+	// RollForward send fails after chainsyncServerRequestNext has returned.
+	h.server.Stop()
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  1,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
+
+	// The failure must be observable as normal connection lifecycle handling.
+	requireChainsyncClosedEvent(
+		t,
+		h,
+		"async RollForward send failure should close the connection",
+	)
+}
+
+// TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection
+// reproduces H6 for the async RollBackward path: rollback send failures after
+// AwaitReply must not leave the downstream peer connection silently open.
+func TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection(
+	t *testing.T,
+) {
+	h := newChainsyncAsyncSendFailureHarness(t)
+	block := &testBlock{
+		testBlockHeader: &testBlockHeader{
+			hash:        gledger.Blake2b256{0x01},
+			blockNumber: 1,
+			slotNumber:  1,
+		},
+		blockType: 1,
+		cbor:      []byte{0x80},
+	}
+	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
+	requestNextIntoAsyncAwait(t, h)
+	ctx := ochainsync.CallbackContext{
+		ConnectionId: h.conn.Id(),
+		Server:       h.server,
+	}
+	require.NoError(t, h.o.chainsyncServerRequestNext(ctx))
+
+	// Stop the protocol before rolling back so the goroutine's RollBackward
+	// send fails after chainsyncServerRequestNext has returned.
+	h.server.Stop()
+	require.NoError(t, h.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()))
+
+	// The failure must be observable as normal connection lifecycle handling.
+	requireChainsyncClosedEvent(
+		t,
+		h,
+		"async RollBackward send failure should close the connection",
+	)
 }
 
 func TestNormalizeIntersectPoints(t *testing.T) {
@@ -761,7 +1017,6 @@ func TestSubscribeChainsyncResyncClosesConnectionForFreshSyncReasons(
 		event.ChainsyncResyncReasonRollbackLoop,
 	}
 	for _, reason := range reasons {
-		reason := reason
 		t.Run(reason, func(t *testing.T) {
 			logBuf := &lockedBuffer{}
 			logger := slog.New(
@@ -1268,4 +1523,77 @@ func TestChainsyncClientRollBackward_InboundUpstreamProcessesRollback(
 			"expected chainselection rollback event from eligible inbound peer",
 		)
 	}
+}
+
+// newFindIntersectTestOuroboros builds an Ouroboros wired with a fresh,
+// empty LedgerState (tip at origin) and ChainsyncState. With the chain at
+// origin, GetIntersectPoint returns the origin point for any in-bounds point
+// list, so a successful FindIntersect proves the cap did not reject the
+// request.
+func newFindIntersectTestOuroboros(t *testing.T) *Ouroboros {
+	t.Helper()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	bus := event.NewEventBus(nil, logger)
+	t.Cleanup(bus.Close)
+	ledgerState := newTestLedgerState(t)
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		Logger:   logger,
+	})
+	o.LedgerState = ledgerState
+	o.ChainsyncState = dchainsync.NewState(bus, ledgerState)
+	return o
+}
+
+func makeFindIntersectPoints(n int) []ocommon.Point {
+	points := make([]ocommon.Point, n)
+	for i := range points {
+		points[i] = ocommon.NewPoint(
+			uint64(i+1),
+			[]byte{byte(i), byte(i >> 8)},
+		)
+	}
+	return points
+}
+
+func TestChainsyncServerFindIntersect_AtLimitAccepted(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	// An empty chain intersects every in-bounds request at origin, so a
+	// point list at the limit must be accepted (no error).
+	require.NoError(t, err)
+}
+
+func TestChainsyncServerFindIntersect_OverLimitRejected(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	points := makeFindIntersectPoints(chainsyncMaxFindIntersectPoints + 1)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	// Over-limit lists are rejected before any intersection lookup. On an
+	// empty chain the lookup would otherwise return origin, so receiving
+	// ErrIntersectNotFound here proves the cap short-circuited the request.
+	require.ErrorIs(t, err, ochainsync.ErrIntersectNotFound)
+}
+
+func TestChainsyncServerFindIntersect_NormalPointListAccepted(t *testing.T) {
+	o := newFindIntersectTestOuroboros(t)
+	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	// A typical client sends at most chainsyncIntersectPointCount points.
+	points := makeFindIntersectPoints(chainsyncIntersectPointCount)
+
+	_, _, err := o.chainsyncServerFindIntersect(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		points,
+	)
+	require.NoError(t, err)
 }

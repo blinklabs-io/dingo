@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -84,6 +85,20 @@ func resolveAggregatorURL(
 		)
 	}
 	return url, nil
+}
+
+func parseOptionalDuration(
+	name string,
+	value string,
+) (time.Duration, error) {
+	if value == "" {
+		return 0, nil
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, value, err)
+	}
+	return duration, nil
 }
 
 func mithrilListCommand() *cobra.Command {
@@ -306,6 +321,48 @@ func runMithrilSync(
 			}
 		}()
 	}
+	debugServer, debugErr := startDebugPprofServer(
+		logger,
+		cfg.BindAddr,
+		cfg.DebugPort,
+		"mithril",
+	)
+	if debugErr != nil {
+		logger.Warn(
+			"failed to start pprof debug server; continuing",
+			"component", "mithril",
+			"port", cfg.DebugPort,
+			"error", debugErr,
+		)
+	}
+	defer func() {
+		if debugServer == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(
+			context.WithoutCancel(ctx),
+			5*time.Second,
+		)
+		defer cancel()
+		if shutdownErr := debugServer.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Warn(
+				"failed to stop pprof debug server",
+				"component", "mithril",
+				"error", shutdownErr,
+			)
+		}
+	}()
+	if debugServer != nil {
+		go func() {
+			if serverErr := <-debugServer.Err(); serverErr != nil {
+				logger.Error(
+					"pprof debug server stopped",
+					"component", "mithril",
+					"error", serverErr,
+				)
+			}
+		}()
+	}
 
 	cardanoConfigPath := cfg.CardanoConfig
 	if cardanoConfigPath == "" {
@@ -336,6 +393,19 @@ func runMithrilSync(
 			cfg.DatabasePath, ".mithril-cache",
 		)
 	}
+	downloadIdleTimeout, err := parseOptionalDuration(
+		"Mithril download idle timeout",
+		cfg.Mithril.DownloadIdleTimeout,
+	)
+	if err != nil {
+		return err
+	}
+	if cfg.Mithril.DownloadMaxIdleRetries < 0 {
+		return fmt.Errorf(
+			"invalid Mithril download max idle retries %d: must be >= 0",
+			cfg.Mithril.DownloadMaxIdleRetries,
+		)
+	}
 
 	metrics.setPhaseActive(mithrilSyncPhaseBootstrap, true)
 	result, err := mithril.Bootstrap(
@@ -349,7 +419,9 @@ func runMithrilSync(
 			GenesisVerificationKey: nodeCfg.MithrilGenesisVerificationKey,
 			AncillaryVerificationKey: nodeCfg.
 				MithrilGenesisAncillaryVerificationKey,
-			Logger: logger,
+			Logger:                 logger,
+			DownloadIdleTimeout:    downloadIdleTimeout,
+			DownloadMaxIdleRetries: cfg.Mithril.DownloadMaxIdleRetries,
 			OnProgress: func() func(mithril.DownloadProgress) {
 				const progressLogInterval = 10 * time.Second
 				const progressLogPercentStep = 5.0
@@ -400,6 +472,7 @@ func runMithrilSync(
 		MetadataPlugin: cfg.MetadataPlugin,
 		MaxConnections: cfg.DatabaseWorkers,
 		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
 	})
 	if err != nil {
 		// Tolerate a recoverable commit-timestamp mismatch carried
@@ -457,6 +530,15 @@ func runMithrilSync(
 	// goroutines so both importLedgerState and LoadBlobsWithDB
 	// share the same pragma settings without racing.
 	defer node.WithBulkLoadPragmas(db, logger)()
+
+	// Drop the deferred-index manifest BEFORE inserting any rows
+	// so secondary indexes are not maintained during ledger-state
+	// import, immutable blob load, or API backfill. The rebuild is
+	// triggered explicitly below — before updateMithrilReadyState
+	// clears sync_status — so a crash between drop and rebuild
+	// leaves sync_status set and triggers the recovery path on
+	// the next startup.
+	rebuildDeferredIndexes := node.WithDeferredIndexes(db, logger)
 
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
@@ -759,11 +841,27 @@ func runMithrilSync(
 			return fmt.Errorf("running planner statistics before backfill: %w", err)
 		}
 		bf := node.NewBackfill(db, nodeCfg, logger)
+		if err := bf.SetBatchSize(cfg.BackfillBatchSize); err != nil {
+			return fmt.Errorf(
+				"invalid backfill batch size %d in SetBatchSize: %w",
+				cfg.BackfillBatchSize,
+				err,
+			)
+		}
 		bf.DisableNonceComputation()
+		bf.SetProgressFunc(metrics.recordBackfillProgress)
 		if err := bf.Run(ctx); err != nil {
 			return fmt.Errorf("backfill: %w", err)
 		}
 		metrics.setPhaseActive(mithrilSyncPhaseBackfill, false)
+	}
+
+	// Rebuild deferred indexes BEFORE clearing sync_status so a
+	// crash here leaves sync_status set (serve refuses to start)
+	// and metadata_indexes_pending set (next mithril sync rebuilds
+	// before re-running anything else).
+	if err := rebuildDeferredIndexes(); err != nil {
+		return err
 	}
 
 	if err := updateMithrilReadyState(
@@ -1399,11 +1497,11 @@ func loadGapBlocksFromBlob(
 	endSlot uint64,
 ) ([]models.Block, error) {
 	if startSlot > endSlot {
-		return nil, nil
+		return []models.Block{}, nil
 	}
 	iter := db.BlocksInRange(startSlot, endSlot)
 	defer iter.Close()
-	var ret []models.Block
+	ret := make([]models.Block, 0)
 	for {
 		next, err := iter.NextRaw()
 		if err != nil {
@@ -1474,6 +1572,12 @@ func validateStoredGapBlocks(
 ) error {
 	if err := validateStoredGapContinuity(blocks, immutableTip); err != nil {
 		return err
+	}
+	if len(blocks) == 0 {
+		return fmt.Errorf(
+			"stored volatile gap is empty after immutable tip slot %d",
+			immutableTip.Slot,
+		)
 	}
 	last := blocks[len(blocks)-1]
 	if !bytes.Equal(last.Hash, ledgerStateHash) {
@@ -1732,21 +1836,21 @@ func gapBlockEpoch(
 	epochs []models.Epoch,
 	slot uint64,
 ) (models.Epoch, error) {
-	for i := len(epochs) - 1; i >= 0; i-- {
-		if slot < epochs[i].StartSlot {
+	for _, epoch := range slices.Backward(epochs) {
+		if slot < epoch.StartSlot {
 			continue
 		}
-		end := epochs[i].StartSlot + uint64(epochs[i].LengthInSlots)
-		if epochs[i].LengthInSlots > 0 && slot >= end {
+		end := epoch.StartSlot + uint64(epoch.LengthInSlots)
+		if epoch.LengthInSlots > 0 && slot >= end {
 			return models.Epoch{}, fmt.Errorf(
 				"slot %d is past the end of the last known epoch %d (slots %d..%d)",
 				slot,
-				epochs[i].EpochId,
-				epochs[i].StartSlot,
+				epoch.EpochId,
+				epoch.StartSlot,
 				end,
 			)
 		}
-		return epochs[i], nil
+		return epoch, nil
 	}
 	return models.Epoch{}, fmt.Errorf("no epoch found for slot %d", slot)
 }

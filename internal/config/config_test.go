@@ -41,6 +41,7 @@ func resetGlobalConfig() {
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
 		UtxorpcPort:                 9090,
+		CORSAllowedOrigins:          []string{"*"},
 		BlockfrostPort:              3000,
 		MeshPort:                    8080,
 		Topology:                    "",
@@ -54,6 +55,7 @@ func resetGlobalConfig() {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
@@ -83,6 +85,7 @@ relayPort: 4000
 utxorpcPort: 9940
 databaseWorkers: 11
 databaseQueueSize: 77
+backfillBatchSize: 200
 immutableDbPath: "/tmp/immutable"
 shutdownTimeout: "45s"
 ledgerCatchupTimeout: "90m"
@@ -97,6 +100,8 @@ mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
   downloadDir: "/tmp/mithril"
+  downloadIdleTimeout: "5m"
+  downloadMaxIdleRetries: 9
   cleanupAfterLoad: false
   verifyCertificates: false
 `
@@ -129,6 +134,7 @@ mithril:
 		PrivatePort:          8000,
 		RelayPort:            4000,
 		UtxorpcPort:          9940, // explicit override from YAML
+		CORSAllowedOrigins:   []string{"*"},
 		BlockfrostPort:       3000, // default
 		MeshPort:             8080, // default
 		Topology:             "",
@@ -142,6 +148,7 @@ mithril:
 		LedgerCatchupTimeout: "90m",
 		DatabaseWorkers:      11,
 		DatabaseQueueSize:    77,
+		BackfillBatchSize:    200,
 		GenesisBootstrap: GenesisBootstrapConfig{
 			Enabled:                     false,
 			WindowSlots:                 4321,
@@ -150,11 +157,13 @@ mithril:
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
-			Enabled:            false,
-			AggregatorURL:      "https://mithril.example.net",
-			DownloadDir:        "/tmp/mithril",
-			CleanupAfterLoad:   false,
-			VerifyCertificates: false,
+			Enabled:                false,
+			AggregatorURL:          "https://mithril.example.net",
+			DownloadDir:            "/tmp/mithril",
+			DownloadIdleTimeout:    "5m",
+			DownloadMaxIdleRetries: 9,
+			CleanupAfterLoad:       false,
+			VerifyCertificates:     false,
 		},
 	}
 
@@ -197,6 +206,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
 		UtxorpcPort:                 9090,
+		CORSAllowedOrigins:          []string{"*"},
 		BlockfrostPort:              3000,
 		MeshPort:                    8080,
 		Topology:                    "",
@@ -210,6 +220,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
 		DatabaseWorkers:             5,
 		DatabaseQueueSize:           50,
+		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,

@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"runtime"
+	"slices"
 	"strconv"
 	"time"
 
@@ -95,6 +96,7 @@ type Config struct {
 	barkBaseUrl              string
 	barkPort                 uint
 	barkPrunerFrequency      time.Duration
+	corsAllowedOrigins       []string
 	networkMagic             uint32
 	intersectTip             bool
 	peerSharing              bool
@@ -375,6 +377,9 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// We do this so we don't have to add guards around every log operation
 		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		genesisBootstrap: true,
+		corsAllowedOrigins: []string{
+			"*",
+		},
 	}
 	// Apply options
 	for _, opt := range opts {
@@ -816,6 +821,15 @@ func WithBarkPort(port uint) ConfigOptionFunc {
 func WithBarkPrunerFrequency(freq time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkPrunerFrequency = freq
+	}
+}
+
+// WithCORSAllowedOrigins configures browser CORS access for public API
+// servers. Use []string{"*"} to allow any origin, or an empty list to
+// disable CORS headers.
+func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.corsAllowedOrigins = slices.Clone(origins)
 	}
 }
 

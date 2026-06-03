@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -67,6 +68,23 @@ type BatchedTxIngestOpts struct {
 	// TX offset writes, metadata writes, and consumed-input handling are
 	// unaffected.
 	SkipProducedUtxoOffsetWrites bool
+
+	// Stats receives hot-path timings and row-ish counts for operator
+	// visibility during API-mode Mithril backfill. It is optional and is
+	// intentionally updated only at coarse stage boundaries.
+	Stats *types.BackfillHotPathStats
+}
+
+type batchStatsSetter interface {
+	SetBackfillStats(*types.BackfillHotPathStats)
+}
+
+// inFlightProducerLookup is implemented by accumulators that index the
+// outputs produced earlier in the current batch but not yet flushed. When
+// available, consumed-input recovery can skip blob/metadata recovery for a
+// producer that will be created (and spent) by the pending FlushBatch.
+type inFlightProducerLookup interface {
+	HasInFlightProducer(txId []byte, outputIdx uint32) bool
 }
 
 // SetTransactionBatched stores transaction blob offsets and immediate
@@ -132,13 +150,14 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 
 	txHash := tx.Hash()
+	txHashBytes := ledgerHashBytes(txHash)
 	var txHashArray [32]byte
-	copy(txHashArray[:], txHash.Bytes())
+	copy(txHashArray[:], txHashBytes)
 
 	if offsets == nil {
 		return fmt.Errorf(
 			"missing offsets for transaction %s at slot %d: offsets must be computed",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
@@ -146,17 +165,32 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	if !ok {
 		return fmt.Errorf(
 			"missing TX offset for %s at slot %d: offset must be computed by block indexer",
-			hex.EncodeToString(txHash.Bytes()[:8]),
+			hex.EncodeToString(ledgerHashPrefix(txHash)),
 			point.Slot,
 		)
 	}
-	offsetData := EncodeTxOffset(&txOffset)
-	if err := blob.SetTx(blobTxn, txHash.Bytes(), offsetData); err != nil {
-		return fmt.Errorf("set tx offset: %w", err)
+
+	produced := tx.Produced()
+	if opts.Stats != nil {
+		// Record interval density so timings can be compared across eras.
+		opts.Stats.Txs++
+		opts.Stats.Utxos += uint64(len(produced))
+		opts.Stats.InputRefs += uint64(len(tx.Inputs()) +
+			len(tx.Collateral()) + len(tx.ReferenceInputs()))
 	}
 
-	for _, utxo := range tx.Produced() {
-		txID := utxo.Id.Id().Bytes()
+	blobStart := time.Now()
+	offsetData := EncodeTxOffset(&txOffset)
+	if err := blob.SetTx(blobTxn, txHashBytes, offsetData); err != nil {
+		return fmt.Errorf("set tx offset: %w", err)
+	}
+	if opts.Stats != nil {
+		// Count tx offset writes separately from produced UTxO offset writes.
+		opts.Stats.BlobTxOffsetWrites++
+	}
+
+	for _, utxo := range produced {
+		txID := ledgerInputIDBytes(utxo.Id)
 		outputIdx := utxo.Id.Index()
 		ref := UtxoRef{
 			TxId:      txHashArray,
@@ -166,7 +200,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		if !ok {
 			return fmt.Errorf(
 				"missing UTxO offset for %s#%d at slot %d: offset must be computed by block indexer",
-				hex.EncodeToString(txID[:8]),
+				hex.EncodeToString(bytePrefix(txID)),
 				outputIdx,
 				point.Slot,
 			)
@@ -182,19 +216,39 @@ func (d *Database) SetTransactionBatchedWithOpts(
 		if err := blob.SetUtxo(blobTxn, txID, outputIdx, offsetData); err != nil {
 			return fmt.Errorf(
 				"set utxo offset %x#%d: %w",
-				txID[:8],
+				bytePrefix(txID),
 				outputIdx,
 				err,
 			)
 		}
+		if opts.Stats != nil {
+			// Count produced UTxO offset writes that were not elided.
+			opts.Stats.BlobUtxoOffsetWrites++
+		}
+	}
+	if opts.Stats != nil {
+		if opts.SkipProducedUtxoOffsetWrites {
+			// Count saved blob writes from the Mithril immutable-copy phase.
+			opts.Stats.SkippedUtxoOffsets += uint64(len(produced))
+		}
+		// Time spent writing offset refs to the blob plugin.
+		opts.Stats.BlobOffsetWrites += time.Since(blobStart)
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
+	recoverStart := time.Now()
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, acc); err != nil {
 		return err
+	}
+	if opts.Stats != nil {
+		// Time consumed-input lookup/recovery before metadata batching.
+		opts.Stats.ConsumedInputRecovery += time.Since(recoverStart)
 	}
 	metadataTxn := txn.Metadata()
 	if metadataTxn == nil {
 		return types.ErrNilTxn
+	}
+	if setter, ok := acc.(batchStatsSetter); ok {
+		setter.SetBackfillStats(opts.Stats)
 	}
 	if err := d.metadata.SetTransactionBatched(
 		tx, point, idx, certDeposits, acc, metadataTxn,
@@ -213,6 +267,10 @@ func (d *Database) SetTransactionBatchedWithOpts(
 			); err != nil {
 				return fmt.Errorf("set pparam update: %w", err)
 			}
+		}
+		if opts.Stats != nil {
+			// Count pparam updates written from valid update transactions.
+			opts.Stats.PParamUpdates += uint64(len(pparamUpdates))
 		}
 	}
 

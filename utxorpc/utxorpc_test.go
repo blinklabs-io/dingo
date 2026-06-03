@@ -57,6 +57,12 @@ func TestNewUtxorpc_DefaultLimits(t *testing.T) {
 		u.config.MaxDataKeys,
 		"MaxDataKeys should default",
 	)
+	require.Equal(
+		t,
+		DefaultServerTimeout,
+		u.config.ServerTimeout,
+		"ServerTimeout should default",
+	)
 }
 
 func TestNewUtxorpc_CustomLimits(t *testing.T) {
@@ -67,11 +73,13 @@ func TestNewUtxorpc_CustomLimits(t *testing.T) {
 		MaxUtxoKeys:     500,
 		MaxHistoryItems: 5000,
 		MaxDataKeys:     200,
+		ServerTimeout:   10 * time.Second,
 	})
 	require.Equal(t, 50, u.config.MaxBlockRefs)
 	require.Equal(t, 500, u.config.MaxUtxoKeys)
 	require.Equal(t, 5000, u.config.MaxHistoryItems)
 	require.Equal(t, 200, u.config.MaxDataKeys)
+	require.Equal(t, 10*time.Second, u.config.ServerTimeout)
 }
 
 // TestRequestLimitConstants verifies that the default limit constants
@@ -81,6 +89,7 @@ func TestRequestLimitConstants(t *testing.T) {
 	require.Equal(t, 1000, DefaultMaxUtxoKeys)
 	require.Equal(t, 10000, DefaultMaxHistoryItems)
 	require.Equal(t, 1000, DefaultMaxDataKeys)
+	require.Equal(t, time.Hour, DefaultServerTimeout)
 }
 
 // TestRequestLimitEnforcement_Pattern verifies the limit enforcement

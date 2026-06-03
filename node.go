@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -121,8 +122,8 @@ func (n *Node) Run(ctx context.Context) error {
 				n.cancel()
 			}
 			// Cleanup on panic, then re-panic
-			for i := len(started) - 1; i >= 0; i-- {
-				started[i]()
+			for _, s := range slices.Backward(started) {
+				s()
 			}
 			panic(r)
 		} else if !success {
@@ -130,8 +131,8 @@ func (n *Node) Run(ctx context.Context) error {
 				n.cancel()
 			}
 			// Cleanup on failure (non-panic)
-			for i := len(started) - 1; i >= 0; i-- {
-				started[i]()
+			for _, s := range slices.Backward(started) {
+				s()
 			}
 		}
 	}()
@@ -199,9 +200,10 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to load chain manager: %w", err)
 	}
 	n.chainManager = cm
+	primaryChain := n.chainManager.PrimaryChain()
 	n.eventBus.SubscribeFunc(
 		chain.BlockProposedEventType,
-		n.chainManager.PrimaryChain().HandleBlockProposedEvent,
+		primaryChain.HandleBlockProposedEvent,
 	)
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
@@ -420,6 +422,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.chainsyncStallTimeout > 0 {
 		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
 	}
+	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
@@ -724,14 +727,15 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
 			utxorpc.UtxorpcConfig{
-				Logger:          n.config.logger,
-				EventBus:        n.eventBus,
-				LedgerState:     n.ledgerState,
-				Mempool:         n.mempool,
-				Host:            n.config.bindAddr,
-				Port:            n.config.utxorpcPort,
-				TlsCertFilePath: n.config.tlsCertFilePath,
-				TlsKeyFilePath:  n.config.tlsKeyFilePath,
+				Logger:             n.config.logger,
+				EventBus:           n.eventBus,
+				LedgerState:        n.ledgerState,
+				Mempool:            n.mempool,
+				Host:               n.config.bindAddr,
+				Port:               n.config.utxorpcPort,
+				TlsCertFilePath:    n.config.tlsCertFilePath,
+				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -752,11 +756,12 @@ func (n *Node) Run(ctx context.Context) error {
 		var err error
 		n.bark, err = bark.NewBark(
 			bark.BarkConfig{
-				Logger:          n.config.logger,
-				DB:              db,
-				TlsCertFilePath: n.config.tlsCertFilePath,
-				TlsKeyFilePath:  n.config.tlsKeyFilePath,
-				Port:            n.config.barkPort,
+				Logger:             n.config.logger,
+				DB:                 db,
+				TlsCertFilePath:    n.config.tlsCertFilePath,
+				TlsKeyFilePath:     n.config.tlsKeyFilePath,
+				Port:               n.config.barkPort,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 		)
 		if err != nil {
@@ -790,7 +795,8 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
-				ListenAddress: listenAddr,
+				ListenAddress:      listenAddr,
+				CORSAllowedOrigins: n.config.corsAllowedOrigins,
 			},
 			adapter,
 			n.config.logger,
@@ -843,6 +849,7 @@ func (n *Node) Run(ctx context.Context) error {
 				NetworkMagic:        n.config.networkMagic,
 				GenesisHash:         genesisHash,
 				GenesisStartTimeSec: genesisStartTimeSec,
+				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
 			},
 		)
 		if meshErr != nil {

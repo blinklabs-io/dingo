@@ -1,5 +1,7 @@
 # Architecture
 
+Last reviewed: 2026-05-29
+
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
 ## Table of Contents
@@ -23,6 +25,7 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 - [Block Production](#block-production)
 - [Mithril Bootstrap](#mithril-bootstrap)
 - [External Interfaces](#external-interfaces)
+- [Architectural Boundaries](#architectural-boundaries)
 - [Design Patterns](#design-patterns)
 - [Threading and Concurrency](#threading-and-concurrency)
 - [Configuration](#configuration)
@@ -33,12 +36,19 @@ Dingo is a high-performance Cardano blockchain node implementation in Go. This d
 Dingo's architecture is built on several key principles:
 
 1. Modular component design using dependency injection and composition
-2. Event-driven communication via EventBus rather than direct coupling
+2. Event-driven async notifications via EventBus, with synchronous queries
+   passed through explicit constructor-injected dependencies or narrow
+   interfaces
 3. Pluggable storage backends with a dual-layer database architecture (blob + metadata)
 4. Full Ouroboros protocol support for Node-to-Node and Node-to-Client
 5. Multi-peer chain synchronization with Ouroboros Praos chain selection
 6. Block production with VRF leader election and stake snapshots
 7. Graceful shutdown with phased resource cleanup
+
+The root `dingo` package, `cmd/dingo`, and `internal/node` are the composition
+layers. Domain packages should not reach upward into node startup, CLI, or
+operator policy; when cross-component behavior is required, the node should
+wire it through a narrow interface, callback, or EventBus subscription.
 
 ## Architecture Diagrams
 
@@ -86,10 +96,14 @@ graph TB
         Bark["Bark<br/><i>bark/</i>"]
     end
 
+    subgraph "Archive Support"
+        BPruner["Bark Pruner<br/><i>bark/pruner.go</i>"]
+    end
+
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & BPruner
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -99,6 +113,7 @@ graph TB
     LS -->|"validate txs"| MP
     ChM --> DB
     DB --> Blob & Meta
+    BPruner --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
     CSel -->|"switch active peer"| CS
@@ -111,7 +126,10 @@ graph TB
 
 ### Package Dependency Tree
 
-Internal import relationships between dingo packages. External dependencies are omitted.
+Internal import relationships between production dingo packages. External
+dependencies and tests are omitted. This graph was refreshed from `go list` on
+2026-05-22; it intentionally calls out a few boundary-debt edges that are also
+not yet part of the desired package layering.
 
 ```mermaid
 graph LR
@@ -125,13 +143,19 @@ graph LR
     db_models["database/models"]
     db_types["database/types"]
     db_plugin["database/plugin"]
-    db_blob["database/plugin/blob/*"]
-    db_meta["database/plugin/metadata/*"]
+    db_blob["database/plugin/blob"]
+    db_blob_impl["database/plugin/blob/{aws,badger,gcs}"]
+    db_meta["database/plugin/metadata"]
+    db_meta_impl["database/plugin/metadata/{mysql,postgres,sqlite}"]
+    db_meta_util["database/plugin/metadata/{importutil,labelcodec}"]
     db_immutable["database/immutable"]
+    cardano_cfg["config/cardano"]
     ev["event"]
     ledger["ledger"]
     ledger_eras["ledger/eras"]
     ledger_forging["ledger/forging"]
+    ledger_governance["ledger/governance"]
+    ledger_hardfork["ledger/hardfork"]
     ledger_leader["ledger/leader"]
     ledger_snapshot["ledger/snapshot"]
     ledgerstate["ledgerstate"]
@@ -145,50 +169,59 @@ graph LR
     blockfrost["blockfrost"]
     mesh["mesh"]
     bark["bark"]
-    mithril["mithril"]
+    mithril["mithril<br/>(no internal dingo imports)"]
     keystore["keystore"]
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology
-    root --> utxorpc & blockfrost & mesh & bark
+    root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
-    cmd --> intcfg & intnode & mithril
+    cmd --> root & cardano_cfg & db & db_models & db_plugin
+    cmd --> intcfg & intnode & ledgerstate & ledger_eras
+    cmd --> ledger_governance & mithril
 
     chain --> db & db_models & ev
     chainsync --> chain & ev & ledger
-    chainsel --> ev
+    chainsel --> ev & peergov
     connmgr --> ev
     peergov --> connmgr & ev & topology
 
     ouroboros --> chain & chainsel & chainsync & connmgr
-    ouroboros --> db_immutable & ev & ledger & mempool & peergov
+    ouroboros --> ev & ledger & mempool & peergov
 
-    ledger --> chain & db & db_models & db_meta & db_types & ev
-    ledger --> ledger_eras & ledger_forging & ledger_leader & ledger_snapshot
+    ledger --> chain & chainsel & cardano_cfg & connmgr
+    ledger --> db & db_models & db_meta & db_types & ev
+    ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
     ledger --> mempool & peergov
-    ledger_eras --> db_models
-    ledger_forging --> chain & ev
-    ledger_snapshot --> db & db_models & ev
+    ledger_eras --> cardano_cfg & ledger_hardfork
+    ledger_forging --> ev & ledger_eras
+    ledger_governance --> db & db_models & db_types & ledger_eras
+    ledger_leader --> db_types & ev
+    ledger_snapshot --> db & db_models & db_meta & db_types & ev
 
     mempool --> chain & ev
 
-    db --> db_plugin & db_types & db_models
-    db_plugin --> db_blob & db_meta & intcfg
-    db_blob --> db_plugin & db_types
-    db_meta --> db_models & db_types & db_plugin
+    db --> db_plugin & db_blob & db_meta & db_types & db_models
+    db_blob --> db_plugin & db_blob_impl & db_types
+    db_blob_impl --> db_plugin & db_types
+    db_meta --> db_models & db_types & db_plugin & db_meta_impl
+    db_meta_impl --> db_models & db_types & db_plugin & db_meta_util
+    db_meta_util --> db_models
     db_models --> db_types
 
-    intnode --> chain & chainsync & db & db_immutable & db_models & db_meta
-    intnode --> ledger & ledger_eras & intcfg
+    intcfg --> db_plugin & topology
+    intnode --> root & chain & chainsync & cardano_cfg
+    intnode --> db & db_immutable & db_models & db_meta
+    intnode --> ledger & ledger_eras & ledger_governance & intcfg
 
-    ledgerstate --> db & db_models & db_types & ledger_eras
-    mithril --> db & db_immutable & db_models & ledgerstate & ledger_eras
+    ledgerstate --> db & db_models & db_meta & db_types & ledger_eras
 
-    utxorpc --> db & db_models & ev & ledger & ledger_eras & mempool
+    utxorpc --> chain & cardano_cfg & db & db_models & ev
+    utxorpc --> ledger & ledger_eras & mempool
     mesh --> chain & db & db_models & ev & ledger & mempool
-    blockfrost --> ledger
-    bark --> db & db_types & ledger
+    blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool
+    bark --> db & db_blob & db_types & ledger
 ```
 
 ### Data Flow
@@ -493,7 +526,8 @@ dingo/
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
-│   └── blob.go          # Remote archive blob adapter with security window
+│   ├── blob.go          # Remote archive blob adapter
+│   └── pruner.go        # Ledger-window-based local block pruning
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -539,11 +573,13 @@ type Node struct {
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
+    barkPruner     *bark.Pruner                   // Archive-backed local pruning
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
+    rtsMetrics     *rtsMetrics                    // Runtime statistics metrics
 }
 ```
 
@@ -552,26 +588,28 @@ type Node struct {
 When `Node.Run()` is called, components are initialized in this order:
 
 ```
- 1. EventBus creation
+ 1. EventBus creation in `New`, plus tracing/runtime metrics setup in `Run`
  2. Database loading (blob + metadata plugins)
- 3. ChainManager initialization
+ 3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation (UTXO tracking, validation)
- 6. Bark remote archive adapter (if configured)
- 7. LedgerState start
- 8. Snapshot manager start (captures genesis snapshot)
- 9. Mempool setup
-10. ChainsyncState (multi-client tracking, stall detection)
-11. ChainSelector (Ouroboros Praos chain comparison)
-12. ConnectionManager (listeners)
-13. Stalled client recycler (background goroutine)
-14. PeerGovernor (topology + churn + ledger peers)
-15. UTxO RPC server (if port configured)
-16. Bark C2/archive server (if port configured)
-17. Blockfrost API (if port configured)
-18. Mesh API (if port configured)
-19. Block forger + leader election (if block producer mode)
-20. Wait for shutdown signal
+ 6. Bark remote archive adapter and pruner (if configured)
+ 7. Database recovery, if startup detects a recoverable timestamp conflict
+ 8. LedgerState start
+ 9. Snapshot manager start (captures genesis snapshot)
+10. Mempool setup and injection into LedgerState/Ouroboros
+11. ChainsyncState (multi-client tracking, stall detection)
+12. ChainSelector (genesis/Praos comparison) start
+13. ConnectionManager creation and event wiring
+14. PeerGovernor creation/start (topology + churn + ledger peers)
+15. ConnectionManager listener start
+16. Stalled client recycler (background goroutine)
+17. UTxO RPC server (if API storage mode and port configured)
+18. Bark C2/archive server (if port configured)
+19. Blockfrost API (if API storage mode and port configured)
+20. Mesh API (if API storage mode and port configured)
+21. Block forger + leader election (if block producer mode)
+22. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -596,7 +634,10 @@ Phase 4: Cleanup resources
 
 ## Event-Driven Communication
 
-Components communicate via the `EventBus` (`event/event.go`) rather than direct coupling:
+Components use the `EventBus` (`event/event.go`) for asynchronous
+cross-component notifications. Synchronous state queries still use direct
+method calls, callbacks, or narrow interfaces injected by the node composition
+layer.
 
 ```
 Publisher ---publish---> EventBus ---deliver---> Subscribers
@@ -653,8 +694,11 @@ All event types follow the `subsystem.snake_case_name` convention.
 
 ### EventBus Features
 
-- Asynchronous delivery via worker pool (4 workers, 1000-entry queue)
-- Buffered channels with timeout protection to prevent blocking
+- Asynchronous delivery via worker pool (4 workers, 1000-entry async queue)
+- Default subscriber buffers of 1024 events, with opt-in 100000-entry burst
+  buffers for high-volume ledger chainsync/blockfetch paths
+- Non-blocking `Publish`, blocking `PublishBlocking` for ordering-critical
+  streams, and `PublishAsync` for best-effort async work
 - Prometheus metrics for event delivery tracking and latency
 
 ## Storage Architecture
@@ -680,6 +724,25 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+
+### Archive And Pruning Topology
+
+Dingo's blob-store abstraction supports an archive/pruning deployment pattern:
+
+- An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
+  `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
+  maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
+  a signed object URL plus compact block metadata.
+- A pruning node keeps its local blob plugin, configures `barkBaseUrl`, and is
+  wired by `node.go` with a `bark.BlobStoreBark` wrapper plus
+  `bark.Pruner`. Normal block writes still go to the local blob plugin. Reads
+  first check local storage; tombstoned or missing historical blocks fall back
+  to the remote Bark archive and download the signed URL response.
+- The pruner derives its safety window from `LedgerState.StabilityWindow()` and
+  scans only blocks older than that window. `Database.PruneBlock` materializes
+  any UTxO CBOR still stored as block offsets before replacing the block CBOR
+  value with a tombstone, leaving block indexes and metadata intact for archive
+  resolution.
 
 ### Tiered CBOR Cache
 
@@ -778,6 +841,8 @@ The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
 The `ledger/eras/` package provides era-specific validation rules for each Cardano era (Byron through Conway). Each era implements protocol parameter extraction, fee calculation, and era-specific transaction rules.
 
+During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
+
 ### Block Header Validation
 
 `ledger/verify_header.go` performs cryptographic validation of block headers:
@@ -830,8 +895,14 @@ The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
 
 1. Higher block number wins (longer chain)
 2. At equal block number, lower slot wins (denser chain)
+3. At equal length/slot, the reference implementation's opcert/VRF
+   tie-breaker is used when the necessary select-view data is available
+4. During genesis bootstrap mode, observed density is used until the local tip
+   is close enough to the best observed peer tip to switch back to Praos
 
-The selector tracks tips from all connected peers and switches the active chainsync connection when a better chain is found.
+The selector tracks tips from all connected peers, honors peer eligibility and
+priority updates from peer governance, and switches the active chainsync
+connection when a better chain is found.
 
 ## Network and Protocol Handling
 
@@ -969,13 +1040,19 @@ VRF signing keys, KES signing keys, and operational certificates are loaded from
 
 ## Mithril Bootstrap
 
-The `mithril/` package enables fast initial sync by downloading and importing a Mithril snapshot rather than syncing from genesis:
+The `mithril/` package enables fast initial sync by downloading and verifying a
+Mithril snapshot rather than syncing from genesis:
 
 1. `client.go` queries the Mithril aggregator for the latest certified snapshot
-2. `download.go` downloads and extracts the snapshot archive
-3. `bootstrap.go` orchestrates the import into Dingo's database
+2. `download.go` downloads and extracts the snapshot archive, including
+   resumable downloads with idle-stall retry handling
+3. `bootstrap.go` verifies the certificate chain and orchestrates the snapshot
+   artifact workflow
 
-This is exposed via the `dingo mithril` CLI subcommand and the `dingo load` command.
+The `mithril/` package itself has no internal Dingo imports. Database import,
+ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
+orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
+`dingo mithril` CLI subcommand and the `dingo load` command.
 
 ## External Interfaces
 
@@ -983,7 +1060,14 @@ Dingo provides three client-facing APIs plus Bark. All are optional and gated by
 
 ### Blockfrost API (`blockfrost/`)
 
-A Blockfrost-compatible REST API that provides read access to chain data. The current implementation exposes the latest, epoch, network, and pool subset. It uses an adapter pattern to translate between Dingo's internal state and Blockfrost response types and supports cursor-based pagination.
+A Blockfrost-compatible REST API that provides read access to chain data and
+transaction submission. The current router includes health/root, blocks,
+epochs/parameters, network/eras, genesis, assets, pools/extended, governance
+DRep lookup, address UTxOs and transactions, metadata label JSON/CBOR,
+transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
+signers, and account/delegation/registration/reward endpoints. It uses an
+adapter pattern to translate between Dingo's internal state and Blockfrost
+response types and supports Blockfrost-style pagination headers.
 
 ### Mesh API (`mesh/`)
 
@@ -995,7 +1079,49 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 
 ### Bark (`bark/`)
 
-Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive services. It exposes archive access over Connect/gRPC and also supplies a remote archive adapter with a configurable security window, allowing Dingo to fetch historical blocks from a remote Bark instance instead of storing them locally.
+Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
+services. It exposes archive access over Connect/gRPC and supplies the remote
+archive adapter used by pruning nodes.
+
+The server side (`bark.Bark`) registers the archive service, health endpoint,
+and gRPC reflection. Archive fetches validate the requested block hash, ask the
+active blob plugin for a signed block URL, and return that URL with block type,
+height, and previous-hash metadata. In practice this makes `s3` and `gcs` the
+archive-node blob backends because they can sign object-storage URLs.
+
+The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
+`GetBlock` and block iterators pass through local values, but resolve
+`types.ErrBlockTombstoned` or missing historical block CBOR by calling the
+remote Bark archive and downloading the signed URL. `bark.Pruner` runs only
+when `barkBaseUrl` is configured; it uses the ledger-derived stability window,
+not a separate operator-supplied security-window value, to decide which local
+blocks are safe to tombstone.
+
+## Architectural Boundaries
+
+Package isolation is enforced by direction, ownership, and composition:
+
+- `cmd/dingo`, `internal/node`, and the root `dingo` package own startup,
+  shutdown, CLI/config adaptation, and cross-component wiring.
+- `event/` owns the EventBus primitive only. Event type constants and payloads
+  should live with the package that owns the event semantics.
+- `connmanager/` owns sockets and listener lifecycle. It must not know about
+  ledger validation, chain selection rules, or Ouroboros mini-protocol internals.
+- `ouroboros/` owns mini-protocol handlers and translates protocol callbacks
+  into ledger, mempool, chainsync, and peer-governance interactions.
+- `chainselection/` owns peer-tip comparison and active-peer choice. It should
+  not validate blocks or mutate ledger state.
+- `ledger/` owns validation, ledger state, rollback state repair, nonce/epoch
+  logic, and ledger queries. Network connection action should be requested via
+  neutral events or callbacks rather than direct connection-manager coupling.
+- `mempool/` owns pending transaction admission, eviction, and relay state. It
+  depends on a transaction-validation interface supplied by ledger, not on a
+  concrete ledger implementation.
+- `database/` and `database/plugin/*` own persistence and storage backends.
+  They should not import node, ledger, mempool, networking, or API packages.
+- API packages (`blockfrost/`, `mesh/`, `utxorpc/`) should expose server logic
+  through local interfaces. Concrete adapters to `ledger`, `database`, and
+  `mempool` are integration boundaries and should remain narrow.
 
 ## Design Patterns
 

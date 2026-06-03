@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros_cbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -37,9 +38,28 @@ import (
 // backfill checkpoint.
 const BackfillPhase = "metadata"
 
-// backfillBatchSize controls how many processed blocks are accumulated
+// DefaultBackfillBatchSize controls how many processed blocks are accumulated
 // before deferred metadata rows are flushed.
-const backfillBatchSize = 100
+const DefaultBackfillBatchSize = 100
+
+// DefaultBackfillBatchRows caps the accumulated metadata row count before a
+// flush so dense eras do not hold oversized batches in memory.
+const DefaultBackfillBatchRows = 5000
+
+type backfillBatchSizer interface {
+	Len() int
+}
+
+// BackfillProgress is emitted with interval counters during metadata backfill.
+type BackfillProgress struct {
+	Slot            uint64
+	TipSlot         uint64
+	ProcessedBlocks int
+	ProcessedTxs    int
+	BlocksPerSecond float64
+	ProgressPercent float64
+	Stats           dbtypes.BackfillHotPathStats
+}
 
 // Backfill replays stored blocks to populate historical metadata.
 // It is triggered automatically during Mithril sync when
@@ -50,6 +70,7 @@ type Backfill struct {
 	logger       *slog.Logger
 	epochs       []models.Epoch
 	pparamsCache map[uint64]lcommon.ProtocolParameters
+	batchSize    int
 
 	// Running state tracked across blocks.
 	currentPParams lcommon.ProtocolParameters
@@ -75,6 +96,8 @@ type Backfill struct {
 	// observable.
 	skippedBlocks   uint64
 	skippedUtxoRefs uint64
+
+	onProgress func(BackfillProgress)
 }
 
 // NewBackfill creates a new Backfill instance.
@@ -87,8 +110,19 @@ func NewBackfill(
 		db:            db,
 		nodeCfg:       nodeCfg,
 		logger:        logger,
+		batchSize:     DefaultBackfillBatchSize,
 		computeNonces: nodeCfg != nil,
 	}
+}
+
+// SetBatchSize overrides the number of processed blocks accumulated before
+// deferred metadata rows are flushed.
+func (b *Backfill) SetBatchSize(size int) error {
+	if size <= 0 {
+		return fmt.Errorf("backfill batch size must be positive: %d", size)
+	}
+	b.batchSize = size
+	return nil
 }
 
 // DisableNonceComputation skips historical block nonce reconstruction.
@@ -97,6 +131,11 @@ func NewBackfill(
 // nonce rows.
 func (b *Backfill) DisableNonceComputation() {
 	b.computeNonces = false
+}
+
+// SetProgressFunc registers a callback for interval backfill counters.
+func (b *Backfill) SetProgressFunc(onProgress func(BackfillProgress)) {
+	b.onProgress = onProgress
 }
 
 // SetImmutableUtxoOffsetsTipSlot informs the backfill that produced-UTxO
@@ -669,6 +708,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 			"starting metadata backfill",
 			"component", "backfill",
 			"tip_slot", tipSlot,
+			"batch_size", b.batchSize,
+			"batch_row_limit", DefaultBackfillBatchRows,
 		)
 		// Fresh start: reset epoch/era tracking to the
 		// first epoch so processEpochBoundary doesn't
@@ -688,6 +729,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"component", "backfill",
 				"tip_slot", tipSlot,
 				"restart_from_first_block", true,
+				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			b.initializeFromFirstEpoch()
 		} else {
@@ -696,6 +739,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 				"component", "backfill",
 				"resume_from_slot", cp.LastSlot,
 				"tip_slot", tipSlot,
+				"batch_size", b.batchSize,
+				"batch_row_limit", DefaultBackfillBatchRows,
 			)
 			// Recover running nonce from the last processed
 			// block so nonce computation can continue.
@@ -730,6 +775,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 	var (
 		processedBlocks int
 		processedTxs    int
+		intervalStats   dbtypes.BackfillHotPathStats
 		// batchBlockCount tracks blocks accumulated since the last flush.
 		batchBlockCount int
 		// committedSlot is the latest slot durably committed by a batch.
@@ -762,9 +808,12 @@ func (b *Backfill) Run(ctx context.Context) error {
 			return errors.New("missing backfill batch transaction")
 		}
 		oldTxn := batchTxn
+		flushStart := time.Now()
 		if err := b.db.FlushBatch(acc, oldTxn); err != nil {
 			return err
 		}
+		// Track deferred metadata batch write cost.
+		intervalStats.FlushBatch += time.Since(flushStart)
 		if err := oldTxn.Commit(); err != nil {
 			return err
 		}
@@ -800,6 +849,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 			return fmt.Errorf("cancelled: %w", err)
 		}
 
+		readDecodeStart := time.Now()
 		blk, err := it.NextRaw()
 		if err != nil {
 			saveCommittedCheckpoint()
@@ -833,6 +883,9 @@ func (b *Backfill) Run(ctx context.Context) error {
 			blk.Cbor,
 			lcommon.VerifyConfig{SkipBodyHashValidation: true},
 		)
+		// Track raw block read plus ledger block decode cost.
+		intervalStats.BlockReadDecode += time.Since(readDecodeStart)
+		intervalStats.Blocks++
 		if parseErr != nil {
 			b.logger.Warn(
 				"skipping unparseable block",
@@ -862,9 +915,12 @@ func (b *Backfill) Run(ctx context.Context) error {
 				indexer := database.NewBlockIndexer(
 					blk.Slot, blk.Hash,
 				)
+				offsetStart := time.Now()
 				offsets, oErr := indexer.ComputeOffsets(
 					blk.Cbor, parsedBlock,
 				)
+				// Track CBOR offset discovery for txs and produced UTxOs.
+				intervalStats.OffsetComputation += time.Since(offsetStart)
 				if oErr != nil {
 					b.logger.Warn(
 						"skipping block with offset error",
@@ -878,6 +934,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 					if pErr := b.processBlockTxsBatched(
 						txs, point, epochId, eraId,
 						pp, offsets, acc, batchTxn,
+						&intervalStats,
 					); pErr != nil {
 						saveCommittedCheckpoint()
 						return fmt.Errorf(
@@ -896,9 +953,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 		processedBlocks++
 		batchBlockCount++
 
-		// Flush once the current batch reaches the configured block
-		// window.
-		if batchBlockCount >= backfillBatchSize {
+		batchRows := 0
+		if sizer, ok := acc.(backfillBatchSizer); ok {
+			batchRows = sizer.Len()
+		}
+		// Flush once the current batch reaches the configured block window
+		// or the plugin reports enough accumulated rows to fill efficient
+		// bulk SQL batches.
+		if batchBlockCount >= b.batchSize ||
+			batchRows >= DefaultBackfillBatchRows {
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -910,7 +973,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 		if processedBlocks%1000 == 0 {
 			// Periodic checkpoints must only record durable progress.
 			// Flush any partial batch first so checkpoint safety does
-			// not depend on backfillBatchSize dividing 1000.
+			// not depend on the configured batch size dividing 1000.
 			if err := flushBatch(); err != nil {
 				saveCommittedCheckpoint()
 				return fmt.Errorf(
@@ -918,11 +981,15 @@ func (b *Backfill) Run(ctx context.Context) error {
 					err,
 				)
 			}
+			checkpointStart := time.Now()
 			b.saveCheckpoint(cp)
+			// Track checkpoint writes that make backfill resumable.
+			intervalStats.CheckpointWrites += time.Since(checkpointStart)
 		}
 		b.maybeLogProgress(
 			cp, processedBlocks, processedTxs,
 			tipSlot, startSlot, startTime, &lastLogTime,
+			&intervalStats, false,
 		)
 	}
 
@@ -931,6 +998,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 		saveCommittedCheckpoint()
 		return fmt.Errorf("flushing final backfill batch: %w", err)
 	}
+	b.maybeLogProgress(
+		cp, processedBlocks, processedTxs,
+		tipSlot, startSlot, startTime, &lastLogTime,
+		&intervalStats, true,
+	)
 
 	cp.Completed = true
 	cp.UpdatedAt = time.Now()
@@ -949,6 +1021,8 @@ func (b *Backfill) Run(ctx context.Context) error {
 		"blocks_processed", processedBlocks,
 		"transactions_stored", processedTxs,
 		"elapsed", elapsed.Round(time.Second),
+		"batch_size", b.batchSize,
+		"batch_row_limit", DefaultBackfillBatchRows,
 		"skipped_utxo_offset_block_writes", b.skippedBlocks,
 		"skipped_utxo_offset_refs", b.skippedUtxoRefs,
 	)
@@ -966,6 +1040,7 @@ func (b *Backfill) processBlockTxsBatched(
 	offsets *database.BlockIngestionResult,
 	acc database.BatchAccumulator,
 	txn *database.Txn,
+	stats *dbtypes.BackfillHotPathStats,
 ) error {
 	opts := database.BatchedTxIngestOpts{
 		SkipProducedUtxoOffsetWrites: b.immutableUtxoOffsetsTipSlot > 0 &&
@@ -983,12 +1058,21 @@ func (b *Backfill) processBlockTxsBatched(
 			// Counter is informational; Produced() is cheap (slice length).
 			b.skippedUtxoRefs += uint64(len(tx.Produced()))
 		}
+		setTxStart := time.Now()
 		if err := b.db.SetTransactionBatchedWithOpts(
 			tx, point, uint32(i), // #nosec G115
 			updateEpoch, paramUpdates,
-			certDeposits, offsets, acc, txn, opts,
+			certDeposits, offsets, acc, txn,
+			database.BatchedTxIngestOpts{
+				SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
+				Stats:                        stats,
+			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)
+		}
+		if stats != nil {
+			// Track end-to-end batched transaction ingestion.
+			stats.SetTransactionBatched += time.Since(setTxStart)
 		}
 		if err := b.processBlockGovernance(
 			tx, point, epochId, pp, txn,
@@ -1017,7 +1101,7 @@ func (b *Backfill) saveCheckpoint(cp *models.BackfillCheckpoint) {
 }
 
 // maybeLogProgress logs backfill progress with rate and ETA,
-// throttled to at most once every 10 seconds.
+// throttled to at most once every 10 seconds unless force is true.
 func (b *Backfill) maybeLogProgress(
 	cp *models.BackfillCheckpoint,
 	processedBlocks int,
@@ -1026,9 +1110,11 @@ func (b *Backfill) maybeLogProgress(
 	startSlot uint64,
 	startTime time.Time,
 	lastLogTime *time.Time,
+	stats *dbtypes.BackfillHotPathStats,
+	force bool,
 ) {
 	now := time.Now()
-	if now.Sub(*lastLogTime) < 10*time.Second {
+	if !force && now.Sub(*lastLogTime) < 10*time.Second {
 		return
 	}
 	*lastLogTime = now
@@ -1048,6 +1134,21 @@ func (b *Backfill) maybeLogProgress(
 		"blocks_per_sec", fmt.Sprintf("%.0f", blocksPerSec),
 		"progress", fmt.Sprintf("%.1f%%", pct),
 	}
+	if stats != nil {
+		attrs = appendBackfillStatsAttrs(attrs, *stats)
+		if b.onProgress != nil {
+			b.onProgress(BackfillProgress{
+				Slot:            cp.LastSlot,
+				TipSlot:         tipSlot,
+				ProcessedBlocks: processedBlocks,
+				ProcessedTxs:    processedTxs,
+				BlocksPerSecond: blocksPerSec,
+				ProgressPercent: pct,
+				Stats:           *stats,
+			})
+		}
+		stats.Reset()
+	}
 
 	slotsProcessed := cp.LastSlot - startSlot
 	if blocksPerSec > 0 && slotsProcessed > 0 &&
@@ -1066,4 +1167,41 @@ func (b *Backfill) maybeLogProgress(
 	}
 
 	b.logger.Info("backfill progress", attrs...)
+}
+
+// appendBackfillStatsAttrs adds interval hot-path counters to progress logs.
+func appendBackfillStatsAttrs(
+	attrs []any,
+	stats dbtypes.BackfillHotPathStats,
+) []any {
+	return append(
+		attrs,
+		"interval_blocks", stats.Blocks,
+		"interval_txs", stats.Txs,
+		"interval_utxos", stats.Utxos,
+		"interval_input_refs", stats.InputRefs,
+		"blob_tx_offset_writes", stats.BlobTxOffsetWrites,
+		"blob_utxo_offset_writes", stats.BlobUtxoOffsetWrites,
+		"skipped_utxo_offsets", stats.SkippedUtxoOffsets,
+		"address_txs", stats.AddressTxs,
+		"witnesses", stats.Witnesses,
+		"witness_scripts", stats.WitnessScripts,
+		"scripts", stats.Scripts,
+		"plutus_data", stats.PlutusData,
+		"redeemers", stats.Redeemers,
+		"utxo_spends", stats.UtxoSpends,
+		"collateral_returns", stats.CollateralRets,
+		"certificates", stats.Certificates,
+		"metadata_labels", stats.MetadataLabels,
+		"pparam_updates", stats.PParamUpdates,
+		"block_read_decode_ms", stats.BlockReadDecode.Milliseconds(),
+		"offset_compute_ms", stats.OffsetComputation.Milliseconds(),
+		"blob_offset_write_ms", stats.BlobOffsetWrites.Milliseconds(),
+		"set_transaction_batched_ms", stats.SetTransactionBatched.Milliseconds(),
+		"consumed_input_recovery_ms", stats.ConsumedInputRecovery.Milliseconds(),
+		"utxo_address_lookup_ms", stats.UtxoAddressLookup.Milliseconds(),
+		"address_index_ms", stats.AddressIndex.Milliseconds(),
+		"flush_batch_ms", stats.FlushBatch.Milliseconds(),
+		"checkpoint_write_ms", stats.CheckpointWrites.Milliseconds(),
+	)
 }

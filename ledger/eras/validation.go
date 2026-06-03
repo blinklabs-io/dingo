@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"reflect"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -31,6 +32,105 @@ import (
 var ErrExUnitsOverflow = errors.New(
 	"execution units overflow int64",
 )
+
+type phase2ValidationSkipper interface {
+	SkipPhase2Validation() bool
+}
+
+type indexedUtxoValidationRule struct {
+	index          int
+	validationFunc lcommon.UtxoValidationRuleFunc
+}
+
+const (
+	noUtxoValidationRuleIndex = -1
+
+	// Positions in gouroboros v0.179.0 UtxoValidationRules. Function
+	// values are not directly comparable in Go, so setup guards compare
+	// function pointers before filtering by index.
+	alonzoUtxoValidatePlutusScriptsRuleIndex  = 26
+	babbageUtxoValidatePlutusScriptsRuleIndex = 30
+	conwayUtxoValidateExUnitsTooBigRuleIndex  = 34
+	conwayUtxoValidatePlutusScriptsRuleIndex  = 38
+)
+
+func shouldSkipPhase2Validation(
+	ls lcommon.LedgerState,
+) bool {
+	skipper, ok := ls.(phase2ValidationSkipper)
+	return ok && skipper.SkipPhase2Validation()
+}
+
+func buildIndexedUtxoValidationRules(
+	rules []lcommon.UtxoValidationRuleFunc,
+	skipIndex int,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
+) []indexedUtxoValidationRule {
+	if skipIndex != noUtxoValidationRuleIndex {
+		validateUtxoValidationSkipIndex(
+			rules,
+			skipIndex,
+			skipValidationFunc,
+			skipRuleName,
+		)
+	}
+
+	ret := make([]indexedUtxoValidationRule, 0, len(rules))
+	for idx, validationFunc := range rules {
+		if idx == skipIndex {
+			continue
+		}
+		ret = append(ret, indexedUtxoValidationRule{
+			index:          idx,
+			validationFunc: validationFunc,
+		})
+	}
+	return ret
+}
+
+func validateUtxoValidationSkipIndex(
+	rules []lcommon.UtxoValidationRuleFunc,
+	skipIndex int,
+	skipValidationFunc lcommon.UtxoValidationRuleFunc,
+	skipRuleName string,
+) {
+	if skipRuleName == "" {
+		skipRuleName = "UTxO validation skip rule"
+	}
+	if skipIndex < 0 {
+		panic(fmt.Sprintf(
+			"%s has invalid negative hardcoded rule index %d",
+			skipRuleName,
+			skipIndex,
+		))
+	}
+	if skipIndex >= len(rules) {
+		panic(fmt.Sprintf(
+			"%s hardcoded rule index %d is outside upstream rules length %d",
+			skipRuleName,
+			skipIndex,
+			len(rules),
+		))
+	}
+	if skipValidationFunc == nil {
+		panic(skipRuleName + " expected validation function is nil")
+	}
+	if utxoValidationRulePtr(rules[skipIndex]) != utxoValidationRulePtr(skipValidationFunc) {
+		panic(fmt.Sprintf(
+			"%s hardcoded rule index %d no longer resolves to the expected function",
+			skipRuleName,
+			skipIndex,
+		))
+	}
+}
+
+func utxoValidationRulePtr(fn lcommon.UtxoValidationRuleFunc) uintptr {
+	if fn == nil {
+		return 0
+	}
+	return reflect.ValueOf(fn).Pointer()
+}
 
 // SafeAddExUnits adds two ExUnits values with
 // overflow detection. Returns an error if either

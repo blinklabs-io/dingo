@@ -19,8 +19,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
@@ -2423,6 +2425,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		return errors.New("SetTransactionBatched: acc must not be nil")
 	}
 	local := NewBatchAccumulator()
+	local.stats = batch.stats
 	txHash := tx.Hash().Bytes()
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -2517,6 +2520,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 
 	// metadata labels – small, write immediately just like SetTransaction.
 	if len(metadataLabels) > 0 {
+		if batch.stats != nil {
+			// Count metadata label rows written immediately for this tx.
+			batch.stats.MetadataLabels += uint64(len(metadataLabels))
+		}
 		labelRecords := make(
 			[]models.TransactionMetadataLabel,
 			0,
@@ -2577,10 +2584,15 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			})
 		}
 		var err error
+		lookupStart := time.Now()
 		collateralAddressKeys, err = d.GetUtxoAddressKeysBatch(
 			collateralRefs,
 			txn,
 		)
+		if batch.stats != nil {
+			// Track collateral input address-key lookup for address indexing.
+			batch.stats.UtxoAddressLookup += time.Since(lookupStart)
+		}
 		if err != nil {
 			return fmt.Errorf(
 				"failed to batch fetch collateral UTXO address keys (batched): %w",
@@ -2636,10 +2648,15 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			})
 		}
 		var err error
+		lookupStart := time.Now()
 		refInputAddressKeys, err = d.GetUtxoAddressKeysBatch(
 			refInputRefs,
 			txn,
 		)
+		if batch.stats != nil {
+			// Track reference input address-key lookup for address indexing.
+			batch.stats.UtxoAddressLookup += time.Since(lookupStart)
+		}
 		if err != nil {
 			return fmt.Errorf(
 				"failed to batch fetch reference input UTXO address keys (batched): %w",
@@ -2717,23 +2734,42 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			local.AddDeleteTxID(tmpTx.ID)
 		}
 
-		// Fetch input address keys for address-indexing below.
+		// Fetch input address keys for address-indexing below. Outputs
+		// produced earlier in this same batch are not yet in the database,
+		// so resolve those from the in-flight accumulator and only query the
+		// store for the remaining (cross-batch) refs.
+		inputAddressKeys := make(map[string]UtxoAddressKeys, len(tx.Inputs()))
 		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
 		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			if keys, ok := batch.InFlightAddressKeys(inTxId, inIdx); ok {
+				inputAddressKeys[fmt.Sprintf("%x:%d", inTxId, inIdx)] = keys
+				continue
+			}
 			inputRefs = append(inputRefs, UtxoRef{
-				TxId:      input.Id().Bytes(),
-				OutputIdx: input.Index(),
+				TxId:      inTxId,
+				OutputIdx: inIdx,
 			})
 		}
-		inputAddressKeys, err := d.GetUtxoAddressKeysBatch(inputRefs, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to batch fetch input UTXO address keys (batched): %w",
-				err,
-			)
+		if len(inputRefs) > 0 {
+			lookupStart := time.Now()
+			dbKeys, err := d.GetUtxoAddressKeysBatch(inputRefs, txn)
+			if batch.stats != nil {
+				// Track regular input address-key lookup for address indexing.
+				batch.stats.UtxoAddressLookup += time.Since(lookupStart)
+			}
+			if err != nil {
+				return fmt.Errorf(
+					"failed to batch fetch input UTXO address keys (batched): %w",
+					err,
+				)
+			}
+			maps.Copy(inputAddressKeys, dbKeys)
 		}
 
 		// Address-transaction index.
+		addressIndexStart := time.Now()
 		addressKeys := make(
 			[]UtxoAddressKeys,
 			0,
@@ -2773,6 +2809,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			addressKeys,
 		) {
 			local.AddAddressTx(atx)
+		}
+		if batch.stats != nil {
+			// Track address_transaction row generation from collected keys.
+			batch.stats.AddressIndex += time.Since(addressIndexStart)
 		}
 
 		// Witnesses.
@@ -2884,6 +2924,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 	if tx.IsValid() {
 		certs := tx.Certificates()
 		if len(certs) > 0 {
+			if batch.stats != nil {
+				// Count certificate rows handled by immediate metadata writes.
+				batch.stats.Certificates += uint64(len(certs))
+			}
 			unifiedIDs := []uint{}
 			if result := db.Model(&models.Certificate{}).
 				Where("transaction_id = ?", tmpTx.ID).
@@ -3689,6 +3733,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		}
 	}
 
+	local.addPendingCountsToStats()
 	batch.MergeFrom(local)
 	return nil
 }

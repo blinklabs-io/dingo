@@ -30,14 +30,13 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // Default request size limits to prevent denial-of-service via
@@ -47,6 +46,7 @@ const (
 	DefaultMaxUtxoKeys     = 1000
 	DefaultMaxHistoryItems = 10000
 	DefaultMaxDataKeys     = 1000
+	DefaultServerTimeout   = time.Hour
 )
 
 type Utxorpc struct {
@@ -72,6 +72,12 @@ type UtxorpcConfig struct {
 	// max_items uses this cap.
 	MaxHistoryItems int
 	MaxDataKeys     int
+	// ServerTimeout bounds long-running UTxO RPC handlers server-side
+	// (0 = use default).
+	ServerTimeout time.Duration
+	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
+	// Empty disables CORS.
+	CORSAllowedOrigins []string
 }
 
 func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
@@ -96,6 +102,9 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 	if cfg.MaxDataKeys <= 0 {
 		cfg.MaxDataKeys = DefaultMaxDataKeys
+	}
+	if cfg.ServerTimeout <= 0 {
+		cfg.ServerTimeout = DefaultServerTimeout
 	}
 	return &Utxorpc{
 		config: cfg,
@@ -163,6 +172,12 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			compress1KB,
 		),
 	)
+	handler := httpcors.Handler(
+		mux,
+		httpcors.Config{
+			AllowedOrigins: u.config.CORSAllowedOrigins,
+		},
+	)
 	var server *http.Server
 	if u.config.TlsCertFilePath != "" && u.config.TlsKeyFilePath != "" {
 		u.config.Logger.Info(
@@ -178,7 +193,7 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 				u.config.Host,
 				u.config.Port,
 			),
-			Handler:           mux,
+			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
 			IdleTimeout:       120 * time.Second,
@@ -199,8 +214,8 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 				u.config.Host,
 				u.config.Port,
 			),
-			// Use h2c so we can serve HTTP/2 without TLS
-			Handler:           h2c.NewHandler(mux, &http2.Server{}),
+			Handler:           handler,
+			Protocols:         unencryptedHTTP2Protocols(),
 			ReadHeaderTimeout: 60 * time.Second,
 			ReadTimeout:       60 * time.Second,
 			IdleTimeout:       120 * time.Second,
@@ -246,6 +261,13 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func unencryptedHTTP2Protocols() *http.Protocols {
+	protocols := &http.Protocols{}
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+	return protocols
 }
 
 func (u *Utxorpc) Stop(ctx context.Context) error {

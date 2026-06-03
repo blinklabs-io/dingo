@@ -34,10 +34,12 @@ const importUtxoBatchSize = 500
 // so 1000 x 7 = 7000 parameters per batch.
 const importAssetBatchSize = 1000
 
-// ImportUtxos inserts UTxOs in bulk, ignoring duplicates.
-// Assets are inserted in a second pass to avoid cascading
-// the associated Assets into the same bulk INSERT, which can
-// push the packet size over MySQL limits.
+// ImportUtxos inserts UTxOs in bulk. Existing snapshot-imported
+// rows are hydrated with transaction provenance when backfill later
+// replays their producing transaction. Assets are inserted in a
+// second pass to avoid cascading the associated Assets into the
+// same bulk INSERT, which can push the packet size over MySQL
+// limits.
 func (d *MetadataStoreMysql) ImportUtxos(
 	utxos []models.Utxo,
 	txn types.Txn,
@@ -74,6 +76,7 @@ func importUtxosWithDB(
 	}
 
 	// Insert UTxOs (without assets)
+	var hydrationCandidates []models.Utxo
 	for i := 0; i < len(stripped); i += importUtxoBatchSize {
 		end := min(i+importUtxoBatchSize, len(stripped))
 		batch := stripped[i:end]
@@ -87,6 +90,22 @@ func importUtxosWithDB(
 		if result.Error != nil {
 			return fmt.Errorf("import utxos: %w", result.Error)
 		}
+		// Only skipped inserts can correspond to snapshot-imported
+		// rows that still need provenance hydration.
+		if result.RowsAffected != int64(len(batch)) {
+			hydrationCandidates = append(
+				hydrationCandidates,
+				batch...,
+			)
+		}
+	}
+
+	if err := importutil.BatchHydrateUtxoProvenance(
+		db,
+		hydrationCandidates,
+		importUtxoBatchSize,
+	); err != nil {
+		return fmt.Errorf("hydrating utxo provenance: %w", err)
 	}
 
 	// Link assets to their UTxO IDs and batch-insert.

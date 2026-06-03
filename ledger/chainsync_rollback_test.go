@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -137,17 +138,18 @@ func TestHandleEventChainsyncRollbackRejectsBelowMithrilBoundary(
 	require.NoError(t, err)
 	assert.Equal(t, "20", storedBoundary)
 
-	select {
-	case e := <-resyncCh:
-		assert.Equal(
-			t,
-			event.ChainsyncResyncReasonRollbackExceedsMithril,
-			e.Reason,
-		)
-		assert.Equal(t, fixture.connId, e.ConnectionId)
-	case <-time.After(time.Second):
-		t.Fatal("expected Mithril rollback-boundary resync event")
-	}
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected Mithril rollback-boundary resync event",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.activeBlockfetchConnId)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.selectedBlockfetchConnId)
 	assert.Equal(t, ouroboros.ConnectionId{}, fixture.ls.shadowBlockfetchConnId)
@@ -624,11 +626,12 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, fixture.ancestorTip, dbTip)
 
-	select {
-	case resync := <-resyncCh:
-		t.Fatalf("expected no local rollback resync event, got: %#v", resync)
-	case <-time.After(200 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"expected no local rollback resync event",
+	)
 }
 
 func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
@@ -851,17 +854,18 @@ func TestHandleEventChainsyncBlockHeaderMissingAncestorRequestsResync(
 	})
 	require.NoError(t, err)
 
-	select {
-	case resync := <-resyncCh:
-		assert.Equal(t, fixture.connId, resync.ConnectionId)
-		assert.Equal(
-			t,
-			event.ChainsyncResyncReasonRollbackNotFound,
-			resync.Reason,
-		)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected chainsync resync event")
-	}
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"expected chainsync resync event",
+	)
+	assert.Equal(t, fixture.connId, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackNotFound,
+		resync.Reason,
+	)
 
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	_, ok := fixture.ls.bufferedHeaderEvents[connIdKey(fixture.connId)]
@@ -894,18 +898,19 @@ func TestRollbackPublishesChainsyncResyncAtRollbackPoint(t *testing.T) {
 
 	require.NoError(t, fixture.ls.rollback(fixture.ancestorTip.Point))
 
-	select {
-	case resync := <-resyncCh:
-		assert.Equal(
-			t,
-			event.ChainsyncResyncReasonLocalLedgerRollback,
-			resync.Reason,
-		)
-		assert.Equal(t, fixture.ancestorTip.Point, resync.Point)
-		assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected chainsync resync event")
-	}
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"expected chainsync resync event",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalLedgerRollback,
+		resync.Reason,
+	)
+	assert.Equal(t, fixture.ancestorTip.Point, resync.Point)
+	assert.Equal(t, ouroboros.ConnectionId{}, resync.ConnectionId)
 }
 
 func TestRecoverAfterLocalRollbackReplaysPeerHeaderHistory(
@@ -1269,11 +1274,12 @@ func TestHandleEventChainsyncBlockHeaderIgnoresStaleRollForwardBehindTip(
 	assert.Zero(t, fixture.ls.headerMismatchCount)
 	assert.Zero(t, fixture.ls.chain.HeaderCount())
 
-	select {
-	case resync := <-resyncCh:
-		t.Fatalf("expected no chainsync resync event, got: %#v", resync)
-	case <-time.After(200 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"expected no chainsync resync event",
+	)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMetadata(t *testing.T) {
@@ -1332,6 +1338,64 @@ func TestReconcilePrimaryChainTipWithLedgerTipRollsBackMissingLedgerTipToCommonA
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
 	assert.Equal(t, fixture.ancestorTip.Point.Hash, rows[0].Hash)
+}
+
+// TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFork
+// pins the wire-in the plateau-watchdog path depends on
+// (node_chainsync_recycler.go). Sub-K same-slot fork resolutions can
+// advance chain.Tip() to the canonical hash while leaving the ledger
+// pipeline pinned on the abandoned hash, with no error returned and
+// therefore no caller of the existing in-package live-reconciler.
+// The exported wrapper is what node-level watchdog code can invoke
+// to repair the divergence in place — without it, the plateau path
+// can only recycle the upstream peer, which does not unstick a
+// locally-pinned ledger.
+func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFork(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+
+	forkHash := testHashBytes("live-sub-k-fork")
+	require.NoError(t, fixture.ls.chain.Rollback(fixture.ancestorTip.Point))
+	require.NoError(t, fixture.ls.chain.AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        fixture.currentTip.Point.Slot + 5,
+			Hash:        forkHash,
+			BlockNumber: fixture.currentTip.BlockNumber + 1,
+			Type:        1,
+			PrevHash:    fixture.ancestorTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NotEqual(
+		t,
+		fixture.ls.chain.Tip(),
+		fixture.ls.currentTip,
+		"test setup must produce a chain/ledger tip divergence",
+	)
+	require.Equal(
+		t,
+		fixture.currentTip,
+		fixture.ls.currentTip,
+		"currentTip must remain at the post-switch abandoned hash",
+	)
+
+	reconciled, err := fixture.ls.ReconcileLivePrimaryChainLedgerDivergence(
+		"local tip plateau",
+		fixture.connId,
+	)
+	require.NoError(t, err)
+	require.True(
+		t,
+		reconciled,
+		"exported reconciler must report success",
+	)
+
+	assert.Equal(t, fixture.ancestorTip, fixture.ls.currentTip)
+	assert.True(
+		t,
+		bytes.Equal(fixture.ancestorNonce, fixture.ls.currentTipBlockNonce),
+	)
 }
 
 func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyondK(

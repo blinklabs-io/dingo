@@ -15,8 +15,10 @@
 package event
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -40,7 +42,14 @@ const (
 	AsyncQueueSize          = 1000
 	AsyncWorkerPoolSize     = 4
 	RemoteDeliverTimeout    = 5 * time.Second
+	blockingDeliverRetry    = 10 * time.Millisecond
 )
+
+// ErrEventBusStopped is returned by PublishBlocking when the EventBus is
+// stopping or closed before or during delivery.
+var ErrEventBusStopped = errors.New("event bus stopped")
+
+var errChannelSubscriberClosed = errors.New("channel subscriber closed")
 
 type EventType string
 
@@ -100,6 +109,7 @@ type EventBus struct {
 	stopCh     chan struct{}
 	closed     bool
 	stopped    bool
+	stopSeq    uint64
 	stopMu     sync.RWMutex
 	stopOpMu   sync.Mutex // Serializes Stop() calls to prevent duplicate worker pools
 }
@@ -225,6 +235,29 @@ func (c *channelSubscriber) Deliver(evt Event) (err error) {
 		}
 	}
 	return nil
+}
+
+func (c *channelSubscriber) DeliverBlocking(evt Event) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("channel deliver panic: %v", r)
+		}
+	}()
+	for {
+		c.mu.RLock()
+		if c.closed {
+			c.mu.RUnlock()
+			return errChannelSubscriberClosed
+		}
+		select {
+		case c.ch <- evt:
+			c.mu.RUnlock()
+			return nil
+		default:
+			c.mu.RUnlock()
+		}
+		time.Sleep(blockingDeliverRetry)
+	}
 }
 
 func (c *channelSubscriber) Close() {
@@ -503,6 +536,88 @@ func (e *EventBus) Publish(eventType EventType, evt Event) {
 	}
 }
 
+// PublishBlocking delivers an event to all subscribers without dropping
+// in-memory channel events when subscriber buffers are full. This should be
+// reserved for ordering-critical streams where loss is worse than applying
+// producer backpressure. It returns ErrEventBusStopped when the bus is
+// stopping or closed before or during delivery.
+func (e *EventBus) PublishBlocking(eventType EventType, evt Event) error {
+	e.stopMu.RLock()
+	if e.stopped || e.closed {
+		e.stopMu.RUnlock()
+		return ErrEventBusStopped
+	}
+	stopSeq := e.stopSeq
+	e.stopMu.RUnlock()
+
+	e.mu.RLock()
+	subList := append([]subscriberEntry(nil), e.subscriberSnapshots[eventType]...)
+	e.mu.RUnlock()
+	if len(subList) == 0 {
+		if e.metrics != nil {
+			e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
+		}
+		return nil
+	}
+	var firstErr error
+	for _, item := range subList {
+		var deliverErr error
+		if item.channelSub != nil {
+			deliverErr = item.channelSub.DeliverBlocking(evt)
+		} else {
+			deliverErr = e.deliverWithTimeout(item.sub, evt)
+		}
+
+		if errors.Is(deliverErr, errChannelSubscriberClosed) {
+			e.stopMu.RLock()
+			stopped := e.stopped || e.closed || e.stopSeq != stopSeq
+			e.stopMu.RUnlock()
+			if stopped {
+				deliverErr = ErrEventBusStopped
+			} else {
+				deliverErr = nil
+			}
+		}
+		if deliverErr != nil {
+			if firstErr == nil {
+				firstErr = deliverErr
+			}
+			e.Unsubscribe(eventType, item.id)
+			if e.metrics != nil {
+				e.metrics.deliveryErrors.WithLabelValues(string(eventType), item.kind).
+					Inc()
+			}
+			if e.Logger != nil {
+				e.Logger.Debug(
+					"event delivery error",
+					"type",
+					eventType,
+					"err",
+					deliverErr,
+				)
+			} else {
+				slog.Default().Debug(
+					"event delivery error",
+					"type",
+					eventType,
+					"err",
+					deliverErr,
+				)
+			}
+		}
+	}
+	if e.metrics != nil {
+		e.metrics.eventsTotal.WithLabelValues(string(eventType)).Inc()
+	}
+	e.stopMu.RLock()
+	stopped := e.stopped || e.closed || e.stopSeq != stopSeq
+	e.stopMu.RUnlock()
+	if firstErr == nil && stopped {
+		firstErr = ErrEventBusStopped
+	}
+	return firstErr
+}
+
 // PublishAsync enqueues an event for asynchronous delivery to all subscribers.
 // This method returns immediately without blocking on subscriber delivery.
 // Use this for non-critical events where immediate delivery is not required.
@@ -597,6 +712,7 @@ func (e *EventBus) shutdown(restart bool) {
 		e.closed = true
 	}
 	e.stopped = true
+	e.stopSeq++
 	e.stopMu.Unlock()
 
 	if !wasAlreadyStopped {
@@ -668,5 +784,8 @@ func (e *EventBus) refreshSubscriberSnapshotLocked(eventType EventType) {
 		}
 		snapshot = append(snapshot, entry)
 	}
+	sort.Slice(snapshot, func(i, j int) bool {
+		return snapshot[i].id < snapshot[j].id
+	})
 	e.subscriberSnapshots[eventType] = snapshot
 }

@@ -22,6 +22,31 @@ import (
 	"gorm.io/gorm"
 )
 
+// PoolRewardAccountAutoVote enumerates the CIP-1694 reward-account
+// DRep-delegation outcomes that produce an implicit SPO vote when a
+// pool did not cast an explicit vote on a proposal. Resolved and
+// frozen at the epoch boundary that captures the stake snapshot so
+// the governance tally uses snapshot-era state rather than live state.
+const (
+	// PoolRewardAccountAutoVoteNone means the pool's reward account is
+	// unset, deregistered, or delegated to anything other than the
+	// predefined Always{Abstain,NoConfidence} DRep options. Such a
+	// pool contributes to SPOTotalStake only and counts as implicit
+	// no under CIP-1694.
+	PoolRewardAccountAutoVoteNone uint8 = 0
+	// PoolRewardAccountAutoVoteAbstain means the pool's reward
+	// account delegates to AlwaysAbstain at the snapshot epoch. Its
+	// stake is bucketed into SPOAbstainStake (excluded from the
+	// active denominator).
+	PoolRewardAccountAutoVoteAbstain uint8 = 1
+	// PoolRewardAccountAutoVoteNoConfidence means the pool's reward
+	// account delegates to AlwaysNoConfidence at the snapshot epoch.
+	// For NoConfidence actions the pool stake is bucketed Yes; for
+	// any other action type it is bucketed No (mirrors the
+	// AlwaysNoConfidence DRep handling).
+	PoolRewardAccountAutoVoteNoConfidence uint8 = 2
+)
+
 // PoolStakeSnapshot captures aggregated pool stake at an epoch boundary.
 // Used for leader election in Ouroboros Praos consensus.
 type PoolStakeSnapshot struct {
@@ -32,6 +57,23 @@ type PoolStakeSnapshot struct {
 	TotalStake     types.Uint64 `gorm:"not null"`
 	DelegatorCount uint64       `gorm:"not null"`
 	CapturedSlot   uint64       `gorm:"not null"`
+	// RewardAccountAutoVote captures the CIP-1694 SPO auto-vote
+	// outcome implied by the pool's reward-account DRep delegation at
+	// the snapshot epoch. Values come from PoolRewardAccountAutoVote*.
+	// This field is only meaningful when RewardAccountAutoVoteResolved
+	// is true; otherwise its value is undefined and must not be read
+	// by the tally.
+	RewardAccountAutoVote uint8 `gorm:"not null;default:0"`
+	// RewardAccountAutoVoteResolved disambiguates "resolved as none"
+	// from "never resolved". The resolver sets this to true after it
+	// has computed RewardAccountAutoVote against snapshot-era state.
+	// Rows imported by Mithril for set/go rotations (which only have
+	// live state available at import time and cannot be faithfully
+	// resolved against historical boundaries) intentionally leave this
+	// false; the tally treats them as PoolRewardAccountAutoVoteNone,
+	// matching pre-CIP-1694 behaviour for those rows. Pre-CIP-1694
+	// rows in upgraded databases also remain false until re-resolved.
+	RewardAccountAutoVoteResolved bool `gorm:"not null;default:false"`
 }
 
 // TableName returns the table name

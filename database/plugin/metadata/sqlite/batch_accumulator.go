@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -51,21 +52,25 @@ type BatchAccumulator struct {
 	UtxoSpends     []utxoSpend
 	CollateralRets []models.Utxo
 	DeleteTxIDs    []uint
+	stats          *types.BackfillHotPathStats
+	// producedByRef indexes produced outputs and collateral returns by their
+	// "%x:%d" tx-id/output-index ref so a later transaction in the same batch
+	// can resolve provenance and address keys for an output that has not yet
+	// been flushed to the database. Eagerly allocated so the Add/lookup
+	// methods never need a nil check.
+	producedByRef map[string]models.Utxo
+}
+
+// utxoRefKey builds the "%x:%d" lookup key shared by the in-flight index,
+// GetUtxoAddressKeysBatch's result map, and the consumed-input dedup loops.
+func utxoRefKey(txId []byte, outputIdx uint32) string {
+	return fmt.Sprintf("%x:%d", txId, outputIdx)
 }
 
 // NewBatchAccumulator returns an empty BatchAccumulator ready for use.
 func NewBatchAccumulator() *BatchAccumulator {
 	return &BatchAccumulator{
-		KeyWitnesses:   make([]models.KeyWitness, 0, batchChunkRows),
-		WitnessScripts: make([]models.WitnessScripts, 0, batchChunkRows),
-		Scripts:        make([]models.Script, 0, batchChunkRows),
-		PlutusData:     make([]models.PlutusData, 0, batchChunkRows),
-		Redeemers:      make([]models.Redeemer, 0, batchChunkRows),
-		AddressTxs:     make([]models.AddressTransaction, 0, batchChunkRows),
-		UtxoOutputs:    make([]models.Utxo, 0, batchChunkRows),
-		UtxoSpends:     make([]utxoSpend, 0, batchChunkRows),
-		CollateralRets: make([]models.Utxo, 0, batchChunkRows),
-		DeleteTxIDs:    make([]uint, 0, batchChunkRows),
+		producedByRef: make(map[string]models.Utxo),
 	}
 }
 
@@ -107,6 +112,7 @@ func (b *BatchAccumulator) AddAddressTx(at models.AddressTransaction) {
 // AddUtxoOutput appends a produced UTxO record to the batch.
 func (b *BatchAccumulator) AddUtxoOutput(u models.Utxo) {
 	b.UtxoOutputs = append(b.UtxoOutputs, u)
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
 // AddUtxoSpend appends a consumed UTxO record to the batch.
@@ -117,6 +123,32 @@ func (b *BatchAccumulator) AddUtxoSpend(s utxoSpend) {
 // AddCollateralReturn appends a collateral return UTxO to the batch.
 func (b *BatchAccumulator) AddCollateralReturn(u models.Utxo) {
 	b.CollateralRets = append(b.CollateralRets, u)
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
+}
+
+// InFlightAddressKeys returns the address-key projection for an output
+// produced earlier in the current batch (and not yet flushed), so a later
+// transaction can resolve it without a database round trip.
+func (b *BatchAccumulator) InFlightAddressKeys(
+	txId []byte,
+	outputIdx uint32,
+) (UtxoAddressKeys, bool) {
+	u, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	if !ok {
+		return UtxoAddressKeys{}, false
+	}
+	return utxoAddressKeysFromUtxo(u), true
+}
+
+// HasInFlightProducer reports whether an output produced earlier in the
+// current batch (and not yet flushed) matches the given ref. The database
+// layer uses this to skip blob recovery for same-batch provenance.
+func (b *BatchAccumulator) HasInFlightProducer(
+	txId []byte,
+	outputIdx uint32,
+) bool {
+	_, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	return ok
 }
 
 // AddDeleteTxID appends a transaction ID scheduled for idempotent
@@ -138,6 +170,35 @@ func (b *BatchAccumulator) Reset() {
 	b.UtxoSpends = b.UtxoSpends[:0]
 	b.CollateralRets = b.CollateralRets[:0]
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
+	clear(b.producedByRef)
+	b.stats = nil
+}
+
+// SetBackfillStats attaches the current backfill interval stats collector.
+func (b *BatchAccumulator) SetBackfillStats(
+	stats *types.BackfillHotPathStats,
+) {
+	if b != nil {
+		b.stats = stats
+	}
+}
+
+// Len returns the number of accumulated metadata rows. It is intentionally a
+// simple row-count estimate used by backfill to bound batch memory.
+func (b *BatchAccumulator) Len() int {
+	if b == nil {
+		return 0
+	}
+	return len(b.KeyWitnesses) +
+		len(b.WitnessScripts) +
+		len(b.Scripts) +
+		len(b.PlutusData) +
+		len(b.Redeemers) +
+		len(b.AddressTxs) +
+		len(b.UtxoOutputs) +
+		len(b.UtxoSpends) +
+		len(b.CollateralRets) +
+		len(b.DeleteTxIDs)
 }
 
 // MergeFrom appends all records from other into b.
@@ -156,6 +217,24 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
 	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
 	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+	maps.Copy(b.producedByRef, other.producedByRef)
+}
+
+// addPendingCountsToStats reports rows buffered for the next batch flush.
+func (b *BatchAccumulator) addPendingCountsToStats() {
+	if b == nil || b.stats == nil {
+		return
+	}
+	// Count deferred metadata rows accumulated for the next FlushBatch.
+	b.stats.Witnesses += uint64(len(b.KeyWitnesses))
+	b.stats.WitnessScripts += uint64(len(b.WitnessScripts))
+	b.stats.Scripts += uint64(len(b.Scripts))
+	b.stats.PlutusData += uint64(len(b.PlutusData))
+	b.stats.Redeemers += uint64(len(b.Redeemers))
+	b.stats.AddressTxs += uint64(len(b.AddressTxs))
+	b.stats.UtxoSpends += uint64(len(b.UtxoSpends))
+	b.stats.CollateralRets += uint64(len(b.CollateralRets))
+	b.stats.DeleteTxIDs += uint64(len(b.DeleteTxIDs))
 }
 
 // FlushBatch writes all accumulated records in a deterministic order.

@@ -22,6 +22,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -53,7 +54,6 @@ import (
 	watch "github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/watch/watchconnect"
 	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 // --- harness (preview fixture + h2c server) --------------------------------
@@ -88,6 +88,7 @@ type utxorpcConnectHarness struct {
 type utxorpcHarnessOptions struct {
 	numBlocks       int
 	maxHistoryItems int
+	serverTimeout   time.Duration
 }
 
 func newConnectH2CClient() *http.Client {
@@ -124,7 +125,7 @@ func testUtxorpcHTTPHandler(u *Utxorpc) http.Handler {
 	mux.Handle(sp, sh)
 	mux.Handle(yp, yh)
 	mux.Handle(wp, wh)
-	return h2c.NewHandler(mux, &http2.Server{})
+	return mux
 }
 
 func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpcConnectHarness {
@@ -148,6 +149,7 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 	t.Cleanup(func() { _ = db.Close() })
 
 	blocks := loadTestChainBlocks(t, opts.numBlocks)
+	require.NotEmpty(t, blocks)
 	for i := range blocks {
 		require.NoError(t, db.BlockCreate(blocks[i], nil))
 	}
@@ -212,9 +214,12 @@ func newUtxorpcConnectHarness(t *testing.T, opts utxorpcHarnessOptions) *utxorpc
 		LedgerState:     ls,
 		Mempool:         mp,
 		MaxHistoryItems: maxHist,
+		ServerTimeout:   opts.serverTimeout,
 	})
 
-	srv := httptest.NewServer(testUtxorpcHTTPHandler(u))
+	srv := httptest.NewUnstartedServer(testUtxorpcHTTPHandler(u))
+	srv.Config.Protocols = unencryptedHTTP2Protocols()
+	srv.Start()
 	t.Cleanup(srv.Close)
 
 	return &utxorpcConnectHarness{
@@ -378,6 +383,7 @@ func TestConnect_DumpHistory(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	blocks := loadTestChainBlocks(t, 25)
+	require.NotEmpty(t, blocks)
 	out, err := cli.DumpHistory(
 		ctx,
 		connect.NewRequest(&sync.DumpHistoryRequest{
@@ -631,6 +637,124 @@ func TestConnect_WaitForTx_EmptyRefsClosesStream(t *testing.T) {
 	cancel()
 }
 
+// Wait until WaitForTx is listening on the fake event bus before the test
+// publishes events.
+func waitForEventSubscriber(
+	t *testing.T,
+	ctx context.Context,
+	eb *event.EventBus,
+	eventType event.EventType,
+) {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if eb.HasSubscribers(eventType) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("event subscriber was not registered: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+type waitForTxResult struct {
+	resp *submit.WaitForTxResponse
+	err  error
+}
+
+// Run WaitForTx in the background so the test can cancel the request while
+// the stream is still open.
+func receiveWaitForTx(
+	ctx context.Context,
+	cli submitconnect.SubmitServiceClient,
+	req *submit.WaitForTxRequest,
+) <-chan waitForTxResult {
+	resultCh := make(chan waitForTxResult, 1)
+	go func() {
+		stream, err := cli.WaitForTx(ctx, connect.NewRequest(req))
+		if err != nil {
+			resultCh <- waitForTxResult{err: err}
+			return
+		}
+		if !stream.Receive() {
+			resultCh <- waitForTxResult{err: stream.Err()}
+			return
+		}
+		resp := stream.Msg()
+		if stream.Receive() {
+			resultCh <- waitForTxResult{
+				err: fmt.Errorf("unexpected extra WaitForTx frame"),
+			}
+			return
+		}
+		resultCh <- waitForTxResult{resp: resp, err: stream.Err()}
+	}()
+	return resultCh
+}
+
+// Test that WaitForTx times out when the transaction is never seen.
+func TestConnect_WaitForTx_ServerTimeout(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     5,
+		serverTimeout: 25 * time.Millisecond,
+	})
+	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resultCh := receiveWaitForTx(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{bytes.Repeat([]byte{0xaa}, 32)},
+		},
+	)
+	select {
+	case result := <-resultCh:
+		require.Nil(t, result.resp)
+		require.Equal(t, connect.CodeDeadlineExceeded, connect.CodeOf(result.err))
+		require.ErrorContains(t, result.err, "wait for tx timed out")
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
+// Test that WaitForTx stops when the client cancels first.
+func TestConnect_WaitForTx_ClientCancellation(t *testing.T) {
+	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{
+		numBlocks:     5,
+		serverTimeout: time.Hour,
+	})
+	cli := submitconnect.NewSubmitServiceClient(h.Client, h.Server.URL, connect.WithGRPC())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	resultCh := receiveWaitForTx(
+		ctx,
+		cli,
+		&submit.WaitForTxRequest{
+			Ref: [][]byte{bytes.Repeat([]byte{0xbb}, 32)},
+		},
+	)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer waitCancel()
+	waitForEventSubscriber(t, waitCtx, h.EB, ledger.BlockfetchEventType)
+
+	cancel()
+
+	select {
+	case result := <-resultCh:
+		require.Nil(t, result.resp)
+		require.Equal(t, connect.CodeCanceled, connect.CodeOf(result.err))
+	case <-waitCtx.Done():
+		t.Fatal(waitCtx.Err())
+	}
+}
+
 func TestConnect_EvalTx(t *testing.T) {
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: 40})
 	_, txCbor, _ := firstTxInFixtureBlocks(t, 40)
@@ -667,6 +791,7 @@ func TestConnect_FollowTip_RollbackEmitsReset(t *testing.T) {
 	const n = 8
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: n})
 	blocks := loadTestChainBlocks(t, n)
+	require.Len(t, blocks, n)
 	inter := blocks[5]
 	roll := ocommon.NewPoint(inter.Slot, inter.Hash)
 	require.NoError(t, h.LS.Chain().ValidateRollback(roll))
@@ -740,8 +865,14 @@ func TestConnect_WatchTx_IdleEmptyForwardBlock(t *testing.T) {
 		break
 	}
 	require.True(t, found, "no suitable empty block in fixture scan")
+	if cut < 2 {
+		t.Fatalf("empty block cut must include a parent, got %d", cut)
+	}
 	h := newUtxorpcConnectHarness(t, utxorpcHarnessOptions{numBlocks: cut})
 	blocks := loadTestChainBlocks(t, cut)
+	if len(blocks) < cut {
+		t.Fatalf("expected at least %d blocks, got %d", cut, len(blocks))
+	}
 	parent := blocks[cut-2]
 	emptyChild := blocks[cut-1]
 	require.Equal(t, emptyChild.Slot, h.LS.Tip().Point.Slot)

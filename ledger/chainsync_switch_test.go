@@ -690,11 +690,12 @@ func TestHandleEventChainsyncBlockHeaderBuffersIncompatibleNonOwnerConnection(
 	require.NoError(t, err)
 	assert.Equal(t, connId1, ls.headerPipelineConnId)
 	assert.Equal(t, 1, ls.chain.HeaderCount())
-	require.Len(t, ls.bufferedHeaderEvents[connIdKey(connId2)], 1)
+	events := ls.bufferedHeaderEvents[connIdKey(connId2)]
+	require.Len(t, events, 1)
 	assert.Equal(
 		t,
 		header2.slot,
-		ls.bufferedHeaderEvents[connIdKey(connId2)][0].Point.Slot,
+		events[0].Point.Slot,
 	)
 }
 

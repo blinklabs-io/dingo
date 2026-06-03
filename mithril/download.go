@@ -28,6 +28,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,13 @@ type DownloadProgress struct {
 // ProgressFunc is a callback invoked periodically during download
 // to report progress.
 type ProgressFunc func(DownloadProgress)
+
+const (
+	defaultDownloadIdleTimeout = 2 * time.Minute
+	defaultDownloadIdleRetries = 12
+)
+
+var errDownloadIdleTimeout = errors.New("download idle timeout")
 
 type countingReader struct {
 	reader io.Reader
@@ -75,6 +83,183 @@ type DownloadConfig struct {
 	Logger *slog.Logger
 	// OnProgress is called periodically with download progress.
 	OnProgress ProgressFunc
+	// IdleTimeout is the maximum time to wait for response headers
+	// or body bytes before retrying. If zero, a conservative default
+	// is used. If negative, idle detection is disabled.
+	IdleTimeout time.Duration
+	// MaxIdleRetries is the number of consecutive retry attempts
+	// after idle timeouts that make no additional download progress.
+	// If zero, a conservative default is used.
+	MaxIdleRetries int
+}
+
+// Validate checks DownloadConfig values before use.
+func (cfg DownloadConfig) Validate() error {
+	if cfg.MaxIdleRetries < 0 {
+		return fmt.Errorf(
+			"download config MaxIdleRetries must be >= 0, got %d",
+			cfg.MaxIdleRetries,
+		)
+	}
+	return nil
+}
+
+type idleTimeoutReader struct {
+	reader io.Reader
+	timer  *idleTimer
+}
+
+func newIdleTimeoutReader(
+	reader io.Reader,
+	timeout time.Duration,
+	onIdle func(),
+) *idleTimeoutReader {
+	if timeout <= 0 {
+		return &idleTimeoutReader{reader: reader}
+	}
+	return &idleTimeoutReader{
+		reader: reader,
+		timer:  newIdleTimer(timeout, onIdle),
+	}
+}
+
+func (r *idleTimeoutReader) Read(p []byte) (int, error) {
+	if r.timer != nil {
+		r.timer.Reset()
+		defer r.timer.Stop()
+	}
+	return r.reader.Read(p)
+}
+
+func (r *idleTimeoutReader) Stop() {
+	if r.timer != nil {
+		r.timer.Stop()
+	}
+}
+
+type idleTimer struct {
+	timeout time.Duration
+	onIdle  func()
+
+	mu      sync.Mutex
+	current *idleTimerRun
+}
+
+type idleTimerRun struct {
+	timer *time.Timer
+	done  chan struct{}
+	once  sync.Once
+}
+
+func newIdleTimer(timeout time.Duration, onIdle func()) *idleTimer {
+	if timeout <= 0 {
+		return nil
+	}
+	timer := &idleTimer{
+		timeout: timeout,
+		onIdle:  onIdle,
+	}
+	timer.Reset()
+	return timer
+}
+
+func (t *idleTimer) Reset() {
+	if t == nil {
+		return
+	}
+	t.stopCurrent()
+	t.mu.Lock()
+	t.current = newIdleTimerRun(t.timeout, t.onIdle)
+	t.mu.Unlock()
+}
+
+func (t *idleTimer) Stop() {
+	if t == nil {
+		return
+	}
+	t.stopCurrent()
+}
+
+func (t *idleTimer) stopCurrent() {
+	t.mu.Lock()
+	current := t.current
+	t.current = nil
+	t.mu.Unlock()
+	if current != nil {
+		current.stopAndWait()
+	}
+}
+
+func newIdleTimerRun(timeout time.Duration, onIdle func()) *idleTimerRun {
+	run := &idleTimerRun{done: make(chan struct{})}
+	run.timer = time.AfterFunc(timeout, func() {
+		defer run.closeDone()
+		onIdle()
+	})
+	return run
+}
+
+func (r *idleTimerRun) stopAndWait() {
+	if r.timer.Stop() {
+		r.closeDone()
+	}
+	<-r.done
+}
+
+func (r *idleTimerRun) closeDone() {
+	r.once.Do(func() {
+		close(r.done)
+	})
+}
+
+func (cfg DownloadConfig) idleTimeout() time.Duration {
+	switch {
+	case cfg.IdleTimeout < 0:
+		return 0
+	case cfg.IdleTimeout > 0:
+		return cfg.IdleTimeout
+	default:
+		return defaultDownloadIdleTimeout
+	}
+}
+
+func (cfg DownloadConfig) maxIdleRetries() int {
+	if cfg.MaxIdleRetries > 0 {
+		return cfg.MaxIdleRetries
+	}
+	return defaultDownloadIdleRetries
+}
+
+func downloadIdleTimeoutCause(timeout time.Duration) error {
+	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
+}
+
+func downloadDestinationPath(cfg DownloadConfig) string {
+	filename := filepath.Base(cfg.Filename)
+	if filename == "." || filename == "/" {
+		filename = "snapshot.tar.zst"
+	}
+	return filepath.Join(cfg.DestDir, filename)
+}
+
+func downloadFileSize(filename string) int64 {
+	fi, err := os.Stat(filename)
+	if err != nil {
+		return 0
+	}
+	return fi.Size()
+}
+
+func newDownloadTransport() *http.Transport {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport := base.Clone()
+		transport.DisableKeepAlives = true
+		return transport
+	}
+	return &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		DisableKeepAlives: true,
+	}
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -171,12 +356,64 @@ func DownloadSnapshot(
 	ctx context.Context,
 	cfg DownloadConfig,
 ) (string, error) {
+	if err := cfg.Validate(); err != nil {
+		return "", err
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
+	maxIdleRetries := cfg.maxIdleRetries()
+	destPath := downloadDestinationPath(cfg)
+	lastObservedSize := downloadFileSize(destPath)
+	consecutiveIdleRetries := 0
+	for attempt := 1; ; attempt++ {
+		startSize := downloadFileSize(destPath)
+		path, err := downloadSnapshotOnce(ctx, cfg)
+		if err == nil {
+			return path, nil
+		}
+		if !errors.Is(err, errDownloadIdleTimeout) || ctx.Err() != nil {
+			return "", err
+		}
+		currentSize := downloadFileSize(destPath)
+		madeProgress := currentSize > startSize ||
+			currentSize > lastObservedSize
+		if madeProgress {
+			consecutiveIdleRetries = 0
+			lastObservedSize = currentSize
+		} else {
+			consecutiveIdleRetries++
+		}
+		if consecutiveIdleRetries > maxIdleRetries {
+			return "", err
+		}
+		cfg.Logger.Warn(
+			"snapshot download stalled, retrying",
+			"component", "mithril",
+			"attempt", attempt,
+			"consecutive_idle_retries", consecutiveIdleRetries,
+			"max_idle_retries", maxIdleRetries,
+			"idle_timeout", cfg.idleTimeout(),
+			"partial_bytes", currentSize,
+			"made_progress", madeProgress,
+			"error", err,
+		)
+	}
+}
+
+func downloadSnapshotOnce(
+	ctx context.Context,
+	cfg DownloadConfig,
+) (string, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.URL == "" {
 		return "", errors.New("download URL is empty")
 	}
+	idleTimeout := cfg.idleTimeout()
+	downloadCtx, cancelDownload := context.WithCancelCause(ctx)
+	defer cancelDownload(nil)
 
 	// Ensure destination directory exists
 	if err := os.MkdirAll(cfg.DestDir, 0o750); err != nil {
@@ -186,11 +423,7 @@ func DownloadSnapshot(
 		)
 	}
 
-	filename := filepath.Base(cfg.Filename)
-	if filename == "." || filename == "/" {
-		filename = "snapshot.tar.zst"
-	}
-	destPath := filepath.Join(cfg.DestDir, filename)
+	destPath := downloadDestinationPath(cfg)
 
 	// Check for partial download to support resume
 	var existingSize int64
@@ -199,7 +432,7 @@ func DownloadSnapshot(
 	}
 
 	req, err := http.NewRequestWithContext(
-		ctx,
+		downloadCtx,
 		http.MethodGet,
 		cfg.URL,
 		nil,
@@ -216,14 +449,29 @@ func DownloadSnapshot(
 		)
 	}
 
+	transport := newDownloadTransport()
+	defer transport.CloseIdleConnections()
 	client := &http.Client{
 		Timeout:       0, // No timeout for large downloads
+		Transport:     transport,
 		CheckRedirect: httpsOnlyRedirect,
+	}
+	var headerTimer *idleTimer
+	if idleTimeout > 0 {
+		headerTimer = newIdleTimer(idleTimeout, func() {
+			cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+		})
 	}
 	resp, err := client.Do( //nolint:gosec // URL from caller-provided config; HTTPS-only redirect policy prevents downgrade
 		req,
 	)
+	if headerTimer != nil {
+		headerTimer.Stop()
+	}
 	if err != nil {
+		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+			return "", fmt.Errorf("downloading snapshot: %w", cause)
+		}
 		return "", fmt.Errorf("downloading snapshot: %w", err)
 	}
 	if resp == nil || resp.Body == nil {
@@ -292,7 +540,7 @@ func DownloadSnapshot(
 			}
 			// Re-issue request without Range header
 			req, err = http.NewRequestWithContext(
-				ctx,
+				downloadCtx,
 				http.MethodGet,
 				cfg.URL,
 				nil,
@@ -304,11 +552,23 @@ func DownloadSnapshot(
 					err,
 				)
 			}
+			if idleTimeout > 0 {
+				headerTimer = newIdleTimer(idleTimeout, func() {
+					cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+				})
+			}
 			resp2, err := client.Do( //nolint:gosec // same URL retried after Content-Range mismatch
 				req,
 			)
+			if headerTimer != nil {
+				headerTimer.Stop()
+				headerTimer = nil
+			}
 			if err != nil {
 				file.Close()
+				if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+					return "", fmt.Errorf("restarting download: %w", cause)
+				}
 				return "", fmt.Errorf(
 					"restarting download: %w",
 					err,
@@ -438,11 +698,19 @@ func DownloadSnapshot(
 		onProgress:  cfg.OnProgress,
 	}
 
-	if _, err := io.Copy(pw, resp.Body); err != nil {
+	body := newIdleTimeoutReader(resp.Body, idleTimeout, func() {
+		cancelDownload(downloadIdleTimeoutCause(idleTimeout))
+	})
+	if _, err := io.Copy(pw, body); err != nil {
+		body.Stop()
 		file.Close()
 		file = nil
+		if cause := context.Cause(downloadCtx); errors.Is(cause, errDownloadIdleTimeout) {
+			return "", fmt.Errorf("writing snapshot data: %w", cause)
+		}
 		return "", fmt.Errorf("writing snapshot data: %w", err)
 	}
+	body.Stop()
 
 	// Close the file explicitly so write errors (e.g. ENOSPC
 	// during a deferred flush) are not silently ignored.

@@ -178,8 +178,8 @@ func ValidateTxAlonzo(
 	}
 	tx = normalizedTx
 	errs := []error{}
-	for _, validationFunc := range alonzo.UtxoValidationRules {
-		err = validationFunc(tx, slot, ls, pp)
+	for _, validationRule := range alonzoUtxoValidationRules {
+		err = validationRule.validationFunc(tx, slot, ls, pp)
 		if err != nil {
 			errs = append(
 				errs,
@@ -215,6 +215,9 @@ func ValidateTxAlonzo(
 	if !tx.IsValid() {
 		return nil
 	}
+	if shouldSkipPhase2Validation(ls) {
+		return nil
+	}
 	// Resolve inputs
 	resolvedInputs := []lcommon.Utxo{}
 	for _, tmpInput := range tx.Inputs() {
@@ -248,11 +251,13 @@ func ValidateTxAlonzo(
 		}
 		scripts[tmpScript.Hash()] = tmpScript
 	}
-	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
-		scripts[tmpScript.Hash()] = tmpScript
-	}
-	for _, tmpScript := range tx.Witnesses().NativeScripts() {
-		scripts[tmpScript.Hash()] = tmpScript
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		for _, tmpScript := range witnesses.PlutusV1Scripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
+		for _, tmpScript := range witnesses.NativeScripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
 	}
 	// Evaluate scripts
 	var txInfoV1 script.TxInfo
@@ -343,6 +348,17 @@ func ValidateTxAlonzo(
 	return nil
 }
 
+var alonzoUtxoValidationRules = buildAlonzoValidationRules()
+
+func buildAlonzoValidationRules() []indexedUtxoValidationRule {
+	return buildIndexedUtxoValidationRules(
+		alonzo.UtxoValidationRules,
+		alonzoUtxoValidatePlutusScriptsRuleIndex,
+		alonzo.UtxoValidatePlutusScripts,
+		"alonzo.UtxoValidatePlutusScripts",
+	)
+}
+
 func EvaluateTxAlonzo(
 	tx lcommon.Transaction,
 	ls lcommon.LedgerState,
@@ -385,11 +401,13 @@ func EvaluateTxAlonzo(
 		}
 		scripts[tmpScript.Hash()] = tmpScript
 	}
-	for _, tmpScript := range tx.Witnesses().PlutusV1Scripts() {
-		scripts[tmpScript.Hash()] = tmpScript
-	}
-	for _, tmpScript := range tx.Witnesses().NativeScripts() {
-		scripts[tmpScript.Hash()] = tmpScript
+	if witnesses := tx.Witnesses(); witnesses != nil {
+		for _, tmpScript := range witnesses.PlutusV1Scripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
+		for _, tmpScript := range witnesses.NativeScripts() {
+			scripts[tmpScript.Hash()] = tmpScript
+		}
 	}
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits

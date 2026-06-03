@@ -112,6 +112,37 @@ func TestSyncStateScheduleStoreLoadsZeroFormatVersionFromOldRecord(t *testing.T)
 		"missing format_version must decode to 0 so validation rejects it")
 }
 
+// TestSyncStateScheduleStoreSortsUnsortedRecord verifies that a persisted
+// payload whose leader_slots are out of order is re-sorted on load, so
+// IsLeaderForSlot's binary search stays correct even against a tampered or
+// legacy record.
+func TestSyncStateScheduleStoreSortsUnsortedRecord(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	backingStore := newMockSyncStateStore()
+	key := syncStateScheduleKey(42, poolId)
+	backingStore.values[key] = `{"format_version":1,"epoch":42,"pool_id":"` +
+		hexEncode(poolId[:]) + `","pool_stake":1,"total_stake":1,` +
+		`"epoch_nonce":"","leader_slots":[300,100,200,50]}`
+
+	store := NewSyncStateScheduleStore(backingStore)
+	loaded, err := store.LoadSchedule(42, poolId)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(
+		t,
+		[]uint64{50, 100, 200, 300},
+		loaded.LeaderSlotsSnapshot(),
+		"persisted leader slots must be sorted ascending on load",
+	)
+	// Binary search must find every slot regardless of stored order.
+	for _, slot := range []uint64{50, 100, 200, 300} {
+		assert.True(t, loaded.IsLeaderForSlot(slot))
+	}
+	assert.False(t, loaded.IsLeaderForSlot(150))
+}
+
 func hexEncode(b []byte) string {
 	const hexChars = "0123456789abcdef"
 	out := make([]byte, len(b)*2)

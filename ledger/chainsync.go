@@ -1461,8 +1461,8 @@ func (ls *LedgerState) recoverPeerHeaderHistoryFromPointLocked(
 	if history == nil || len(history.order) == 0 {
 		return 0, nil
 	}
-	for i := len(history.order) - 1; i >= 0; i-- {
-		record, ok := history.byHash[history.order[i]]
+	for _, v := range slices.Backward(history.order) {
+		record, ok := history.byHash[v]
 		if !ok || record.event.Point.Slot <= point.Slot {
 			continue
 		}
@@ -1708,8 +1708,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"connection_id", e.ConnectionId.String(),
 	)
 	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
-		var notFitErr chain.BlockNotFitChainTipError
-		if errors.As(err, &notFitErr) {
+		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
 			localTip := ls.chain.Tip()
 			// A header behind the local tip is stale only if the
 			// Praos comparison also says it cannot beat the local

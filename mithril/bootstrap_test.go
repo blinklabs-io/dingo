@@ -80,6 +80,7 @@ func createChunkArchive(t *testing.T) []byte {
 
 func finalizeTestCertificate(t *testing.T, cert *Certificate) {
 	t.Helper()
+	require.NotNil(t, cert)
 	if cert.ProtocolMessage.MessageParts == nil {
 		cert.ProtocolMessage.MessageParts = map[string]string{}
 	}

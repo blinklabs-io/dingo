@@ -310,7 +310,7 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	require.ErrorContains(
 		t,
 		err,
-		"treasury withdrawal of 7 exceeds tracked treasury balance 6",
+		"treasury withdrawal of 7 exceeds tracked treasury withdrawal capacity 6",
 	)
 
 	account, err := store.GetAccount(stakeCred, false, nil)
@@ -322,4 +322,128 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(6), uint64(state.Treasury))
 	assert.Equal(t, uint64(20), uint64(state.Reserves))
+}
+
+func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 2)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	a := &lcommon.TreasuryWithdrawalGovAction{
+		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
+	}
+	err = applyTreasuryWithdrawal(&EnactmentContext{
+		DB:   db,
+		Slot: 123,
+	}, a)
+	require.NoError(t, err)
+
+	active, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	assert.Nil(t, active, "withdrawal must not create a reward account")
+	account, err := store.GetAccount(stakeCred, true, nil)
+	require.NoError(t, err)
+	assert.Nil(t, account)
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury))
+	assert.Equal(t, uint64(20), uint64(state.Reserves))
+}
+
+func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 3)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(5),
+		Active:     true,
+	}).Error)
+	require.NoError(t, store.DB().
+		Model(&models.Account{}).
+		Where("staking_key = ?", stakeCred).
+		Update("active", false).Error)
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	a := &lcommon.TreasuryWithdrawalGovAction{
+		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
+	}
+	err = applyTreasuryWithdrawal(&EnactmentContext{
+		DB:   db,
+		Slot: 123,
+	}, a)
+	require.NoError(t, err)
+
+	active, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	assert.Nil(t, active, "withdrawal must not reactivate the reward account")
+	account, err := store.GetAccount(stakeCred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.False(t, account.Active)
+	assert.Equal(t, uint64(5), uint64(account.Reward))
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury))
+	assert.Equal(t, uint64(20), uint64(state.Reserves))
+}
+
+func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 4)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	ctx := &EnactmentContext{
+		DB:   db,
+		Slot: 123,
+	}
+	first := &lcommon.TreasuryWithdrawalGovAction{
+		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 70},
+	}
+	require.NoError(t, applyTreasuryWithdrawal(ctx, first))
+
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(100), uint64(state.Treasury))
+	assert.Equal(t, uint64(30), ctx.TreasuryWithdrawalRemaining)
+
+	second := &lcommon.TreasuryWithdrawalGovAction{
+		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 40},
+	}
+	err = applyTreasuryWithdrawal(ctx, second)
+	require.Error(t, err)
+	assert.Contains(
+		t,
+		err.Error(),
+		"exceeds tracked treasury withdrawal capacity",
+	)
 }

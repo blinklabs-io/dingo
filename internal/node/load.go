@@ -135,6 +135,65 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 	return nil
 }
 
+// WithDeferredIndexes drops the deferred-index manifest before bulk
+// load and rebuilds it on the returned cleanup. Stores that do not
+// implement metadata.DeferredIndexManager are silently skipped — the
+// orchestrator behaves as if every index stayed in place.
+//
+// The cleanup must be called before the database is marked ready
+// (i.e. before sync_status is cleared). The orchestrator is the
+// authority on that ordering; this helper just owns the
+// drop/rebuild pairing.
+func WithDeferredIndexes(
+	db *database.Database,
+	logger *slog.Logger,
+) func() error {
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
+		return func() error { return nil }
+	}
+	if err := manager.DropDeferredIndexes(); err != nil {
+		logger.Warn(
+			"failed to drop deferred metadata indexes; "+
+				"continuing with full schema",
+			"error", err,
+		)
+		return func() error { return nil }
+	}
+	return func() error {
+		if err := manager.BuildDeferredIndexes(); err != nil {
+			return fmt.Errorf("rebuilding deferred indexes: %w", err)
+		}
+		return nil
+	}
+}
+
+// RepairDeferredIndexes rebuilds any deferred indexes that were
+// recorded as pending by a prior interrupted run. It is safe to call
+// when no rebuild is outstanding: BuildDeferredIndexes is itself
+// idempotent and clears the marker.
+func RepairDeferredIndexes(
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
+		return nil
+	}
+	pending, err := manager.HasDeferredIndexesPending()
+	if err != nil {
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	logger.Warn(
+		"deferred metadata indexes pending from a prior run; " +
+			"rebuilding before continuing",
+	)
+	return manager.BuildDeferredIndexes()
+}
+
 // LoadWithDB loads immutable DB blocks into the chain. If db is nil,
 // a new database connection is opened (and closed on return).
 func LoadWithDB(
@@ -915,15 +974,24 @@ func storeRawBlockUtxoOffsets(
 }
 
 func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
-	var blockArray []gcbor.RawMessage
-	if _, err := gcbor.Decode(blockCbor, &blockArray); err != nil {
+	decoder, err := gcbor.NewStreamDecoder(blockCbor)
+	if err != nil {
 		return nil, err
 	}
-	if len(blockArray) < 5 {
+	blockLen, _, _, err := decoder.DecodeArrayHeader()
+	if err != nil {
+		return nil, err
+	}
+	if blockLen < 5 {
 		return nil, nil
 	}
+	for i := 0; i < 4; i++ {
+		if _, _, err := decoder.Skip(); err != nil {
+			return nil, err
+		}
+	}
 	var invalidTxs []uint
-	if _, err := gcbor.Decode([]byte(blockArray[4]), &invalidTxs); err != nil {
+	if _, _, err := decoder.Decode(&invalidTxs); err != nil {
 		return nil, err
 	}
 	if len(invalidTxs) == 0 {

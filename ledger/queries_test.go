@@ -63,6 +63,13 @@ func newTestEraHistoryCfg(t testing.TB) *cardano.CardanoNodeConfig {
 	return cfg
 }
 
+func requireEraDesc(t testing.TB, eraId uint) eras.EraDesc {
+	t.Helper()
+	era := eras.GetEraById(eraId)
+	require.NotNil(t, era)
+	return *era
+}
+
 // TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone proves that the
 // current era's EraEnd is snapped to the end of the epoch that contains
 // ledgerTip + safeZone.  Within a single epoch slot↔time is linear (constant
@@ -917,6 +924,10 @@ func TestCheckedSlotAdd(t *testing.T) {
 // stopped in the window between an epoch-rollover version bump and the first
 // block of the new era.
 func TestReconstructTransitionInfo(t *testing.T) {
+	babbageEra := eras.GetEraById(eras.BabbageEraDesc.Id)
+	require.NotNil(t, babbageEra)
+	conwayEra := eras.GetEraById(eras.ConwayEraDesc.Id)
+	require.NotNil(t, conwayEra)
 	tests := []struct {
 		name           string
 		currentEra     eras.EraDesc
@@ -929,7 +940,7 @@ func TestReconstructTransitionInfo(t *testing.T) {
 			// Babbage pparams with Conway major version (9): TransitionKnown.
 			// This is the pre-Conway restart window scenario.
 			name:       "babbage era pparams with conway version → TransitionKnown",
-			currentEra: *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEra: *babbageEra,
 			currentEpoch: models.Epoch{
 				EpochId: 500,
 				EraId:   eras.BabbageEraDesc.Id,
@@ -943,7 +954,7 @@ func TestReconstructTransitionInfo(t *testing.T) {
 		{
 			// Babbage pparams with normal Babbage version: no transition.
 			name:       "babbage era pparams with babbage version → TransitionUnknown",
-			currentEra: *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEra: *babbageEra,
 			currentEpoch: models.Epoch{
 				EpochId: 499,
 				EraId:   eras.BabbageEraDesc.Id,
@@ -956,7 +967,7 @@ func TestReconstructTransitionInfo(t *testing.T) {
 		{
 			// Conway pparams in Conway era: pparamsEra == currentEra, no transition.
 			name:       "conway era pparams with conway version → TransitionUnknown",
-			currentEra: *eras.GetEraById(eras.ConwayEraDesc.Id),
+			currentEra: *conwayEra,
 			currentEpoch: models.Epoch{
 				EpochId: 600,
 				EraId:   eras.ConwayEraDesc.Id,
@@ -971,7 +982,7 @@ func TestReconstructTransitionInfo(t *testing.T) {
 		{
 			// Nil pparams: must not panic, leave TransitionUnknown.
 			name:           "nil pparams → TransitionUnknown",
-			currentEra:     *eras.GetEraById(eras.BabbageEraDesc.Id),
+			currentEra:     *babbageEra,
 			currentEpoch:   models.Epoch{EpochId: 400, EraId: eras.BabbageEraDesc.Id},
 			currentPParams: nil,
 			expectedState:  hardfork.TransitionUnknown,

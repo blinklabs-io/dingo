@@ -75,6 +75,7 @@ var flagSpecs = []flagSpec{
 	uintFlag("UtxorpcPort", "utxorpc-port", "UTxO RPC API port"),
 	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
 	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
+	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive base URL"),
@@ -123,9 +124,10 @@ var flagSpecs = []flagSpec{
 	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
 
-	// Database workers
+	// Database workers and API backfill
 	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
 	intFlag("DatabaseQueueSize", "db-queue-size", "database worker pool task queue size"),
+	intFlag("BackfillBatchSize", "backfill-batch-size", "API-mode metadata backfill block batch size"),
 
 	// Block production
 	boolFlag("BlockProducer", "block-producer", "enable block production mode"),
@@ -141,6 +143,8 @@ var flagSpecs = []flagSpec{
 	boolFlag("Mithril.Enabled", "mithril-enabled", "enable Mithril integration"),
 	stringFlag("Mithril.AggregatorURL", "mithril-aggregator-url", "", "Mithril aggregator URL override"),
 	stringFlag("Mithril.DownloadDir", "mithril-download-dir", "", "Mithril snapshot download directory"),
+	stringFlag("Mithril.DownloadIdleTimeout", "mithril-download-idle-timeout", "", "Mithril snapshot download idle timeout"),
+	intFlag("Mithril.DownloadMaxIdleRetries", "mithril-download-max-idle-retries", "Mithril snapshot download idle retries without progress"),
 	boolFlag("Mithril.CleanupAfterLoad", "mithril-cleanup-after-load", "cleanup Mithril files after load"),
 	boolFlag("Mithril.VerifyCertificates", "mithril-verify-certs", "verify Mithril certificate chains"),
 }
@@ -203,6 +207,28 @@ func stringFlag(field, name, shorthand, help string) flagSpec {
 				return err
 			}
 			targetValue(cfg, field).SetString(v)
+			return nil
+		},
+	}
+}
+
+func stringSliceFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet) {
+			def := defaultValue(field).Interface().([]string)
+			f.StringSlice(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetStringSlice(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(v))
 			return nil
 		},
 	}

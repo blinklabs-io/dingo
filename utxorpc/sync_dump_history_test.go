@@ -47,7 +47,7 @@ func loadTestChainBlocks(t *testing.T, n int) []models.Block {
 	it, err := imm.BlocksFromPoint(ocommon.Point{})
 	require.NoError(t, err)
 	defer it.Close()
-	var out []models.Block
+	out := make([]models.Block, 0, n)
 	for range n {
 		b, err := it.Next()
 		require.NoError(t, err)
@@ -211,5 +211,6 @@ func TestSyncBlockRefFromModel_CopiesHash(t *testing.T) {
 	}
 	ref := syncBlockRefFromModel(b)
 	b.Hash[0] = 0xff
+	require.NotEmpty(t, ref.GetHash())
 	require.Equal(t, byte(1), ref.GetHash()[0])
 }

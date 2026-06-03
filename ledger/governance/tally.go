@@ -278,16 +278,29 @@ func tallyDRepVotes(
 	return nil
 }
 
-// tallySPOVotes sums pool stake for votes matched against the stake
-// distribution snapshot at StakeEpoch. Pools that did not vote are not
-// counted.
+// tallySPOVotes computes SPO yes/no/abstain stake against the pool
+// stake distribution snapshot at StakeEpoch, applying the CIP-1694
+// reward-account delegation rules:
 //
-// TODO(#2369): account for the SPO reward-account delegation rules from
-// CIP-1694. Pools whose reward account delegates to AlwaysNoConfidence
-// auto-vote per the action's NoConfidence handling, and pools delegating
-// to AlwaysAbstain count toward abstain stake (excluded from the
-// denominator). This is related to the reward-account plumbing from
-// #1988, but the delegation semantics are separate follow-up work.
+//   - Pools with an explicit vote in `votes` use that vote.
+//   - Pools without an explicit vote fall back to the auto-vote
+//     pre-computed at snapshot capture time
+//     (PoolStakeSnapshot.RewardAccountAutoVote):
+//     Abstain        → SPOAbstainStake (excluded from the active
+//     denominator via SPOYesRatio).
+//     NoConfidence   → Yes for NoConfidence actions, No for any
+//     other action type (mirrors the DRep
+//     AlwaysNoConfidence handling).
+//   - Any other delegation (regular DRep, no DRep set, deregistered
+//     reward account, etc.) maps to None at snapshot time; the pool's
+//     stake remains in SPOTotalStake and counts as implicit no under
+//     CIP-1694 (in the denominator, not the numerator).
+//
+// Reading the auto-vote off the snapshot row makes the tally
+// snapshot-correct: a pool that re-delegates its reward account or
+// changes its reward account between StakeEpoch and the ratification
+// epoch does not retroactively shift the tally, matching
+// cardano-ledger's ssDelegations/ssDReps semantics.
 func tallySPOVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
@@ -306,27 +319,61 @@ func tallySPOVotes(
 		return fmt.Errorf("get pool stake snapshot: %w", err)
 	}
 
-	poolStake := make(map[string]uint64, len(dist))
 	var total uint64
 	for _, s := range dist {
-		stake := uint64(s.TotalStake)
-		poolStake[string(s.PoolKeyHash)] = stake
-		total += stake
+		total += uint64(s.TotalStake)
 	}
 	tally.SPOTotalStake = total
+	if len(dist) == 0 {
+		return nil
+	}
 
+	// Explicit vote precedence: build a pool-keyed view first so we
+	// can short-circuit the auto-vote branch for pools that did vote.
+	voteByPool := make(map[string]uint8, len(votes))
 	for _, v := range votes {
-		stake, ok := poolStake[string(v.VoterCredential)]
-		if !ok {
+		voteByPool[string(v.VoterCredential)] = v.Vote
+	}
+
+	isNoConfidenceAction := lcommon.GovActionType(tally.ActionType) ==
+		lcommon.GovActionTypeNoConfidence
+
+	for _, s := range dist {
+		stake := uint64(s.TotalStake)
+
+		if v, voted := voteByPool[string(s.PoolKeyHash)]; voted {
+			switch v {
+			case models.VoteYes:
+				tally.SPOYesStake += stake
+			case models.VoteNo:
+				tally.SPONoStake += stake
+			case models.VoteAbstain:
+				tally.SPOAbstainStake += stake
+			}
 			continue
 		}
-		switch v.Vote {
-		case models.VoteYes:
-			tally.SPOYesStake += stake
-		case models.VoteNo:
-			tally.SPONoStake += stake
-		case models.VoteAbstain:
+
+		// Only trust RewardAccountAutoVote when the row is flagged
+		// as resolved. Unresolved rows (Mithril-imported set/go
+		// rotations, or rows written by pre-CIP-1694 code) fall
+		// back to PoolRewardAccountAutoVoteNone — implicit no — so
+		// stale or never-computed values can never silently bucket
+		// stake into Abstain or NoConfidence.
+		if !s.RewardAccountAutoVoteResolved {
+			continue
+		}
+		switch s.RewardAccountAutoVote {
+		case models.PoolRewardAccountAutoVoteAbstain:
 			tally.SPOAbstainStake += stake
+		case models.PoolRewardAccountAutoVoteNoConfidence:
+			if isNoConfidenceAction {
+				tally.SPOYesStake += stake
+			} else {
+				tally.SPONoStake += stake
+			}
+		case models.PoolRewardAccountAutoVoteNone:
+			// No auto-vote: pool contributes only to SPOTotalStake
+			// (implicit no under CIP-1694).
 		}
 	}
 	return nil

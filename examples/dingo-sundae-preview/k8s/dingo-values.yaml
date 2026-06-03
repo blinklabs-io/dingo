@@ -1,0 +1,42 @@
+image:
+  repository: ghcr.io/blinklabs-io/dingo
+  tag: "0.46.2"
+  pullPolicy: IfNotPresent
+
+mithril:
+  enabled: true
+  cleanupAfterLoad: true
+  verifyCertificates: true
+
+environment:
+  CARDANO_NETWORK: "preview"
+  CARDANO_DATABASE_PATH: "/data"
+  DINGO_STORAGE_MODE: "api"
+  DINGO_UTXORPC_PORT: "9090"
+  DINGO_BLOCKFROST_PORT: "0"
+  DINGO_MESH_PORT: "0"
+  DINGO_DATABASE_METADATA_PLUGIN: "sqlite"
+  DINGO_DATABASE_BLOB_PLUGIN: "badger"
+
+persistence:
+  accessMode: ReadWriteOnce
+  size: 60Gi
+
+service:
+  type: LoadBalancer
+  sessionAffinity: ClientIP
+  ports:
+    private: 3002
+    relay: 3001
+    metrics: 12798
+    utxorpc: 9090
+    blockfrost: 0
+    mesh: 0
+
+resources:
+  requests:
+    cpu: 1
+    memory: 4Gi
+  limits:
+    cpu: 4
+    memory: 12Gi

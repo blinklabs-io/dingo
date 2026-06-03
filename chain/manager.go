@@ -97,7 +97,11 @@ func (cm *ChainManager) SetLedger(
 func (cm *ChainManager) PrimaryChain() *Chain {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
-	return cm.primaryChainLocked()
+	chain := cm.primaryChainLocked()
+	if chain == nil {
+		panic("chain manager primary chain is not initialized")
+	}
+	return chain
 }
 
 // primaryChainLocked returns the primary chain without acquiring the mutex.

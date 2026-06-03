@@ -47,10 +47,19 @@ type Schedule struct {
 	PoolStake     uint64              // Pool's stake from Go snapshot
 	TotalStake    uint64              // Total active stake from Go snapshot
 	EpochNonce    []byte              // Epoch nonce for VRF
-	LeaderSlots   []uint64            // Slots where pool is leader
+	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
 
 	mu sync.RWMutex
 }
+
+// LeaderSlots is maintained in ascending-sorted order so that
+// IsLeaderForSlot can do an O(log n) binary search instead of an O(n)
+// scan — relevant for high-stake pools with many leader slots per epoch.
+// The invariant is upheld at every entry point that populates the slice:
+//   - CalculateSchedule iterates slots in ascending order, so AddLeaderSlot
+//     only ever appends a value greater than the last.
+//   - syncStateScheduleStore.LoadSchedule re-sorts after rebuilding from a
+//     persisted record, guarding against a tampered or legacy unsorted list.
 
 // NewSchedule creates a new empty schedule for an epoch.
 func NewSchedule(
@@ -79,15 +88,21 @@ func (s *Schedule) AddLeaderSlot(slot uint64) {
 }
 
 // IsLeaderForSlot returns true if the pool is leader for the given slot.
+// LeaderSlots is kept ascending-sorted (see the type doc), so this is an
+// O(log n) binary search rather than an O(n) scan.
 func (s *Schedule) IsLeaderForSlot(slot uint64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return slices.Contains(s.LeaderSlots, slot)
+	_, found := slices.BinarySearch(s.LeaderSlots, slot)
+	return found
 }
 
 // SlotCount returns the number of slots where this pool is leader.
 func (s *Schedule) SlotCount() int {
+	if s == nil {
+		return 0
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.LeaderSlots)
@@ -95,6 +110,9 @@ func (s *Schedule) SlotCount() int {
 
 // LeaderSlotsSnapshot returns a copy of the leader slot list.
 func (s *Schedule) LeaderSlotsSnapshot() []uint64 {
+	if s == nil {
+		return nil
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]uint64(nil), s.LeaderSlots...)

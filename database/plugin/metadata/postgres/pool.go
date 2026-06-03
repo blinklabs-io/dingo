@@ -225,6 +225,68 @@ func (d *MetadataStorePostgres) LatestPoolOpCertSequence(
 	return ret.Sequence, ret.Count > 0, nil
 }
 
+// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
+// inclusive slot range, grouped by pool key hash.
+func (d *MetadataStorePostgres) CountPoolBlocksInSlotRange(
+	pkhs []lcommon.PoolKeyHash,
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (map[string]uint64, uint64, error) {
+	counts := make(map[string]uint64, len(pkhs))
+	for _, pkh := range pkhs {
+		counts[string(pkh.Bytes())] = 0
+	}
+	if endSlot < startSlot {
+		return counts, 0, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var totalRows int64
+	if err := db.Model(&models.PoolOpCertSequence{}).
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Count(&totalRows).Error; err != nil {
+		return nil, 0, fmt.Errorf("count pool blocks in slot range: %w", err)
+	}
+	total := uint64(totalRows) // #nosec G115 -- COUNT(*) is non-negative.
+
+	if len(pkhs) == 0 {
+		return counts, total, nil
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+	type poolBlockCount struct {
+		PoolKeyHash []byte
+		Count       uint64
+	}
+	var rows []poolBlockCount
+	if err := db.Model(&models.PoolOpCertSequence{}).
+		Select("pool_key_hash, COUNT(*) AS count").
+		Where(
+			"pool_key_hash IN ? AND slot >= ? AND slot <= ?",
+			hashes,
+			startSlot,
+			endSlot,
+		).
+		Group("pool_key_hash").
+		Scan(&rows).Error; err != nil {
+		return nil, 0, fmt.Errorf(
+			"count pool blocks by pool in slot range: %w",
+			err,
+		)
+	}
+	for _, row := range rows {
+		counts[string(row.PoolKeyHash)] = row.Count
+	}
+
+	return counts, total, nil
+}
+
 // GetPools gets pools by key hash.
 func (d *MetadataStorePostgres) GetPools(
 	pkhs []lcommon.PoolKeyHash,
@@ -260,6 +322,52 @@ func (d *MetadataStorePostgres) GetPools(
 		return nil, result.Error
 	}
 	return ret, nil
+}
+
+// GetPoolRegistrationsAtSlot retrieves the latest registration for each pool
+// at or before the supplied slot.
+func (d *MetadataStorePostgres) GetPoolRegistrationsAtSlot(
+	pkhs []lcommon.PoolKeyHash,
+	slot uint64,
+	txn types.Txn,
+) ([]models.PoolRegistration, error) {
+	if len(pkhs) == 0 {
+		return []models.PoolRegistration{}, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+
+	query := `
+		WITH ranked AS (
+			SELECT pr.*,
+				ROW_NUMBER() OVER (
+					PARTITION BY pr.pool_key_hash
+					ORDER BY pr.added_slot DESC,
+						COALESCE(t.block_index, 0) DESC,
+						COALESCE(c.cert_index, 0) DESC,
+						pr.id DESC
+				) AS rn
+			FROM pool_registration pr
+			LEFT JOIN certs c ON c.id = pr.certificate_id
+			LEFT JOIN "transaction" t ON t.id = c.transaction_id
+			WHERE pr.pool_key_hash IN ? AND pr.added_slot <= ?
+		)
+		SELECT * FROM ranked WHERE rn = 1`
+
+	var registrations []models.PoolRegistration
+	if err := db.Raw(query, hashes, slot).Scan(&registrations).Error; err != nil {
+		return nil, fmt.Errorf(
+			"GetPoolRegistrationsAtSlot: query registrations: %w",
+			err,
+		)
+	}
+	return registrations, nil
 }
 
 // GetPoolRegistrations returns pool registration certificates

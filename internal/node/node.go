@@ -300,6 +300,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithBarkPrunerFrequency(cfg.BarkPrunerFrequency),
+			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithShutdownTimeout(shutdownTimeout),

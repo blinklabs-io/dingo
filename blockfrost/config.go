@@ -20,4 +20,7 @@ type BlockfrostConfig struct {
 	// ListenAddress is the address to listen on.
 	// Defaults to ":3000".
 	ListenAddress string
+	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
+	// Empty disables CORS.
+	CORSAllowedOrigins []string
 }

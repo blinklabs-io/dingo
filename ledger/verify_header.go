@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -231,8 +232,7 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 
 	// Search newest-to-oldest so that if cache entries overlap
 	// (e.g., after rollback/rebuild), we use the most recent epoch data.
-	for i := len(ls.epochCache) - 1; i >= 0; i-- {
-		ep := ls.epochCache[i]
+	for _, ep := range slices.Backward(ls.epochCache) {
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -246,10 +246,10 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	// meaningful error message.
 	var lastValidEnd uint64
 	var hasValidEpoch bool
-	for i := len(ls.epochCache) - 1; i >= 0; i-- {
-		if ls.epochCache[i].LengthInSlots > 0 {
-			lastValidEnd = ls.epochCache[i].StartSlot +
-				uint64(ls.epochCache[i].LengthInSlots)
+	for _, v := range slices.Backward(ls.epochCache) {
+		if v.LengthInSlots > 0 {
+			lastValidEnd = v.StartSlot +
+				uint64(v.LengthInSlots)
 			hasValidEpoch = true
 			break
 		}

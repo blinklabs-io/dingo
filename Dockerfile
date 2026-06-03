@@ -1,4 +1,4 @@
-FROM ghcr.io/blinklabs-io/go:1.26.1-1 AS build
+FROM ghcr.io/blinklabs-io/go:1.26.3-1 AS build
 
 ARG VERSION
 ARG COMMIT_HASH
@@ -25,7 +25,7 @@ RUN make build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
 FROM ghcr.io/blinklabs-io/cardano-configs:20260430-1 AS cardano-configs
-FROM ghcr.io/blinklabs-io/nview:0.13.0 AS nview
+FROM ghcr.io/blinklabs-io/nview:0.14.0 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.15.0 AS txtop
 
 FROM debian:bookworm-slim AS dingo

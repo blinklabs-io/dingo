@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -543,11 +542,8 @@ func convertMultiAsset(
 // file. The tvar format is array(1) containing a map of TxIn->TxOut
 // entries. The map may use indefinite-length encoding (0xbf...0xff).
 //
-// Note: The entire file is read into memory because the CBOR stream
-// decoder (gouroboros) requires a contiguous byte slice and does not
-// support io.Reader streaming. Mainnet tvar files can be multi-GB.
-// A future optimization could use mmap to avoid copying the file
-// contents into Go heap memory.
+// Note: The CBOR stream decoder requires a contiguous byte slice, so the file
+// is mmap'd read-only to avoid copying large UTxO-HD tables into Go heap.
 func ParseUTxOsFromFile(
 	path string,
 	callback UTxOCallback,
@@ -560,10 +556,11 @@ func parseUTxOsFromFileWithProgress(
 	callback UTxOCallback,
 	progress func(UTxOParseProgress),
 ) (int, error) {
-	data, err := os.ReadFile(path)
+	data, cleanup, err := mmapReadOnly(path)
 	if err != nil {
 		return 0, fmt.Errorf("reading tvar file: %w", err)
 	}
+	defer cleanup()
 
 	// Parse outer array header using StreamDecoder
 	decoder, err := cbor.NewStreamDecoder(data)
