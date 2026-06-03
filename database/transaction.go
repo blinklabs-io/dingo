@@ -143,7 +143,7 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil); err != nil {
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
@@ -274,11 +274,13 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	tx lcommon.Transaction,
 	point ocommon.Point,
 	txn *Txn,
+	acc BatchAccumulator,
 ) error {
 	consumed := tx.Consumed()
 	if len(consumed) == 0 {
 		return nil
 	}
+	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))
 	seen := make(map[string]struct{}, len(consumed))
@@ -326,6 +328,20 @@ func (d *Database) ensureTransactionConsumedUtxos(
 					)
 				}
 			}
+			continue
+		}
+		// The row is absent from the store. If it was produced earlier in
+		// this same batch it has not been flushed yet: FlushBatch creates the
+		// producer row before applying spends, and SetTransactionBatched
+		// records the spend independently, so skip the expensive blob
+		// recovery rather than reconstructing a row the flush will write.
+		// This check is deliberately after the existing-row repair above so a
+		// partially-written row from a resumed backfill (DeletedSlot ==
+		// point.Slot, SpentAtTxId == nil) still gets its spender link
+		// backfilled — batchSpendUtxos only updates rows where deleted_slot
+		// = 0 and would not fix it later.
+		if inFlight != nil &&
+			inFlight.HasInFlightProducer(inputTxId, input.Index()) {
 			continue
 		}
 		recoveredUtxo, err := d.recoverConsumedUtxo(

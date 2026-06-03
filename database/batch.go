@@ -79,6 +79,14 @@ type batchStatsSetter interface {
 	SetBackfillStats(*types.BackfillHotPathStats)
 }
 
+// inFlightProducerLookup is implemented by accumulators that index the
+// outputs produced earlier in the current batch but not yet flushed. When
+// available, consumed-input recovery can skip blob/metadata recovery for a
+// producer that will be created (and spent) by the pending FlushBatch.
+type inFlightProducerLookup interface {
+	HasInFlightProducer(txId []byte, outputIdx uint32) bool
+}
+
 // SetTransactionBatched stores transaction blob offsets and immediate
 // metadata, while accumulating bulk metadata rows into acc for a later
 // FlushBatch.
@@ -228,7 +236,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 
 	recoverStart := time.Now()
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, acc); err != nil {
 		return err
 	}
 	if opts.Stats != nil {
