@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/binary"
 	"sync"
 	"testing"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm/clause"
 	"gorm.io/gorm/schema"
 )
 
@@ -285,6 +287,67 @@ func BenchmarkInsertKeyWitnessesGORM(b *testing.B) {
 		b.StartTimer()
 		if err := store.DB().
 			CreateInBatches(rows, batchChunkRows).Error; err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// benchHash builds a deterministic 32-byte key unique to (prefix, a, b) so a
+// benchmark's repeated flushes insert fresh rows instead of hitting
+// ON CONFLICT DO NOTHING.
+func benchHash(prefix byte, a, b int) []byte {
+	h := make([]byte, 32)
+	h[0] = prefix
+	binary.BigEndian.PutUint32(h[1:5], uint32(a))
+	binary.BigEndian.PutUint32(h[5:9], uint32(b))
+	return h
+}
+
+func benchUtxos(iter, n int) []models.Utxo {
+	utxos := make([]models.Utxo, n)
+	for i := range utxos {
+		utxos[i] = models.Utxo{
+			TxId:       benchHash(0x01, iter, i),
+			OutputIdx:  0,
+			PaymentKey: benchHash(0x02, iter, i)[:28],
+			StakingKey: benchHash(0x03, iter, i)[:28],
+			AddedSlot:  uint64(iter),
+			Amount:     types.Uint64(1_000_000),
+		}
+	}
+	return utxos
+}
+
+// BenchmarkImportUtxos and BenchmarkImportUtxosGORM compare the fixed-shape
+// utxo writer against the prior GORM CreateInBatches path on the heaviest flush
+// table. Both rebuild rows per iteration (untimed) with keys unique to the
+// iteration, so each insert is fresh; utxos carry no assets and a nil
+// TransactionID, so neither path touches the asset refetch or any FK.
+func BenchmarkImportUtxos(b *testing.B) {
+	store := newBenchStore(b)
+	for n := range b.N {
+		b.StopTimer()
+		utxos := benchUtxos(n, 500)
+		b.StartTimer()
+		if err := importUtxosWithDB(store.DB(), utxos); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkImportUtxosGORM(b *testing.B) {
+	store := newBenchStore(b)
+	for n := range b.N {
+		b.StopTimer()
+		utxos := benchUtxos(n, 500)
+		b.StartTimer()
+		if err := store.DB().Omit("Assets").Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "tx_id"},
+				{Name: "output_idx"},
+			},
+			DoNothing: true,
+		}).CreateInBatches(utxos, importUtxoBatchSize).Error; err != nil {
 			b.Fatal(err)
 		}
 	}
