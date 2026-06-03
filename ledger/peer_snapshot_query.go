@@ -268,7 +268,10 @@ func relayAccessPoints(
 		return nil
 	}
 	host := relay.Hostname
-	if relay.Port != 0 {
+	// Branch on the validated port, not relay.Port: a malformed out-of-range
+	// port narrows to 0 above, so such a row falls through to MultiHostName
+	// rather than emitting a SingleHostName with a bogus port 0.
+	if port != 0 {
 		// SingleHostName: a domain resolved directly, with an explicit port.
 		p := port
 		return []olocalstatequery.RelayAccessPoint{{

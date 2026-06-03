@@ -287,6 +287,30 @@ func TestAssembleLedgerPeerSnapshotRelayKinds(t *testing.T) {
 	assert.Equal(t, uint16(3004), *relays[5].Port)
 }
 
+// TestAssembleLedgerPeerSnapshotMalformedPort proves a hostname relay with an
+// out-of-range (malformed) port narrows to no port and is treated as an SRV
+// (MultiHostName) record rather than a SingleHostName with a bogus port 0.
+func TestAssembleLedgerPeerSnapshotMalformedPort(t *testing.T) {
+	host := "bad-port.example.com"
+	kh := poolKeyHash28(0x01)
+	pool := poolWithRelays(
+		kh,
+		models.PoolRegistrationRelay{Hostname: host, Port: 70000},
+	)
+	stake := map[string]uint64{string(kh): 1}
+
+	snapshot := assembleLedgerPeerSnapshot(
+		1, stake, []models.Pool{pool}, olocalstatequery.LedgerPeerKindAll,
+	)
+	require.Len(t, snapshot.Pools, 1)
+	relays := snapshot.Pools[0].Detail.Relays
+	require.Len(t, relays, 1)
+	assert.Equal(t, olocalstatequery.RelayKindSRV, relays[0].Kind)
+	require.NotNil(t, relays[0].Domain)
+	assert.Equal(t, host, *relays[0].Domain)
+	assert.Nil(t, relays[0].Port, "malformed port must not be emitted")
+}
+
 // TestAssembleLedgerPeerSnapshotResultEncodes proves the assembled result
 // round-trips through the gouroboros CBOR marshaller, i.e. it is a valid
 // wire-format GetLedgerPeerSnapshot response.
