@@ -47,6 +47,7 @@ func TestBulkInsertColumnsMatchSchema(t *testing.T) {
 		{"address_transaction", &models.AddressTransaction{}, addressTxCols},
 		{"utxo", &models.Utxo{}, utxoCols},
 		{"asset", &models.Asset{}, assetCols},
+		{"transaction", &models.Transaction{}, transactionCols},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

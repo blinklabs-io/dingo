@@ -2486,25 +2486,47 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 	// Clear Outputs on tmpTx so the upsert doesn't try to create them.
 	tmpTx.Outputs = nil
 
-	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "hash"}},
-		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
-		),
-	}).Create(tmpTx)
-	needsIdFetch := tmpTx.ID == 0
-
-	if result.Error != nil {
+	// Fixed-shape upsert. The common path is a single INSERT ... ON CONFLICT
+	// DO NOTHING RETURNING id: a returned id means a fresh insert. On conflict
+	// the row already exists (a retry), so preserve the prior DO UPDATE
+	// behavior on the mutable columns, refetch the id, and flag needsIdFetch so
+	// previously flushed child rows are deleted before re-insert.
+	insertSQL := buildBulkInsertSQL(
+		"transaction",
+		transactionCols,
+		`ON CONFLICT ("hash") DO NOTHING RETURNING id`,
+		1,
+	)
+	id, inserted, err := insertReturningID(
+		db, insertSQL, appendTransactionRow(nil, tmpTx),
+	)
+	if err != nil {
 		return fmt.Errorf(
 			"create transaction (batched) at slot %d, block %x, txHash %x, txIndex %d: %w",
 			point.Slot,
 			point.Hash,
 			txHash,
 			idx,
-			result.Error,
+			err,
 		)
 	}
-	if needsIdFetch {
+	needsIdFetch := !inserted
+	if inserted {
+		tmpTx.ID = id
+	} else {
+		if _, err := execRawOnConn(
+			db,
+			`UPDATE "transaction" SET "block_hash" = ?, "block_index" = ?, `+
+				`"slot" = ? WHERE "hash" = ?`,
+			[]any{tmpTx.BlockHash, tmpTx.BlockIndex, tmpTx.Slot, txHash},
+		); err != nil {
+			return fmt.Errorf(
+				"update existing transaction (batched) at slot %d, txHash %x: %w",
+				point.Slot,
+				txHash,
+				err,
+			)
+		}
 		var existing struct{ ID uint }
 		if err := db.Model(&models.Transaction{}).
 			Select("id").

@@ -58,6 +58,10 @@ var (
 	assetCols = []string{
 		"name", "name_hex", "policy_id", "fingerprint", "utxo_id", "amount",
 	}
+	transactionCols = []string{
+		"hash", "block_hash", "metadata", "slot", "type",
+		"fee", "ttl", "block_index", "valid",
+	}
 )
 
 // Conflict clauses preserved verbatim from the prior GORM clause.OnConflict
@@ -81,6 +85,37 @@ func appendAssetRow(dst []any, a *models.Asset) []any {
 	return append(dst,
 		a.Name, a.NameHex, a.PolicyId, a.Fingerprint, a.UtxoID, a.Amount,
 	)
+}
+
+func appendTransactionRow(dst []any, t *models.Transaction) []any {
+	return append(dst,
+		t.Hash, t.BlockHash, t.Metadata, t.Slot, t.Type,
+		t.Fee, t.TTL, t.BlockIndex, t.Valid,
+	)
+}
+
+// insertReturningID runs an INSERT ... RETURNING id on the transaction's conn
+// pool. It returns (id, true) for a row that was actually inserted, or
+// (0, false) when an ON CONFLICT DO NOTHING skipped the insert (RETURNING
+// yields no row). []byte args bind as blobs, like execRawOnConn.
+func insertReturningID(db *gorm.DB, query string, args []any) (uint, bool, error) {
+	ctx := db.Statement.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	rows, err := db.Statement.ConnPool.QueryContext(ctx, query, args...)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close() //nolint:errcheck
+	if !rows.Next() {
+		return 0, false, rows.Err()
+	}
+	var id uint
+	if err := rows.Scan(&id); err != nil {
+		return 0, false, err
+	}
+	return id, true, nil
 }
 
 // buildBulkInsertSQL returns a multi-row INSERT for nRows rows. For a given
