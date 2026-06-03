@@ -49,8 +49,8 @@ var flagSpecs = []flagSpec{
 	stringFlag("DatabasePath", "data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)"),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
-	transformStringFlag("RunMode", "run-mode", "", "run mode: serve, load, dev, or leios", normalizeRunMode),
-	transformStringFlag("StorageMode", "storage-mode", "", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
+	transformStringFlag("RunMode", "run-mode", "run mode: serve, load, dev, or leios", normalizeRunMode),
+	transformStringFlag("StorageMode", "storage-mode", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
 	stringFlag("CardanoConfig", "cardano-config", "", "path to Cardano config file"),
 	stringFlag("Topology", "topology", "", "path to topology file"),
 	stringFlag("ShutdownTimeout", "shutdown-timeout", "", "graceful shutdown timeout"),
@@ -125,8 +125,8 @@ var flagSpecs = []flagSpec{
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
 
 	// Logging
-	stringFlag("Logging.Format", "logging-format", "", "log output format: text (default) or json"),
-	stringFlag("Logging.Level", "logging-level", "", "log level: debug, info (default), warn, or error"),
+	transformStringFlag("Logging.Format", "logging-format", "log output format: text (default) or json", normalizeLoggingValue),
+	transformStringFlag("Logging.Level", "logging-level", "log level: debug, info (default), warn, or error", normalizeLoggingValue),
 
 	// Database workers and API backfill
 	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
@@ -264,10 +264,10 @@ func validatedStringFlag(
 // transformStringFlag normalizes the parsed value (e.g. lowercasing)
 // and may reject it; the transformed value is stored.
 func transformStringFlag(
-	field, name, shorthand, help string,
+	field, name, help string,
 	transform func(string) (string, error),
 ) flagSpec {
-	s := stringFlag(field, name, shorthand, help)
+	s := stringFlag(field, name, "", help)
 	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
 		if !f.Changed(name) {
 			return nil
@@ -509,4 +509,12 @@ func normalizeStorageMode(v string) (string, error) {
 			v, storageModeCore, storageModeAPI,
 		)
 	}
+}
+
+// normalizeLoggingValue lower-cases a logging format/level flag so values are
+// accepted case-insensitively (e.g. --logging-format=JSON). It does not
+// validate: unknown values are handled by the logger's warn-and-fallback path,
+// keeping flag, env, and YAML behavior identical.
+func normalizeLoggingValue(v string) (string, error) {
+	return strings.ToLower(strings.TrimSpace(v)), nil
 }

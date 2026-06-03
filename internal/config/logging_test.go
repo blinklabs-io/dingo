@@ -52,6 +52,13 @@ func TestLoad_LoggingEnvVars(t *testing.T) {
 func TestLoad_LoggingFromYAML(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
+	// Ensure a developer's exported DINGO_LOGGING_* env vars cannot override
+	// the YAML values under test. t.Setenv records the originals for restore;
+	// os.Unsetenv then removes them for the duration of the test.
+	t.Setenv("DINGO_LOGGING_FORMAT", "")
+	os.Unsetenv("DINGO_LOGGING_FORMAT")
+	t.Setenv("DINGO_LOGGING_LEVEL", "")
+	os.Unsetenv("DINGO_LOGGING_LEVEL")
 
 	yamlContent := "logging:\n  format: json\n  level: error\n"
 	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")

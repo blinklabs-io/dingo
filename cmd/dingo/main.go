@@ -58,18 +58,21 @@ func commonRun(cfg *config.Config) *slog.Logger {
 		globalFlags.debug,
 	)
 	slog.SetDefault(logger)
+	// Config-validation warnings go to stderr, not the logger: a high
+	// configured level (e.g. error) would otherwise suppress them, leaving the
+	// operator with no feedback that their value was ignored.
 	if !levelOK {
-		logger.Warn(
-			"unknown logging level, using info",
-			"component", programName,
-			"level", cfg.Logging.Level,
+		fmt.Fprintf(
+			os.Stderr,
+			"%s: unknown logging level %q, using info\n",
+			programName, cfg.Logging.Level,
 		)
 	}
 	if !formatOK {
-		logger.Warn(
-			"unknown logging format, using text",
-			"component", programName,
-			"format", cfg.Logging.Format,
+		fmt.Fprintf(
+			os.Stderr,
+			"%s: unknown logging format %q, using text\n",
+			programName, cfg.Logging.Format,
 		)
 	}
 	// Configure max processes with our logger wrapper, toss undo func
