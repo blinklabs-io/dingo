@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -109,6 +110,11 @@ func (s *syncStateScheduleStore) LoadSchedule(
 	for _, slot := range record.LeaderSlots {
 		schedule.AddLeaderSlot(slot)
 	}
+	// IsLeaderForSlot relies on LeaderSlots being ascending-sorted for its
+	// binary search. Persisted records written by CalculateSchedule already
+	// satisfy this, but sort defensively so a tampered or legacy unsorted
+	// payload can never silently break leader lookups.
+	slices.Sort(schedule.LeaderSlots)
 	return schedule, nil
 }
 

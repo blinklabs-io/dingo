@@ -16,6 +16,7 @@ package leader
 
 import (
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -500,4 +501,71 @@ func TestScheduleConcurrentAccess(t *testing.T) {
 	}
 
 	assert.Equal(t, 10, schedule.SlotCount())
+}
+
+// TestCalculateScheduleProducesSortedSlots guards the invariant that
+// IsLeaderForSlot's binary search depends on: CalculateSchedule must emit
+// leader slots in ascending order.
+func TestCalculateScheduleProducesSortedSlots(t *testing.T) {
+	calc := NewCalculator(0.9, 30)
+	poolId := lcommon.PoolKeyHash{}
+	copy(poolId[:], []byte("testpool1234567890123"))
+
+	schedule, err := calc.CalculateSchedule(
+		7,
+		poolId,
+		testVRFSeed,
+		1_000_000,
+		1_000_000,
+		testEpochNonce,
+		consensus.ConsensusModeCPraos,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, schedule)
+
+	slots := schedule.LeaderSlotsSnapshot()
+	require.NotEmpty(t, slots, "high-stake pool should win some slots")
+	assert.True(t, slices.IsSorted(slots),
+		"CalculateSchedule must produce ascending-sorted leader slots, got %v",
+		slots)
+}
+
+// TestScheduleIsLeaderForSlotBinarySearch cross-checks the binary-search
+// lookup against a linear scan over a wide, sparse slot set so a regression
+// in either ordering or search would be caught.
+func TestScheduleIsLeaderForSlotBinarySearch(t *testing.T) {
+	poolId := lcommon.PoolKeyHash{}
+	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
+
+	want := []uint64{1, 5, 9, 42, 100, 1_000, 50_000, 1_000_000}
+	for _, slot := range want {
+		schedule.AddLeaderSlot(slot)
+	}
+
+	for probe := range uint64(60) {
+		assert.Equal(t,
+			slices.Contains(want, probe),
+			schedule.IsLeaderForSlot(probe),
+			"binary search disagrees with linear scan for slot %d", probe)
+	}
+	// Spot-check the large boundary values too.
+	assert.True(t, schedule.IsLeaderForSlot(1_000_000))
+	assert.False(t, schedule.IsLeaderForSlot(1_000_001))
+}
+
+// BenchmarkIsLeaderForSlot exercises lookups against a large schedule,
+// approximating a high-stake pool with many leader slots per epoch.
+func BenchmarkIsLeaderForSlot(b *testing.B) {
+	poolId := lcommon.PoolKeyHash{}
+	schedule := NewSchedule(10, poolId, 1000, 10000, nil)
+	const n = 20_000
+	for i := range uint64(n) {
+		schedule.AddLeaderSlot(i * 3) // ascending, sparse
+	}
+
+	b.ResetTimer()
+	for i := 0; b.Loop(); i++ {
+		// Miss on odd offset, exercising the not-found path too.
+		_ = schedule.IsLeaderForSlot(uint64(i%n)*3 + uint64(i&1))
+	}
 }
