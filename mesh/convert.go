@@ -611,8 +611,7 @@ func certToOpType(
 		lcommon.CertificateTypeResignCommitteeCold,
 		lcommon.CertificateTypeRegistrationDrep,
 		lcommon.CertificateTypeDeregistrationDrep,
-		lcommon.CertificateTypeUpdateDrep,
-		lcommon.CertificateTypeLeiosEb:
+		lcommon.CertificateTypeUpdateDrep:
 		return ""
 	}
 	return ""

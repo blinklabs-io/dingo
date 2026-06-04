@@ -287,15 +287,23 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
-# Operational mode: "serve" (default), "load", or "dev"
+# Operational mode: "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)
 # - load: Batch import from ImmutableDB (requires immutableDbPath)
 # - dev: Development mode (forge blocks, disable outbound, skip topology)
+# - leios: Full node with experimental Leios/Dijkstra protocol support
 # Note: CLI commands (serve, load) take priority over this setting
 #
 # Can be overridden with the DINGO_RUN_MODE environment variable
 # CLI: --run-mode
 runMode: "serve"
+
+# Experimental startup era. Empty follows the genesis protocol version.
+# Set to "dijkstra" only for Dijkstra/Leios test networks.
+#
+# Can be overridden with the DINGO_START_ERA environment variable
+# CLI: --start-era
+startEra: ""
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command

@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 // EnactmentContext carries the inputs enactment needs: a writable
@@ -70,9 +71,10 @@ func EnactProposal(
 	}
 	result := &EnactmentResult{UpdatedPParams: ctx.PParams}
 
-	action, err := decodeGovAction(
+	action, err := decodeGovActionForPParams(
 		proposal.GovActionCbor,
 		proposal.ActionType,
+		ctx.PParams,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("decode gov action: %w", err)
@@ -80,19 +82,15 @@ func EnactProposal(
 
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
-		// Cross-era hazard: ctx.UpdateFn is the era's PParamsUpdateFunc,
-		// which type-asserts on its own ParameterUpdate struct. A
-		// proposal ratified in era E and enacted in era E+1 (because a
-		// HardForkInitiation also ratified at the same boundary) will
-		// hit this site with a Conway-shape ParamUpdate but era-E+1's
-		// UpdateFn — the assertion fails, the tick aborts, and the
-		// chain halts at that boundary. Pre-Dijkstra blast radius is
-		// zero (Conway is the only governance era today). The fix
-		// when a post-Conway era is added is a per-pair
-		// (fromEra, toEra) update-translation table called at the
-		// boundary, parallel to the EraDesc.HardForkFunc table that
-		// already translates pparams.
-		updated, err := ctx.UpdateFn(ctx.PParams, &a.ParamUpdate)
+		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
+		if err != nil {
+			return nil, fmt.Errorf("apply param update: %w", err)
+		}
+		result.UpdatedPParams = updated
+		result.PParamsChanged = true
+
+	case *gdijkstra.DijkstraParameterChangeGovAction:
+		updated, err := ctx.UpdateFn(ctx.PParams, a.ParamUpdate)
 		if err != nil {
 			return nil, fmt.Errorf("apply param update: %w", err)
 		}
@@ -182,6 +180,24 @@ func EnactProposal(
 	}
 
 	return result, nil
+}
+
+func decodeGovActionForPParams(
+	data []byte,
+	actionType uint8,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.GovAction, error) {
+	if lcommon.GovActionType(actionType) ==
+		lcommon.GovActionTypeParameterChange {
+		if _, ok := pparams.(*gdijkstra.DijkstraProtocolParameters); ok {
+			var a gdijkstra.DijkstraParameterChangeGovAction
+			if _, err := cbor.Decode(data, &a); err != nil {
+				return nil, err
+			}
+			return &a, nil
+		}
+	}
+	return decodeGovAction(data, actionType)
 }
 
 // applyTreasuryWithdrawal debits the treasury by the sum of the

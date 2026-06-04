@@ -3166,8 +3166,8 @@ func (ls *LedgerState) processEpochRollover(
 		result.NewEpochCache = epochs
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
-			eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
-			if eraDesc == nil {
+			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
+			if !ok {
 				return nil, fmt.Errorf(
 					"unknown era ID %d",
 					result.NewCurrentEpoch.EraId,
@@ -3300,9 +3300,9 @@ func (ls *LedgerState) processEpochRollover(
 		)
 	}
 	if oldErr == nil && newErr == nil {
-		if IsHardForkTransition(oldVer, newVer) {
-			fromEra, _ := EraForVersion(oldVer.Major)
-			toEra, _ := EraForVersion(newVer.Major)
+		if ls.isHardForkTransition(oldVer, newVer) {
+			fromEra, _ := ls.eraForVersion(oldVer.Major)
+			toEra, _ := ls.eraForVersion(newVer.Major)
 			result.HardFork = &HardForkInfo{
 				OldVersion: oldVer,
 				NewVersion: newVer,
@@ -3385,8 +3385,8 @@ func (ls *LedgerState) processEpochRollover(
 	result.NewEpochCache = epochs
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
-		eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
-		if eraDesc == nil {
+		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
+		if !ok {
 			return nil, fmt.Errorf(
 				"unknown era ID %d",
 				result.NewCurrentEpoch.EraId,

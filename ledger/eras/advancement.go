@@ -33,25 +33,30 @@ package eras
 // Era IDs are not assumed to be contiguous integers; the check resolves
 // each ID to its position in Eras and compares positions.
 func IsValidEraAdvancement(currentEraId, nextEraId uint) bool {
-	currentIdx := indexOfEra(currentEraId)
+	return IsValidEraAdvancementIn(Eras, currentEraId, nextEraId)
+}
+
+func IsValidEraAdvancementIn(
+	eraList []EraDesc,
+	currentEraId, nextEraId uint,
+) bool {
+	currentIdx := indexOfEraIn(eraList, currentEraId)
 	if currentIdx < 0 {
 		return false
 	}
 	if nextEraId == currentEraId {
 		return true
 	}
-	nextIdx := indexOfEra(nextEraId)
+	nextIdx := indexOfEraIn(eraList, nextEraId)
 	if nextIdx < 0 {
 		return false
 	}
 	return nextIdx == currentIdx+1
 }
 
-// indexOfEra returns the position of an era ID in the Eras slice, or
-// -1 if the era is not present.
-func indexOfEra(eraId uint) int {
-	for i := range Eras {
-		if Eras[i].Id == eraId {
+func indexOfEraIn(eraList []EraDesc, eraId uint) int {
+	for i := range eraList {
+		if eraList[i].Id == eraId {
 			return i
 		}
 	}

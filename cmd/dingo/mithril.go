@@ -1309,22 +1309,24 @@ func fetchGapBlocksFromPeer(
 		)
 	}
 
+	blockfetchCfg, err := blockfetch.NewConfig(
+		blockfetch.WithBlockFunc(blockFunc),
+		blockfetch.WithBatchDoneFunc(batchDoneFunc),
+		blockfetch.WithBatchStartTimeout(30*time.Second),
+		blockfetch.WithBlockTimeout(60*time.Second),
+	)
+	if err != nil {
+		tcpConn.Close()
+		return nil, fmt.Errorf("creating blockfetch config: %w", err)
+	}
+
 	// Create ouroboros connection with blockfetch protocol
 	oConn, err := ouroboros.NewConnection(
 		ouroboros.WithConnection(tcpConn),
 		ouroboros.WithNetworkMagic(networkMagic),
 		ouroboros.WithNodeToNode(true),
 		ouroboros.WithKeepAlive(true),
-		ouroboros.WithBlockFetchConfig(
-			blockfetch.NewConfig(
-				blockfetch.WithBlockFunc(blockFunc),
-				blockfetch.WithBatchDoneFunc(batchDoneFunc),
-				blockfetch.WithBatchStartTimeout(
-					30*time.Second,
-				),
-				blockfetch.WithBlockTimeout(60*time.Second),
-			),
-		),
+		ouroboros.WithBlockFetchConfig(blockfetchCfg),
 	)
 	if err != nil {
 		tcpConn.Close()

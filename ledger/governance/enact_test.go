@@ -20,9 +20,11 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +59,49 @@ func TestDecodeGovAction_ParameterChangeRoundtrip(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, concrete.ParamUpdate.MinFeeA)
 	assert.Equal(t, uint(1234), *concrete.ParamUpdate.MinFeeA)
+}
+
+func TestEnactProposal_DijkstraParameterChange(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+
+	fee := uint(1234)
+	action := &gdijkstra.DijkstraParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: gdijkstra.DijkstraProtocolParameterUpdate{
+			MinFeeA: &fee,
+		},
+	}
+	encoded, err := cbor.Encode(action)
+	require.NoError(t, err)
+
+	pparams := &gdijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MinFeeA: 1,
+		},
+	}
+	proposal := &models.GovernanceProposal{
+		TxHash:        testBytes(32, 0xD1),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		GovActionCbor: encoded,
+		AddedSlot:     500,
+		ExpiresEpoch:  100,
+		AnchorURL:     "https://example.invalid/dijkstra-param",
+		AnchorHash:    testBytes(32, 0xD2),
+		ReturnAddress: testBytes(29, 0xD3),
+		Deposit:       0,
+	}
+
+	result, err := EnactProposal(&EnactmentContext{
+		DB:       db,
+		Slot:     2000,
+		Epoch:    42,
+		PParams:  pparams,
+		UpdateFn: eras.PParamsUpdateDijkstra,
+	}, proposal)
+	require.NoError(t, err)
+	require.True(t, result.PParamsChanged)
+	require.Equal(t, uint(1234), pparams.MinFeeA)
 }
 
 func TestDecodeGovAction_HardForkRoundtrip(t *testing.T) {

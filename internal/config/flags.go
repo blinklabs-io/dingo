@@ -50,6 +50,7 @@ var flagSpecs = []flagSpec{
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
 	transformStringFlag("RunMode", "run-mode", "run mode: serve, load, dev, or leios", normalizeRunMode),
+	transformStringFlag("StartEra", "start-era", "experimental start era: dijkstra", normalizeStartEra),
 	transformStringFlag("StorageMode", "storage-mode", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
 	stringFlag("CardanoConfig", "cardano-config", "", "path to Cardano config file"),
 	stringFlag("Topology", "topology", "", "path to topology file"),
@@ -496,6 +497,17 @@ func normalizeRunMode(v string) (string, error) {
 		)
 	}
 	return string(mode), nil
+}
+
+func normalizeStartEra(v string) (string, error) {
+	era := StartEra(strings.ToLower(v))
+	if !era.Valid() {
+		return "", fmt.Errorf(
+			"invalid start era %q: must be empty or 'dijkstra'",
+			v,
+		)
+	}
+	return string(era), nil
 }
 
 func normalizeStorageMode(v string) (string, error) {

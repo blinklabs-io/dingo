@@ -162,6 +162,23 @@ func TestBuildShape_OK(t *testing.T) {
 	assert.NoError(t, shape.Validate(), "BuildShape must produce a valid Shape")
 }
 
+func TestBuildShapeWithDijkstra_OK(t *testing.T) {
+	cfg := newTestCfg(t)
+	shape, err := eras.BuildShapeWithDijkstra(cfg, true)
+	require.NoError(t, err)
+
+	require.Len(t, shape.Eras, 8)
+	assert.Equal(t, "Conway", shape.Eras[6].EraName)
+	assert.Equal(t, "Dijkstra", shape.Eras[7].EraName)
+	assert.Equal(t, uint(12), shape.Eras[7].MinMajorVersion)
+	assert.Equal(t, uint(13), shape.Eras[7].MaxMajorVersion)
+
+	entry, found := shape.EraForVersion(12)
+	require.True(t, found)
+	assert.Equal(t, eras.DijkstraEraDesc.Id, entry.EraID)
+	assert.NoError(t, shape.Validate(), "Dijkstra shape must validate")
+}
+
 // Shape.EraForVersion and the package-level eras.EraForVersion agree on
 // every covered major-version, and both reject unknown versions.
 func TestBuildShape_EraForVersionAgreesWithEraTable(t *testing.T) {

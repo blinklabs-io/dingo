@@ -27,6 +27,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/topology"
@@ -104,6 +105,7 @@ type Config struct {
 	tracing                  bool
 	tracingStdout            bool
 	runMode                  string
+	startEra                 internalconfig.StartEra
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 	// Peer targets (0 = use default, -1 = unlimited)
@@ -315,6 +317,10 @@ func (c *Config) isDevMode() bool {
 	return c.runMode == runModeDev
 }
 
+func (c *Config) experimentalDijkstraEnabled() bool {
+	return c.runMode == runModeLeios || c.startEra.IsDijkstra()
+}
+
 func (n *Node) configValidate() error {
 	// Default storageMode to "core" when unset, and validate.
 	if n.config.storageMode == "" {
@@ -326,6 +332,13 @@ func (n *Node) configValidate() error {
 			n.config.storageMode,
 			StorageModeCore,
 			StorageModeAPI,
+		)
+	}
+	if !n.config.startEra.Valid() {
+		return fmt.Errorf(
+			"invalid start era %q: must be empty or %q",
+			n.config.startEra,
+			internalconfig.StartEraDijkstra,
 		)
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
@@ -579,6 +592,14 @@ func WithRejectionWatermark(
 func WithRunMode(mode string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.runMode = mode
+	}
+}
+
+// WithStartEra sets the experimental direct startup era. Empty uses the
+// genesis protocol version; "dijkstra" starts directly in the Dijkstra era.
+func WithStartEra(startEra string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.startEra = internalconfig.StartEra(startEra)
 	}
 }
 

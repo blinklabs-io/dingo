@@ -48,7 +48,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
 		"ProcessEpoch",                 // (2) Conway-style governance enact
 		"SetPParams",                   // (3) persist enacted pparams
-		"IsHardForkTransition",         // (4) inter-era boundary detection
+		"isHardForkTransition",         // (4) inter-era boundary detection
 		"applyIntraEraHardForkRule",    // (5) per-major-version HARDFORK rule
 	}
 

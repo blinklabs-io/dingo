@@ -2657,6 +2657,8 @@ func redeemerPurpose(tag lcommon.RedeemerTag) string {
 		return "voting"
 	case lcommon.RedeemerTagProposing:
 		return "proposing"
+	case lcommon.RedeemerTagGuarding:
+		return "guarding"
 	default:
 		return ""
 	}

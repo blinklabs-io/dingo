@@ -54,6 +54,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -389,6 +390,8 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	ValidateHistorical          bool
+	EnableDijkstra              bool
+	StartInDijkstra             bool
 	TrustedReplay               bool
 	ManualBlockProcessing       bool
 	ForgeBlocks                 bool
@@ -443,6 +446,7 @@ type slotBattleRecorderHolder struct {
 type LedgerState struct {
 	metrics                            stateMetrics
 	currentEra                         eras.EraDesc
+	activeEras                         []eras.EraDesc
 	config                             LedgerStateConfig
 	chainsyncBlockfetchTimeoutTimer    *time.Timer // timeout timer for blockfetch operations
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
@@ -581,6 +585,9 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		// We do this so we don't have to add guards around every log operation
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	if cfg.StartInDijkstra && !cfg.EnableDijkstra {
+		return nil, errors.New("StartInDijkstra requires EnableDijkstra")
+	}
 	// Initialize database worker pool config with defaults if not set
 	if cfg.DatabaseWorkerPoolConfig.WorkerPoolSize == 0 &&
 		cfg.DatabaseWorkerPoolConfig.TaskQueueSize == 0 {
@@ -588,6 +595,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	}
 	ls := &LedgerState{
 		config:             cfg,
+		activeEras:         eras.ActiveEras(cfg.EnableDijkstra),
 		chainsyncState:     InitChainsyncState,
 		db:                 cfg.Database,
 		chain:              cfg.ChainManager.PrimaryChain(),
@@ -604,6 +612,38 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
 	return ls, nil
+}
+
+func (ls *LedgerState) eraList() []eras.EraDesc {
+	if len(ls.activeEras) > 0 {
+		return ls.activeEras
+	}
+	return eras.Eras
+}
+
+func (ls *LedgerState) eraById(eraId uint) (*eras.EraDesc, bool) {
+	eraDesc := eras.GetEraByIdIn(ls.eraList(), eraId)
+	return eraDesc, eraDesc != nil
+}
+
+func (ls *LedgerState) eraForVersion(majorVersion uint) (uint, bool) {
+	return EraForVersion(ls.eraList(), majorVersion)
+}
+
+func (ls *LedgerState) isValidEraAdvancement(
+	currentEraId, nextEraId uint,
+) bool {
+	return eras.IsValidEraAdvancementIn(
+		ls.eraList(),
+		currentEraId,
+		nextEraId,
+	)
+}
+
+func (ls *LedgerState) isHardForkTransition(
+	oldVersion, newVersion ProtocolVersion,
+) bool {
+	return IsHardForkTransition(ls.eraList(), oldVersion, newVersion)
 }
 
 func (ls *LedgerState) Start(ctx context.Context) error {
@@ -1776,7 +1816,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		// nonce.
 		if len(epochs) > 0 {
 			newCurrentEpoch = epochs[len(epochs)-1]
-			eraDesc := eras.GetEraById(
+			eraDesc, _ := ls.eraById(
 				newCurrentEpoch.EraId,
 			)
 			if eraDesc != nil {
@@ -1992,17 +2032,6 @@ func (ls *LedgerState) processChainIteratorRollback(
 //   - currentPParams: current protocol parameters (read-only input)
 //
 // Returns the new era and protocol parameters, or an error.
-//
-// What this function does NOT do: translate in-flight governance state
-// across the boundary. Specifically, a ParameterChange proposal that is
-// ratified-but-not-enacted at this transition will keep its old-era
-// ProtocolParameterUpdate CBOR shape, and the subsequent ENACT call in
-// the new era's context will fail its type assertion and halt the
-// chain. The blast radius is zero pre-Dijkstra (Conway is the only
-// governance era currently in eras.Eras), and the fix when a post-
-// Conway era is added is a per-pair (fromEra, toEra) update-translation
-// table called from this site, parallel to the EraDesc.HardForkFunc
-// table that already translates pparams here.
 func (ls *LedgerState) transitionToEra(
 	txn *database.Txn,
 	nextEraId uint,
@@ -2010,12 +2039,17 @@ func (ls *LedgerState) transitionToEra(
 	addedSlot uint64,
 	currentPParams lcommon.ProtocolParameters,
 ) (*EraTransitionResult, error) {
-	nextEra := eras.Eras[nextEraId]
+	nextEraPtr, ok := ls.eraById(nextEraId)
+	if !ok {
+		return nil, fmt.Errorf("unknown era ID %d", nextEraId)
+	}
+	nextEra := *nextEraPtr
 	result := &EraTransitionResult{
 		NewPParams: currentPParams,
 		NewEra:     nextEra,
 	}
 	if nextEra.HardForkFunc != nil {
+		fromEraId := ls.currentEra.Id
 		// Perform hard fork
 		// This generally means upgrading pparams from previous era
 		newPParams, err := nextEra.HardForkFunc(
@@ -2045,6 +2079,14 @@ func (ls *LedgerState) transitionToEra(
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to set pparams: %w", err)
+		}
+		if err := governance.TranslateRatifiedGovActions(
+			ls.db,
+			txn,
+			fromEraId,
+			nextEraId,
+		); err != nil {
+			return nil, fmt.Errorf("translate governance actions: %w", err)
 		}
 	}
 	return result, nil
@@ -2660,7 +2702,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					entry.NextEraTrigger.Kind == hardfork.TriggerAtEpoch &&
 					entry.NextEraTrigger.Epoch <= newEpochId &&
 					nextEpochEraId == snapshotEra.Id {
-					if int(snapshotEra.Id+1) < len(eras.Eras) {
+					if _, ok := ls.eraById(snapshotEra.Id + 1); ok {
 						nextEpochEraId = snapshotEra.Id + 1
 					}
 				}
@@ -2675,7 +2717,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				// HardForkFunc but skip per-era epoch-based events
 				// that should have fired during the omitted span.
 				if nextEpochEraId != snapshotEra.Id {
-					if !eras.IsValidEraAdvancement(
+					if !ls.isValidEraAdvancement(
 						snapshotEra.Id, nextEpochEraId,
 					) {
 						return fmt.Errorf(
@@ -2703,10 +2745,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				}
 
 				// Process epoch rollover
+				workingEraPtr, ok := ls.eraById(workingEraId)
+				if !ok {
+					return fmt.Errorf("unknown era ID %d", workingEraId)
+				}
 				result, err := ls.processEpochRollover(
 					txn,
 					snapshotEpoch,
-					eras.Eras[workingEraId],
+					*workingEraPtr,
 					workingPParams,
 				)
 				if err != nil {
@@ -3244,8 +3290,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					// up to the stability window cutoff.
 					var blockNonce []byte
 					if snapshotEra.CalculateEtaVFunc != nil {
-						tmpEra := eras.Eras[next.Era().Id]
-						if tmpEra.CalculateEtaVFunc != nil {
+						tmpEra, ok := ls.eraById(uint(next.Era().Id))
+						if ok && tmpEra.CalculateEtaVFunc != nil {
 							tmpNonce, err := tmpEra.CalculateEtaVFunc(
 								ls.config.CardanoNodeConfig,
 								runningNonce,
@@ -3474,6 +3520,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			validationEra, err := resolveValidationEra(
 				tx,
 				currentEra,
+				ls.eraList(),
 			)
 			if err != nil {
 				delta.Release()
@@ -3631,6 +3678,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
 	switch header := block.Header().(type) {
+	case *dijkstra.DijkstraBlockHeader:
+		// Distinct concrete type embedding BabbageBlockHeader; a type
+		// switch won't fall through to the Babbage case, so it needs an
+		// explicit entry or per-pool OpCert sequence tracking is skipped
+		// for Dijkstra-era blocks.
+		return header.Body.OpCert.SequenceNumber, true
 	case *shelley.ShelleyBlockHeader:
 		return header.Body.OpCertSequenceNumber, true
 	case *allegra.AllegraBlockHeader:
@@ -3761,7 +3814,7 @@ func (ls *LedgerState) reconstructTransitionInfo() {
 		// silently leave transitionInfo at TransitionUnknown.
 		return
 	}
-	pparamsEraId, ok := EraForVersion(ver.Major)
+	pparamsEraId, ok := ls.eraForVersion(ver.Major)
 	if !ok {
 		return
 	}
@@ -3789,7 +3842,7 @@ func (ls *LedgerState) eraShape() hardfork.Shape {
 	if cfg == nil {
 		return hardfork.Shape{}
 	}
-	s, err := eras.BuildShape(cfg)
+	s, err := eras.BuildShapeWithDijkstra(cfg, ls.config.EnableDijkstra)
 	if err != nil {
 		return hardfork.Shape{}
 	}
@@ -4035,7 +4088,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 			Major: result.NewMajor,
 			Minor: result.NewMinor,
 		}
-		if !IsHardForkTransition(currentVer, targetVer) {
+		if !ls.isHardForkTransition(currentVer, targetVer) {
 			return
 		}
 		ls.Lock()
@@ -4117,7 +4170,7 @@ func (ls *LedgerState) computePParams(
 	}
 	for _, ep := range slices.Backward(epochCache) {
 		if ep.EraId != era.Id {
-			prevEra := eras.GetEraById(ep.EraId)
+			prevEra, _ := ls.eraById(ep.EraId)
 			if prevEra != nil &&
 				prevEra.DecodePParamsFunc != nil {
 				prevPP, prevErr := ls.db.GetPParams(
@@ -4170,7 +4223,7 @@ func (ls *LedgerState) computeGenesisProtocolParameters(
 
 	// Chain through each era up to the target era
 	for eraId := eras.AllegraEraDesc.Id; eraId <= era.Id; eraId++ {
-		eraStep := eras.GetEraById(eraId)
+		eraStep, _ := ls.eraById(eraId)
 		if eraStep == nil {
 			return nil, fmt.Errorf(
 				"unknown era ID %d",
@@ -4207,7 +4260,7 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	if len(epochs) > 0 {
 		// Set current epoch and era
 		ls.currentEpoch = epochs[len(epochs)-1]
-		eraDesc := eras.GetEraById(ls.currentEpoch.EraId)
+		eraDesc, _ := ls.eraById(ls.currentEpoch.EraId)
 		if eraDesc == nil {
 			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
 		}
@@ -4222,9 +4275,12 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		return errors.New("failed to load Shelley genesis")
 	}
 	startProtoVersion := shelleyGenesis.ProtocolParameters.ProtocolVersion.Major
-	startEra, startEraOk := eras.EraForVersion(startProtoVersion)
+	startEra, startEraOk := eras.EraForVersionIn(
+		ls.eraList(),
+		startProtoVersion,
+	)
 	// Initialize current era to Byron when starting from genesis
-	ls.currentEra = eras.Eras[0] // Byron era
+	ls.currentEra = ls.eraList()[0] // Byron era
 	// Transition through every era between the current and the target era.
 	// If the configured version is unknown, the loop is skipped and the
 	// node starts at Byron — same fallback behavior as the previous map
@@ -4234,6 +4290,9 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	startEraId := uint(0)
 	if startEraOk {
 		startEraId = startEra.Id
+	}
+	if ls.config.StartInDijkstra {
+		startEraId = eras.DijkstraEraDesc.Id
 	}
 	for nextEraId := ls.currentEra.Id + 1; nextEraId <= startEraId; nextEraId++ {
 		result, err := ls.transitionToEra(
@@ -5047,10 +5106,11 @@ func (ls *LedgerState) ProtocolParamsForSlot(
 			break
 		}
 		nextID := eraID + 1
-		if int(nextID) >= len(eras.Eras) {
+		nextEraPtr, ok := ls.eraById(nextID)
+		if !ok {
 			break
 		}
-		nextEra := eras.Eras[nextID]
+		nextEra := *nextEraPtr
 		if nextEra.HardForkFunc == nil {
 			eraID = nextID
 			continue
@@ -5131,7 +5191,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMo
 	if transitionInfo.State == hardfork.TransitionKnown &&
 		epoch >= transitionInfo.KnownEpoch {
 		nextID := currentEra.Id + 1
-		if int(nextID) < len(eras.Eras) {
+		if _, ok := ls.eraById(nextID); ok {
 			return consensusModeForEraID(nextID)
 		}
 	}
@@ -5147,7 +5207,7 @@ func (ls *LedgerState) ConsensusModeForEpoch(epoch uint64) consensus.ConsensusMo
 			break
 		}
 		nextID := eraID + 1
-		if int(nextID) >= len(eras.Eras) {
+		if _, ok := ls.eraById(nextID); !ok {
 			break
 		}
 		eraID = nextID
@@ -5698,19 +5758,20 @@ func (ls *LedgerState) CountBlocksInSlotRange(
 func resolveValidationEra(
 	tx lcommon.Transaction,
 	currentEra eras.EraDesc,
+	eraList []eras.EraDesc,
 ) (eras.EraDesc, error) {
 	txEraId := uint(tx.Type()) // #nosec G115 -- era IDs are non-negative
 	if txEraId == currentEra.Id {
 		return currentEra, nil
 	}
-	if !eras.IsCompatibleEra(txEraId, currentEra.Id) {
+	if !eras.IsCompatibleEraIn(eraList, txEraId, currentEra.Id) {
 		// Typed *gledger.EraMismatch carries the Haskell-canonical
 		// wire format via MarshalCBOR; localtxsubmission's
 		// encodeRejectReason picks it up via errors.As and emits
 		// canonical CBOR to peers.
 		return eras.EraDesc{}, newEraMismatchError(txEraId, currentEra.Id)
 	}
-	txEra := eras.GetEraById(txEraId)
+	txEra := eras.GetEraByIdIn(eraList, txEraId)
 	if txEra == nil {
 		return eras.EraDesc{}, fmt.Errorf(
 			"TX %s era %d not found in era registry",
@@ -5763,7 +5824,11 @@ func (ls *LedgerState) validateTxCore(
 		currentSlotErr,
 	)
 
-	validationEra, err := resolveValidationEra(tx, snapshotEra)
+	validationEra, err := resolveValidationEra(
+		tx,
+		snapshotEra,
+		ls.eraList(),
+	)
 	if err != nil {
 		return err
 	}
@@ -5831,7 +5896,11 @@ func (ls *LedgerState) EvaluateTx(
 	snapshotPrevEraPParams := ls.prevEraPParams
 	ls.RUnlock()
 
-	validationEra, err := resolveValidationEra(tx, snapshotEra)
+	validationEra, err := resolveValidationEra(
+		tx,
+		snapshotEra,
+		ls.eraList(),
+	)
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}

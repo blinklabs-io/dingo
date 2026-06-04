@@ -249,12 +249,15 @@ func FetchBlock(
 		return nil
 	}
 
-	cfg := blockfetch.NewConfig(
+	cfg, err := blockfetch.NewConfig(
 		blockfetch.WithBlockFunc(blockFunc),
 		blockfetch.WithBatchDoneFunc(batchDone),
 		blockfetch.WithBatchStartTimeout(timeout),
 		blockfetch.WithBlockTimeout(timeout),
 	)
+	if err != nil {
+		return nil, err
+	}
 	oc, err := dial(ep, magic, ouroboros.WithBlockFetchConfig(cfg))
 	if err != nil {
 		return nil, err

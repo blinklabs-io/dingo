@@ -54,11 +54,10 @@ import (
 //     live via LedgerState.IsVrfKeyInUse, so no boundary index needs
 //     to be populated.
 //
-// Cases known but not yet required (no era defined in dingo yet):
-//
-//   - major == 12 (Dijkstra): full ledger era after Conway, distinct
-//     from vanRossem. Stubbed until cardano-ledger publishes stable
-//     Dijkstra specs and gouroboros + dingo grow a Dijkstra era table.
+//   - major == 12 (Dijkstra): full ledger era after Conway. The era
+//     transition is handled by eras.DijkstraEraDesc when the
+//     experimental Dijkstra table is enabled; there is no additional
+//     intra-era state rewrite here.
 //
 // Any future major-version bump that lands without a case here is a
 // no-op, matching the Haskell rule's `otherwise = id` branch.

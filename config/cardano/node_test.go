@@ -150,6 +150,38 @@ func TestCardanoNodeConfigMissingGenesisHashes(t *testing.T) {
 	}
 }
 
+func TestCardanoNodeConfigLoadsDijkstraGenesis(t *testing.T) {
+	tmpDir := t.TempDir()
+	genesisPath := filepath.Join(tmpDir, "dijkstra-genesis.json")
+	err := os.WriteFile(genesisPath, []byte(`{
+  "maxRefScriptSizePerBlock": 1048576,
+  "maxRefScriptSizePerTx": 204800,
+  "refScriptCostStride": 25600,
+  "refScriptCostMultiplier": 1.2,
+  "committeeStakeCoverage": 0.99,
+  "quorumStakeThreshold": 0.75
+}`), 0644)
+	require.NoError(t, err)
+
+	configPath := filepath.Join(tmpDir, "config.json")
+	err = os.WriteFile(configPath, []byte(`{
+  "DijkstraGenesisFile": "dijkstra-genesis.json"
+}`), 0644)
+	require.NoError(t, err)
+
+	cfg, err := NewCardanoNodeConfigFromFile(configPath)
+	require.NoError(t, err)
+	require.NotEmpty(t, cfg.DijkstraGenesisHash)
+	require.NotNil(t, cfg.DijkstraGenesis())
+	assert.Equal(
+		t,
+		uint32(1048576),
+		cfg.DijkstraGenesis().MaxRefScriptSizePerBlock,
+	)
+	assert.Equal(t, uint32(204800), cfg.DijkstraGenesis().MaxRefScriptSizePerTx)
+	assert.Equal(t, uint32(25600), cfg.DijkstraGenesis().RefScriptCostStride)
+}
+
 func TestCardanoNodeConfigLoadsMithrilVerificationKeysFromDisk(t *testing.T) {
 	tmpDir := t.TempDir()
 	genesisKey := "genesis-vkey-data\n"
@@ -353,10 +385,11 @@ func TestHardForkEpoch(t *testing.T) {
 			TestAlonzoHardForkAtEpoch:    ptrUint64(0),
 			TestBabbageHardForkAtEpoch:   ptrUint64(0),
 			TestConwayHardForkAtEpoch:    ptrUint64(0),
+			TestDijkstraHardForkAtEpoch:  ptrUint64(0),
 		}
 		for _, era := range []string{
 			"shelley", "allegra", "mary",
-			"alonzo", "babbage", "conway",
+			"alonzo", "babbage", "conway", "dijkstra",
 		} {
 			epoch, ok := cfg.HardForkEpoch(era)
 			assert.True(t, ok, "era %s should be configured", era)
@@ -412,10 +445,13 @@ func TestHardForkEpoch(t *testing.T) {
 		cfg := &CardanoNodeConfig{
 			ExperimentalHardForksEnabled: new(true),
 			TestConwayHardForkAtEpoch:    ptrUint64(5),
+			TestDijkstraHardForkAtEpoch:  ptrUint64(5),
 		}
-		epoch, ok := cfg.HardForkEpoch("conway")
-		assert.True(t, ok)
-		assert.Equal(t, uint64(5), epoch)
+		for _, era := range []string{"conway", "dijkstra"} {
+			epoch, ok := cfg.HardForkEpoch(era)
+			assert.True(t, ok, "era %s should be configured", era)
+			assert.Equal(t, uint64(5), epoch)
+		}
 	})
 }
 

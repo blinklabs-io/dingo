@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
@@ -87,6 +88,16 @@ func babbageHeaderWithMajor(t *testing.T, major uint64) *babbage.BabbageBlockHea
 	}
 }
 
+// dijkstraHeaderWithMajor builds a Dijkstra header (a distinct concrete
+// type that embeds a Babbage header) with the given protocol major
+// version.
+func dijkstraHeaderWithMajor(t *testing.T, major uint64) *dijkstra.DijkstraBlockHeader {
+	t.Helper()
+	return &dijkstra.DijkstraBlockHeader{
+		BabbageBlockHeader: *babbageHeaderWithMajor(t, major),
+	}
+}
+
 func TestHeaderProtocolMajor_Shelley(t *testing.T) {
 	got, ok := HeaderProtocolMajor(shelleyHeaderWithMajor(t, 2))
 	require.True(t, ok)
@@ -133,6 +144,15 @@ func TestHeaderProtocolMajor_Conway(t *testing.T) {
 	got, ok := HeaderProtocolMajor(h)
 	require.True(t, ok)
 	assert.Equal(t, uint(10), got)
+}
+
+func TestHeaderProtocolMajor_Dijkstra(t *testing.T) {
+	// Dijkstra headers are a distinct concrete type from Babbage/Conway.
+	// Without an explicit case the type switch falls through to default
+	// (ok=false), which disables the "too high" check for Dijkstra blocks.
+	got, ok := HeaderProtocolMajor(dijkstraHeaderWithMajor(t, 12))
+	require.True(t, ok)
+	assert.Equal(t, uint(12), got)
 }
 
 func TestHeaderProtocolMajor_Byron(t *testing.T) {
@@ -211,6 +231,35 @@ func TestValidateHeaderProtocolVersion_TestnetOneAheadAtDijkstra(t *testing.T) {
 		babbageHeaderWithMajor(t, 13),
 		12,
 		false,
+	)
+	require.NoError(t, err)
+}
+
+func TestValidateHeaderProtocolVersion_DijkstraTooHigh(t *testing.T) {
+	// Regression: a Dijkstra-era header more than one ahead of current
+	// pparams must be rejected. Before HeaderProtocolMajor had an explicit
+	// Dijkstra case, this header fell through to default (ok=false) and the
+	// BBODY "HeaderProtVerTooHigh" check was silently skipped, letting a
+	// malicious peer's header with an arbitrarily high protocol major
+	// version pass on a node running the Dijkstra era.
+	err := ValidateHeaderProtocolVersion(
+		dijkstraHeaderWithMajor(t, 99),
+		12,
+		true,
+	)
+	require.Error(t, err)
+	var typed *HeaderProtocolVersionTooHighError
+	require.True(t, errors.As(err, &typed))
+	assert.Equal(t, uint(99), typed.Supplied)
+	assert.Equal(t, uint(13), typed.Expected)
+}
+
+func TestValidateHeaderProtocolVersion_DijkstraOneAhead(t *testing.T) {
+	// A Dijkstra header exactly one ahead of current is still accepted.
+	err := ValidateHeaderProtocolVersion(
+		dijkstraHeaderWithMajor(t, 13),
+		12,
+		true,
 	)
 	require.NoError(t, err)
 }
@@ -366,6 +415,27 @@ func TestLedgerStateValidateBlockHeaderProtocolVersion_MainnetRejects(t *testing
 	header := &conway.ConwayBlockHeader{
 		BabbageBlockHeader: *babbageHeaderWithMajor(t, 12),
 	}
+	err := ls.validateBlockHeaderProtocolVersion(header, pp)
+	require.Error(t, err)
+	var typed *HeaderProtocolVersionTooHighError
+	require.True(t, errors.As(err, &typed))
+}
+
+func TestLedgerStateValidateBlockHeaderProtocolVersion_DijkstraRejects(t *testing.T) {
+	// End-to-end: a node in the Dijkstra era (pparams major 12) on mainnet
+	// must reject a Dijkstra header whose protocol major is more than one
+	// ahead, exercising the GetProtocolVersion Dijkstra case, isMainnet,
+	// and the HeaderProtocolMajor Dijkstra case together.
+	ls := newLedgerStateForNetwork(t, "Mainnet", byron.MainnetProtocolMagic)
+	pp := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 12,
+				Minor: 0,
+			},
+		},
+	}
+	header := dijkstraHeaderWithMajor(t, 99)
 	err := ls.validateBlockHeaderProtocolVersion(header, pp)
 	require.Error(t, err)
 	var typed *HeaderProtocolVersionTooHighError
