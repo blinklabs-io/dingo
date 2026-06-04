@@ -43,6 +43,10 @@ const (
 	DefaultAPIBlockCacheSize      = DefaultBlockCacheSize
 	DefaultAPIIndexCacheSize      = DefaultIndexCacheSize
 	DefaultAPICompressionEnabled  = true
+	// DefaultCompressionLevel is the ZSTD compression level used when
+	// compression is enabled. Badger recommends level 1, which gives a good
+	// compression ratio without the throughput penalty of higher levels.
+	DefaultCompressionLevel = 1
 )
 
 var (
@@ -57,6 +61,7 @@ var (
 		valueThreshold        uint64
 		gcEnabled             bool
 		compressionEnabled    bool
+		compressionLevel      uint64
 		blockCacheSizeSet     bool
 		indexCacheSizeSet     bool
 		compressionEnabledSet bool
@@ -115,6 +120,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.storageMode = "core"
 	cmdlineOptions.gcEnabled = true
 	cmdlineOptions.compressionEnabled = DefaultCoreCompressionEnabled
+	cmdlineOptions.compressionLevel = DefaultCompressionLevel
 	cmdlineOptions.blockCacheSizeSet = false
 	cmdlineOptions.indexCacheSizeSet = false
 	cmdlineOptions.compressionEnabledSet = false
@@ -199,10 +205,17 @@ func init() {
 				{
 					Name:         "compression",
 					Type:         plugin.PluginOptionTypeBool,
-					Description:  "Enable Snappy compression (runtime default: false in core mode, true in api mode)",
+					Description:  "Enable ZSTD compression (runtime default: false in core mode, true in api mode)",
 					DefaultValue: DefaultCoreCompressionEnabled,
 					Dest:         &(cmdlineOptions.compressionEnabled),
 					SetIndicator: &(cmdlineOptions.compressionEnabledSet),
+				},
+				{
+					Name:         "compression-level",
+					Type:         plugin.PluginOptionTypeUint,
+					Description:  "ZSTD compression level used when compression is enabled (higher = better ratio, slower)",
+					DefaultValue: uint64(DefaultCompressionLevel),
+					Dest:         &(cmdlineOptions.compressionLevel),
 				},
 			},
 		},
@@ -237,6 +250,10 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		cmdlineOptions.valueThreshold,
 		uint64(math.MaxInt64),
 	)
+	compressionLevel := min(
+		cmdlineOptions.compressionLevel,
+		uint64(math.MaxInt),
+	)
 	// #nosec G115
 	opts := []BlobStoreBadgerOptionFunc{
 		WithDataDir(cmdlineOptions.dataDir),
@@ -253,6 +270,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		WithValueThreshold(int64(valueThreshold)),
 		WithGc(cmdlineOptions.gcEnabled),
 		WithCompressionEnabled(compressionEnabled),
+		WithCompressionLevel(int(compressionLevel)),
 		WithDeferOpen(),
 	}
 	cmdlineOptionsMutex.Unlock()

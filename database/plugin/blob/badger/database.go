@@ -271,6 +271,7 @@ type BlobStoreBadger struct {
 	valueThreshold       int64
 	compactBlockMetadata bool
 	compressionEnabled   bool
+	compressionLevel     int
 	gcEnabled            bool
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
@@ -282,7 +283,8 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
 		gcEnabled:          true, // Enable GC by default for disk-backed stores
-		compressionEnabled: true, // Snappy compression by default
+		compressionEnabled: true, // ZSTD compression by default
+		compressionLevel:   DefaultCompressionLevel,
 		blockCacheSize:     DefaultBlockCacheSize,
 		indexCacheSize:     DefaultIndexCacheSize,
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
@@ -315,7 +317,8 @@ func (db *BlobStoreBadger) open() error {
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true).
 			WithValueThreshold(db.valueThreshold).
-			WithCompression(db.badgerCompression())
+			WithCompression(db.badgerCompression()).
+			WithZSTDCompressionLevel(db.compressionLevel)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)
@@ -343,7 +346,8 @@ func (db *BlobStoreBadger) open() error {
 			WithValueLogFileSize(db.valueLogFileSize).
 			WithMemTableSize(db.memTableSize).
 			WithValueThreshold(db.valueThreshold).
-			WithCompression(db.badgerCompression())
+			WithCompression(db.badgerCompression()).
+			WithZSTDCompressionLevel(db.compressionLevel)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open on-disk: %w", err)
@@ -367,7 +371,7 @@ func (db *BlobStoreBadger) open() error {
 
 func (db *BlobStoreBadger) badgerCompression() options.CompressionType {
 	if db.compressionEnabled {
-		return options.Snappy
+		return options.ZSTD
 	}
 	return options.None
 }

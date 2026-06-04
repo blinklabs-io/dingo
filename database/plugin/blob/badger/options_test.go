@@ -358,6 +358,62 @@ func TestNewFromCmdlineOptionsPreservesExplicitCompressionDisableInAPIStorageMod
 	}
 }
 
+func TestNewFromCmdlineOptionsCompressionLevelDefault(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b.compressionLevel != DefaultCompressionLevel {
+		t.Fatalf(
+			"compressionLevel: want default %d, got %d",
+			DefaultCompressionLevel,
+			b.compressionLevel,
+		)
+	}
+}
+
+func TestNewFromCmdlineOptionsCompressionLevelOverride(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	if err := plugin.ProcessConfig(map[string]map[string]map[string]any{
+		"blob": {
+			"badger": {
+				"compression-level": uint64(7),
+			},
+		},
+	}); err != nil {
+		t.Fatalf("process plugin config: %v", err)
+	}
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b.compressionLevel != 7 {
+		t.Fatalf("compressionLevel: want explicit override 7, got %d", b.compressionLevel)
+	}
+}
+
 func TestNewFromCmdlineOptionsDoesNotMutateGlobals(t *testing.T) {
 	cmdlineOptionsMutex.Lock()
 	saved := cmdlineOptions

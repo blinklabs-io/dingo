@@ -38,11 +38,15 @@ database:
       # index-cache-size: 0
       # Enable garbage collection (default: true)
       gc: true
-      # Enable Snappy compression.
+      # Enable ZSTD compression.
       # Leave unset to use the storage-mode default:
       # - false when storageMode: "core"
       # - true when storageMode: "api"
       # compression: false
+      # ZSTD compression level used when compression is enabled.
+      # Higher levels give a better compression ratio at the cost of
+      # throughput. Badger recommends level 1 (default).
+      # compression-level: 1
     gcs:
       # Google Cloud Storage bucket name
       bucket: ""
