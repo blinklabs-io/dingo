@@ -943,8 +943,10 @@ func (n *Node) startDeferredIndexMaintenance() {
 		return
 	}
 	if !pending {
+		n.config.logger.Info("deferred-index maintenance not needed")
 		return
 	}
+	n.config.logger.Info("deferred-index maintenance starting")
 	go func() {
 		if err := manager.BuildDeferredIndexes(); err != nil {
 			n.config.logger.Error(
