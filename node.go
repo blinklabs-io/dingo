@@ -962,6 +962,16 @@ func (n *Node) startDeferredIndexMaintenance() func() {
 		n.config.logger.Info("deferred-index maintenance complete")
 	}()
 	return func() {
-		<-done
+		timeout := n.configuredShutdownTimeout()
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			n.config.logger.Warn(
+				"timed out waiting for deferred-index maintenance; continuing cleanup",
+				"timeout", timeout,
+			)
+		}
 	}
 }

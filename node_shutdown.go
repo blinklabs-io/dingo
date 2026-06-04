@@ -73,13 +73,16 @@ func (n *Node) closeWithShutdownTimeout(
 	}
 }
 
+func (n *Node) configuredShutdownTimeout() time.Duration {
+	if n.config.shutdownTimeout > 0 {
+		return n.config.shutdownTimeout
+	}
+	return 30 * time.Second
+}
+
 func (n *Node) shutdown() error {
 	shutdownStart := time.Now()
-	// Create shutdown context with timeout (default 30s if not configured)
-	shutdownTimeout := 30 * time.Second
-	if n.config.shutdownTimeout > 0 {
-		shutdownTimeout = n.config.shutdownTimeout
-	}
+	shutdownTimeout := n.configuredShutdownTimeout()
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	if n.cancel != nil {
@@ -216,8 +219,23 @@ func (n *Node) shutdown() error {
 
 	if n.deferredIndexMaintenanceDone != nil {
 		n.config.logger.Info("waiting for deferred-index maintenance")
-		<-n.deferredIndexMaintenanceDone
-		n.config.logger.Info("deferred-index maintenance stopped")
+		select {
+		case <-n.deferredIndexMaintenanceDone:
+			n.config.logger.Info("deferred-index maintenance stopped")
+		case <-ctx.Done():
+			n.config.logger.Warn(
+				"timed out waiting for deferred-index maintenance; continuing shutdown",
+				"timeout", shutdownTimeout,
+				"error", ctx.Err(),
+			)
+			err = errors.Join(
+				err,
+				fmt.Errorf(
+					"deferred-index maintenance shutdown: %w",
+					ctx.Err(),
+				),
+			)
+		}
 	}
 
 	if n.db != nil {
