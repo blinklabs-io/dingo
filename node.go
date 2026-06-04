@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -67,6 +68,7 @@ type Node struct {
 	leaderElection                   *leader.Election
 	rtsMetrics                       *rtsMetrics
 	shutdownFuncs                    []func(context.Context) error
+	deferredIndexMaintenanceDone     chan struct{}
 	config                           Config
 	ctx                              context.Context
 	cancel                           context.CancelFunc
@@ -875,6 +877,10 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
+	if n.config.storageMode.IsAPI() {
+		started = append(started, n.startDeferredIndexMaintenance())
+	}
+
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
 		creds, err := n.validateBlockProducerStartup()
@@ -920,4 +926,55 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// startDeferredIndexMaintenance finishes lazy deferred-index rebuilds
+// using the node's already-open database handle. The critical subset is
+// rebuilt before API readiness, so this background repair can restore
+// secondary query indexes and clear the pending marker without opening a
+// second Badger handle during serve startup.
+func (n *Node) startDeferredIndexMaintenance() func() {
+	manager, ok := n.db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
+		return func() {}
+	}
+	pending, err := manager.HasDeferredIndexesPending()
+	if err != nil {
+		n.config.logger.Error(
+			"checking deferred-index maintenance state failed",
+			"error", err,
+		)
+		return func() {}
+	}
+	if !pending {
+		n.config.logger.Info("deferred-index maintenance not needed")
+		return func() {}
+	}
+	done := make(chan struct{})
+	n.deferredIndexMaintenanceDone = done
+	n.config.logger.Info("deferred-index maintenance starting")
+	go func() {
+		defer close(done)
+		if err := manager.BuildDeferredIndexes(); err != nil {
+			n.config.logger.Error(
+				"deferred-index maintenance failed",
+				"error", err,
+			)
+			return
+		}
+		n.config.logger.Info("deferred-index maintenance complete")
+	}()
+	return func() {
+		timeout := n.configuredShutdownTimeout()
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			n.config.logger.Warn(
+				"timed out waiting for deferred-index maintenance; continuing cleanup",
+				"timeout", timeout,
+			)
+		}
+	}
 }

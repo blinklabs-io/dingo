@@ -96,6 +96,7 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 			CheckpointWrites:      900 * time.Millisecond,
 		},
 	})
+	metrics.recordIndexRebuildDuration(1500 * time.Millisecond)
 	metrics.markComplete()
 	metrics.recordError()
 
@@ -198,6 +199,11 @@ func TestMithrilSyncMetricsRecordProgress(t *testing.T) {
 				"skipped_utxo_offsets",
 			),
 		),
+	)
+	require.Equal(
+		t,
+		float64(1.5),
+		promtestutil.ToFloat64(metrics.indexRebuildDuration),
 	)
 	require.Equal(t, float64(1), promtestutil.ToFloat64(metrics.completed))
 	require.Equal(t, float64(1), promtestutil.ToFloat64(metrics.errors))

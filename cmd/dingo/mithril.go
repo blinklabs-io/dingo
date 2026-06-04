@@ -538,7 +538,7 @@ func runMithrilSync(
 	// clears sync_status — so a crash between drop and rebuild
 	// leaves sync_status set and triggers the recovery path on
 	// the next startup.
-	rebuildDeferredIndexes := node.WithDeferredIndexes(db, logger)
+	deferredIndexes := node.WithDeferredIndexes(db, logger)
 
 	// Import ledger state and copy blocks in parallel.
 	// Ledger state goes to metadata (SQLite), blocks go to the blob
@@ -856,13 +856,24 @@ func runMithrilSync(
 		metrics.setPhaseActive(mithrilSyncPhaseBackfill, false)
 	}
 
-	// Rebuild deferred indexes BEFORE clearing sync_status so a
+	// Rebuild critical deferred indexes BEFORE clearing sync_status so a
 	// crash here leaves sync_status set (serve refuses to start)
 	// and metadata_indexes_pending set (next mithril sync rebuilds
 	// before re-running anything else).
-	if err := rebuildDeferredIndexes(); err != nil {
+	metrics.setPhaseActive(mithrilSyncPhaseIndexRebuild, true)
+	indexRebuildStart := time.Now()
+	if err := deferredIndexes.BuildCritical(); err != nil {
+		metrics.setPhaseActive(mithrilSyncPhaseIndexRebuild, false)
 		return err
 	}
+	indexRebuildElapsed := time.Since(indexRebuildStart)
+	metrics.recordIndexRebuildDuration(indexRebuildElapsed)
+	metrics.setPhaseActive(mithrilSyncPhaseIndexRebuild, false)
+	logger.Info(
+		"critical deferred metadata indexes rebuilt; lazy indexes deferred to maintenance",
+		"component", "mithril",
+		"duration", indexRebuildElapsed,
+	)
 
 	if err := updateMithrilReadyState(
 		db, logger, loadResult, ledgerStateSlot,
@@ -883,6 +894,8 @@ func runMithrilSync(
 		"component", "mithril",
 		"epoch", result.Snapshot.Beacon.Epoch,
 		"immutable_file_number", result.Snapshot.Beacon.ImmutableFileNumber,
+		"index_rebuild_elapsed", indexRebuildElapsed,
+		"lazy_index_rebuild_mode", "maintenance",
 	)
 
 	return nil
