@@ -1,5 +1,48 @@
 # Dingo Releases
 
+## v0.50.2 (June 3, 2026)
+
+**Title:** Faster leader scheduling, sturdier backfill provenance, and safer chainsync intersections
+
+**Date:** June 3, 2026
+
+**Version:** v0.50.2
+
+Hi folks! Here’s what we shipped in v0.50.2.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, testing coverage, and release history updates.
+
+### 💪 Improvements
+
+* Improved **speed leader scheduling checks during block production planning:** Leader schedule lookups now finish faster, which keeps block production planning more responsive. ([#2493](https://github.com/blinklabs-io/dingo/pull/2493))
+* Refined **strengthen recovery coverage with real chain replay paths:** Regression checks now cover real chain replay paths more directly, which increases confidence in recovery behavior. ([#2479](https://github.com/blinklabs-io/dingo/pull/2479))
+* Updated **keep the published v0.50.1 release history current:** The release history now includes the v0.50.1 notes, which makes recent release context easier to review. ([#2480](https://github.com/blinklabs-io/dingo/pull/2480))
+
+### 🔧 Fixes
+
+* Fixed **preserve backfill history more reliably during historical recovery:** Historical backfill now keeps output history aligned more reliably during resumed recovery, which improves tracking accuracy after interruptions. ([#2481](https://github.com/blinklabs-io/dingo/pull/2481))
+* Corrected **fail oversized sync intersection requests earlier:** Oversized sync intersection requests now stop sooner, which avoids unnecessary intersection work and keeps sync behavior safer. ([#2494](https://github.com/blinklabs-io/dingo/pull/2494))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps for this release:** Normal patch release upgrade steps are generally sufficient for this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.50.1 (June 2, 2026)
 
 **Title:** Stuck-peer recovery, corrected chain density, and maintenance polish
