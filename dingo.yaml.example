@@ -123,6 +123,16 @@ socketPath: "dingo.socket"
 # CLI: --network
 network: "preview"
 
+# Logging output configuration
+# format: "text" (default, human-readable) or "json" (machine-parseable,
+#         for ELK/Loki ingestion)
+# level:  "debug", "info" (default), "warn", or "error".
+#         The --debug flag overrides this to "debug".
+# Env: DINGO_LOGGING_FORMAT, DINGO_LOGGING_LEVEL
+logging:
+  format: text
+  level: info
+
 # TLS certificate file path (for HTTPS)
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable

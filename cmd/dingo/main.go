@@ -16,6 +16,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -46,21 +47,34 @@ var (
 	configFile string
 )
 
-func commonRun() *slog.Logger {
-	// Configure logger
-	logLevel := slog.LevelInfo
-	addSource := false
-	if globalFlags.debug {
-		logLevel = slog.LevelDebug
-		addSource = true
-	}
-	logger := slog.New(
-		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-			AddSource: addSource,
-			Level:     logLevel,
-		}),
+func commonRun(cfg *config.Config) *slog.Logger {
+	// Configure logger from config. The --debug flag is the highest-precedence
+	// override (CLI > env > YAML > defaults): it forces debug level and source
+	// locations regardless of the configured level.
+	logger, levelOK, formatOK := newLogger(
+		os.Stdout,
+		cfg.Logging.Format,
+		cfg.Logging.Level,
+		globalFlags.debug,
 	)
 	slog.SetDefault(logger)
+	// Config-validation warnings go to stderr, not the logger: a high
+	// configured level (e.g. error) would otherwise suppress them, leaving the
+	// operator with no feedback that their value was ignored.
+	if !levelOK {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s: unknown logging level %q, using info\n",
+			programName, cfg.Logging.Level,
+		)
+	}
+	if !formatOK {
+		fmt.Fprintf(
+			os.Stderr,
+			"%s: unknown logging format %q, using text\n",
+			programName, cfg.Logging.Format,
+		)
+	}
 	// Configure max processes with our logger wrapper, toss undo func
 	_, err := maxprocs.Set(maxprocs.Logger(slogPrintf))
 	if err != nil {
@@ -73,6 +87,54 @@ func commonRun() *slog.Logger {
 		"component", programName,
 	)
 	return logger
+}
+
+// newLogger builds a slog.Logger writing to w. format selects the handler
+// ("json" for JSON, anything else for text); level sets the minimum level;
+// debug forces debug level and source locations. The two bools report whether
+// level/format were recognized so the caller can warn on unknown values.
+func newLogger(
+	w io.Writer,
+	format, level string,
+	debug bool,
+) (*slog.Logger, bool, bool) {
+	logLevel, levelOK := parseLogLevel(level)
+	addSource := false
+	if debug {
+		logLevel = slog.LevelDebug
+		addSource = true
+	}
+	opts := &slog.HandlerOptions{
+		AddSource: addSource,
+		Level:     logLevel,
+	}
+	f := strings.ToLower(strings.TrimSpace(format))
+	formatOK := f == "" || f == "text" || f == "json"
+	var handler slog.Handler
+	if f == "json" {
+		handler = slog.NewJSONHandler(w, opts)
+	} else {
+		handler = slog.NewTextHandler(w, opts)
+	}
+	return slog.New(handler), levelOK, formatOK
+}
+
+// parseLogLevel maps a config level string to a slog.Level. It returns
+// ok=false for an unrecognized value so the caller can warn; an empty value
+// is treated as the default ("info").
+func parseLogLevel(level string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		return slog.LevelDebug, true
+	case "", "info":
+		return slog.LevelInfo, true
+	case "warn", "warning":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return slog.LevelInfo, false
+	}
 }
 
 func listPlugins(

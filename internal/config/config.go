@@ -202,6 +202,24 @@ func DefaultCacheConfig() CacheConfig {
 	}
 }
 
+// LoggingConfig holds log output configuration.
+type LoggingConfig struct {
+	// Format selects the log output handler: "text" (default) or "json".
+	// JSON is intended for machine-parseable ingestion (ELK/Loki).
+	Format string `yaml:"format" envconfig:"DINGO_LOGGING_FORMAT"`
+	// Level is the minimum log level: "debug", "info" (default), "warn",
+	// or "error". The --debug flag, when set, overrides this to "debug".
+	Level string `yaml:"level"  envconfig:"DINGO_LOGGING_LEVEL"`
+}
+
+// DefaultLoggingConfig returns the default logging configuration.
+func DefaultLoggingConfig() LoggingConfig {
+	return LoggingConfig{
+		Format: "text",
+		Level:  "info",
+	}
+}
+
 type Config struct {
 	MetadataPlugin       string        `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
 	TlsKeyFilePath       string        `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
@@ -270,6 +288,9 @@ type Config struct {
 
 	// Genesis bootstrap configuration for from-origin chain selection.
 	GenesisBootstrap GenesisBootstrapConfig `yaml:"genesisBootstrap"`
+
+	// Logging configuration (output format and level)
+	Logging LoggingConfig `yaml:"logging"`
 
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
@@ -447,6 +468,8 @@ var globalConfig = &Config{
 	Chainsync: DefaultChainsyncConfig(),
 	// Genesis bootstrap defaults
 	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
+	// Logging defaults (text output at info level)
+	Logging: DefaultLoggingConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
