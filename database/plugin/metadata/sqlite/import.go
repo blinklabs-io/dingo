@@ -78,24 +78,27 @@ func importUtxosWithDB(
 		stripped[i].Assets = nil
 	}
 
-	// Insert UTxOs (without assets)
+	// Insert UTxOs (without assets) via fixed-shape SQL. A raw INSERT does
+	// not write back autoincrement IDs, so utxo IDs for asset linking are
+	// recovered below by BatchRefetchUtxoIDs (which handles all-zero IDs).
 	var hydrationCandidates []models.Utxo
 	for i := 0; i < len(stripped); i += importUtxoBatchSize {
 		end := min(i+importUtxoBatchSize, len(stripped))
 		batch := stripped[i:end]
-		result := db.Omit("Assets").Clauses(clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "tx_id"},
-				{Name: "output_idx"},
-			},
-			DoNothing: true,
-		}).Create(&batch)
-		if result.Error != nil {
-			return fmt.Errorf("import utxos: %w", result.Error)
+		args := make([]any, 0, len(batch)*len(utxoCols))
+		for j := range batch {
+			args = appendUtxoRow(args, &batch[j])
+		}
+		sqlStr := buildBulkInsertSQL(
+			"utxo", utxoCols, utxoConflictClause, len(batch),
+		)
+		n, err := execRawOnConn(db, sqlStr, args)
+		if err != nil {
+			return fmt.Errorf("import utxos: %w", err)
 		}
 		// Only skipped inserts can correspond to snapshot-imported
 		// rows that still need provenance hydration.
-		if result.RowsAffected != int64(len(batch)) {
+		if n != int64(len(batch)) {
 			hydrationCandidates = append(
 				hydrationCandidates,
 				batch...,
@@ -142,18 +145,17 @@ func importUtxosWithDB(
 		for i := 0; i < len(assets); i += importAssetBatchSize {
 			end := min(i+importAssetBatchSize, len(assets))
 			batch := assets[i:end]
-			result := db.Clauses(clause.OnConflict{
-				Columns: []clause.Column{
-					{Name: "utxo_id"},
-					{Name: "policy_id"},
-					{Name: "name"},
-				},
-				DoNothing: true,
-			}).Create(&batch)
-			if result.Error != nil {
+			args := make([]any, 0, len(batch)*len(assetCols))
+			for j := range batch {
+				args = appendAssetRow(args, &batch[j])
+			}
+			sqlStr := buildBulkInsertSQL(
+				"asset", assetCols, assetConflictClause, len(batch),
+			)
+			if _, err := execRawOnConn(db, sqlStr, args); err != nil {
 				return fmt.Errorf(
 					"import utxo assets: %w",
-					result.Error,
+					err,
 				)
 			}
 		}
