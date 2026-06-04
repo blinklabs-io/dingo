@@ -68,6 +68,7 @@ type Node struct {
 	leaderElection                   *leader.Election
 	rtsMetrics                       *rtsMetrics
 	shutdownFuncs                    []func(context.Context) error
+	deferredIndexMaintenanceDone     chan struct{}
 	config                           Config
 	ctx                              context.Context
 	cancel                           context.CancelFunc
@@ -874,7 +875,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.storageMode.IsAPI() {
-		n.startDeferredIndexMaintenance()
+		started = append(started, n.startDeferredIndexMaintenance())
 	}
 
 	// Initialize block forger if production mode is enabled
@@ -929,10 +930,10 @@ func (n *Node) Run(ctx context.Context) error {
 // rebuilt before API readiness, so this background repair can restore
 // secondary query indexes and clear the pending marker without opening a
 // second Badger handle during serve startup.
-func (n *Node) startDeferredIndexMaintenance() {
+func (n *Node) startDeferredIndexMaintenance() func() {
 	manager, ok := n.db.Metadata().(metadata.DeferredIndexManager)
 	if !ok {
-		return
+		return func() {}
 	}
 	pending, err := manager.HasDeferredIndexesPending()
 	if err != nil {
@@ -940,14 +941,17 @@ func (n *Node) startDeferredIndexMaintenance() {
 			"checking deferred-index maintenance state failed",
 			"error", err,
 		)
-		return
+		return func() {}
 	}
 	if !pending {
 		n.config.logger.Info("deferred-index maintenance not needed")
-		return
+		return func() {}
 	}
+	done := make(chan struct{})
+	n.deferredIndexMaintenanceDone = done
 	n.config.logger.Info("deferred-index maintenance starting")
 	go func() {
+		defer close(done)
 		if err := manager.BuildDeferredIndexes(); err != nil {
 			n.config.logger.Error(
 				"deferred-index maintenance failed",
@@ -957,4 +961,7 @@ func (n *Node) startDeferredIndexMaintenance() {
 		}
 		n.config.logger.Info("deferred-index maintenance complete")
 	}()
+	return func() {
+		<-done
+	}
 }

@@ -214,6 +214,12 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.deferredIndexMaintenanceDone != nil {
+		n.config.logger.Info("waiting for deferred-index maintenance")
+		<-n.deferredIndexMaintenanceDone
+		n.config.logger.Info("deferred-index maintenance stopped")
+	}
+
 	if n.db != nil {
 		n.config.logger.Info("closing database")
 		if closeErr := n.closeWithShutdownTimeout(
