@@ -94,11 +94,20 @@ func WithCompactBlockMetadata(enabled bool) BlobStoreBadgerOptionFunc {
 	}
 }
 
-// WithCompressionEnabled controls Snappy compression of SSTable blocks.
+// WithCompressionEnabled controls ZSTD compression of SSTable blocks.
 // Disabling compression allows block cache size 0 (pure mmap).
 func WithCompressionEnabled(enabled bool) BlobStoreBadgerOptionFunc {
 	return func(b *BlobStoreBadger) {
 		b.compressionEnabled = enabled
+	}
+}
+
+// WithCompressionLevel sets the ZSTD compression level used when compression
+// is enabled. Higher levels yield better compression ratios at the cost of
+// throughput. Has no effect when compression is disabled.
+func WithCompressionLevel(level int) BlobStoreBadgerOptionFunc {
+	return func(b *BlobStoreBadger) {
+		b.compressionLevel = level
 	}
 }
 
