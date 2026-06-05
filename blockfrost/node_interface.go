@@ -239,6 +239,34 @@ type ProtocolParamsInfo struct {
 	MaxValSize          string
 	CollateralPercent   int
 	MaxCollateralInputs int
+	// Conway-era governance and reference-script parameters. These are nil
+	// for pre-Conway eras where they do not apply.
+	PvtMotionNoConfidence      *float64
+	PvtCommitteeNormal         *float64
+	PvtCommitteeNoConfidence   *float64
+	PvtHardForkInitiation      *float64
+	PvtPPSecurityGroup         *float64
+	DvtMotionNoConfidence      *float64
+	DvtCommitteeNormal         *float64
+	DvtCommitteeNoConfidence   *float64
+	DvtUpdateToConstitution    *float64
+	DvtHardForkInitiation      *float64
+	DvtPPNetworkGroup          *float64
+	DvtPPEconomicGroup         *float64
+	DvtPPTechnicalGroup        *float64
+	DvtPPGovGroup              *float64
+	DvtTreasuryWithdrawal      *float64
+	CommitteeMinSize           *string
+	CommitteeMaxTermLength     *string
+	GovActionLifetime          *string
+	GovActionDeposit           *string
+	DRepDeposit                *string
+	DRepActivity               *string
+	MinFeeRefScriptCostPerByte *float64
+	// CostModelsRaw holds cost models keyed by Plutus version name with raw
+	// integer arrays, matching the Blockfrost cost_models_raw field. nil
+	// when the era carries no cost models.
+	CostModelsRaw *any
 }
 
 // NetworkInfo holds network supply and stake data needed by the API.

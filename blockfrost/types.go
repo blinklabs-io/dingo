@@ -98,6 +98,37 @@ type ProtocolParamsResponse struct {
 	MaxValSize            *string         `json:"max_val_size"`
 	CollateralPercent     *int            `json:"collateral_percent"`
 	MaxCollateralInputs   *int            `json:"max_collateral_inputs"`
+	// Conway-era governance and reference-script parameters. These are
+	// null for pre-Conway eras where they do not apply.
+	PvtMotionNoConfidence    *float64 `json:"pvt_motion_no_confidence"`
+	PvtCommitteeNormal       *float64 `json:"pvt_committee_normal"`
+	PvtCommitteeNoConfidence *float64 `json:"pvt_committee_no_confidence"`
+	PvtHardForkInitiation    *float64 `json:"pvt_hard_fork_initiation"`
+	DvtMotionNoConfidence    *float64 `json:"dvt_motion_no_confidence"`
+	DvtCommitteeNormal       *float64 `json:"dvt_committee_normal"`
+	DvtCommitteeNoConfidence *float64 `json:"dvt_committee_no_confidence"`
+	DvtUpdateToConstitution  *float64 `json:"dvt_update_to_constitution"`
+	DvtHardForkInitiation    *float64 `json:"dvt_hard_fork_initiation"`
+	//nolint:tagliatelle
+	DvtPPNetworkGroup *float64 `json:"dvt_p_p_network_group"`
+	//nolint:tagliatelle
+	DvtPPEconomicGroup *float64 `json:"dvt_p_p_economic_group"`
+	//nolint:tagliatelle
+	DvtPPTechnicalGroup *float64 `json:"dvt_p_p_technical_group"`
+	//nolint:tagliatelle
+	DvtPPGovGroup          *float64 `json:"dvt_p_p_gov_group"`
+	DvtTreasuryWithdrawal  *float64 `json:"dvt_treasury_withdrawal"`
+	CommitteeMinSize       *string  `json:"committee_min_size"`
+	CommitteeMaxTermLength *string  `json:"committee_max_term_length"`
+	GovActionLifetime      *string  `json:"gov_action_lifetime"`
+	GovActionDeposit       *string  `json:"gov_action_deposit"`
+	DrepDeposit            *string  `json:"drep_deposit"`
+	DrepActivity           *string  `json:"drep_activity"`
+	PvtppSecurityGroup     *float64 `json:"pvtpp_security_group"`
+	//nolint:tagliatelle
+	PvtPPSecurityGroup         *float64 `json:"pvt_p_p_security_group"`
+	MinFeeRefScriptCostPerByte *float64 `json:"min_fee_ref_script_cost_per_byte"`
+	CostModelsRaw              *any     `json:"cost_models_raw"`
 }
 
 // NetworkResponse represents Blockfrost network info.
