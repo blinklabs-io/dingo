@@ -1331,13 +1331,14 @@ func protocolParamsInfoFromNative(
 		info.MinPoolCost = strconv.FormatUint(pp.MinPoolCost, 10)
 	case *alonzo.AlonzoProtocolParameters:
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
-		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
 	case *babbage.BabbageProtocolParameters:
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolMajor, pp.ProtocolMinor)
-		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
 	case *conway.ConwayProtocolParameters:
 		fillBasePParamsInfo(&info, pp.MinFeeA, pp.MinFeeB, pp.MaxBlockBodySize, pp.MaxTxSize, pp.MaxBlockHeaderSize, pp.KeyDeposit, pp.PoolDeposit, pp.MaxEpoch, pp.NOpt, pp.A0, pp.Rho, pp.Tau, pp.ProtocolVersion.Major, pp.ProtocolVersion.Minor)
-		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs)
+		fillAlonzoPParamsInfo(&info, pp.MinPoolCost, pp.AdaPerUtxoByte, pp.ExecutionCosts, pp.MaxTxExUnits, pp.MaxBlockExUnits, pp.MaxValueSize, pp.CollateralPercentage, pp.MaxCollateralInputs, pp.CostModels)
+		fillConwayPParamsInfo(&info, pp)
 	default:
 		return ProtocolParamsInfo{}, fmt.Errorf(
 			"unsupported protocol parameters type: %T",
@@ -1392,6 +1393,7 @@ func fillAlonzoPParamsInfo(
 	maxValueSize uint,
 	collateralPercentage uint,
 	maxCollateralInputs uint,
+	costModels map[uint][]int64,
 ) {
 	// Execution pricing, ex-units, collateral, and coins-per-UTxO sizing only
 	info.MinPoolCost = strconv.FormatUint(minPoolCost, 10)
@@ -1405,6 +1407,97 @@ func fillAlonzoPParamsInfo(
 	info.MaxValSize = strconv.FormatUint(uint64(maxValueSize), 10)
 	info.CollateralPercent = uintToInt(collateralPercentage)
 	info.MaxCollateralInputs = uintToInt(maxCollateralInputs)
+	info.CostModelsRaw = costModelsRaw(costModels)
+}
+
+// fillConwayPParamsInfo maps Conway-era governance and reference-script
+// parameters from the native ledger type. These fields are absent in
+// pre-Conway eras and therefore left nil there.
+func fillConwayPParamsInfo(
+	info *ProtocolParamsInfo,
+	pp *conway.ConwayProtocolParameters,
+) {
+	pvt := pp.PoolVotingThresholds
+	dvt := pp.DRepVotingThresholds
+	info.PvtMotionNoConfidence = ratValuePtr(pvt.MotionNoConfidence)
+	info.PvtCommitteeNormal = ratValuePtr(pvt.CommitteeNormal)
+	info.PvtCommitteeNoConfidence = ratValuePtr(pvt.CommitteeNoConfidence)
+	info.PvtHardForkInitiation = ratValuePtr(pvt.HardForkInitiation)
+	info.PvtPPSecurityGroup = ratValuePtr(pvt.PpSecurityGroup)
+	info.DvtMotionNoConfidence = ratValuePtr(dvt.MotionNoConfidence)
+	info.DvtCommitteeNormal = ratValuePtr(dvt.CommitteeNormal)
+	info.DvtCommitteeNoConfidence = ratValuePtr(dvt.CommitteeNoConfidence)
+	info.DvtUpdateToConstitution = ratValuePtr(dvt.UpdateToConstitution)
+	info.DvtHardForkInitiation = ratValuePtr(dvt.HardForkInitiation)
+	info.DvtPPNetworkGroup = ratValuePtr(dvt.PpNetworkGroup)
+	info.DvtPPEconomicGroup = ratValuePtr(dvt.PpEconomicGroup)
+	info.DvtPPTechnicalGroup = ratValuePtr(dvt.PpTechnicalGroup)
+	info.DvtPPGovGroup = ratValuePtr(dvt.PpGovGroup)
+	info.DvtTreasuryWithdrawal = ratValuePtr(dvt.TreasuryWithdrawal)
+	committeeMinSize := strconv.FormatUint(uint64(pp.MinCommitteeSize), 10)
+	info.CommitteeMinSize = &committeeMinSize
+	committeeMaxTermLength := strconv.FormatUint(pp.CommitteeTermLimit, 10)
+	info.CommitteeMaxTermLength = &committeeMaxTermLength
+	govActionLifetime := strconv.FormatUint(pp.GovActionValidityPeriod, 10)
+	info.GovActionLifetime = &govActionLifetime
+	govActionDeposit := strconv.FormatUint(pp.GovActionDeposit, 10)
+	info.GovActionDeposit = &govActionDeposit
+	drepDeposit := strconv.FormatUint(pp.DRepDeposit, 10)
+	info.DRepDeposit = &drepDeposit
+	drepActivity := strconv.FormatUint(pp.DRepInactivityPeriod, 10)
+	info.DRepActivity = &drepActivity
+	info.MinFeeRefScriptCostPerByte = ratPointerPtr(
+		pp.MinFeeRefScriptCostPerByte,
+	)
+}
+
+// ratValuePtr converts a value cbor.Rat into a *float64 for JSON output. A
+// zero-value Rat (nil inner big.Rat) yields a zero threshold rather than
+// panicking.
+func ratValuePtr(r cbor.Rat) *float64 {
+	if r.Rat == nil {
+		return new(float64)
+	}
+	f := ratToFloat64(&r)
+	return &f
+}
+
+// ratPointerPtr converts an optional *cbor.Rat into a *float64, preserving
+// nil so an absent parameter serializes as JSON null.
+func ratPointerPtr(r *cbor.Rat) *float64 {
+	if r == nil {
+		return nil
+	}
+	f := ratToFloat64(r)
+	return &f
+}
+
+// costModelsRaw renders cost models keyed by Plutus version name with raw
+// integer arrays, matching the Blockfrost cost_models_raw field. It returns
+// nil when the era carries no cost models.
+func costModelsRaw(models map[uint][]int64) *any {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make(map[string][]int64, len(models))
+	for version, model := range models {
+		out[plutusVersionName(version)] = model
+	}
+	var result any = out
+	return &result
+}
+
+func plutusVersionName(version uint) string {
+	switch version {
+	case 0:
+		return "PlutusV1"
+	case 1:
+		return "PlutusV2"
+	case 2:
+		return "PlutusV3"
+	default:
+		return "PlutusV" + strconv.FormatUint(uint64(version)+1, 10)
+	}
 }
 
 func uintToInt(v uint) int {
