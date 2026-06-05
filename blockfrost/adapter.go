@@ -1434,22 +1434,18 @@ func fillConwayPParamsInfo(
 	info.DvtPPTechnicalGroup = ratValuePtr(dvt.PpTechnicalGroup)
 	info.DvtPPGovGroup = ratValuePtr(dvt.PpGovGroup)
 	info.DvtTreasuryWithdrawal = ratValuePtr(dvt.TreasuryWithdrawal)
-	info.CommitteeMinSize = new(
-		strconv.FormatUint(uint64(pp.MinCommitteeSize), 10),
-	)
-	info.CommitteeMaxTermLength = new(
-		strconv.FormatUint(pp.CommitteeTermLimit, 10),
-	)
-	info.GovActionLifetime = new(
-		strconv.FormatUint(pp.GovActionValidityPeriod, 10),
-	)
-	info.GovActionDeposit = new(
-		strconv.FormatUint(pp.GovActionDeposit, 10),
-	)
-	info.DRepDeposit = new(strconv.FormatUint(pp.DRepDeposit, 10))
-	info.DRepActivity = new(
-		strconv.FormatUint(pp.DRepInactivityPeriod, 10),
-	)
+	committeeMinSize := strconv.FormatUint(uint64(pp.MinCommitteeSize), 10)
+	info.CommitteeMinSize = &committeeMinSize
+	committeeMaxTermLength := strconv.FormatUint(pp.CommitteeTermLimit, 10)
+	info.CommitteeMaxTermLength = &committeeMaxTermLength
+	govActionLifetime := strconv.FormatUint(pp.GovActionValidityPeriod, 10)
+	info.GovActionLifetime = &govActionLifetime
+	govActionDeposit := strconv.FormatUint(pp.GovActionDeposit, 10)
+	info.GovActionDeposit = &govActionDeposit
+	drepDeposit := strconv.FormatUint(pp.DRepDeposit, 10)
+	info.DRepDeposit = &drepDeposit
+	drepActivity := strconv.FormatUint(pp.DRepInactivityPeriod, 10)
+	info.DRepActivity = &drepActivity
 	info.MinFeeRefScriptCostPerByte = ratPointerPtr(
 		pp.MinFeeRefScriptCostPerByte,
 	)
