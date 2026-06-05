@@ -644,7 +644,37 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ouroboros.HandleOutboundConnEvent,
 	)
 	if n.config.topologyConfig != nil {
-		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+		topologyConfig := n.config.topologyConfig
+		usePeerSnapshot := genesisSelectionMode &&
+			topologyConfig.PeerSnapshot != nil &&
+			topologyConfig.PeerSnapshot.HasRelays()
+		if usePeerSnapshot {
+			topologyConfig = topologyConfig.WithoutBootstrapPeers()
+		}
+		n.peerGov.LoadTopologyConfig(topologyConfig)
+		if usePeerSnapshot {
+			added := n.peerGov.LoadPeerSnapshot(
+				n.config.topologyConfig.PeerSnapshot,
+			)
+			if added > 0 {
+				n.config.logger.Info(
+					"using peer snapshot for Genesis bootstrap",
+					"snapshot_slot",
+					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+					"snapshot_peers_added",
+					added,
+					"bootstrap_peers_omitted",
+					len(n.config.topologyConfig.BootstrapPeers),
+				)
+			} else {
+				n.config.logger.Warn(
+					"peer snapshot produced no usable peers; falling back to topology bootstrap peers",
+					"snapshot_slot",
+					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+				)
+				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+			}
+		}
 	}
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor start failed: %w", err)

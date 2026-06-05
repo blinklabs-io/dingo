@@ -15,7 +15,6 @@
 package peergov
 
 import (
-	"math/rand/v2"
 	"time"
 )
 
@@ -93,24 +92,8 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 		return
 	}
 
-	// Flatten relays into candidate addresses, deduplicate them, and
-	// shuffle so we do not always pick the same relays in provider-returned
-	// order.
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
-	rand.Shuffle(len(candidates), func(i, j int) {
-		candidates[i], candidates[j] = candidates[j], candidates[i]
-	})
-
-	// Add candidates until we reach the target or exhaust the list.
-	addedCount := 0
-	for _, addr := range candidates {
-		if p.ledgerPeerDeficit() <= 0 {
-			break
-		}
-		if p.addLedgerPeer(addr) {
-			addedCount++
-		}
-	}
+	addedCount := p.addLedgerRelays(relays)
 
 	if addedCount > 0 {
 		p.config.Logger.Info(

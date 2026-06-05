@@ -161,6 +161,42 @@ func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	}
 }
 
+func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
+	resetGlobalConfig()
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected default network preview, got %q", cfg.Network)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=preprod"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Network != "preprod" {
+		t.Fatalf("expected network preprod, got %q", cfg.Network)
+	}
+	topologyConfig := GetTopologyConfig()
+	if topologyConfig.PeerSnapshot == nil {
+		t.Fatal("expected topology reload to load preprod peer snapshot")
+	}
+	if topologyConfig.PeerSnapshot.NetworkMagic != 1 {
+		t.Fatalf(
+			"expected preprod peer snapshot network magic 1, got %d",
+			topologyConfig.PeerSnapshot.NetworkMagic,
+		)
+	}
+}
+
 func collectExportedLeafFields(
 	t reflect.Type,
 	prefix string,

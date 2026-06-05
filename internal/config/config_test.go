@@ -20,6 +20,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/blinklabs-io/dingo/topology"
 )
 
 func resetGlobalConfig() {
@@ -66,6 +68,7 @@ func resetGlobalConfig() {
 			VerifyCertificates: true,
 		},
 	}
+	globalTopologyConfig = &topology.TopologyConfig{}
 }
 
 func TestLoad_CompareFullStruct(t *testing.T) {
@@ -463,6 +466,20 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 
 	if cfg.RelayPort != 3001 {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
+	}
+
+	topologyConfig := GetTopologyConfig()
+	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
+		t.Fatalf(
+			"expected embedded topology to reference peer-snapshot.json, got %q",
+			topologyConfig.PeerSnapshotFile,
+		)
+	}
+	if topologyConfig.PeerSnapshot == nil {
+		t.Fatal("expected embedded topology to load peer snapshot")
+	}
+	if !topologyConfig.PeerSnapshot.HasRelays() {
+		t.Fatal("expected embedded peer snapshot to contain relays")
 	}
 }
 

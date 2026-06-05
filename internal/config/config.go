@@ -19,12 +19,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -776,39 +779,73 @@ func GetConfig() *Config {
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
-	if globalConfig.RunMode.IsDevMode() {
-		return globalTopologyConfig, nil
+	tc, err := LoadTopologyConfigFor(globalConfig)
+	if err != nil {
+		return nil, err
 	}
-	if globalConfig.Topology == "" {
-		// Use default bootstrap peers for specified network
-		network, ok := ouroboros.NetworkByName(globalConfig.Network)
+	globalTopologyConfig = tc
+	return globalTopologyConfig, nil
+}
+
+func LoadTopologyConfigFor(cfg *Config) (*topology.TopologyConfig, error) {
+	if cfg == nil {
+		return nil, errors.New("nil config")
+	}
+	if cfg.RunMode.IsDevMode() {
+		return &topology.TopologyConfig{}, nil
+	}
+	if cfg.Topology == "" {
+		embeddedTopologyPath := path.Join(cfg.Network, "topology.json")
+		tc, err := topology.NewTopologyConfigFromFS(
+			cardano.EmbeddedConfigFS,
+			embeddedTopologyPath,
+		)
+		if err == nil {
+			return tc, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) ||
+			!embeddedTopologyFileMissing(embeddedTopologyPath) {
+			return nil, fmt.Errorf(
+				"failed to load embedded topology file: %w",
+				err,
+			)
+		}
+		network, ok := ouroboros.NetworkByName(cfg.Network)
 		if !ok {
-			return nil, fmt.Errorf("unknown network: %s", globalConfig.Network)
+			return nil, fmt.Errorf("unknown network: %s", cfg.Network)
 		}
 		if len(network.BootstrapPeers) == 0 {
 			return nil, fmt.Errorf(
 				"no known bootstrap peers for network %s",
-				globalConfig.Network,
+				cfg.Network,
 			)
 		}
+		ret := &topology.TopologyConfig{}
 		for _, peer := range network.BootstrapPeers {
-			globalTopologyConfig.BootstrapPeers = append(
-				globalTopologyConfig.BootstrapPeers,
+			ret.BootstrapPeers = append(
+				ret.BootstrapPeers,
 				topology.TopologyConfigP2PAccessPoint{
 					Address: peer.Address,
 					Port:    peer.Port,
 				},
 			)
 		}
-		return globalTopologyConfig, nil
+		return ret, nil
 	}
-	tc, err := topology.NewTopologyConfigFromFile(globalConfig.Topology)
+	tc, err := topology.NewTopologyConfigFromFile(cfg.Topology)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load topology file: %+w", err)
 	}
-	// update globalTopologyConfig
-	globalTopologyConfig = tc
-	return globalTopologyConfig, nil
+	return tc, nil
+}
+
+func embeddedTopologyFileMissing(file string) bool {
+	topologyFile, err := cardano.EmbeddedConfigFS.Open(file)
+	if err == nil {
+		_ = topologyFile.Close()
+		return false
+	}
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 func GetTopologyConfig() *topology.TopologyConfig {

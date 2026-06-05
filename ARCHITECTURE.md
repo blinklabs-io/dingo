@@ -501,7 +501,7 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
-│   └── topology.go      # Topology configuration
+│   └── topology.go      # Topology and peer-snapshot configuration
 ├── blockfrost/          # Blockfrost-compatible REST API
 │   ├── blockfrost.go    # Server lifecycle
 │   ├── adapter.go       # Node state adapter
@@ -1001,6 +1001,22 @@ The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
     |   (30 min timeout)                             |
     -------------------------------------------------
 ```
+
+Topology configuration is loaded from an explicit topology file when provided,
+otherwise from the embedded `network/topology.json` for built-in networks,
+falling back to the legacy network bootstrap-peer list only when no embedded
+topology exists. A topology `peerSnapshotFile` is resolved relative to the
+topology file or embedded network directory and parsed as a cardano-node ledger
+peer snapshot.
+
+When Genesis chain selection is active and a peer snapshot contains relays, the
+node loads topology local/public roots without topology bootstrap peers, then
+seeds the snapshot relays as `PeerSourceP2PLedger` peers before outbound
+connection startup. This avoids relying on bootstrap peers for Ouroboros
+Genesis initial sync while preserving the existing `UseLedgerAfterSlot` path:
+later ledger peer refreshes still query the live ledger/database provider.
+If the snapshot produces no usable peers, startup falls back to topology
+bootstrap peers.
 
 ## Transaction Mempool
 
