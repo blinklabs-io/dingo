@@ -275,11 +275,32 @@ func (d *Database) ensureTransactionConsumedUtxos(
 	point ocommon.Point,
 	txn *Txn,
 	acc BatchAccumulator,
+	opts BatchedTxIngestOpts,
 ) error {
 	consumed := tx.Consumed()
 	if len(consumed) == 0 {
 		return nil
 	}
+
+	// During Mithril historical backfill, immutable blocks are replayed in
+	// slot order against a metadata store being populated from the same
+	// history. Consumed inputs are guaranteed to already exist in the store
+	// from earlier producer transactions, so the per-input recovery checks
+	// are redundant. The in-flight producer lookup optimization (same-batch
+	// provenance) remains valuable and is preserved below.
+	if opts.SkipConsumedInputRecovery {
+		if opts.Stats != nil {
+			// Count inputs that would have triggered GetUtxoIncludingSpent
+			// lookups. The in-flight check below is cheap and would have
+			// avoided recovery anyway, so count the full consumed set.
+			opts.Stats.SkippedInputRecovery += uint64(len(consumed))
+		}
+		// Return early: skip GetUtxoIncludingSpent, SetUtxoDeletedAtSlot,
+		// recoverConsumedUtxo, and ImportUtxos. The in-flight producer
+		// optimization is moot when the recovery path is disabled.
+		return nil
+	}
+
 	inFlight, _ := acc.(inFlightProducerLookup)
 	spenderTxHash := ledgerHashBytes(tx.Hash())
 	recoveredUtxos := make([]models.Utxo, 0, len(consumed))

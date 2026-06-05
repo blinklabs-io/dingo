@@ -1065,6 +1065,7 @@ func (b *Backfill) processBlockTxsBatched(
 			certDeposits, offsets, acc, txn,
 			database.BatchedTxIngestOpts{
 				SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
+				SkipConsumedInputRecovery:    true, // Mithril backfill: immutable blocks in slot order
 				Stats:                        stats,
 			},
 		); err != nil {
