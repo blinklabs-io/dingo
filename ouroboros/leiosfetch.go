@@ -154,8 +154,12 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 	ctx oleiosfetch.CallbackContext,
 	voteIds []oleiosfetch.MsgVotesRequestVoteId,
 ) (protocol.Message, error) {
-	// TODO
-	return nil, nil
+	votes := o.leiosVotesForIds(voteIds)
+	msg, err := oleiosfetch.NewMsgVotesFromVotes(votes)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
 }
 
 func (o *Ouroboros) leiosfetchServerBlockRangeRequest(

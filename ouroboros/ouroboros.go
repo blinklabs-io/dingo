@@ -86,6 +86,11 @@ type Ouroboros struct {
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
+	leiosVotes          map[string]*leiosVoteData
+	leiosVoteOrder      []string
+	leiosVoteCursors    map[string]uint64
+	leiosVoteNotify     chan struct{}
+	leiosVoteSeq        uint64
 	leiosMu             sync.RWMutex
 }
 
@@ -153,6 +158,9 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosVotes:               make(map[string]*leiosVoteData),
+		leiosVoteCursors:         make(map[string]uint64),
+		leiosVoteNotify:          make(chan struct{}),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -425,6 +433,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
 	}
+	o.leiosMu.Lock()
+	delete(o.leiosVoteCursors, leiosConnectionIdString(connId))
+	o.leiosMu.Unlock()
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
@@ -519,6 +530,14 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		if err := o.leiosnotifyClientStart(connId); err != nil {
 			o.config.Logger.Error(
 				"failed to start leiosnotify client",
+				"error",
+				err,
+			)
+			return
+		}
+		if err := o.leiosvotesClientStart(connId); err != nil {
+			o.config.Logger.Error(
+				"failed to start leiosvotes client",
 				"error",
 				err,
 			)
@@ -634,6 +653,32 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		} else {
 			o.config.Logger.Debug(
 				"started txsubmission client on inbound connection",
+				"connection_id", connId.String(),
+			)
+		}
+	}
+	if o.config.EnableLeios {
+		if err := o.leiosnotifyClientStart(connId); err != nil {
+			o.config.Logger.Warn(
+				"leiosnotify client failed on inbound connection",
+				"error", err,
+				"connection_id", connId.String(),
+			)
+		} else {
+			o.config.Logger.Debug(
+				"started leiosnotify client on inbound connection",
+				"connection_id", connId.String(),
+			)
+		}
+		if err := o.leiosvotesClientStart(connId); err != nil {
+			o.config.Logger.Warn(
+				"leiosvotes client failed on inbound connection",
+				"error", err,
+				"connection_id", connId.String(),
+			)
+		} else {
+			o.config.Logger.Debug(
+				"started leiosvotes client on inbound connection",
 				"connection_id", connId.String(),
 			)
 		}

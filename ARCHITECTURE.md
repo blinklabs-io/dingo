@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-06-04
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -843,7 +843,7 @@ The `ledger/eras/` package provides era-specific validation rules for each Carda
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
-When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and the scaffolded LeiosVotes mini-protocol; vote generation/storage is not implemented yet, so LeiosVotes can receive/log votes but returns an explicit unavailable error when peers request locally generated votes.
+When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and LeiosVotes. LeiosNotify/LeiosFetch cache endorser-block material in-memory, and LeiosVotes caches received vote messages in-memory with TTL/dedupe so peers can pull vote diffusion data through LeiosVotes or targeted LeiosFetch vote requests. LeiosVotes pull requests remain outstanding while the in-memory vote cache is empty and complete when new vote material arrives or the protocol shuts down, so an empty relay cache is not treated as a mini-protocol error. Local vote generation, durable vote storage, EB certificate aggregation, and RB certificate embedding are still gated by the current gouroboros/Dijkstra certificate shape, where the generated Leios certificate slot remains a placeholder.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
@@ -930,6 +930,10 @@ The `Ouroboros` struct (`ouroboros/ouroboros.go`) manages all protocol handlers:
     |                     |                     |
     | PeerSharing         | LocalStateQuery     |
     |   Peer discovery    |   Ledger queries    |
+    |                     |                     |
+    | LeiosFetch/Notify/  |                     |
+    | Votes (experimental)|                     |
+    |   EB + vote relay   |                     |
     -------------------------------------------
 ```
 
