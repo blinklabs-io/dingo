@@ -143,7 +143,7 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, BatchedTxIngestOpts{}); err != nil {
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
