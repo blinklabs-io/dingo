@@ -988,3 +988,66 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_WithLeiosVotingConfig(t *testing.T) {
+	resetGlobalConfig()
+
+	yamlContent := `
+runMode: "leios"
+network: "preview"
+leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
+leiosVoterPublicKeys:
+  "aabbcc": "ddeeff"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-leios-voting.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.LeiosVoteSigningKeyFile != "/keys/leios-vote.skey" {
+		t.Errorf(
+			"expected LeiosVoteSigningKeyFile to be '/keys/leios-vote.skey', got: %q",
+			cfg.LeiosVoteSigningKeyFile,
+		)
+	}
+	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
+		t.Errorf(
+			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
+			cfg.LeiosVoterPublicKeys,
+		)
+	}
+}
+
+func TestLoad_LeiosVotingEnvVars(t *testing.T) {
+	resetGlobalConfig()
+
+	t.Setenv("DINGO_LEIOS_VOTE_SIGNING_KEY_FILE", "/env/leios-vote.skey")
+	t.Setenv("DINGO_LEIOS_VOTER_PUBLIC_KEYS", "aabbcc:ddeeff")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+
+	if cfg.LeiosVoteSigningKeyFile != "/env/leios-vote.skey" {
+		t.Errorf(
+			"expected LeiosVoteSigningKeyFile to be '/env/leios-vote.skey', got: %q",
+			cfg.LeiosVoteSigningKeyFile,
+		)
+	}
+	if cfg.LeiosVoterPublicKeys["aabbcc"] != "ddeeff" {
+		t.Errorf(
+			"expected LeiosVoterPublicKeys['aabbcc'] to be 'ddeeff', got: %v",
+			cfg.LeiosVoterPublicKeys,
+		)
+	}
+}

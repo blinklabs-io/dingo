@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/mesh"
@@ -58,6 +59,7 @@ type Node struct {
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
+	leiosVoteManager                 *leios.VoteManager
 	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
 	barkPruner                       *bark.Pruner
@@ -392,6 +394,22 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	// Initialize Leios vote manager (experimental)
+	if enableDijkstra {
+		//nolint:contextcheck // n.ctx is the node's lifecycle context
+		if err := n.initLeiosVoteManager(n.ctx); err != nil {
+			return fmt.Errorf(
+				"failed to initialize leios vote manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.leiosVoteManager.Stop() })
+	} else if n.config.leiosVoteSigningKeyFile != "" {
+		n.config.logger.Warn(
+			"leios vote signing key configured without leios mode; voting disabled",
+			"component", "node",
+		)
+	}
 	// Initialize mempool
 	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity:    n.config.mempoolCapacity,
@@ -897,6 +915,11 @@ func (n *Node) Run(ctx context.Context) error {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx, creds); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
+		}
+		// Enable Leios vote emission when a vote signing key is
+		// configured (experimental, leios mode only)
+		if err := n.enableLeiosVoting(creds); err != nil {
+			return fmt.Errorf("failed to enable leios voting: %w", err)
 		}
 		// Wire forger's slot tracker into ledger state for slot
 		// battle detection. The forger is created after the ledger

@@ -335,6 +335,17 @@ type Config struct {
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 
+	// Leios voting configuration (experimental, leios runMode only).
+	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
+	// vote signing key. When set on a block producer whose pool is a
+	// committee member, the node emits Leios votes for endorser blocks.
+	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
+	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
+	// BLS12-381 voter public keys for vote signature verification.
+	// CIP-0164 key registration is not yet specified, so this static
+	// registry stands in for it (devnet-style).
+	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys" envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
+
 	// Blockfrost REST API port (0 = disabled)
 	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
 	// Mesh (Coinbase Rosetta) API port (0 = disabled)

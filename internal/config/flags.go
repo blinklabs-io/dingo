@@ -144,6 +144,10 @@ var flagSpecs = []flagSpec{
 	uint64Flag("ForgeSyncToleranceSlots", "forge-sync-tolerance-slots", "max slots behind tip before skipping block forging"),
 	uint64Flag("ForgeStaleGapThresholdSlots", "forge-stale-gap-threshold-slots", "slot gap threshold for stale slot clock alerts"),
 
+	// Leios voting (experimental)
+	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
+	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
+
 	// Mithril
 	boolFlag("Mithril.Enabled", "mithril-enabled", "enable Mithril integration"),
 	stringFlag("Mithril.AggregatorURL", "mithril-aggregator-url", "", "Mithril aggregator URL override"),
@@ -230,6 +234,29 @@ func stringSliceFlag(field, name, help string) flagSpec {
 				return nil
 			}
 			v, err := f.GetStringSlice(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(v))
+			return nil
+		},
+	}
+}
+
+func stringToStringFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet) {
+			def, _ := defaultValue(field).
+				Interface().(map[string]string)
+			f.StringToString(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetStringToString(name)
 			if err != nil {
 				return err
 			}

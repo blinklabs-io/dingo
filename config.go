@@ -144,6 +144,9 @@ type Config struct {
 	// Forging tolerances (0 = use defaults)
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+	// Leios voting configuration (experimental)
+	leiosVoteSigningKeyFile string
+	leiosVoterPublicKeys    map[string]string
 	// Blockfrost API port (0 = disabled)
 	blockfrostPort uint
 	// Chainsync multi-client configuration
@@ -795,6 +798,27 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shelleyOperationalCertificate = path
+	}
+}
+
+// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
+// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
+// block producer whose pool is a Leios committee member, the node emits
+// votes for endorser blocks. Experimental, leios runMode only.
+func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.leiosVoteSigningKeyFile = path
+	}
+}
+
+// WithLeiosVoterPublicKeys specifies the static Leios voter public key
+// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
+// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
+// registration, which is not yet specified. Experimental, leios runMode
+// only.
+func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.leiosVoterPublicKeys = keys
 	}
 }
 
