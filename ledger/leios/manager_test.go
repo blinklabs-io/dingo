@@ -1352,8 +1352,35 @@ func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
 	)
 }
 
+// partialRegistryOpt removes the registered public keys for the given
+// voter ids so their votes pass lenient validation as unverified.
+func partialRegistryOpt(
+	t *testing.T,
+	unregistered ...uint64,
+) func(*managerFixture, *VoteManagerConfig) {
+	t.Helper()
+	return func(f *managerFixture, cfg *VoteManagerConfig) {
+		partial := maps.Clone(f.registryEntries)
+		for _, member := range f.members {
+			for _, voterId := range unregistered {
+				if member.VoterId == voterId {
+					delete(
+						partial,
+						hex.EncodeToString(member.PoolKeyHash),
+					)
+				}
+			}
+		}
+		registry, err := NewVoterRegistry(partial)
+		require.NoError(t, err)
+		cfg.Registry = registry
+	}
+}
+
 func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
-	fixture := newManagerFixture(t)
+	// Voters 0..2 have no registered keys: their votes are unverified
+	// and subject to the record admission cap.
+	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
 	fixture.mgr.maxRecords = 2
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	for voterId := range uint64(2) {
@@ -1365,8 +1392,8 @@ func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
 			),
 		)
 	}
-	// The ledger is full: a new vote id is rejected outright rather
-	// than evicting an existing record
+	// The ledger is full: a new unverified vote id is rejected
+	// outright rather than evicting an existing record
 	require.NoError(
 		t,
 		fixture.mgr.HandleVote(
@@ -1379,7 +1406,7 @@ func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
 		fixture.mgr.VotesByIds(
 			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
 		),
-		"vote beyond the record capacity is rejected",
+		"unverified vote beyond the record capacity is rejected",
 	)
 	// Recorded votes are unaffected
 	assert.Len(
@@ -1389,6 +1416,56 @@ func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
 			{SlotNo: 577, VoterId: 1},
 		}),
 		2,
+	)
+}
+
+func TestVoteManagerVerifiedVoteBypassesRecordCapacity(t *testing.T) {
+	// Voters 0..2 have no registered keys; voter 3 stays registered.
+	fixture := newManagerFixture(t, partialRegistryOpt(t, 0, 1, 2))
+	fixture.mgr.maxRecords = 2
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	// Unverified votes fill the record ledger
+	for voterId := range uint64(2) {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, voterId, 577, ebHash),
+			),
+		)
+	}
+	// A verified vote must be admitted despite the full ledger:
+	// unverifiable noise cannot starve the votes that feed
+	// certificates
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 3, 577, ebHash),
+		),
+	)
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
+		),
+		1,
+		"verified vote admitted past the record capacity",
+	)
+	// Unverified votes remain capped
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 2, 577, ebHash),
+		),
+	)
+	assert.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
+		),
+		"unverified vote still rejected at capacity",
 	)
 }
 

@@ -45,10 +45,16 @@ const (
 	// ~100 bytes each (16-byte map key, 64-byte value, bucket
 	// overhead), so this is roughly a 3.3 MiB ceiling. Records must
 	// outlive serving entries (votesById is a subset of voteRecords),
-	// hence the multiple of the serving store bound. When the ledger is
-	// full, new votes from peers are rejected rather than evicting old
-	// records: evicting a record would let a re-received vote re-count
-	// its stake into a still-live tally.
+	// hence the multiple of the serving store bound. The cap is an
+	// admission bound for unverified peer votes only -- the kind that
+	// needs no valid signature while key registration is partial and
+	// whose only effect is observed-stake visibility. When the ledger
+	// is full those are rejected rather than evicting old records,
+	// since evicting a record would let a re-received vote re-count
+	// its stake into a still-live tally. Verified and locally emitted
+	// votes bypass the cap: they are unforgeable, and dedup bounds
+	// them to one record per (slot, registered voter) inside the slot
+	// window.
 	voteRecordMaxEntries = 4 * voteStoreMaxEntries
 	// slotWindowPastTolerance and slotWindowFutureTolerance bound the
 	// slots for which votes are accepted, relative to the current (or
@@ -626,14 +632,19 @@ func (m *VoteManager) insertVote(
 		)
 		return
 	}
-	if originConn != "" && len(m.voteRecords) >= m.maxRecords {
+	if originConn != "" && !verified && len(m.voteRecords) >= m.maxRecords {
 		// Reject rather than evict: dropping a record would let a
-		// re-received vote re-count its stake (see voteRecord).
-		// Already-counted tallies keep accumulating from recorded
-		// voters; new voters stall until records free up. Locally
-		// emitted votes bypass the cap so a vote flood cannot suppress
-		// the node's own committee participation; local volume is
-		// bounded by the endorser block cache.
+		// re-received vote re-count its stake (see voteRecord). The
+		// cap gates only unverified peer votes, which anyone can
+		// fabricate for committee members without registered keys.
+		// Verified votes bypass it -- each requires a valid BLS
+		// signature from a registered committee key and dedup bounds
+		// them to one record per (slot, registered voter) -- so a
+		// flood of unverifiable noise cannot starve the votes that
+		// feed certificates. Locally emitted votes bypass it so a
+		// flood cannot suppress the node's own committee
+		// participation; local volume is bounded by the endorser
+		// block cache.
 		m.mu.Unlock()
 		m.rejectVote(
 			"capacity",
