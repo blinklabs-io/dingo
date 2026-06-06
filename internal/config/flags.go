@@ -172,6 +172,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 			return err
 		}
 	}
+	globalConfig = cfg
+	if _, err := LoadTopologyConfig(); err != nil {
+		return fmt.Errorf("loading topology after flags: %w", err)
+	}
 	return nil
 }
 
