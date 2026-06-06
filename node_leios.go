@@ -112,6 +112,11 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		ParamsProvider: &leiosCommitteeParamsAdapter{
 			ledgerState: n.ledgerState,
 		},
+		// LedgerState satisfies leios.SlotProvider directly; the slot
+		// window keeps fabricated far-past/future votes away from
+		// committee computation and the stake snapshot queries behind
+		// it.
+		SlotProvider: n.ledgerState,
 		Registry:     registry,
 		PromRegistry: n.config.promRegistry,
 	})

@@ -37,9 +37,28 @@ const (
 	// voteStoreTTL bounds how long collected votes are retained,
 	// mirroring the endorser block cache in the ouroboros component.
 	voteStoreTTL = 10 * time.Minute
-	// voteStoreMaxEntries bounds the vote store size. Votes are ~100
-	// bytes, so this is roughly a 1 MiB ceiling.
+	// voteStoreMaxEntries bounds the serving store size. A stored vote
+	// is ~100 bytes of fields plus ~120 bytes of raw CBOR and map/log
+	// overhead, so this is roughly a 2-3 MiB ceiling.
 	voteStoreMaxEntries = 8192
+	// voteRecordMaxEntries bounds the dedup record ledger. Records are
+	// ~100 bytes each (16-byte map key, 64-byte value, bucket
+	// overhead), so this is roughly a 3.3 MiB ceiling. Records must
+	// outlive serving entries (votesById is a subset of voteRecords),
+	// hence the multiple of the serving store bound. When the ledger is
+	// full, new votes from peers are rejected rather than evicting old
+	// records: evicting a record would let a re-received vote re-count
+	// its stake into a still-live tally.
+	voteRecordMaxEntries = 4 * voteStoreMaxEntries
+	// slotWindowPastTolerance and slotWindowFutureTolerance bound the
+	// slots for which votes are accepted, relative to the current (or
+	// tip) slot. CIP-0164 defines a vote timing window (L_vote) that is
+	// not yet implemented; these are provisional dingo-local bounds that
+	// keep the forgeable vote-id space (window x committee size) small.
+	// The past tolerance roughly matches voteStoreTTL at 1s slots; the
+	// future tolerance allows for clock skew and diffusion delay.
+	slotWindowPastTolerance   = 600
+	slotWindowFutureTolerance = 60
 )
 
 // ErrVoteManagerStopped is returned by blocking calls when the vote
@@ -61,6 +80,17 @@ type EpochProvider interface {
 	EpochForSlot(slot uint64) (uint64, error)
 }
 
+// SlotProvider supplies the current slot for the vote acceptance window:
+// the wall-clock slot when the slot clock is available, otherwise the
+// chain tip slot. *ledger.LedgerState satisfies this directly via
+// CurrentOrTipSlot. A node that is far behind the network sees only its
+// tip slot and rejects live votes as too far in the future; that is
+// acceptable, since votes are unusable to a syncing node and expire from
+// peers' stores before it catches up.
+type SlotProvider interface {
+	CurrentOrTipSlot() uint64
+}
+
 // CommitteeParamsProvider supplies the Leios committee protocol
 // parameters. Implementations must validate the tau < sigma_c invariant
 // (DijkstraProtocolParameters.ValidateLeiosCommitteeParameters) and
@@ -76,8 +106,12 @@ type VoteManagerConfig struct {
 	StakeProvider  StakeDistributionProvider
 	EpochProvider  EpochProvider
 	ParamsProvider CommitteeParamsProvider
-	Registry       *VoterRegistry
-	PromRegistry   prometheus.Registerer
+	// SlotProvider enables the vote slot acceptance window. When nil
+	// the window check is disabled and votes for any resolvable slot
+	// are accepted.
+	SlotProvider SlotProvider
+	Registry     *VoterRegistry
+	PromRegistry prometheus.Registerer
 }
 
 // storedVote is one retained vote with its serving metadata.
@@ -87,6 +121,27 @@ type storedVote struct {
 	originConn string // empty for locally emitted votes
 	verified   bool
 	seq        uint64
+	epoch      uint64
+	insertedAt time.Time
+}
+
+// voteRecord is the authoritative dedup and tally-accounting entry for
+// one accepted (slot, voter) vote id. Records are decoupled from the
+// size-capped serving store (votesById/voteLog): serving entries may be
+// evicted to bound raw-CBOR memory, but the record keeps the vote's
+// stake from being re-counted into a still-live tally and keeps
+// first-wins equivocation detection durable. Invariants:
+//   - votesById is a subset of voteRecords (as id sets): records are
+//     pruned by the same-or-looser predicates in the same critical
+//     sections, and size eviction only shrinks the serving store.
+//   - a record's tally always has lastUpdated >= the record's
+//     insertedAt, so TTL pruning can drop a record only once its tally
+//     is gone (see pruneExpiredLocked).
+//   - every tally is created together with a record, so
+//     len(tallies) <= len(voteRecords) and voteRecordMaxEntries bounds
+//     both maps.
+type voteRecord struct {
+	ebHash     lcommon.Blake2b256
 	epoch      uint64
 	insertedAt time.Time
 }
@@ -120,21 +175,26 @@ type epochEntry struct {
 // VoteManager collects, validates, serves, and emits Leios votes. It
 // memoizes per-epoch voting committees from stake snapshots, tallies vote
 // stake per endorser block, and builds a certificate when verified votes
-// meet the stake quorum. All state is in-memory: votes are TTL-bounded
-// and committees are recomputed on demand.
+// meet the stake quorum. All state is in-memory: raw votes live in a
+// TTL- and size-bounded serving store, dedup/tally accounting lives in a
+// separate record ledger pruned in lockstep with tallies (see
+// voteRecord), and committees are recomputed on demand.
 type VoteManager struct {
 	logger         *slog.Logger
 	eventBus       *event.EventBus
 	stakeProvider  StakeDistributionProvider
 	epochProvider  EpochProvider
 	paramsProvider CommitteeParamsProvider
+	slotProvider   SlotProvider // nil disables the slot window check
 	registry       *VoterRegistry
 	metrics        *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
-	// voteTTL and maxVotes bound the vote store; tests may lower them.
-	voteTTL  time.Duration
-	maxVotes int
+	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
+	// may lower them.
+	voteTTL    time.Duration
+	maxVotes   int
+	maxRecords int
 
 	mu       sync.Mutex
 	running  bool
@@ -143,13 +203,14 @@ type VoteManager struct {
 	loopWg   sync.WaitGroup
 	subs     []managerSubscription
 
-	committees map[uint64]*epochEntry
-	votesById  map[lcommon.LeiosVoteId]*storedVote
-	voteLog    []*storedVote // ascending seq order
-	nextSeq    uint64
-	cursors    map[string]uint64 // connection key -> next seq to serve
-	wakeCh     chan struct{}     // closed and replaced on every insert
-	tallies    map[tallyKey]*ebTally
+	committees  map[uint64]*epochEntry
+	votesById   map[lcommon.LeiosVoteId]*storedVote
+	voteLog     []*storedVote // ascending seq order
+	voteRecords map[lcommon.LeiosVoteId]voteRecord
+	nextSeq     uint64
+	cursors     map[string]uint64 // connection key -> next seq to serve
+	wakeCh      chan struct{}     // closed and replaced on every insert
+	tallies     map[tallyKey]*ebTally
 
 	votingPool []byte // local pool key hash; nil disables voting
 	votingKey  *VoteSigningKey
@@ -192,13 +253,16 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		stakeProvider:  cfg.StakeProvider,
 		epochProvider:  cfg.EpochProvider,
 		paramsProvider: cfg.ParamsProvider,
+		slotProvider:   cfg.SlotProvider,
 		registry:       registry,
 		now:            time.Now,
 		voteTTL:        voteStoreTTL,
 		maxVotes:       voteStoreMaxEntries,
+		maxRecords:     voteRecordMaxEntries,
 		committees:     make(map[uint64]*epochEntry),
 		votesById:      make(map[lcommon.LeiosVoteId]*storedVote),
 		voteLog:        make([]*storedVote, 0),
+		voteRecords:    make(map[lcommon.LeiosVoteId]voteRecord),
 		cursors:        make(map[string]uint64),
 		wakeCh:         make(chan struct{}),
 		tallies:        make(map[tallyKey]*ebTally),
@@ -390,6 +454,34 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 	return committee, tau, nil
 }
 
+// slotWindowCheck reports whether a vote slot falls within the
+// acceptance window around the current (or tip) slot, returning a
+// descriptive error when it does not. A nil slot provider disables the
+// check.
+func (m *VoteManager) slotWindowCheck(slot uint64) error {
+	if m.slotProvider == nil {
+		return nil
+	}
+	cur := m.slotProvider.CurrentOrTipSlot()
+	if slot < cur && cur-slot > slotWindowPastTolerance {
+		return fmt.Errorf(
+			"vote slot %d is more than %d slots behind current slot %d",
+			slot,
+			uint64(slotWindowPastTolerance),
+			cur,
+		)
+	}
+	if slot > cur && slot-cur > slotWindowFutureTolerance {
+		return fmt.Errorf(
+			"vote slot %d is more than %d slots ahead of current slot %d",
+			slot,
+			uint64(slotWindowFutureTolerance),
+			cur,
+		)
+	}
+	return nil
+}
+
 // rejectVote logs and counts a dropped vote.
 func (m *VoteManager) rejectVote(
 	reason string,
@@ -421,6 +513,14 @@ func (m *VoteManager) HandleVote(
 	}
 	if err := vote.Validate(); err != nil {
 		m.rejectVote("structural", vote, err)
+		return nil
+	}
+	// Window the vote slot before any epoch or committee work:
+	// EpochForSlot projects future slots indefinitely and committee
+	// computation reaches the stake snapshot in the database, so
+	// out-of-window slots must not get that far.
+	if err := m.slotWindowCheck(vote.SlotNo); err != nil {
+		m.rejectVote("slot_window", vote, err)
 		return nil
 	}
 	epoch, err := m.epochProvider.EpochForSlot(vote.SlotNo)
@@ -498,14 +598,22 @@ func (m *VoteManager) insertVote(
 	// Prune before the dedup check so an expired entry cannot block a
 	// fresh vote with the same id.
 	m.pruneExpiredLocked(now)
-	if existing, ok := m.votesById[voteId]; ok {
+	// Dedup against the record ledger, not the serving store: serving
+	// entries are size-evicted, and re-counting an evicted vote would
+	// inflate its tally and wedge certificate building on a duplicate
+	// voter id.
+	if record, ok := m.voteRecords[voteId]; ok {
 		m.mu.Unlock()
-		if existing.vote.EndorserBlockHash == vote.EndorserBlockHash {
-			// Identical resubmission
+		if record.ebHash == vote.EndorserBlockHash {
+			// Identical resubmission. Deliberately not re-stored for
+			// serving: a size-evicted vote stays unservable until its
+			// record dies, which avoids serving-store churn under
+			// re-delivery.
 			return
 		}
 		// Equivocation: same voter and slot, different endorser
-		// block. The first vote wins.
+		// block. The first vote wins for as long as its record
+		// lives, even after its serving entry is evicted.
 		if m.metrics != nil {
 			m.metrics.votesEquivocationTotal.Inc()
 		}
@@ -513,11 +621,33 @@ func (m *VoteManager) insertVote(
 			"dropping equivocating leios vote",
 			"slot", vote.SlotNo,
 			"voter_id", vote.VoterId,
-			"kept_endorser_block_hash", existing.vote.EndorserBlockHash.String(),
+			"kept_endorser_block_hash", record.ebHash.String(),
 			"dropped_endorser_block_hash", vote.EndorserBlockHash.String(),
 		)
 		return
 	}
+	if originConn != "" && len(m.voteRecords) >= m.maxRecords {
+		// Reject rather than evict: dropping a record would let a
+		// re-received vote re-count its stake (see voteRecord).
+		// Already-counted tallies keep accumulating from recorded
+		// voters; new voters stall until records free up. Locally
+		// emitted votes bypass the cap so a vote flood cannot suppress
+		// the node's own committee participation; local volume is
+		// bounded by the endorser block cache.
+		m.mu.Unlock()
+		m.rejectVote(
+			"capacity",
+			vote,
+			errors.New("vote record ledger full"),
+		)
+		return
+	}
+	m.voteRecords[voteId] = voteRecord{
+		ebHash:     vote.EndorserBlockHash,
+		epoch:      epoch,
+		insertedAt: now,
+	}
+	m.updateRecordsGaugeLocked()
 	stored := &storedVote{
 		vote:       vote,
 		raw:        raw,
@@ -650,8 +780,8 @@ func (m *VoteManager) evaluateQuorumLocked(
 	}
 }
 
-// pruneExpiredLocked drops votes and tallies older than the TTL. Callers
-// must hold m.mu.
+// pruneExpiredLocked drops votes, tallies, and dedup records older than
+// the TTL. Callers must hold m.mu.
 func (m *VoteManager) pruneExpiredLocked(now time.Time) {
 	cutoff := now.Add(-m.voteTTL)
 	m.filterVotesLocked(func(sv *storedVote) bool {
@@ -661,6 +791,34 @@ func (m *VoteManager) pruneExpiredLocked(now time.Time) {
 		if tally.lastUpdated.Before(cutoff) {
 			delete(m.tallies, key)
 		}
+	}
+	// Records are pruned after tallies, in the same pass: an expired
+	// record is dropped only once its tally is gone, so a vote whose
+	// tally is still accumulating can never be re-counted. The reverse
+	// direction also holds within this pass: a tally with
+	// lastUpdated < cutoff implies every one of its records has
+	// insertedAt <= lastUpdated < cutoff, so a dead tally's records all
+	// drop with it and a re-created tally re-counts from a clean slate.
+	for id, rec := range m.voteRecords {
+		if !rec.insertedAt.Before(cutoff) {
+			continue
+		}
+		if _, ok := m.tallies[tallyKey{
+			slotNo: id.SlotNo,
+			ebHash: rec.ebHash,
+		}]; ok {
+			continue
+		}
+		delete(m.voteRecords, id)
+	}
+	m.updateRecordsGaugeLocked()
+}
+
+// updateRecordsGaugeLocked refreshes the record-ledger size gauge.
+// Callers must hold m.mu.
+func (m *VoteManager) updateRecordsGaugeLocked() {
+	if m.metrics != nil {
+		m.metrics.voteRecordsCount.Set(float64(len(m.voteRecords)))
 	}
 }
 
@@ -682,7 +840,9 @@ func (m *VoteManager) enforceSizeLocked() {
 }
 
 // filterVotesLocked retains only votes matching keep, removing the rest
-// from both the log and the id index. Callers must hold m.mu.
+// from both the log and the id index. It intentionally does not touch
+// voteRecords -- callers own record pruning, with predicates that keep
+// votesById a subset of voteRecords. Callers must hold m.mu.
 func (m *VoteManager) filterVotesLocked(keep func(*storedVote) bool) {
 	kept := m.voteLog[:0]
 	for _, sv := range m.voteLog {
@@ -784,6 +944,16 @@ func (m *VoteManager) HandleEndorserBlock(
 	votingKey := m.votingKey
 	m.mu.Unlock()
 	if len(votingPool) == 0 || votingKey == nil {
+		return
+	}
+	// Do not sign votes peers will reject as out of window (e.g. a
+	// replayed old endorser block).
+	if err := m.slotWindowCheck(slot); err != nil {
+		m.logger.Debug(
+			"endorser block slot outside vote window, not voting",
+			"slot", slot,
+			"error", err,
+		)
 		return
 	}
 	epoch, err := m.epochProvider.EpochForSlot(slot)
@@ -908,6 +1078,14 @@ func (m *VoteManager) handleEpochTransition(
 			delete(m.tallies, key)
 		}
 	}
+	// Records share the tally predicate (all votes in a tally share an
+	// epoch), so record/tally pairs are dropped together.
+	for id, rec := range m.voteRecords {
+		if rec.epoch < keepFrom {
+			delete(m.voteRecords, id)
+		}
+	}
+	m.updateRecordsGaugeLocked()
 	m.logger.Debug(
 		"pruned leios vote state at epoch transition",
 		"new_epoch", evt.NewEpoch,
@@ -930,6 +1108,15 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 			delete(m.tallies, key)
 		}
 	}
+	// Records share the tally predicate, so record/tally pairs are
+	// dropped together and a re-vote for the replacement chain is
+	// accepted instead of being mistaken for equivocation.
+	for id := range m.voteRecords {
+		if id.SlotNo > evt.Point.Slot {
+			delete(m.voteRecords, id)
+		}
+	}
+	m.updateRecordsGaugeLocked()
 	m.committees = make(map[uint64]*epochEntry)
 	m.logger.Debug(
 		"pruned leios vote state after rollback",

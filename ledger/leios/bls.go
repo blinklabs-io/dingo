@@ -157,6 +157,13 @@ func AggregateSignatures(sigs [][]byte) ([]byte, error) {
 // shared message against the sum of the signers' public keys. All Leios
 // votes for the same endorser block sign the same message, so aggregate
 // verification reduces to one pairing check.
+//
+// SECURITY: summing public keys over a shared message is forgeable via
+// rogue-key attacks (an attacker choosing pk_evil = g2^x - sum(pk_honest)
+// can forge the aggregate alone) unless every public key carries a
+// verified proof of possession. Callers must only pass keys whose
+// possession is established; today that holds because keys come
+// exclusively from the operator-configured VoterRegistry.
 func VerifyAggregateSignature(
 	pubs []*bls12381.G2Affine,
 	msg []byte,

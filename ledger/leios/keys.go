@@ -158,6 +158,14 @@ func ParseVoterPublicKey(hexStr string) (*bls12381.G2Affine, error) {
 // specified, so the registry is populated from static configuration
 // (devnet-style). Voters absent from the registry can still have their
 // committee membership checked, but not their signatures.
+//
+// SECURITY: the registry is the trust root that discharges the
+// proof-of-possession requirement of BLS aggregate verification
+// (VerifyAggregateSignature): operators vouch for the keys they
+// configure. Any registration mechanism that replaces this static
+// configuration must verify a proof of possession before a key enters
+// the registry, or aggregate certificate verification becomes forgeable
+// via rogue-key attacks.
 type VoterRegistry struct {
 	keys map[string]*bls12381.G2Affine // lowercase-hex pool key hash -> pubkey
 }

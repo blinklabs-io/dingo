@@ -81,6 +81,14 @@ func (f *fakeEpochProvider) EpochForSlot(slot uint64) (uint64, error) {
 	return slot / testSlotsPerEpoch, nil
 }
 
+type fakeSlotProvider struct {
+	slot uint64
+}
+
+func (f *fakeSlotProvider) CurrentOrTipSlot() uint64 {
+	return f.slot
+}
+
 type fakeParamsProvider struct {
 	mu     sync.Mutex
 	sigmaC *big.Rat
@@ -1118,4 +1126,397 @@ func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
 	assert.Equal(t, uint64(0), result.votes[0].VoterId)
+}
+
+func TestVoteManagerEvictedVoteDoesNotRecount(t *testing.T) {
+	fixture := newManagerFixture(t)
+	fixture.mgr.maxVotes = 3
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	// Voters 0..3 hold 100+90+80+70 = 340 < 385 (tau = 7/10 of 550).
+	// Voter 0's serving entry is size-evicted by voter 3's insert.
+	for voterId := range uint64(4) {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, voterId, 577, ebHash),
+			),
+		)
+	}
+	require.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+		),
+		"voter 0's serving entry is evicted",
+	)
+
+	// Re-delivery of the evicted vote (e.g. a reconnecting peer
+	// re-serving its log) must not re-count its stake: an unfixed
+	// re-count reaches 440 >= 385 with a duplicate voter id, which
+	// wedges certificate building for this EB permanently.
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-b",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+	testutil.RequireNoReceive(
+		t,
+		quorumCh,
+		300*time.Millisecond,
+		"re-delivered vote must not count toward quorum",
+	)
+
+	// Genuine quorum: voter 4 brings verified stake to 400 >= 385
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 4, 577, ebHash),
+		),
+	)
+	evt := testutil.RequireReceive(
+		t,
+		quorumCh,
+		2*time.Second,
+		"quorum event after genuine quorum",
+	)
+	quorum, ok := evt.Data.(EbQuorumEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(400), quorum.VerifiedStake)
+	assert.Equal(t, uint64(400), quorum.ObservedStake)
+	require.NotNil(t, quorum.Certificate)
+
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	registry, err := NewVoterRegistry(fixture.registryEntries)
+	require.NoError(t, err)
+	sigChecked, err := ValidateEbCertificate(
+		quorum.Certificate, committee, big.NewRat(7, 10), registry,
+	)
+	require.NoError(t, err)
+	assert.True(t, sigChecked)
+}
+
+func TestVoteManagerEvictedVoteEquivocationStillDetected(t *testing.T) {
+	fixture := newManagerFixture(t)
+	fixture.mgr.maxVotes = 1
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+
+	ebHashA := lcommon.NewBlake2b256([]byte("eb-a"))
+	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHashA),
+		),
+	)
+	// Voter 1's insert evicts voter 0's serving entry
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 577, ebHashA),
+		),
+	)
+	require.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+		),
+	)
+
+	// Voter 0 equivocates after eviction: the record must still hold
+	// the first vote so the conflicting one is dropped.
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-b",
+			fixture.makeVote(t, 0, 577, ebHashB),
+		),
+	)
+
+	// Voters 2..6 hold 80+70+60+50+40 = 300 < 385 for hashB. A leaked
+	// equivocating vote (voter 0's 100) would push it to 400 >= 385
+	// and fire a quorum event.
+	for voterId := uint64(2); voterId <= 6; voterId++ {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, voterId, 577, ebHashB),
+			),
+		)
+	}
+	testutil.RequireNoReceive(
+		t,
+		quorumCh,
+		300*time.Millisecond,
+		"equivocating vote must not count after serving eviction",
+	)
+}
+
+func TestVoteManagerRecordsRetainedWhileTallyLive(t *testing.T) {
+	fixture := newManagerFixture(t)
+	base := time.Now()
+	var offsetMu sync.Mutex
+	offset := time.Duration(0)
+	fixture.mgr.now = func() time.Time {
+		offsetMu.Lock()
+		defer offsetMu.Unlock()
+		return base.Add(offset)
+	}
+	setOffset := func(d time.Duration) {
+		offsetMu.Lock()
+		offset = d
+		offsetMu.Unlock()
+	}
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+	// A later vote keeps the tally alive past voter 0's record TTL
+	setOffset(9 * time.Minute)
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 577, ebHash),
+		),
+	)
+
+	// Voter 0's record is past its TTL but its tally is live, so the
+	// record must be retained and the re-delivered vote deduplicated.
+	setOffset(voteStoreTTL + time.Minute)
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-b",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+
+	// Voters 2..4 bring verified stake to exactly 400 >= 385; a
+	// re-counted voter 0 would have produced a duplicate voter id and
+	// wedged certificate building instead.
+	for voterId := uint64(2); voterId <= 4; voterId++ {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, voterId, 577, ebHash),
+			),
+		)
+	}
+	evt := testutil.RequireReceive(
+		t,
+		quorumCh,
+		2*time.Second,
+		"quorum reached with deduplicated stake",
+	)
+	quorum, ok := evt.Data.(EbQuorumEvent)
+	require.True(t, ok)
+	assert.Equal(t, uint64(400), quorum.VerifiedStake)
+
+	// Once the tally itself expires, the records go with it and the
+	// same vote id is accepted fresh.
+	setOffset(2*voteStoreTTL + 5*time.Minute)
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-b",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+		),
+		1,
+		"vote accepted fresh after its tally expired",
+	)
+}
+
+func TestVoteManagerRecordCapacityRejectsNewVotes(t *testing.T) {
+	fixture := newManagerFixture(t)
+	fixture.mgr.maxRecords = 2
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	for voterId := range uint64(2) {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, voterId, 577, ebHash),
+			),
+		)
+	}
+	// The ledger is full: a new vote id is rejected outright rather
+	// than evicting an existing record
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 2, 577, ebHash),
+		),
+	)
+	assert.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 2}},
+		),
+		"vote beyond the record capacity is rejected",
+	)
+	// Recorded votes are unaffected
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: 577, VoterId: 0},
+			{SlotNo: 577, VoterId: 1},
+		}),
+		2,
+	)
+}
+
+func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
+	fixture := newManagerFixture(t)
+	fixture.mgr.maxRecords = 1
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	// A peer vote fills the record ledger
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+
+	// The node's own vote must bypass the capacity cap
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	assert.Len(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
+		),
+		1,
+		"local vote emitted despite full record ledger",
+	)
+}
+
+func TestVoteManagerSlotWindowRejects(t *testing.T) {
+	fixture := newManagerFixture(
+		t,
+		func(f *managerFixture, cfg *VoteManagerConfig) {
+			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+		},
+	)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	for _, tc := range []struct {
+		name     string
+		slot     uint64
+		voterId  uint64
+		accepted bool
+	}{
+		{"past edge accepted", 1000 - slotWindowPastTolerance, 0, true},
+		{"too far past", 1000 - slotWindowPastTolerance - 1, 1, false},
+		{"future edge accepted", 1000 + slotWindowFutureTolerance, 2, true},
+		{"too far future", 1000 + slotWindowFutureTolerance + 1, 3, false},
+	} {
+		require.NoError(
+			t,
+			fixture.mgr.HandleVote(
+				"conn-a",
+				fixture.makeVote(t, tc.voterId, tc.slot, ebHash),
+			),
+			tc.name,
+		)
+		raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{
+			{SlotNo: tc.slot, VoterId: tc.voterId},
+		})
+		if tc.accepted {
+			assert.Len(t, raws, 1, tc.name)
+		} else {
+			assert.Empty(t, raws, tc.name)
+		}
+	}
+
+	// Out-of-window endorser blocks must not trigger local votes
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	oldSlot := uint64(1000 - slotWindowPastTolerance - 100)
+	fixture.mgr.HandleEndorserBlock(oldSlot, ebHash)
+	assert.Empty(
+		t,
+		fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: oldSlot, VoterId: 3}},
+		),
+		"no local vote for an out-of-window endorser block",
+	)
+}
+
+func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
+	fixture := newManagerFixture(t)
+	ebHashA := lcommon.NewBlake2b256([]byte("eb-a"))
+	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 590, ebHashA),
+		),
+	)
+
+	fixture.eventBus.Publish(
+		chain.ChainUpdateEventType,
+		event.NewEvent(
+			chain.ChainUpdateEventType,
+			chain.ChainRollbackEvent{
+				Point: ocommon.Point{Slot: 550},
+			},
+		),
+	)
+	testutil.WaitForCondition(t, func() bool {
+		return len(fixture.mgr.VotesByIds(
+			[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
+		)) == 0
+	}, 2*time.Second, "rolled-back vote is pruned")
+
+	// The rollback also dropped the dedup record, so a vote for the
+	// replacement chain's endorser block is accepted rather than being
+	// mistaken for equivocation.
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 1, 590, ebHashB),
+		),
+	)
+	raws := fixture.mgr.VotesByIds(
+		[]lcommon.LeiosVoteId{{SlotNo: 590, VoterId: 1}},
+	)
+	require.Len(t, raws, 1)
+	var stored lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &stored)
+	require.NoError(t, err)
+	assert.Equal(t, ebHashB, stored.EndorserBlockHash)
 }

@@ -26,6 +26,7 @@ type voteManagerMetrics struct {
 	ebQuorumReachedTotal   prometheus.Counter
 	certificatesBuiltTotal prometheus.Counter
 	committeeSize          prometheus.Gauge
+	voteRecordsCount       prometheus.Gauge
 }
 
 func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
@@ -54,6 +55,10 @@ func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 		committeeSize: factory.NewGauge(prometheus.GaugeOpts{
 			Name: "dingo_metrics_leios_committee_size_int",
 			Help: "member count of the most recently computed voting committee",
+		}),
+		voteRecordsCount: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_metrics_leios_vote_records_int",
+			Help: "current size of the vote dedup record ledger",
 		}),
 	}
 }
