@@ -153,9 +153,11 @@ type NetworkStake struct {
 	Active string `json:"active"`
 }
 
-// NetworkEraResponse represents a Blockfrost era summary.
+// NetworkEraResponse represents a Blockfrost era summary. Per Blockfrost
+// OpenAPI 0.1.88 (schema network-eras) each item carries only start, end,
+// and parameters; the human-readable era name is intentionally omitted to
+// keep the response shape compatible with the published schema.
 type NetworkEraResponse struct {
-	Era        string               `json:"era,omitempty"`
 	Start      NetworkEraBound      `json:"start"`
 	End        *NetworkEraBound     `json:"end"`
 	Parameters NetworkEraParameters `json:"parameters"`

@@ -195,6 +195,10 @@ var Manifest = []Index{
 		Notes:    "Composite SearchUtxos index; primary utxorpc query path",
 		Critical: true,
 	},
+	{
+		Model: &models.Utxo{}, Name: "idx_utxo_deleted_payment_script", Table: "utxo",
+		Notes: "Script-locked supply sum (blockfrost /network); low-frequency, lazy",
+	},
 
 	// transaction: BlockHash/Slot are query indexes; the
 	// uniqueIndex on Hash carries the ON CONFLICT target and

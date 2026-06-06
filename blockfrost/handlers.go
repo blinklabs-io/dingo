@@ -368,7 +368,6 @@ func (b *Blockfrost) handleNetworkEras(
 			}
 		}
 		resp = append(resp, NetworkEraResponse{
-			Era: era.Era,
 			Start: NetworkEraBound{
 				Time:  era.Start.Time,
 				Slot:  era.Start.Slot,

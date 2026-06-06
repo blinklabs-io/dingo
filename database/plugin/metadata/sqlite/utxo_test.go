@@ -401,3 +401,55 @@ func sortUtxoIds(ids []models.UtxoId) {
 		return ids[i].Idx < ids[j].Idx
 	})
 }
+
+func TestGetScriptLockedSupply(t *testing.T) {
+	store := setupTestDB(t)
+
+	rows := []models.Utxo{
+		// Live key-hash UTxO: excluded.
+		{
+			TxId:      bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx: 0,
+			AddedSlot: 100,
+			Amount:    types.Uint64(1_000_000),
+		},
+		// Live script UTxOs: counted.
+		{
+			TxId:          bytes.Repeat([]byte{0x02}, 32),
+			OutputIdx:     0,
+			AddedSlot:     100,
+			Amount:        types.Uint64(2_000_000),
+			PaymentScript: true,
+		},
+		{
+			TxId:          bytes.Repeat([]byte{0x03}, 32),
+			OutputIdx:     0,
+			AddedSlot:     200,
+			Amount:        types.Uint64(3_000_000),
+			PaymentScript: true,
+		},
+		// Spent script UTxO: excluded (deleted_slot != 0).
+		{
+			TxId:          bytes.Repeat([]byte{0x04}, 32),
+			OutputIdx:     0,
+			AddedSlot:     100,
+			DeletedSlot:   150,
+			Amount:        types.Uint64(9_000_000),
+			PaymentScript: true,
+		},
+	}
+	for i := range rows {
+		require.NoError(t, store.DB().Create(&rows[i]).Error)
+	}
+
+	got, err := store.GetScriptLockedSupply(nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(5_000_000), got)
+}
+
+func TestGetScriptLockedSupplyEmpty(t *testing.T) {
+	store := setupTestDB(t)
+	got, err := store.GetScriptLockedSupply(nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), got)
+}

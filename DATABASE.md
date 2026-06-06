@@ -174,7 +174,7 @@ erDiagram
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `metadata` is populated only in API mode. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, staking_key, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, staking_key, amount)` and `(deleted_slot, payment_script, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
 | `address_transaction` | `id`, `payment_key`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `staking_key`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
@@ -497,6 +497,18 @@ Controlled amount by staking key:
 SELECT COALESCE(SUM(amount), 0) AS controlled_amount
 FROM utxo
 WHERE staking_key = decode($1, 'hex')
+  AND deleted_slot = 0;
+```
+
+### `GetScriptLockedSupply`
+
+Network script-locked supply (sum of lovelace in live UTxOs whose payment
+credential is a script), backing blockfrost `/network` `supply.locked`:
+
+```sql
+SELECT COALESCE(SUM(amount), 0) AS locked_supply
+FROM utxo
+WHERE payment_script = true
   AND deleted_slot = 0;
 ```
 

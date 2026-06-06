@@ -53,7 +53,7 @@ var (
 		"transaction_id", "collateral_return_for_tx_id", "tx_id",
 		"payment_key", "staking_key", "datum_hash", "spent_at_tx_id",
 		"referenced_by_tx_id", "collateral_by_tx_id", "added_slot",
-		"deleted_slot", "amount", "output_idx",
+		"deleted_slot", "amount", "output_idx", "payment_script",
 	}
 	assetCols = []string{
 		"name", "name_hex", "policy_id", "fingerprint", "utxo_id", "amount",
@@ -77,7 +77,7 @@ func appendUtxoRow(dst []any, u *models.Utxo) []any {
 		u.TransactionID, u.CollateralReturnForTxID, u.TxId,
 		u.PaymentKey, u.StakingKey, u.DatumHash, u.SpentAtTxId,
 		u.ReferencedByTxId, u.CollateralByTxId, u.AddedSlot,
-		u.DeletedSlot, u.Amount, u.OutputIdx,
+		u.DeletedSlot, u.Amount, u.OutputIdx, u.PaymentScript,
 	)
 }
 

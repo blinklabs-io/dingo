@@ -1935,7 +1935,7 @@ func TestHandleNetwork(t *testing.T) {
 				Max:         "45000000000000000",
 				Total:       "33000000000000000",
 				Circulating: "32000000000000000",
-				Locked:      "0",
+				Locked:      "1000000000000",
 				Treasury:    "500000000000",
 				Reserves:    "12000000000000000",
 			},
@@ -1969,6 +1969,7 @@ func TestHandleNetwork(t *testing.T) {
 	assert.NotEmpty(t, resp.Stake.Active)
 	assert.Equal(t, "500000000000", resp.Supply.Treasury)
 	assert.Equal(t, "12000000000000000", resp.Supply.Reserves)
+	assert.Equal(t, "1000000000000", resp.Supply.Locked)
 }
 
 func TestHandleNetworkEras(t *testing.T) {
@@ -2006,11 +2007,14 @@ func TestHandleNetworkEras(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
+	// Per OpenAPI 0.1.88, era items carry only start, end, and
+	// parameters; the era name must not appear in the response.
+	assert.NotContains(t, w.Body.String(), "\"era\"")
+
 	var resp []NetworkEraResponse
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	require.Len(t, resp, 1)
-	assert.Equal(t, "Byron", resp[0].Era)
 	assert.Equal(t, uint64(0), resp[0].Start.Epoch)
 	require.NotNil(t, resp[0].End)
 	assert.Equal(t, uint64(208), resp[0].End.Epoch)

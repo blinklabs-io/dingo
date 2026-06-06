@@ -516,9 +516,16 @@ func (a *NodeAdapter) Network() (NetworkInfo, error) {
 		treasury = uint64(state.Treasury)
 		reserves = uint64(state.Reserves)
 	}
-	// TODO: Wire locked supply from script-address UTxOs and ledger deposits,
-	// then subtract it from circulating supply.
-	locked := uint64(0)
+	// Script-locked supply: lovelace held in live UTxOs whose payment
+	// credential is a script. Subtracted from circulating supply below.
+	locked, err := a.ledgerState.Database().Metadata().
+		GetScriptLockedSupply(nil)
+	if err != nil {
+		return NetworkInfo{}, fmt.Errorf(
+			"get script-locked supply: %w",
+			err,
+		)
+	}
 	total := uint64(0)
 	if reserves <= maxSupply {
 		total = maxSupply - reserves
