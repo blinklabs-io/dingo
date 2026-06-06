@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"runtime"
 	"slices"
 	"strconv"
@@ -818,7 +819,8 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 // only.
 func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.leiosVoterPublicKeys = keys
+		// Copy so later caller mutations cannot change live config
+		c.leiosVoterPublicKeys = maps.Clone(keys)
 	}
 }
 

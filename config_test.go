@@ -214,5 +214,13 @@ func TestWithLeiosVoterPublicKeys(t *testing.T) {
 	assert.Nil(t, cfg.leiosVoterPublicKeys)
 	keys := map[string]string{"aabbcc": "ddeeff"}
 	WithLeiosVoterPublicKeys(keys)(cfg)
-	assert.Equal(t, keys, cfg.leiosVoterPublicKeys)
+	assert.Equal(
+		t,
+		map[string]string{"aabbcc": "ddeeff"},
+		cfg.leiosVoterPublicKeys,
+	)
+	// The option copies the map: later caller mutations must not
+	// change live config
+	keys["aabbcc"] = "mutated"
+	assert.Equal(t, "ddeeff", cfg.leiosVoterPublicKeys["aabbcc"])
 }

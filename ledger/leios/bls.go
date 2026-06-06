@@ -105,6 +105,11 @@ func VerifyVoteSignature(
 	if pub == nil || pub.IsInfinity() {
 		return errors.New("invalid public key")
 	}
+	// Defense in depth for callers outside this package: keys parsed by
+	// ParseVoterPublicKey are already subgroup-checked at decode time.
+	if !pub.IsInSubGroup() {
+		return errors.New("public key is not in the G2 subgroup")
+	}
 	sigPoint, err := decodeSignaturePoint(sig)
 	if err != nil {
 		return err

@@ -1034,3 +1034,88 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 		),
 	)
 }
+
+func TestVoteManagerExpiredVoteIdCanBeReplaced(t *testing.T) {
+	fixture := newManagerFixture(t)
+	base := time.Now()
+	var offsetMu sync.Mutex
+	offset := time.Duration(0)
+	fixture.mgr.now = func() time.Time {
+		offsetMu.Lock()
+		defer offsetMu.Unlock()
+		return base.Add(offset)
+	}
+
+	ebHashA := lcommon.NewBlake2b256([]byte("eb-a"))
+	ebHashB := lcommon.NewBlake2b256([]byte("eb-b"))
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHashA),
+		),
+	)
+	offsetMu.Lock()
+	offset = voteStoreTTL + time.Minute
+	offsetMu.Unlock()
+	// The first vote has expired: a fresh vote with the same id must
+	// replace it rather than being dropped by the stale dedup entry.
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHashB),
+		),
+	)
+	raws := fixture.mgr.VotesByIds(
+		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 0}},
+	)
+	require.Len(t, raws, 1)
+	var stored lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &stored)
+	require.NoError(t, err)
+	assert.Equal(t, ebHashB, stored.EndorserBlockHash)
+}
+
+func TestVoteManagerNextVotesAbortDoesNotSkipVotes(t *testing.T) {
+	fixture := newManagerFixture(t)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	require.NoError(
+		t,
+		fixture.mgr.HandleVote(
+			"conn-a",
+			fixture.makeVote(t, 0, 577, ebHash),
+		),
+	)
+
+	// Request more votes than available, then abort the wait
+	done := make(chan struct{})
+	resultCh := startNextVotes(fixture, done, "conn-b", 2)
+	testutil.RequireNoReceive(
+		t,
+		resultCh,
+		300*time.Millisecond,
+		"NextVotes waits for the full count",
+	)
+	close(done)
+	result := testutil.RequireReceive(
+		t,
+		resultCh,
+		2*time.Second,
+		"aborted NextVotes returns",
+	)
+	require.Error(t, result.err)
+
+	// The undelivered vote must still be served on the next request
+	done2 := make(chan struct{})
+	defer close(done2)
+	result = testutil.RequireReceive(
+		t,
+		startNextVotes(fixture, done2, "conn-b", 1),
+		2*time.Second,
+		"vote re-served after aborted request",
+	)
+	require.NoError(t, result.err)
+	require.Len(t, result.votes, 1)
+	assert.Equal(t, uint64(0), result.votes[0].VoterId)
+}

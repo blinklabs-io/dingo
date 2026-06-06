@@ -495,6 +495,9 @@ func (m *VoteManager) insertVote(
 	now := m.now()
 
 	m.mu.Lock()
+	// Prune before the dedup check so an expired entry cannot block a
+	// fresh vote with the same id.
+	m.pruneExpiredLocked(now)
 	if existing, ok := m.votesById[voteId]; ok {
 		m.mu.Unlock()
 		if existing.vote.EndorserBlockHash == vote.EndorserBlockHash {
@@ -515,7 +518,6 @@ func (m *VoteManager) insertVote(
 		)
 		return
 	}
-	m.pruneExpiredLocked(now)
 	stored := &storedVote{
 		vote:       vote,
 		raw:        raw,
@@ -710,6 +712,11 @@ func (m *VoteManager) NextVotes(
 		return nil, errors.New("leios vote request for zero votes")
 	}
 	collected := make([]lcommon.LeiosVote, 0, count)
+	// Track the cursor locally and persist it only on successful
+	// delivery: an aborted wait must not permanently skip votes that
+	// were collected but never returned to the peer.
+	cursorLoaded := false
+	var cursor uint64
 	for {
 		m.mu.Lock()
 		if !m.running {
@@ -717,7 +724,10 @@ func (m *VoteManager) NextVotes(
 			return nil, ErrVoteManagerStopped
 		}
 		m.pruneExpiredLocked(m.now())
-		cursor := m.cursors[connKey]
+		if !cursorLoaded {
+			cursor = m.cursors[connKey]
+			cursorLoaded = true
+		}
 		startIdx := sort.Search(len(m.voteLog), func(i int) bool {
 			return m.voteLog[i].seq >= cursor
 		})
@@ -731,8 +741,8 @@ func (m *VoteManager) NextVotes(
 				break
 			}
 		}
-		m.cursors[connKey] = cursor
 		if uint64(len(collected)) == count {
+			m.cursors[connKey] = cursor
 			m.mu.Unlock()
 			return collected, nil
 		}

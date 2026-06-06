@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/keystore"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 )
@@ -40,6 +41,9 @@ const voteSigningKeySize = 32
 // voteSigningKeyFileMaxSize bounds reads of the signing key file: a hex
 // scalar plus surrounding whitespace fits comfortably in 1 KiB.
 const voteSigningKeyFileMaxSize = 1024
+
+// voterPoolKeyHashSize is the Blake2b-224 pool key hash length.
+const voterPoolKeyHashSize = 28
 
 // VoteSigningKey is a BLS12-381 MinSig signing key for Leios votes: a
 // scalar secret key with its G2 public key.
@@ -88,20 +92,30 @@ func ParseVoteSigningKey(hexStr string) (*VoteSigningKey, error) {
 }
 
 // LoadVoteSigningKeyFile reads a hex-encoded vote signing key from a file.
-// The file must not be readable by group or other (checked via fstat on
-// the open handle to avoid TOCTOU races, as keystore does).
+// The file must not be accessible beyond its owner (checked on the open
+// handle via keystore, which avoids TOCTOU races between check and read)
+// and must not exceed voteSigningKeyFileMaxSize.
 func LoadVoteSigningKeyFile(path string) (*VoteSigningKey, error) {
 	f, err := os.Open(path) // #nosec G304 -- operator-configured key path
 	if err != nil {
 		return nil, fmt.Errorf("open vote signing key file: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only handle
-	if err := checkVoteKeyFilePermissions(f); err != nil {
+	if err := keystore.CheckOpenFilePermissions(f); err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, voteSigningKeyFileMaxSize))
+	// Read one byte past the limit so oversized files are rejected
+	// rather than silently truncated.
+	data, err := io.ReadAll(io.LimitReader(f, voteSigningKeyFileMaxSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("read vote signing key file: %w", err)
+	}
+	if len(data) > voteSigningKeyFileMaxSize {
+		return nil, fmt.Errorf(
+			"vote signing key file %q exceeds %d bytes",
+			path,
+			voteSigningKeyFileMaxSize,
+		)
 	}
 	key, err := ParseVoteSigningKey(strings.TrimSpace(string(data)))
 	if err != nil {
@@ -164,6 +178,14 @@ func NewVoterRegistry(entries map[string]string) (*VoterRegistry, error) {
 				err,
 			)
 		}
+		if len(poolHash) != voterPoolKeyHashSize {
+			return nil, fmt.Errorf(
+				"malformed voter pool key hash %q: must be %d bytes, got %d",
+				poolHashHex,
+				voterPoolKeyHashSize,
+				len(poolHash),
+			)
+		}
 		pub, err := ParseVoterPublicKey(pubHex)
 		if err != nil {
 			return nil, fmt.Errorf(
@@ -172,7 +194,14 @@ func NewVoterRegistry(entries map[string]string) (*VoterRegistry, error) {
 				err,
 			)
 		}
-		registry.keys[hex.EncodeToString(poolHash)] = pub
+		canonical := hex.EncodeToString(poolHash)
+		if _, exists := registry.keys[canonical]; exists {
+			return nil, fmt.Errorf(
+				"duplicate voter pool key hash %q after normalization",
+				poolHashHex,
+			)
+		}
+		registry.keys[canonical] = pub
 	}
 	return registry, nil
 }

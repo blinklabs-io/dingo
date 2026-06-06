@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
@@ -189,4 +190,38 @@ func TestNewVoterRegistryNormalizesPoolHashCase(t *testing.T) {
 	require.NoError(t, err)
 	_, ok := registry.PublicKeyFor(poolHash)
 	assert.True(t, ok)
+}
+
+func TestNewVoterRegistryRejectsWrongLengthPoolHash(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
+	require.NoError(t, err)
+	// Valid hex, but not a 28-byte pool key hash
+	_, err = NewVoterRegistry(map[string]string{
+		"aabbccdd": hex.EncodeToString(key.PublicKeyBytes()),
+	})
+	assert.Error(t, err)
+}
+
+func TestNewVoterRegistryRejectsDuplicateNormalizedEntries(t *testing.T) {
+	key, err := ParseVoteSigningKey(fmt.Sprintf("%064x", 11))
+	require.NoError(t, err)
+	pubHex := hex.EncodeToString(key.PublicKeyBytes())
+	lower := "abcdef" + testPoolHash(0)[6:]
+	upper := "ABCDEF" + testPoolHash(0)[6:]
+	// Distinct map keys that normalize to the same pool key hash must
+	// be rejected instead of silently picking one entry.
+	_, err = NewVoterRegistry(map[string]string{
+		lower: pubHex,
+		upper: pubHex,
+	})
+	assert.Error(t, err)
+}
+
+func TestLoadVoteSigningKeyFileRejectsOversized(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vote.skey")
+	content := fmt.Sprintf("%064x", 42) + strings.Repeat(" ", 2048)
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	_, err := LoadVoteSigningKeyFile(path)
+	assert.Error(t, err)
 }

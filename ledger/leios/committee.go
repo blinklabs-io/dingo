@@ -149,6 +149,17 @@ func ComputeCommittee(
 			break
 		}
 	}
+	if scaledCum.Cmp(target) < 0 {
+		// Inconsistent inputs: the pools cannot cover the target
+		// fraction of total active stake. A partial committee would
+		// break downstream stake-quorum assumptions.
+		return nil, fmt.Errorf(
+			"committee stake coverage target %s unreachable: pool stake %d of total active stake %d",
+			committeeStakeCoverage.RatString(),
+			committee.CommitteeStake,
+			totalActiveStake,
+		)
+	}
 	return committee, nil
 }
 

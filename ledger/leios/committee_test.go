@@ -272,3 +272,25 @@ func TestCommitteeSnapshotEpoch(t *testing.T) {
 		)
 	}
 }
+
+func TestComputeCommitteeUnreachableCoverage(t *testing.T) {
+	// Inconsistent inputs: the pools sum to less than total active
+	// stake, so the coverage target can never be reached. Returning a
+	// partial committee would break downstream stake-quorum
+	// assumptions.
+	poolStakes := map[string]uint64{
+		testPoolHash(1): 30,
+		testPoolHash(2): 20,
+	}
+	_, err := ComputeCommittee(
+		1, 0, poolStakes, 100, big.NewRat(9, 10),
+	)
+	assert.Error(t, err)
+
+	// The same pools satisfy a reachable target
+	committee, err := ComputeCommittee(
+		1, 0, poolStakes, 100, big.NewRat(1, 2),
+	)
+	require.NoError(t, err)
+	assert.Len(t, committee.Members, 2)
+}
