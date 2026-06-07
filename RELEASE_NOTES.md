@@ -12,10 +12,10 @@ Hi folks! Here’s what we shipped in v0.51.0.
 
 ### ✨ What's New
 
-* Added **try experimental next era support with early Leios groundwork:** Early support for the next era and Leios preparation expand what preview testing can exercise, which helps upcoming protocol work move forward with less setup friction. ([#2495](https://github.com/blinklabs-io/dingo/pull/2495))
+* Added **try experimental next era support with early Leios groundwork:** Early support for the next era expands preview testing, which helps upcoming Leios work move forward with less setup friction. ([#2495](https://github.com/blinklabs-io/dingo/pull/2495))
 * Introduced **relay Leios votes across the network path:** Leios mode can now diffuse votes through the dedicated relay flow, which makes early vote handling behave more like a complete network path. ([#2502](https://github.com/blinklabs-io/dingo/pull/2502))
 * Expanded **read Conway protocol settings through Blockfrost epoch endpoints:** Blockfrost compatible epoch responses now expose Conway era protocol parameters, which gives API users a clearer view of current network settings. ([#2504](https://github.com/blinklabs-io/dingo/pull/2504))
-* Delivered **request ledger based peer snapshots directly:** Peer snapshot consumers can now fetch ledger based snapshot data directly, which makes peer selection and network insight easier to build around live ledger state. ([#2496](https://github.com/blinklabs-io/dingo/pull/2496))
+* Delivered **request ledger based peer snapshots directly:** Peer snapshot consumers can now fetch ledger based snapshot data directly, which makes peer selection and network insight easier to use with live ledger state. ([#2496](https://github.com/blinklabs-io/dingo/pull/2496))
 * Enabled **run a local Blockfrost explorer example for API testing:** A local explorer example now helps teams try Dingo’s Blockfrost compatible APIs in a more realistic workflow before deploying elsewhere. ([#2482](https://github.com/blinklabs-io/dingo/pull/2482))
 
 ### 💪 Improvements
@@ -23,7 +23,7 @@ Hi folks! Here’s what we shipped in v0.51.0.
 * Improved **speed SQLite writes during heavy API backfill:** API backfill can now write SQLite data more efficiently on busy paths, which helps long historical catch up finish more smoothly. ([#2499](https://github.com/blinklabs-io/dingo/pull/2499))
 * Refined **rebuild the most important indexes first after API backfill:** Critical indexes now return sooner while the remaining maintenance continues in the background, which makes recovered services more usable earlier and shutdown behavior safer. ([#2497](https://github.com/blinklabs-io/dingo/pull/2497))
 * Updated **refresh bundled peer snapshots and seed startup from them:** Bundled topology data now stays fresher and startup can seed peers from embedded peer snapshots, which makes initial network connections more dependable. ([#2506](https://github.com/blinklabs-io/dingo/pull/2506))
-* Modernized **use stronger compression controls when compression is on:** Compressed storage can now use a more efficient compression mode with a selectable compression level, which gives operators clearer control over storage behavior. ([#2501](https://github.com/blinklabs-io/dingo/pull/2501))
+* Modernized **use stronger compression controls when compression is on:** Compressed storage can now use a more efficient compression mode with a selectable compression level, which gives operators more direct control over storage behavior. ([#2501](https://github.com/blinklabs-io/dingo/pull/2501))
 * Strengthened **keep the published v0.50.2 release history current:** The release history now includes the prior v0.50.2 entry, which keeps recent release context easier to review. ([#2498](https://github.com/blinklabs-io/dingo/pull/2498))
 
 ### 🔧 Fixes
