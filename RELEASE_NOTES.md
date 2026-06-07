@@ -1,5 +1,55 @@
 # Dingo Releases
 
+## v0.51.0 (June 7, 2026)
+
+**Title:** Advance Leios support, expand protocol APIs, and smooth sync and backfill
+
+**Date:** June 7, 2026
+
+**Version:** v0.51.0
+
+Hi folks! Here’s what we shipped in v0.51.0.
+
+### ✨ What's New
+
+* Added **try experimental Dijkstra era support with early Leios groundwork:** Early era support and Leios preparation expand what preview testing can exercise, which helps upcoming protocol work move forward with less setup friction. ([#2495](https://github.com/blinklabs-io/dingo/pull/2495))
+* Introduced **relay Leios votes across the network path:** Leios mode can now diffuse votes through the dedicated relay flow, which makes early vote handling behave more like a complete network path. ([#2502](https://github.com/blinklabs-io/dingo/pull/2502))
+* Expanded **read Conway protocol settings through Blockfrost epoch endpoints:** Blockfrost compatible epoch responses now expose Conway era protocol parameters, which gives API users a clearer view of current network settings. ([#2504](https://github.com/blinklabs-io/dingo/pull/2504))
+* Delivered **request ledger driven peer snapshots through LocalStateQuery:** Peer snapshot consumers can now fetch ledger based snapshot data directly, which makes peer selection and network insight easier to build around live ledger state. ([#2496](https://github.com/blinklabs-io/dingo/pull/2496))
+* Enabled **run a local Blockfrost explorer example for API testing:** A local explorer example now helps teams try Dingo’s Blockfrost compatible APIs in a more realistic workflow before deploying elsewhere. ([#2482](https://github.com/blinklabs-io/dingo/pull/2482))
+
+### 💪 Improvements
+
+* Improved **speed SQLite writes during heavy API backfill:** API backfill can now write SQLite data more efficiently on busy paths, which helps long historical catch up finish more smoothly. ([#2499](https://github.com/blinklabs-io/dingo/pull/2499))
+* Refined **rebuild the most important indexes first after API backfill:** Critical indexes now return sooner while the remaining maintenance continues in the background, which makes recovered services more usable earlier and shutdown behavior safer. ([#2497](https://github.com/blinklabs-io/dingo/pull/2497))
+* Updated **refresh bundled peer snapshots and seed Genesis startup from them:** Bundled topology data now stays fresher and Genesis startup can seed peers from embedded peer snapshots, which makes initial network connections more dependable. ([#2506](https://github.com/blinklabs-io/dingo/pull/2506))
+* Modernized **use stronger Badger compression controls when compression is on:** Compressed storage can now use ZSTD with a selectable compression level, which gives operators clearer control over storage behavior. ([#2501](https://github.com/blinklabs-io/dingo/pull/2501))
+* Strengthened **keep the published v0.50.2 release history current:** The release history now includes the prior v0.50.2 entry, which keeps recent release context easier to review. ([#2498](https://github.com/blinklabs-io/dingo/pull/2498))
+
+### 🔧 Fixes
+
+* Fixed **avoid near tip stalls during bootstrap exit and tip detection:** Near tip sync now leaves bootstrap mode more safely and detects tip conditions more reliably, which helps nodes avoid stalling close to the tip. ([#2511](https://github.com/blinklabs-io/dingo/pull/2511))
+* Corrected **match devnet startup with protocol version 11:** Devnet now starts with the intended minimum protocol version, which keeps test environments aligned with current network expectations. ([#2505](https://github.com/blinklabs-io/dingo/pull/2505))
+
+### 📋 What You Need to Know
+
+* Clarified **start bundled Leios testnets without separate network files:** Leios testnet configuration, topology, peer snapshot, and genesis data now ship inside the binary, which makes bundled Leios startup simpler. ([#2503](https://github.com/blinklabs-io/dingo/pull/2503))
+* Highlighted **set JSON logging explicitly when machine readable logs are required:** The default log format is now text, and JSON log consumers must set `logging.format=json` or the matching environment variable or flag to keep machine readable JSON logs. ([#2500](https://github.com/blinklabs-io/dingo/pull/2500))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.50.2 (June 3, 2026)
 
 **Title:** Faster leader scheduling, sturdier backfill provenance, and safer chainsync intersections
