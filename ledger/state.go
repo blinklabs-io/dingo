@@ -1281,8 +1281,8 @@ func (ls *LedgerState) handleSlotTicks() {
 
 		// During catch up, don't emit slot-based epoch events. Block
 		// processing handles epoch transitions for historical data. We
-		// consider the node "near tip" when the ledger tip is within 95%
-		// of the upstream peer's tip slot.
+		// consider the node "near tip" when the ledger tip is inside the
+		// current era's stability window from the upstream peer's tip.
 		if !ls.isNearTip(tipSlot) {
 			if tick.IsEpochStart {
 				logger.Debug(
@@ -1428,19 +1428,21 @@ func (ls *LedgerState) resetNextEpochNonceReady() {
 	ls.nextNonceReadyEpoch.Store(0)
 }
 
-// isNearTip returns true when the given slot is within 95% of the
-// upstream peer's tip. This is used to decide whether to emit
-// slot-clock epoch events. During initial catch-up the node is far
-// behind the tip and these checks are skipped; once the node is close
-// to the tip they are always on. Returns false when no upstream tip is
-// known yet (no peer connected), since we can't determine proximity.
+// isNearTip returns true when the given slot is inside the current era's
+// stability window from the upstream peer's tip. This is used to decide
+// whether to emit slot-clock epoch events. During initial catch-up the node is
+// far behind the tip and these checks are skipped; once the node is close to
+// the tip they are always on. Returns false when no upstream tip is known yet
+// (no peer connected), since we can't determine proximity.
 func (ls *LedgerState) isNearTip(slot uint64) bool {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()
 	if upstreamTip == 0 {
 		return false
 	}
-	// 95% threshold using division to avoid uint64 overflow.
-	return slot >= upstreamTip-upstreamTip/20
+	if slot >= upstreamTip {
+		return true
+	}
+	return upstreamTip-slot <= ls.calculateStabilityWindow()
 }
 
 func (ls *LedgerState) scheduleCleanupConsumedUtxos() {

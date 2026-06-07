@@ -908,6 +908,11 @@ The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
 connection when a better chain is found.
 
+Bootstrap topology peers remain chain-selection eligible after bootstrap exit
+as a fallback ingress source, but peer governance lowers their priority to zero.
+This lets non-bootstrap peers win same-tip transport selection without
+stranding ChainSync when the bootstrap peer is still the only usable upstream.
+
 ## Network and Protocol Handling
 
 ### Ouroboros Protocol Stack
@@ -1017,6 +1022,13 @@ Genesis initial sync while preserving the existing `UseLedgerAfterSlot` path:
 later ledger peer refreshes still query the live ledger/database provider.
 If the snapshot produces no usable peers, startup falls back to topology
 bootstrap peers.
+
+Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
+be triggered by enough connected ledger peers, or by the configured slot/progress
+thresholds once at least one non-bootstrap client-capable successor is
+available. Exiting bootstrap preserves bootstrap peer identity for recovery and
+lowers bootstrap chain-selection priority instead of making connected bootstrap
+ChainSync streams ineligible.
 
 ## Transaction Mempool
 
@@ -1311,6 +1323,11 @@ type EpochTransitionEvent struct {
     SnapshotSlot      uint64  // Typically boundary - 1
 }
 ```
+
+Epoch transition events may come from block processing or the slot clock. The
+slot clock only emits proactive epoch transitions when the ledger tip is within
+the current era's stability window of the upstream tip; while farther behind,
+block processing owns historical epoch transitions during catch-up.
 
 ### Rollback Support
 

@@ -493,7 +493,10 @@ func chainSelectionState(
 	eligible := chainSelectionEligible(source, conn)
 	priority := chainSelectionPriority(source)
 	if source == PeerSourceTopologyBootstrapPeer && bootstrapExited {
-		eligible = false
+		// Bootstrap peers remain eligible as a fallback ingress source after
+		// bootstrap exit. Lowering priority lets ledger/gossip/topology peers
+		// win same-tip transport selection without stranding ChainSync when no
+		// replacement peer is actually usable yet.
 		priority = 0
 	}
 	return chainSelectionPeerState{

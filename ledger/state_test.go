@@ -954,6 +954,20 @@ func newNonceReadyTestLedgerState(
 	}
 }
 
+func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+		},
+		currentEra: eras.ShelleyEraDesc,
+	}
+	ls.syncUpstreamTipSlot.Store(1000)
+
+	assert.False(t, ls.isNearTip(993), "gap above 3k/f should be catch-up")
+	assert.True(t, ls.isNearTip(994), "gap equal to 3k/f should be near tip")
+	assert.True(t, ls.isNearTip(1001), "local tip beyond upstream is near tip")
+}
+
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 	byronGenesisJSON := `{
 		"protocolConsts": {
