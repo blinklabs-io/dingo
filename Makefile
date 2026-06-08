@@ -84,7 +84,11 @@ $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
 	test -n "$(PROTOC_SHA256)"
 	curl -fL -o $(PROTOC_ZIP) https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
-	printf '%s  %s\n' "$(PROTOC_SHA256)" "$(PROTOC_ZIP)" | shasum -a 256 -c -
+	if command -v sha256sum >/dev/null 2>&1; then \
+		printf '%s  %s\n' "$(PROTOC_SHA256)" "$(PROTOC_ZIP)" | sha256sum -c -; \
+	else \
+		printf '%s  %s\n' "$(PROTOC_SHA256)" "$(PROTOC_ZIP)" | shasum -a 256 -c -; \
+	fi
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
 test: mod-tidy ## Run tests with race detection
