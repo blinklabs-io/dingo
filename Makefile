@@ -15,10 +15,15 @@ HOST_OS=$(shell uname -s | tr '[:upper:]' '[:lower:]')
 HOST_ARCH=$(shell uname -m)
 PROTOC_VERSION=32.1
 PROTOC_OS=$(if $(filter darwin,$(HOST_OS)),osx,$(HOST_OS))
-PROTOC_ARCH=$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch_64,x86_64)
+PROTOC_ARCH=$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch_64,$(if $(filter x86_64 amd64,$(HOST_ARCH)),x86_64,$(error unsupported HOST_ARCH $(HOST_ARCH); supported: x86_64/amd64, arm64/aarch64)))
 PROTOC_DIR=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH)
 PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
 PROTOC=$(PROTOC_DIR)/bin/protoc
+PROTOC_SHA256_osx_aarch_64=a7b51b2113862690fa52c62f8891a6037bafb9db88d4f9924c486de9d9bb89d5
+PROTOC_SHA256_osx_x86_64=f9caa5b4d0b537acffb0ffd7d53225511a5574ef903fca550ea9e7600987f13b
+PROTOC_SHA256_linux_aarch_64=4a802ed23d70f7bad7eb19e5a3e724b3aa967250d572cadfd537c1ba939aee6a
+PROTOC_SHA256_linux_x86_64=e9c129c176bb7df02546c4cd6185126ca53c89e7d2f09511e209319704b5dd7e
+PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -77,7 +82,9 @@ proto: $(PROTOC) ## Generate Go code from protobuf definitions
 
 $(PROTOC):
 	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
+	test -n "$(PROTOC_SHA256)"
 	curl -fL -o $(PROTOC_ZIP) https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
+	printf '%s  %s\n' "$(PROTOC_SHA256)" "$(PROTOC_ZIP)" | shasum -a 256 -c -
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
 test: mod-tidy ## Run tests with race detection
