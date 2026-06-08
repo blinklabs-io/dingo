@@ -1698,7 +1698,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if result.Error != nil {
@@ -1743,7 +1746,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if result.Error != nil {
@@ -3118,7 +3124,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 							CredentialTag: credentialTag,
 						}
 						r := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if r.Error != nil {
@@ -3156,7 +3165,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 							CredentialTag: credentialTag,
 						}
 						r := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if r.Error != nil {
@@ -3963,10 +3975,11 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 		}
 
 		account := &models.Account{
-			StakingKey: stakerBytes,
-			Pool:       poolBytes,
-			Active:     true,
-			AddedSlot:  0,
+			StakingKey:    stakerBytes,
+			CredentialTag: 0,
+			Pool:          poolBytes,
+			Active:        true,
+			AddedSlot:     0,
 		}
 		// DoUpdates intentionally omits added_slot: RestoreAccountStateAtSlot
 		// selects rows by `added_slot > rollback_slot`, so resetting a
@@ -3974,7 +3987,10 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 		// Mithril after partial sync) would make that row invisible to
 		// every future rollback.
 		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "staking_key"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "staking_key"},
+			},
 			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
 		}).Create(account)
 		if result.Error != nil {
@@ -4110,10 +4126,10 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 
 		// Delegation history tables have no unique constraint that covers
-		// (staking_key, added_slot), so we use FirstOrCreate to keep the
-		// slot-0 row idempotent across retries (e.g., resumed Mithril
-		// bootstrap). Each staking key contributes at most one genesis
-		// delegation row of a given type, so matching on staking_key +
+		// (credential_tag, staking_key, added_slot), so we use FirstOrCreate
+		// to keep the slot-0 row idempotent across retries (e.g., resumed
+		// Mithril bootstrap). Each stake credential contributes at most one
+		// genesis delegation row of a given type, so matching on tag + key +
 		// added_slot is sufficient.
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
@@ -4125,8 +4141,8 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.StakeDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.StakeDelegation{
 				StakingKey:    stakeKey,
 				CredentialTag: credentialTag,
@@ -4148,8 +4164,8 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.VoteDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.VoteDelegation{
 				StakingKey:    stakeKey,
 				CredentialTag: credentialTag,
@@ -4173,8 +4189,8 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.StakeVoteDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.StakeVoteDelegation{
 				StakingKey:    stakeKey,
 				CredentialTag: credentialTag,
