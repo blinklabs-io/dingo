@@ -295,7 +295,8 @@ type MetadataStore interface {
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
 
-	// GetAccount retrieves an account by stake credential, optionally including inactive accounts.
+	// GetAccount retrieves a key-credential account by staking key.
+	// This compatibility wrapper defaults credential_tag to 0.
 	GetAccount(
 		[]byte, // stakeKey
 		bool, // includeInactive
@@ -311,10 +312,8 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Account, error)
 
-	// GetAccounts retrieves multiple accounts by stake credential in a single query,
-	// optionally including inactive accounts. The returned map is keyed by the
-	// StakeCredentialRef MapKey; credentials with no matching row are omitted. An
-	// empty input returns an empty (non-nil) map and no error.
+	// GetAccounts retrieves key-credential accounts by staking key.
+	// This compatibility wrapper defaults credential_tag to 0.
 	GetAccounts(
 		[][]byte, // stakeKeys
 		bool, // includeInactive
@@ -329,7 +328,8 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
-	// AddAccountReward credits a reward account by stake credential.
+	// AddAccountReward credits a key-credential reward account by staking key.
+	// This compatibility wrapper defaults credential_tag to 0.
 	AddAccountReward(
 		[]byte, // stakeKey
 		uint64, // amount
