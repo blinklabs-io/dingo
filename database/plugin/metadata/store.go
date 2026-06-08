@@ -295,19 +295,36 @@ type MetadataStore interface {
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
 
-	// GetAccount retrieves an account by stake key, optionally including inactive accounts.
+	// GetAccount retrieves an account by stake credential, optionally including inactive accounts.
 	GetAccount(
 		[]byte, // stakeKey
 		bool, // includeInactive
 		types.Txn,
 	) (*models.Account, error)
 
-	// GetAccounts retrieves multiple accounts by stake key in a single query,
-	// optionally including inactive accounts. The returned map is keyed by
-	// string(StakingKey); stake keys with no matching row are omitted. An
+	// GetAccountByCredential retrieves an account using the full stake credential identity.
+	// The credential tag separates key and script credentials that share the same hash.
+	GetAccountByCredential(
+		uint8, // credentialTag
+		[]byte, // stakeKey
+		bool, // includeInactive
+		types.Txn,
+	) (*models.Account, error)
+
+	// GetAccounts retrieves multiple accounts by stake credential in a single query,
+	// optionally including inactive accounts. The returned map is keyed by the
+	// StakeCredentialRef MapKey; credentials with no matching row are omitted. An
 	// empty input returns an empty (non-nil) map and no error.
 	GetAccounts(
 		[][]byte, // stakeKeys
+		bool, // includeInactive
+		types.Txn,
+	) (map[string]*models.Account, error)
+
+	// GetAccountsByCredential retrieves accounts in batch using tag-aware stake credentials.
+	// The returned map is keyed by StakeCredentialRef.MapKey() for tag plus hash lookups.
+	GetAccountsByCredential(
+		[]models.StakeCredentialRef, // stakeCredentials
 		bool, // includeInactive
 		types.Txn,
 	) (map[string]*models.Account, error)
@@ -327,6 +344,16 @@ type MetadataStore interface {
 		uint64, // amount
 		uint64, // slot
 		[]byte, // txHash
+		types.Txn,
+	) error
+
+	// AddAccountRewardByCredential credits rewards using the full stake credential identity.
+	// The credential tag prevents key and script reward accounts with the same hash from merging.
+	AddAccountRewardByCredential(
+		uint8, // credentialTag
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
 		types.Txn,
 	) error
 

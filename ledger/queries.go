@@ -652,11 +652,6 @@ func (ls *LedgerState) queryShelleyUtxoByAddress(
 // filtered out. The delegations map only contains accounts whose `Pool`
 // is currently set; an account that is registered but undelegated will
 // appear in the rewards map only.
-//
-// Stake credential lookup is hash-only: dingo's Account.StakingKey is the
-// 28-byte Blake2b224 credential hash and does not carry the key/script
-// discriminator. Collisions across the two tag spaces are cryptographically
-// negligible. TODO(#394): refine if Account grows tag-aware storage.
 func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	creds []olocalstatequery.StakeCredential,
 ) (any, error) {
@@ -665,22 +660,29 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	if len(creds) == 0 {
 		return []any{[]any{delegations, rewards}}, nil
 	}
-	stakeKeys := make([][]byte, 0, len(creds))
+	stakeCreds := make([]models.StakeCredentialRef, 0, len(creds))
 	seen := make(map[string]struct{}, len(creds))
 	for _, cred := range creds {
-		key := string(cred.Bytes[:])
+		ref := models.StakeCredentialRef{
+			Tag: uint8(cred.Tag),
+			Key: cred.Bytes[:],
+		}
+		key := ref.MapKey()
 		if _, dup := seen[key]; dup {
 			continue
 		}
 		seen[key] = struct{}{}
-		stakeKeys = append(stakeKeys, cred.Bytes[:])
+		stakeCreds = append(stakeCreds, ref)
 	}
-	accounts, err := ls.db.GetAccounts(stakeKeys, false, nil)
+	accounts, err := ls.db.GetAccountsByCredential(stakeCreds, false, nil)
 	if err != nil {
 		return nil, err
 	}
 	for _, cred := range creds {
-		account, ok := accounts[string(cred.Bytes[:])]
+		account, ok := accounts[models.StakeCredentialRef{
+			Tag: uint8(cred.Tag),
+			Key: cred.Bytes[:],
+		}.MapKey()]
 		if !ok {
 			continue
 		}

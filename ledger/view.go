@@ -133,7 +133,12 @@ func (lv *LedgerView) StakeRegistration(
 func (lv *LedgerView) IsStakeCredentialRegistered(
 	cred lcommon.Credential,
 ) bool {
-	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
+	account, err := lv.ls.db.GetAccountByCredential(
+		uint8(cred.CredType),
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			lv.ls.config.Logger.Error(
@@ -324,7 +329,12 @@ func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 func (lv *LedgerView) IsRewardAccountRegistered(
 	cred lcommon.Credential,
 ) bool {
-	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
+	account, err := lv.ls.db.GetAccountByCredential(
+		uint8(cred.CredType),
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			lv.ls.config.Logger.Error(

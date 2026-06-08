@@ -1078,6 +1078,115 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 	}
 }
 
+// TestStakeRegistrationCertificateProcessingIsCredentialTagAware verifies that
+// cert processing persists the on-chain credential tag instead of merging key
+// and script stake credentials that carry the same 28-byte hash.
+func TestStakeRegistrationCertificateProcessingIsCredentialTagAware(t *testing.T) {
+	sqliteStore := setupTestDB(t)
+	stakeKey := bytes.Repeat([]byte{0xA7}, 28)
+
+	mockTx := &mockTransaction{
+		hash:    lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB8}, 32)),
+		isValid: true,
+		certificates: []lcommon.Certificate{
+			&lcommon.StakeRegistrationCertificate{
+				CertType: uint(lcommon.CertificateTypeStakeRegistration),
+				StakeCredential: lcommon.Credential{
+					CredType: lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.CredentialHash(
+						bytes.Clone(stakeKey),
+					),
+				},
+			},
+			&lcommon.StakeRegistrationCertificate{
+				CertType: uint(lcommon.CertificateTypeStakeRegistration),
+				StakeCredential: lcommon.Credential{
+					CredType: lcommon.CredentialTypeScriptHash,
+					Credential: lcommon.CredentialHash(
+						bytes.Clone(stakeKey),
+					),
+				},
+			},
+		},
+	}
+
+	point := ocommon.Point{
+		Hash: bytes.Repeat([]byte{0xC9}, 32),
+		Slot: 1000000,
+	}
+	certDeposits := map[int]uint64{
+		0: 2000000,
+		1: 2000000,
+	}
+	if err := sqliteStore.SetTransaction(
+		mockTx,
+		point,
+		0,
+		certDeposits,
+		nil,
+	); err != nil {
+		t.Fatalf("failed to set transaction: %v", err)
+	}
+
+	var accounts []models.Account
+	if result := sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Order("credential_tag ASC").
+		Find(&accounts); result.Error != nil {
+		t.Fatalf("failed to query accounts: %v", result.Error)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(accounts))
+	}
+	if accounts[0].CredentialTag != 0 {
+		t.Fatalf("expected key account tag 0, got %d", accounts[0].CredentialTag)
+	}
+	if accounts[1].CredentialTag != 1 {
+		t.Fatalf(
+			"expected script account tag 1, got %d",
+			accounts[1].CredentialTag,
+		)
+	}
+
+	keyAccount, err := sqliteStore.GetAccountByCredential(0, stakeKey, false, nil)
+	if err != nil {
+		t.Fatalf("failed to query key credential account: %v", err)
+	}
+	if keyAccount == nil {
+		t.Fatal("expected key credential account")
+	}
+	scriptAccount, err := sqliteStore.GetAccountByCredential(1, stakeKey, false, nil)
+	if err != nil {
+		t.Fatalf("failed to query script credential account: %v", err)
+	}
+	if scriptAccount == nil {
+		t.Fatal("expected script credential account")
+	}
+
+	var registrations []models.StakeRegistration
+	if result := sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Order("credential_tag ASC").
+		Find(&registrations); result.Error != nil {
+		t.Fatalf("failed to query stake registrations: %v", result.Error)
+	}
+	if len(registrations) != 2 {
+		t.Fatalf("expected 2 stake registrations, got %d", len(registrations))
+	}
+	if registrations[0].CredentialTag != 0 {
+		t.Fatalf(
+			"expected key registration tag 0, got %d",
+			registrations[0].CredentialTag,
+		)
+	}
+	if registrations[1].CredentialTag != 1 {
+		t.Fatalf(
+			"expected script registration tag 1, got %d",
+			registrations[1].CredentialTag,
+		)
+	}
+}
+
 // TestDeleteCertificatesAfterSlot tests that certificates added after a given slot are deleted
 func TestDeleteCertificatesAfterSlot(t *testing.T) {
 	t.Parallel()

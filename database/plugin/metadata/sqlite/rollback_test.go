@@ -1178,6 +1178,105 @@ func TestRollbackAndReplay(t *testing.T) {
 	)
 }
 
+// TestRollbackRestoreAccountStateIsCredentialTagAware verifies that rollback
+// restore keeps key and script cert history separate when both credentials use
+// the same 28-byte staking hash.
+func TestRollbackRestoreAccountStateIsCredentialTagAware(t *testing.T) {
+	store := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0xE1}, 28)
+	keyPool := bytes.Repeat([]byte{0xA0}, 28)
+	scriptPool := bytes.Repeat([]byte{0xA1}, 28)
+	currentPool := bytes.Repeat([]byte{0xFF}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Pool:          currentPool,
+		AddedSlot:     200,
+		Active:        true,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Pool:          currentPool,
+		AddedSlot:     200,
+		Active:        true,
+	}).Error)
+
+	require.NoError(t, createTestTransaction(store.DB(), 51, 100))
+
+	keyRegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&keyRegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     100,
+		CertificateID: keyRegCert.ID,
+	}).Error)
+
+	scriptRegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     1,
+		CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&scriptRegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		AddedSlot:     100,
+		CertificateID: scriptRegCert.ID,
+	}).Error)
+
+	keyDelegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     2,
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&keyDelegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   keyPool,
+		AddedSlot:     100,
+		CertificateID: keyDelegCert.ID,
+	}).Error)
+
+	scriptDelegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     3,
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&scriptDelegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		PoolKeyHash:   scriptPool,
+		AddedSlot:     100,
+		CertificateID: scriptDelegCert.ID,
+	}).Error)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(150, nil))
+
+	keyAccount, err := store.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, keyAccount)
+	require.Equal(t, keyPool, keyAccount.Pool)
+
+	scriptAccount, err := store.GetAccountByCredential(1, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, scriptAccount)
+	require.Equal(t, scriptPool, scriptAccount.Pool)
+}
+
 // TestRollbackPParamsDeletion tests that protocol parameters added
 // after the rollback slot are removed.
 func TestRollbackPParamsDeletion(t *testing.T) {

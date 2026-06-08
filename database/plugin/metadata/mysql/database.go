@@ -318,6 +318,13 @@ func (d *MetadataStoreMysql) Start() error {
 			"block_nonce unique index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateAccountCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"account credential tag index migration failed: %w", err,
+		)
+	}
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",

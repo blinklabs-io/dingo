@@ -647,11 +647,12 @@ func certRequiresDeposit(cert lcommon.Certificate) bool {
 
 // getOrCreateAccount retrieves an existing account or creates a new one
 func (d *MetadataStoreMysql) getOrCreateAccount(
+	credentialTag uint8,
 	stakeKey []byte,
 	txn types.Txn,
 ) (*models.Account, error) {
 	// Include inactive accounts to allow reactivation on registration.
-	tmpAccount, err := d.GetAccount(stakeKey, true, txn)
+	tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			return nil, err
@@ -659,7 +660,8 @@ func (d *MetadataStoreMysql) getOrCreateAccount(
 	}
 	if tmpAccount == nil {
 		tmpAccount = &models.Account{
-			StakingKey: stakeKey,
+			StakingKey:    stakeKey,
+			CredentialTag: credentialTag,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
@@ -668,12 +670,15 @@ func (d *MetadataStoreMysql) getOrCreateAccount(
 }
 
 // saveAccount persists the account to the database. It creates a new
-// record when `account.ID == 0` (with an upsert on `staking_key`) or saves
+// record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
 func saveAccount(account *models.Account, db *gorm.DB) error {
 	if account.ID == 0 {
 		result := db.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "staking_key"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "staking_key"},
+			},
 			DoUpdates: clause.AssignmentColumns(
 				[]string{
 					"added_slot",
@@ -1623,13 +1628,15 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					tmpReg := models.StakeRegistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1683,14 +1690,16 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 					if tmpAccount == nil {
 						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
 						tmpAccount = &models.Account{
-							StakingKey: stakeKey,
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
@@ -1706,6 +1715,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1722,14 +1732,16 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 					if tmpAccount == nil {
 						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
 						tmpAccount = &models.Account{
-							StakingKey: stakeKey,
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
@@ -1745,6 +1757,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
@@ -1762,7 +1775,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1772,6 +1786,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -1789,7 +1804,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1799,6 +1815,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
@@ -1817,7 +1834,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1838,6 +1856,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -1857,13 +1876,15 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					tmpReg := models.Registration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -2005,7 +2026,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2026,6 +2048,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -2046,7 +2069,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2066,6 +2090,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -2085,7 +2110,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2105,6 +2131,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -3042,12 +3069,14 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					tmpReg := models.StakeRegistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -3095,12 +3124,16 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					if tmpAccount == nil {
-						tmpAccount = &models.Account{StakingKey: stakeKey}
+						tmpAccount = &models.Account{
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
+						}
 						r := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
 							UpdateAll: true,
@@ -3113,6 +3146,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -3125,12 +3159,16 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					if tmpAccount == nil {
-						tmpAccount = &models.Account{StakingKey: stakeKey}
+						tmpAccount = &models.Account{
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
+						}
 						r := db.Clauses(clause.OnConflict{
 							Columns:   []clause.Column{{Name: "staking_key"}},
 							UpdateAll: true,
@@ -3143,6 +3181,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
@@ -3156,7 +3195,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3164,6 +3204,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -3177,7 +3218,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3185,6 +3227,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
@@ -3199,7 +3242,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3218,6 +3262,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -3233,12 +3278,14 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					tmpReg := models.Registration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -3358,7 +3405,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3377,6 +3425,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -3393,7 +3442,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3411,6 +3461,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -3426,7 +3477,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag := uint8(c.StakeCredential.CredType)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3444,6 +3496,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -4003,6 +4056,7 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 			continue
 		}
 		stakeKey := cred.Credential[:]
+		credentialTag := uint8(cred.CredType)
 
 		drepType, err := models.DrepTypeFromInt(delegatee.DRep.Type)
 		if err != nil && delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {
@@ -4015,7 +4069,7 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 			drepCredential = delegatee.DRep.Credential
 		}
 
-		account, err := d.getOrCreateAccount(stakeKey, txn)
+		account, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 		if err != nil {
 			return fmt.Errorf(
 				"get or create genesis delegatee account: %w",
@@ -4033,11 +4087,12 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 		// would delete a genesis-rooted account.
 		var existingReg models.Registration
 		regResult := db.Where(
-			"staking_key = ? AND added_slot = ?",
-			stakeKey, uint64(0),
+			"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+			credentialTag, stakeKey, uint64(0),
 		).Attrs(models.Registration{
-			StakingKey: stakeKey,
-			AddedSlot:  0,
+			StakingKey:    stakeKey,
+			CredentialTag: credentialTag,
+			AddedSlot:     0,
 		}).FirstOrCreate(&existingReg)
 		if regResult.Error != nil {
 			return fmt.Errorf(
@@ -4064,9 +4119,10 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 				"staking_key = ? AND added_slot = ?",
 				stakeKey, uint64(0),
 			).Attrs(models.StakeDelegation{
-				StakingKey:  stakeKey,
-				PoolKeyHash: delegatee.PoolId[:],
-				AddedSlot:   0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				PoolKeyHash:   delegatee.PoolId[:],
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -4086,10 +4142,11 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 				"staking_key = ? AND added_slot = ?",
 				stakeKey, uint64(0),
 			).Attrs(models.VoteDelegation{
-				StakingKey: stakeKey,
-				Drep:       drepCredential,
-				DrepType:   drepType,
-				AddedSlot:  0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				Drep:          drepCredential,
+				DrepType:      drepType,
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -4110,11 +4167,12 @@ func (d *MetadataStoreMysql) SetGenesisGovernance(
 				"staking_key = ? AND added_slot = ?",
 				stakeKey, uint64(0),
 			).Attrs(models.StakeVoteDelegation{
-				StakingKey:  stakeKey,
-				PoolKeyHash: delegatee.PoolId[:],
-				Drep:        drepCredential,
-				DrepType:    drepType,
-				AddedSlot:   0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				PoolKeyHash:   delegatee.PoolId[:],
+				Drep:          drepCredential,
+				DrepType:      drepType,
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(
