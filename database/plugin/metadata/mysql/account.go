@@ -17,6 +17,7 @@ package mysql
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -100,28 +101,31 @@ func (d *MetadataStoreMysql) GetAccountsByCredential(
 	if err != nil {
 		return nil, err
 	}
-	query := db.Where("1 = 0")
+
+	wanted := make(map[string]struct{}, len(refs))
+	stakeKeys := make([][]byte, 0, len(refs))
 	for _, ref := range refs {
-		conditions := "credential_tag = ? AND staking_key = ?"
-		args := []any{ref.Tag, ref.Key}
+		wanted[ref.MapKey()] = struct{}{}
+		stakeKeys = append(stakeKeys, ref.Key)
+	}
+	for chunk := range slices.Chunk(stakeKeys, 400) {
+		query := db.Where("staking_key IN ?", chunk)
 		if !includeInactive {
-			conditions += " AND active = ?"
-			args = append(args, true)
+			query = query.Where("active = ?", true)
 		}
-		query = query.Or(
-			conditions,
-			args...,
-		)
-	}
-	var rows []*models.Account
-	if result := query.Find(&rows); result.Error != nil {
-		return nil, result.Error
-	}
-	for _, row := range rows {
-		ret[models.StakeCredentialRef{
-			Tag: row.CredentialTag,
-			Key: row.StakingKey,
-		}.MapKey()] = row
+		var rows []*models.Account
+		if result := query.Find(&rows); result.Error != nil {
+			return nil, result.Error
+		}
+		for _, row := range rows {
+			key := models.StakeCredentialRef{
+				Tag: row.CredentialTag,
+				Key: row.StakingKey,
+			}.MapKey()
+			if _, ok := wanted[key]; ok {
+				ret[key] = row
+			}
+		}
 	}
 	return ret, nil
 }
