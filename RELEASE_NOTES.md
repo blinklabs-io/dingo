@@ -16,6 +16,12 @@ Hi folks! Here’s what we shipped in v0.52.0.
 
 ### 💪 Improvements
 
+* Improved **refresh AWS credential support for authenticated integrations:** AWS authenticated integrations now stay aligned with newer upstream credential handling, which helps related storage and service connections behave more reliably. ([#2517](https://github.com/blinklabs-io/dingo/pull/2517))
+* Refined **keep core AWS integration support current:** AWS backed storage and transfer paths now stay aligned with newer upstream SDK behavior, which supports steadier compatibility for those integrations. ([#2515](https://github.com/blinklabs-io/dingo/pull/2515))
+* Updated **keep Google integration support current:** Google backed integrations now stay aligned with a newer client release, which supports ongoing compatibility and maintenance. ([#2516](https://github.com/blinklabs-io/dingo/pull/2516))
+* Modernized **keep AWS protocol support aligned with upstream changes:** AWS related protocol and serialization handling now stays aligned with a newer upstream release, which supports steadier compatibility across those integration paths. ([#2513](https://github.com/blinklabs-io/dingo/pull/2513))
+* Strengthened **keep the published v0.51.0 release history current:** The release history now includes the prior v0.51.0 entry, which keeps recent release context easier to review. ([#2512](https://github.com/blinklabs-io/dingo/pull/2512))
+
 ## v0.51.0 (June 7, 2026)
 
 **Title:** Advance Leios support, expand protocol APIs, and smooth sync and backfill
