@@ -277,7 +277,7 @@ func ValidateTxBabbage(
 		}
 	}
 	// Evaluate scripts
-	var txInfoV2 script.TxInfo
+	var txInfoV2 script.TxInfoV2
 	txInfoV2, err = script.NewTxInfoV2FromTransaction(
 		ls,
 		tx,
@@ -286,7 +286,7 @@ func ValidateTxBabbage(
 	if err != nil {
 		return err
 	}
-	for _, redeemerPair := range txInfoV2.(script.TxInfoV2).Redeemers {
+	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return errors.New("script purpose is nil")
@@ -327,6 +327,7 @@ func ValidateTxBabbage(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
+			evalContext.SkipFinalSlippageFlush = true
 			_, err = s.Evaluate(
 				datum,
 				redeemer.Data,
@@ -392,6 +393,7 @@ func ValidateTxBabbage(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
+			evalContext.SkipFinalSlippageFlush = true
 			_, err = s.Evaluate(
 				datum,
 				redeemer.Data,
@@ -506,9 +508,8 @@ func EvaluateTxBabbage(
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
-	var txInfoV2 script.TxInfo
 	var err error
-	txInfoV2, err = script.NewTxInfoV2FromTransaction(
+	txInfoV2, err := script.NewTxInfoV2FromTransaction(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
@@ -516,7 +517,7 @@ func EvaluateTxBabbage(
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	for _, redeemerPair := range txInfoV2.(script.TxInfoV2).Redeemers {
+	for _, redeemerPair := range txInfoV2.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(
