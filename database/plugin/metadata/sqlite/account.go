@@ -758,14 +758,16 @@ func (d *MetadataStoreSqlite) GetAccountsByCredential(
 	}
 	query := db.Where("1 = 0")
 	for _, ref := range refs {
+		conditions := "credential_tag = ? AND staking_key = ?"
+		args := []any{ref.Tag, ref.Key}
+		if !includeInactive {
+			conditions += " AND active = ?"
+			args = append(args, true)
+		}
 		query = query.Or(
-			"credential_tag = ? AND staking_key = ?",
-			ref.Tag,
-			ref.Key,
+			conditions,
+			args...,
 		)
-	}
-	if !includeInactive {
-		query = query.Where("active = ?", true)
 	}
 	var rows []*models.Account
 	if result := query.Find(&rows); result.Error != nil {

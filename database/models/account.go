@@ -142,10 +142,32 @@ type StakeCredentialRef struct {
 	Key []byte
 }
 
-func NewStakeCredentialRef(tag uint, key []byte) StakeCredentialRef {
+func NewStakeCredentialRef(tag uint8, key []byte) StakeCredentialRef {
 	return StakeCredentialRef{
-		Tag: uint8(tag),
+		Tag: tag,
 		Key: key,
+	}
+}
+
+func CredentialTagFromUint(tag uint) (uint8, error) {
+	switch tag {
+	case 0:
+		return 0, nil
+	case 1:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("unsupported stake credential tag: %d", tag)
+	}
+}
+
+func CredentialTagFromUint64(tag uint64) (uint8, error) {
+	switch tag {
+	case 0:
+		return 0, nil
+	case 1:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("unsupported stake credential tag: %d", tag)
 	}
 }
 

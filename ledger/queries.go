@@ -663,8 +663,12 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 	stakeCreds := make([]models.StakeCredentialRef, 0, len(creds))
 	seen := make(map[string]struct{}, len(creds))
 	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
+		if err != nil {
+			return nil, err
+		}
 		ref := models.StakeCredentialRef{
-			Tag: uint8(cred.Tag),
+			Tag: credentialTag,
 			Key: cred.Bytes[:],
 		}
 		key := ref.MapKey()
@@ -679,8 +683,12 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		return nil, err
 	}
 	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
+		if err != nil {
+			return nil, err
+		}
 		account, ok := accounts[models.StakeCredentialRef{
-			Tag: uint8(cred.Tag),
+			Tag: credentialTag,
 			Key: cred.Bytes[:],
 		}.MapKey()]
 		if !ok {
