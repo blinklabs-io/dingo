@@ -1162,6 +1162,18 @@ func TestStakeRegistrationCertificateProcessingIsCredentialTagAware(t *testing.T
 	if scriptAccount == nil {
 		t.Fatal("expected script credential account")
 	}
+	if keyAccount.CredentialTag != 0 {
+		t.Fatalf("expected key account tag 0, got %d", keyAccount.CredentialTag)
+	}
+	if scriptAccount.CredentialTag != 1 {
+		t.Fatalf(
+			"expected script account tag 1, got %d",
+			scriptAccount.CredentialTag,
+		)
+	}
+	if keyAccount.ID == scriptAccount.ID {
+		t.Fatal("expected distinct accounts for key and script credentials")
+	}
 
 	var registrations []models.StakeRegistration
 	if result := sqliteStore.DB().
