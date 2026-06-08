@@ -1023,7 +1023,10 @@ func (d *MetadataStoreSqlite) SetAccount(
 		Active:     active,
 	}
 	onConflict := clause.OnConflict{
-		Columns: []clause.Column{{Name: "staking_key"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"added_slot", "pool", "drep", "active"},
 		),
