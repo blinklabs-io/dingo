@@ -143,11 +143,11 @@ func (n *Node) shutdown() error {
 		}
 	}
 
-	if n.barkPruner != nil {
-		if stopErr := n.barkPruner.Stop(ctx); stopErr != nil {
+	if n.historyExpiry != nil {
+		if stopErr := n.historyExpiry.Stop(ctx); stopErr != nil {
 			err = errors.Join(
 				err,
-				fmt.Errorf("bark pruner shutdown: %w", stopErr))
+				fmt.Errorf("history expiry shutdown: %w", stopErr))
 		}
 	}
 

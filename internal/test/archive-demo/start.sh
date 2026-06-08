@@ -16,7 +16,7 @@
 
 # Start the archive-node demo for manual exploration.
 # The bind-mount tmp/dingo-pruning-data is created up front so the
-# pruning node has a stable host path the integration test can later
+# history-expiry node has a stable host path the integration test can later
 # open with Badger.
 #
 # Usage: ./start.sh
@@ -37,7 +37,7 @@ echo "Archive demo started."
 echo "  Cardano producer: localhost:${ARCHIVEDEMO_CARDANO_PORT:-3110}"
 echo "  Dingo archive:    localhost:${ARCHIVEDEMO_DINGO_ARCHIVE_PORT:-3111}"
 echo "  Bark gRPC:        localhost:${ARCHIVEDEMO_BARK_PORT:-3112}"
-echo "  Dingo pruning:    localhost:${ARCHIVEDEMO_DINGO_PRUNING_PORT:-3113}"
+echo "  Dingo expiry:     localhost:${ARCHIVEDEMO_DINGO_PRUNING_PORT:-3113}"
 echo "  Minio S3:         localhost:${ARCHIVEDEMO_MINIO_PORT:-9100}"
 echo "  Minio console:    localhost:${ARCHIVEDEMO_MINIO_CONSOLE_PORT:-9101} (demo/demodemo)"
 echo ""

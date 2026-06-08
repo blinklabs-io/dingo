@@ -269,11 +269,11 @@ flowchart LR
 
 | Logical key | Value | Used by |
 |---|---|---|
-| `bp` + big-endian slot `uint64` + block hash bytes | Raw block CBOR, or tombstone marker `DBT1` | `BlobStore.SetBlock`, `GetBlock`, `TombstoneBlock`, block iterators |
-| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata | `GetBlock` and archive-proxy/tombstone paths |
+| `bp` + big-endian slot `uint64` + block hash bytes | Raw block CBOR, or expired-history marker `DBT1` | `BlobStore.SetBlock`, `GetBlock`, `TombstoneBlock`, block iterators |
+| `bp..._metadata` | `types.BlockMetadata`: `id`, `type`, `height`, `prev_hash` encoded as CBOR; Badger can use compact `DBM1` binary metadata | `GetBlock` and archive-proxy/history-expiry paths |
 | `bi` + big-endian internal block ID `uint64` | The corresponding `bp...` block key | Block iteration and block-by-index lookup |
 | `bh` + block hash bytes | The corresponding `bp...` block key | Fast block-by-hash lookup |
-| `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and pruning |
+| `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
 | `t` + tx hash bytes | Transaction CBOR offset bytes. Current writers store 52-byte `DOFF`; readers also support 69-byte `DTXP` tx-part offsets. | Transaction CBOR lookup |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
 
@@ -291,11 +291,11 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
-### Archive And Pruning Contract
+### Archive And History Expiry Contract
 
-Archive nodes and pruning nodes use the same logical blob keys. The difference
-is where immutable block CBOR is expected to live after the block is older than
-the ledger stability window:
+Archive nodes and history-expiry nodes use the same logical blob keys. The
+difference is where immutable block CBOR is expected to live after the block is
+older than the ledger stability window:
 
 - Archive nodes keep block CBOR in a signed-URL-capable blob backend. The `s3`
   and `gcs` plugins implement `GetBlockURL` by reading the block's
@@ -303,18 +303,18 @@ the ledger stability window:
   object. Bark's archive service exposes that URL and metadata to other Dingo
   nodes. The local Badger plugin does not implement `GetBlockURL`, so it is not
   suitable as the backing store for a Bark archive node.
-- Pruning nodes keep their normal local blob plugin, wrap it with the Bark
-  archive adapter, and run the Bark pruner when `barkBaseUrl` is configured.
-  The pruner calls `Database.PruneBlock` for blocks below
+- History-expiry nodes keep their normal local blob plugin and run
+  `internal/historyexpiry.Pruner` when `historyExpiry.enabled` is configured. The pruner
+  calls `Database.PruneBlock` for blocks below
   `current_slot - ledger.StabilityWindow()`. `PruneBlock` first materializes
   UTxO CBOR entries that still point into the block by `DOFF` offset, then
-  replaces the block's `bp...` value with tombstone marker `DBT1` in the same
-  blob transaction.
-- Tombstoned blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries.
-  SQL metadata rows also remain. Blob readers return
-  `types.ErrBlockTombstoned` with the slot/hash, allowing the Bark wrapper to
-  fetch the CBOR from the archive while preserving local block indexes and
-  iteration semantics.
+  replaces the block's `bp...` value with marker `DBT1` in the same blob
+  transaction.
+- Expired blocks keep their `bi...`, `bh...`, and `bp..._metadata` entries.
+  SQL metadata rows also remain. Blob readers return `types.ErrHistoryExpired`
+  with the slot/hash. Without an archive wrapper this is the final read error;
+  with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
+  preserving local block indexes and iteration semantics.
 
 ## SQL Examples Mirroring the Go API
 

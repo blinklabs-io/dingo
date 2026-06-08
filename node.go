@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/historyexpiry"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -60,7 +61,7 @@ type Node struct {
 	snapshotMgr                      *snapshot.Manager
 	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
-	barkPruner                       *bark.Pruner
+	historyExpiry                    *historyexpiry.Pruner
 	blockfrostAPI                    *blockfrost.Blockfrost
 	meshAPI                          *mesh.Server
 	ouroboros                        *ouroborosPkg.Ouroboros
@@ -336,31 +337,31 @@ func (n *Node) Run(ctx context.Context) error {
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
-			LedgerState: state,
-			Logger:      n.config.logger,
 		}, n.db.Blob())
 		if err != nil {
 			return fmt.Errorf("failed to create bark blob store: %w", err)
 		}
 		n.db.SetBlobStore(barkBlobStore)
+	}
 
-		prunerFreq := n.config.barkPrunerFrequency
+	if n.config.historyExpiry.Enabled {
+		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
 			prunerFreq = time.Hour
 		}
-		n.barkPruner = bark.NewPruner(bark.PrunerConfig{
+		n.historyExpiry = historyexpiry.NewPruner(historyexpiry.PrunerConfig{
 			LedgerState: state,
 			DB:          n.db,
 			Logger:      n.config.logger,
 			Frequency:   prunerFreq,
 		})
 
-		if err := n.barkPruner.Start(n.ctx); err != nil {
-			return fmt.Errorf("failed to start pruner: %w", err)
+		if err := n.historyExpiry.Start(n.ctx); err != nil {
+			return fmt.Errorf("failed to start history expiry: %w", err)
 		}
 
 		started = append(started, func() {
-			_ = n.barkPruner.Stop(context.Background())
+			_ = n.historyExpiry.Stop(context.Background())
 		})
 	}
 

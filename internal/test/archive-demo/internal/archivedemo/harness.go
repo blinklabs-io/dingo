@@ -42,7 +42,7 @@ type Endpoint struct {
 	Address string
 }
 
-// DefaultEndpoints returns the archive and pruning Dingo endpoints,
+// DefaultEndpoints returns the archive and history-expiry Dingo endpoints,
 // honoring env overrides for CI flexibility.
 func DefaultEndpoints() (archive, pruning Endpoint) {
 	arch := os.Getenv("ARCHIVEDEMO_DINGO_ARCHIVE_ADDR")
