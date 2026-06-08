@@ -11,6 +11,14 @@ BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 # Extract Go module name from go.mod
 GOMODULE=$(shell grep ^module $(ROOT_DIR)/go.mod | awk '{ print $$2 }')
 TOOLS_BIN=$(ROOT_DIR)/.tools/bin
+HOST_OS=$(shell uname -s | tr '[:upper:]' '[:lower:]')
+HOST_ARCH=$(shell uname -m)
+PROTOC_VERSION=32.1
+PROTOC_OS=$(if $(filter darwin,$(HOST_OS)),osx,$(HOST_OS))
+PROTOC_ARCH=$(if $(filter arm64 aarch64,$(HOST_ARCH)),aarch_64,x86_64)
+PROTOC_DIR=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH)
+PROTOC_ZIP=$(ROOT_DIR)/.tools/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
+PROTOC=$(PROTOC_DIR)/bin/protoc
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
@@ -54,11 +62,10 @@ lint: ## Run linters (golangci-lint + modernize)
 	golangci-lint run ./...
 	modernize ./...
 
-proto: ## Generate Go code from protobuf definitions
-	mkdir -p $(TOOLS_BIN)
+proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
 	go build -o $(TOOLS_BIN)/protoc-gen-go-grpc google.golang.org/grpc/cmd/protoc-gen-go-grpc
-	PATH="$(TOOLS_BIN):$$PATH" protoc \
+	PATH="$(TOOLS_BIN):$$PATH" $(PROTOC) \
 		-I $(ROOT_DIR) \
 		--go_out=$(ROOT_DIR) \
 		--go_opt=module=$(GOMODULE) \
@@ -67,6 +74,11 @@ proto: ## Generate Go code from protobuf definitions
 		--go-grpc_opt=module=$(GOMODULE) \
 		--go-grpc_opt=Mmidnight/proto/midnight_state.proto=$(GOMODULE)/midnight \
 		$(ROOT_DIR)/midnight/proto/midnight_state.proto
+
+$(PROTOC):
+	mkdir -p $(TOOLS_BIN) $(PROTOC_DIR)
+	curl -fL -o $(PROTOC_ZIP) https://github.com/protocolbuffers/protobuf/releases/download/v$(PROTOC_VERSION)/protoc-$(PROTOC_VERSION)-$(PROTOC_OS)-$(PROTOC_ARCH).zip
+	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
 test: mod-tidy ## Run tests with race detection
 	go test -v -race ./...
