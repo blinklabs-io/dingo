@@ -1618,7 +1618,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1680,7 +1683,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1722,7 +1728,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1765,7 +1774,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1794,7 +1806,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1824,7 +1839,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -1866,7 +1884,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -2016,7 +2037,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -2058,7 +2082,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -2098,7 +2125,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
@@ -3016,7 +3046,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3071,7 +3104,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3106,7 +3142,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3142,7 +3181,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3165,7 +3207,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3189,7 +3234,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3225,7 +3273,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3352,7 +3403,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3389,7 +3443,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3424,7 +3481,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					credentialTag := uint8(c.StakeCredential.CredType)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
 					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -4002,7 +4062,10 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			continue
 		}
 		stakeKey := cred.Credential[:]
-		credentialTag := uint8(cred.CredType)
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return err
+		}
 
 		drepType, err := models.DrepTypeFromInt(delegatee.DRep.Type)
 		if err != nil && delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {

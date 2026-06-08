@@ -144,7 +144,7 @@ func TestBatchFetchCerts_SameSlotTiebreakByBlockIndex(t *testing.T) {
 	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
 	require.NoError(t, err)
 
-	rec, ok := cache.poolDelegation[string(stakeKey)]
+	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]
 	require.True(t, ok, "expected pool delegation for staking key")
 	assert.Equal(
 		t,
@@ -239,7 +239,7 @@ func TestBatchFetchCerts_CrossTableTiebreakByBlockIndex(t *testing.T) {
 	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
 	require.NoError(t, err)
 
-	rec, ok := cache.poolDelegation[string(stakeKey)]
+	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]
 	require.True(t, ok, "expected pool delegation for staking key")
 	assert.Equal(
 		t,

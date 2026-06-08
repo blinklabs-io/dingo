@@ -133,8 +133,12 @@ func (lv *LedgerView) StakeRegistration(
 func (lv *LedgerView) IsStakeCredentialRegistered(
 	cred lcommon.Credential,
 ) bool {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return false
+	}
 	account, err := lv.ls.db.GetAccountByCredential(
-		uint8(cred.CredType),
+		credentialTag,
 		cred.Credential[:],
 		false,
 		lv.txn,
@@ -329,8 +333,12 @@ func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 func (lv *LedgerView) IsRewardAccountRegistered(
 	cred lcommon.Credential,
 ) bool {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return false
+	}
 	account, err := lv.ls.db.GetAccountByCredential(
-		uint8(cred.CredType),
+		credentialTag,
 		cred.Credential[:],
 		false,
 		lv.txn,
