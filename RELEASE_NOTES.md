@@ -22,6 +22,31 @@ Hi folks! Here’s what we shipped in v0.52.0.
 * Modernized **keep AWS protocol support aligned with upstream changes:** AWS related protocol and serialization handling now stays aligned with a newer upstream release, which supports steadier compatibility across those integration paths. ([#2513](https://github.com/blinklabs-io/dingo/pull/2513))
 * Strengthened **keep the published v0.51.0 release history current:** The release history now includes the prior v0.51.0 entry, which keeps recent release context easier to review. ([#2512](https://github.com/blinklabs-io/dingo/pull/2512))
 
+### 🔧 Fixes
+
+* Fixed **correct Conway transaction checks for fees and required witnesses:** Conway transaction validation now includes reference-script costs in minimum-fee checks and enforces required redeemers locally, which reduces the chance of accepting invalid transactions. ([#2462](https://github.com/blinklabs-io/dingo/pull/2462))
+* Corrected **avoid stalls while syncing close to the tip:** Near-tip sync now keeps a workable upstream path longer before leaving bootstrap mode, which helps nodes continue syncing instead of stalling near the tip. ([#2511](https://github.com/blinklabs-io/dingo/pull/2511))
+
+### 📋 What You Need to Know
+
+* Clarified **move history expiry settings to the new opt-in configuration:** Operators who previously used `barkPrunerFrequency` must move to `historyExpiry.enabled` and `historyExpiry.frequency`, and history expiry remains off until it is explicitly enabled.
+* Highlighted **expect stricter Conway transaction checks on this release:** Minimum-fee validation now includes reference-script costs, and required redeemers must be present during local validation.
+* Emphasized **expect more reliable near tip sync and bootstrap exit behavior:** Near-tip sync and bootstrap exit should behave more reliably, which reduces the chance of stalls close to the tip.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.51.0 (June 7, 2026)
 
 **Title:** Advance Leios support, expand protocol APIs, and smooth sync and backfill
