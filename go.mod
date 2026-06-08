@@ -47,6 +47,8 @@ require (
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.45.0
 	google.golang.org/api v0.282.0
+	google.golang.org/grpc v1.81.1
+	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.2
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/mysql v1.6.0
@@ -220,7 +222,6 @@ require (
 	google.golang.org/genproto v0.0.0-20260427160629-7cedc36a6bc4 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
-	google.golang.org/grpc v1.81.1 // indirect
 	gopkg.in/ini.v1 v1.67.2 // indirect
 	gorm.io/driver/clickhouse v0.7.0 // indirect
 	modernc.org/libc v1.22.5 // indirect

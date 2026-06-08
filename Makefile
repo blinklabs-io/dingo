@@ -10,13 +10,14 @@ BINARIES=$(shell cd $(ROOT_DIR)/cmd && ls -1 | grep -v ^common)
 
 # Extract Go module name from go.mod
 GOMODULE=$(shell grep ^module $(ROOT_DIR)/go.mod | awk '{ print $$2 }')
+TOOLS_BIN=$(ROOT_DIR)/.tools/bin
 
 # Set version strings: use env vars if set, else git
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
-.PHONY: all build help mod-tidy clean format golines lint test bench test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help mod-tidy clean format golines lint proto test bench test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -52,6 +53,20 @@ golines: ## Enforce 80-character line limit
 lint: ## Run linters (golangci-lint + modernize)
 	golangci-lint run ./...
 	modernize ./...
+
+proto: ## Generate Go code from protobuf definitions
+	mkdir -p $(TOOLS_BIN)
+	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
+	go build -o $(TOOLS_BIN)/protoc-gen-go-grpc google.golang.org/grpc/cmd/protoc-gen-go-grpc
+	PATH="$(TOOLS_BIN):$$PATH" protoc \
+		-I $(ROOT_DIR) \
+		--go_out=$(ROOT_DIR) \
+		--go_opt=module=$(GOMODULE) \
+		--go_opt=Mmidnight/proto/midnight_state.proto=$(GOMODULE)/midnight \
+		--go-grpc_out=$(ROOT_DIR) \
+		--go-grpc_opt=module=$(GOMODULE) \
+		--go-grpc_opt=Mmidnight/proto/midnight_state.proto=$(GOMODULE)/midnight \
+		$(ROOT_DIR)/midnight/proto/midnight_state.proto
 
 test: mod-tidy ## Run tests with race detection
 	go test -v -race ./...
