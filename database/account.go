@@ -123,11 +123,22 @@ func (d *Database) GetAccount(
 	includeInactive bool,
 	txn *Txn,
 ) (*models.Account, error) {
+	return d.GetAccountByCredential(0, stakeKey, includeInactive, txn)
+}
+
+// GetAccountByCredential returns an account by staking credential tag and key.
+func (d *Database) GetAccountByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	includeInactive bool,
+	txn *Txn,
+) (*models.Account, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	account, err := d.metadata.GetAccount(
+	account, err := d.metadata.GetAccountByCredential(
+		credentialTag,
 		stakeKey,
 		includeInactive,
 		txn.Metadata(),
@@ -157,8 +168,38 @@ func (d *Database) GetAccounts(
 	return d.metadata.GetAccounts(stakeKeys, includeInactive, txn.Metadata())
 }
 
+// GetAccountsByCredential returns accounts for the given staking credentials in
+// a single query, keyed by StakeCredentialRef.MapKey().
+func (d *Database) GetAccountsByCredential(
+	refs []models.StakeCredentialRef,
+	includeInactive bool,
+	txn *Txn,
+) (map[string]*models.Account, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetAccountsByCredential(
+		refs,
+		includeInactive,
+		txn.Metadata(),
+	)
+}
+
 // AddAccountReward credits the reward balance for a registered account.
 func (d *Database) AddAccountReward(
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	txn *Txn,
+) error {
+	return d.AddAccountRewardByCredential(0, stakeKey, amount, slot, txn)
+}
+
+// AddAccountRewardByCredential credits the reward balance for a registered
+// account identified by stake credential tag and key.
+func (d *Database) AddAccountRewardByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
@@ -177,7 +218,8 @@ func (d *Database) AddAccountReward(
 			}
 		}()
 	}
-	if err := d.metadata.AddAccountReward(
+	if err := d.metadata.AddAccountRewardByCredential(
+		credentialTag,
 		stakeKey,
 		amount,
 		slot,

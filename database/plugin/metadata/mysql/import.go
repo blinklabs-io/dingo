@@ -169,7 +169,10 @@ func (d *MetadataStoreMysql) ImportAccount(
 		)
 	}
 	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "staking_key"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"pool", "drep", "drep_type", "active", "reward"},
 		),
