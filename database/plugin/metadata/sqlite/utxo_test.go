@@ -29,6 +29,7 @@ import (
 )
 
 func TestGetLiveUtxosBySlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Three UTxOs added at slot 100: two live, one already spent.
@@ -134,6 +135,7 @@ func TestGetLiveUtxosBySlot(t *testing.T) {
 // TestGetLiveUtxosBySlotExcludesSpentAtSameSlot verifies that a UTxO
 // spent in the same slot it was added is excluded.
 func TestGetLiveUtxosBySlotExcludesSpentAtSameSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	live := models.Utxo{
@@ -160,6 +162,7 @@ func TestGetLiveUtxosBySlotExcludesSpentAtSameSlot(t *testing.T) {
 }
 
 func TestGetUtxosBatchUsesTxIdOutputIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	refs := make([]UtxoRef, 0, 12)
@@ -220,6 +223,7 @@ func TestGetUtxosBatchUsesTxIdOutputIndex(t *testing.T) {
 // address-key lookup selects only the address-index fields and uses the UTxO ref
 // index instead of a broader deleted-slot scan.
 func TestGetUtxoAddressKeysBatchUsesSkinnyTxIdOutputIndexLookup(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	refs := make([]UtxoRef, 0, 12)
@@ -338,6 +342,7 @@ func BenchmarkGetUtxoAddressKeysBatch(b *testing.B) {
 // API storage mode relies on this so the pruner can materialize CBOR
 // bytes for retained spent UTxOs before tombstoning the source block.
 func TestGetUtxosBySlotIncludesSpent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	live := models.Utxo{

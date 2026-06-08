@@ -36,6 +36,7 @@ func setupTestStore(t *testing.T) *MetadataStoreSqlite {
 }
 
 func TestGetConstitution(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Initially no constitution
@@ -75,6 +76,7 @@ func TestGetConstitution(t *testing.T) {
 }
 
 func TestGetConstitutionDeletedSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Add a constitution
@@ -99,6 +101,7 @@ func TestGetConstitutionDeletedSlot(t *testing.T) {
 }
 
 func TestGetCommitteeMember(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	coldKey := []byte("cold_credential_12345678901234567890123456")
@@ -127,6 +130,7 @@ func TestGetCommitteeMember(t *testing.T) {
 }
 
 func TestGetActiveCommitteeMembers(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	coldKey1 := []byte("cold_credential_1234567890123456789012345a")
@@ -158,6 +162,7 @@ func TestGetActiveCommitteeMembers(t *testing.T) {
 }
 
 func TestIsCommitteeMemberResigned(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	coldKey := []byte("cold_credential_12345678901234567890123456")
@@ -197,6 +202,7 @@ func TestIsCommitteeMemberResigned(t *testing.T) {
 }
 
 func TestGetResignedCommitteeMembers(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	resignedCold := []byte("cold_credential_12345678901234567890123456")
@@ -253,6 +259,7 @@ func TestGetResignedCommitteeMembers(t *testing.T) {
 }
 
 func TestGetActiveDreps(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Initially empty
@@ -311,6 +318,7 @@ func TestGetActiveDreps(t *testing.T) {
 }
 
 func TestGetDrep(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("drep_credential_1234567890123456789012345a")
@@ -359,6 +367,7 @@ func TestGetDrep(t *testing.T) {
 }
 
 func TestGetGovernanceProposal(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	txHash := []byte("tx_hash_1234567890123456789012345678901234")
@@ -403,6 +412,7 @@ func TestGetGovernanceProposal(t *testing.T) {
 }
 
 func TestGetActiveGovernanceProposals(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Add an active proposal (expires in epoch 200)
@@ -453,6 +463,7 @@ func TestGetActiveGovernanceProposals(t *testing.T) {
 // enforces at-most-one ratification per purpose per tick, so nodes
 // must see proposals in the same order.
 func TestGetActiveGovernanceProposals_DeterministicOrder(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Insert in reverse-sorted order; the query must return them in
@@ -512,6 +523,7 @@ func TestGetActiveGovernanceProposals_DeterministicOrder(t *testing.T) {
 }
 
 func TestGetRatifiedGovernanceProposals(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Active (not ratified)
@@ -582,6 +594,7 @@ func TestGetRatifiedGovernanceProposals(t *testing.T) {
 }
 
 func TestGetLastEnactedGovernanceProposal(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Enact two ParameterChange proposals at different slots.
@@ -670,6 +683,7 @@ func TestGetLastEnactedGovernanceProposal(t *testing.T) {
 // either via the purpose's action-type set must find the most
 // recently enacted of both.
 func TestGetLastEnactedGovernanceProposal_CommitteePurpose(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Enact a NoConfidence, then a later UpdateCommittee. Both belong
@@ -743,6 +757,7 @@ func TestGetLastEnactedGovernanceProposal_CommitteePurpose(t *testing.T) {
 }
 
 func TestUpdateDRepActivity(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("drep_credential_1234567890123456789012345a")
@@ -791,6 +806,7 @@ func TestUpdateDRepActivity(t *testing.T) {
 }
 
 func TestGetExpiredDReps(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	credA := []byte("drep_credential_1234567890123456789012345a")
@@ -836,6 +852,7 @@ func TestGetExpiredDReps(t *testing.T) {
 }
 
 func TestGetDRepVotingPower(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := []byte("drep_credential_1234567890123456789012345a")
@@ -915,6 +932,7 @@ func TestGetDRepVotingPower(t *testing.T) {
 }
 
 func TestGetDRepVotingPowerByTypeRejectsCredentialTypes(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	_, err := store.GetDRepVotingPowerByType(
@@ -937,6 +955,7 @@ func TestGetDRepVotingPowerByTypeRejectsCredentialTypes(t *testing.T) {
 }
 
 func TestGetCommitteeActiveCount(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Initially zero

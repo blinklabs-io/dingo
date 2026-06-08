@@ -26,6 +26,7 @@ import (
 )
 
 func TestRewardAdaPotsCRUD(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	pots := &models.RewardAdaPots{
@@ -63,6 +64,7 @@ func TestRewardAdaPotsCRUD(t *testing.T) {
 }
 
 func TestRewardSnapshotCRUD(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	snapshot := &models.RewardSnapshot{
@@ -105,6 +107,7 @@ func TestRewardSnapshotCRUD(t *testing.T) {
 }
 
 func TestRewardPoolInputsCRUD(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	blocksProduced := uint64(12)
@@ -192,6 +195,7 @@ func TestRewardPoolInputsCRUD(t *testing.T) {
 }
 
 func TestDeleteRewardStateAfterSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	poolA := rewardStateTestHash(0xaa)
 	poolB := rewardStateTestHash(0xbb)
@@ -258,6 +262,7 @@ func TestDeleteRewardStateAfterSlot(t *testing.T) {
 }
 
 func TestDeleteRewardStateBeforeEpoch(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	require.NoError(t, store.SaveRewardAdaPots(&models.RewardAdaPots{
@@ -322,6 +327,7 @@ func TestDeleteRewardStateBeforeEpoch(t *testing.T) {
 }
 
 func TestGetPoolRegistrationsAtSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	poolA := rewardStateTestHash(0xaa)
 	poolB := rewardStateTestHash(0xbb)
@@ -387,6 +393,7 @@ func TestGetPoolRegistrationsAtSlot(t *testing.T) {
 }
 
 func TestGetPoolRegistrationsAtSlotTieBreaksSameAddedSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	poolKeyHash := rewardStateTestHash(0xcc)
 	poolHash := rewardStateTestPoolKeyHash(0xcc)
