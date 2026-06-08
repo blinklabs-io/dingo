@@ -75,6 +75,12 @@ func (m StorageMode) IsAPI() bool {
 	return m == StorageModeAPI
 }
 
+// HistoryExpiryConfig controls local expiry of immutable block history.
+type HistoryExpiryConfig struct {
+	Enabled   bool
+	Frequency time.Duration
+}
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
@@ -96,7 +102,7 @@ type Config struct {
 	utxorpcPort              uint
 	barkBaseUrl              string
 	barkPort                 uint
-	barkPrunerFrequency      time.Duration
+	historyExpiry            HistoryExpiryConfig
 	corsAllowedOrigins       []string
 	networkMagic             uint32
 	intersectTip             bool
@@ -390,6 +396,9 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// We do this so we don't have to add guards around every log operation
 		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		genesisBootstrap: true,
+		historyExpiry: HistoryExpiryConfig{
+			Frequency: time.Hour,
+		},
 		corsAllowedOrigins: []string{
 			"*",
 		},
@@ -836,12 +845,10 @@ func WithBarkPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithBarkPrunerFrequency specifies how often the Bark pruner runs
-// (deleting blob entries older than the ledger stability window).
-// Default is 1 hour. Values <= 0 fall back to the default.
-func WithBarkPrunerFrequency(freq time.Duration) ConfigOptionFunc {
+// WithHistoryExpiry configures local immutable block history expiry.
+func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkPrunerFrequency = freq
+		c.historyExpiry = cfg
 	}
 }
 

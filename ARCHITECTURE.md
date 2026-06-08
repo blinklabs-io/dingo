@@ -96,14 +96,14 @@ graph TB
         Bark["Bark<br/><i>bark/</i>"]
     end
 
-    subgraph "Archive Support"
-        BPruner["Bark Pruner<br/><i>bark/pruner.go</i>"]
+    subgraph "History Expiry"
+        HExpiry["History Expiry<br/><i>internal/historyexpiry/</i>"]
     end
 
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & BPruner
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & HExpiry
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -113,7 +113,7 @@ graph TB
     LS -->|"validate txs"| MP
     ChM --> DB
     DB --> Blob & Meta
-    BPruner --> LS & DB
+    HExpiry --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
     CSel -->|"switch active peer"| CS
@@ -221,7 +221,7 @@ graph LR
     utxorpc --> ledger & ledger_eras & mempool
     mesh --> chain & db & db_models & ev & ledger & mempool
     blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool
-    bark --> db & db_blob & db_types & ledger
+    bark --> db & db_blob & db_types
 ```
 
 ### Data Flow
@@ -526,8 +526,7 @@ dingo/
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
-│   ├── blob.go          # Remote archive blob adapter
-│   └── pruner.go        # Ledger-window-based local block pruning
+│   └── blob.go          # Remote archive blob adapter
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -545,6 +544,8 @@ dingo/
 │   ├── node/            # Node orchestration (CLI wiring)
 │   │   ├── node.go      # Run(), signal handling, metrics server
 │   │   └── load.go      # Block loading implementation
+│   ├── historyexpiry/   # Ledger-window-based local block history expiry
+│   │   └── pruner.go    # Background expiry scanner
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Amaru conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
@@ -573,7 +574,7 @@ type Node struct {
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
-    barkPruner     *bark.Pruner                   // Archive-backed local pruning
+    historyExpiry  *historyexpiry.Pruner          // Local block history expiry
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
@@ -593,7 +594,7 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation (UTXO tracking, validation)
- 6. Bark remote archive adapter and pruner (if configured)
+ 6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
  8. LedgerState start
  9. Snapshot manager start (captures genesis snapshot)
@@ -725,24 +726,26 @@ Dingo supports two storage modes, configured via `storageMode`:
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
-### Archive And Pruning Topology
+### Archive And History Expiry Topology
 
-Dingo's blob-store abstraction supports an archive/pruning deployment pattern:
+Dingo's blob-store abstraction supports independent history expiry and archive
+fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
   maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
   a signed object URL plus compact block metadata.
-- A pruning node keeps its local blob plugin, configures `barkBaseUrl`, and is
-  wired by `node.go` with a `bark.BlobStoreBark` wrapper plus
-  `bark.Pruner`. Normal block writes still go to the local blob plugin. Reads
-  first check local storage; tombstoned or missing historical blocks fall back
-  to the remote Bark archive and download the signed URL response.
-- The pruner derives its safety window from `LedgerState.StabilityWindow()` and
-  scans only blocks older than that window. `Database.PruneBlock` materializes
-  any UTxO CBOR still stored as block offsets before replacing the block CBOR
-  value with a tombstone, leaving block indexes and metadata intact for archive
-  resolution.
+- A node with `historyExpiry.enabled` keeps its local blob plugin and starts
+  `internal/historyexpiry.Pruner`. The worker derives its safety window from
+  `LedgerState.StabilityWindow()` and scans only blocks older than that window.
+  `Database.PruneBlock` materializes any UTxO CBOR still stored as block
+  offsets before replacing the block CBOR value with an expired-history marker,
+  leaving block indexes and metadata intact.
+- A node with `barkBaseUrl` is wired by `node.go` with a `bark.BlobStoreBark`
+  wrapper. Normal block writes still go to the local blob plugin. Reads first
+  check local storage; expired or missing historical blocks fall back to the
+  remote Bark archive and download the signed URL response. This wrapper can be
+  used with or without local History Expiry.
 
 ### Tiered CBOR Cache
 
@@ -1129,7 +1132,7 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
 services. It exposes archive access over Connect/gRPC and supplies the remote
-archive adapter used by pruning nodes.
+archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
 and gRPC reflection. Archive fetches validate the requested block hash, ask the
@@ -1139,11 +1142,10 @@ archive-node blob backends because they can sign object-storage URLs.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
-`types.ErrBlockTombstoned` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. `bark.Pruner` runs only
-when `barkBaseUrl` is configured; it uses the ledger-derived stability window,
-not a separate operator-supplied security-window value, to decide which local
-blocks are safe to tombstone.
+`types.ErrHistoryExpired` or missing historical block CBOR by calling the
+remote Bark archive and downloading the signed URL. Bark does not decide which
+local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
+`historyExpiry.enabled` is configured.
 
 ## Architectural Boundaries
 

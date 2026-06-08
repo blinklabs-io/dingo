@@ -71,13 +71,12 @@ type BlobStore interface {
 		hash []byte,
 	) ([]byte, types.BlockMetadata, error)
 	DeleteBlock(txn types.Txn, slot uint64, hash []byte, id uint64) error
-	// TombstoneBlock replaces the block's CBOR with a tombstone marker
-	// while leaving index pointers (bi, bh) and metadata in place. Used by
-	// the prune-for-archive path so a wrapping proxy (e.g. bark) can still
-	// resolve the block via GetBlock(slot, hash) — the upstream returns
-	// types.ErrBlockTombstoned for the block, which the wrapper intercepts
-	// and proxies to the archive. DeleteBlock continues to fully remove a
-	// block (used for orphan rollbacks where there is no archive copy).
+	// TombstoneBlock replaces the block's CBOR with an expired-history
+	// marker while leaving index pointers (bi, bh) and metadata in place.
+	// GetBlock and iterator ValueCopy must return types.ErrHistoryExpired
+	// for the block so archive wrappers can proxy it if configured.
+	// DeleteBlock continues to fully remove a block for orphan rollbacks
+	// where there is no retained history entry.
 	TombstoneBlock(txn types.Txn, slot uint64, hash []byte) error
 	GetBlockURL(ctx context.Context, txn types.Txn, point ocommon.Point) (types.SignedURL, types.BlockMetadata, error)
 	// UTxO operations

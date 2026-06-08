@@ -39,7 +39,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestArchiveProxy exercises the full archive-node + pruning-node + bark
+// TestArchiveProxy exercises the full archive-node + history-expiry-node + bark
 // proxy story end to end:
 //
 //  1. wait for chain to advance well past the security window on both nodes
@@ -52,9 +52,9 @@ func TestArchiveProxy(t *testing.T) {
 	archive, pruning := archivedemo.DefaultEndpoints()
 
 	// Step 1: wait for both nodes to advance past the stability window.
-	// Dingo derives the bark security window from LedgerState.StabilityWindow(),
+	// Dingo derives the expiry window from LedgerState.StabilityWindow(),
 	// which is 3k/f. With testnet.yaml's k=40 and f=0.4 that's 300 slots.
-	// We wait for tip >= 400 to give the pruner some cycles past the window.
+	// We wait for tip >= 400 to give History Expiry some cycles past the window.
 	const stabilityWindow = uint64(300) // 3 * k(40) / f(0.4)
 	const targetTip = uint64(400)
 	_, err := archivedemo.WaitForSlot(archive, archivedemo.DefaultNetworkMagic, targetTip, 10*time.Minute, t.Logf)
@@ -62,9 +62,9 @@ func TestArchiveProxy(t *testing.T) {
 	_, err = archivedemo.WaitForSlot(pruning, archivedemo.DefaultNetworkMagic, targetTip, 10*time.Minute, t.Logf)
 	require.NoError(t, err)
 
-	// Step 1b: poll until the pruner has had time to act on candidateSlot.
+	// Step 1b: poll until History Expiry has had time to act on candidateSlot.
 	// inspect-blob can't run while the container holds the badger lockfile,
-	// so we wait until the pruner's tick frequency (5s) has had several
+	// so we wait until the expiry tick frequency (5s) has had several
 	// cycles past candidateSlot+stabilityWindow.
 	const candidateSlot = uint64(50)
 	require.Eventually(t, func() bool {
@@ -73,7 +73,7 @@ func TestArchiveProxy(t *testing.T) {
 			return false
 		}
 		return tip.Slot >= candidateSlot+stabilityWindow+30
-	}, 3*time.Minute, 5*time.Second, "chain did not advance far enough for pruner to act")
+	}, 3*time.Minute, 5*time.Second, "chain did not advance far enough for history expiry to act")
 
 	// Step 2: resolve (slot, hash) of the first block at or after candidateSlot
 	// using dingo-archive, which has the full chain.
@@ -88,7 +88,7 @@ func TestArchiveProxy(t *testing.T) {
 	cbor, err := archivedemo.FetchBlock(
 		pruning, archivedemo.DefaultNetworkMagic, point, 60*time.Second,
 	)
-	require.NoError(t, err, "BlockFetch on pruning node should transparently proxy via bark")
+	require.NoError(t, err, "BlockFetch on history-expiry node should transparently proxy via bark")
 	require.NotEmpty(t, cbor, "block CBOR should be non-empty")
 
 	// Step 4 (assertion 3): object present in Minio bucket.

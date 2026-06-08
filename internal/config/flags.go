@@ -79,9 +79,12 @@ var flagSpecs = []flagSpec{
 	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
 
 	// Bark
-	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive base URL"),
+	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
-	durationFlag("BarkPrunerFrequency", "bark-pruner-frequency", "Bark pruner run frequency"),
+
+	// History expiry
+	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
+	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
 
 	// Mempool
 	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),

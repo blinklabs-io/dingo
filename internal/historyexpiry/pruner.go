@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package bark
+package historyexpiry
 
 import (
 	"context"
@@ -24,11 +24,18 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
+// LedgerWindow exposes the ledger-derived slot horizon used to decide when
+// immutable block history can be expired locally.
+type LedgerWindow interface {
+	CurrentSlot() (uint64, error)
+	StabilityWindow() uint64
+}
+
 type PrunerConfig struct {
-	LedgerState *ledger.LedgerState
+	LedgerState LedgerWindow
 	DB          *database.Database
 	Logger      *slog.Logger
 	Frequency   time.Duration
@@ -37,7 +44,7 @@ type PrunerConfig struct {
 type Pruner struct {
 	config      PrunerConfig
 	logger      *slog.Logger
-	ledgerState *ledger.LedgerState
+	ledgerState LedgerWindow
 	db          *database.Database
 
 	wg     sync.WaitGroup
@@ -58,7 +65,7 @@ func NewPruner(cfg PrunerConfig) *Pruner {
 
 func (p *Pruner) pruneBlock(next *database.BlobBlockResult) error {
 	if _, err := p.db.PruneBlock(next.Slot, next.Hash); err != nil {
-		return fmt.Errorf("pruner: %w", err)
+		return fmt.Errorf("history expiry: %w", err)
 	}
 	return nil
 }
@@ -67,22 +74,22 @@ func (p *Pruner) prune(ctx context.Context) {
 	currentSlot, err := p.ledgerState.CurrentSlot()
 	if err != nil {
 		p.logger.Error(
-			"pruner: failed to get current slot",
+			"history expiry: failed to get current slot",
 			"error",
 			err,
 		)
 		return
 	}
 
-	securityWindow := p.ledgerState.StabilityWindow()
-	if currentSlot <= securityWindow {
+	stabilityWindow := p.ledgerState.StabilityWindow()
+	if currentSlot <= stabilityWindow {
 		p.logger.Debug(
-			"pruner: skipped because current slot is not high enough")
+			"history expiry: skipped because current slot is not high enough")
 		return
 	}
 	iter := p.db.BlocksInRange(
 		0,
-		currentSlot-securityWindow-1,
+		currentSlot-stabilityWindow-1,
 	)
 	defer iter.Close()
 
@@ -93,21 +100,24 @@ func (p *Pruner) prune(ctx context.Context) {
 		default:
 			next, err := iter.NextRaw()
 			if err != nil {
+				if errors.Is(err, types.ErrHistoryExpired) {
+					continue
+				}
 				p.logger.Error(
-					"pruner: failed to prune block",
+					"history expiry: failed to expire block",
 					"error",
 					err,
 				)
 				return
 			}
 			if next == nil {
-				p.logger.Debug("pruner: completed round of pruning")
+				p.logger.Debug("history expiry: completed round")
 				return
 			}
 
 			if err := p.pruneBlock(next); err != nil {
 				p.logger.Error(
-					"pruner: failed to prune block",
+					"history expiry: failed to expire block",
 					"error",
 					err,
 				)
@@ -132,15 +142,15 @@ func (p *Pruner) run(ctx context.Context) {
 func (p *Pruner) Start(ctx context.Context) error {
 	if p.config.Frequency <= 0 {
 		return fmt.Errorf(
-			"pruner: invalid frequency %d (must be > 0)",
+			"history expiry: invalid frequency %d (must be > 0)",
 			p.config.Frequency,
 		)
 	}
 	if p.ledgerState == nil {
-		return errors.New("pruner: ledger state must not be nil")
+		return errors.New("history expiry: ledger state must not be nil")
 	}
 	if p.db == nil {
-		return errors.New("pruner: database must not be nil")
+		return errors.New("history expiry: database must not be nil")
 	}
 
 	ctx, p.cancel = context.WithCancel(ctx) //nolint:gosec
@@ -166,7 +176,7 @@ func (p *Pruner) Stop(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return fmt.Errorf(
-			"pruner: failed to stop before context cancellation: %w",
+			"history expiry: failed to stop before context cancellation: %w",
 			ctx.Err(),
 		)
 	}

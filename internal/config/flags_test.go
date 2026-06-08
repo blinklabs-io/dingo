@@ -72,6 +72,7 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
 	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
+	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -101,6 +102,12 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.BackfillBatchSize,
 		)
 	}
+	if cfg.HistoryExpiry.Frequency.String() != "15m0s" {
+		t.Fatalf(
+			"expected env var to set history expiry frequency=15m, got %s",
+			cfg.HistoryExpiry.Frequency,
+		)
+	}
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -108,6 +115,8 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		"--mempool-capacity=7890",
 		"--data-dir=/tmp/override",
 		"--backfill-batch-size=200",
+		"--history-expiry-enabled=true",
+		"--history-expiry-frequency=30m",
 	}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
@@ -138,6 +147,15 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf(
 			"expected --backfill-batch-size to set backfillBatchSize=200, got %d",
 			cfg.BackfillBatchSize,
+		)
+	}
+	if !cfg.HistoryExpiry.Enabled {
+		t.Fatal("expected --history-expiry-enabled to enable history expiry")
+	}
+	if cfg.HistoryExpiry.Frequency.String() != "30m0s" {
+		t.Fatalf(
+			"expected --history-expiry-frequency to set 30m, got %s",
+			cfg.HistoryExpiry.Frequency,
 		)
 	}
 }
