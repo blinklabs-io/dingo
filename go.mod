@@ -14,7 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.17
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.17
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.101.0
-	github.com/aws/smithy-go v1.26.0
+	github.com/aws/smithy-go v1.27.2
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
 	github.com/blinklabs-io/gouroboros v0.180.1
