@@ -1,5 +1,21 @@
 # Dingo Releases
 
+## v0.52.0 (June 8, 2026)
+
+**Title:** Configurable history expiry, corrected Conway fees, and safer near-tip sync
+
+**Date:** June 8, 2026
+
+**Version:** v0.52.0
+
+Hi folks! Here’s what we shipped in v0.52.0.
+
+### ✨ What's New
+
+* Added **configure history expiry separately from Bark pruning:** Operators can now enable local history expiry with dedicated settings while still using Bark as a fallback for archived block access when a remote archive is configured. ([#2519](https://github.com/blinklabs-io/dingo/pull/2519))
+
+### 💪 Improvements
+
 ## v0.51.0 (June 7, 2026)
 
 **Title:** Advance Leios support, expand protocol APIs, and smooth sync and backfill
