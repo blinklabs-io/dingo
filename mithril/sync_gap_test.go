@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package mithril
 
 import (
 	"io"
@@ -432,7 +432,6 @@ func TestProcessGapBlocksNoOpWithoutUint64Overflow(t *testing.T) {
 	// the path the underflow regression would land on.
 	immutableDir := filepath.Join(
 		"..",
-		"..",
 		"database",
 		"immutable",
 		"testdata",
@@ -581,7 +580,6 @@ func TestLoadGapBlocksFromBlob(t *testing.T) {
 	defer db.Close()
 
 	immutableDir := filepath.Join(
-		"..",
 		"..",
 		"database",
 		"immutable",
