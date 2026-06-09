@@ -521,8 +521,13 @@ func (d *MetadataStoreSqlite) Close() error {
 	d.timerMutex.Unlock()
 
 	var errs []error
-	// Close read pool first (if separate from write pool)
+	// Close read pool first (if separate from write pool). Stop the
+	// PreparedStmtDB LRU goroutine first so it does not access the pool
+	// after the underlying sql.DB is closed.
 	if d.readDB != nil && d.readDB != d.db {
+		if ps, ok := d.readDB.ConnPool.(*gorm.PreparedStmtDB); ok {
+			ps.Close()
+		}
 		if readSqlDB, err := d.readDB.DB(); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -533,6 +538,9 @@ func (d *MetadataStoreSqlite) Close() error {
 	}
 	// Close write pool
 	if d.db != nil {
+		if ps, ok := d.db.ConnPool.(*gorm.PreparedStmtDB); ok {
+			ps.Close()
+		}
 		if db, err := d.DB().DB(); err != nil {
 			errs = append(errs, err)
 		} else {

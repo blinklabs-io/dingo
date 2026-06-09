@@ -197,7 +197,8 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Utxo{}, Name: "idx_utxo_deleted_payment_script", Table: "utxo",
-		Notes: "Script-locked supply sum (blockfrost /network); low-frequency, lazy",
+		Notes:    "Script-locked supply SUM (blockfrost /network); live query path",
+		Critical: true,
 	},
 
 	// transaction: BlockHash/Slot are query indexes; the
