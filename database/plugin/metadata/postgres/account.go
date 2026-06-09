@@ -102,14 +102,12 @@ func (d *MetadataStorePostgres) GetAccountsByCredential(
 		return nil, err
 	}
 
-	wanted := make(map[string]struct{}, len(refs))
-	stakeKeys := make([][]byte, 0, len(refs))
+	pairs := make([][]any, 0, len(refs))
 	for _, ref := range refs {
-		wanted[ref.MapKey()] = struct{}{}
-		stakeKeys = append(stakeKeys, ref.Key)
+		pairs = append(pairs, []any{ref.Tag, ref.Key})
 	}
-	for chunk := range slices.Chunk(stakeKeys, 400) {
-		query := db.Where("staking_key IN ?", chunk)
+	for chunk := range slices.Chunk(pairs, 400) {
+		query := db.Where("(credential_tag, staking_key) IN ?", chunk)
 		if !includeInactive {
 			query = query.Where("active = ?", true)
 		}
@@ -122,9 +120,7 @@ func (d *MetadataStorePostgres) GetAccountsByCredential(
 				Tag: row.CredentialTag,
 				Key: row.StakingKey,
 			}.MapKey()
-			if _, ok := wanted[key]; ok {
-				ret[key] = row
-			}
+			ret[key] = row
 		}
 	}
 	return ret, nil
