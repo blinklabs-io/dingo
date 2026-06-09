@@ -2064,6 +2064,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -2108,6 +2109,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
@@ -2151,6 +2153,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
