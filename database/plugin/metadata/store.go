@@ -295,14 +295,6 @@ type MetadataStore interface {
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
 
-	// GetAccount retrieves a key-credential account by staking key.
-	// This compatibility wrapper defaults credential_tag to 0.
-	GetAccount(
-		[]byte, // stakeKey
-		bool, // includeInactive
-		types.Txn,
-	) (*models.Account, error)
-
 	// GetAccountByCredential retrieves an account using the full stake credential identity.
 	// The credential tag separates key and script credentials that share the same hash.
 	GetAccountByCredential(
@@ -312,14 +304,6 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Account, error)
 
-	// GetAccounts retrieves key-credential accounts by staking key.
-	// This compatibility wrapper defaults credential_tag to 0.
-	GetAccounts(
-		[][]byte, // stakeKeys
-		bool, // includeInactive
-		types.Txn,
-	) (map[string]*models.Account, error)
-
 	// GetAccountsByCredential retrieves accounts in batch using tag-aware stake credentials.
 	// The returned map is keyed by StakeCredentialRef.MapKey() for tag plus hash lookups.
 	GetAccountsByCredential(
@@ -327,15 +311,6 @@ type MetadataStore interface {
 		bool, // includeInactive
 		types.Txn,
 	) (map[string]*models.Account, error)
-
-	// AddAccountReward credits a key-credential reward account by staking key.
-	// This compatibility wrapper defaults credential_tag to 0.
-	AddAccountReward(
-		[]byte, // stakeKey
-		uint64, // amount
-		uint64, // slot
-		types.Txn,
-	) error
 
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
 	// validated transaction withdrawal and records rollback state.
@@ -507,16 +482,6 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
-	// GetAccountDelegationHistory retrieves key-credential delegation history
-	// rows for a staking key. It is a tag-0 compatibility wrapper.
-	GetAccountDelegationHistory(
-		[]byte, // stakingKey
-		int, // limit
-		int, // offset
-		string, // order (asc|desc)
-		types.Txn,
-	) ([]models.AccountDelegationHistoryRow, error)
-
 	// GetAccountDelegationHistoryByCredential retrieves delegation history
 	// rows for a stake credential tag/hash pair.
 	GetAccountDelegationHistoryByCredential(
@@ -528,13 +493,6 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AccountDelegationHistoryRow, error)
 
-	// CountAccountDelegationHistory retrieves the total count of key-credential
-	// delegation history rows for a staking key. It is a tag-0 compatibility wrapper.
-	CountAccountDelegationHistory(
-		[]byte, // stakingKey
-		types.Txn,
-	) (int, error)
-
 	// CountAccountDelegationHistoryByCredential retrieves the total count of
 	// delegation history rows for a stake credential tag/hash pair.
 	CountAccountDelegationHistoryByCredential(
@@ -542,16 +500,6 @@ type MetadataStore interface {
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
-
-	// GetAccountRegistrationHistory retrieves key-credential registration history
-	// rows for a staking key. It is a tag-0 compatibility wrapper.
-	GetAccountRegistrationHistory(
-		[]byte, // stakingKey
-		int, // limit
-		int, // offset
-		string, // order (asc|desc)
-		types.Txn,
-	) ([]models.AccountRegistrationHistoryRow, error)
 
 	// GetAccountRegistrationHistoryByCredential retrieves registration history
 	// rows for a stake credential tag/hash pair.
@@ -563,13 +511,6 @@ type MetadataStore interface {
 		string, // order (asc|desc)
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
-
-	// CountAccountRegistrationHistory retrieves the total count of key-credential
-	// registration history rows for a staking key. It is a tag-0 compatibility wrapper.
-	CountAccountRegistrationHistory(
-		[]byte, // stakingKey
-		types.Txn,
-	) (int, error)
 
 	// CountAccountRegistrationHistoryByCredential retrieves the total count of
 	// registration history rows for a stake credential tag/hash pair.

@@ -94,13 +94,34 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 
 	// includeInactive=false so a deregistered reward account that
 	// still carries a stale predefined-DRep flag does not auto-vote.
-	accounts, err := d.GetAccounts(rewardAccounts, false, txn)
+	rewardAccountRefs := make(
+		[]models.StakeCredentialRef,
+		0,
+		len(rewardAccounts),
+	)
+	for _, rewardAccount := range rewardAccounts {
+		rewardAccountRefs = append(
+			rewardAccountRefs,
+			models.StakeCredentialRef{
+				Tag: 0,
+				Key: rewardAccount,
+			},
+		)
+	}
+	accounts, err := d.GetAccountsByCredential(
+		rewardAccountRefs,
+		false,
+		txn,
+	)
 	if err != nil {
 		return fmt.Errorf("get reward accounts: %w", err)
 	}
 
 	for poolKey, ra := range rewardAcctByPool {
-		acct, ok := accounts[string(ra)]
+		acct, ok := accounts[models.StakeCredentialRef{
+			Tag: 0,
+			Key: ra,
+		}.MapKey()]
 		if !ok {
 			continue
 		}

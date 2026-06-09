@@ -90,12 +90,12 @@ func TestApplyIntraEraHardForkRule_Pv10_ClearsDangling(t *testing.T) {
 		500,  // newEpoch (log-only)
 	))
 
-	live, err := db.GetAccount(keys.Live, true, nil)
+	live, err := db.GetAccountByCredential(0, keys.Live, true, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, live.Drep,
 		"delegation to registered DRep must survive the rule")
 
-	dead, err := db.GetAccount(keys.Dead, true, nil)
+	dead, err := db.GetAccountByCredential(0, keys.Dead, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, dead.Drep,
 		"dangling delegation must be cleared at pv10")
@@ -120,13 +120,13 @@ func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
 		))
 	}
 
-	live, err := db.GetAccount(keys.Live, true, nil)
+	live, err := db.GetAccountByCredential(0, keys.Live, true, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, live.Drep)
 	assert.Equal(t, uint64(100), live.AddedSlot,
 		"unknown-major dispatch must not touch unrelated accounts")
 
-	dead, err := db.GetAccount(keys.Dead, true, nil)
+	dead, err := db.GetAccountByCredential(0, keys.Dead, true, nil)
 	require.NoError(t, err)
 	assert.NotNil(t, dead.Drep,
 		"unknown-major dispatch must not touch even the dangling account")

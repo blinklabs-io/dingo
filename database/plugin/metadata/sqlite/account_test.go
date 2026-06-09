@@ -24,8 +24,8 @@ import (
 )
 
 // TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse pins the
-// includeInactive=false branch of GetAccount: a row with active=false must
-// not be returned. This is the semantic the
+// includeInactive=false branch of GetAccountByCredential: a row with
+// active=false must not be returned. This is the semantic the
 // queryShelleyFilteredDelegationAndRewardAccounts handler relies on when
 // it passes includeInactive=false; testing it here keeps the assertion
 // next to the SQL clause it actually tests, without forcing the ledger
@@ -55,11 +55,11 @@ func TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse(t *testing.T) {
 		Where("staking_key = ?", stakeKey).
 		Update("active", false).Error)
 
-	got, err := store.GetAccount(stakeKey, false /* includeInactive */, nil)
+	got, err := store.GetAccountByCredential(0, stakeKey, false /* includeInactive */, nil)
 	require.NoError(t, err)
 	assert.Nil(t, got, "inactive account must not be returned when includeInactive=false")
 
-	got, err = store.GetAccount(stakeKey, true /* includeInactive */, nil)
+	got, err = store.GetAccountByCredential(0, stakeKey, true /* includeInactive */, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got, "inactive account must be returned when includeInactive=true")
 	assert.False(t, got.Active, "returned account should have Active=false")

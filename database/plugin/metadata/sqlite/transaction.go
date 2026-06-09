@@ -466,24 +466,6 @@ func addressOrderClause(order string) string {
 	return "payment_key ASC"
 }
 
-// GetAccountDelegationHistory returns delegation history rows for a staking key.
-func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn types.Txn,
-) ([]models.AccountDelegationHistoryRow, error) {
-	return d.GetAccountDelegationHistoryByCredential(
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
-}
-
 func (d *MetadataStoreSqlite) GetAccountDelegationHistoryByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -516,15 +498,6 @@ func (d *MetadataStoreSqlite) GetAccountDelegationHistoryByCredential(
 	return rows, nil
 }
 
-// CountAccountDelegationHistory returns the total number of
-// delegation history rows for a staking key.
-func (d *MetadataStoreSqlite) CountAccountDelegationHistory(
-	stakingKey []byte,
-	txn types.Txn,
-) (int, error) {
-	return d.CountAccountDelegationHistoryByCredential(0, stakingKey, txn)
-}
-
 func (d *MetadataStoreSqlite) CountAccountDelegationHistoryByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -549,24 +522,6 @@ func (d *MetadataStoreSqlite) CountAccountDelegationHistoryByCredential(
 		)
 	}
 	return count, nil
-}
-
-// GetAccountRegistrationHistory returns registration history rows for a staking key.
-func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn types.Txn,
-) ([]models.AccountRegistrationHistoryRow, error) {
-	return d.GetAccountRegistrationHistoryByCredential(
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
 }
 
 func (d *MetadataStoreSqlite) GetAccountRegistrationHistoryByCredential(
@@ -599,15 +554,6 @@ func (d *MetadataStoreSqlite) GetAccountRegistrationHistoryByCredential(
 		)
 	}
 	return rows, nil
-}
-
-// CountAccountRegistrationHistory returns the total number of
-// registration history rows for a staking key.
-func (d *MetadataStoreSqlite) CountAccountRegistrationHistory(
-	stakingKey []byte,
-	txn types.Txn,
-) (int, error) {
-	return d.CountAccountRegistrationHistoryByCredential(0, stakingKey, txn)
 }
 
 func (d *MetadataStoreSqlite) CountAccountRegistrationHistoryByCredential(

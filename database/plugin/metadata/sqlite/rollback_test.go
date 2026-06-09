@@ -561,7 +561,7 @@ func TestRollbackAccountState(t *testing.T) {
 	require.NoError(t, err, "RestoreAccountStateAtSlot should succeed")
 
 	// Verify account was restored to pool1
-	restored, err := store.GetAccount(stakeKey, false, nil)
+	restored, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, restored, "account should still exist after rollback")
 	require.True(
@@ -593,7 +593,7 @@ func TestRollbackDeletesAccountRegisteredAfterSlot(t *testing.T) {
 	require.NoError(t, err)
 
 	// Account should be deleted since it was registered after rollback slot
-	restored, err := store.GetAccount(stakeKey, true, nil)
+	restored, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	require.Nil(
 		t,
@@ -1112,7 +1112,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	})
 
 	// Capture pre-rollback state at slot 200
-	preRollback, err := store.GetAccount(stakeKey, false, nil)
+	preRollback, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -1130,7 +1130,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify rollback state
-	midRollback, err := store.GetAccount(stakeKey, false, nil)
+	midRollback, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
@@ -1168,7 +1168,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	})
 
 	// Verify final state matches pre-rollback state
-	postReplay, err := store.GetAccount(stakeKey, false, nil)
+	postReplay, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, postReplay, "account should exist after replay")
 	require.True(

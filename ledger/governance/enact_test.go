@@ -315,7 +315,7 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	}, a)
 	require.NoError(t, err)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
@@ -358,7 +358,7 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 		"treasury withdrawal of 7 exceeds tracked treasury withdrawal capacity 6",
 	)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(5), uint64(account.Reward))
@@ -392,10 +392,10 @@ func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 	}, a)
 	require.NoError(t, err)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "withdrawal must not create a reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, account)
 	state, err := store.GetNetworkState(nil)
@@ -437,10 +437,10 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 	}, a)
 	require.NoError(t, err)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "withdrawal must not reactivate the reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.False(t, account.Active)

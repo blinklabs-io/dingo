@@ -681,15 +681,6 @@ func batchFetchStakeVoteDelegation(
 	return nil
 }
 
-// GetAccount gets an account by key credential hash.
-func (d *MetadataStoreSqlite) GetAccount(
-	stakeKey []byte,
-	includeInactive bool,
-	txn types.Txn,
-) (*models.Account, error) {
-	return d.GetAccountByCredential(0, stakeKey, includeInactive, txn)
-}
-
 // GetAccountByCredential gets an account by credential tag and hash.
 func (d *MetadataStoreSqlite) GetAccountByCredential(
 	credentialTag uint8,
@@ -717,27 +708,6 @@ func (d *MetadataStoreSqlite) GetAccountByCredential(
 			return nil, nil
 		}
 		return nil, result.Error
-	}
-	return ret, nil
-}
-
-// GetAccounts fetches multiple key-credential accounts.
-func (d *MetadataStoreSqlite) GetAccounts(
-	stakeKeys [][]byte,
-	includeInactive bool,
-	txn types.Txn,
-) (map[string]*models.Account, error) {
-	refs := make([]models.StakeCredentialRef, 0, len(stakeKeys))
-	for _, stakeKey := range stakeKeys {
-		refs = append(refs, models.StakeCredentialRef{Key: stakeKey})
-	}
-	accounts, err := d.GetAccountsByCredential(refs, includeInactive, txn)
-	if err != nil {
-		return nil, err
-	}
-	ret := make(map[string]*models.Account, len(accounts))
-	for _, account := range accounts {
-		ret[string(account.StakingKey)] = account
 	}
 	return ret, nil
 }
@@ -780,16 +750,6 @@ func (d *MetadataStoreSqlite) GetAccountsByCredential(
 		}
 	}
 	return ret, nil
-}
-
-// AddAccountReward credits a registered key-credential reward account.
-func (d *MetadataStoreSqlite) AddAccountReward(
-	stakeKey []byte,
-	amount uint64,
-	slot uint64,
-	txn types.Txn,
-) error {
-	return d.AddAccountRewardByCredential(0, stakeKey, amount, slot, txn)
 }
 
 // AddAccountRewardByCredential credits a registered reward account.
