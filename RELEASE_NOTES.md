@@ -1,5 +1,31 @@
 # Dingo Releases
 
+## v0.52.1 (June 9, 2026)
+
+**Title:** Mithril snapshot reuse, steadier epoch timing, and Blockfrost explorer improvements
+
+**Date:** June 9, 2026
+
+**Version:** v0.52.1
+
+Hi folks! Here’s what we shipped in v0.52.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, example polish, testing, and release history maintenance.
+
+### 💪 Improvements
+
+* Improved **keep protocol support aligned and harden Leios cache behavior:** Protocol and transaction handling now stay aligned with newer upstream support, and Leios endorser block caching now behaves more reliably. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Refined **refresh the Blockfrost explorer example for easier local evaluation:** The Blockfrost explorer example now offers a clearer dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure, which makes local API evaluation easier to use. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
+* Updated **keep the published v0.52.0 release history current:** The release history now includes the prior v0.52.0 entry, which keeps recent release context easier to review. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
+* Strengthened **let metadata tests run safely in parallel:** Metadata test coverage now runs with better isolation, which makes routine validation steadier and reduces test interference. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
+
+### 🔧 Fixes
+
+* Fixed **reuse a valid Mithril snapshot window during API startup:** API mode startup now reuses an existing post Mithril snapshot window instead of rebuilding that state again, which makes startup smoother after Mithril based recovery. ([#2525](https://github.com/blinklabs-io/dingo/pull/2525))
+* Corrected **keep epoch timing moving through reconnects more reliably:** Epoch timing now clears stale upstream tip state and matches connection identity more safely across reconnects, which helps nodes avoid timing stalls. ([#2523](https://github.com/blinklabs-io/dingo/pull/2523))
+
 ## v0.52.0 (June 8, 2026)
 
 **Title:** Configurable history expiry, corrected Conway fees, and safer near-tip sync
