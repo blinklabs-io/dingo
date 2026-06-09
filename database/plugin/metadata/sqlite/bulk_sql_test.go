@@ -33,6 +33,7 @@ import (
 // column (or GORM names one differently than expected, e.g. ex_units_cpu),
 // this fails instead of silently writing the wrong columns.
 func TestBulkInsertColumnsMatchSchema(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	ns := store.DB().NamingStrategy
 
@@ -82,6 +83,7 @@ func TestBulkInsertColumnsMatchSchema(t *testing.T) {
 // a row count that is not a multiple of batchChunkRows must still write every
 // row (full chunks via the stable statement, the tail via a one-off statement).
 func TestExecBulkInsert_PartialChunkWritesAllRows(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	// 2 full chunks of batchChunkRows + a partial remainder.
 	n := 2*batchChunkRows + batchChunkRows/2
@@ -119,6 +121,7 @@ func TestExecBulkInsert_PartialChunkWritesAllRows(t *testing.T) {
 // semantics survive the GORM->fixed-shape conversion: re-inserting an existing
 // hash is a no-op that keeps the original row.
 func TestInsertScripts_ConflictDoNothing(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	hash := bytes.Repeat([]byte{0xAB}, 28)
 
@@ -142,6 +145,7 @@ func TestInsertScripts_ConflictDoNothing(t *testing.T) {
 // corrupts a value here. It also exercises asset linking, which depends on
 // BatchRefetchUtxoIDs recovering the utxo ID after a raw INSERT.
 func TestImportUtxos_FixedShapeRoundTrip(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	txid := bytes.Repeat([]byte{0x11}, 32)
 	in := models.Utxo{
@@ -184,6 +188,7 @@ func TestImportUtxos_FixedShapeRoundTrip(t *testing.T) {
 // ON CONFLICT(tx_id,output_idx) DO NOTHING semantics survive the conversion:
 // re-importing the same ref keeps the original row.
 func TestImportUtxos_ConflictDoNothingIdempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	txid := bytes.Repeat([]byte{0xAA}, 32)
 	require.NoError(t, store.ImportUtxos([]models.Utxo{{
@@ -206,6 +211,7 @@ func TestImportUtxos_ConflictDoNothingIdempotent(t *testing.T) {
 // row (e.g. on retry, or a different tx) is a no-op and leaves the first
 // spender's slot/hash intact.
 func TestBatchSpendUtxos_GuardSkipsAlreadySpent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	txid := bytes.Repeat([]byte{0x55}, 32)
 	spender1 := bytes.Repeat([]byte{0x66}, 32)

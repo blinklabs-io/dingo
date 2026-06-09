@@ -87,6 +87,7 @@ func (r *importSQLRecorder) containsUpdate(table string) bool {
 }
 
 func TestImportUtxosAddsMissingAssetsForExistingUtxo(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	txID := bytes.Repeat([]byte{0x31}, 32)
@@ -153,6 +154,7 @@ func TestImportUtxosAddsMissingAssetsForExistingUtxo(t *testing.T) {
 }
 
 func TestImportUtxosSkipsHydrationForFreshInsert(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	txID := bytes.Repeat([]byte{0x41}, 32)
@@ -180,6 +182,7 @@ func TestImportUtxosSkipsHydrationForFreshInsert(t *testing.T) {
 }
 
 func TestImportUtxosHydratesSnapshotProvenance(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	txID := bytes.Repeat([]byte{0x51}, 32)
@@ -267,6 +270,7 @@ func TestImportUtxosHydratesSnapshotProvenance(t *testing.T) {
 }
 
 func TestImportUtxosHydratesSnapshotCollateralReturnProvenance(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	txID := bytes.Repeat([]byte{0x61}, 32)

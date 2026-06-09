@@ -32,6 +32,7 @@ import (
 // layer to import this package or to depend on the GORM default-tag
 // behavior of CreateAccount.
 func TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	stakeKey := make([]byte, 28)
@@ -75,6 +76,7 @@ func TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse(t *testing.T) {
 // "added_slot DESC, block_index DESC, cert_index DESC"; the account-side
 // queries must too.
 func TestBatchFetchCerts_SameSlotTiebreakByBlockIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 	db := store.DB()
 	const slot = uint64(1000)
@@ -163,6 +165,7 @@ func TestBatchFetchCerts_SameSlotTiebreakByBlockIndex(t *testing.T) {
 // non-deterministic across refactors and makes the restore path silently
 // drift from the on-chain ordering.
 func TestBatchFetchCerts_CrossTableTiebreakByBlockIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 	db := store.DB()
 	const slot = uint64(2000)

@@ -46,6 +46,7 @@ func makePoolId(b byte) lcommon.PoolId {
 }
 
 func TestSqliteSetGenesisGovernance(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := makeCred(0x11)
@@ -195,6 +196,7 @@ func TestSqliteSetGenesisGovernance(t *testing.T) {
 }
 
 func TestSqliteSetGenesisGovernanceIdempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := makeCred(0x55)
@@ -246,6 +248,7 @@ func TestSqliteSetGenesisGovernanceIdempotent(t *testing.T) {
 }
 
 func TestSqliteSetGenesisGovernanceEmpty(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 	require.NoError(t, store.SetGenesisGovernance(
 		conway.ConwayGenesisInitialDReps{},
@@ -268,6 +271,7 @@ func TestSqliteSetGenesisGovernanceEmpty(t *testing.T) {
 // causing "DRep ... has no registration cert at or before slot ..." in
 // Phase 2 of RestoreDrepStateAtSlot.
 func TestSqliteRollbackPreservesGenesisDrep(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := makeCred(0x81)
@@ -338,6 +342,7 @@ func TestSqliteRollbackPreservesGenesisDrep(t *testing.T) {
 // genesis-rooted DReps (slot-0 registration) get their values
 // preserved.
 func TestSqliteRollbackResetsExpiryForOnChainDrep(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := bytes.Repeat([]byte{0xa1}, 28)
@@ -387,6 +392,7 @@ func TestSqliteRollbackResetsExpiryForOnChainDrep(t *testing.T) {
 // silently keeping the DRep active when it should have been
 // deregistered.
 func TestSqliteRollbackDrepCrossTypeBlockIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := bytes.Repeat([]byte{0xb1}, 28)
@@ -472,6 +478,7 @@ func TestSqliteRollbackDrepCrossTypeBlockIndex(t *testing.T) {
 // hasReg was false, and the account was deleted by Phase 1 of
 // RestoreAccountStateAtSlot.
 func TestSqliteRollbackPreservesGenesisVoteOnlyAccount(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := makeCred(0x82)
@@ -539,6 +546,7 @@ func TestSqliteRollbackPreservesGenesisVoteOnlyAccount(t *testing.T) {
 // account created from a Conway-genesis stake+vote delegation is NOT
 // deleted when we roll back past a later on-chain StakeDelegation.
 func TestSqliteRollbackPreservesGenesisStakeVoteAccount(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := makeCred(0x84)
@@ -613,6 +621,7 @@ func TestSqliteRollbackPreservesGenesisStakeVoteAccount(t *testing.T) {
 // distinguishes them. (See CLAUDE.md: "Order certificates using
 // added_slot DESC, block_index DESC, cert_index DESC".)
 func TestCertRecordIsMoreRecentBlockIndex(t *testing.T) {
+	t.Parallel()
 	// Same slot, different block_index, same cert_index — the higher
 	// block_index must win.
 	earlier := certRecord{addedSlot: 100, blockIndex: 0, certIndex: 0}
@@ -653,6 +662,7 @@ func TestCertRecordIsMoreRecentBlockIndex(t *testing.T) {
 // ordering (slot, cert_index) both certs tied on cert_index=0 and the
 // outcome was non-deterministic.
 func TestRollbackPicksLatestByBlockIndexAtSameSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	stakeKey := bytes.Repeat([]byte{0x91}, 28)

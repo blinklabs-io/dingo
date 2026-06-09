@@ -26,6 +26,7 @@ import (
 )
 
 func TestSetCommitteeMembers(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	members := []*models.CommitteeMember{
@@ -51,6 +52,7 @@ func TestSetCommitteeMembers(t *testing.T) {
 }
 
 func TestSetCommitteeQuorum(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	got, err := store.GetCommitteeQuorum(nil)
@@ -74,6 +76,7 @@ func TestSetCommitteeQuorum(t *testing.T) {
 }
 
 func TestSoftDeleteCommitteeMembers(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	credA := []byte("cred_hash_a_1234567890123456")
@@ -99,6 +102,7 @@ func TestSoftDeleteCommitteeMembers(t *testing.T) {
 }
 
 func TestSoftDeleteAllCommitteeMembers(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	err := store.SetCommitteeMembers([]*models.CommitteeMember{
@@ -116,6 +120,7 @@ func TestSoftDeleteAllCommitteeMembers(t *testing.T) {
 }
 
 func TestSoftDeleteCommitteeMembersEmpty(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	err := store.SetCommitteeMembers([]*models.CommitteeMember{
@@ -132,6 +137,7 @@ func TestSoftDeleteCommitteeMembersEmpty(t *testing.T) {
 }
 
 func TestSetCommitteeMembersEmpty(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Empty slice should be a no-op
@@ -146,6 +152,7 @@ func TestSetCommitteeMembersEmpty(t *testing.T) {
 }
 
 func TestSetCommitteeMembersUpsert(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("cred_hash_1_2345678901234567")
@@ -180,6 +187,7 @@ func TestSetCommitteeMembersUpsert(t *testing.T) {
 }
 
 func TestGetCommitteeMembersExcludesDeleted(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred1 := []byte("cred_hash_1_2345678901234567")
@@ -214,6 +222,7 @@ func TestGetCommitteeMembersExcludesDeleted(t *testing.T) {
 }
 
 func TestDeleteCommitteeMembersAfterSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Add members at different slots
@@ -246,6 +255,7 @@ func TestDeleteCommitteeMembersAfterSlot(t *testing.T) {
 }
 
 func TestDeleteCommitteeMembersAfterSlotDeletesQuorum(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	require.NoError(t, store.SetCommitteeQuorum(
@@ -265,6 +275,7 @@ func TestDeleteCommitteeMembersAfterSlotDeletesQuorum(t *testing.T) {
 }
 
 func TestClearCommitteeQuorum(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Seed a quorum.
@@ -291,6 +302,7 @@ func TestClearCommitteeQuorum(t *testing.T) {
 }
 
 func TestClearCommitteeQuorumWhenNoPrior(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	// Clearing without any prior Set must still leave GetCommitteeQuorum
@@ -314,6 +326,7 @@ func TestClearCommitteeQuorumWhenNoPrior(t *testing.T) {
 }
 
 func TestClearCommitteeQuorumRollbackRestoresPrior(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	require.NoError(t, store.SetCommitteeQuorum(
@@ -331,6 +344,7 @@ func TestClearCommitteeQuorumRollbackRestoresPrior(t *testing.T) {
 }
 
 func TestDeleteCommitteeMembersAfterSlotClearsDeletedSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("cred_hash_1_2345678901234567")
