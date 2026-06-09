@@ -154,12 +154,12 @@ func (o *Ouroboros) leiosfetchServerVotesRequest(
 	ctx oleiosfetch.CallbackContext,
 	voteIds []oleiosfetch.MsgVotesRequestVoteId,
 ) (protocol.Message, error) {
-	votes := o.leiosVotesForIds(voteIds)
-	msg, err := oleiosfetch.NewMsgVotesFromVotes(votes)
-	if err != nil {
-		return nil, err
+	if o.LeiosVotes == nil {
+		return nil, errLeiosVotesUnavailable
 	}
-	return msg, nil
+	// MsgVotesRequestVoteId aliases lcommon.LeiosVoteId; unknown ids
+	// are omitted from the response.
+	return oleiosfetch.NewMsgVotes(o.LeiosVotes.VotesByIds(voteIds)), nil
 }
 
 func (o *Ouroboros) leiosfetchServerBlockRangeRequest(

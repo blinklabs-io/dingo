@@ -91,7 +91,6 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		insertedAt: time.Now(),
 	}
 	o.leiosMu.Lock()
-	defer o.leiosMu.Unlock()
 	if o.leiosEndorserBlocks == nil {
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
@@ -99,6 +98,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.leiosEndorserBlocks[key] = data
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	o.leiosMu.Unlock()
+	// Trigger local vote emission for the stored block, outside the
+	// cache lock
+	if o.LeiosVotes != nil {
+		o.LeiosVotes.HandleEndorserBlock(block.SlotNumber(), blockHash)
+	}
 	return nil
 }
 

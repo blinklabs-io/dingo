@@ -157,6 +157,7 @@ graph LR
     ledger_governance["ledger/governance"]
     ledger_hardfork["ledger/hardfork"]
     ledger_leader["ledger/leader"]
+    ledger_leios["ledger/leios"]
     ledger_snapshot["ledger/snapshot"]
     ledgerstate["ledgerstate"]
     mempool["mempool"]
@@ -173,7 +174,7 @@ graph LR
     keystore["keystore"]
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
-    root --> ledger & ledger_forging & ledger_leader & ledger_snapshot
+    root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
@@ -198,6 +199,7 @@ graph LR
     ledger_forging --> ev & ledger_eras
     ledger_governance --> db & db_models & db_types & ledger_eras
     ledger_leader --> db_types & ev
+    ledger_leios --> chain & ev
     ledger_snapshot --> db & db_models & db_meta & db_types & ev
 
     mempool --> chain & ev
@@ -470,6 +472,13 @@ dingo/
 │   ├── leader/          # Leader election
 │   │   ├── election.go  # Ouroboros Praos leader checks
 │   │   └── schedule.go  # Epoch leader schedule computation
+│   ├── leios/           # CIP-0164 Leios voting (experimental)
+│   │   ├── committee.go # Stake-truncated committee selection
+│   │   ├── quorum.go    # Stake-quorum predicate
+│   │   ├── bls.go       # BLS12-381 MinSig sign/verify/aggregate
+│   │   ├── keys.go      # Vote signing key + voter pubkey registry
+│   │   ├── certificate.go # EB certificate build/validate
+│   │   └── manager.go   # VoteManager: store, tally, serve, emit
 │   └── snapshot/        # Stake snapshot management
 │       ├── manager.go   # Snapshot manager, event-driven capture
 │       ├── calculator.go# Stake distribution calculation
@@ -684,6 +693,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block successfully forged |
 | `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
+| `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built |
 | `peergov.outbound_conn` | PeerGov | Outbound connection initiated |
 | `peergov.peer_demoted` | PeerGov | Peer demoted |
 | `peergov.peer_promoted` | PeerGov | Peer promoted |
@@ -847,7 +857,7 @@ The `ledger/eras/` package provides era-specific validation rules for each Carda
 
 Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
 
-When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and LeiosVotes. LeiosNotify/LeiosFetch cache endorser-block material in-memory, and LeiosVotes caches received vote messages in-memory with TTL/dedupe so peers can pull vote diffusion data through LeiosVotes or targeted LeiosFetch vote requests. LeiosVotes pull requests remain outstanding while the in-memory vote cache is empty and complete when new vote material arrives or the protocol shuts down, so an empty relay cache is not treated as a mini-protocol error. Local vote generation, durable vote storage, EB certificate aggregation, and RB certificate embedding are still gated by the current gouroboros/Dijkstra certificate shape, where the generated Leios certificate slot remains a placeholder.
+When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and LeiosVotes. LeiosNotify/LeiosFetch cache endorser-block material in-memory; the LeiosVotes and LeiosFetch vote handlers delegate vote collection, serving, and emission to the `ledger/leios` vote manager (see "Leios Voting"), and return an explicit unavailable error when the manager is not wired. LeiosVotes pull requests remain outstanding while no servable votes exist and complete when new vote material arrives or the protocol shuts down, so an empty relay store is not treated as a mini-protocol error. Durable vote storage and RB certificate embedding are still gated by the current gouroboros/Dijkstra certificate shape, where the generated Leios certificate slot remains a placeholder.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
@@ -1078,6 +1088,18 @@ The forger tracks slot battles (competing blocks at the same slot) and skips for
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from files at startup. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
+
+### Leios Voting (`ledger/leios/`)
+
+Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:
+
+- **Committee selection**: the voting committee for an epoch is a pure function of the stake snapshot two epochs back (the same Mark→Set→Go cadence as leader election) and the Dijkstra `CommitteeStakeCoverage` (sigma_c) protocol parameter. Pools are ordered by stake descending (pool key hash ascending on ties) and selected until cumulative stake reaches sigma_c; the 0-based position in that order is the voter's stable `voter_id`. Committees are memoized in memory and recomputed on demand — there is no database table.
+- **Vote validation**: incoming votes are checked structurally, windowed against the current (or tip) slot (CIP-0164's L_vote timing window is not yet specified, so a provisional slot window bounds the forgeable vote-id space and keeps fabricated far-past/future slots away from stake snapshot queries), mapped to a committee by slot epoch, membership-checked by `voter_id`, deduplicated by `(slot, voter_id)` (first vote wins on equivocation), and BLS-verified when the voter's public key is known. CIP-0164 key registration is not yet specified, so voter public keys come from a static config registry (`leiosVoterPublicKeys`); votes from unknown voters pass lenient validation but cannot contribute to certificates. The registry is the trust root discharging the proof-of-possession requirement of BLS aggregate verification — operators vouch for the keys they configure.
+- **Stake quorum and certificates**: per endorser block, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches the `QuorumStakeThreshold` (tau) fraction of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum`. The tau < sigma_c invariant is revalidated whenever parameters are read; failures disable committee computation. Certificate *validation* (`ValidateEbCertificate`) is exposed but not yet wired into block validation: the Dijkstra CDDL's `leios_cert` block slot is still an empty placeholder in gouroboros v0.180.0.
+- **Vote emission**: a block producer with a `leiosVoteSigningKeyFile` configured signs exactly one uniform vote (`slot_no`, `endorser_block_hash`, `voter_id`, BLS signature over `concat(slot_no, eb_hash)`) per observed endorser block while its pool is a committee member.
+- **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser block's tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Epoch transitions prune state older than the previous epoch; chain rollbacks drop votes, tallies, and records past the rollback point and clear the committee memo.
+
+The manager implements the `ouroboros.LeiosVoteHandler` interface and is assigned to the Ouroboros component post-construction. The LeiosVotes server callback must return exactly the requested number of votes, so it blocks (with a per-connection cursor over the append-ordered vote log, never echoing a vote back to its origin) until enough votes arrive or the protocol shuts down; dingo's LeiosVotes client requests one vote at a time with pipelining for streaming delivery.
 
 ## Mithril Bootstrap
 

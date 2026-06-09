@@ -69,6 +69,7 @@ type Ouroboros struct {
 	EventBus                 *event.EventBus
 	Mempool                  *mempool.Mempool
 	LedgerState              *ledger.LedgerState
+	LeiosVotes               LeiosVoteHandler
 	config                   OuroborosConfig
 	blockfetchMetrics        *blockfetchMetrics
 	protocolMetrics          *protocolMetrics
@@ -86,11 +87,6 @@ type Ouroboros struct {
 	// ChainSync serve merged RB+EB blocks without coupling the chain
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
-	leiosVotes          map[string]*leiosVoteData
-	leiosVoteOrder      []string
-	leiosVoteCursors    map[string]uint64
-	leiosVoteNotify     chan struct{}
-	leiosVoteSeq        uint64
 	leiosMu             sync.RWMutex
 }
 
@@ -158,9 +154,6 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
-		leiosVotes:               make(map[string]*leiosVoteData),
-		leiosVoteCursors:         make(map[string]uint64),
-		leiosVoteNotify:          make(chan struct{}),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -433,9 +426,10 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
 	}
-	o.leiosMu.Lock()
-	delete(o.leiosVoteCursors, leiosConnectionIdString(connId))
-	o.leiosMu.Unlock()
+	// Clean up Leios vote serving state
+	if o.LeiosVotes != nil {
+		o.LeiosVotes.RemoveConnection(leiosConnectionIdString(connId))
+	}
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
@@ -535,6 +529,7 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			)
 			return
 		}
+		// Start leiosvotes client
 		if err := o.leiosvotesClientStart(connId); err != nil {
 			o.config.Logger.Error(
 				"failed to start leiosvotes client",

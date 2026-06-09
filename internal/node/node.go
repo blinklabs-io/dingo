@@ -376,6 +376,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithForgeStaleGapThresholdSlots(
 				cfg.ForgeStaleGapThresholdSlots,
 			),
+			// Leios voting (experimental)
+			dingo.WithLeiosVoteSigningKeyFile(
+				cfg.LeiosVoteSigningKeyFile,
+			),
+			dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 		),
 	)
 	if err != nil {

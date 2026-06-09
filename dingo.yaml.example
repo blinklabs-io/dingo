@@ -312,6 +312,26 @@ runMode: "serve"
 # CLI: --start-era
 startEra: ""
 
+# Leios voting (experimental, leios runMode only)
+#
+# leiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381 vote
+# signing key (32-byte scalar; the file must not be group/other readable).
+# When set on a block producer whose pool is a member of the epoch's
+# stake-truncated voting committee, the node signs and emits one Leios
+# vote per observed endorser block.
+#
+# leiosVoterPublicKeys maps hex pool key hashes to hex-encoded 96-byte
+# compressed BLS12-381 public keys. It stands in for CIP-0164 key
+# registration (not yet specified) so vote signatures can be verified on
+# test networks. Votes from voters without a registered key still count
+# toward observed stake but cannot contribute to certificates.
+#
+# Can be overridden with the DINGO_LEIOS_VOTE_SIGNING_KEY_FILE and
+# DINGO_LEIOS_VOTER_PUBLIC_KEYS environment variables
+# leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
+# leiosVoterPublicKeys:
+#   "<pool key hash hex>": "<compressed G2 public key hex>"
+
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
 #

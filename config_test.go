@@ -201,3 +201,26 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 		"updater should exit after ctx cancel",
 	)
 }
+
+func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
+	cfg := &Config{}
+	assert.Equal(t, "", cfg.leiosVoteSigningKeyFile)
+	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
+	assert.Equal(t, "/keys/leios-vote.skey", cfg.leiosVoteSigningKeyFile)
+}
+
+func TestWithLeiosVoterPublicKeys(t *testing.T) {
+	cfg := &Config{}
+	assert.Nil(t, cfg.leiosVoterPublicKeys)
+	keys := map[string]string{"aabbcc": "ddeeff"}
+	WithLeiosVoterPublicKeys(keys)(cfg)
+	assert.Equal(
+		t,
+		map[string]string{"aabbcc": "ddeeff"},
+		cfg.leiosVoterPublicKeys,
+	)
+	// The option copies the map: later caller mutations must not
+	// change live config
+	keys["aabbcc"] = "mutated"
+	assert.Equal(t, "ddeeff", cfg.leiosVoterPublicKeys["aabbcc"])
+}
