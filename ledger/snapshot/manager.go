@@ -349,6 +349,28 @@ func (m *Manager) captureMarkSnapshot(
 // snapshot immediately.
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	start := time.Now()
+	if ok, epoch, pools, stake, err := m.hasExistingPostMithrilSnapshotWindow(); err != nil {
+		m.logger.Warn(
+			"failed to check existing post-Mithril snapshot window",
+			"component", "snapshot",
+			"error", err,
+		)
+	} else if ok {
+		if m.metrics != nil {
+			m.metrics.capturePoolsTotal.Set(float64(pools))
+			m.metrics.captureTotalStakeLovelace.Set(float64(stake))
+			m.metrics.lastSuccessfulEpoch.Set(float64(epoch))
+		}
+		m.logger.Info(
+			"post-Mithril snapshot window already present; skipping genesis snapshot capture",
+			"component", "snapshot",
+			"epoch", epoch,
+			"total_pools", pools,
+			"total_stake", stake,
+		)
+		return nil
+	}
+
 	calculator := NewCalculator(m.db)
 	successCount := uint64(0)
 	lastSuccessfulEpoch := uint64(0)
@@ -512,4 +534,58 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		m.metrics.lastSuccessfulEpoch.Set(float64(lastSuccessfulEpoch))
 	}
 	return nil
+}
+
+func (m *Manager) hasExistingPostMithrilSnapshotWindow() (
+	bool,
+	uint64,
+	uint64,
+	uint64,
+	error,
+) {
+	epochs, err := m.db.GetEpochs(nil)
+	if err != nil {
+		return false, 0, 0, 0, fmt.Errorf("load epochs: %w", err)
+	}
+	if len(epochs) == 0 {
+		return false, 0, 0, 0, nil
+	}
+	currentEpoch := epochs[len(epochs)-1].EpochId
+	if currentEpoch == 0 {
+		return false, 0, 0, 0, nil
+	}
+
+	meta := m.db.Metadata()
+	var currentPools uint64
+	var currentStake uint64
+	for offset := uint64(0); offset <= 2 && offset <= currentEpoch; offset++ {
+		epoch := currentEpoch - offset
+		snapshots, err := meta.GetPoolStakeSnapshotsByEpoch(
+			epoch,
+			"mark",
+			nil,
+		)
+		if err != nil {
+			return false, 0, 0, 0, fmt.Errorf(
+				"load mark snapshots for epoch %d: %w",
+				epoch,
+				err,
+			)
+		}
+		if len(snapshots) == 0 {
+			return false, 0, 0, 0, nil
+		}
+		var totalStake uint64
+		for _, snapshot := range snapshots {
+			totalStake += uint64(snapshot.TotalStake)
+		}
+		if totalStake == 0 {
+			return false, 0, 0, 0, nil
+		}
+		if offset == 0 {
+			currentPools = uint64(len(snapshots))
+			currentStake = totalStake
+		}
+	}
+	return true, currentEpoch, currentPools, currentStake, nil
 }

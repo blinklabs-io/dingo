@@ -597,7 +597,8 @@ When `Node.Run()` is called, components are initialized in this order:
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
  8. LedgerState start
- 9. Snapshot manager start (captures genesis snapshot)
+ 9. Snapshot manager start (captures genesis snapshot, or reuses an existing
+    post-Mithril Mark snapshot window)
 10. Mempool setup and injection into LedgerState/Ouroboros
 11. ChainsyncState (multi-client tracking, stall detection)
 12. ChainSelector (genesis/Praos comparison) start
@@ -1093,6 +1094,12 @@ The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
+
+During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
+snapshot manager to ensure the initial stake snapshot state before starting the
+client APIs. If the imported database already contains a non-empty Mark snapshot
+window for the current epoch, N-1, and N-2, the snapshot manager reuses that
+window instead of recalculating stake distribution from live UTxO state.
 
 In API storage mode, the SQLite metadata plugin can defer selected query indexes
 during bulk load. Deferred indexes are classified as critical or lazy in
