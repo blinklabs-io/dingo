@@ -977,7 +977,7 @@ func (a *NodeAdapter) PoolsExtended() (
 func (a *NodeAdapter) Account(
 	stakeAddress string,
 ) (AccountInfo, error) {
-	_, stakeKey, err := parseStakeAddress(
+	_, credentialTag, stakeKey, err := parseStakeAddress(
 		stakeAddress,
 	)
 	if err != nil {
@@ -985,7 +985,12 @@ func (a *NodeAdapter) Account(
 	}
 
 	db := a.ledgerState.Database()
-	account, err := db.GetAccount(stakeKey, true, nil)
+	account, err := db.GetAccountByCredential(
+		credentialTag,
+		stakeKey,
+		true,
+		nil,
+	)
 	if err != nil {
 		return AccountInfo{}, err
 	}
@@ -1047,7 +1052,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
-	stakeAddr, stakeKey, err := parseStakeAddress(
+	stakeAddr, credentialTag, stakeKey, err := parseStakeAddress(
 		stakeAddress,
 	)
 	if err != nil {
@@ -1061,7 +1066,12 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	total, err := a.ledgerState.Database().
@@ -1120,13 +1130,18 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	offset := (params.Page - 1) * params.Count
@@ -1187,13 +1202,18 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	offset := (params.Page - 1) * params.Count
@@ -1243,12 +1263,17 @@ func (a *NodeAdapter) AccountRewardHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	// TODO(#1875): Implement reward history once Dingo persists
@@ -1267,18 +1292,27 @@ func blockIssuer(issuer lcommon.IssuerVkey) string {
 
 func parseStakeAddress(
 	stakeAddress string,
-) (lcommon.Address, []byte, error) {
+) (lcommon.Address, uint8, []byte, error) {
 	addr, err := lcommon.NewAddress(stakeAddress)
 	if err != nil {
-		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
 	}
 	zeroHash := lcommon.NewBlake2b224(nil)
 	if addr.PaymentKeyHash() != zeroHash ||
 		addr.StakeKeyHash() == zeroHash {
-		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
+	}
+	var credentialTag uint8
+	switch addr.StakingPayload().(type) {
+	case lcommon.AddressPayloadKeyHash:
+		credentialTag = 0
+	case lcommon.AddressPayloadScriptHash:
+		credentialTag = 1
+	default:
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
 	}
 	stakeKey := addr.StakeKeyHash().Bytes()
-	return addr, stakeKey, nil
+	return addr, credentialTag, stakeKey, nil
 }
 
 func blockHashString(hash []byte) string {
