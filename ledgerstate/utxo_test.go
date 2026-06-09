@@ -98,6 +98,8 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
+			} else {
+				require.Empty(t, result.StakingKey, "StakingKey should be empty for non-staking-key address types")
 			}
 		})
 	}
