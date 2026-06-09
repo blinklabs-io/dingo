@@ -16,7 +16,7 @@ Hi folks! Here’s what we shipped in v0.52.1.
 
 ### 💪 Improvements
 
-* Improved **keep protocol support aligned and harden Leios cache behavior:** Protocol and transaction handling now stay aligned with newer upstream support, and Leios endorser block caching now behaves more reliably. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Improved **keep protocol support aligned and steady Leios cache behavior:** Protocol and transaction handling now stay aligned with newer upstream support, and Leios endorser block caching now behaves more reliably. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
 * Refined **refresh the Blockfrost explorer example for easier local evaluation:** The Blockfrost explorer example now offers a clearer dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure, which makes local API evaluation easier to use. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
 * Updated **keep the published v0.52.0 release history current:** The release history now includes the prior v0.52.0 entry, which keeps recent release context easier to review. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
 * Strengthened **let metadata tests run safely in parallel:** Metadata test coverage now runs with better isolation, which makes routine validation steadier and reduces test interference. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
@@ -28,7 +28,7 @@ Hi folks! Here’s what we shipped in v0.52.1.
 
 ### 📋 What You Need to Know
 
-* Clarified **expect more reliable protocol behavior and steadier Leios caching:** Protocol handling now stays aligned with newer upstream support, and Leios endorser block caching should behave more reliably during affected workflows. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Clarified **expect more reliable protocol behavior and steadier Leios caching:** Protocol handling now stays aligned with newer upstream support, and Leios endorser block caching should behave more reliably where it is in use. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
 * Highlighted **use the refreshed Blockfrost explorer example for smoother local API evaluation:** Teams using the example can expect an easier dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
 * Emphasized **review the published v0.52.0 notes alongside this patch:** The release history now includes the prior v0.52.0 entry, which makes recent patch context easier to follow. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
 * Summarized **trust steadier parallel metadata test coverage around this release:** Validation now runs with better metadata test isolation, which supports more dependable routine verification. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
