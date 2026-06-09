@@ -474,6 +474,24 @@ func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountDelegationHistoryRow, error) {
+	return d.GetAccountDelegationHistoryByCredential(
+		0,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+func (d *MetadataStoreSqlite) GetAccountDelegationHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -481,8 +499,9 @@ func (d *MetadataStoreSqlite) GetAccountDelegationHistory(
 			err,
 		)
 	}
-	rows, err := accounthistory.QueryDelegationHistory(
+	rows, err := accounthistory.QueryDelegationHistoryByCredential(
 		db,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -503,6 +522,14 @@ func (d *MetadataStoreSqlite) CountAccountDelegationHistory(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
+	return d.CountAccountDelegationHistoryByCredential(0, stakingKey, txn)
+}
+
+func (d *MetadataStoreSqlite) CountAccountDelegationHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -510,7 +537,11 @@ func (d *MetadataStoreSqlite) CountAccountDelegationHistory(
 			err,
 		)
 	}
-	count, err := accounthistory.CountDelegationHistory(db, stakingKey)
+	count, err := accounthistory.CountDelegationHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -528,6 +559,24 @@ func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
 	order string,
 	txn types.Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
+	return d.GetAccountRegistrationHistoryByCredential(
+		0,
+		stakingKey,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+func (d *MetadataStoreSqlite) GetAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn types.Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, fmt.Errorf(
@@ -535,8 +584,9 @@ func (d *MetadataStoreSqlite) GetAccountRegistrationHistory(
 			err,
 		)
 	}
-	rows, err := accounthistory.QueryRegistrationHistory(
+	rows, err := accounthistory.QueryRegistrationHistoryByCredential(
 		db,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -557,6 +607,14 @@ func (d *MetadataStoreSqlite) CountAccountRegistrationHistory(
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
+	return d.CountAccountRegistrationHistoryByCredential(0, stakingKey, txn)
+}
+
+func (d *MetadataStoreSqlite) CountAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (int, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
@@ -564,7 +622,11 @@ func (d *MetadataStoreSqlite) CountAccountRegistrationHistory(
 			err,
 		)
 	}
-	count, err := accounthistory.CountRegistrationHistory(db, stakingKey)
+	count, err := accounthistory.CountRegistrationHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account registration history: %w",

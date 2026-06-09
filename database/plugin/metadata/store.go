@@ -507,7 +507,8 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
-	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
+	// GetAccountDelegationHistory retrieves key-credential delegation history
+	// rows for a staking key. It is a tag-0 compatibility wrapper.
 	GetAccountDelegationHistory(
 		[]byte, // stakingKey
 		int, // limit
@@ -516,14 +517,34 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AccountDelegationHistoryRow, error)
 
-	// CountAccountDelegationHistory retrieves the total count of
-	// delegation history rows for a staking key.
+	// GetAccountDelegationHistoryByCredential retrieves delegation history
+	// rows for a stake credential tag/hash pair.
+	GetAccountDelegationHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountDelegationHistoryRow, error)
+
+	// CountAccountDelegationHistory retrieves the total count of key-credential
+	// delegation history rows for a staking key. It is a tag-0 compatibility wrapper.
 	CountAccountDelegationHistory(
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
 
-	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
+	// CountAccountDelegationHistoryByCredential retrieves the total count of
+	// delegation history rows for a stake credential tag/hash pair.
+	CountAccountDelegationHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// GetAccountRegistrationHistory retrieves key-credential registration history
+	// rows for a staking key. It is a tag-0 compatibility wrapper.
 	GetAccountRegistrationHistory(
 		[]byte, // stakingKey
 		int, // limit
@@ -532,9 +553,28 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
 
-	// CountAccountRegistrationHistory retrieves the total count of
-	// registration history rows for a staking key.
+	// GetAccountRegistrationHistoryByCredential retrieves registration history
+	// rows for a stake credential tag/hash pair.
+	GetAccountRegistrationHistoryByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		int, // limit
+		int, // offset
+		string, // order (asc|desc)
+		types.Txn,
+	) ([]models.AccountRegistrationHistoryRow, error)
+
+	// CountAccountRegistrationHistory retrieves the total count of key-credential
+	// registration history rows for a staking key. It is a tag-0 compatibility wrapper.
 	CountAccountRegistrationHistory(
+		[]byte, // stakingKey
+		types.Txn,
+	) (int, error)
+
+	// CountAccountRegistrationHistoryByCredential retrieves the total count of
+	// registration history rows for a stake credential tag/hash pair.
+	CountAccountRegistrationHistoryByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)

@@ -628,28 +628,32 @@ FROM (
   FROM stake_delegation sd
   JOIN certs c ON c.id = sd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE sd.staking_key = decode($1, 'hex')
+  WHERE sd.credential_tag = $1
+    AND sd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT srd.added_slot, tx.block_index, c.cert_index, tx.hash, srd.pool_key_hash
   FROM stake_registration_delegation srd
   JOIN certs c ON c.id = srd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE srd.staking_key = decode($1, 'hex')
+  WHERE srd.credential_tag = $1
+    AND srd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT svd.added_slot, tx.block_index, c.cert_index, tx.hash, svd.pool_key_hash
   FROM stake_vote_delegation svd
   JOIN certs c ON c.id = svd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE svd.staking_key = decode($1, 'hex')
+  WHERE svd.credential_tag = $1
+    AND svd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT svrd.added_slot, tx.block_index, c.cert_index, tx.hash, svrd.pool_key_hash
   FROM stake_vote_registration_delegation svrd
   JOIN certs c ON c.id = svrd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE svrd.staking_key = decode($1, 'hex')
+  WHERE svrd.credential_tag = $1
+    AND svrd.staking_key = decode($2, 'hex')
 ) h
 ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC
 LIMIT 50;

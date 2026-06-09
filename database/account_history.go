@@ -28,11 +28,32 @@ func (d *Database) GetAccountDelegationHistory(
 	order string,
 	txn *Txn,
 ) ([]models.AccountDelegationHistoryRow, error) {
+	return d.GetAccountDelegationHistoryByCredential(
+		0,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+// GetAccountDelegationHistoryByCredential returns delegation history rows for
+// a stake credential.
+func (d *Database) GetAccountDelegationHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.AccountDelegationHistoryRow, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountDelegationHistory(
+	rows, err := d.metadata.GetAccountDelegationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		limit,
 		offset,
@@ -54,11 +75,22 @@ func (d *Database) CountAccountDelegationHistory(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
+	return d.CountAccountDelegationHistoryByCredential(0, stakeKey, txn)
+}
+
+// CountAccountDelegationHistoryByCredential returns the total number of
+// delegation history rows for a stake credential.
+func (d *Database) CountAccountDelegationHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountDelegationHistory(
+	count, err := d.metadata.CountAccountDelegationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		txn.Metadata(),
 	)
@@ -79,11 +111,32 @@ func (d *Database) GetAccountRegistrationHistory(
 	order string,
 	txn *Txn,
 ) ([]models.AccountRegistrationHistoryRow, error) {
+	return d.GetAccountRegistrationHistoryByCredential(
+		0,
+		stakeKey,
+		limit,
+		offset,
+		order,
+		txn,
+	)
+}
+
+// GetAccountRegistrationHistoryByCredential returns registration history rows
+// for a stake credential.
+func (d *Database) GetAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	limit int,
+	offset int,
+	order string,
+	txn *Txn,
+) ([]models.AccountRegistrationHistoryRow, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	rows, err := d.metadata.GetAccountRegistrationHistory(
+	rows, err := d.metadata.GetAccountRegistrationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		limit,
 		offset,
@@ -105,11 +158,22 @@ func (d *Database) CountAccountRegistrationHistory(
 	stakeKey []byte,
 	txn *Txn,
 ) (int, error) {
+	return d.CountAccountRegistrationHistoryByCredential(0, stakeKey, txn)
+}
+
+// CountAccountRegistrationHistoryByCredential returns the total number of
+// registration history rows for a stake credential.
+func (d *Database) CountAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (int, error) {
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAccountRegistrationHistory(
+	count, err := d.metadata.CountAccountRegistrationHistoryByCredential(
+		credentialTag,
 		stakeKey,
 		txn.Metadata(),
 	)
