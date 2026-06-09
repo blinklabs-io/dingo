@@ -435,6 +435,8 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 		// Base address: 1 header + 28 payment + 28 staking
 		if paymentIsKey {
 			result.PaymentKey = bytes.Clone(addr[1:29])
+		} else {
+			result.PaymentScript = true
 		}
 		if addrType <= 1 { // staking is key for types 0,1
 			result.StakingKey = bytes.Clone(addr[29:57])
@@ -443,11 +445,15 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 		// Pointer address: 1 header + 28 payment + pointer
 		if paymentIsKey {
 			result.PaymentKey = bytes.Clone(addr[1:29])
+		} else {
+			result.PaymentScript = true
 		}
 	case (addrType == 6 || addrType == 7) && len(addr) >= 29:
 		// Enterprise address: 1 header + 28 payment
 		if paymentIsKey {
 			result.PaymentKey = bytes.Clone(addr[1:29])
+		} else {
+			result.PaymentScript = true
 		}
 	}
 }
@@ -499,6 +505,9 @@ func parseCborTxOut(
 	skh := addr.StakeKeyHash()
 	if skh != zeroBlake2b224 {
 		result.StakingKey = skh.Bytes()
+	}
+	if addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
+		result.PaymentScript = true
 	}
 
 	if dh := txOut.DatumHash(); dh != nil {
@@ -698,15 +707,16 @@ func parseIndefiniteUTxOMapWithProgress(
 // UTxOToModel converts a ParsedUTxO to a Dingo database Utxo model.
 func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 	utxo := models.Utxo{
-		TxId:       u.TxHash,
-		OutputIdx:  u.OutputIndex,
-		PaymentKey: u.PaymentKey,
-		StakingKey: u.StakingKey,
-		Amount:     types.Uint64(u.Amount),
-		AddedSlot:  slot,
-		DatumHash:  u.DatumHash,
-		Datum:      u.Datum,
-		ScriptRef:  u.ScriptRef,
+		TxId:          u.TxHash,
+		OutputIdx:     u.OutputIndex,
+		PaymentKey:    u.PaymentKey,
+		StakingKey:    u.StakingKey,
+		PaymentScript: u.PaymentScript,
+		Amount:        types.Uint64(u.Amount),
+		AddedSlot:     slot,
+		DatumHash:     u.DatumHash,
+		Datum:         u.Datum,
+		ScriptRef:     u.ScriptRef,
 	}
 
 	// Convert assets
