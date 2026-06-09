@@ -1101,9 +1101,13 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		0,
 		len(rows),
 	)
+	addressType := uint8(lcommon.AddressTypeKeyKey)
+	if credentialTag == 1 {
+		addressType = lcommon.AddressTypeKeyScript
+	}
 	for _, row := range rows {
 		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey,
+			addressType,
 			networkID,
 			row.PaymentKey,
 			stakeKey,
@@ -1143,7 +1147,11 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	}
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
-		CountAccountDelegationHistory(stakeKey, nil)
+		CountAccountDelegationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -1154,7 +1162,8 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		return []AccountDelegationHistoryInfo{}, total, nil
 	}
 	rows, err := a.ledgerState.Database().
-		GetAccountDelegationHistory(
+		GetAccountDelegationHistoryByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,
@@ -1215,7 +1224,11 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	}
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
-		CountAccountRegistrationHistory(stakeKey, nil)
+		CountAccountRegistrationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account registration history: %w",
@@ -1226,7 +1239,8 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 		return []AccountRegistrationHistoryInfo{}, total, nil
 	}
 	rows, err := a.ledgerState.Database().
-		GetAccountRegistrationHistory(
+		GetAccountRegistrationHistoryByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,

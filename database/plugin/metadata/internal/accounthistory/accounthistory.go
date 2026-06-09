@@ -31,12 +31,34 @@ func QueryDelegationHistory(
 	offset int,
 	order string,
 ) ([]models.AccountDelegationHistoryRow, error) {
+	return QueryDelegationHistoryByCredential(
+		db,
+		0,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+}
+
+func QueryDelegationHistoryByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+) ([]models.AccountDelegationHistoryRow, error) {
 	ret := make([]models.AccountDelegationHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
 
-	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	query, args := delegationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if strings.EqualFold(order, "asc") {
 		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC"
 	} else {
@@ -60,10 +82,22 @@ func CountDelegationHistory(
 	db *gorm.DB,
 	stakingKey []byte,
 ) (int, error) {
+	return CountDelegationHistoryByCredential(db, 0, stakingKey)
+}
+
+func CountDelegationHistoryByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+) (int, error) {
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	query, args := delegationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	var count int64
 	if err := db.Raw(
 		"SELECT COUNT(*) AS count FROM ("+query+") AS delegation_history",
@@ -76,6 +110,7 @@ func CountDelegationHistory(
 
 func delegationHistoryUnionQuery(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (string, []any) {
 	tables := []string{
@@ -98,13 +133,15 @@ func delegationHistoryUnionQuery(
 				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
-			WHERE %[1]s.staking_key = ?`,
+				WHERE %[1]s.credential_tag = ?
+					AND %[1]s.staking_key = ?`,
 			table,
 			transactionJoinClause(db),
 		))
 		args = append(
 			args,
 			DelegationTableCertTypes(table)[0],
+			credentialTag,
 			stakingKey,
 		)
 	}
@@ -118,12 +155,34 @@ func QueryRegistrationHistory(
 	offset int,
 	order string,
 ) ([]models.AccountRegistrationHistoryRow, error) {
+	return QueryRegistrationHistoryByCredential(
+		db,
+		0,
+		stakingKey,
+		limit,
+		offset,
+		order,
+	)
+}
+
+func QueryRegistrationHistoryByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+	limit int,
+	offset int,
+	order string,
+) ([]models.AccountRegistrationHistoryRow, error) {
 	ret := make([]models.AccountRegistrationHistoryRow, 0)
 	if len(stakingKey) == 0 {
 		return ret, nil
 	}
 
-	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	query, args := registrationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if strings.EqualFold(order, "asc") {
 		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC, action ASC"
 	} else {
@@ -182,10 +241,22 @@ func CountRegistrationHistory(
 	db *gorm.DB,
 	stakingKey []byte,
 ) (int, error) {
+	return CountRegistrationHistoryByCredential(db, 0, stakingKey)
+}
+
+func CountRegistrationHistoryByCredential(
+	db *gorm.DB,
+	credentialTag uint8,
+	stakingKey []byte,
+) (int, error) {
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	query, args := registrationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	var count int64
 	if err := db.Raw(
 		"SELECT COUNT(*) AS count FROM ("+query+") AS registration_history",
@@ -203,6 +274,7 @@ type registrationHistorySource struct {
 
 func registrationHistoryUnionQuery(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (string, []any) {
 	sources := registrationHistorySources()
@@ -220,7 +292,8 @@ func registrationHistoryUnionQuery(
 				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
-			WHERE %[1]s.staking_key = ?`,
+				WHERE %[1]s.credential_tag = ?
+					AND %[1]s.staking_key = ?`,
 			source.table,
 			transactionJoinClause(db),
 		))
@@ -228,6 +301,7 @@ func registrationHistoryUnionQuery(
 			args,
 			source.action,
 			RegistrationTableCertTypes(source.table)[0],
+			credentialTag,
 			stakingKey,
 		)
 	}

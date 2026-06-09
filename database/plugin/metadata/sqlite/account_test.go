@@ -65,6 +65,148 @@ func TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse(t *testing.T) {
 	assert.False(t, got.Active, "returned account should have Active=false")
 }
 
+// TestAccountHistoryQueriesAreCredentialTagAware verifies that account
+// registration/delegation history queries do not merge key and script
+// credential rows that share the same 28-byte hash.
+func TestAccountHistoryQueriesAreCredentialTagAware(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xA1
+	}
+	keyPool := make([]byte, 28)
+	for i := range keyPool {
+		keyPool[i] = 0xB1
+	}
+	scriptPool := make([]byte, 28)
+	for i := range scriptPool {
+		scriptPool[i] = 0xC1
+	}
+
+	require.NoError(t, db.Create(&models.Transaction{
+		ID:         100,
+		Hash:       []byte("tx_key_history_hash_123456789012"),
+		Slot:       10,
+		BlockIndex: 0,
+	}).Error)
+	require.NoError(t, db.Create(&models.Transaction{
+		ID:         101,
+		Hash:       []byte("tx_script_history_hash_123456789"),
+		Slot:       20,
+		BlockIndex: 0,
+	}).Error)
+	require.NoError(t, db.Create(&models.Certificate{
+		ID:            1000,
+		TransactionID: 100,
+		CertIndex:     0,
+		Slot:          10,
+		CertType:      11, // StakeRegistrationDelegation
+	}).Error)
+	require.NoError(t, db.Create(&models.Certificate{
+		ID:            1001,
+		TransactionID: 101,
+		CertIndex:     0,
+		Slot:          20,
+		CertType:      11, // StakeRegistrationDelegation
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistrationDelegation{
+		ID:            1000,
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   keyPool,
+		CertificateID: 1000,
+		AddedSlot:     10,
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistrationDelegation{
+		ID:            1001,
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		PoolKeyHash:   scriptPool,
+		CertificateID: 1001,
+		AddedSlot:     20,
+	}).Error)
+
+	keyDelegations, err := store.GetAccountDelegationHistoryByCredential(
+		0,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, keyDelegations, 1)
+	assert.Equal(t, keyPool, keyDelegations[0].PoolKeyHash)
+
+	scriptDelegations, err := store.GetAccountDelegationHistoryByCredential(
+		1,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, scriptDelegations, 1)
+	assert.Equal(t, scriptPool, scriptDelegations[0].PoolKeyHash)
+
+	keyDelegationCount, err := store.CountAccountDelegationHistoryByCredential(
+		0,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, keyDelegationCount)
+	scriptDelegationCount, err := store.CountAccountDelegationHistoryByCredential(
+		1,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, scriptDelegationCount)
+
+	keyRegistrations, err := store.GetAccountRegistrationHistoryByCredential(
+		0,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, keyRegistrations, 1)
+	assert.Equal(t, uint64(10), keyRegistrations[0].AddedSlot)
+
+	scriptRegistrations, err := store.GetAccountRegistrationHistoryByCredential(
+		1,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, scriptRegistrations, 1)
+	assert.Equal(t, uint64(20), scriptRegistrations[0].AddedSlot)
+
+	keyRegistrationCount, err := store.CountAccountRegistrationHistoryByCredential(
+		0,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, keyRegistrationCount)
+	scriptRegistrationCount, err := store.CountAccountRegistrationHistoryByCredential(
+		1,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, scriptRegistrationCount)
+}
+
 // TestBatchFetchCerts_SameSlotTiebreakByBlockIndex pins the cert ordering
 // invariant documented in CLAUDE.md: when two certs for the same staking
 // key live in the same slot but in different transactions of the same
