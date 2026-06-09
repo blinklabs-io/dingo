@@ -20,6 +20,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/blinklabs-io/dingo/topology"
 )
 
 func resetGlobalConfig() {
@@ -58,6 +61,7 @@ func resetGlobalConfig() {
 		DatabaseQueueSize:           50,
 		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:               DefaultHistoryExpiryConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -66,6 +70,7 @@ func resetGlobalConfig() {
 			VerifyCertificates: true,
 		},
 	}
+	globalTopologyConfig = &topology.TopologyConfig{}
 }
 
 func TestLoad_CompareFullStruct(t *testing.T) {
@@ -156,6 +161,7 @@ mithril:
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
 		},
+		HistoryExpiry:               DefaultHistoryExpiryConfig(),
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
@@ -225,6 +231,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 		DatabaseQueueSize:           50,
 		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:               DefaultHistoryExpiryConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -302,6 +309,58 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		t.Fatalf(
 			"expected GenesisBootstrap.PromotionMinDiversityGroups to be 6, got %d",
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		)
+	}
+}
+
+func TestLoad_HistoryExpiryConfig(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	yamlContent := `
+historyExpiry:
+  enabled: true
+  frequency: 15m
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "history-expiry.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if !cfg.HistoryExpiry.Enabled {
+		t.Fatal("expected HistoryExpiry.Enabled to be true")
+	}
+	if cfg.HistoryExpiry.Frequency != 15*time.Minute {
+		t.Fatalf(
+			"expected HistoryExpiry.Frequency to be 15m, got %s",
+			cfg.HistoryExpiry.Frequency,
+		)
+	}
+}
+
+func TestLoad_HistoryExpiryEnvVars(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	t.Setenv("DINGO_HISTORY_EXPIRY_ENABLED", "true")
+	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "45m")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if !cfg.HistoryExpiry.Enabled {
+		t.Fatal("expected HistoryExpiry.Enabled to be true")
+	}
+	if cfg.HistoryExpiry.Frequency != 45*time.Minute {
+		t.Fatalf(
+			"expected HistoryExpiry.Frequency to be 45m, got %s",
+			cfg.HistoryExpiry.Frequency,
 		)
 	}
 }
@@ -463,6 +522,20 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 
 	if cfg.RelayPort != 3001 {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
+	}
+
+	topologyConfig := GetTopologyConfig()
+	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
+		t.Fatalf(
+			"expected embedded topology to reference peer-snapshot.json, got %q",
+			topologyConfig.PeerSnapshotFile,
+		)
+	}
+	if topologyConfig.PeerSnapshot == nil {
+		t.Fatal("expected embedded topology to load peer snapshot")
+	}
+	if !topologyConfig.PeerSnapshot.HasRelays() {
+		t.Fatal("expected embedded peer snapshot to contain relays")
 	}
 }
 

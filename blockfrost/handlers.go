@@ -1678,6 +1678,35 @@ func protocolParamsResponse(
 		Nonce:                 "",
 		DecentralisationParam: 0,
 		ExtraEntropy:          nil,
+		// Conway-era governance and reference-script parameters. nil for
+		// pre-Conway eras, where they serialize as JSON null.
+		PvtMotionNoConfidence:    info.PvtMotionNoConfidence,
+		PvtCommitteeNormal:       info.PvtCommitteeNormal,
+		PvtCommitteeNoConfidence: info.PvtCommitteeNoConfidence,
+		PvtHardForkInitiation:    info.PvtHardForkInitiation,
+		DvtMotionNoConfidence:    info.DvtMotionNoConfidence,
+		DvtCommitteeNormal:       info.DvtCommitteeNormal,
+		DvtCommitteeNoConfidence: info.DvtCommitteeNoConfidence,
+		DvtUpdateToConstitution:  info.DvtUpdateToConstitution,
+		DvtHardForkInitiation:    info.DvtHardForkInitiation,
+		DvtPPNetworkGroup:        info.DvtPPNetworkGroup,
+		DvtPPEconomicGroup:       info.DvtPPEconomicGroup,
+		DvtPPTechnicalGroup:      info.DvtPPTechnicalGroup,
+		DvtPPGovGroup:            info.DvtPPGovGroup,
+		DvtTreasuryWithdrawal:    info.DvtTreasuryWithdrawal,
+		CommitteeMinSize:         info.CommitteeMinSize,
+		CommitteeMaxTermLength:   info.CommitteeMaxTermLength,
+		GovActionLifetime:        info.GovActionLifetime,
+		GovActionDeposit:         info.GovActionDeposit,
+		DrepDeposit:              info.DRepDeposit,
+		DrepActivity:             info.DRepActivity,
+		// Blockfrost exposes the pool-voting security-group threshold under
+		// both the legacy "pvtpp_security_group" key and the current
+		// "pvt_p_p_security_group" key; populate both from the same value.
+		PvtppSecurityGroup:         info.PvtPPSecurityGroup,
+		PvtPPSecurityGroup:         info.PvtPPSecurityGroup,
+		MinFeeRefScriptCostPerByte: info.MinFeeRefScriptCostPerByte,
+		CostModelsRaw:              info.CostModelsRaw,
 	}
 }
 

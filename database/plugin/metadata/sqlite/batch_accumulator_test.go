@@ -26,6 +26,7 @@ import (
 )
 
 func TestBatchAccumulator_AddAndReset(t *testing.T) {
+	t.Parallel()
 	ba := NewBatchAccumulator()
 	require.NotNil(t, ba)
 
@@ -150,6 +151,7 @@ func TestBatchAccumulator_AddAndReset(t *testing.T) {
 }
 
 func TestBatchAccumulator_InFlightProducerIndex(t *testing.T) {
+	t.Parallel()
 	ba := NewBatchAccumulator()
 
 	producerTx := bytes.Repeat([]byte{0xaa}, 32)
@@ -201,6 +203,7 @@ func TestBatchAccumulator_InFlightProducerIndex(t *testing.T) {
 }
 
 func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
+	t.Parallel()
 	dst := NewBatchAccumulator()
 	src := NewBatchAccumulator()
 
@@ -225,6 +228,7 @@ func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
 }
 
 func TestFlushBatch_Witnesses(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	batch := NewBatchAccumulator()
 
@@ -248,6 +252,7 @@ func TestFlushBatch_Witnesses(t *testing.T) {
 }
 
 func TestFlushBatch_UtxoOutputsAndSpends(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	batch := NewBatchAccumulator()
 
@@ -296,6 +301,7 @@ func TestFlushBatch_UtxoOutputsAndSpends(t *testing.T) {
 }
 
 func TestFlushBatch_MultipleSpends(t *testing.T) {
+	t.Parallel()
 	// This test specifically guards against the args-ordering bug in
 	// batchSpendUtxos: with N>1 spends the SQL has three separate CASE
 	// sections whose bindings must be grouped (all deletedSlot args, then
@@ -363,6 +369,7 @@ func TestFlushBatch_MultipleSpends(t *testing.T) {
 }
 
 func TestFlushBatch_Idempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 	batch := NewBatchAccumulator()
 
@@ -431,6 +438,7 @@ func TestFlushBatch_Idempotent(t *testing.T) {
 // to the accumulator rather than the database.
 // A subsequent FlushBatch call must materialise those rows correctly.
 func TestSetTransactionBatched_AccumulatesCorrectly(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 
 	// ------------------------------------------------------------------ //

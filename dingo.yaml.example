@@ -197,8 +197,8 @@ blockfrostPort: 3000
 meshPort: 8080
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
-# its configured local blob plugin but wraps it with Bark archive fallback and
-# starts the background pruner.
+# its configured local blob plugin but wraps it with Bark archive fallback for
+# expired or missing historical blocks.
 # Can be overridden with DINGO_BARK_BASE_URL
 # CLI: --bark-url
 barkBaseUrl: ""
@@ -208,11 +208,16 @@ barkBaseUrl: ""
 # CLI: --bark-port
 barkPort: 0
 
-# How often a Bark-backed pruning node scans for blocks older than the
-# ledger-derived stability window. Default: 1h.
-# Can be overridden with DINGO_BARK_PRUNER_FREQUENCY
-# CLI: --bark-pruner-frequency
-barkPrunerFrequency: 1h
+# Local immutable block history expiry. When enabled, Dingo replaces block CBOR
+# older than the ledger-derived stability window with an expired-history marker
+# while retaining local indexes and metadata. Bark fallback is optional.
+historyExpiry:
+  # Can be overridden with DINGO_HISTORY_EXPIRY_ENABLED
+  # CLI: --history-expiry-enabled
+  enabled: false
+  # Can be overridden with DINGO_HISTORY_EXPIRY_FREQUENCY
+  # CLI: --history-expiry-frequency
+  frequency: 1h
 
 # ---
 # Deployment pattern examples (uncomment one block):
@@ -257,13 +262,15 @@ barkPrunerFrequency: 1h
 #         prefix: "preview"
 #   barkPort: 9091
 #
-# Pruning node (local blobs plus remote archive fallback):
+# History-expiry node (local blobs plus remote archive fallback):
 #   storageMode: "core"
 #   database:
 #     blob:
 #       plugin: "badger"
+#   historyExpiry:
+#     enabled: true
+#     frequency: 1h
 #   barkBaseUrl: "http://archive.example.internal:9091"
-#   barkPrunerFrequency: 1h
 #
 # Dev mode (isolated, forge blocks, no outbound):
 #   runMode: "dev"

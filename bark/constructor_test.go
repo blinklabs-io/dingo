@@ -30,12 +30,11 @@ func TestNewBark_RejectsNilDB(t *testing.T) {
 	assert.Contains(t, err.Error(), "db is required")
 }
 
-// TestNewBarkBlobStore_RejectsNilLedgerState pins that the constructor
-// returns an error rather than panicking when the required ledger state
-// dependency is nil.
-func TestNewBarkBlobStore_RejectsNilLedgerState(t *testing.T) {
-	bs, err := NewBarkBlobStore(BlobStoreBarkConfig{LedgerState: nil}, nil)
+// TestNewBarkBlobStore_RejectsNilUpstream pins that the constructor returns an
+// error rather than panicking when the required upstream blob store is nil.
+func TestNewBarkBlobStore_RejectsNilUpstream(t *testing.T) {
+	bs, err := NewBarkBlobStore(BlobStoreBarkConfig{}, nil)
 	require.Error(t, err)
 	assert.Nil(t, bs)
-	assert.Contains(t, err.Error(), "ledger state is required")
+	assert.Contains(t, err.Error(), "upstream blob store is required")
 }

@@ -72,6 +72,7 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	t.Setenv("CARDANO_MEMPOOL_CAPACITY", "123456")
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
 	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
+	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -101,6 +102,12 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.BackfillBatchSize,
 		)
 	}
+	if cfg.HistoryExpiry.Frequency.String() != "15m0s" {
+		t.Fatalf(
+			"expected env var to set history expiry frequency=15m, got %s",
+			cfg.HistoryExpiry.Frequency,
+		)
+	}
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -108,6 +115,8 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		"--mempool-capacity=7890",
 		"--data-dir=/tmp/override",
 		"--backfill-batch-size=200",
+		"--history-expiry-enabled=true",
+		"--history-expiry-frequency=30m",
 	}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
@@ -140,6 +149,15 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.BackfillBatchSize,
 		)
 	}
+	if !cfg.HistoryExpiry.Enabled {
+		t.Fatal("expected --history-expiry-enabled to enable history expiry")
+	}
+	if cfg.HistoryExpiry.Frequency.String() != "30m0s" {
+		t.Fatalf(
+			"expected --history-expiry-frequency to set 30m, got %s",
+			cfg.HistoryExpiry.Frequency,
+		)
+	}
 }
 
 func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
@@ -158,6 +176,42 @@ func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	err := ApplyFlags(cmd, cfg)
 	if err == nil {
 		t.Fatalf("expected overflow error, got nil")
+	}
+}
+
+func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
+	resetGlobalConfig()
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected default network preview, got %q", cfg.Network)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=preprod"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Network != "preprod" {
+		t.Fatalf("expected network preprod, got %q", cfg.Network)
+	}
+	topologyConfig := GetTopologyConfig()
+	if topologyConfig.PeerSnapshot == nil {
+		t.Fatal("expected topology reload to load preprod peer snapshot")
+	}
+	if topologyConfig.PeerSnapshot.NetworkMagic != 1 {
+		t.Fatalf(
+			"expected preprod peer snapshot network magic 1, got %d",
+			topologyConfig.PeerSnapshot.NetworkMagic,
+		)
 	}
 }
 

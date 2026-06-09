@@ -39,6 +39,7 @@ func setupStakeSnapshotTestStore(t *testing.T) *MetadataStoreSqlite {
 
 // TestPoolStakeSnapshotSave tests saving a single pool stake snapshot
 func TestPoolStakeSnapshotSave(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -59,6 +60,7 @@ func TestPoolStakeSnapshotSave(t *testing.T) {
 
 // TestPoolStakeSnapshotGet tests retrieving a specific pool stake snapshot
 func TestPoolStakeSnapshotGet(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -83,6 +85,7 @@ func TestPoolStakeSnapshotGet(t *testing.T) {
 
 // TestPoolStakeSnapshotGetNotFound tests retrieval when snapshot does not exist
 func TestPoolStakeSnapshotGetNotFound(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -94,6 +97,7 @@ func TestPoolStakeSnapshotGetNotFound(t *testing.T) {
 
 // TestPoolStakeSnapshotsSaveBatch tests saving multiple snapshots in batch
 func TestPoolStakeSnapshotsSaveBatch(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -126,6 +130,7 @@ func TestPoolStakeSnapshotsSaveBatch(t *testing.T) {
 
 // TestPoolStakeSnapshotsSaveBatchEmpty tests that empty batch save works
 func TestPoolStakeSnapshotsSaveBatchEmpty(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -135,6 +140,7 @@ func TestPoolStakeSnapshotsSaveBatchEmpty(t *testing.T) {
 
 // TestPoolStakeSnapshotsGetByEpoch tests retrieving all snapshots for an epoch
 func TestPoolStakeSnapshotsGetByEpoch(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -179,6 +185,7 @@ func TestPoolStakeSnapshotsGetByEpoch(t *testing.T) {
 
 // TestGetTotalActiveStake tests summing all pool stakes for an epoch
 func TestGetTotalActiveStake(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -218,6 +225,7 @@ func TestGetTotalActiveStake(t *testing.T) {
 
 // TestGetTotalActiveStakeNoSnapshots tests GetTotalActiveStake when no snapshots exist
 func TestGetTotalActiveStakeNoSnapshots(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -228,6 +236,7 @@ func TestGetTotalActiveStakeNoSnapshots(t *testing.T) {
 
 // TestEpochSummarySave tests saving an epoch summary
 func TestEpochSummarySave(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -248,6 +257,7 @@ func TestEpochSummarySave(t *testing.T) {
 
 // TestEpochSummaryGet tests retrieving an epoch summary by epoch number
 func TestEpochSummaryGet(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -272,6 +282,7 @@ func TestEpochSummaryGet(t *testing.T) {
 
 // TestEpochSummaryGetNotFound tests retrieval when summary does not exist
 func TestEpochSummaryGetNotFound(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -282,6 +293,7 @@ func TestEpochSummaryGetNotFound(t *testing.T) {
 
 // TestEpochSummaryGetLatest tests retrieving the most recent epoch summary
 func TestEpochSummaryGetLatest(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -323,6 +335,7 @@ func TestEpochSummaryGetLatest(t *testing.T) {
 
 // TestEpochSummaryGetLatestEmpty tests GetLatestEpochSummary when no summaries exist
 func TestEpochSummaryGetLatestEmpty(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -332,6 +345,7 @@ func TestEpochSummaryGetLatestEmpty(t *testing.T) {
 }
 
 func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -393,6 +407,7 @@ func TestSavePoolStakeSnapshotsUpsertsExistingRows(t *testing.T) {
 }
 
 func TestSaveEpochSummaryUpsertsExistingRow(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -431,6 +446,7 @@ func TestSaveEpochSummaryUpsertsExistingRow(t *testing.T) {
 
 // TestDeletePoolStakeSnapshotsForEpoch tests deleting snapshots for a specific epoch
 func TestDeletePoolStakeSnapshotsForEpoch(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -492,6 +508,7 @@ func TestDeletePoolStakeSnapshotsForEpoch(t *testing.T) {
 
 // TestDeletePoolStakeSnapshotsAfterEpoch tests deleting snapshots after a given epoch
 func TestDeletePoolStakeSnapshotsAfterEpoch(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -556,6 +573,7 @@ func TestDeletePoolStakeSnapshotsAfterEpoch(t *testing.T) {
 
 // TestDeleteEpochSummariesAfterEpoch tests deleting summaries after a given epoch
 func TestDeleteEpochSummariesAfterEpoch(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -629,6 +647,7 @@ func TestDeleteEpochSummariesAfterEpoch(t *testing.T) {
 // TestGetStakeByPoolsAggregatesUtxos tests that GetStakeByPools correctly
 // sums live UTxO amounts per pool by joining accounts with their UTxOs.
 func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -694,6 +713,7 @@ func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
 // TestGetStakeByPoolsExcludesInactiveAccounts tests that inactive accounts
 // are excluded from stake aggregation.
 func TestGetStakeByPoolsExcludesInactiveAccounts(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -739,6 +759,7 @@ func TestGetStakeByPoolsExcludesInactiveAccounts(t *testing.T) {
 // TestGetStakeByPoolsNoDelegators tests that pools with no delegators
 // return zero stake.
 func TestGetStakeByPoolsNoDelegators(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -755,6 +776,7 @@ func TestGetStakeByPoolsNoDelegators(t *testing.T) {
 
 // TestSnapshotTypesMarkSetGo tests all three snapshot types
 func TestSnapshotTypesMarkSetGo(t *testing.T) {
+	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
 	defer store.Close() //nolint:errcheck
 

@@ -31,6 +31,7 @@ import (
 // account delegating to a credential that is not present in the drep
 // table is cleared.
 func TestClearDanglingDRepDelegations_ClearsUnregisteredCredBackedDelegation(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	liveCred := bytes.Repeat([]byte{0x11}, 28)
@@ -92,6 +93,7 @@ func TestClearDanglingDRepDelegations_ClearsUnregisteredCredBackedDelegation(t *
 // Inactive DReps (deregistered) are also not "live" and their delegators
 // must have their delegations cleared.
 func TestClearDanglingDRepDelegations_InactiveDRepCountsAsDangling(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	inactiveCred := bytes.Repeat([]byte{0x33}, 28)
@@ -130,6 +132,7 @@ func TestClearDanglingDRepDelegations_InactiveDRepCountsAsDangling(t *testing.T)
 // Script-credential delegations (DrepType 1) are treated the same way
 // as key credentials.
 func TestClearDanglingDRepDelegations_ScriptCredentialAlsoCleared(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	deadScriptCred := bytes.Repeat([]byte{0x44}, 28)
@@ -155,6 +158,7 @@ func TestClearDanglingDRepDelegations_ScriptCredentialAlsoCleared(t *testing.T) 
 // AlwaysAbstain / AlwaysNoConfidence delegations are pseudo-DReps with no
 // credential and must not be touched by the rule.
 func TestClearDanglingDRepDelegations_PseudoDRepDelegationsPreserved(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stakeKeyA := bytes.Repeat([]byte{0xD1}, 28)
@@ -194,6 +198,7 @@ func TestClearDanglingDRepDelegations_PseudoDRepDelegationsPreserved(t *testing.
 
 // Accounts with no DRep delegation at all are not touched.
 func TestClearDanglingDRepDelegations_NoDelegationUntouched(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stakeKey := bytes.Repeat([]byte{0xE1}, 28)
@@ -216,6 +221,7 @@ func TestClearDanglingDRepDelegations_NoDelegationUntouched(t *testing.T) {
 // Idempotent: once dangling delegations have been cleared, a second call
 // finds nothing to do.
 func TestClearDanglingDRepDelegations_Idempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	dead := bytes.Repeat([]byte{0x55}, 28)

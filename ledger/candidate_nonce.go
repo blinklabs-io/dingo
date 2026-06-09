@@ -305,7 +305,7 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 		}
 		eraId := uint(parsedBlock.Era().Id)
 		era, ok := ls.eraById(eraId)
-		if !ok {
+		if !ok || era == nil {
 			return fmt.Errorf(
 				"recompute candidate nonce at slot %d block %x: unknown era ID %d",
 				block.Slot,

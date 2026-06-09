@@ -6033,12 +6033,49 @@ func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold(t *testing.T) {
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
+	pg.peers = append(pg.peers, &Peer{
+		Address:    "192.168.1.1:3001",
+		Source:     PeerSourceP2PGossip,
+		State:      PeerStateWarm,
+		Connection: &PeerConnection{IsClient: true},
+	})
 
 	shouldExit, reason := pg.shouldExitBootstrap()
 	pg.mu.Unlock()
 
 	assert.True(t, shouldExit, "should exit bootstrap when slot > threshold")
 	assert.Equal(t, "slot threshold reached", reason)
+}
+
+func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NoSuccessor(
+	t *testing.T,
+) {
+	mockProvider := &mockLedgerPeerProvider{
+		currentSlot: 5001, // Above threshold
+	}
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		LedgerPeerProvider: mockProvider,
+		UseLedgerAfterSlot: 5000, // Threshold
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:    "44.0.0.1:3001",
+		Source:     PeerSourceTopologyBootstrapPeer,
+		State:      PeerStateHot,
+		Connection: &PeerConnection{IsClient: true},
+	})
+
+	shouldExit, _ := pg.shouldExitBootstrap()
+	pg.mu.Unlock()
+
+	assert.False(
+		t,
+		shouldExit,
+		"should keep bootstrap when no non-bootstrap peer can carry chainsync",
+	)
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_SlotThreshold_NotReached(
@@ -6228,6 +6265,12 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		Source:  PeerSourceTopologyBootstrapPeer,
 		State:   PeerStateWarm,
 	})
+	pg.peers = append(pg.peers, &Peer{
+		Address:    "192.168.1.1:3001",
+		Source:     PeerSourceP2PGossip,
+		State:      PeerStateWarm,
+		Connection: &PeerConnection{IsClient: true},
+	})
 
 	shouldExit, reason := pg.shouldExitBootstrap()
 	pg.mu.Unlock()
@@ -6238,6 +6281,37 @@ func TestPeerGovernor_ShouldExitBootstrap_SyncProgress(t *testing.T) {
 		"should exit bootstrap when sync progress >= threshold",
 	)
 	assert.Contains(t, reason, "sync progress")
+}
+
+func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NoSuccessor(
+	t *testing.T,
+) {
+	mockSync := &mockSyncProgressProvider{
+		progress: 0.9995,
+	}
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:               slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		SyncProgressProvider: mockSync,
+		SyncProgressForExit:  0.95,
+	})
+
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:    "44.0.0.1:3001",
+		Source:     PeerSourceTopologyBootstrapPeer,
+		State:      PeerStateHot,
+		Connection: &PeerConnection{IsClient: true},
+	})
+
+	shouldExit, _ := pg.shouldExitBootstrap()
+	pg.mu.Unlock()
+
+	assert.False(
+		t,
+		shouldExit,
+		"should keep bootstrap when high absolute-slot progress has no successor",
+	)
 }
 
 func TestPeerGovernor_ShouldExitBootstrap_SyncProgress_NotReached(
@@ -6432,7 +6506,7 @@ func TestPeerGovernor_ExitBootstrapDoesNotReportDemotions(t *testing.T) {
 	)
 }
 
-func TestPeerGovernor_ExitBootstrapPublishesChainSelectionDowngrade(
+func TestPeerGovernor_ExitBootstrapLowersBootstrapPriority(
 	t *testing.T,
 ) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
@@ -6458,18 +6532,6 @@ func TestPeerGovernor_ExitBootstrapPublishesChainSelectionDowngrade(
 
 	assert.Equal(
 		t,
-		PeerEligibilityChangedEvent{
-			ConnectionId: connId,
-			Eligible:     false,
-		},
-		requirePendingEventData[PeerEligibilityChangedEvent](
-			t,
-			events,
-			PeerEligibilityChangedEventType,
-		),
-	)
-	assert.Equal(
-		t,
 		PeerPriorityChangedEvent{
 			ConnectionId: connId,
 			Priority:     0,
@@ -6480,6 +6542,13 @@ func TestPeerGovernor_ExitBootstrapPublishesChainSelectionDowngrade(
 			PeerPriorityChangedEventType,
 		),
 	)
+	for _, evt := range events {
+		require.NotEqual(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			evt.eventType,
+		)
+	}
 }
 
 func TestPeerGovernor_ExitBootstrap_PreventsPromotion(t *testing.T) {
@@ -6581,18 +6650,6 @@ func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
 
 	assert.Equal(
 		t,
-		PeerEligibilityChangedEvent{
-			ConnectionId: connId,
-			Eligible:     true,
-		},
-		requirePendingEventData[PeerEligibilityChangedEvent](
-			t,
-			events,
-			PeerEligibilityChangedEventType,
-		),
-	)
-	assert.Equal(
-		t,
 		PeerPriorityChangedEvent{
 			ConnectionId: connId,
 			Priority:     40,
@@ -6603,6 +6660,13 @@ func TestPeerGovernor_BootstrapRecoveryPublishesChainSelectionUpgrade(
 			PeerPriorityChangedEventType,
 		),
 	)
+	for _, evt := range events {
+		require.NotEqual(
+			t,
+			event.EventType(PeerEligibilityChangedEventType),
+			evt.eventType,
+		)
+	}
 }
 
 func TestPeerGovernor_BootstrapRecovery_NotNeededWithWarmCandidates(
