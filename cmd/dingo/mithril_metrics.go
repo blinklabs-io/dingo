@@ -344,6 +344,7 @@ func (m *mithrilSyncMetrics) recordSnapshot(snapshot *mithril.SnapshotListItem) 
 	)
 }
 
+// recordLedgerImportProgress records per-stage ledger-state import progress.
 func (m *mithrilSyncMetrics) recordLedgerImportProgress(
 	p ledgerstate.ImportProgress,
 ) {
@@ -359,6 +360,7 @@ func (m *mithrilSyncMetrics) recordLedgerImportProgress(
 	m.ledgerImportPercent.WithLabelValues(p.Stage).Set(percent)
 }
 
+// recordLedgerStateSlot records the ledger-state tip slot.
 func (m *mithrilSyncMetrics) recordLedgerStateSlot(slot uint64) {
 	if m == nil {
 		return
@@ -441,6 +443,7 @@ func (m *mithrilSyncMetrics) recordBackfillProgress(
 		Set(float64(stats.SkippedUtxoOffsets))
 }
 
+// recordIndexRebuildDuration records the elapsed time for deferred-index rebuild.
 func (m *mithrilSyncMetrics) recordIndexRebuildDuration(duration time.Duration) {
 	if m == nil {
 		return
