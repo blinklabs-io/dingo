@@ -26,6 +26,29 @@ Hi folks! Here’s what we shipped in v0.52.1.
 * Fixed **reuse a valid Mithril snapshot window during API startup:** API mode startup now reuses an existing post Mithril snapshot window instead of rebuilding that state again, which makes startup smoother after Mithril based recovery. ([#2525](https://github.com/blinklabs-io/dingo/pull/2525))
 * Corrected **keep epoch timing moving through reconnects more reliably:** Epoch timing now clears stale upstream tip state and matches connection identity more safely across reconnects, which helps nodes avoid timing stalls. ([#2523](https://github.com/blinklabs-io/dingo/pull/2523))
 
+### 📋 What You Need to Know
+
+* Clarified **expect more reliable protocol behavior and steadier Leios caching:** Protocol handling now stays aligned with newer upstream support, and Leios endorser block caching should behave more reliably during affected workflows. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Highlighted **use the refreshed Blockfrost explorer example for smoother local API evaluation:** Teams using the example can expect an easier dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
+* Emphasized **review the published v0.52.0 notes alongside this patch:** The release history now includes the prior v0.52.0 entry, which makes recent patch context easier to follow. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
+* Summarized **trust steadier parallel metadata test coverage around this release:** Validation now runs with better metadata test isolation, which supports more dependable routine verification. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
+* Reviewed **expect smoother API startup after Mithril based recovery:** API mode startup now reuses a valid post Mithril snapshot window when it is available, which avoids unnecessary rebuild work. ([#2525](https://github.com/blinklabs-io/dingo/pull/2525))
+* Noted **expect steadier epoch timing across reconnect events:** Nodes should avoid timing stalls more reliably because stale upstream tip state no longer lingers across reconnects. ([#2523](https://github.com/blinklabs-io/dingo/pull/2523))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.52.0 (June 8, 2026)
 
 **Title:** Configurable history expiry, corrected Conway fees, and safer near-tip sync
