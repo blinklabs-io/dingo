@@ -412,24 +412,6 @@ func addressOrderClause(order string) string {
 	return "payment_key ASC"
 }
 
-// GetAccountDelegationHistory returns delegation history rows for a staking key.
-func (d *MetadataStoreMysql) GetAccountDelegationHistory(
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn types.Txn,
-) ([]models.AccountDelegationHistoryRow, error) {
-	return d.GetAccountDelegationHistoryByCredential(
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
-}
-
 func (d *MetadataStoreMysql) GetAccountDelegationHistoryByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -462,15 +444,6 @@ func (d *MetadataStoreMysql) GetAccountDelegationHistoryByCredential(
 	return rows, nil
 }
 
-// CountAccountDelegationHistory returns the total number of
-// delegation history rows for a staking key.
-func (d *MetadataStoreMysql) CountAccountDelegationHistory(
-	stakingKey []byte,
-	txn types.Txn,
-) (int, error) {
-	return d.CountAccountDelegationHistoryByCredential(0, stakingKey, txn)
-}
-
 func (d *MetadataStoreMysql) CountAccountDelegationHistoryByCredential(
 	credentialTag uint8,
 	stakingKey []byte,
@@ -495,24 +468,6 @@ func (d *MetadataStoreMysql) CountAccountDelegationHistoryByCredential(
 		)
 	}
 	return count, nil
-}
-
-// GetAccountRegistrationHistory returns registration history rows for a staking key.
-func (d *MetadataStoreMysql) GetAccountRegistrationHistory(
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn types.Txn,
-) ([]models.AccountRegistrationHistoryRow, error) {
-	return d.GetAccountRegistrationHistoryByCredential(
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
 }
 
 func (d *MetadataStoreMysql) GetAccountRegistrationHistoryByCredential(
@@ -545,15 +500,6 @@ func (d *MetadataStoreMysql) GetAccountRegistrationHistoryByCredential(
 		)
 	}
 	return rows, nil
-}
-
-// CountAccountRegistrationHistory returns the total number of
-// registration history rows for a staking key.
-func (d *MetadataStoreMysql) CountAccountRegistrationHistory(
-	stakingKey []byte,
-	txn types.Txn,
-) (int, error) {
-	return d.CountAccountRegistrationHistoryByCredential(0, stakingKey, txn)
 }
 
 func (d *MetadataStoreMysql) CountAccountRegistrationHistoryByCredential(

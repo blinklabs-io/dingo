@@ -20,24 +20,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
-// GetAccountDelegationHistory returns delegation history rows for a staking key.
-func (d *Database) GetAccountDelegationHistory(
-	stakeKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn *Txn,
-) ([]models.AccountDelegationHistoryRow, error) {
-	return d.GetAccountDelegationHistoryByCredential(
-		0,
-		stakeKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
-}
-
 // GetAccountDelegationHistoryByCredential returns delegation history rows for
 // a stake credential.
 func (d *Database) GetAccountDelegationHistoryByCredential(
@@ -69,15 +51,6 @@ func (d *Database) GetAccountDelegationHistoryByCredential(
 	return rows, nil
 }
 
-// CountAccountDelegationHistory returns the total number of delegation
-// history rows for a staking key.
-func (d *Database) CountAccountDelegationHistory(
-	stakeKey []byte,
-	txn *Txn,
-) (int, error) {
-	return d.CountAccountDelegationHistoryByCredential(0, stakeKey, txn)
-}
-
 // CountAccountDelegationHistoryByCredential returns the total number of
 // delegation history rows for a stake credential.
 func (d *Database) CountAccountDelegationHistoryByCredential(
@@ -101,24 +74,6 @@ func (d *Database) CountAccountDelegationHistoryByCredential(
 		)
 	}
 	return count, nil
-}
-
-// GetAccountRegistrationHistory returns registration history rows for a staking key.
-func (d *Database) GetAccountRegistrationHistory(
-	stakeKey []byte,
-	limit int,
-	offset int,
-	order string,
-	txn *Txn,
-) ([]models.AccountRegistrationHistoryRow, error) {
-	return d.GetAccountRegistrationHistoryByCredential(
-		0,
-		stakeKey,
-		limit,
-		offset,
-		order,
-		txn,
-	)
 }
 
 // GetAccountRegistrationHistoryByCredential returns registration history rows
@@ -150,15 +105,6 @@ func (d *Database) GetAccountRegistrationHistoryByCredential(
 		)
 	}
 	return rows, nil
-}
-
-// CountAccountRegistrationHistory returns the total number of
-// registration history rows for a staking key.
-func (d *Database) CountAccountRegistrationHistory(
-	stakeKey []byte,
-	txn *Txn,
-) (int, error) {
-	return d.CountAccountRegistrationHistoryByCredential(0, stakeKey, txn)
 }
 
 // CountAccountRegistrationHistoryByCredential returns the total number of

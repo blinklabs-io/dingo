@@ -532,7 +532,7 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetAccount(testStakeKey, false, nil)
+		_, err := db.Metadata().GetAccountByCredential(0, testStakeKey, false, nil)
 		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -609,7 +609,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		key := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetAccount(key, false, nil)
+		_, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
 		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}

@@ -24,23 +24,6 @@ import (
 	"gorm.io/gorm"
 )
 
-func QueryDelegationHistory(
-	db *gorm.DB,
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-) ([]models.AccountDelegationHistoryRow, error) {
-	return QueryDelegationHistoryByCredential(
-		db,
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-	)
-}
-
 func QueryDelegationHistoryByCredential(
 	db *gorm.DB,
 	credentialTag uint8,
@@ -76,13 +59,6 @@ func QueryDelegationHistoryByCredential(
 		return nil, fmt.Errorf("get account delegation history: %w", err)
 	}
 	return ret, nil
-}
-
-func CountDelegationHistory(
-	db *gorm.DB,
-	stakingKey []byte,
-) (int, error) {
-	return CountDelegationHistoryByCredential(db, 0, stakingKey)
 }
 
 func CountDelegationHistoryByCredential(
@@ -146,23 +122,6 @@ func delegationHistoryUnionQuery(
 		)
 	}
 	return strings.Join(parts, " UNION ALL "), args
-}
-
-func QueryRegistrationHistory(
-	db *gorm.DB,
-	stakingKey []byte,
-	limit int,
-	offset int,
-	order string,
-) ([]models.AccountRegistrationHistoryRow, error) {
-	return QueryRegistrationHistoryByCredential(
-		db,
-		0,
-		stakingKey,
-		limit,
-		offset,
-		order,
-	)
 }
 
 func QueryRegistrationHistoryByCredential(
@@ -235,13 +194,6 @@ func DelegationTableCertTypes(table string) []uint {
 	default:
 		return []uint{}
 	}
-}
-
-func CountRegistrationHistory(
-	db *gorm.DB,
-	stakingKey []byte,
-) (int, error) {
-	return CountRegistrationHistoryByCredential(db, 0, stakingKey)
 }
 
 func CountRegistrationHistoryByCredential(
