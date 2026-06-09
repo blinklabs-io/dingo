@@ -20,6 +20,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -101,6 +102,36 @@ func TestBlockByHashTxn_EmptyIndexEntryIsCorruption(t *testing.T) {
 	assert.Equal(t, uint64(0), hits)
 	assert.Equal(t, uint64(0), misses,
 		"corruption must not be folded into the miss counter")
+}
+
+// TestRegisterBlockByHashMetrics_PerRegistry verifies that every registry
+// passed to RegisterBlockByHashMetrics exposes the hash-index counters, not
+// just the first one in the process, and that reusing a registry is a no-op.
+func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
+	resetBlockByHashStats()
+	blockByHashIndexMisses.Add(3)
+
+	for i := 0; i < 2; i++ {
+		reg := prometheus.NewRegistry()
+		RegisterBlockByHashMetrics(reg)
+		RegisterBlockByHashMetrics(reg) // reuse must not panic or duplicate
+
+		families, err := reg.Gather()
+		require.NoError(t, err)
+		found := map[string]float64{}
+		for _, mf := range families {
+			for _, m := range mf.GetMetric() {
+				found[mf.GetName()] = m.GetCounter().GetValue()
+			}
+		}
+		assert.Contains(t, found,
+			"dingo_database_block_hash_index_hits_total",
+			"registry %d must expose the hit counter", i)
+		assert.Equal(t, float64(3),
+			found["dingo_database_block_hash_index_misses_total"],
+			"registry %d must read the shared miss total", i)
+	}
+	resetBlockByHashStats()
 }
 
 // BenchmarkBlockByHashTxn_UnknownHash measures the cost of the fork-

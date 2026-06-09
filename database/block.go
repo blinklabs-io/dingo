@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 	"sync/atomic"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -30,7 +29,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -45,31 +43,43 @@ const (
 var (
 	blockByHashIndexHits   atomic.Uint64
 	blockByHashIndexMisses atomic.Uint64
-
-	// Prometheus counters; nil until RegisterBlockByHashMetrics is called.
-	blockByHashHitsCounter   prometheus.Counter
-	blockByHashMissesCounter prometheus.Counter
-	blockByHashMetricsOnce   sync.Once
 )
 
-// RegisterBlockByHashMetrics wires the block-hash index hit/miss counters
-// into the given Prometheus registry. It is idempotent; subsequent calls
-// after the first successful registration are no-ops.
+// RegisterBlockByHashMetrics exposes the block-hash index hit/miss counters
+// on the given Prometheus registry. The underlying counters are process-wide
+// atomics, so every registry observes the same totals; registering the same
+// registry more than once is a no-op.
 func RegisterBlockByHashMetrics(reg prometheus.Registerer) {
 	if reg == nil {
 		return
 	}
-	blockByHashMetricsOnce.Do(func() {
-		factory := promauto.With(reg)
-		blockByHashHitsCounter = factory.NewCounter(prometheus.CounterOpts{
+	collectors := []prometheus.Collector{
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "dingo_database_block_hash_index_hits_total",
 			Help: "Total block-hash index lookups resolved via the O(1) fast path",
-		})
-		blockByHashMissesCounter = factory.NewCounter(prometheus.CounterOpts{
+		}, func() float64 {
+			return float64(blockByHashIndexHits.Load())
+		}),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Name: "dingo_database_block_hash_index_misses_total",
 			Help: "Total block-hash index lookups that were a hard miss (ErrBlockNotFound)",
-		})
-	})
+		}, func() float64 {
+			return float64(blockByHashIndexMisses.Load())
+		}),
+	}
+	for _, c := range collectors {
+		err := reg.Register(c)
+		if err == nil {
+			continue
+		}
+		// A reused registry already exposes these counters. The existing
+		// collectors read the same process-wide atomics, so the duplicate
+		// registration is safe to drop; any other collision is treated the
+		// same way the database size gauges treat registration errors.
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
+			continue
+		}
+	}
 }
 
 // BlockByHashStats returns the cumulative hit/miss counts for the
@@ -371,9 +381,6 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	blockKey, err := blob.Get(blobTxn, hashIndexKey)
 	if err == nil && len(blockKey) > 0 {
 		blockByHashIndexHits.Add(1)
-		if blockByHashHitsCounter != nil {
-			blockByHashHitsCounter.Inc()
-		}
 		return blockByKey(txn, blockKey)
 	}
 	if err == nil && len(blockKey) == 0 {
@@ -388,9 +395,6 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 		return models.Block{}, err
 	}
 	blockByHashIndexMisses.Add(1)
-	if blockByHashMissesCounter != nil {
-		blockByHashMissesCounter.Inc()
-	}
 	// Index miss is a hard miss (#2105). Per-peer chainsync /
 	// intersect-point callers should fall back to PeerHeaderLookupFunc
 	// rather than scan the bp prefix on every miss; legacy blocks
