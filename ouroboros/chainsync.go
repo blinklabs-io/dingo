@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync"
 	"time"
 
@@ -130,14 +131,19 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
-func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	if a.LocalAddr == nil && a.RemoteAddr == nil {
-		return b.LocalAddr == nil && b.RemoteAddr == nil
-	}
-	if b.LocalAddr == nil && b.RemoteAddr == nil {
-		return false
+// sameNetAddr compares addresses by string form, treating nil as equal
+// only to nil. ConnectionId.String() panics when either net.Addr field
+// is nil, so the addresses are compared individually instead.
+func sameNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
 	return a.String() == b.String()
+}
+
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	return sameNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
 func chainsyncResyncRequiresFreshConnection(reason string) bool {

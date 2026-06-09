@@ -967,6 +967,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
 - Plateau detection: if the local tip stops advancing while peers are ahead, the active chainsync connection is recycled
+- Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs; when no active chainsync client remains, ledger clears its cached upstream tip so slot-clock epoch work does not run against a disconnected tip
 
 ## Peer Governance
 

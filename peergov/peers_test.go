@@ -14,7 +14,95 @@
 
 package peergov
 
-import "testing"
+import (
+	"net"
+	"testing"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
+)
+
+func testPeerConnId(localPort, remotePort int) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: localPort,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: remotePort,
+		},
+	}
+}
+
+func TestPeerIndexByConnIdMatchesEquivalentEndpoint(t *testing.T) {
+	storedConnId := testPeerConnId(6000, 3001)
+	closedConnId := testPeerConnId(6000, 3001)
+	if storedConnId == closedConnId {
+		t.Fatal("test requires distinct address pointers")
+	}
+
+	pg := &PeerGovernor{
+		peers: []*Peer{
+			{
+				Source: PeerSourceTopologyLocalRoot,
+				Connection: &PeerConnection{
+					Id:       storedConnId,
+					IsClient: true,
+				},
+			},
+		},
+	}
+
+	if got := pg.peerIndexByConnId(closedConnId); got != 0 {
+		t.Fatalf("peerIndexByConnId() = %d, want 0", got)
+	}
+}
+
+func TestSameConnectionIdHandlesZeroValues(t *testing.T) {
+	zeroConnId := ouroboros.ConnectionId{}
+	realConnId := testPeerConnId(6000, 3001)
+
+	if !sameConnectionId(zeroConnId, zeroConnId) {
+		t.Fatal("sameConnectionId() = false, want true for zero values")
+	}
+	if sameConnectionId(zeroConnId, realConnId) {
+		t.Fatal("sameConnectionId() = true, want false for zero vs real")
+	}
+	if sameConnectionId(realConnId, zeroConnId) {
+		t.Fatal("sameConnectionId() = true, want false for real vs zero")
+	}
+}
+
+func TestSameConnectionIdHandlesPartialNilAddrs(t *testing.T) {
+	remoteAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
+	remoteOnly := ouroboros.ConnectionId{RemoteAddr: remoteAddr}
+	remoteOnlySame := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
+	}
+	remoteOnlyOther := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3002},
+	}
+	localOnly := ouroboros.ConnectionId{LocalAddr: remoteAddr}
+
+	if !sameConnectionId(remoteOnly, remoteOnly) {
+		t.Fatal("sameConnectionId() = false, want true for identical remote-only ids")
+	}
+	if !sameConnectionId(remoteOnly, remoteOnlySame) {
+		t.Fatal("sameConnectionId() = false, want true for equal remote-only ids")
+	}
+	if sameConnectionId(remoteOnly, remoteOnlyOther) {
+		t.Fatal("sameConnectionId() = true, want false for differing remote-only ids")
+	}
+	if sameConnectionId(remoteOnly, localOnly) {
+		t.Fatal("sameConnectionId() = true, want false for remote-only vs local-only")
+	}
+	if sameConnectionId(remoteOnly, ouroboros.ConnectionId{}) {
+		t.Fatal("sameConnectionId() = true, want false for remote-only vs zero")
+	}
+	if sameConnectionId(remoteOnly, testPeerConnId(6000, 3001)) {
+		t.Fatal("sameConnectionId() = true, want false for remote-only vs full id")
+	}
+}
 
 // TestChainSelectionEligible_FiltersRandomInboundSource ensures that inbound
 // connections from peers we don't know about (PeerSourceInboundConn) are not
