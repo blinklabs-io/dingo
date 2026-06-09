@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
@@ -82,6 +83,38 @@ func testDijkstraBlockRaw(
 	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
 }
 
+func testLeiosEndorserBlockRaw(
+	t *testing.T,
+	idx int,
+) (ocommon.Point, cbor.RawMessage) {
+	t.Helper()
+	return testLeiosEndorserBlockRawWithRefs(t, idx, 1)
+}
+
+func testLeiosEndorserBlockRawWithRefs(
+	t *testing.T,
+	idx int,
+	refCount int,
+) (ocommon.Point, cbor.RawMessage) {
+	t.Helper()
+	refs := make([]gleios.LeiosTransactionReference, refCount)
+	for refIdx := range refs {
+		refs[refIdx] = gleios.LeiosTransactionReference{
+			TransactionHash: lcommon.Blake2b256Hash(
+				[]byte{byte(idx), byte(refIdx)},
+			),
+			TransactionSize: uint16(refIdx + 1),
+		}
+	}
+	block := gleios.LeiosEndorserBlock{
+		TransactionReferences: refs,
+	}
+	raw, err := cbor.Encode(&block)
+	require.NoError(t, err)
+	hash := lcommon.Blake2b256Hash(raw)
+	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
+}
+
 func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
 
@@ -105,7 +138,7 @@ func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
-	point, blockRaw := testDijkstraBlockRaw(t, 10)
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -116,9 +149,6 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
 		),
 	)
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
-	require.True(t, ok)
-	data.txCount = 2
 
 	msg, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
@@ -131,7 +161,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
-	point, blockRaw := testDijkstraBlockRaw(t, 10)
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
@@ -175,7 +205,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	t *testing.T,
 ) {
-	point, blockRaw := testDijkstraBlockRaw(t, 10)
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	txRaw := mustCbor(t, "tx0")
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
@@ -198,9 +228,25 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	require.Equal(t, txRaw, cached.txsRaw[0])
 }
 
+func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+	point.Hash[0] ^= 0xff
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	err := o.storeLeiosEndorserBlock(point, blockRaw, nil)
+	require.ErrorContains(
+		t,
+		err,
+		"leios endorser block cache: point hash mismatch",
+	)
+
+	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.False(t, ok)
+}
+
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	point, raw := testDijkstraBlockRaw(t, 1)
+	point, raw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
@@ -220,7 +266,7 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	oldPoint, oldRaw := testDijkstraBlockRaw(t, 1)
+	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil))
 	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Hash)
 	require.True(t, ok)
@@ -229,7 +275,7 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	oldData.insertedAt = time.Now().Add(-leiosEndorserBlockCacheTTL - time.Second)
 	o.leiosMu.Unlock()
 
-	newPoint, newRaw := testDijkstraBlockRaw(t, 2)
+	newPoint, newRaw := testLeiosEndorserBlockRaw(t, 2)
 	require.NoError(t, o.storeLeiosEndorserBlock(newPoint, newRaw, nil))
 
 	_, ok = o.lookupLeiosEndorserBlock(oldPoint.Hash)
@@ -242,7 +288,7 @@ func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	var lastPoint ocommon.Point
 	for idx := 0; idx < leiosEndorserBlockCacheMaxEntries+1; idx++ {
-		point, raw := testDijkstraBlockRaw(t, idx)
+		point, raw := testLeiosEndorserBlockRaw(t, idx)
 		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 		lastPoint = point
 	}

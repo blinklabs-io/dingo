@@ -124,14 +124,18 @@ func TestRequestLimitEnforcement_Pattern(t *testing.T) {
 }
 
 func TestUtxorpc_StartStop(t *testing.T) {
-	// Start server on ephemeral port by setting Port to 0
 	u := NewUtxorpc(UtxorpcConfig{
 		Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus: event.NewEventBus(nil, nil),
 		Host:     "127.0.0.1",
-		Port:     0,
 	})
-	err := u.Start(context.Background())
+	// NewUtxorpc defaults Port 0 to 9090 for runtime config. Force the
+	// test instance back to an ephemeral port to avoid local port conflicts.
+	u.config.Port = 0
+
+	startCtx, cancelStart := context.WithCancel(context.Background())
+	defer cancelStart()
+	err := u.Start(startCtx)
 	require.NoError(t, err, "failed to start utxorpc")
 
 	// Server is already listening after Start returns successfully

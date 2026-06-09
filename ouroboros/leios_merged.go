@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -73,19 +74,19 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
-	blockHash := block.Hash()
-	cacheKeys := []string{leiosBlockKey(blockHash.Bytes())}
-	if len(point.Hash) > 0 {
-		pointKey := leiosBlockKey(point.Hash)
-		if pointKey != cacheKeys[0] {
-			cacheKeys = append(cacheKeys, pointKey)
-		}
+	if len(point.Hash) == 0 {
+		return errors.New("leios endorser block cache: empty point hash")
 	}
+	blockHash := lcommon.Blake2b256Hash(blockRaw)
+	if !slices.Equal(blockHash.Bytes(), point.Hash) {
+		return errors.New("leios endorser block cache: point hash mismatch")
+	}
+	cacheKeys := []string{leiosBlockKey(point.Hash)}
 	data := &leiosEndorserBlockData{
 		point:      point,
 		blockRaw:   slices.Clone(blockRaw),
 		txsRaw:     cloneRawMessages(txsRaw),
-		txCount:    len(txsRaw),
+		txCount:    len(block.TransactionReferences),
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
 	}
