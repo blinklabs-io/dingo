@@ -352,19 +352,21 @@ func (d *MetadataStorePostgres) DeleteAccountRewardsAfterSlot(
 	return db.Transaction(rollback)
 }
 
-// SetAccount saves an account
+// SetAccount saves an account by full stake credential identity.
 func (d *MetadataStorePostgres) SetAccount(
+	credentialTag uint8,
 	stakeKey, pkh, drep []byte,
 	slot uint64,
 	active bool,
 	txn types.Txn,
 ) error {
 	tmpItem := models.Account{
-		StakingKey: stakeKey,
-		AddedSlot:  slot,
-		Pool:       pkh,
-		Drep:       drep,
-		Active:     active,
+		StakingKey:    stakeKey,
+		CredentialTag: credentialTag,
+		AddedSlot:     slot,
+		Pool:          pkh,
+		Drep:          drep,
+		Active:        active,
 	}
 	onConflict := clause.OnConflict{
 		Columns: []clause.Column{

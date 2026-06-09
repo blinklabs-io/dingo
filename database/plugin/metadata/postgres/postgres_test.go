@@ -780,6 +780,7 @@ func TestPostgresSetAccountPreservesCertificateID(t *testing.T) {
 
 	// Now use SetAccount to update the account (this should NOT overwrite CertificateID)
 	err := pgStore.SetAccount(
+		0,
 		stakeKey,
 		[]byte("pool2"), // new pool
 		[]byte("drep2"), // new drep
@@ -793,7 +794,9 @@ func TestPostgresSetAccountPreservesCertificateID(t *testing.T) {
 
 	// Fetch the account and verify CertificateID was preserved
 	var updatedAccount models.Account
-	if result := pgStore.DB().Where("staking_key = ?", stakeKey).First(&updatedAccount); result.Error != nil {
+	if result := pgStore.DB().
+		Where("credential_tag = ? AND staking_key = ?", 0, stakeKey).
+		First(&updatedAccount); result.Error != nil {
 		t.Fatalf("failed to fetch updated account: %v", result.Error)
 	}
 
