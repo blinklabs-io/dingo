@@ -395,11 +395,26 @@ func topologyGroupIDForPeer(peer *Peer, isTopology bool) string {
 func (p *PeerGovernor) peerIndexByConnId(connId ouroboros.ConnectionId) int {
 	for i, peer := range p.peers {
 		if peer != nil && peer.Connection != nil &&
-			peer.Connection.Id == connId {
+			sameConnectionId(peer.Connection.Id, connId) {
 			return i
 		}
 	}
 	return -1
+}
+
+// sameNetAddr compares addresses by string form, treating nil as equal
+// only to nil. ConnectionId.String() panics when either net.Addr field
+// is nil, so the addresses are compared individually instead.
+func sameNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.String() == b.String()
+}
+
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	return sameNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
 func (p *PeerGovernor) SetPeerHotByConnId(connId ouroboros.ConnectionId) {
@@ -523,7 +538,8 @@ func (p *PeerGovernor) appendChainSelectionEventsLocked(
 			peer.Connection,
 		)
 	}
-	if oldState.ok && newState.ok && oldState.connId == newState.connId {
+	if oldState.ok && newState.ok &&
+		sameConnectionId(oldState.connId, newState.connId) {
 		if oldState.eligible != newState.eligible {
 			events = append(events, pendingEvent{
 				PeerEligibilityChangedEventType,
@@ -565,7 +581,7 @@ func (p *PeerGovernor) appendChainSelectionEventsLocked(
 		}
 	}
 	if newState.ok {
-		if oldState.connId != newState.connId ||
+		if !sameConnectionId(oldState.connId, newState.connId) ||
 			oldState.eligible != newState.eligible {
 			events = append(events, pendingEvent{
 				PeerEligibilityChangedEventType,
@@ -576,7 +592,7 @@ func (p *PeerGovernor) appendChainSelectionEventsLocked(
 			})
 		}
 		if newState.priority != 0 &&
-			(oldState.connId != newState.connId ||
+			(!sameConnectionId(oldState.connId, newState.connId) ||
 				oldState.priority != newState.priority) {
 			events = append(events, pendingEvent{
 				PeerPriorityChangedEventType,

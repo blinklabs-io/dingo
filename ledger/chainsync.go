@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"slices"
 	"strings"
 	"time"
@@ -427,6 +428,12 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
 		ls.clearQueuedHeaders()
 	}
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil || sameConnectionId(*activeConnId, e.ConnectionId) {
+			ls.syncUpstreamTipSlot.Store(0)
+		}
+	}
 }
 
 func (ls *LedgerState) handleEventChainsyncAwaitReply(evt event.Event) {
@@ -777,20 +784,26 @@ func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
 	return database.BlockByHash(ls.db, hash)
 }
 
+func netAddrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
+// connIdKey builds the key from nil-safe per-address strings because
+// ConnectionId.String() panics when either net.Addr field is nil.
 func connIdKey(connId ouroboros.ConnectionId) string {
 	if connId.LocalAddr == nil && connId.RemoteAddr == nil {
 		return ""
 	}
-	return connId.String()
+	return netAddrString(connId.LocalAddr) +
+		"<->" +
+		netAddrString(connId.RemoteAddr)
 }
 
 func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	keyA := connIdKey(a)
-	keyB := connIdKey(b)
-	if keyA == "" || keyB == "" {
-		return keyA == keyB
-	}
-	return keyA == keyB
+	return connIdKey(a) == connIdKey(b)
 }
 
 func desiredBlockfetchBatchHeaders(

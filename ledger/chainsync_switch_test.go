@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -34,6 +35,19 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func testChainsyncConnId(localPort, remotePort int) ouroboros.ConnectionId {
+	return ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: localPort,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.IPv4(127, 0, 0, 1),
+			Port: remotePort,
+		},
+	}
+}
 
 type mockHeader struct {
 	hash        lcommon.Blake2b256
@@ -129,6 +143,57 @@ func TestDetectConnectionSwitchHandsOffQueuedHeadersToNewActiveConnection(
 	assert.Equal(t, 1, switchCalls)
 
 	ls.blockfetchRequestRangeCleanup()
+}
+
+func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
+	t *testing.T,
+) {
+	closedConnId := testChainsyncConnId(6000, 3001)
+	equivalentClosedConnId := testChainsyncConnId(6000, 3001)
+	otherConnId := testChainsyncConnId(6000, 3002)
+
+	tests := []struct {
+		name       string
+		activeConn *ouroboros.ConnectionId
+		wantTip    uint64
+	}{
+		{
+			name:       "active connection closed",
+			activeConn: &equivalentClosedConnId,
+			wantTip:    0,
+		},
+		{
+			name:       "no active connection",
+			activeConn: nil,
+			wantTip:    0,
+		},
+		{
+			name:       "different active connection remains",
+			activeConn: &otherConnId,
+			wantTip:    114220800,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+						return tc.activeConn
+					},
+				},
+			}
+			ls.syncUpstreamTipSlot.Store(114220800)
+
+			ls.handleConnectionClosedEvent(event.NewEvent(
+				connmanager.ConnectionClosedEventType,
+				connmanager.ConnectionClosedEvent{
+					ConnectionId: closedConnId,
+				},
+			))
+
+			assert.Equal(t, tc.wantTip, ls.syncUpstreamTipSlot.Load())
+		})
+	}
 }
 
 func TestHandoffPipelineOnSwitchDropsStaleQueuedHeadersForNewBufferedPeer(
