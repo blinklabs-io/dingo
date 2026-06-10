@@ -12,31 +12,31 @@ Hi folks! Here’s what we shipped in v0.53.0.
 
 ### ✨ What's New
 
-* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce committee voting and quorum handling for experimental voting flows, and operators can turn it on with the required voting credentials and public key settings.
-* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate.
+* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce committee voting and quorum handling for experimental voting flows, and operators can turn it on with the required voting credentials and public key settings. ([#2533](https://github.com/blinklabs-io/dingo/pull/2533))
+* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate. ([#2537](https://github.com/blinklabs-io/dingo/pull/2537))
 
 ### 💪 Improvements
 
-* Improved **speed fresh Mithril backfills by skipping consumed input recovery:** Fresh Mithril backfills now avoid recovery work that is not needed on that path, which helps historical catch up finish sooner.
-* Refined **focus published artifacts on the main release images:** Release automation now publishes only the main release images in this release train, which keeps published outputs aligned with the supported artifacts.
-* Updated **keep untagged publish runs moving when build attestations are unavailable:** Untagged publish runs now continue when attestation steps are unavailable, while tagged releases still require successful attestations.
-* Enhanced **strengthen Antithesis startup and validation checks:** Antithesis runs now load network bootstrap data more reliably and validate newer era data more safely, which makes test environments steadier.
-* Corrected **report expired transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results.
-* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review.
+* Improved **speed fresh Mithril backfills by skipping consumed input recovery:** Fresh Mithril backfills now avoid recovery work that is not needed on that path, which helps historical catch up finish sooner. ([#2535](https://github.com/blinklabs-io/dingo/pull/2535))
+* Refined **stop publishing ancillary txpump, configurator, and analysis images in this release train:** Release automation now publishes only the main release images in this release train, which keeps published outputs aligned with the supported artifacts. ([#2530](https://github.com/blinklabs-io/dingo/pull/2530))
+* Updated **keep untagged publish runs moving when build attestations are unavailable:** Untagged publish runs now continue when attestation steps are unavailable, while tagged releases still require successful attestations. ([#2531](https://github.com/blinklabs-io/dingo/pull/2531))
+* Enhanced **strengthen Antithesis startup and validation checks:** Antithesis runs now load network bootstrap data more reliably and validate newer era data more safely, which makes test environments steadier. ([#2529](https://github.com/blinklabs-io/dingo/pull/2529))
+* Corrected **report expired transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results. ([#2528](https://github.com/blinklabs-io/dingo/pull/2528))
+* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review. ([#2534](https://github.com/blinklabs-io/dingo/pull/2534))
 
 ### 🔧 Fixes
 
-* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry script details through metadata, and align the network eras response with the supported schema.
-* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now connects endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned.
-* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril data and unknown era data more safely, which prevents avoidable failures during analysis.
-* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger empty value guards, which keeps experimental voting behavior more reliable.
+* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry script details through metadata, and align the network eras response with the supported schema. ([#2532](https://github.com/blinklabs-io/dingo/pull/2532))
+* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now connects endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned. ([#2536](https://github.com/blinklabs-io/dingo/pull/2536))
+* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril data and unknown era data more safely, which prevents avoidable failures during analysis. ([#2538](https://github.com/blinklabs-io/dingo/pull/2538))
+* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger empty value guards, which keeps experimental voting behavior more reliable. ([#2539](https://github.com/blinklabs-io/dingo/pull/2539))
 
 ### 📋 What You Need to Know
 
-* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the required voting key and voter public key configuration.
-* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs.
-* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API directly, and fresh Mithril backfills should finish faster because this path skips consumed input recovery.
-* Summarized **expect a narrower release artifact set while tagged releases stay strict:** Release automation no longer publishes new ancillary images in this release train, while tagged releases still require successful attestations.
+* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the required voting key and voter public key configuration. ([#2533](https://github.com/blinklabs-io/dingo/pull/2533), [#2539](https://github.com/blinklabs-io/dingo/pull/2539))
+* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs. ([#2532](https://github.com/blinklabs-io/dingo/pull/2532))
+* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API directly, and fresh Mithril backfills should finish faster because this path skips consumed input recovery. ([#2537](https://github.com/blinklabs-io/dingo/pull/2537), [#2535](https://github.com/blinklabs-io/dingo/pull/2535))
+* Summarized **expect ancillary txpump, configurator, and analysis images to stay unpublished while tagged releases stay strict:** Release automation no longer publishes ancillary txpump, configurator, and analysis images in this release train, while tagged releases still require successful attestations. ([#2530](https://github.com/blinklabs-io/dingo/pull/2530), [#2531](https://github.com/blinklabs-io/dingo/pull/2531))
 
 ### Recommended Network Compatibility ⚠️
 
