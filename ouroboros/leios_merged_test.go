@@ -220,6 +220,7 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 
 	got, err := o.fetchCachedLeiosEndorserBlockTxs(point)
 	require.NoError(t, err)
+	require.Len(t, got, 1)
 	require.Equal(t, []cbor.RawMessage{txRaw}, got)
 
 	got[0][0] ^= 0xff
@@ -287,7 +288,7 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	var lastPoint ocommon.Point
-	for idx := 0; idx < leiosEndorserBlockCacheMaxEntries+1; idx++ {
+	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
 		point, raw := testLeiosEndorserBlockRaw(t, idx)
 		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 		lastPoint = point

@@ -102,7 +102,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
 	if o.LeiosVotes != nil {
-		o.LeiosVotes.HandleEndorserBlock(block.SlotNumber(), blockHash)
+		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
 	}
 	return nil
 }

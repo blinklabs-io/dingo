@@ -701,7 +701,9 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	key := fixture.keys[3]
+	require.NotNil(t, key)
+	fixture.mgr.EnableVoting(poolKeyHash, key)
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
@@ -718,7 +720,7 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	require.NoError(
 		t,
 		VerifyVoteSignature(
-			fixture.keys[3].PublicKey(),
+			key.PublicKey(),
 			VoteMessageBytes(577, ebHash),
 			vote.VoteSignature,
 		),
@@ -1033,7 +1035,9 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	key := fixture.keys[3]
+	require.NotNil(t, key)
+	fixture.mgr.EnableVoting(poolKeyHash, key)
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
 	assert.Empty(
 		t,
@@ -1486,7 +1490,9 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	key := fixture.keys[3]
+	require.NotNil(t, key)
+	fixture.mgr.EnableVoting(poolKeyHash, key)
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
 	assert.Len(
 		t,
@@ -1539,7 +1545,9 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
-	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	key := fixture.keys[3]
+	require.NotNil(t, key)
+	fixture.mgr.EnableVoting(poolKeyHash, key)
 	oldSlot := uint64(1000 - slotWindowPastTolerance - 100)
 	fixture.mgr.HandleEndorserBlock(oldSlot, ebHash)
 	assert.Empty(
