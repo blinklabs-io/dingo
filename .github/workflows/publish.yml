@@ -188,12 +188,14 @@ jobs:
             VERSION=${{ github.ref_type == 'tag' && github.ref_name || '' }}
             COMMIT_HASH=${{ github.sha }}
       - name: Attest Docker Hub image
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Attest GHCR image
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -232,6 +234,7 @@ jobs:
             COMMIT_HASH=${{ github.sha }}
       - name: Attest antithesis Docker Hub image
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: docker.io/blinklabs/dingo
@@ -239,6 +242,7 @@ jobs:
           push-to-registry: true
       - name: Attest antithesis GHCR image
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
@@ -273,6 +277,7 @@ jobs:
           labels: ${{ steps.txpump-meta.outputs.labels }}
       - name: Attest txpump GHCR image
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
@@ -307,6 +312,7 @@ jobs:
           labels: ${{ steps.configurator-meta.outputs.labels }}
       - name: Attest configurator GHCR image
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-configurator
@@ -341,6 +347,7 @@ jobs:
           labels: ${{ steps.analysis-meta.outputs.labels }}
       - name: Attest analysis GHCR image
         if: matrix.arch == 'amd64'
+        continue-on-error: ${{ github.ref_type != 'tag' }}
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
