@@ -219,3 +219,27 @@ echo "copying testnet.yaml to /testnet-config/testnet.yaml"
 if [ -d /testnet-config ]; then
     cp /testnet.yaml /testnet-config/testnet.yaml
 fi
+
+# Test-only credentials: make config + genesis files world-readable so any
+# consuming container's user can read them.
+find /configs -type d -exec chmod 0755 {} +
+find /configs -type f -exec chmod 0644 {} +
+
+# cardano-node refuses to start when vrf.skey has "other" read permissions,
+# so the cardano-node pools must be 0700/0600. Pool 1 is consumed by the
+# dingo container, which runs as a non-root user, so those test-only keys must
+# stay world-readable.
+for pool_dir in /configs/[0-9]*; do
+    if [ "$(basename "$pool_dir")" = "1" ]; then
+        continue
+    fi
+    keys_dir="$pool_dir/keys"
+    if [ -d "$keys_dir" ]; then
+        chmod 0700 "$keys_dir"
+        find "$keys_dir" -type f -exec chmod 0600 {} +
+    fi
+done
+if [ -d /configs/1/keys ]; then
+    chmod 0755 /configs/1/keys
+    find /configs/1/keys -type f -exec chmod 0644 {} +
+fi

@@ -20,8 +20,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/big"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/plutigo/data"
 )
 
 // alwaysSucceedsScriptHex is a minimal Plutus V2 always-succeeds script
@@ -87,7 +90,7 @@ type txBodyWithScriptOutput struct {
 
 // conwayTxWithScriptOutput is a Conway transaction targeting a script address.
 type conwayTxWithScriptOutput struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBodyWithScriptOutput
 	Witness map[any]any
 	IsValid bool
@@ -147,7 +150,10 @@ func BuildPlutusLockTx(
 				u.TxHash, len(hashBytes),
 			)
 		}
-		bodyInputs = append(bodyInputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		bodyInputs = append(
+			bodyInputs,
+			txBodyInput{Hash: hashBytes, Idx: u.Index},
+		)
 	}
 
 	var total uint64
@@ -158,7 +164,10 @@ func BuildPlutusLockTx(
 	if total < spent {
 		return nil, fmt.Errorf(
 			"plutus_lock: total input %d cannot cover amount (%d) + fee (%d) = %d",
-			total, amount, fee, spent,
+			total,
+			amount,
+			fee,
+			spent,
 		)
 	}
 	change := total - spent
@@ -251,27 +260,11 @@ type witnessWithScript struct {
 
 // conwayTxWithScript is the top-level Conway transaction with script witness.
 type conwayTxWithScript struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBodyUnlock
 	Witness witnessWithScript
 	IsValid bool
 	AuxData any
-}
-
-// redeemerKey identifies which input the redeemer applies to.
-// [tag, index] where tag 0 = spend.
-type redeemerKey struct {
-	_     cbor.StructAsArray
-	Tag   uint32
-	Index uint32
-}
-
-// redeemerValue is the redeemer data and execution units.
-// [data, [memory, steps]].
-type redeemerValue struct {
-	_       cbor.StructAsArray
-	Data    any
-	ExUnits []uint64
 }
 
 // BuildPlutusUnlockTx constructs a minimal CBOR-encoded Conway transaction
@@ -311,7 +304,10 @@ func BuildPlutusUnlockTx(
 				u.TxHash, len(hashBytes),
 			)
 		}
-		bodyInputs = append(bodyInputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		bodyInputs = append(
+			bodyInputs,
+			txBodyInput{Hash: hashBytes, Idx: u.Index},
+		)
 	}
 
 	var total uint64
@@ -333,7 +329,10 @@ func BuildPlutusUnlockTx(
 
 	var outputs []txBodyOutput
 	if change > 0 && len(changeAddr) > 0 {
-		outputs = append(outputs, txBodyOutput{Address: changeAddr, Amount: change})
+		outputs = append(
+			outputs,
+			txBodyOutput{Address: changeAddr, Amount: change},
+		)
 	}
 
 	body := txBodyUnlock{
@@ -342,11 +341,16 @@ func BuildPlutusUnlockTx(
 		Fee:     fee,
 	}
 
-	// Redeemer: spend tag (0), input index (0), data = unit (null), ExUnits.
+	// Redeemer: spend tag (0), input index (0), data = integer 0, ExUnits.
 	// Key 5 of the witness set must be a CBOR map of
 	// redeemer_key => redeemer_value.
-	rKey := redeemerKey{Tag: 0, Index: 0}
-	rVal := redeemerValue{Data: nil, ExUnits: []uint64{200_000, 700_000_000}}
+	rKey := common.RedeemerKey{Tag: common.RedeemerTagSpend, Index: 0}
+	rVal := common.RedeemerValue{
+		Data: common.Datum{
+			Data: data.NewInteger(big.NewInt(0)),
+		},
+		ExUnits: common.ExUnits{Memory: 200_000, Steps: 700_000_000},
+	}
 
 	witness := witnessWithScript{
 		PlutusV2Scripts: [][]byte{scriptBytes},

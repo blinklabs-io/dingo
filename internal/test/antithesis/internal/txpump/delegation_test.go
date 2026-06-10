@@ -49,6 +49,7 @@ func TestBuildDelegationTx_Success(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildDelegationTx_NoInputs(t *testing.T) {

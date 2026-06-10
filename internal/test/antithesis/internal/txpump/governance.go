@@ -26,7 +26,7 @@ import (
 // Conway CDDL: [16, drep_credential, coin, anchor / null]
 // Type 16 = reg_drep_cert.
 type drepRegCert struct {
-	_          cbor.StructAsArray
+	cbor.StructAsArray
 	CertType   uint32
 	Credential stakeCredential
 	Deposit    uint64
@@ -48,7 +48,7 @@ type txBodyWithDRepCerts struct {
 
 // conwayTxWithDRepCerts is the top-level Conway tx carrying DRep certs.
 type conwayTxWithDRepCerts struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBodyWithDRepCerts
 	Witness map[any]any
 	IsValid bool
@@ -83,7 +83,10 @@ func BuildDRepRegistrationTx(
 				"drep_reg: invalid tx hash %q: %w", u.TxHash, err,
 			)
 		}
-		bodyInputs = append(bodyInputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		bodyInputs = append(
+			bodyInputs,
+			txBodyInput{Hash: hashBytes, Idx: u.Index},
+		)
 	}
 
 	var total uint64
@@ -94,14 +97,20 @@ func BuildDRepRegistrationTx(
 	if total < spent {
 		return nil, fmt.Errorf(
 			"drep_reg: total input %d cannot cover fee (%d) + deposit (%d) = %d",
-			total, fee, deposit, spent,
+			total,
+			fee,
+			deposit,
+			spent,
 		)
 	}
 	change := total - spent
 
 	var outputs []txBodyOutput
 	if change > 0 && len(changeAddr) > 0 {
-		outputs = append(outputs, txBodyOutput{Address: changeAddr, Amount: change})
+		outputs = append(
+			outputs,
+			txBodyOutput{Address: changeAddr, Amount: change},
+		)
 	}
 
 	cert := drepRegCert{
@@ -138,7 +147,7 @@ func BuildDRepRegistrationTx(
 // govActionID identifies a governance action by the transaction that
 // introduced it and the index within that transaction.
 type govActionID struct {
-	_     cbor.StructAsArray
+	cbor.StructAsArray
 	TxID  []byte
 	Index uint32
 }
@@ -146,7 +155,7 @@ type govActionID struct {
 // voter identifies the entity casting a vote.
 // voterType 2 = DRep key hash.
 type voter struct {
-	_         cbor.StructAsArray
+	cbor.StructAsArray
 	VoterType uint32
 	KeyHash   []byte
 }
@@ -154,7 +163,7 @@ type voter struct {
 // votingProcedure is a single vote entry: [vote, anchor / null].
 // vote: 0 = No, 1 = Yes, 2 = Abstain.
 type votingProcedure struct {
-	_      cbor.StructAsArray
+	cbor.StructAsArray
 	Vote   uint32
 	Anchor any // null for test transactions
 }
@@ -178,7 +187,7 @@ type txBodyWithVotes struct {
 
 // conwayTxWithVotes is the top-level Conway tx carrying voting procedures.
 type conwayTxWithVotes struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBodyWithVotes
 	Witness map[any]any
 	IsValid bool
@@ -207,7 +216,9 @@ func BuildVoteTx(
 		return nil, errors.New("vote: voter key hash must not be empty")
 	}
 	if len(govActionTxHash) == 0 {
-		return nil, errors.New("vote: governance action tx hash must not be empty")
+		return nil, errors.New(
+			"vote: governance action tx hash must not be empty",
+		)
 	}
 
 	bodyInputs := make([]txBodyInput, 0, len(inputs))
@@ -218,7 +229,10 @@ func BuildVoteTx(
 				"vote: invalid tx hash %q: %w", u.TxHash, err,
 			)
 		}
-		bodyInputs = append(bodyInputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		bodyInputs = append(
+			bodyInputs,
+			txBodyInput{Hash: hashBytes, Idx: u.Index},
+		)
 	}
 
 	var total uint64
@@ -232,7 +246,10 @@ func BuildVoteTx(
 
 	var outputs []txBodyOutput
 	if change > 0 && len(changeAddr) > 0 {
-		outputs = append(outputs, txBodyOutput{Address: changeAddr, Amount: change})
+		outputs = append(
+			outputs,
+			txBodyOutput{Address: changeAddr, Amount: change},
+		)
 	}
 
 	// Encode the voting_procedures map:
@@ -254,7 +271,10 @@ func BuildVoteTx(
 	}
 	procedureBytes, err := cbor.Encode(procedure)
 	if err != nil {
-		return nil, fmt.Errorf("vote: CBOR encoding voting procedure failed: %w", err)
+		return nil, fmt.Errorf(
+			"vote: CBOR encoding voting procedure failed: %w",
+			err,
+		)
 	}
 	// 0xa1 = CBOR map with 1 pair.
 	innerBytes := append([]byte{0xa1}, actionIDBytes...)
