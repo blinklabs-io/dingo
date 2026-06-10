@@ -107,6 +107,8 @@ services:
     networks:
       antithesis:
         ipv4_address: 172.21.0.10
+        aliases:
+          - p1.example
     healthcheck:
       test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
       interval: 5s
@@ -131,6 +133,8 @@ services:
     networks:
       antithesis:
         ipv4_address: 172.21.0.11
+        aliases:
+          - p2.example
 
   p3:
     <<: *cardano-node-base
@@ -149,6 +153,8 @@ services:
     networks:
       antithesis:
         ipv4_address: 172.21.0.12
+        aliases:
+          - p3.example
 
   p4:
     <<: *cardano-node-base
@@ -167,6 +173,8 @@ services:
     networks:
       antithesis:
         ipv4_address: 172.21.0.13
+        aliases:
+          - p4.example
 
   p5:
     <<: *cardano-node-base
@@ -185,6 +193,8 @@ services:
     networks:
       antithesis:
         ipv4_address: 172.21.0.14
+        aliases:
+          - p5.example
 
   txpump:
     build:
@@ -192,6 +202,9 @@ services:
       dockerfile: internal/test/antithesis/Dockerfile.txpump
     container_name: antithesis-txpump
     init: true
+    # Named Docker volumes are root-owned on first mount; txpump writes
+    # /logs/txpump.log for the analysis container.
+    user: "0:0"
     depends_on:
       p1:
         condition: service_healthy
@@ -204,9 +217,10 @@ services:
       TXPUMP_COOLDOWN_MAX: "15"
       TXPUMP_TYPES: "payment"
       TXPUMP_GENESIS_FILE: "/testnet/testnet.yaml"
-      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+      TXPUMP_GENESIS_UTXO_FILE: "/configs/configs/shelley-genesis.json"
     volumes:
       - ./testnet.yaml:/testnet/testnet.yaml:ro
+      - p1-configs:/configs:ro
       - p1-ipc:/ipc:ro
       - utxo-keys:/utxo-keys:ro
       - logs:/logs

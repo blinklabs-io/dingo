@@ -47,6 +47,7 @@ func TestBuildPlutusLockTx_Success(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPlutusLockTx_NoInputs(t *testing.T) {
@@ -99,7 +100,13 @@ func TestBuildPlutusLockTx_InvalidTxHash(t *testing.T) {
 }
 
 func TestBuildPlutusLockTx_ShortTxHash(t *testing.T) {
-	inputs := []UTxO{{TxHash: "00112233445566778899aabbccddeeff", Index: 0, Amount: 10_000_000}}
+	inputs := []UTxO{
+		{
+			TxHash: "00112233445566778899aabbccddeeff",
+			Index:  0,
+			Amount: 10_000_000,
+		},
+	}
 	_, err := BuildPlutusLockTx(
 		inputs,
 		sampleScriptHash,
@@ -167,6 +174,7 @@ func TestBuildPlutusUnlockTx_Success(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPlutusUnlockTx_NilScriptUsesDefault(t *testing.T) {
@@ -180,6 +188,7 @@ func TestBuildPlutusUnlockTx_NilScriptUsesDefault(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPlutusUnlockTx_NoInputs(t *testing.T) {
@@ -206,7 +215,13 @@ func TestBuildPlutusUnlockTx_InvalidTxHash(t *testing.T) {
 }
 
 func TestBuildPlutusUnlockTx_ShortTxHash(t *testing.T) {
-	inputs := []UTxO{{TxHash: "00112233445566778899aabbccddeeff", Index: 0, Amount: 10_000_000}}
+	inputs := []UTxO{
+		{
+			TxHash: "00112233445566778899aabbccddeeff",
+			Index:  0,
+			Amount: 10_000_000,
+		},
+	}
 	_, err := BuildPlutusUnlockTx(
 		inputs,
 		alwaysSucceedsScript(),
