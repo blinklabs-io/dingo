@@ -70,6 +70,7 @@ type Ouroboros struct {
 	Mempool                  *mempool.Mempool
 	LedgerState              *ledger.LedgerState
 	LeiosVotes               LeiosVoteHandler
+	LeiosPipeline            LeiosPipelineHandler
 	config                   OuroborosConfig
 	blockfetchMetrics        *blockfetchMetrics
 	protocolMetrics          *protocolMetrics

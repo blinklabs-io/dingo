@@ -61,6 +61,7 @@ type Node struct {
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
 	leiosVoteManager                 *leios.VoteManager
+	leiosPipelineManager             *leios.PipelineManager
 	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
 	historyExpiry                    *historyexpiry.Pruner
@@ -405,6 +406,17 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 		started = append(started, func() { _ = n.leiosVoteManager.Stop() })
+		// Initialize the Leios pipeline manager after the vote manager so
+		// it stops first (LIFO cleanup): it consumes the vote manager's
+		// EbQuorumEvent.
+		//nolint:contextcheck // n.ctx is the node's lifecycle context
+		if err := n.initLeiosPipelineManager(n.ctx); err != nil {
+			return fmt.Errorf(
+				"failed to initialize leios pipeline manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.leiosPipelineManager.Stop() })
 	} else if n.config.leiosVoteSigningKeyFile != "" {
 		n.config.logger.Warn(
 			"leios vote signing key configured without leios mode; voting disabled",
