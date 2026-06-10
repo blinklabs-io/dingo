@@ -170,7 +170,8 @@ func searchUtxoModelToAnyData(utxo *models.UtxoWithOrdering) (*query.AnyUtxoData
 	return &aud, nil
 }
 
-// dedupeSearchAddresses drops duplicate ledger addresses (same payment + stake keys).
+// dedupeSearchAddresses drops duplicate ledger addresses with the same payment
+// credential and full stake credential identity.
 func dedupeSearchAddresses(addrs []ledger.Address) []ledger.Address {
 	if len(addrs) < 2 {
 		return addrs
@@ -180,7 +181,13 @@ func dedupeSearchAddresses(addrs []ledger.Address) []ledger.Address {
 	for _, a := range addrs {
 		pkb := a.PaymentKeyHash().Bytes()
 		skb := a.StakeKeyHash().Bytes()
-		key := string(pkb) + "\x00" + string(skb)
+		stakeTag := byte(0)
+		if _, ok := a.StakingPayload().(lcommon.AddressPayloadScriptHash); ok {
+			stakeTag = 1
+		}
+		key := string(pkb) + "\x00" +
+			string([]byte{stakeTag}) + "\x00" +
+			string(skb)
 		if _, ok := seen[key]; ok {
 			continue
 		}
