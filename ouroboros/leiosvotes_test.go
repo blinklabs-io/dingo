@@ -206,6 +206,30 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 	assert.Equal(t, point.Hash, handler.ebs[0].ebHash.Bytes())
 }
 
+// A peer must not be able to make us vote for the same EB hash under a
+// different slot by replaying the same EB bytes with a different point.
+func TestStoreLeiosEndorserBlockRejectsSlotMismatchBeforeVote(
+	t *testing.T,
+) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	handler := &fakeLeiosVoteHandler{}
+	o.LeiosVotes = handler
+
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
+
+	mismatchedPoint := point
+	mismatchedPoint.Slot++
+	err := o.storeLeiosEndorserBlock(mismatchedPoint, blockRaw, nil)
+	require.ErrorContains(
+		t,
+		err,
+		"leios endorser block cache: point slot mismatch",
+	)
+	require.Len(t, handler.ebs, 1)
+	assert.Equal(t, uint64(10), handler.ebs[0].slot)
+}
+
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
 	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
