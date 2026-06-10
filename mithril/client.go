@@ -406,7 +406,9 @@ func uint32ToBigEndianBytes(v uint32) []byte {
 
 func int64ToBigEndianBytes(v int64) []byte {
 	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(v)) //nolint:gosec // intentional bit-pattern reinterpretation for serialization
+	//nolint:gosec // Intentional bit-pattern reinterpretation for serialization.
+	vU64 := uint64(v)
+	binary.BigEndian.PutUint64(b, vU64)
 	return b
 }
 

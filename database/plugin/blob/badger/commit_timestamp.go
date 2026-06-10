@@ -43,7 +43,8 @@ func (b *BlobStoreBadger) GetCommitTimestamp() (int64, error) {
 		return 0, fmt.Errorf("failed to read commit timestamp: %w", err)
 	}
 	if len(val) == 8 {
-		return int64(binary.BigEndian.Uint64(val)), nil //nolint:gosec // Unix timestamps are always positive and within int64 range
+		//nolint:gosec // Unix timestamps are always positive and within int64 range.
+		return int64(binary.BigEndian.Uint64(val)), nil
 	}
 	return new(big.Int).SetBytes(val).Int64(), nil
 }
@@ -57,7 +58,9 @@ func (b *BlobStoreBadger) SetCommitTimestamp(
 	}
 	// Update badger
 	var tmpTimestamp [8]byte
-	binary.BigEndian.PutUint64(tmpTimestamp[:], uint64(timestamp)) //nolint:gosec // Unix timestamps are always positive
+	//nolint:gosec // Unix timestamps are always positive.
+	timestampU64 := uint64(timestamp)
+	binary.BigEndian.PutUint64(tmpTimestamp[:], timestampU64)
 	if err := b.Set(txn, []byte(commitTimestampBlobKey), tmpTimestamp[:]); err != nil {
 		return fmt.Errorf("failed to write commit timestamp: %w", err)
 	}

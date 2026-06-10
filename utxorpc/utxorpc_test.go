@@ -133,8 +133,7 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	// test instance back to an ephemeral port to avoid local port conflicts.
 	u.config.Port = 0
 
-	startCtx, cancelStart := context.WithCancel(context.Background())
-	defer cancelStart()
+	startCtx := t.Context()
 	err := u.Start(startCtx)
 	require.NoError(t, err, "failed to start utxorpc")
 
