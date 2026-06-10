@@ -166,6 +166,42 @@ func TestMayProduceEndorserBlock(t *testing.T) {
 	assert.Contains(t, d.Reason, "already observed")
 }
 
+func TestObserveEndorserBlockRejectsFutureSlots(t *testing.T) {
+	f := newPipelineFixture(t, DefaultPipelineTiming())
+	f.slot.slot = 1000
+
+	// A far-future slot must be ignored so a peer cannot pre-seed it.
+	future := uint64(1000 + observeFutureToleranceSlots + 5)
+	f.mgr.ObserveEndorserBlock(future, ebHashFor("future-eb"))
+	f.mgr.mu.Lock()
+	_, exists := f.mgr.instances[future]
+	f.mgr.mu.Unlock()
+	assert.False(t, exists, "far-future observations must be ignored")
+
+	// The legitimate producer can still produce for that slot when it opens.
+	f.slot.slot = future
+	d, err := f.mgr.MayProduceEndorserBlock(future)
+	require.NoError(t, err)
+	assert.True(
+		t,
+		d.Allowed,
+		"a pre-seeded future slot must not block production",
+	)
+
+	// A near-future observation within tolerance (clock skew) is accepted.
+	f.slot.slot = 2000
+	near := uint64(2000 + 1)
+	f.mgr.ObserveEndorserBlock(near, ebHashFor("near-eb"))
+	f.mgr.mu.Lock()
+	_, nearExists := f.mgr.instances[near]
+	f.mgr.mu.Unlock()
+	assert.True(
+		t,
+		nearExists,
+		"near-future observations within tolerance are accepted",
+	)
+}
+
 func TestObserveAndCertifySingleEb(t *testing.T) {
 	f := newPipelineFixture(t, DefaultPipelineTiming())
 	const slot = 300

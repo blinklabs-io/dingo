@@ -29,6 +29,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// observeFutureToleranceSlots bounds how far ahead of the current (or tip)
+// slot an endorser block observation is admitted into the pipeline. Honest
+// EBs are produced in the present and diffused, so the only legitimate
+// future skew is clock drift and diffusion delay; beyond this an
+// observation is a peer attempting to pre-seed future slots, which would
+// make MayProduceEndorserBlock deny the legitimate local producer when
+// those slots open. Matches the vote manager's slotWindowFutureTolerance so
+// the two Leios components admit endorser blocks over the same future
+// window. Far-past slots are bounded separately by InstanceTTLSlots.
+const observeFutureToleranceSlots = 60
+
 // Stage identifies where an endorser block sits in the CIP-0164 Linear
 // Leios pipeline. The pipeline is three logical stages -- produce/diffuse,
 // vote/certify, and ranking-block inclusion -- expanded here into the
@@ -464,9 +475,25 @@ func (m *PipelineManager) ObserveEndorserBlock(
 	slot uint64,
 	ebHash lcommon.Blake2b256,
 ) {
+	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneExpiredLocked(m.slotProvider.CurrentOrTipSlot())
+	m.pruneExpiredLocked(cur)
+
+	// Reject observations outside the acceptance window before recording
+	// anything. A far-future slot would otherwise let a peer pre-seed an
+	// instance and deny the local producer (see MayProduceEndorserBlock);
+	// a far-past slot can never become eligible. The slot is peer-supplied
+	// here, unlike the quorum path, which is fed by the locally windowed
+	// vote manager.
+	if !m.withinObservationWindow(slot, cur) {
+		m.logger.Debug(
+			"ignoring out-of-window endorser block observation",
+			"slot", slot,
+			"current_slot", cur,
+		)
+		return
+	}
 
 	inst := m.instances[slot]
 	if inst == nil {
@@ -705,6 +732,18 @@ func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
 		"rollback_slot", evt.Point.Slot,
 		"retained_instances", len(m.instances),
 	)
+}
+
+// withinObservationWindow reports whether an endorser block observed for
+// slot should be admitted, given the current (or tip) slot. Future slots
+// are bounded by a small clock-skew/diffusion tolerance so a peer cannot
+// pre-seed arbitrary future slots; far-past slots already older than the
+// instance TTL are rejected since they can never become eligible.
+func (m *PipelineManager) withinObservationWindow(slot, cur uint64) bool {
+	if slot > cur {
+		return slot-cur <= observeFutureToleranceSlots
+	}
+	return cur-slot < m.timing.InstanceTTLSlots
 }
 
 // epochForSlot resolves a slot's epoch, falling back to the current epoch
