@@ -204,6 +204,7 @@ func TestValidateEbCertificateUnknownSignerSkipsSigCheck(t *testing.T) {
 	partialEntries := make(map[string]string)
 	for _, member := range fixture.committee.Members[1:] {
 		key := fixture.keys[member.VoterId]
+		require.NotNil(t, key)
 		partialEntries[hex.EncodeToString(member.PoolKeyHash)] =
 			hex.EncodeToString(key.PublicKeyBytes())
 	}
