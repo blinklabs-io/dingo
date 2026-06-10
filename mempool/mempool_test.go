@@ -2307,13 +2307,15 @@ func TestMempool_TTL_ExpiredMetricUpdated(t *testing.T) {
 	m.consumersMutex.Unlock()
 	m.Unlock()
 
-	// Wait for cleanup to remove all expired transactions
+	// Wait for cleanup to remove all expired transactions and update metrics.
 	require.Eventually(t, func() bool {
 		m.RLock()
-		defer m.RUnlock()
-		return len(m.transactions) == 0
+		removed := len(m.transactions) == 0
+		m.RUnlock()
+		return removed &&
+			testutil.ToFloat64(m.metrics.txsExpired) == float64(5)
 	}, 2*time.Second, 10*time.Millisecond,
-		"all expired transactions should be removed",
+		"all expired transactions should be removed and counted",
 	)
 
 	// Verify the expired counter was incremented
