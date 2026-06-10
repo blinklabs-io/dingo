@@ -12,31 +12,31 @@ Hi folks! Here’s what we shipped in v0.53.0.
 
 ### ✨ What's New
 
-* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce stake truncated committee voting with stake quorum rules, and operators can turn it on with the Leios voting key and voter public key settings.
-* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate.
+* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce committee voting and quorum handling for experimental voting flows, and operators can turn it on with the required voting credentials and public key settings. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate. ([#placeholder](https://github.com/blinklabs-io/dingo))
 
 ### 💪 Improvements
 
 * Improved **speed fresh Mithril backfills by skipping consumed input recovery:** Fresh Mithril backfills now avoid recovery work that is not needed on that path, which helps historical catch up finish sooner.
-* Refined **focus published artifacts on the main release images:** Release automation no longer publishes ancillary txpump, configurator, or analysis images in this release train, which keeps published outputs aligned with the supported artifacts.
-* Updated **keep untagged publish runs moving when attestations are unavailable:** Non tag publish runs now stay open when attestation steps are unavailable, while tagged releases still require successful attestations.
-* Enhanced **strengthen Antithesis txpump startup and validation checks:** Antithesis txpump runs now load genesis data more reliably and validate Conway decoding more safely, which makes test environments steadier.
-* Corrected **report expired mempool transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results.
-* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review.
+* Refined **focus published artifacts on the main release images:** Release automation now publishes only the main release images in this release train, which keeps published outputs aligned with the supported artifacts. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Updated **keep untagged publish runs moving when build attestations are unavailable:** Non tag publish runs now continue when attestation steps are unavailable, while tagged releases still require successful attestations. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Enhanced **strengthen Antithesis startup and validation checks:** Antithesis runs now load network bootstrap data more reliably and validate newer era data more safely, which makes test environments steadier. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Corrected **report expired transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review. ([#placeholder](https://github.com/blinklabs-io/dingo))
 
 ### 🔧 Fixes
 
-* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry payment script details through metadata, and align the network eras response with the supported schema.
-* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now wires endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned.
-* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril payloads and unknown era data more safely, which prevents avoidable failures during analysis.
-* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger nil guard coverage, which keeps experimental voting behavior more reliable.
+* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry script details through metadata, and align the network eras response with the supported schema. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now connects endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril data and unknown era data more safely, which prevents avoidable failures during analysis. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger empty value guards, which keeps experimental voting behavior more reliable. ([#placeholder](https://github.com/blinklabs-io/dingo))
 
 ### 📋 What You Need to Know
 
-* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the Leios voting key plus voter public key configuration.
-* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs.
-* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API without private wiring, and fresh Mithril backfills should finish faster because this path skips consumed input recovery.
-* Summarized **expect a narrower release artifact set while tagged releases stay strict:** Release automation no longer publishes new ancillary txpump, configurator, or analysis images in this release train, while tagged releases still require successful attestations.
+* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the required voting key and voter public key configuration. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API directly, and fresh Mithril backfills should finish faster because this path skips consumed input recovery. ([#placeholder](https://github.com/blinklabs-io/dingo))
+* Summarized **expect a narrower release artifact set while tagged releases stay strict:** Release automation no longer publishes new ancillary images in this release train, while tagged releases still require successful attestations. ([#placeholder](https://github.com/blinklabs-io/dingo))
 
 ### Recommended Network Compatibility ⚠️
 
