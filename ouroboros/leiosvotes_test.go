@@ -195,7 +195,7 @@ func TestLeiosFetchServerVotesRequestWithoutHandler(t *testing.T) {
 }
 
 func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
-	point, blockRaw := testDijkstraBlockRaw(t, 10)
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	handler := &fakeLeiosVoteHandler{}
 	o.LeiosVotes = handler
@@ -207,7 +207,7 @@ func TestStoreLeiosEndorserBlockNotifiesVoteHandler(t *testing.T) {
 }
 
 func TestStoreLeiosEndorserBlockWithoutHandler(t *testing.T) {
-	point, blockRaw := testDijkstraBlockRaw(t, 11)
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, nil))
 }

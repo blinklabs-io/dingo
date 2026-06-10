@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -102,7 +103,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
 	if o.LeiosVotes != nil {
-		o.LeiosVotes.HandleEndorserBlock(block.SlotNumber(), blockHash)
+		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
 	}
 	return nil
 }
@@ -248,10 +249,9 @@ func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	blockCbor []byte,
 ) ([]byte, bool, error) {
-	// gouroboros v0.180.0 maps the old Leios block aliases onto the
-	// Dijkstra block CDDL. Dijkstra carries nullable Leios/Peras certificate
-	// slots, but the current Leios certificate placeholder is an empty list
-	// and does not contain an endorser-block hash to drive the old merge path.
+	// Dijkstra carries nullable Leios/Peras certificate slots, but the current
+	// Leios certificate placeholder is an empty list and does not contain an
+	// endorser-block hash to drive the old merge path.
 	return blockCbor, false, nil
 }
 
@@ -260,7 +260,7 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	block models.Block,
 ) []byte {
 	if !o.config.EnableLeios ||
-		block.Type != uint(gleios.BlockTypeLeiosRanking) ||
+		block.Type != uint(gdijkstra.BlockTypeDijkstra) ||
 		ctx.Server == nil {
 		return block.Cbor
 	}
