@@ -1,5 +1,36 @@
 # Dingo Releases
 
+## v0.53.0 (June 10, 2026)
+
+**Title:** Experimental Leios quorum voting, public Mithril sync API, and Blockfrost network accuracy
+
+**Date:** June 10, 2026
+
+**Version:** v0.53.0
+
+Hi folks! Here’s what we shipped in v0.53.0.
+
+### ✨ What's New
+
+* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce stake truncated committee voting with stake quorum rules, and operators can turn it on with the Leios voting key and voter public key settings.
+* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate.
+
+### 💪 Improvements
+
+* Improved **speed fresh Mithril backfills by skipping consumed input recovery:** Fresh Mithril backfills now avoid recovery work that is not needed on that path, which helps historical catch up finish sooner.
+* Refined **focus published artifacts on the main release images:** Release automation no longer publishes ancillary txpump, configurator, or analysis images in this release train, which keeps published outputs aligned with the supported artifacts.
+* Updated **keep untagged publish runs moving when attestations are unavailable:** Non tag publish runs now stay open when attestation steps are unavailable, while tagged releases still require successful attestations.
+* Enhanced **strengthen Antithesis txpump startup and validation checks:** Antithesis txpump runs now load genesis data more reliably and validate Conway decoding more safely, which makes test environments steadier.
+* Corrected **report expired mempool transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results.
+* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review.
+
+### 🔧 Fixes
+
+* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry payment script details through metadata, and align the network eras response with the supported schema.
+* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now wires endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned.
+* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril payloads and unknown era data more safely, which prevents avoidable failures during analysis.
+* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger nil guard coverage, which keeps experimental voting behavior more reliable.
+
 ## v0.52.1 (June 9, 2026)
 
 **Title:** Mithril snapshot reuse, steadier epoch timing, and Blockfrost explorer improvements
