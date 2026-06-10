@@ -31,6 +31,27 @@ Hi folks! Here’s what we shipped in v0.53.0.
 * Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril payloads and unknown era data more safely, which prevents avoidable failures during analysis.
 * Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger nil guard coverage, which keeps experimental voting behavior more reliable.
 
+### 📋 What You Need to Know
+
+* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the Leios voting key plus voter public key configuration.
+* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs.
+* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API without private wiring, and fresh Mithril backfills should finish faster because this path skips consumed input recovery.
+* Summarized **expect a narrower release artifact set while tagged releases stay strict:** Release automation no longer publishes new ancillary txpump, configurator, or analysis images in this release train, while tagged releases still require successful attestations.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.52.1 (June 9, 2026)
 
 **Title:** Mithril snapshot reuse, steadier epoch timing, and Blockfrost explorer improvements
