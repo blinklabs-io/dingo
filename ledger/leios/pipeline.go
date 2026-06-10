@@ -71,6 +71,10 @@ const (
 	StageExpired
 )
 
+// stageCount is the number of distinct stages. It is not a stage itself; it
+// sizes per-stage aggregations such as the stage gauge.
+const stageCount = int(StageExpired) + 1
+
 // String returns a human-readable stage name.
 func (s Stage) String() string {
 	switch s {
@@ -104,17 +108,17 @@ func (s Stage) String() string {
 // ProduceWindowSlots, the diffuse phase while off < DiffuseWindowSlots, and
 // so on.
 type PipelineTiming struct {
-	// StageLengthSlots is the nominal length of a single pipeline stage.
-	// It is informational for now; the per-phase windows below drive
-	// behavior.
-	StageLengthSlots uint64
 	// ProduceWindowSlots bounds how long after its produce slot an EB may
 	// still be forged.
 	ProduceWindowSlots uint64
 	// DiffuseWindowSlots is the cumulative offset by which diffusion is
 	// expected to complete.
 	DiffuseWindowSlots uint64
-	// VoteWindowSlots is the cumulative offset by which voting closes.
+	// VoteWindowSlots is the cumulative offset by which voting closes. It is
+	// the single source for VoteManager's vote-acceptance past bound
+	// (relative to the EB produce slot), so the two components admit votes
+	// over the same window; stageFor surfaces the same boundary as
+	// StageVote.
 	VoteWindowSlots uint64
 	// CertifyByDeadlineSlots is the cumulative offset by which a
 	// certificate must be observed; past it an uncertified EB expires.
@@ -133,7 +137,6 @@ type PipelineTiming struct {
 // the in-memory instance set small.
 func DefaultPipelineTiming() PipelineTiming {
 	return PipelineTiming{
-		StageLengthSlots:       1,
 		ProduceWindowSlots:     1,
 		DiffuseWindowSlots:     5,
 		VoteWindowSlots:        10,
@@ -146,9 +149,6 @@ func DefaultPipelineTiming() PipelineTiming {
 // Validate checks that the timing windows are positive and monotonically
 // non-decreasing, the invariant stageFor relies on.
 func (t PipelineTiming) Validate() error {
-	if t.StageLengthSlots == 0 {
-		return errors.New("leios pipeline timing: StageLengthSlots must be > 0")
-	}
 	steps := []struct {
 		name string
 		val  uint64
@@ -519,7 +519,7 @@ func (m *PipelineManager) ObserveEndorserBlock(
 		m.metrics.ebObservedTotal.Inc()
 	}
 	m.markEquivocationLocked(inst)
-	m.updateGaugesLocked()
+	m.updateGaugesLocked(cur)
 }
 
 // handleEbQuorum marks an endorser block certified when the VoteManager
@@ -528,9 +528,10 @@ func (m *PipelineManager) ObserveEndorserBlock(
 // its votes), it is tracked here so eligibility reflects every certified
 // block.
 func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
+	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pruneExpiredLocked(m.slotProvider.CurrentOrTipSlot())
+	m.pruneExpiredLocked(cur)
 
 	eb := m.byHash[evt.EndorserBlockHash]
 	if eb == nil {
@@ -555,6 +556,26 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 	if eb.certified {
 		return
 	}
+	// A certificate at or past the certification deadline is too late: the
+	// EB has already expired in stageFor's uncertified branch, so honoring it
+	// would resurrect a block the rest of the pipeline treats as dead. Keep
+	// it tracked (it still counts toward equivocation and the stage gauge)
+	// but never mark it certified, so EligibleCertifiedEbs and StageOf agree
+	// it is expired.
+	if cur >= evt.SlotNo && cur-evt.SlotNo >= m.timing.CertifyByDeadlineSlots {
+		if m.metrics != nil {
+			m.metrics.certsRejectedTotal.WithLabelValues("late").Inc()
+		}
+		m.logger.Warn(
+			"discarding leios certificate past certification deadline",
+			"slot", evt.SlotNo,
+			"eb_hash", evt.EndorserBlockHash.String(),
+			"offset_slots", cur-evt.SlotNo,
+			"deadline_slots", m.timing.CertifyByDeadlineSlots,
+		)
+		m.updateGaugesLocked(cur)
+		return
+	}
 	eb.certified = true
 	eb.certificate = evt.Certificate
 	if m.metrics != nil {
@@ -566,7 +587,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		"eb_hash", evt.EndorserBlockHash.String(),
 		"eligible", !eb.equivocated,
 	)
-	m.updateGaugesLocked()
+	m.updateGaugesLocked(cur)
 }
 
 // MayProduceEndorserBlock reports whether an endorser block may be forged
@@ -641,6 +662,25 @@ func (m *PipelineManager) MarkEmbedded(ebHash lcommon.Blake2b256) {
 	}
 }
 
+// StageOf reports the pipeline stage of a tracked endorser block and whether
+// it is tracked. It is the read-only introspection seam for the producer and
+// inclusion paths; it never mutates pipeline state (no pruning), so it is
+// safe to call at high frequency. The stage is derived from the current slot
+// and the EB's observed certified flag via stageFor.
+func (m *PipelineManager) StageOf(
+	slot uint64,
+	ebHash lcommon.Blake2b256,
+) (Stage, bool) {
+	cur := m.slotProvider.CurrentOrTipSlot()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	eb, ok := m.byHash[ebHash]
+	if !ok || eb.slot != slot {
+		return StageProduce, false
+	}
+	return stageFor(slot, cur, m.timing, eb.certified), true
+}
+
 // markEquivocationLocked flags every EB in an instance as equivocated once
 // the instance holds more than one distinct EB hash. Without an EB producer
 // identity (the CIP-0164 endorser block carries none yet) we cannot pick a
@@ -684,7 +724,7 @@ func (m *PipelineManager) pruneExpiredLocked(cur uint64) {
 		}
 		delete(m.instances, slot)
 	}
-	m.updateGaugesLocked()
+	m.updateGaugesLocked(cur)
 }
 
 // handleEpochTransition flushes pipeline instances older than the previous
@@ -699,6 +739,7 @@ func (m *PipelineManager) handleEpochTransition(
 	if evt.NewEpoch >= 1 {
 		keepFrom = evt.NewEpoch - 1
 	}
+	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for slot, inst := range m.instances {
@@ -709,7 +750,7 @@ func (m *PipelineManager) handleEpochTransition(
 			delete(m.instances, slot)
 		}
 	}
-	m.updateGaugesLocked()
+	m.updateGaugesLocked(cur)
 	m.logger.Debug(
 		"flushed leios pipeline state at epoch transition",
 		"new_epoch", evt.NewEpoch,
@@ -721,6 +762,7 @@ func (m *PipelineManager) handleEpochTransition(
 // rollback point, so a re-produced endorser block on the replacement chain
 // is not mistaken for equivocation.
 func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
+	cur := m.slotProvider.CurrentOrTipSlot()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for slot, inst := range m.instances {
@@ -731,7 +773,7 @@ func (m *PipelineManager) handleRollback(evt chain.ChainRollbackEvent) {
 			delete(m.instances, slot)
 		}
 	}
-	m.updateGaugesLocked()
+	m.updateGaugesLocked(cur)
 	m.logger.Debug(
 		"flushed leios pipeline state after rollback",
 		"rollback_slot", evt.Point.Slot,
@@ -767,11 +809,25 @@ func (m *PipelineManager) epochForSlot(slot uint64) uint64 {
 	return epoch
 }
 
-// updateGaugesLocked refreshes instance-count gauges. Callers must hold
-// m.mu.
-func (m *PipelineManager) updateGaugesLocked() {
+// updateGaugesLocked refreshes the instance-count and per-stage gauges.
+// Iterating instances and calling stageFor with each EB's actual certified
+// flag here is what exercises stageFor's uncertified branch in production;
+// nothing else calls stageFor with certified=false. Every stage label is
+// rewritten on each refresh (including zeros), so a stage that empties is
+// set to 0 rather than left stale. Callers must hold m.mu.
+func (m *PipelineManager) updateGaugesLocked(cur uint64) {
 	if m.metrics == nil {
 		return
 	}
 	m.metrics.instancesCount.Set(float64(len(m.instances)))
+	var counts [stageCount]int
+	for _, inst := range m.instances {
+		for _, eb := range inst.ebs {
+			counts[stageFor(inst.produceSlot, cur, m.timing, eb.certified)]++
+		}
+	}
+	for s := range stageCount {
+		m.metrics.stagesCount.WithLabelValues(Stage(s).String()).
+			Set(float64(counts[s]))
+	}
 }

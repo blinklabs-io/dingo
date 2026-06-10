@@ -56,14 +56,13 @@ const (
 	// them to one record per (slot, registered voter) inside the slot
 	// window.
 	voteRecordMaxEntries = 4 * voteStoreMaxEntries
-	// slotWindowPastTolerance and slotWindowFutureTolerance bound the
-	// slots for which votes are accepted, relative to the current (or
-	// tip) slot. CIP-0164 defines a vote timing window (L_vote) that is
-	// not yet implemented; these are provisional dingo-local bounds that
-	// keep the forgeable vote-id space (window x committee size) small.
-	// The past tolerance roughly matches voteStoreTTL at 1s slots; the
-	// future tolerance allows for clock skew and diffusion delay.
-	slotWindowPastTolerance   = 600
+	// slotWindowFutureTolerance bounds how far ahead of the current (or
+	// tip) slot a vote is accepted, allowing for clock skew and diffusion
+	// delay. The past bound is the pipeline's VoteWindowSlots (the offset
+	// after an EB's produce slot at which voting closes), supplied via
+	// VoteManagerConfig so the vote manager and pipeline admit votes over
+	// the same window. Both keep the forgeable vote-id space (window x
+	// committee size) small.
 	slotWindowFutureTolerance = 60
 )
 
@@ -118,6 +117,13 @@ type VoteManagerConfig struct {
 	SlotProvider SlotProvider
 	Registry     *VoterRegistry
 	PromRegistry prometheus.Registerer
+	// VoteWindowSlots is the offset after an EB's produce slot at which
+	// voting closes: a vote whose slot is this many slots or more behind
+	// the current (or tip) slot is rejected. It is the pipeline's
+	// VoteWindowSlots, passed here so the vote manager and pipeline admit
+	// votes over the same window. Zero falls back to
+	// DefaultPipelineTiming().VoteWindowSlots.
+	VoteWindowSlots uint64
 }
 
 // storedVote is one retained vote with its serving metadata.
@@ -192,8 +198,13 @@ type VoteManager struct {
 	epochProvider  EpochProvider
 	paramsProvider CommitteeParamsProvider
 	slotProvider   SlotProvider // nil disables the slot window check
-	registry       *VoterRegistry
-	metrics        *voteManagerMetrics
+	// voteWindowSlots is the past bound of the vote acceptance window: a
+	// vote whose slot is this many slots or more behind the current slot
+	// is rejected. It is the pipeline's VoteWindowSlots so the two
+	// components admit votes over the same window.
+	voteWindowSlots uint64
+	registry        *VoterRegistry
+	metrics         *voteManagerMetrics
 	// now is the clock used for vote TTL expiry; tests may override it.
 	now func() time.Time
 	// voteTTL, maxVotes, and maxRecords bound the vote stores; tests
@@ -253,25 +264,30 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 			return nil, err
 		}
 	}
+	voteWindowSlots := cfg.VoteWindowSlots
+	if voteWindowSlots == 0 {
+		voteWindowSlots = DefaultPipelineTiming().VoteWindowSlots
+	}
 	m := &VoteManager{
-		logger:         logger.With("component", "leios"),
-		eventBus:       cfg.EventBus,
-		stakeProvider:  cfg.StakeProvider,
-		epochProvider:  cfg.EpochProvider,
-		paramsProvider: cfg.ParamsProvider,
-		slotProvider:   cfg.SlotProvider,
-		registry:       registry,
-		now:            time.Now,
-		voteTTL:        voteStoreTTL,
-		maxVotes:       voteStoreMaxEntries,
-		maxRecords:     voteRecordMaxEntries,
-		committees:     make(map[uint64]*epochEntry),
-		votesById:      make(map[lcommon.LeiosVoteId]*storedVote),
-		voteLog:        make([]*storedVote, 0),
-		voteRecords:    make(map[lcommon.LeiosVoteId]voteRecord),
-		cursors:        make(map[string]uint64),
-		wakeCh:         make(chan struct{}),
-		tallies:        make(map[tallyKey]*ebTally),
+		logger:          logger.With("component", "leios"),
+		eventBus:        cfg.EventBus,
+		stakeProvider:   cfg.StakeProvider,
+		epochProvider:   cfg.EpochProvider,
+		paramsProvider:  cfg.ParamsProvider,
+		slotProvider:    cfg.SlotProvider,
+		voteWindowSlots: voteWindowSlots,
+		registry:        registry,
+		now:             time.Now,
+		voteTTL:         voteStoreTTL,
+		maxVotes:        voteStoreMaxEntries,
+		maxRecords:      voteRecordMaxEntries,
+		committees:      make(map[uint64]*epochEntry),
+		votesById:       make(map[lcommon.LeiosVoteId]*storedVote),
+		voteLog:         make([]*storedVote, 0),
+		voteRecords:     make(map[lcommon.LeiosVoteId]voteRecord),
+		cursors:         make(map[string]uint64),
+		wakeCh:          make(chan struct{}),
+		tallies:         make(map[tallyKey]*ebTally),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initVoteManagerMetrics(cfg.PromRegistry)
@@ -463,17 +479,20 @@ func (m *VoteManager) committeeAndParamsForEpoch(
 // slotWindowCheck reports whether a vote slot falls within the
 // acceptance window around the current (or tip) slot, returning a
 // descriptive error when it does not. A nil slot provider disables the
-// check.
+// check. The past bound is the pipeline's vote window (voteWindowSlots):
+// once a vote's slot is that many slots behind the current slot, voting
+// has closed for that EB, matching stageFor's StageVote boundary. The
+// future bound allows for clock skew and diffusion delay.
 func (m *VoteManager) slotWindowCheck(slot uint64) error {
 	if m.slotProvider == nil {
 		return nil
 	}
 	cur := m.slotProvider.CurrentOrTipSlot()
-	if slot < cur && cur-slot > slotWindowPastTolerance {
+	if slot < cur && cur-slot >= m.voteWindowSlots {
 		return fmt.Errorf(
-			"vote slot %d is more than %d slots behind current slot %d",
+			"vote slot %d is %d or more slots behind current slot %d (vote window closed)",
 			slot,
-			uint64(slotWindowPastTolerance),
+			m.voteWindowSlots,
 			cur,
 		)
 	}

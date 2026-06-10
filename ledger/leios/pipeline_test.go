@@ -107,10 +107,6 @@ func TestPipelineTimingValidate(t *testing.T) {
 	// certify deadline earlier than the vote window violates ordering
 	nonMonotonic.CertifyByDeadlineSlots = 1
 	require.Error(t, nonMonotonic.Validate())
-
-	noStageLen := DefaultPipelineTiming()
-	noStageLen.StageLengthSlots = 0
-	require.Error(t, noStageLen.Validate())
 }
 
 func TestNewPipelineManagerValidation(t *testing.T) {
@@ -309,6 +305,119 @@ func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
 		promtestutil.ToFloat64(mgr.metrics.ebEquivocationTotal),
 		"equivocation metric must count slots, not additional EBs",
 	)
+}
+
+func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
+	tm := DefaultPipelineTiming()
+	const slot = 300
+	hash := ebHashFor("eb-late")
+
+	// A certificate arriving one slot before the deadline is accepted.
+	inTime := newPipelineFixture(t, tm)
+	inTime.slot.slot = slot
+	inTime.mgr.ObserveEndorserBlock(slot, hash)
+	inTime.slot.slot = slot + tm.CertifyByDeadlineSlots - 1
+	inTime.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            slot,
+		EndorserBlockHash: hash,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	require.Len(t, inTime.mgr.EligibleCertifiedEbs(), 1)
+
+	// A certificate arriving at the deadline offset is too late: the EB
+	// stays tracked but is never certified, so it can never become eligible.
+	late := newPipelineFixture(t, tm)
+	late.slot.slot = slot
+	late.mgr.ObserveEndorserBlock(slot, hash)
+	late.slot.slot = slot + tm.CertifyByDeadlineSlots
+	late.mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            slot,
+		EndorserBlockHash: hash,
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	assert.Empty(t, late.mgr.EligibleCertifiedEbs())
+	late.mgr.mu.Lock()
+	eb := late.mgr.byHash[hash]
+	late.mgr.mu.Unlock()
+	require.NotNil(t, eb, "a late-certified EB stays tracked")
+	assert.False(t, eb.certified, "a late certificate must not certify the EB")
+}
+
+func TestLateCertMetricCounted(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	tm := DefaultPipelineTiming()
+	mgr, err := NewPipelineManager(PipelineManagerConfig{
+		EventBus:      event.NewEventBus(nil, nil),
+		SlotProvider:  &fakeSlotProvider{slot: 300 + tm.CertifyByDeadlineSlots},
+		EpochProvider: &fakeEpochProvider{},
+		Timing:        tm,
+		PromRegistry:  reg,
+	})
+	require.NoError(t, err)
+
+	mgr.handleEbQuorum(EbQuorumEvent{
+		SlotNo:            300,
+		EndorserBlockHash: ebHashFor("eb-late"),
+		Certificate:       &lcommon.LeiosEbCertificate{},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(mgr.metrics.certsRejectedTotal.WithLabelValues("late")),
+	)
+}
+
+func TestStageGaugesReflectUncertifiedStages(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	mgr, err := NewPipelineManager(PipelineManagerConfig{
+		EventBus:      event.NewEventBus(nil, nil),
+		SlotProvider:  &fakeSlotProvider{slot: 1000},
+		EpochProvider: &fakeEpochProvider{},
+		Timing:        DefaultPipelineTiming(),
+		PromRegistry:  reg,
+	})
+	require.NoError(t, err)
+	sp := mgr.slotProvider.(*fakeSlotProvider)
+
+	// Observed at the current slot -> offset 0 -> produce stage.
+	mgr.ObserveEndorserBlock(1000, ebHashFor("eb-p"))
+	stageGauge := func(s Stage) float64 {
+		return promtestutil.ToFloat64(
+			mgr.metrics.stagesCount.WithLabelValues(s.String()),
+		)
+	}
+	assert.Equal(t, float64(1), stageGauge(StageProduce))
+	assert.Equal(t, float64(0), stageGauge(StageVote))
+
+	// Advance into the vote band (offset 6) and refresh via a query path:
+	// this drives stageFor's uncertified branch in production.
+	sp.slot = 1006
+	_ = mgr.EligibleCertifiedEbs()
+	assert.Equal(t, float64(1), stageGauge(StageVote))
+	assert.Equal(t, float64(0), stageGauge(StageProduce))
+}
+
+func TestStageOf(t *testing.T) {
+	tm := DefaultPipelineTiming()
+	f := newPipelineFixture(t, tm)
+	const slot = 500
+	hash := ebHashFor("eb")
+	f.slot.slot = slot
+	f.mgr.ObserveEndorserBlock(slot, hash)
+
+	st, ok := f.mgr.StageOf(slot, hash)
+	require.True(t, ok)
+	assert.Equal(t, StageProduce, st)
+
+	// Past the certify deadline without a certificate -> expired.
+	f.slot.slot = slot + tm.CertifyByDeadlineSlots
+	st, ok = f.mgr.StageOf(slot, hash)
+	require.True(t, ok)
+	assert.Equal(t, StageExpired, st)
+
+	// An unknown hash is not tracked.
+	_, ok = f.mgr.StageOf(slot, ebHashFor("missing"))
+	assert.False(t, ok)
 }
 
 func TestEbQuorumForUnobservedEb(t *testing.T) {
