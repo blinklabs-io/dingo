@@ -28,6 +28,7 @@ type BackfillHotPathStats struct {
 	BlobTxOffsetWrites   uint64
 	BlobUtxoOffsetWrites uint64
 	SkippedUtxoOffsets   uint64
+	SkippedInputRecovery uint64
 
 	AddressTxs      uint64
 	Witnesses       uint64
@@ -63,6 +64,7 @@ func (s *BackfillHotPathStats) Add(other BackfillHotPathStats) {
 	s.BlobTxOffsetWrites += other.BlobTxOffsetWrites
 	s.BlobUtxoOffsetWrites += other.BlobUtxoOffsetWrites
 	s.SkippedUtxoOffsets += other.SkippedUtxoOffsets
+	s.SkippedInputRecovery += other.SkippedInputRecovery
 	s.AddressTxs += other.AddressTxs
 	s.Witnesses += other.Witnesses
 	s.Scripts += other.Scripts

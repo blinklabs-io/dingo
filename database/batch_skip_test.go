@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -320,4 +321,133 @@ func TestSetTransactionBatchedWithOpts_RequiresOffsetsEvenWhenSkipping(
 	)
 	require.Error(t, err, "missing offset must still error even with skip enabled")
 	require.Contains(t, err.Error(), "missing UTxO offset")
+}
+
+// TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery verifies that
+// enabling SkipConsumedInputRecovery elides the per-input GetUtxoIncludingSpent
+// checks. During Mithril backfill, immutable blocks are replayed in slot order
+// against a metadata store being populated from the same history, so consumed
+// inputs are guaranteed to already exist from earlier producer transactions.
+// This test ensures the skip path counts inputs that would have been checked.
+func TestSetTransactionBatchedWithOpts_SkipConsumedInputRecovery(t *testing.T) {
+	db := openTestDB(t)
+
+	candidate := findBatchedCrossBlockSpendCandidate(t)
+
+	// Store producer block first so consumed inputs exist in metadata
+	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		candidate.producerTx,
+		candidate.producerPoint,
+		candidate.producerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.producerBlock),
+		acc,
+		txn,
+		BatchedTxIngestOpts{},
+	))
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	// Now ingest the consumer with skip enabled
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+	var stats types.BackfillHotPathStats
+	acc2 := db.NewBatchAccumulator()
+	txn2 := db.Transaction(true)
+	defer txn2.Release()
+	defer txn2.Rollback() //nolint:errcheck
+
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		candidate.consumerTx,
+		candidate.consumerPoint,
+		candidate.consumerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.consumerBlock),
+		acc2,
+		txn2,
+		BatchedTxIngestOpts{
+			SkipConsumedInputRecovery: true,
+			Stats:                     &stats,
+		},
+	))
+	require.NoError(t, db.FlushBatch(acc2, txn2))
+	require.NoError(t, txn2.Commit())
+
+	// Verify the counter shows skipped inputs
+	consumed := candidate.consumerTx.Consumed()
+	require.Greater(t, len(consumed), 0, "consumer tx must have at least one input")
+	require.Equal(
+		t, uint64(len(consumed)), stats.SkippedInputRecovery,
+		"SkippedInputRecovery must count all consumed inputs when skip is enabled",
+	)
+}
+
+// TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery confirms
+// that when SkipConsumedInputRecovery is false (default), the recovery path
+// is still executed and the counter remains zero.
+func TestSetTransactionBatchedWithOpts_DefaultDoesNotSkipInputRecovery(
+	t *testing.T,
+) {
+	db := openTestDB(t)
+
+	candidate := findBatchedCrossBlockSpendCandidate(t)
+
+	// Store producer block first
+	storeBlockOffsetsOnly(t, db, candidate.producerBlock)
+	acc := db.NewBatchAccumulator()
+	txn := db.Transaction(true)
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		candidate.producerTx,
+		candidate.producerPoint,
+		candidate.producerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.producerBlock),
+		acc,
+		txn,
+		BatchedTxIngestOpts{},
+	))
+	require.NoError(t, db.FlushBatch(acc, txn))
+	require.NoError(t, txn.Commit())
+	txn.Release()
+
+	// Ingest consumer with default options (skip disabled)
+	storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+	var stats types.BackfillHotPathStats
+	acc2 := db.NewBatchAccumulator()
+	txn2 := db.Transaction(true)
+	defer txn2.Release()
+	defer txn2.Rollback() //nolint:errcheck
+
+	require.NoError(t, db.SetTransactionBatchedWithOpts(
+		candidate.consumerTx,
+		candidate.consumerPoint,
+		candidate.consumerIdx,
+		0,
+		nil,
+		nil,
+		mustBlockOffsets(t, candidate.consumerBlock),
+		acc2,
+		txn2,
+		BatchedTxIngestOpts{
+			SkipConsumedInputRecovery: false, // explicit default
+			Stats:                     &stats,
+		},
+	))
+	require.NoError(t, db.FlushBatch(acc2, txn2))
+	require.NoError(t, txn2.Commit())
+
+	// Verify the skip counter is zero when recovery is not skipped
+	require.Equal(
+		t, uint64(0), stats.SkippedInputRecovery,
+		"SkippedInputRecovery must be zero when skip is disabled",
+	)
 }
