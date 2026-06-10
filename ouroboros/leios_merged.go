@@ -95,6 +95,16 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if o.leiosEndorserBlocks == nil {
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil &&
+		existing.point.Slot != point.Slot {
+		o.leiosMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
+			existing.point.Slot,
+			point.Slot,
+		)
+	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
 	}

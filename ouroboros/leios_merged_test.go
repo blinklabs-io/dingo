@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -99,10 +100,11 @@ func testLeiosEndorserBlockRawWithRefs(
 	t.Helper()
 	refs := make([]gleios.LeiosTransactionReference, refCount)
 	for refIdx := range refs {
+		var hashSeed [12]byte
+		binary.BigEndian.PutUint64(hashSeed[:8], uint64(idx))
+		binary.BigEndian.PutUint32(hashSeed[8:], uint32(refIdx))
 		refs[refIdx] = gleios.LeiosTransactionReference{
-			TransactionHash: lcommon.Blake2b256Hash(
-				[]byte{byte(idx), byte(refIdx)},
-			),
+			TransactionHash: lcommon.Blake2b256Hash(hashSeed[:]),
 			TransactionSize: uint16(refIdx + 1),
 		}
 	}
