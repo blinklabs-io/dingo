@@ -992,7 +992,7 @@ func (a *NodeAdapter) Account(
 		return AccountInfo{}, err
 	}
 	controlledAmount, err := a.ledgerState.Database().
-		GetControlledAmountByStakingKey(stakeKey, nil)
+		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf(
 			"get controlled amount: %w",
@@ -1072,7 +1072,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		return nil, 0, err
 	}
 	total, err := a.ledgerState.Database().
-		CountAddressesByStakingKey(stakeKey, nil)
+		CountAddressesByCredential(credentialTag, stakeKey, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count associated addresses: %w",
@@ -1082,7 +1082,8 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 	offset := (params.Page - 1) * params.Count
 
 	rows, err := a.ledgerState.Database().
-		GetAddressesByStakingKey(
+		GetAddressesByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,
@@ -2373,11 +2374,9 @@ func (a *NodeAdapter) TransactionPoolUpdates(
 			owners = append(owners, address)
 		}
 
+		rewardAccountCredential := poolRewardAccountCredential(c)
 		rewardAccount, err := stakeAddressFromCredential(
-			lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: lcommon.CredentialHash(c.RewardAccount),
-			},
+			rewardAccountCredential,
 			networkID,
 		)
 		if err != nil {
@@ -2789,6 +2788,31 @@ func stakeAddressFromCredential(
 		return "", err
 	}
 	return addr.String(), nil
+}
+
+func poolRewardAccountCredential(
+	cert *lcommon.PoolRegistrationCertificate,
+) lcommon.Credential {
+	credType := uint(lcommon.CredentialTypeAddrKeyHash)
+	hash := cert.RewardAccount[:]
+	rawCbor := cert.Cbor()
+	if len(rawCbor) > 0 {
+		var raw []cbor.RawMessage
+		if _, err := cbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
+			var rewardAddrBytes []byte
+			if _, err := cbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
+				len(rewardAddrBytes) == 29 {
+				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
+					credType = lcommon.CredentialTypeScriptHash
+				}
+				hash = rewardAddrBytes[1:]
+			}
+		}
+	}
+	return lcommon.Credential{
+		CredType:   credType,
+		Credential: lcommon.CredentialHash(lcommon.NewBlake2b224(hash)),
+	}
 }
 
 func redeemerPurpose(tag lcommon.RedeemerTag) string {

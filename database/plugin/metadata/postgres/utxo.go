@@ -76,9 +76,10 @@ func (d *MetadataStorePostgres) GetUtxoIncludingSpent(
 	return ret, nil
 }
 
-// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
-// controlled by the given staking key.
-func (d *MetadataStorePostgres) GetControlledAmountByStakingKey(
+// GetControlledAmountByCredential returns the sum of live UTxO amounts
+// controlled by the given stake credential.
+func (d *MetadataStorePostgres) GetControlledAmountByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (uint64, error) {
@@ -88,17 +89,21 @@ func (d *MetadataStorePostgres) GetControlledAmountByStakingKey(
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"resolve DB for controlled amount by staking key: %w",
+			"resolve DB for controlled amount by stake credential: %w",
 			err,
 		)
 	}
 	var total uint64
 	if err := db.Model(&models.Utxo{}).
-		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND deleted_slot = 0",
+			credentialTag,
+			stakingKey,
+		).
 		Select("COALESCE(SUM(amount), 0)").
 		Scan(&total).Error; err != nil {
 		return 0, fmt.Errorf(
-			"get controlled amount by staking key: %w",
+			"get controlled amount by stake credential: %w",
 			err,
 		)
 	}
@@ -241,9 +246,11 @@ func addressWhereClause(
 
 	switch {
 	case hasPayment && hasStake:
+		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
 		return db.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			addr.PaymentKeyHash().Bytes(),
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
 		)
 	case hasPayment:
@@ -252,8 +259,10 @@ func addressWhereClause(
 			addr.PaymentKeyHash().Bytes(),
 		)
 	case hasStake:
+		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
 		return db.Where(
-			"staking_key = ?",
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
 		)
 	default:

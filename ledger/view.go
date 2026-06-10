@@ -126,7 +126,23 @@ func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
-	return lv.ls.db.GetStakeRegistrations(stakingKey, lv.txn)
+	return lv.ls.db.GetStakeRegistrationsByCredential(0, stakingKey, lv.txn)
+}
+
+// StakeRegistrationByCredential returns stake registration certificates for the
+// full stake credential identity, preserving key/script credential separation.
+func (lv *LedgerView) StakeRegistrationByCredential(
+	cred lcommon.Credential,
+) ([]lcommon.StakeRegistrationCertificate, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	return lv.ls.db.GetStakeRegistrationsByCredential(
+		credentialTag,
+		cred.Credential[:],
+		lv.txn,
+	)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered

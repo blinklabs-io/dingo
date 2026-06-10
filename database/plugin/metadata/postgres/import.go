@@ -197,7 +197,7 @@ func (d *MetadataStorePostgres) ImportPool(
 		Columns: []clause.Column{{Name: "pool_key_hash"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"vrf_key_hash", "pledge", "cost",
-			"margin", "reward_account",
+			"margin", "reward_account", "reward_account_credential_tag",
 		}),
 	}).Create(pool)
 	if result.Error != nil {

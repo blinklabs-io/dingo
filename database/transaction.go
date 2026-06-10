@@ -880,15 +880,18 @@ func (d *Database) GetTransactionsByAddress(
 ) ([]models.Transaction, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	var paymentKey []byte
+	var credentialTag uint8
 	var stakingKey []byte
 	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
 		stakingKey = skh.Bytes()
 	}
 	return d.GetTransactionsByAddressKeys(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -908,15 +911,18 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 ) ([]models.Transaction, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	var paymentKey []byte
+	var credentialTag uint8
 	var stakingKey []byte
 	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
 		stakingKey = skh.Bytes()
 	}
 	return d.GetTransactionsByAddressKeys(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -925,10 +931,11 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 	)
 }
 
-// GetTransactionsByAddressKeys returns transactions for a payment/staking key
-// tuple with pagination and explicit order (asc|desc).
+// GetTransactionsByAddressKeys returns transactions for a payment/staking
+// credential tuple with pagination and explicit order (asc|desc).
 func (d *Database) GetTransactionsByAddressKeys(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -941,6 +948,7 @@ func (d *Database) GetTransactionsByAddressKeys(
 	}
 	txs, err := d.metadata.GetTransactionsByAddress(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -969,24 +977,28 @@ func (d *Database) CountTransactionsByAddress(
 ) (int, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	var paymentKey []byte
+	var credentialTag uint8
 	var stakingKey []byte
 	if pkh := addr.PaymentKeyHash(); pkh != zeroHash {
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
+		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
 		stakingKey = skh.Bytes()
 	}
 	return d.CountTransactionsByAddressKeys(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		txn,
 	)
 }
 
 // CountTransactionsByAddressKeys returns the total number
-// of transactions for a payment/staking key tuple.
+// of transactions for a payment/staking credential tuple.
 func (d *Database) CountTransactionsByAddressKeys(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -996,6 +1008,7 @@ func (d *Database) CountTransactionsByAddressKeys(
 	}
 	count, err := d.metadata.CountTransactionsByAddress(
 		paymentKey,
+		credentialTag,
 		stakingKey,
 		txn.Metadata(),
 	)
@@ -1010,8 +1023,9 @@ func (d *Database) CountTransactionsByAddressKeys(
 	return count, nil
 }
 
-// GetAddressesByStakingKey returns distinct address mappings for a staking key.
-func (d *Database) GetAddressesByStakingKey(
+// GetAddressesByCredential returns distinct address mappings for a stake credential.
+func (d *Database) GetAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -1022,7 +1036,8 @@ func (d *Database) GetAddressesByStakingKey(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	addresses, err := d.metadata.GetAddressesByStakingKey(
+	addresses, err := d.metadata.GetAddressesByCredential(
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -1031,7 +1046,8 @@ func (d *Database) GetAddressesByStakingKey(
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"get addresses by staking key=%x limit=%d offset=%d: %w",
+			"get addresses by credential tag=%d key=%x limit=%d offset=%d: %w",
+			credentialTag,
 			stakingKey,
 			limit,
 			offset,
@@ -1041,8 +1057,9 @@ func (d *Database) GetAddressesByStakingKey(
 	return addresses, nil
 }
 
-// CountAddressesByStakingKey returns the total number of distinct address mappings for a staking key.
-func (d *Database) CountAddressesByStakingKey(
+// CountAddressesByCredential returns the total number of distinct address mappings for a stake credential.
+func (d *Database) CountAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (int, error) {
@@ -1050,13 +1067,15 @@ func (d *Database) CountAddressesByStakingKey(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	count, err := d.metadata.CountAddressesByStakingKey(
+	count, err := d.metadata.CountAddressesByCredential(
+		credentialTag,
 		stakingKey,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"count addresses by staking key=%x: %w",
+			"count addresses by credential tag=%d key=%x: %w",
+			credentialTag,
 			stakingKey,
 			err,
 		)

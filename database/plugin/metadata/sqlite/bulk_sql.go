@@ -47,13 +47,14 @@ var (
 		"ex_units_cpu", "index", "tag",
 	}
 	addressTxCols = []string{
-		"payment_key", "staking_key", "transaction_id", "slot", "tx_index",
+		"payment_key", "staking_key", "credential_tag",
+		"transaction_id", "slot", "tx_index",
 	}
 	utxoCols = []string{
 		"transaction_id", "collateral_return_for_tx_id", "tx_id",
-		"payment_key", "staking_key", "datum_hash", "spent_at_tx_id",
-		"referenced_by_tx_id", "collateral_by_tx_id", "added_slot",
-		"deleted_slot", "amount", "output_idx", "payment_script",
+		"payment_key", "staking_key", "credential_tag", "datum_hash",
+		"spent_at_tx_id", "referenced_by_tx_id", "collateral_by_tx_id",
+		"added_slot", "deleted_slot", "amount", "output_idx", "payment_script",
 	}
 	assetCols = []string{
 		"name", "name_hex", "policy_id", "fingerprint", "utxo_id", "amount",
@@ -75,8 +76,8 @@ const (
 func appendUtxoRow(dst []any, u *models.Utxo) []any {
 	return append(dst,
 		u.TransactionID, u.CollateralReturnForTxID, u.TxId,
-		u.PaymentKey, u.StakingKey, u.DatumHash, u.SpentAtTxId,
-		u.ReferencedByTxId, u.CollateralByTxId, u.AddedSlot,
+		u.PaymentKey, u.StakingKey, u.CredentialTag, u.DatumHash,
+		u.SpentAtTxId, u.ReferencedByTxId, u.CollateralByTxId, u.AddedSlot,
 		u.DeletedSlot, u.Amount, u.OutputIdx, u.PaymentScript,
 	)
 }
@@ -295,7 +296,8 @@ func insertAddressTxs(db *gorm.DB, items []models.AddressTransaction) error {
 		func(dst []any, i int) []any {
 			a := &items[i]
 			return append(dst,
-				a.PaymentKey, a.StakingKey, a.TransactionID, a.Slot, a.TxIndex,
+				a.PaymentKey, a.StakingKey, a.CredentialTag,
+				a.TransactionID, a.Slot, a.TxIndex,
 			)
 		},
 	)

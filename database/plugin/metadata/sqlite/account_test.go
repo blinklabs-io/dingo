@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -205,6 +206,52 @@ func TestAccountHistoryQueriesAreCredentialTagAware(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, 1, scriptRegistrationCount)
+}
+
+// TestGetStakeRegistrationsByCredentialIsTagAware verifies that certificate
+// reconstruction keeps key and script stake registrations with the same hash
+// separate and restores the correct on-chain credential type.
+func TestGetStakeRegistrationsByCredentialIsTagAware(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xD1
+	}
+
+	require.NoError(t, db.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		CertificateID: 2000,
+		AddedSlot:     10,
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		CertificateID: 2001,
+		AddedSlot:     20,
+	}).Error)
+
+	keyCerts, err := store.GetStakeRegistrationsByCredential(0, stakeKey, nil)
+	require.NoError(t, err)
+	require.Len(t, keyCerts, 1)
+	assert.Equal(
+		t,
+		uint(lcommon.CredentialTypeAddrKeyHash),
+		keyCerts[0].StakeCredential.CredType,
+	)
+	assert.Equal(t, stakeKey, keyCerts[0].StakeCredential.Credential.Bytes())
+
+	scriptCerts, err := store.GetStakeRegistrationsByCredential(1, stakeKey, nil)
+	require.NoError(t, err)
+	require.Len(t, scriptCerts, 1)
+	assert.Equal(
+		t,
+		uint(lcommon.CredentialTypeScriptHash),
+		scriptCerts[0].StakeCredential.CredType,
+	)
+	assert.Equal(t, stakeKey, scriptCerts[0].StakeCredential.Credential.Bytes())
 }
 
 // TestBatchFetchCerts_SameSlotTiebreakByBlockIndex pins the cert ordering

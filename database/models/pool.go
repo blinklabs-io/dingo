@@ -30,6 +30,13 @@ type Pool struct {
 	VrfKeyHash           []byte
 	RewardAccount        []byte
 	LatestOpCertSequence uint64
+	// RewardAccountCredentialTag is the stake credential type of the pool's
+	// reward account: 0 = key hash, 1 = script hash. The on-chain pool cert
+	// encodes the reward_account as a 29-byte reward address (header + 28-byte
+	// hash). The gouroboros library stores only the first 28 bytes in
+	// RewardAccount (AddrKeyHash), discarding the header. We decode the raw
+	// cert CBOR to preserve the credential type here.
+	RewardAccountCredentialTag uint8 `gorm:"not null;default:0"`
 	// Owners and Relays are query-only associations (no CASCADE).
 	// The actual parent-child relationship is PoolRegistration -> Owners/Relays.
 	// When Pool is deleted, PoolRegistrations cascade, which then cascade to Owners/Relays.
@@ -58,22 +65,23 @@ func (PoolOpCertSequence) TableName() string {
 }
 
 type PoolRegistration struct {
-	Margin        *types.Rat
-	Pool          *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
-	MetadataUrl   string
-	VrfKeyHash    []byte
-	PoolKeyHash   []byte `gorm:"index;size:28"`
-	RewardAccount []byte
-	MetadataHash  []byte
-	Owners        []PoolRegistrationOwner `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
-	Relays        []PoolRegistrationRelay `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
-	Pledge        types.Uint64
-	Cost          types.Uint64
-	CertificateID uint   `gorm:"index"`
-	ID            uint   `gorm:"primarykey"`
-	PoolID        uint   `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
-	AddedSlot     uint64 `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
-	DepositAmount types.Uint64
+	Margin                     *types.Rat
+	Pool                       *Pool // Belongs-to relationship; CASCADE is defined on Pool.Registration
+	MetadataUrl                string
+	VrfKeyHash                 []byte
+	PoolKeyHash                []byte `gorm:"index;size:28"`
+	RewardAccount              []byte
+	RewardAccountCredentialTag uint8 `gorm:"not null;default:0"`
+	MetadataHash               []byte
+	Owners                     []PoolRegistrationOwner `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
+	Relays                     []PoolRegistrationRelay `gorm:"foreignKey:PoolRegistrationID;constraint:OnDelete:CASCADE"`
+	Pledge                     types.Uint64
+	Cost                       types.Uint64
+	CertificateID              uint   `gorm:"index"`
+	ID                         uint   `gorm:"primarykey"`
+	PoolID                     uint   `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
+	AddedSlot                  uint64 `gorm:"uniqueIndex:idx_pool_reg_pool_slot"`
+	DepositAmount              types.Uint64
 }
 
 func (PoolRegistration) TableName() string {

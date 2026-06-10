@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -206,7 +207,7 @@ func (d *MetadataStoreMysql) GetTransactionsByBlockHash(
 }
 
 // It builds AddressTransaction rows for a single transaction.
-// deduplication by (payment_key, staking_key) within the tx.
+// deduplication by (payment_key, credential_tag, staking_key) within the tx.
 func collectAddressTransactions(
 	transactionID uint,
 	slot uint64,
@@ -219,13 +220,19 @@ func collectAddressTransactions(
 		if len(utxo.PaymentKey) == 0 && len(utxo.StakingKey) == 0 {
 			continue
 		}
-		key := fmt.Sprintf("%x|%x", utxo.PaymentKey, utxo.StakingKey)
+		key := fmt.Sprintf(
+			"%x|%d|%x",
+			utxo.PaymentKey,
+			utxo.CredentialTag,
+			utxo.StakingKey,
+		)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		ret = append(ret, models.AddressTransaction{
 			PaymentKey:    append([]byte(nil), utxo.PaymentKey...),
+			CredentialTag: utxo.CredentialTag,
 			StakingKey:    append([]byte(nil), utxo.StakingKey...),
 			TransactionID: transactionID,
 			Slot:          slot,
@@ -239,6 +246,7 @@ func collectAddressTransactions(
 // the given payment/staking key with pagination support.
 func (d *MetadataStoreMysql) GetTransactionsByAddress(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -259,8 +267,9 @@ func (d *MetadataStoreMysql) GetTransactionsByAddress(
 	switch {
 	case len(paymentKey) > 0 && len(stakingKey) > 0:
 		addrQuery = addrQuery.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			paymentKey,
+			credentialTag,
 			stakingKey,
 		)
 	case len(paymentKey) > 0:
@@ -269,7 +278,11 @@ func (d *MetadataStoreMysql) GetTransactionsByAddress(
 			paymentKey,
 		)
 	default:
-		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+		addrQuery = addrQuery.Where(
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
+			stakingKey,
+		)
 	}
 
 	subQuery := addrQuery.Select("DISTINCT transaction_id")
@@ -307,6 +320,7 @@ func (d *MetadataStoreMysql) GetTransactionsByAddress(
 // payment/staking key.
 func (d *MetadataStoreMysql) CountTransactionsByAddress(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -323,8 +337,9 @@ func (d *MetadataStoreMysql) CountTransactionsByAddress(
 	switch {
 	case len(paymentKey) > 0 && len(stakingKey) > 0:
 		addrQuery = addrQuery.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			paymentKey,
+			credentialTag,
 			stakingKey,
 		)
 	case len(paymentKey) > 0:
@@ -333,7 +348,11 @@ func (d *MetadataStoreMysql) CountTransactionsByAddress(
 			paymentKey,
 		)
 	default:
-		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+		addrQuery = addrQuery.Where(
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
+			stakingKey,
+		)
 	}
 
 	var count int64
@@ -347,8 +366,9 @@ func (d *MetadataStoreMysql) CountTransactionsByAddress(
 	return int(count), nil
 }
 
-// GetAddressesByStakingKey returns distinct addresses mapped to a staking key.
-func (d *MetadataStoreMysql) GetAddressesByStakingKey(
+// GetAddressesByCredential returns distinct addresses mapped to a stake credential.
+func (d *MetadataStoreMysql) GetAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -364,9 +384,13 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 		return nil, err
 	}
 	query := db.Model(&models.AddressTransaction{}).
-		Select("MIN(id) AS id, payment_key, staking_key").
-		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
-		Group("payment_key, staking_key").
+		Select("MIN(id) AS id, payment_key, credential_tag, staking_key").
+		Where(
+			"credential_tag = ? AND staking_key = ? AND length(payment_key) > 0",
+			credentialTag,
+			stakingKey,
+		).
+		Group("payment_key, credential_tag, staking_key").
 		Order(addressOrderClause(order))
 	if limit > 0 {
 		query = query.Limit(limit)
@@ -375,13 +399,14 @@ func (d *MetadataStoreMysql) GetAddressesByStakingKey(
 		query = query.Offset(offset)
 	}
 	if result := query.Find(&ret); result.Error != nil {
-		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
+		return nil, fmt.Errorf("get addresses by stake credential: %w", result.Error)
 	}
 	return ret, nil
 }
 
-// CountAddressesByStakingKey returns the total number of distinct addresses mapped to a staking key.
-func (d *MetadataStoreMysql) CountAddressesByStakingKey(
+// CountAddressesByCredential returns the total number of distinct addresses mapped to a stake credential.
+func (d *MetadataStoreMysql) CountAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -391,16 +416,20 @@ func (d *MetadataStoreMysql) CountAddressesByStakingKey(
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"resolve DB for count addresses by staking key: %w",
+			"resolve DB for count addresses by stake credential: %w",
 			err,
 		)
 	}
 	var count int64
 	if err := db.Model(&models.AddressTransaction{}).
-		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND length(payment_key) > 0",
+			credentialTag,
+			stakingKey,
+		).
 		Distinct("payment_key").
 		Count(&count).Error; err != nil {
-		return 0, fmt.Errorf("count addresses by staking key: %w", err)
+		return 0, fmt.Errorf("count addresses by stake credential: %w", err)
 	}
 	return int(count), nil
 }
@@ -1497,19 +1526,22 @@ func (d *MetadataStoreMysql) SetTransaction(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					tmpPool.RewardAccount = c.RewardAccount[:]
+					rewardAcctTag, rewardAcctHash := certutil.PoolRewardAccount(c)
+					tmpPool.RewardAccount = rewardAcctHash
+					tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
 					// Create registration record
 					tmpReg := models.PoolRegistration{
-						PoolKeyHash:   c.Operator[:],
-						VrfKeyHash:    c.VrfKeyHash[:],
-						Pledge:        types.Uint64(c.Pledge),
-						Cost:          types.Uint64(c.Cost),
-						Margin:        &types.Rat{Rat: c.Margin.Rat},
-						RewardAccount: c.RewardAccount[:],
-						AddedSlot:     point.Slot,
-						DepositAmount: types.Uint64(deposit),
-						CertificateID: certIDMap[i],
+						PoolKeyHash:                c.Operator[:],
+						VrfKeyHash:                 c.VrfKeyHash[:],
+						Pledge:                     types.Uint64(c.Pledge),
+						Cost:                       types.Uint64(c.Cost),
+						Margin:                     &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount:              rewardAcctHash,
+						RewardAccountCredentialTag: rewardAcctTag,
+						AddedSlot:                  point.Slot,
+						DepositAmount:              types.Uint64(deposit),
+						CertificateID:              certIDMap[i],
 					}
 					if c.PoolMetadata != nil {
 						tmpReg.MetadataUrl = c.PoolMetadata.Url
@@ -1562,7 +1594,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 						},
 						DoUpdates: clause.AssignmentColumns([]string{
 							"vrf_key_hash", "pledge", "cost", "margin",
-							"reward_account", "certificate_id",
+							"reward_account", "reward_account_credential_tag", "certificate_id",
 							"metadata_url", "metadata_hash",
 							"deposit_amount",
 						}),
@@ -2235,10 +2267,15 @@ func (d *MetadataStoreMysql) SetTransaction(
 
 					// Save individual rewards
 					for credential, amount := range c.Reward.Rewards {
+						credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+						if err != nil {
+							return fmt.Errorf("process certificate: %w", err)
+						}
 						tmpReward := models.MoveInstantaneousRewardsReward{
-							Credential: credential.Credential[:],
-							Amount:     types.Uint64(amount),
-							MIRID:      tmpMIR.ID,
+							Credential:    credential.Credential[:],
+							CredentialTag: credentialTag,
+							Amount:        types.Uint64(amount),
+							MIRID:         tmpMIR.ID,
 						}
 						result := db.Create(&tmpReward)
 						if result.Error != nil {
@@ -2920,17 +2957,20 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					tmpPool.RewardAccount = c.RewardAccount[:]
+					rewardAcctTag2, rewardAcctHash2 := certutil.PoolRewardAccount(c)
+					tmpPool.RewardAccount = rewardAcctHash2
+					tmpPool.RewardAccountCredentialTag = rewardAcctTag2
 					tmpReg := models.PoolRegistration{
-						PoolKeyHash:   c.Operator[:],
-						VrfKeyHash:    c.VrfKeyHash[:],
-						Pledge:        types.Uint64(c.Pledge),
-						Cost:          types.Uint64(c.Cost),
-						Margin:        &types.Rat{Rat: c.Margin.Rat},
-						RewardAccount: c.RewardAccount[:],
-						AddedSlot:     point.Slot,
-						DepositAmount: types.Uint64(deposit),
-						CertificateID: certIDMap[i],
+						PoolKeyHash:                c.Operator[:],
+						VrfKeyHash:                 c.VrfKeyHash[:],
+						Pledge:                     types.Uint64(c.Pledge),
+						Cost:                       types.Uint64(c.Cost),
+						Margin:                     &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount:              rewardAcctHash2,
+						RewardAccountCredentialTag: rewardAcctTag2,
+						AddedSlot:                  point.Slot,
+						DepositAmount:              types.Uint64(deposit),
+						CertificateID:              certIDMap[i],
 					}
 					if c.PoolMetadata != nil {
 						tmpReg.MetadataUrl = c.PoolMetadata.Url
@@ -2986,7 +3026,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 						},
 						DoUpdates: clause.AssignmentColumns([]string{
 							"vrf_key_hash", "pledge", "cost", "margin",
-							"reward_account", "certificate_id",
+							"reward_account", "reward_account_credential_tag", "certificate_id",
 							"metadata_url", "metadata_hash", "deposit_amount",
 						}),
 					}).Omit("Owners", "Relays").Create(&tmpReg)
@@ -3567,10 +3607,15 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					}
 					certIDUpdates[certIDMap[i]] = tmpMIR.ID
 					for credential, amount := range c.Reward.Rewards {
+						credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+						if err != nil {
+							return fmt.Errorf("process certificate: %w", err)
+						}
 						tmpReward := models.MoveInstantaneousRewardsReward{
-							Credential: credential.Credential[:],
-							Amount:     types.Uint64(amount),
-							MIRID:      tmpMIR.ID,
+							Credential:    credential.Credential[:],
+							CredentialTag: credentialTag,
+							Amount:        types.Uint64(amount),
+							MIRID:         tmpMIR.ID,
 						}
 						if r := db.Create(&tmpReward); r.Error != nil {
 							return fmt.Errorf("process certificate (batched): %w", r.Error)
@@ -3884,16 +3929,19 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 		tmpPool.Pledge = types.Uint64(cert.Pledge)
 		tmpPool.Cost = types.Uint64(cert.Cost)
 		tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
-		tmpPool.RewardAccount = cert.RewardAccount[:]
+		rewardAcctTag, rewardAcctHash := certutil.PoolRewardAccount(&cert)
+		tmpPool.RewardAccount = rewardAcctHash
+		tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
 		tmpReg := models.PoolRegistration{
-			PoolKeyHash:   cert.Operator[:],
-			VrfKeyHash:    cert.VrfKeyHash[:],
-			Pledge:        types.Uint64(cert.Pledge),
-			Cost:          types.Uint64(cert.Cost),
-			Margin:        &types.Rat{Rat: cert.Margin.Rat},
-			RewardAccount: cert.RewardAccount[:],
-			AddedSlot:     0,
+			PoolKeyHash:                cert.Operator[:],
+			VrfKeyHash:                 cert.VrfKeyHash[:],
+			Pledge:                     types.Uint64(cert.Pledge),
+			Cost:                       types.Uint64(cert.Cost),
+			Margin:                     &types.Rat{Rat: cert.Margin.Rat},
+			RewardAccount:              rewardAcctHash,
+			RewardAccountCredentialTag: rewardAcctTag,
+			AddedSlot:                  0,
 		}
 		if cert.PoolMetadata != nil {
 			tmpReg.MetadataUrl = cert.PoolMetadata.Url
