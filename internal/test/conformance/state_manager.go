@@ -991,11 +991,12 @@ func (m *DingoStateManager) proposalToModel(
 ) models.GovernanceProposal {
 	txHash := parseProposalTxHash(id)
 	actionIdx := parseProposalActionIdx(id)
+	actionType := uint8(info.ActionType) //nolint:gosec // GovActionType is 0-6.
 
 	proposal := models.GovernanceProposal{
 		TxHash:        txHash,
 		ActionIndex:   actionIdx,
-		ActionType:    uint8(info.ActionType), //nolint:gosec // GovActionType is 0-6
+		ActionType:    actionType,
 		ProposedEpoch: info.SubmittedEpoch,
 		ExpiresEpoch:  info.ExpiresAfter,
 		PolicyHash:    info.PolicyHash,

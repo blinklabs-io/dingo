@@ -72,6 +72,7 @@ func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
 
 	var reason cborRejectReason
 	require.ErrorAs(t, err, &reason)
+	require.NotNil(t, reason)
 
 	wireBytes, marshalErr := reason.MarshalCBOR()
 	require.NoError(t, marshalErr)
@@ -81,6 +82,7 @@ func TestLocalTxSubmissionRejectReason_PreservesTypedReason(t *testing.T) {
 
 	var eraMismatch *gledger.EraMismatch
 	require.ErrorAs(t, decoded, &eraMismatch)
+	require.NotNil(t, eraMismatch)
 	assert.Equal(t, typed.OtherEra, eraMismatch.OtherEra)
 	assert.Equal(t, typed.LedgerEra, eraMismatch.LedgerEra)
 }

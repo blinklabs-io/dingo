@@ -401,7 +401,7 @@ func TestBlockfetchRecordNoBlocks_BelowThreshold(t *testing.T) {
 	connId := testConnId()
 	start := ocommon.NewPoint(100, []byte{0x01})
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "should not trigger before threshold")
 	}
 }
@@ -418,7 +418,7 @@ func TestBlockfetchRecordNoBlocks_ReachesThreshold(t *testing.T) {
 	connId := testConnId()
 	start := ocommon.NewPoint(100, []byte{0x01})
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		o.blockfetchRecordNoBlocks(connId, start)
 	}
 	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger on 5th consecutive request")
@@ -436,13 +436,13 @@ func TestBlockfetchRecordNoBlocks_ProgressResetsCounter(t *testing.T) {
 	connId := testConnId()
 	start := ocommon.NewPoint(100, []byte{0x01})
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, start))
 	}
 
 	o.blockfetchResetNoBlocks(connId)
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after progress")
 	}
 	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should need another full sequence after progress")
@@ -461,7 +461,7 @@ func TestBlockfetchRecordNoBlocks_IndependentPoints(t *testing.T) {
 	startA := ocommon.NewPoint(100, []byte{0x01})
 	startB := ocommon.NewPoint(200, []byte{0x02})
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, startA))
 	}
 	assert.False(t, o.blockfetchRecordNoBlocks(connId, startB), "different start point should not inherit count")
@@ -487,7 +487,7 @@ func TestBlockfetchRecordNoBlocks_IndependentConns(t *testing.T) {
 	}
 	start := ocommon.NewPoint(100, []byte{0x01})
 
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		o.blockfetchRecordNoBlocks(connA, start)
 	}
 	// Different connId at the same point must have its own independent counter
@@ -507,7 +507,7 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 	start := ocommon.NewPoint(100, []byte{0x01})
 
 	// Drive counter to threshold
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks {
 		o.blockfetchRecordNoBlocks(connId, start)
 	}
 
@@ -517,7 +517,7 @@ func TestBlockfetchRecordNoBlocks_CleanupResetsCounter(t *testing.T) {
 	o.blockFetchMutex.Unlock()
 
 	// Counter should be reset — needs another full sequence to trigger
-	for i := 0; i < blockfetchMaxConsecutiveNoBlocks-1; i++ {
+	for range blockfetchMaxConsecutiveNoBlocks - 1 {
 		assert.False(t, o.blockfetchRecordNoBlocks(connId, start), "counter should reset after cleanup")
 	}
 	assert.True(t, o.blockfetchRecordNoBlocks(connId, start), "should trigger again after reset")

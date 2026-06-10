@@ -208,10 +208,10 @@ func (m *Manager) rewardPoolInputs(
 			BoundarySlot:   evt.BoundarySlot,
 		}
 		if totalBlocks != nil {
-			input.TotalBlocksInEpoch = uint64Ptr(*totalBlocks)
+			input.TotalBlocksInEpoch = new(*totalBlocks)
 		}
 		if blockCounts != nil {
-			input.BlocksProduced = uint64Ptr(blockCounts[string(poolKey[:])])
+			input.BlocksProduced = new(blockCounts[string(poolKey[:])])
 		}
 		if registration, ok := registrationByHash[string(poolKey[:])]; ok {
 			input.Pledge = registration.Pledge
@@ -275,10 +275,6 @@ func rewardPoolBlockCounts(
 		)
 	}
 	return counts, &total, nil
-}
-
-func uint64Ptr(v uint64) *uint64 {
-	return &v
 }
 
 func cloneRat(r *types.Rat) *types.Rat {

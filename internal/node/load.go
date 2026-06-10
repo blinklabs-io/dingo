@@ -1035,7 +1035,7 @@ func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
 	if blockLen < 5 {
 		return nil, nil
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		if _, _, err := decoder.Skip(); err != nil {
 			return nil, err
 		}

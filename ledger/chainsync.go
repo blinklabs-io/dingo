@@ -3180,7 +3180,7 @@ func (ls *LedgerState) processEpochRollover(
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
 			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
-			if !ok {
+			if !ok || eraDesc == nil {
 				return nil, fmt.Errorf(
 					"unknown era ID %d",
 					result.NewCurrentEpoch.EraId,
@@ -3399,7 +3399,7 @@ func (ls *LedgerState) processEpochRollover(
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
 		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
-		if !ok {
+		if !ok || eraDesc == nil {
 			return nil, fmt.Errorf(
 				"unknown era ID %d",
 				result.NewCurrentEpoch.EraId,

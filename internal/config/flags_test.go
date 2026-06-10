@@ -221,7 +221,6 @@ func collectExportedLeafFields(
 	out map[string]struct{},
 ) {
 	for field := range t.Fields() {
-		field := field
 		if !field.IsExported() {
 			continue
 		}

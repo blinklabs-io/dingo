@@ -441,10 +441,7 @@ func calculateTieredRefScriptFee(
 	currentCostPerByte := new(big.Rat).Set(costPerByte)
 	total := new(big.Rat)
 	for remaining > 0 {
-		chunkSize := stride
-		if remaining < chunkSize {
-			chunkSize = remaining
-		}
+		chunkSize := min(remaining, stride)
 		chunkFee := new(big.Rat).Mul(
 			currentCostPerByte,
 			new(big.Rat).SetInt(

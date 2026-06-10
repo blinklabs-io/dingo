@@ -85,8 +85,7 @@ func newLocalTxSubmissionRejectReason(
 	eraId uint16,
 	err error,
 ) error {
-	var typed cborRejectReason
-	if errors.As(err, &typed) {
+	if _, ok := errors.AsType[cborRejectReason](err); ok {
 		return err
 	}
 	return &hardForkApplyTxError{
