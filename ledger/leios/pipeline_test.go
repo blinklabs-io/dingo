@@ -24,6 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -281,6 +283,31 @@ func TestEbEquivocationExcludesFromEligibility(t *testing.T) {
 		t,
 		f.mgr.EligibleCertifiedEbs(),
 		"equivocated endorser blocks must never be eligible for inclusion",
+	)
+}
+
+func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	mgr, err := NewPipelineManager(PipelineManagerConfig{
+		EventBus:      event.NewEventBus(nil, nil),
+		SlotProvider:  &fakeSlotProvider{slot: 300},
+		EpochProvider: &fakeEpochProvider{},
+		Timing:        DefaultPipelineTiming(),
+		PromRegistry:  reg,
+	})
+	require.NoError(t, err)
+
+	const slot = 300
+	// Three distinct EBs for one slot is still a single equivocating slot.
+	mgr.ObserveEndorserBlock(slot, ebHashFor("eb-a"))
+	mgr.ObserveEndorserBlock(slot, ebHashFor("eb-b"))
+	mgr.ObserveEndorserBlock(slot, ebHashFor("eb-c"))
+
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(mgr.metrics.ebEquivocationTotal),
+		"equivocation metric must count slots, not additional EBs",
 	)
 }
 

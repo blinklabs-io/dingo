@@ -35,10 +35,11 @@ import (
 // future skew is clock drift and diffusion delay; beyond this an
 // observation is a peer attempting to pre-seed future slots, which would
 // make MayProduceEndorserBlock deny the legitimate local producer when
-// those slots open. Matches the vote manager's slotWindowFutureTolerance so
-// the two Leios components admit endorser blocks over the same future
-// window. Far-past slots are bounded separately by InstanceTTLSlots.
-const observeFutureToleranceSlots = 60
+// those slots open. Defined as the vote manager's slotWindowFutureTolerance
+// so the two Leios components admit endorser blocks over the same future
+// window and cannot drift apart. Far-past slots are bounded separately by
+// InstanceTTLSlots.
+const observeFutureToleranceSlots = slotWindowFutureTolerance
 
 // Stage identifies where an endorser block sits in the CIP-0164 Linear
 // Leios pipeline. The pipeline is three logical stages -- produce/diffuse,
@@ -263,6 +264,10 @@ type pipelineInstance struct {
 	produceSlot uint64
 	epoch       uint64
 	ebs         map[lcommon.Blake2b256]*ebState
+	// equivocated records that this slot has already been counted as
+	// equivocating, so the metric and warn log fire once per slot rather
+	// than once per additional EB.
+	equivocated bool
 }
 
 // PipelineManagerConfig configures a PipelineManager.
@@ -639,21 +644,21 @@ func (m *PipelineManager) MarkEmbedded(ebHash lcommon.Blake2b256) {
 // markEquivocationLocked flags every EB in an instance as equivocated once
 // the instance holds more than one distinct EB hash. Without an EB producer
 // identity (the CIP-0164 endorser block carries none yet) we cannot pick a
-// winner, so all are excluded from inclusion. Callers must hold m.mu.
+// winner, so all are excluded from inclusion. The metric and warn log fire
+// once per equivocating slot, not once per additional EB. Callers must hold
+// m.mu.
 func (m *PipelineManager) markEquivocationLocked(inst *pipelineInstance) {
 	if len(inst.ebs) <= 1 {
 		return
 	}
-	newlyFlagged := false
 	for _, eb := range inst.ebs {
-		if !eb.equivocated {
-			eb.equivocated = true
-			newlyFlagged = true
-		}
+		eb.equivocated = true
 	}
-	if !newlyFlagged {
+	if inst.equivocated {
+		// This slot was already counted as equivocating.
 		return
 	}
+	inst.equivocated = true
 	if m.metrics != nil {
 		m.metrics.ebEquivocationTotal.Inc()
 	}
