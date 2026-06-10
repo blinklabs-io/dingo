@@ -682,6 +682,11 @@ type MetadataStore interface {
 	// amounts controlled by the given staking key.
 	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
 
+	// GetScriptLockedSupply returns the sum of lovelace held in live
+	// UTxOs whose payment credential is a script. This is the network's
+	// script-locked supply (blockfrost /network supply.locked).
+	GetScriptLockedSupply(types.Txn) (uint64, error)
+
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.
 	GetUtxosByAddressWithOrdering(
