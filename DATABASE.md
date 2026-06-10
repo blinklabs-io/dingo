@@ -175,9 +175,9 @@ erDiagram
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `metadata` is populated only in API mode. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, staking_key, amount)` and `(deleted_slot, payment_script, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, credential_tag, staking_key, amount)` and `(deleted_slot, payment_script, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
-| `address_transaction` | `id`, `payment_key`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `staking_key`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. |
+| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `(credential_tag, staking_key)`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. |
@@ -215,6 +215,7 @@ erDiagram
 | `stake_vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined registration, pool delegation, and DRep delegation. |
 | `vote_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | DRep-only vote delegation. |
 | `vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | Combined registration and DRep delegation. |
+
 | `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot`, `other_pot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. `pot`: 0 = Reserves, 1 = Treasury. `other_pot` is non-zero for pot-to-pot transfer certs (no child rows); zero for credential distribution certs (child rows in `move_instantaneous_rewards_reward`). Applied at each epoch boundary by the Shelley INSTANT rule. |
 | `move_instantaneous_rewards_reward` | `id`, `mir_id`, `credential`, `amount` | PK `id`; index `mir_id` | MIR reward rows. Join `mir_id -> move_instantaneous_rewards.id`. |
 
@@ -222,8 +223,8 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. |
+| `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. |
+| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. |
@@ -469,7 +470,8 @@ SELECT t.slot, t.block_index, encode(t.hash, 'hex') AS tx_hash
 FROM address_transaction atx
 JOIN "transaction" t ON t.id = atx.transaction_id
 WHERE atx.payment_key = decode($1, 'hex')
-  AND atx.staking_key = decode($2, 'hex')
+  AND atx.credential_tag = $2
+  AND atx.staking_key = decode($3, 'hex')
 ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 50;
 ```
@@ -480,7 +482,8 @@ Count the same address index:
 SELECT COUNT(DISTINCT atx.transaction_id) AS tx_count
 FROM address_transaction atx
 WHERE atx.payment_key = decode($1, 'hex')
-  AND atx.staking_key = decode($2, 'hex');
+  AND atx.credential_tag = $2
+  AND atx.staking_key = decode($3, 'hex');
 ```
 
 Payment-only Byron-style or enterprise-style lookups use the same condition Dingo uses:
@@ -490,19 +493,20 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND (atx.staking_key IS NULL OR length(atx.staking_key) = 0)
 ```
 
-### `GetAddressesByStakingKey`
+### `GetAddressesByCredential`
 
 ```sql
-SELECT MIN(id) AS id, payment_key, staking_key
+SELECT MIN(id) AS id, payment_key, credential_tag, staking_key
 FROM address_transaction
-WHERE staking_key = decode($1, 'hex')
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
   AND length(payment_key) > 0
-GROUP BY payment_key, staking_key
+GROUP BY payment_key, credential_tag, staking_key
 ORDER BY payment_key ASC
 LIMIT 100;
 ```
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByStakingKey`
+### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 Live UTxOs for a payment key with assets:
 
@@ -532,12 +536,13 @@ WHERE u.added_slot <= $2
   AND u.payment_key = decode($1, 'hex');
 ```
 
-Controlled amount by staking key:
+Controlled amount by stake credential:
 
 ```sql
 SELECT COALESCE(SUM(amount), 0) AS controlled_amount
 FROM utxo
-WHERE staking_key = decode($1, 'hex')
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
   AND deleted_slot = 0;
 ```
 
@@ -657,6 +662,24 @@ FROM (
 ) h
 ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC
 LIMIT 50;
+```
+
+### `GetStakeRegistrationsByCredential`
+
+Stake registration certificate reconstruction uses the full stake credential
+identity. `credential_tag` is restored into the returned certificate's
+`StakeCredential.CredType`.
+
+```sql
+-- Postgres
+SELECT
+  sr.credential_tag,
+  encode(sr.staking_key, 'hex') AS staking_key,
+  sr.added_slot
+FROM stake_registration sr
+WHERE sr.credential_tag = $1
+  AND sr.staking_key = decode($2, 'hex')
+ORDER BY sr.id DESC;
 ```
 
 ### `GetPool`, `GetPoolRegistrationsAtSlot`, and Pool History
@@ -914,6 +937,7 @@ SELECT HEX(t.hash) AS tx_hash, t.slot, t.block_index
 FROM address_transaction atx
 JOIN `transaction` t ON t.id = atx.transaction_id
 WHERE atx.payment_key = UNHEX(?)
+  AND atx.credential_tag = ?
   AND atx.staking_key = UNHEX(?)
 ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 50;

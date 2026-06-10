@@ -498,14 +498,15 @@ func (d *MetadataStorePostgres) GetPoolByVrfKeyHash(
 // during pool state restoration.
 // Includes blockIndex, certIndex for deterministic same-slot disambiguation.
 type poolRegRecord struct {
-	pledge        types.Uint64
-	cost          types.Uint64
-	margin        *types.Rat
-	vrfKeyHash    []byte
-	rewardAccount []byte
-	addedSlot     uint64
-	blockIndex    uint32
-	certIndex     uint32
+	pledge                     types.Uint64
+	cost                       types.Uint64
+	margin                     *types.Rat
+	vrfKeyHash                 []byte
+	rewardAccount              []byte
+	rewardAccountCredentialTag uint8
+	addedSlot                  uint64
+	blockIndex                 uint32
+	certIndex                  uint32
 }
 
 // poolRegCache holds batch-fetched registration data for all pools being restored.
@@ -528,15 +529,16 @@ func batchFetchPoolRegs(
 	}
 
 	type result struct {
-		PoolID        uint
-		Pledge        types.Uint64
-		Cost          types.Uint64
-		Margin        *types.Rat
-		VrfKeyHash    []byte
-		RewardAccount []byte
-		AddedSlot     uint64
-		BlockIndex    uint32
-		CertIndex     uint32
+		PoolID                     uint
+		Pledge                     types.Uint64
+		Cost                       types.Uint64
+		Margin                     *types.Rat
+		VrfKeyHash                 []byte
+		RewardAccount              []byte
+		RewardAccountCredentialTag uint8
+		AddedSlot                  uint64
+		BlockIndex                 uint32
+		CertIndex                  uint32
 	}
 	var records []result
 
@@ -544,8 +546,9 @@ func batchFetchPoolRegs(
 	// Join transaction to get block_index for proper ordering (cert_index resets per tx)
 	query := `
 		WITH ranked AS (
-			SELECT pr.pool_id, pr.pledge, pr.cost, pr.margin,
-				pr.vrf_key_hash, pr.reward_account, pr.added_slot,
+				SELECT pr.pool_id, pr.pledge, pr.cost, pr.margin,
+					pr.vrf_key_hash, pr.reward_account,
+					pr.reward_account_credential_tag, pr.added_slot,
 				COALESCE(t.block_index, 0) AS block_index,
 				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
@@ -557,22 +560,23 @@ func batchFetchPoolRegs(
 			LEFT JOIN transaction t ON t.id = c.transaction_id
 			WHERE pr.pool_id IN ? AND pr.added_slot <= ?
 		)
-		SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account, added_slot, block_index, cert_index
-		FROM ranked WHERE rn = 1`
+			SELECT pool_id, pledge, cost, margin, vrf_key_hash, reward_account, reward_account_credential_tag, added_slot, block_index, cert_index
+			FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, poolIDs, slot).Scan(&records).Error; err != nil {
 		return nil, err
 	}
 
 	for _, r := range records {
 		cache.registration[r.PoolID] = poolRegRecord{
-			pledge:        r.Pledge,
-			cost:          r.Cost,
-			margin:        r.Margin,
-			vrfKeyHash:    r.VrfKeyHash,
-			rewardAccount: r.RewardAccount,
-			addedSlot:     r.AddedSlot,
-			blockIndex:    r.BlockIndex,
-			certIndex:     r.CertIndex,
+			pledge:                     r.Pledge,
+			cost:                       r.Cost,
+			margin:                     r.Margin,
+			vrfKeyHash:                 r.VrfKeyHash,
+			rewardAccount:              r.RewardAccount,
+			rewardAccountCredentialTag: r.RewardAccountCredentialTag,
+			addedSlot:                  r.AddedSlot,
+			blockIndex:                 r.BlockIndex,
+			certIndex:                  r.CertIndex,
 		}
 		cache.hasReg[r.PoolID] = true
 	}
@@ -671,11 +675,12 @@ func (d *MetadataStorePostgres) RestorePoolStateAtSlot(
 
 		// Update the Pool's denormalized fields from the registration
 		if result := db.Model(&pool).Updates(map[string]any{
-			"pledge":         latestReg.pledge,
-			"cost":           latestReg.cost,
-			"margin":         latestReg.margin,
-			"vrf_key_hash":   latestReg.vrfKeyHash,
-			"reward_account": latestReg.rewardAccount,
+			"pledge":                        latestReg.pledge,
+			"cost":                          latestReg.cost,
+			"margin":                        latestReg.margin,
+			"vrf_key_hash":                  latestReg.vrfKeyHash,
+			"reward_account":                latestReg.rewardAccount,
+			"reward_account_credential_tag": latestReg.rewardAccountCredentialTag,
 		}); result.Error != nil {
 			return result.Error
 		}

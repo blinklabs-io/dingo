@@ -573,6 +573,51 @@ func TestTallySPOVotesAlwaysAbstainDelegation(t *testing.T) {
 	assert.Equal(t, 0, tally.SPOYesRatio().Sign())
 }
 
+func TestResolvePoolRewardAccountAutoVotesIsCredentialTagAware(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	poolKeyHash := testBytes(28, 62)
+	rewardAccount := testBytes(28, 63)
+
+	require.NoError(t, store.DB().Create(&models.Pool{
+		PoolKeyHash:                poolKeyHash,
+		RewardAccount:              rewardAccount,
+		RewardAccountCredentialTag: 1,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolStakeSnapshot{
+		Epoch:        8,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   types.Uint64(250),
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		CredentialTag: 0,
+		StakingKey:    rewardAccount,
+		DrepType:      models.DrepTypeAlwaysNoConfidence,
+		AddedSlot:     1,
+		Active:        true,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		CredentialTag: 1,
+		StakingKey:    rewardAccount,
+		DrepType:      models.DrepTypeAlwaysAbstain,
+		AddedSlot:     1,
+		Active:        true,
+	}).Error)
+
+	resolveSnapshotAutoVotes(t, db, 8)
+
+	var snapshot models.PoolStakeSnapshot
+	require.NoError(t, store.DB().
+		Where("epoch = ? AND snapshot_type = ? AND pool_key_hash = ?", 8, "mark", poolKeyHash).
+		First(&snapshot).Error)
+	assert.True(t, snapshot.RewardAccountAutoVoteResolved)
+	assert.Equal(
+		t,
+		models.PoolRewardAccountAutoVoteAbstain,
+		snapshot.RewardAccountAutoVote,
+	)
+}
+
 // TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType asserts that
 // AlwaysNoConfidence reward-account delegation produces an auto-Yes on
 // NoConfidence actions and an auto-No on non-NoConfidence actions,
@@ -582,24 +627,24 @@ func TestTallySPOVotesAlwaysNoConfidenceFlipsByActionType(t *testing.T) {
 	noConfidenceRewardAcct := testBytes(28, 71)
 
 	cases := []struct {
-		name              string
-		actionType        lcommon.GovActionType
-		expectYesStake    uint64
-		expectNoStake     uint64
+		name               string
+		actionType         lcommon.GovActionType
+		expectYesStake     uint64
+		expectNoStake      uint64
 		expectAbstainStake uint64
 	}{
 		{
-			name:              "NoConfidence action → auto Yes",
-			actionType:        lcommon.GovActionTypeNoConfidence,
-			expectYesStake:    300,
-			expectNoStake:     0,
+			name:               "NoConfidence action → auto Yes",
+			actionType:         lcommon.GovActionTypeNoConfidence,
+			expectYesStake:     300,
+			expectNoStake:      0,
 			expectAbstainStake: 0,
 		},
 		{
-			name:              "TreasuryWithdrawal action → auto No",
-			actionType:        lcommon.GovActionTypeTreasuryWithdrawal,
-			expectYesStake:    0,
-			expectNoStake:     300,
+			name:               "TreasuryWithdrawal action → auto No",
+			actionType:         lcommon.GovActionTypeTreasuryWithdrawal,
+			expectYesStake:     0,
+			expectNoStake:      300,
 			expectAbstainStake: 0,
 		},
 	}

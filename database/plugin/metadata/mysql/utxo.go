@@ -190,9 +190,11 @@ func addressWhereClause(
 
 	switch {
 	case hasPayment && hasStake:
+		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
 		return db.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			addr.PaymentKeyHash().Bytes(),
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
 		)
 	case hasPayment:
@@ -201,8 +203,10 @@ func addressWhereClause(
 			addr.PaymentKeyHash().Bytes(),
 		)
 	case hasStake:
+		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
 		return db.Where(
-			"staking_key = ?",
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
 		)
 	default:
@@ -235,9 +239,10 @@ func (d *MetadataStoreMysql) GetUtxosByAddress(
 	return ret, nil
 }
 
-// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
-// controlled by the given staking key.
-func (d *MetadataStoreMysql) GetControlledAmountByStakingKey(
+// GetControlledAmountByCredential returns the sum of live UTxO amounts
+// controlled by the given stake credential.
+func (d *MetadataStoreMysql) GetControlledAmountByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (uint64, error) {
@@ -253,7 +258,11 @@ func (d *MetadataStoreMysql) GetControlledAmountByStakingKey(
 	}
 	var total uint64
 	if err := db.Model(&models.Utxo{}).
-		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND deleted_slot = 0",
+			credentialTag,
+			stakingKey,
+		).
 		Select("COALESCE(SUM(amount), 0)").
 		Scan(&total).Error; err != nil {
 		return 0, fmt.Errorf(

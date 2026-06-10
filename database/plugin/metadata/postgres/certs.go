@@ -21,8 +21,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetStakeRegistrations returns stake registration certificates
-func (d *MetadataStorePostgres) GetStakeRegistrations(
+// GetStakeRegistrationsByCredential returns stake registration certificates
+// for a specific key/script credential tag and hash.
+func (d *MetadataStorePostgres) GetStakeRegistrationsByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
@@ -32,7 +34,11 @@ func (d *MetadataStorePostgres) GetStakeRegistrations(
 	if err != nil {
 		return ret, err
 	}
-	result := db.Where("staking_key = ?", stakingKey).
+	result := db.Where(
+		"credential_tag = ? AND staking_key = ?",
+		credentialTag,
+		stakingKey,
+	).
 		Order("id DESC").
 		Find(&certs)
 	if result.Error != nil {
@@ -43,14 +49,20 @@ func (d *MetadataStorePostgres) GetStakeRegistrations(
 		tmpCert = lcommon.StakeRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypeStakeRegistration),
 			StakeCredential: lcommon.Credential{
-				// TODO: determine correct type
-				// CredType: lcommon.CredentialTypeAddrKeyHash,
+				CredType:   stakeCredentialTypeFromTag(cert.CredentialTag),
 				Credential: lcommon.CredentialHash(cert.StakingKey),
 			},
 		}
 		ret = append(ret, tmpCert)
 	}
 	return ret, nil
+}
+
+func stakeCredentialTypeFromTag(tag uint8) uint {
+	if tag == 1 {
+		return lcommon.CredentialTypeScriptHash
+	}
+	return lcommon.CredentialTypeAddrKeyHash
 }
 
 // DeleteCertificatesAfterSlot removes all certificate records added after the given slot.

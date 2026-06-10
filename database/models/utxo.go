@@ -43,19 +43,20 @@ func AppendUtxoAddressOrBranch(
 	sk := addr.StakeKeyHash()
 	hasPayment := pk != zeroHash
 	hasStake := sk != zeroHash
+	credentialTag, _ := StakeCredentialTagFromAddress(addr)
 	switch {
 	case hasPayment && hasStake:
 		*ors = append(
 			*ors,
-			"(utxo.payment_key = ? AND utxo.staking_key = ?)",
+			"(utxo.payment_key = ? AND utxo.credential_tag = ? AND utxo.staking_key = ?)",
 		)
-		*args = append(*args, pk.Bytes(), sk.Bytes())
+		*args = append(*args, pk.Bytes(), credentialTag, sk.Bytes())
 	case hasPayment:
 		*ors = append(*ors, "(utxo.payment_key = ?)")
 		*args = append(*args, pk.Bytes())
 	case hasStake:
-		*ors = append(*ors, "(utxo.staking_key = ?)")
-		*args = append(*args, sk.Bytes())
+		*ors = append(*ors, "(utxo.credential_tag = ? AND utxo.staking_key = ?)")
+		*args = append(*args, credentialTag, sk.Bytes())
 	}
 }
 
@@ -65,7 +66,8 @@ type Utxo struct {
 	CollateralReturnForTxID *uint        `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
 	TxId                    []byte       `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
 	PaymentKey              []byte       `gorm:"index;size:28"`
-	StakingKey              []byte       `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:2"`
+	StakingKey              []byte       `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3"`
+	CredentialTag           uint8        `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2"`
 	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
 	Cbor                    []byte       `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
 	DatumHash               []byte       `gorm:"size:32"` // Optional datum hash (32 bytes)
@@ -167,6 +169,10 @@ func UtxoLedgerToModel(
 	skh := outAddr.StakeKeyHash()
 	if skh != zeroHash {
 		ret.StakingKey = skh.Bytes()
+		credentialTag, ok := StakeCredentialTagFromAddress(outAddr)
+		if ok {
+			ret.CredentialTag = credentialTag
+		}
 	}
 	if dh := utxo.Output.DatumHash(); dh != nil {
 		ret.DatumHash = append([]byte(nil), dh[:]...)
@@ -176,6 +182,21 @@ func UtxoLedgerToModel(
 	}
 
 	return ret
+}
+
+func StakeCredentialTagFromAddress(addr ledger.Address) (uint8, bool) {
+	zeroHash := lcommon.NewBlake2b224(nil)
+	if addr.StakeKeyHash() == zeroHash {
+		return 0, false
+	}
+	switch addr.StakingPayload().(type) {
+	case lcommon.AddressPayloadKeyHash:
+		return 0, true
+	case lcommon.AddressPayloadScriptHash:
+		return 1, true
+	default:
+		return 0, false
+	}
 }
 
 // UtxoSlot allows providing a slot number with a ledger.Utxo object

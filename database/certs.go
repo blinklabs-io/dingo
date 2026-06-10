@@ -64,10 +64,16 @@ func (d *Database) GetPoolRegistrations(
 	return d.metadata.GetPoolRegistrations(poolKeyHash, txn.Metadata())
 }
 
-// GetStakeRegistrations returns a list of stake registration certificates
-func (d *Database) GetStakeRegistrations(
+// GetStakeRegistrationsByCredential returns stake registration certificates
+// for the full stake credential identity.
+func (d *Database) GetStakeRegistrationsByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
-	return d.metadata.GetStakeRegistrations(stakingKey, txn.Metadata())
+	return d.metadata.GetStakeRegistrationsByCredential(
+		credentialTag,
+		stakingKey,
+		txn.Metadata(),
+	)
 }

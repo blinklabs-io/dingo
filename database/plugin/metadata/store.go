@@ -286,8 +286,10 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
-	// GetStakeRegistrations retrieves all stake registration certificates for an account.
-	GetStakeRegistrations(
+	// GetStakeRegistrationsByCredential retrieves stake registration certificates
+	// using the full credential identity: credential tag plus 28-byte hash.
+	GetStakeRegistrationsByCredential(
+		uint8, // credentialTag
 		[]byte, // stakeKey
 		types.Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
@@ -448,9 +450,10 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking key pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -459,16 +462,17 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// CountTransactionsByAddress returns the total number of
-	// transactions involving the provided payment/staking
-	// key pair.
+	// transactions involving the provided payment/staking credential pair.
 	CountTransactionsByAddress(
 		[]byte, // paymentKey
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
 
-	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
-	GetAddressesByStakingKey(
+	// GetAddressesByCredential retrieves distinct address mappings for a stake credential.
+	GetAddressesByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -476,8 +480,9 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AddressTransaction, error)
 
-	// CountAddressesByStakingKey retrieves the total count of distinct address mappings for a staking key.
-	CountAddressesByStakingKey(
+	// CountAddressesByCredential retrieves the total count of distinct address mappings for a stake credential.
+	CountAddressesByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
@@ -751,9 +756,9 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
-	// GetControlledAmountByStakingKey returns the sum of live UTxO
-	// amounts controlled by the given staking key.
-	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
+	// GetControlledAmountByCredential returns the sum of live UTxO
+	// amounts controlled by the given stake credential.
+	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
 	// GetScriptLockedSupply returns the sum of lovelace held in live
 	// UTxOs whose payment credential is a script. This is the network's
