@@ -45,6 +45,11 @@ type forgingMetrics struct {
 	forgeSyncSkip    prometheus.Counter
 	slotClockErrors  prometheus.Counter
 	tipGapSlots      prometheus.Gauge
+
+	// Leios EB forging outcomes
+	leiosEbForged  prometheus.Counter
+	leiosEbSkipped *prometheus.CounterVec
+	leiosEbFailed  prometheus.Counter
 }
 
 // initForgingMetrics initializes all forging metrics using the
@@ -160,6 +165,25 @@ func initForgingMetrics(
 		prometheus.GaugeOpts{
 			Name: "dingo_forge_tip_gap_slots",
 			Help: "latest observed tip gap in slots",
+		},
+	)
+	m.leiosEbForged = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_forge_eb_forged_total",
+			Help: "endorser blocks successfully forged and broadcast",
+		},
+	)
+	m.leiosEbSkipped = factory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_forge_eb_skipped_total",
+			Help: "endorser block production attempts skipped, by reason",
+		},
+		[]string{"reason"},
+	)
+	m.leiosEbFailed = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_forge_eb_failed_total",
+			Help: "endorser block production attempts that returned an error",
 		},
 	)
 

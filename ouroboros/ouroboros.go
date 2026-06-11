@@ -89,6 +89,10 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+
+	// Locally-forged EB broadcast log and per-connection serve cursors.
+	leiosEBLog        *leiosForgedEBLog
+	leiosNotifyCursors map[string]int
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -155,6 +159,8 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosEBLog:               newLeiosForgedEBLog(),
+		leiosNotifyCursors:       make(map[string]int),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond

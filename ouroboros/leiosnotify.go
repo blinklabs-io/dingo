@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -29,6 +30,63 @@ import (
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 )
+
+// leiosForgedEBEntry holds one locally-forged endorser block ready to
+// be announced to peers via LeiosNotify.
+type leiosForgedEBEntry struct {
+	point ocommon.Point
+}
+
+// leiosForgedEBLog is an append-only log of locally-forged EBs.
+// Each per-connection RequestNext goroutine holds a cursor (index) into
+// the log; when the log grows past the cursor the goroutine wakes up and
+// serves the next entry. The wake channel is closed and replaced on every
+// append so all blocked callers unblock at once.
+type leiosForgedEBLog struct {
+	mu     sync.Mutex
+	items  []leiosForgedEBEntry
+	wakeCh chan struct{}
+}
+
+func newLeiosForgedEBLog() *leiosForgedEBLog {
+	return &leiosForgedEBLog{wakeCh: make(chan struct{})}
+}
+
+// append adds an entry and wakes all blocked callers.
+func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
+	l.mu.Lock()
+	l.items = append(l.items, entry)
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	l.mu.Unlock()
+	close(wake)
+}
+
+// since returns the entries starting at cursor and the current wake channel.
+func (l *leiosForgedEBLog) since(cursor int) ([]leiosForgedEBEntry, chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if cursor < len(l.items) {
+		return l.items[cursor:], l.wakeCh
+	}
+	return nil, l.wakeCh
+}
+
+// BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
+// LeiosNotify server goroutines so they can announce it to peers.
+// It satisfies forging.EndorserBlockBroadcaster.
+func (o *Ouroboros) BroadcastEndorserBlock(
+	slot uint64,
+	hash []byte,
+	data []byte,
+) error {
+	point := ocommon.Point{Slot: slot, Hash: hash}
+	if err := o.storeLeiosEndorserBlock(point, data, nil); err != nil {
+		return fmt.Errorf("store forged endorser block: %w", err)
+	}
+	o.leiosEBLog.append(leiosForgedEBEntry{point: point})
+	return nil
+}
 
 func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
@@ -201,6 +259,31 @@ func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 func (o *Ouroboros) leiosnotifyServerRequestNext(
 	ctx oleiosnotify.CallbackContext,
 ) (protocol.Message, error) {
-	// TODO
-	return nil, nil
+	connKey := leiosConnectionIdString(ctx.ConnectionId)
+
+	o.leiosMu.Lock()
+	cursor := o.leiosNotifyCursors[connKey]
+	o.leiosMu.Unlock()
+
+	var done <-chan struct{}
+	if ctx.Server != nil {
+		done = ctx.Server.DoneChan()
+	}
+
+	for {
+		entries, wakeCh := o.leiosEBLog.since(cursor)
+		if len(entries) > 0 {
+			entry := entries[0]
+			o.leiosMu.Lock()
+			o.leiosNotifyCursors[connKey] = cursor + 1
+			o.leiosMu.Unlock()
+			return &oleiosnotify.MsgBlockOffer{Point: entry.point}, nil
+		}
+		select {
+		case <-wakeCh:
+			// new EB appended — re-check
+		case <-done:
+			return nil, nil
+		}
+	}
 }
