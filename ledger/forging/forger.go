@@ -730,12 +730,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 
 	ebCbor, ebHash, txRefCount, err := buildLeiosEB(txs)
 	if err != nil {
-		// No valid transaction references is a skip, not a hard failure.
-		f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot, "error", err)
-		if f.metrics != nil {
-			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
-		}
-		return nil
+		return fmt.Errorf("build leios EB: %w", err)
 	}
 
 	if err := f.leiosEBCaster.BroadcastEndorserBlock(slot, ebHash, ebCbor); err != nil {

@@ -529,6 +529,9 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 	}
 	// Start leiosnotify client
 	if o.config.EnableLeios {
+		// Pre-register cursor so EBs forged before the peer's first
+		// RequestNext are not pruned during the connection setup window.
+		o.leiosEBLog.registerConn(leiosConnectionIdString(connId))
 		if err := o.leiosnotifyClientStart(connId); err != nil {
 			o.config.Logger.Error(
 				"failed to start leiosnotify client",
@@ -661,6 +664,9 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		}
 	}
 	if o.config.EnableLeios {
+		// Pre-register cursor so EBs forged before the peer's first
+		// RequestNext are not pruned during the connection setup window.
+		o.leiosEBLog.registerConn(leiosConnectionIdString(connId))
 		if err := o.leiosnotifyClientStart(connId); err != nil {
 			o.config.Logger.Warn(
 				"leiosnotify client failed on inbound connection",

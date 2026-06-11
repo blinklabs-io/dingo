@@ -108,6 +108,18 @@ func (l *leiosForgedEBLog) removeConn(connKey string) {
 	l.mu.Unlock()
 }
 
+// registerConn pre-registers connKey at the current tail so that EBs
+// appended between connection open and the peer's first RequestNext are
+// not pruned before the cursor is established. It is a no-op when connKey
+// is already registered (e.g. on reconnect within the same session).
+func (l *leiosForgedEBLog) registerConn(connKey string) {
+	l.mu.Lock()
+	if _, exists := l.cursors[connKey]; !exists {
+		l.cursors[connKey] = l.base + len(l.items)
+	}
+	l.mu.Unlock()
+}
+
 // pruneLocked drops head entries whose logical index falls below every
 // registered connection's cursor (i.e. all connections have advanced past
 // them, whether by consuming the entry or by registering after it). When
@@ -327,6 +339,15 @@ func (o *Ouroboros) leiosnotifyServerRequestNext(
 	}
 	connKey := leiosConnectionIdString(ctx.ConnectionId)
 	done := ctx.Server.DoneChan()
+
+	// If the connection is already closing, return without touching the
+	// cursor map. This prevents re-registering a stale cursor after
+	// removeConn has already run (which would block future log pruning).
+	select {
+	case <-done:
+		return nil, nil
+	default:
+	}
 
 	for {
 		entry, wakeCh := o.leiosEBLog.next(connKey)
