@@ -445,6 +445,11 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		"ledger_quota", p.config.ActivePeersLedgerQuota,
 	)
 
+	// Redial known peers that lost their connection. The close-event
+	// reconnect is one-shot; this is the level-triggered fallback that
+	// keeps the node converging back to connected.
+	p.redialDisconnectedPeersLocked()
+
 	// Collect eligible peers for peer sharing
 	// Copy peer data while holding lock to avoid race conditions
 	var eligiblePeersCopy []Peer

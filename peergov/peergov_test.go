@@ -5872,7 +5872,9 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 		MinScoreThreshold:   0.0,
 	})
 
-	// Add a hot gossip peer to be churned
+	// Add a hot gossip peer to be churned, plus a second higher-scoring
+	// upstream so the churned peer is not the node's last eligible
+	// upstream (churn refuses to close the last one).
 	pg.mu.Lock()
 	pg.peers = []*Peer{
 		{
@@ -5881,6 +5883,13 @@ func TestPeerGovernor_EventsPublished(t *testing.T) {
 			State:            PeerStateHot,
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.5,
+		},
+		{
+			Address:          "192.168.1.2:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			Connection:       &PeerConnection{IsClient: true},
+			PerformanceScore: 0.9,
 		},
 	}
 	pg.mu.Unlock()
