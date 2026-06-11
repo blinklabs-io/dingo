@@ -36,7 +36,7 @@ type Drep struct {
 	AnchorURL     string `gorm:"column:anchor_url;size:128"`
 	Credential    []byte `gorm:"uniqueIndex:idx_drep_credential,priority:2;size:28"`
 	AnchorHash    []byte
-	ID            uint  `gorm:"primarykey"`
+	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
 	CredentialTag uint8  `gorm:"uniqueIndex:idx_drep_credential,priority:1;not null;default:0"`
 	// Last activity epoch (vote, register, update).
