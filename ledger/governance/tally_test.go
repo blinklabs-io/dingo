@@ -119,6 +119,60 @@ func TestTallyDRepVotesIncludesAlwaysNoConfidence(t *testing.T) {
 	assert.False(t, updateCommitteeDecision.DRepApproved)
 }
 
+func TestTallyDRepVotesSeparatesSameHashByCredentialTag(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	drepCred := testBytes(28, 9)
+	keyStakeCred := testBytes(28, 10)
+	scriptStakeCred := testBytes(28, 11)
+
+	require.NoError(t, store.DB().Create(&models.Drep{
+		CredentialTag: 0,
+		Credential:    drepCred,
+		Active:        true,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Drep{
+		CredentialTag: 1,
+		Credential:    drepCred,
+		Active:        true,
+	}).Error)
+	seedDRepStake(
+		t, store, keyStakeCred, drepCred, models.DrepTypeAddrKeyHash, 60,
+		12,
+	)
+	seedDRepStake(
+		t, store, scriptStakeCred, drepCred, models.DrepTypeScriptHash, 40,
+		13,
+	)
+
+	tally := &ProposalTally{
+		ActionType: uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+	}
+	err := tallyDRepVotes(
+		&TallyContext{DB: db},
+		[]*models.GovernanceVote{
+			{
+				VoterType:          models.VoterTypeDRep,
+				VoterCredentialTag: 0,
+				VoterCredential:    drepCred,
+				Vote:               models.VoteYes,
+			},
+			{
+				VoterType:          models.VoterTypeDRep,
+				VoterCredentialTag: 1,
+				VoterCredential:    drepCred,
+				Vote:               models.VoteNo,
+			},
+		},
+		tally,
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, uint64(100), tally.DRepTotalStake)
+	assert.Equal(t, uint64(60), tally.DRepYesStake)
+	assert.Equal(t, uint64(40), tally.DRepNoStake)
+	assert.Equal(t, uint64(0), tally.DRepAbstainStake)
+}
+
 func TestTallyCCVotesRequiresSeatedAuthorizedCommitteeMembers(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	coldA := testBytes(28, 10)

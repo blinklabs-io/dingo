@@ -1010,15 +1010,28 @@ func importDReps(
 		default:
 		}
 
+		credentialTag, err := models.CredentialTagFromUint(
+			uint(drep.Credential.Type),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"importing DRep %x credential type %d: %w",
+				drep.Credential.Hash,
+				drep.Credential.Type,
+				err,
+			)
+		}
 		model := &models.Drep{
-			Credential: drep.Credential.Hash,
-			AnchorURL:  drep.AnchorURL,
-			AnchorHash: drep.AnchorHash,
-			AddedSlot:  slot,
-			Active:     drep.Active,
+			CredentialTag: credentialTag,
+			Credential:    drep.Credential.Hash,
+			AnchorURL:     drep.AnchorURL,
+			AnchorHash:    drep.AnchorHash,
+			AddedSlot:     slot,
+			Active:        drep.Active,
 		}
 
 		reg := &models.RegistrationDrep{
+			CredentialTag:  credentialTag,
 			DrepCredential: drep.Credential.Hash,
 			AnchorURL:      drep.AnchorURL,
 			AnchorHash:     drep.AnchorHash,

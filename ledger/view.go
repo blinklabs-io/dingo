@@ -773,9 +773,10 @@ func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 // for accurate voting power. The current implementation approximates
 // voting power using current live balances.
 func (lv *LedgerView) GetDRepVotingPower(
+	credentialTag uint8,
 	drepCredential []byte,
 ) (uint64, error) {
-	power, err := lv.ls.db.GetDRepVotingPower(drepCredential, lv.txn)
+	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, lv.txn)
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}

@@ -354,7 +354,10 @@ func (d *MetadataStoreSqlite) ImportDrep(
 
 	// Upsert the DRep record
 	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "credential"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "credential"},
+		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"anchor_url", "anchor_hash", "active",
 		}),
@@ -366,7 +369,9 @@ func (d *MetadataStoreSqlite) ImportDrep(
 	if drep.ID == 0 {
 		var existing models.Drep
 		if err := db.Where(
-			"credential = ?", drep.Credential,
+			"credential_tag = ? AND credential = ?",
+			drep.CredentialTag,
+			drep.Credential,
 		).First(&existing).Error; err != nil {
 			return fmt.Errorf(
 				"fetching drep ID after upsert: %w", err,
@@ -380,6 +385,7 @@ func (d *MetadataStoreSqlite) ImportDrep(
 	// uniqueness key.
 	if result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
+			{Name: "credential_tag"},
 			{Name: "drep_credential"},
 			{Name: "added_slot"},
 		},

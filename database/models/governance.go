@@ -14,7 +14,13 @@
 
 package models
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"gorm.io/gorm"
+)
 
 var ErrGovernanceProposalNotFound = errors.New("governance proposal not found")
 
@@ -88,21 +94,53 @@ func (GovernanceProposal) TableName() string {
 // GovernanceVote represents a vote cast by a Constitutional Committee member,
 // DRep, or Stake Pool Operator on a governance proposal.
 type GovernanceVote struct {
-	ID              uint    `gorm:"primarykey"`
-	ProposalID      uint    `gorm:"index:idx_vote_proposal;uniqueIndex:idx_vote_unique,priority:1;not null"`
-	VoterType       uint8   `gorm:"index:idx_vote_voter,priority:1;uniqueIndex:idx_vote_unique,priority:2;not null"` // 0=CC, 1=DRep, 2=SPO
-	VoterCredential []byte  `gorm:"index:idx_vote_voter,priority:2;uniqueIndex:idx_vote_unique,priority:3;size:28;not null"`
-	Vote            uint8   `gorm:"not null"` // 0=No, 1=Yes, 2=Abstain
-	AnchorURL       string  `gorm:"column:anchor_url;size:128"`
-	AnchorHash      []byte  `gorm:"size:32"`
-	AddedSlot       uint64  `gorm:"index;not null"`
-	VoteUpdatedSlot *uint64 `gorm:"index"` // Slot when vote was last changed (for rollback safety)
+	ID                 uint   `gorm:"primarykey"`
+	ProposalID         uint   `gorm:"index:idx_vote_proposal;uniqueIndex:idx_vote_unique,priority:1;not null"`
+	VoterType          uint8  `gorm:"index:idx_vote_voter,priority:1;uniqueIndex:idx_vote_unique,priority:2;not null"` // 0=CC, 1=DRep, 2=SPO
+	VoterCredentialTag uint8  `gorm:"index:idx_vote_voter,priority:2;uniqueIndex:idx_vote_unique,priority:3;not null;default:0"`
+	VoterCredential    []byte `gorm:"index:idx_vote_voter,priority:3;uniqueIndex:idx_vote_unique,priority:4;size:28;not null"`
+	Vote               uint8  `gorm:"not null"` // 0=No, 1=Yes, 2=Abstain
+	AnchorURL          string `gorm:"column:anchor_url;size:128"`
+	AnchorHash         []byte `gorm:"size:32"`
+	AddedSlot          uint64 `gorm:"index;not null"`
+	// Slot when vote was last changed (for rollback safety).
+	VoteUpdatedSlot *uint64 `gorm:"index"`
 	DeletedSlot     *uint64 `gorm:"index"`
 }
 
 // TableName returns the table name
 func (GovernanceVote) TableName() string {
 	return "governance_vote"
+}
+
+// MigrateGovernanceVoteCredentialTagIndex drops the legacy vote uniqueness
+// constraint before AutoMigrate installs the tag-aware composite unique index.
+func MigrateGovernanceVoteCredentialTagIndex(
+	db *gorm.DB,
+	logger *slog.Logger,
+) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&GovernanceVote{}) {
+		return nil
+	}
+	if !db.Migrator().HasIndex(&GovernanceVote{}, "idx_vote_unique") {
+		return nil
+	}
+	if db.Migrator().HasColumn(&GovernanceVote{}, "voter_credential_tag") {
+		return nil
+	}
+	logger.Info(
+		"dropping legacy governance vote unique index before tag-aware migration",
+	)
+	if err := db.Migrator().DropIndex(
+		&GovernanceVote{},
+		"idx_vote_unique",
+	); err != nil {
+		return fmt.Errorf("drop governance vote unique index: %w", err)
+	}
+	return nil
 }
 
 // ResignCommitteeCold represents a resignation certificate for a

@@ -35,6 +35,43 @@ func setupTestStore(t *testing.T) *MetadataStoreSqlite {
 	return store
 }
 
+func TestSetGovernanceVoteUsesCredentialTagInConflictKey(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	cred := []byte("same_hash_drep_vote_12345678")
+	slot := uint64(100)
+	require.NoError(t, store.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         1,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 0,
+		VoterCredential:    cred,
+		Vote:               models.VoteYes,
+		AddedSlot:          slot,
+		VoteUpdatedSlot:    &slot,
+	}, nil))
+	require.NoError(t, store.SetGovernanceVote(&models.GovernanceVote{
+		ProposalID:         1,
+		VoterType:          models.VoterTypeDRep,
+		VoterCredentialTag: 1,
+		VoterCredential:    cred,
+		Vote:               models.VoteNo,
+		AddedSlot:          slot,
+		VoteUpdatedSlot:    &slot,
+	}, nil))
+
+	votes, err := store.GetGovernanceVotes(1, nil)
+	require.NoError(t, err)
+	require.Len(t, votes, 2)
+
+	voteByTag := map[uint8]uint8{}
+	for _, vote := range votes {
+		voteByTag[vote.VoterCredentialTag] = vote.Vote
+	}
+	assert.Equal(t, uint8(models.VoteYes), voteByTag[0])
+	assert.Equal(t, uint8(models.VoteNo), voteByTag[1])
+}
+
 func TestGetConstitution(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
@@ -269,6 +306,7 @@ func TestGetActiveDreps(t *testing.T) {
 
 	// Add an active DRep
 	err = store.SetDrep(
+		0,
 		[]byte("drep_credential_1234567890123456789012345a"),
 		1000,
 		"https://drep1.example.com",
@@ -280,6 +318,7 @@ func TestGetActiveDreps(t *testing.T) {
 
 	// Add another active DRep
 	err = store.SetDrep(
+		0,
 		[]byte("drep_credential_1234567890123456789012345b"),
 		2000,
 		"https://drep2.example.com",
@@ -330,6 +369,7 @@ func TestGetDrep(t *testing.T) {
 
 	// Add an active DRep
 	err = store.SetDrep(
+		0,
 		cred,
 		1000,
 		"https://drep.example.com",
@@ -763,7 +803,7 @@ func TestUpdateDRepActivity(t *testing.T) {
 	cred := []byte("drep_credential_1234567890123456789012345a")
 
 	// Create a DRep
-	err := store.SetDrep(cred, 1000, "https://drep.example.com",
+	err := store.SetDrep(0, cred, 1000, "https://drep.example.com",
 		[]byte("anchor_hash_1234567890123456789012"), true, nil)
 	require.NoError(t, err)
 
@@ -775,7 +815,7 @@ func TestUpdateDRepActivity(t *testing.T) {
 	assert.Equal(t, uint64(0), drep.ExpiryEpoch)
 
 	// Update activity at epoch 100 with inactivity period of 20
-	err = store.UpdateDRepActivity(cred, 100, 20, nil)
+	err = store.UpdateDRepActivity(0, cred, 100, 20, nil)
 	require.NoError(t, err)
 
 	// Verify activity was updated
@@ -786,7 +826,7 @@ func TestUpdateDRepActivity(t *testing.T) {
 	assert.Equal(t, uint64(120), drep.ExpiryEpoch)
 
 	// Update activity again at epoch 110
-	err = store.UpdateDRepActivity(cred, 110, 20, nil)
+	err = store.UpdateDRepActivity(0, cred, 110, 20, nil)
 	require.NoError(t, err)
 
 	drep, err = store.GetDrep(cred, false, nil)
@@ -797,6 +837,7 @@ func TestUpdateDRepActivity(t *testing.T) {
 
 	// Updating a non-existent DRep should return an error
 	err = store.UpdateDRepActivity(
+		0,
 		[]byte("nonexistent_credential_1234567890123456"),
 		200,
 		20,
@@ -814,19 +855,19 @@ func TestGetExpiredDReps(t *testing.T) {
 	credC := []byte("drep_credential_1234567890123456789012345c")
 
 	// Create three DReps
-	err := store.SetDrep(credA, 1000, "", nil, true, nil)
+	err := store.SetDrep(0, credA, 1000, "", nil, true, nil)
 	require.NoError(t, err)
-	err = store.SetDrep(credB, 1000, "", nil, true, nil)
+	err = store.SetDrep(0, credB, 1000, "", nil, true, nil)
 	require.NoError(t, err)
-	err = store.SetDrep(credC, 1000, "", nil, true, nil)
+	err = store.SetDrep(0, credC, 1000, "", nil, true, nil)
 	require.NoError(t, err)
 
 	// Set activity: A expires at epoch 120, B at 130, C at 150
-	err = store.UpdateDRepActivity(credA, 100, 20, nil)
+	err = store.UpdateDRepActivity(0, credA, 100, 20, nil)
 	require.NoError(t, err)
-	err = store.UpdateDRepActivity(credB, 110, 20, nil)
+	err = store.UpdateDRepActivity(0, credB, 110, 20, nil)
 	require.NoError(t, err)
-	err = store.UpdateDRepActivity(credC, 130, 20, nil)
+	err = store.UpdateDRepActivity(0, credC, 130, 20, nil)
 	require.NoError(t, err)
 
 	// At epoch 119: no DReps expired
@@ -858,11 +899,11 @@ func TestGetDRepVotingPower(t *testing.T) {
 	drepCred := []byte("drep_credential_1234567890123456789012345a")
 
 	// Create a DRep
-	err := store.SetDrep(drepCred, 1000, "", nil, true, nil)
+	err := store.SetDrep(0, drepCred, 1000, "", nil, true, nil)
 	require.NoError(t, err)
 
 	// No delegators = zero voting power
-	power, err := store.GetDRepVotingPower(drepCred, nil)
+	power, err := store.GetDRepVotingPower(0, drepCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), power)
 
@@ -926,7 +967,7 @@ func TestGetDRepVotingPower(t *testing.T) {
 	require.NoError(t, result.Error)
 
 	// Voting power should be 5M + 3M + 2M = 10M
-	power, err = store.GetDRepVotingPower(drepCred, nil)
+	power, err = store.GetDRepVotingPower(0, drepCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(10000000), power)
 }

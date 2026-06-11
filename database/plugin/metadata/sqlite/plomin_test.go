@@ -155,6 +155,57 @@ func TestClearDanglingDRepDelegations_ScriptCredentialAlsoCleared(t *testing.T) 
 	assert.Nil(t, acct.Drep)
 }
 
+// A key-hash DRep and script-hash DRep can share the same credential bytes.
+// Dangling cleanup must match both the hash and credential tag before preserving a delegation.
+func TestClearDanglingDRepDelegations_DoesNotCrossMatchCredentialTag(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	sharedCred := bytes.Repeat([]byte{0x66}, 28)
+	keyStake := bytes.Repeat([]byte{0xC2}, 28)
+	scriptStake := bytes.Repeat([]byte{0xC3}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Drep{
+		CredentialTag: 0,
+		Credential:    sharedCred,
+		Active:        true,
+		AddedSlot:     50,
+	}).Error)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: keyStake,
+		Drep:       sharedCred,
+		DrepType:   models.DrepTypeAddrKeyHash,
+		Active:     true,
+		AddedSlot:  100,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: scriptStake,
+		Drep:       sharedCred,
+		DrepType:   models.DrepTypeScriptHash,
+		Active:     true,
+		AddedSlot:  100,
+	}).Error)
+
+	n, err := store.ClearDanglingDRepDelegations(1_000, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	keyAcct, err := store.GetAccountByCredential(0, keyStake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, keyAcct)
+	assert.Equal(t, sharedCred, keyAcct.Drep)
+	assert.Equal(t, models.DrepTypeAddrKeyHash, keyAcct.DrepType)
+	assert.Equal(t, uint64(100), keyAcct.AddedSlot)
+
+	scriptAcct, err := store.GetAccountByCredential(0, scriptStake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, scriptAcct)
+	assert.Nil(t, scriptAcct.Drep)
+	assert.Equal(t, uint64(0), scriptAcct.DrepType)
+	assert.Equal(t, uint64(1_000), scriptAcct.AddedSlot)
+}
+
 // AlwaysAbstain / AlwaysNoConfidence delegations are pseudo-DReps with no
 // credential and must not be touched by the rule.
 func TestClearDanglingDRepDelegations_PseudoDRepDelegationsPreserved(t *testing.T) {

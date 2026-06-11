@@ -70,7 +70,8 @@ func (d *Database) RestoreDrepStateAtSlot(
 	return nil
 }
 
-// GetDrep returns a drep by credential
+// GetDrep returns a drep by credential hash only (no tag filter).
+// Use for the protocol validation path where only a hash is available.
 func (d *Database) GetDrep(
 	cred []byte,
 	includeInactive bool,
@@ -81,6 +82,29 @@ func (d *Database) GetDrep(
 		defer txn.Release()
 	}
 	ret, err := d.metadata.GetDrep(cred, includeInactive, txn.Metadata())
+	if err != nil {
+		return nil, err
+	}
+	if ret == nil {
+		return nil, models.ErrDrepNotFound
+	}
+	return ret, nil
+}
+
+// GetDrepByCredential returns a drep by the full credential identity (tag + hash).
+func (d *Database) GetDrepByCredential(
+	credentialTag uint8,
+	cred []byte,
+	includeInactive bool,
+	txn *Txn,
+) (*models.Drep, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	ret, err := d.metadata.GetDrepByCredential(
+		credentialTag, cred, includeInactive, txn.Metadata(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +130,7 @@ func (d *Database) GetActiveDreps(
 // registration metadata (added_slot, anchor_url, anchor_hash, active)
 // is never overwritten by the vote-replay recovery path.
 func (d *Database) InsertDrepIfAbsent(
+	credentialTag uint8,
 	cred []byte,
 	slot uint64,
 	url string,
@@ -124,6 +149,7 @@ func (d *Database) InsertDrepIfAbsent(
 		}()
 	}
 	if err := d.metadata.InsertDrepIfAbsent(
+		credentialTag,
 		cred,
 		slot,
 		url,
@@ -144,8 +170,10 @@ func (d *Database) InsertDrepIfAbsent(
 
 // GetDRepVotingPower calculates the voting power for a DRep by summing
 // the current stake of all delegated accounts, approximated from live
-// UTxO balance plus reward-account balance.
+// UTxO balance plus reward-account balance. credentialTag distinguishes
+// key (0) from script (1) DRep credentials sharing the same 28-byte hash.
 func (d *Database) GetDRepVotingPower(
+	credentialTag uint8,
 	drepCredential []byte,
 	txn *Txn,
 ) (uint64, error) {
@@ -154,6 +182,7 @@ func (d *Database) GetDRepVotingPower(
 		defer txn.Release()
 	}
 	return d.metadata.GetDRepVotingPower(
+		credentialTag,
 		drepCredential,
 		txn.Metadata(),
 	)
@@ -162,7 +191,7 @@ func (d *Database) GetDRepVotingPower(
 // GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
 // the metadata-store interface for the contract.
 func (d *Database) GetDRepVotingPowerBatch(
-	drepCredentials [][]byte,
+	drepCredentials []models.StakeCredentialRef,
 	txn *Txn,
 ) (map[string]uint64, error) {
 	if txn == nil {
@@ -212,6 +241,7 @@ func (d *Database) GetDRepVotingPowerByType(
 // UpdateDRepActivity updates the DRep's last activity epoch and
 // recalculates the expiry epoch.
 func (d *Database) UpdateDRepActivity(
+	credentialTag uint8,
 	drepCredential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
@@ -228,6 +258,7 @@ func (d *Database) UpdateDRepActivity(
 		}()
 	}
 	if err := d.metadata.UpdateDRepActivity(
+		credentialTag,
 		drepCredential,
 		activityEpoch,
 		inactivityPeriod,

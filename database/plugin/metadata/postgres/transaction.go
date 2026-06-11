@@ -1963,10 +1963,15 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					// Registration (re)creates/activates the DRep regardless of prior state.
 
 					tmpReg := models.RegistrationDrep{
+						CredentialTag:  drepCredTag,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -1978,7 +1983,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					}
 
 					// Persist DRep anchor and active state
-					if err := d.SetDrep(drepCredential, point.Slot, tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1987,6 +1992,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					// the registration fields instead of failing on the unique index.
 					result := db.Clauses(clause.OnConflict{
 						Columns: []clause.Column{
+							{Name: "credential_tag"},
 							{Name: "drep_credential"},
 							{Name: "added_slot"},
 						},
@@ -2003,8 +2009,8 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if tmpReg.ID == 0 {
 						var existing models.RegistrationDrep
 						if err := db.Where(
-							"drep_credential = ? AND added_slot = ?",
-							tmpReg.DrepCredential, tmpReg.AddedSlot,
+							"credential_tag = ? AND drep_credential = ? AND added_slot = ?",
+							drepCredTag, tmpReg.DrepCredential, tmpReg.AddedSlot,
 						).First(&existing).Error; err != nil {
 							return fmt.Errorf(
 								"fetching drep registration ID after upsert: %w",
@@ -2018,8 +2024,13 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.DeregistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					tmpDereg := models.DeregistrationDrep{
+						CredentialTag:  drepCredTag,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -2028,7 +2039,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					// Mark DRep inactive
 					// Ensure we don't create a new DRep during deregistration. Check existence first.
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag, drepCredential, true, txn)
 					if err != nil {
 						if !errors.Is(err, models.ErrDrepNotFound) {
 							return fmt.Errorf("process certificate: %w", err)
@@ -2037,7 +2048,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if existingDrep == nil {
 						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
 					}
-					if err := d.SetDrep(drepCredential, point.Slot, "", nil, false, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, "", nil, false, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2049,8 +2060,13 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
 				case *lcommon.UpdateDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					tmpUpdate := models.UpdateDrep{
+						CredentialTag: drepCredTag,
 						Credential:    drepCredential,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -2062,7 +2078,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					// Update DRep anchor and mark active
 					// Require that the DRep already exists for updates.
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag, drepCredential, true, txn)
 					if err != nil {
 						if !errors.Is(err, models.ErrDrepNotFound) {
 							return fmt.Errorf("process certificate: %w", err)
@@ -2071,7 +2087,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if existingDrep == nil {
 						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
 					}
-					if err := d.SetDrep(drepCredential, point.Slot, tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -3364,7 +3380,12 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpReg := models.RegistrationDrep{
+						CredentialTag:  drepCredTag2,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -3375,13 +3396,14 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpReg.AnchorHash = c.Anchor.DataHash[:]
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot,
+						drepCredTag2, drepCredential, point.Slot,
 						tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					r2 := db.Clauses(clause.OnConflict{
 						Columns: []clause.Column{
+							{Name: "credential_tag"},
 							{Name: "drep_credential"},
 							{Name: "added_slot"},
 						},
@@ -3395,8 +3417,8 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if tmpReg.ID == 0 {
 						var existing models.RegistrationDrep
 						if err := db.Where(
-							"drep_credential = ? AND added_slot = ?",
-							tmpReg.DrepCredential, tmpReg.AddedSlot,
+							"credential_tag = ? AND drep_credential = ? AND added_slot = ?",
+							drepCredTag2, tmpReg.DrepCredential, tmpReg.AddedSlot,
 						).First(&existing).Error; err != nil {
 							return fmt.Errorf(
 								"fetching drep registration ID after upsert (batched): %w",
@@ -3408,13 +3430,18 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.DeregistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpDereg := models.DeregistrationDrep{
+						CredentialTag:  drepCredTag2,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
 						CertificateID:  certIDMap[i],
 					}
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag2, drepCredential, true, txn)
 					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3425,7 +3452,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						)
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot, "", nil, false, txn,
+						drepCredTag2, drepCredential, point.Slot, "", nil, false, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3435,7 +3462,12 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
 				case *lcommon.UpdateDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpUpdate := models.UpdateDrep{
+						CredentialTag: drepCredTag2,
 						Credential:    drepCredential,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -3444,7 +3476,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpUpdate.AnchorURL = c.Anchor.Url
 						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
 					}
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag2, drepCredential, true, txn)
 					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3455,7 +3487,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						)
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot,
+						drepCredTag2, drepCredential, point.Slot,
 						tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -4082,19 +4114,27 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		if cred == nil {
 			continue
 		}
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return fmt.Errorf("genesis drep credential type: %w", err)
+		}
 		drepCred := cred.Credential[:]
 		drep := &models.Drep{
-			Credential:  drepCred,
-			AddedSlot:   0,
-			ExpiryEpoch: state.Expiry,
-			Active:      true,
+			CredentialTag: credentialTag,
+			Credential:    drepCred,
+			AddedSlot:     0,
+			ExpiryEpoch:   state.Expiry,
+			Active:        true,
 		}
 		if state.Anchor != nil {
 			drep.AnchorURL = state.Anchor.Url
 			drep.AnchorHash = state.Anchor.DataHash[:]
 		}
 		if result := db.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "credential"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "credential"},
+			},
 			DoUpdates: clause.AssignmentColumns([]string{
 				"added_slot",
 				"anchor_url",
@@ -4110,6 +4150,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 
 		reg := &models.RegistrationDrep{
+			CredentialTag:  credentialTag,
 			DrepCredential: drepCred,
 			AddedSlot:      0,
 			DepositAmount:  types.Uint64(state.Deposit),
@@ -4120,6 +4161,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 		if result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
+				{Name: "credential_tag"},
 				{Name: "drep_credential"},
 				{Name: "added_slot"},
 			},

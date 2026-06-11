@@ -30,7 +30,7 @@ func TestSqliteGetDRepVotingPowerIncludesReward(t *testing.T) {
 	rewardOnlyStake := []byte("stake_reward_only_123456789012345678901")
 	multiUtxoStake := []byte("stake_multi_utxo_123456789012345678901234")
 
-	require.NoError(t, store.SetDrep(drepCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, drepCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.DB().Create(&models.Account{
 		StakingKey: rewardOnlyStake,
 		Drep:       drepCred,
@@ -60,7 +60,7 @@ func TestSqliteGetDRepVotingPowerIncludesReward(t *testing.T) {
 		AddedSlot:  1000,
 	}).Error)
 
-	power, err := store.GetDRepVotingPower(drepCred, nil)
+	power, err := store.GetDRepVotingPower(0, drepCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1700), power)
 }
@@ -74,8 +74,8 @@ func TestSqliteGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	multiUtxoCred := []byte("drep_multi_utxo_1234567890123456789012345")
 	multiUtxoStake := []byte("stake_multi_utxo_223456789012345678901234")
 
-	require.NoError(t, store.SetDrep(rewardOnlyCred, 1000, "", nil, true, nil))
-	require.NoError(t, store.SetDrep(multiUtxoCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, rewardOnlyCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, multiUtxoCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.DB().Create(&models.Account{
 		StakingKey: rewardOnlyStake,
 		Drep:       rewardOnlyCred,
@@ -106,12 +106,15 @@ func TestSqliteGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	}).Error)
 
 	powers, err := store.GetDRepVotingPowerBatch(
-		[][]byte{rewardOnlyCred, multiUtxoCred},
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: rewardOnlyCred},
+			{Tag: 0, Key: multiUtxoCred},
+		},
 		nil,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(700), powers[string(rewardOnlyCred)])
-	assert.Equal(t, uint64(1000), powers[string(multiUtxoCred)])
+	assert.Equal(t, uint64(700), powers[models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey()])
+	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
 }
 
 func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testing.T) {
@@ -121,7 +124,7 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 	drepCred := []byte("drep_multi_reward_12345678901234567890123")
 	stakeKey := []byte("stake_multi_reward_1234567890123456789012")
 
-	require.NoError(t, store.SetDrep(drepCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, drepCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.DB().Create(&models.Account{
 		StakingKey: stakeKey,
 		Drep:       drepCred,
@@ -144,9 +147,12 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 		AddedSlot:  1000,
 	}).Error)
 
-	powers, err := store.GetDRepVotingPowerBatch([][]byte{drepCred}, nil)
+	powers, err := store.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{{Tag: 0, Key: drepCred}},
+		nil,
+	)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1200), powers[string(drepCred)])
+	assert.Equal(t, uint64(1200), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
 }
 
 func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
@@ -156,7 +162,7 @@ func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
 	cred := []byte("drep_insert_absent_1234567890123456789012")
 	require.NoError(
 		t,
-		store.InsertDrepIfAbsent(cred, 1500, "", nil, true, nil),
+		store.InsertDrepIfAbsent(0, cred, 1500, "", nil, true, nil),
 	)
 
 	drep, err := store.GetDrep(cred, true, nil)
@@ -177,13 +183,13 @@ func TestSqliteInsertDrepIfAbsentLeavesExistingRowUntouched(t *testing.T) {
 	anchorHash := []byte("anchor_hash_1234567890123456789012345678")
 	require.NoError(
 		t,
-		store.SetDrep(cred, 1000, anchorURL, anchorHash, true, nil),
+		store.SetDrep(0, cred, 1000, anchorURL, anchorHash, true, nil),
 	)
 
 	// Attempt repair with placeholder values at a later slot — must be a no-op.
 	require.NoError(
 		t,
-		store.InsertDrepIfAbsent(cred, 9999, "", nil, true, nil),
+		store.InsertDrepIfAbsent(0, cred, 9999, "", nil, true, nil),
 	)
 
 	drep, err := store.GetDrep(cred, true, nil)
@@ -193,4 +199,60 @@ func TestSqliteInsertDrepIfAbsentLeavesExistingRowUntouched(t *testing.T) {
 	assert.Equal(t, anchorURL, drep.AnchorURL)
 	assert.Equal(t, anchorHash, drep.AnchorHash)
 	assert.True(t, drep.Active)
+}
+
+// Import must treat credential_tag as part of the DRep identity.
+// This keeps key-hash and script-hash DReps with the same hash as separate rows.
+func TestSqliteImportDrepUsesCredentialTagInConflictKeys(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	cred := []byte("same_hash_drep_12345678901234")
+
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			CredentialTag: 0,
+			Credential:    cred,
+			AddedSlot:     100,
+			AnchorURL:     "https://key.example/drep.json",
+			Active:        true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  0,
+			DrepCredential: cred,
+			AddedSlot:      100,
+		},
+		nil,
+	))
+	require.NoError(t, store.ImportDrep(
+		&models.Drep{
+			CredentialTag: 1,
+			Credential:    cred,
+			AddedSlot:     100,
+			AnchorURL:     "https://script.example/drep.json",
+			Active:        true,
+		},
+		&models.RegistrationDrep{
+			CredentialTag:  1,
+			DrepCredential: cred,
+			AddedSlot:      100,
+		},
+		nil,
+	))
+
+	keyDrep, err := store.GetDrepByCredential(0, cred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, keyDrep)
+	assert.Equal(t, "https://key.example/drep.json", keyDrep.AnchorURL)
+
+	scriptDrep, err := store.GetDrepByCredential(1, cred, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, scriptDrep)
+	assert.Equal(t, "https://script.example/drep.json", scriptDrep.AnchorURL)
+
+	var regCount int64
+	require.NoError(t, store.DB().Model(&models.RegistrationDrep{}).
+		Where("drep_credential = ? AND added_slot = ?", cred, 100).
+		Count(&regCount).Error)
+	assert.Equal(t, int64(2), regCount)
 }
