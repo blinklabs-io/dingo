@@ -25,8 +25,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mesh"
+	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
-	"github.com/blinklabs-io/dingo/blockfrost"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
@@ -41,10 +43,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/mesh"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
-	"github.com/blinklabs-io/dingo/utxorpc"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
