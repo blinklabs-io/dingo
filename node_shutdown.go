@@ -169,6 +169,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.offchainMetadataFetcher != nil {
+		if stopErr := n.offchainMetadataFetcher.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("off-chain metadata fetcher shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	n.config.logger.Info(
 		"shutdown phase 1 complete",
 		"elapsed", time.Since(shutdownStart).Round(time.Millisecond),

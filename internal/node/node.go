@@ -304,6 +304,20 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				Frequency: cfg.HistoryExpiry.Frequency,
 			}),
 			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
+			dingo.WithOffchainMetadataConfig(
+				dingo.OffchainMetadataConfig{
+					Interval: cfg.OffchainMetadata.Interval,
+					RequestTimeout: cfg.OffchainMetadata.
+						RequestTimeout,
+					UserAgent: cfg.OffchainMetadata.UserAgent,
+					IPFSGatewayURL: cfg.OffchainMetadata.
+						IPFSGatewayURL,
+					BatchSize: cfg.OffchainMetadata.BatchSize,
+					MaxBytes:  cfg.OffchainMetadata.MaxBytes,
+					AllowPrivateAddresses: cfg.OffchainMetadata.
+						AllowPrivateAddresses,
+				},
+			),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithStartEra(string(cfg.StartEra)),

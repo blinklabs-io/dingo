@@ -40,6 +40,7 @@ var MigrateModels = []any{
 	&MoveInstantaneousRewards{},
 	&MoveInstantaneousRewardsReward{},
 	&NetworkState{},
+	&OffchainMetadata{},
 	&Pool{},
 	&PoolOpCertSequence{},
 	&PoolRegistration{},

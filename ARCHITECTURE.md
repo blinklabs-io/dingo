@@ -587,6 +587,7 @@ type Node struct {
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
+    offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
@@ -620,8 +621,9 @@ When `Node.Run()` is called, components are initialized in this order:
 18. Bark C2/archive server (if port configured)
 19. Blockfrost API (if API storage mode and port configured)
 20. Mesh API (if API storage mode and port configured)
-21. Block forger + leader election (if block producer mode)
-22. Wait for shutdown signal
+21. Off-chain metadata fetcher (if API storage mode)
+22. Block forger + leader election (if block producer mode)
+23. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -632,7 +634,8 @@ Graceful shutdown proceeds in phases:
 Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
-  Bark C2/archive server, Blockfrost API, Mesh API
+  Bark C2/archive server, Blockfrost API, Mesh API,
+  off-chain metadata fetcher
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager
@@ -737,6 +740,40 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+
+### Off-chain Metadata Fetching
+
+In `storageMode: api`, `node.go` also starts `internal/offchainmetadata.Fetcher`
+as a background worker. The worker asks the metadata store to discover on-chain
+URL/hash pointers from pool registrations, DRep anchors, governance
+proposal/vote anchors, constitutions, and committee resignations. It then fetches
+due rows asynchronously into the `offchain_metadata` table.
+
+Fetched content is never fed back into consensus or ledger validation. The
+on-chain Blake2b-256 hash remains authoritative: fetched bytes are stored as
+usable only when their Blake2b-256 digest matches the ledger-provided hash.
+Failed, unsupported, or oversized fetches remain in the table with retry
+metadata and diagnostic state. HTTP(S) pointers are fetched directly. `ipfs://`
+pointers are translated to the fetcher's configured IPFS gateway URL, which
+defaults to `https://gateway.pinata.cloud/ipfs/`, while the cache key remains
+the original on-chain URL. Operators can override fetch interval, request
+timeout, user agent, IPFS gateway URL, batch size, max response bytes, and
+private-address allowance through the `offchainMetadata` YAML block, matching
+`DINGO_OFFCHAIN_METADATA_*` environment variables, or
+`--offchain-metadata-*` CLI flags.
+If the worker context is canceled while a request is in flight, the worker drops
+that in-memory result instead of recording a failed fetch, so shutdown does not
+advance retry state. Metadata-store discovery, batch claim, and result update
+calls receive the same worker context, and the worker returns before issuing new
+store work after cancellation.
+The default HTTP transport caps response bytes, follows a small redirect budget,
+and refuses localhost, private, link-local, multicast, and other non-public
+targets so arbitrary ledger URLs and gateway targets do not become unrestricted
+node-side network access.
+
+The worker is intentionally composed at the node boundary. Ledger and database
+indexing code persist the URL/hash pointers; APIs read the local cache through
+the metadata store when they need off-chain documents.
 
 ### Archive And History Expiry Topology
 
@@ -1284,6 +1321,8 @@ Key configuration areas:
 - Peer targets and quotas
 - CBOR cache sizing (hot entries, block LRU)
 - Chainsync client limits and stall timeout
+- Off-chain metadata fetcher interval, request timeout, IPFS gateway, batch
+  size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
 - External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
 

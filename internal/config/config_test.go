@@ -972,6 +972,51 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 	}
 }
 
+func TestLoad_OffchainMetadataConfig(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+offchainMetadata:
+  interval: 2m
+  requestTimeout: 10s
+  userAgent: "dingo-test/1"
+  ipfsGatewayUrl: "https://ipfs.example.test/ipfs/"
+  batchSize: 7
+  maxBytes: 65536
+  allowPrivateAddresses: true
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-offchain-metadata.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	expected := OffchainMetadataConfig{
+		Interval:              2 * time.Minute,
+		RequestTimeout:        10 * time.Second,
+		UserAgent:             "dingo-test/1",
+		IPFSGatewayURL:        "https://ipfs.example.test/ipfs/",
+		BatchSize:             7,
+		MaxBytes:              65536,
+		AllowPrivateAddresses: true,
+	}
+	if cfg.OffchainMetadata != expected {
+		t.Fatalf(
+			"expected off-chain metadata config %+v, got %+v",
+			expected,
+			cfg.OffchainMetadata,
+		)
+	}
+}
+
 func TestLoad_StorageMode(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `

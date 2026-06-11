@@ -185,6 +185,26 @@ type HistoryExpiryConfig struct {
 	Frequency time.Duration `yaml:"frequency" envconfig:"DINGO_HISTORY_EXPIRY_FREQUENCY"`
 }
 
+// OffchainMetadataConfig holds API-mode off-chain metadata fetcher settings.
+// Zero values fall back to the fetcher's internal defaults.
+type OffchainMetadataConfig struct {
+	// Interval controls how often the fetcher discovers and fetches due rows.
+	Interval time.Duration `yaml:"interval" envconfig:"DINGO_OFFCHAIN_METADATA_INTERVAL"`
+	// RequestTimeout limits each HTTP(S) metadata request.
+	RequestTimeout time.Duration `yaml:"requestTimeout" envconfig:"DINGO_OFFCHAIN_METADATA_REQUEST_TIMEOUT"`
+	// UserAgent is sent with outbound metadata requests.
+	UserAgent string `yaml:"userAgent" envconfig:"DINGO_OFFCHAIN_METADATA_USER_AGENT"`
+	// IPFSGatewayURL is the gateway prefix used for ipfs:// URLs.
+	IPFSGatewayURL string `yaml:"ipfsGatewayUrl" envconfig:"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL"`
+	// BatchSize bounds the number of due rows claimed per fetcher pass.
+	BatchSize int `yaml:"batchSize" envconfig:"DINGO_OFFCHAIN_METADATA_BATCH_SIZE"`
+	// MaxBytes bounds the response body bytes read from each document.
+	MaxBytes int64 `yaml:"maxBytes" envconfig:"DINGO_OFFCHAIN_METADATA_MAX_BYTES"`
+	// AllowPrivateAddresses permits fetching private, loopback, and link-local
+	// addresses. Leave false for the default SSRF guard.
+	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_OFFCHAIN_METADATA_ALLOW_PRIVATE_ADDRESSES"`
+}
+
 // DefaultChainsyncConfig returns the default chainsync configuration.
 // StallTimeout must match chainsync.DefaultStallTimeout and the
 // fallback in internal/node/node.go.
@@ -330,6 +350,9 @@ type Config struct {
 
 	// History expiry configuration for local immutable block CBOR expiry.
 	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
+
+	// Off-chain metadata fetcher configuration.
+	OffchainMetadata OffchainMetadataConfig `yaml:"offchainMetadata"`
 
 	// Logging configuration (output format and level)
 	Logging LoggingConfig `yaml:"logging"`
