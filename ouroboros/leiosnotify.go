@@ -120,11 +120,19 @@ func (l *leiosForgedEBLog) registerConn(connKey string) {
 	l.mu.Unlock()
 }
 
+// leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
+// retains. When the log grows beyond this limit, the oldest entries are
+// evicted and any lagging cursors are advanced to the new base. This
+// bounds memory even when a pre-registered or slow peer never calls next.
+const leiosEBLogMaxEntries = 64
+
 // pruneLocked drops head entries whose logical index falls below every
 // registered connection's cursor (i.e. all connections have advanced past
 // them, whether by consuming the entry or by registering after it). When
-// no connections are registered the entire log is pruned. Callers must
-// hold l.mu.
+// no connections are registered the entire log is pruned. If the log still
+// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest
+// entries are evicted and lagging cursors are advanced to the new base.
+// Callers must hold l.mu.
 func (l *leiosForgedEBLog) pruneLocked() {
 	if len(l.items) == 0 {
 		return
@@ -137,6 +145,19 @@ func (l *leiosForgedEBLog) pruneLocked() {
 		}
 	}
 	prunable := minCursor - l.base
+	// Size cap: if the log still exceeds leiosEBLogMaxEntries after
+	// cursor-based pruning, evict the excess from the head. Any cursor
+	// that falls behind the new base (e.g. a pre-registered idle peer)
+	// is advanced to the new base so it does not pin future entries.
+	if capped := len(l.items) - prunable - leiosEBLogMaxEntries; capped > 0 {
+		prunable += capped
+		newBase := l.base + prunable
+		for k, c := range l.cursors {
+			if c < newBase {
+				l.cursors[k] = newBase
+			}
+		}
+	}
 	if prunable <= 0 {
 		return
 	}
