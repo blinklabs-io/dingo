@@ -37,39 +37,102 @@ type leiosForgedEBEntry struct {
 	point ocommon.Point
 }
 
-// leiosForgedEBLog is an append-only log of locally-forged EBs.
-// Each per-connection RequestNext goroutine holds a cursor (index) into
-// the log; when the log grows past the cursor the goroutine wakes up and
-// serves the next entry. The wake channel is closed and replaced on every
-// append so all blocked callers unblock at once.
+// leiosForgedEBLog is an append-only log of locally-forged EBs with
+// per-connection cursors owned by the log itself.
+//
+// Head entries are pruned whenever every registered connection's cursor
+// has advanced past them, so memory scales with the largest per-connection
+// backlog rather than total uptime. When no connections are registered the
+// log is always empty. A new connection registers at the current tail and
+// does not receive EBs forged before it connected. Connections are
+// removed via removeConn, which triggers an immediate prune.
+//
+// The wake channel is closed and replaced on every append so all server
+// goroutines waiting for new entries unblock at once.
 type leiosForgedEBLog struct {
-	mu     sync.Mutex
-	items  []leiosForgedEBEntry
-	wakeCh chan struct{}
+	mu      sync.Mutex
+	items   []leiosForgedEBEntry
+	base    int            // logical index of items[0]
+	cursors map[string]int // connKey → next logical index to serve
+	wakeCh  chan struct{}
 }
 
 func newLeiosForgedEBLog() *leiosForgedEBLog {
-	return &leiosForgedEBLog{wakeCh: make(chan struct{})}
+	return &leiosForgedEBLog{
+		cursors: make(map[string]int),
+		wakeCh:  make(chan struct{}),
+	}
 }
 
-// append adds an entry and wakes all blocked callers.
+// append adds an entry, prunes head entries that all registered connections
+// have advanced past (or all entries when none are registered), and signals
+// all server goroutines waiting for new entries to wake and retry.
 func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
 	l.mu.Lock()
 	l.items = append(l.items, entry)
+	l.pruneLocked()
 	wake := l.wakeCh
 	l.wakeCh = make(chan struct{})
 	l.mu.Unlock()
 	close(wake)
 }
 
-// since returns the entries starting at cursor and the current wake channel.
-func (l *leiosForgedEBLog) since(cursor int) ([]leiosForgedEBEntry, chan struct{}) {
+// next returns the next unserved entry for connKey and the current wake
+// channel. If no entry is available it returns (nil, wakeCh); the caller
+// should wait on wakeCh and retry. A connKey that has never called next
+// is registered at the current tail so it does not receive stale EBs.
+func (l *leiosForgedEBLog) next(connKey string) (*leiosForgedEBEntry, chan struct{}) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if cursor < len(l.items) {
-		return l.items[cursor:], l.wakeCh
+	cursor, exists := l.cursors[connKey]
+	if !exists {
+		// New connection: start at the current tail.
+		cursor = l.base + len(l.items)
+		l.cursors[connKey] = cursor
+	}
+	idx := cursor - l.base
+	if idx < len(l.items) {
+		entry := l.items[idx]
+		l.cursors[connKey] = cursor + 1
+		l.pruneLocked()
+		return &entry, l.wakeCh
 	}
 	return nil, l.wakeCh
+}
+
+// removeConn unregisters a connection cursor and prunes newly freed entries.
+func (l *leiosForgedEBLog) removeConn(connKey string) {
+	l.mu.Lock()
+	delete(l.cursors, connKey)
+	l.pruneLocked()
+	l.mu.Unlock()
+}
+
+// pruneLocked drops head entries whose logical index falls below every
+// registered connection's cursor (i.e. all connections have advanced past
+// them, whether by consuming the entry or by registering after it). When
+// no connections are registered the entire log is pruned. Callers must
+// hold l.mu.
+func (l *leiosForgedEBLog) pruneLocked() {
+	if len(l.items) == 0 {
+		return
+	}
+	// Start at the tail: if no cursors constrain it, prune the full log.
+	minCursor := l.base + len(l.items)
+	for _, c := range l.cursors {
+		if c < minCursor {
+			minCursor = c
+		}
+	}
+	prunable := minCursor - l.base
+	if prunable <= 0 {
+		return
+	}
+	// Zero pruned slots so the GC can reclaim the point.Hash []byte
+	// backing arrays before the backing slice is eventually reallocated.
+	clear(l.items[:prunable])
+	l.items = l.items[prunable:]
+	l.base += prunable
 }
 
 // BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
@@ -259,24 +322,15 @@ func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 func (o *Ouroboros) leiosnotifyServerRequestNext(
 	ctx oleiosnotify.CallbackContext,
 ) (protocol.Message, error) {
-	connKey := leiosConnectionIdString(ctx.ConnectionId)
-
-	o.leiosMu.Lock()
-	cursor := o.leiosNotifyCursors[connKey]
-	o.leiosMu.Unlock()
-
-	var done <-chan struct{}
-	if ctx.Server != nil {
-		done = ctx.Server.DoneChan()
+	if ctx.Server == nil {
+		return nil, nil
 	}
+	connKey := leiosConnectionIdString(ctx.ConnectionId)
+	done := ctx.Server.DoneChan()
 
 	for {
-		entries, wakeCh := o.leiosEBLog.since(cursor)
-		if len(entries) > 0 {
-			entry := entries[0]
-			o.leiosMu.Lock()
-			o.leiosNotifyCursors[connKey] = cursor + 1
-			o.leiosMu.Unlock()
+		entry, wakeCh := o.leiosEBLog.next(connKey)
+		if entry != nil {
 			return &oleiosnotify.MsgBlockOffer{Point: entry.point}, nil
 		}
 		select {

@@ -730,7 +730,12 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 
 	ebCbor, ebHash, txRefCount, err := buildLeiosEB(txs)
 	if err != nil {
-		return fmt.Errorf("build leios EB: %w", err)
+		// No valid transaction references is a skip, not a hard failure.
+		f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot, "error", err)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
+		}
+		return nil
 	}
 
 	if err := f.leiosEBCaster.BroadcastEndorserBlock(slot, ebHash, ebCbor); err != nil {
@@ -749,10 +754,10 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 	return nil
 }
 
-// buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions,
-// returning its CBOR encoding, blake2b-256 hash, number of tx references,
-// and any error. Transactions with invalid hashes or sizes exceeding uint16
-// are silently dropped; the call fails only when no valid references remain.
+// buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
+// Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
+// or sizes exceeding uint16 are silently dropped. Returns an error only
+// when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
 ) (cbor []byte, hash []byte, txRefCount int, err error) {
