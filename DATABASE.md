@@ -523,6 +523,7 @@ FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.deleted_slot = 0
   AND u.payment_key = decode($1, 'hex')
+  AND u.payment_script = $2
 ORDER BY u.added_slot DESC, u.output_idx DESC;
 ```
 
@@ -531,9 +532,10 @@ Historical UTxOs at a slot:
 ```sql
 SELECT u.*
 FROM utxo u
-WHERE u.added_slot <= $2
-  AND (u.deleted_slot = 0 OR u.deleted_slot > $2)
-  AND u.payment_key = decode($1, 'hex');
+WHERE u.added_slot <= $3
+  AND (u.deleted_slot = 0 OR u.deleted_slot > $3)
+  AND u.payment_key = decode($1, 'hex')
+  AND u.payment_script = $2;
 ```
 
 Controlled amount by stake credential:
