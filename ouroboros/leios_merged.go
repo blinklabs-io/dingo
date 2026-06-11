@@ -115,6 +115,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if o.LeiosVotes != nil {
 		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
 	}
+	// Register the block into the Leios pipeline for stage/timing
+	// tracking and EB equivocation detection
+	if o.LeiosPipeline != nil {
+		o.LeiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
+	}
 	return nil
 }
 

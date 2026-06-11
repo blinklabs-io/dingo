@@ -62,3 +62,42 @@ func initVoteManagerMetrics(reg prometheus.Registerer) *voteManagerMetrics {
 		}),
 	}
 }
+
+type pipelineMetrics struct {
+	ebObservedTotal     prometheus.Counter
+	ebEquivocationTotal prometheus.Counter
+	ebCertifiedTotal    prometheus.Counter
+	certsRejectedTotal  *prometheus.CounterVec
+	instancesCount      prometheus.Gauge
+	stagesCount         *prometheus.GaugeVec
+}
+
+func initPipelineManagerMetrics(reg prometheus.Registerer) *pipelineMetrics {
+	factory := promauto.With(reg)
+	return &pipelineMetrics{
+		ebObservedTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_pipeline_eb_observed_total",
+			Help: "number of endorser blocks observed into the leios pipeline",
+		}),
+		ebEquivocationTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_pipeline_eb_equivocation_total",
+			Help: "number of slots with equivocating endorser blocks (more than one distinct EB for the same slot)",
+		}),
+		ebCertifiedTotal: factory.NewCounter(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_pipeline_eb_certified_total",
+			Help: "number of endorser blocks marked certified in the leios pipeline",
+		}),
+		certsRejectedTotal: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: "dingo_metrics_leios_pipeline_certs_rejected_total",
+			Help: "number of leios EB certificates rejected by the pipeline, by reason",
+		}, []string{"reason"}),
+		instancesCount: factory.NewGauge(prometheus.GaugeOpts{
+			Name: "dingo_metrics_leios_pipeline_instances_int",
+			Help: "current number of tracked leios pipeline instances",
+		}),
+		stagesCount: factory.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dingo_metrics_leios_pipeline_ebs_by_stage_int",
+			Help: "current count of tracked endorser blocks by pipeline stage",
+		}, []string{"stage"}),
+	}
+}

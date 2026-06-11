@@ -31,6 +31,7 @@ import (
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -154,6 +155,9 @@ type Config struct {
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
+	// Leios pipeline timing override (experimental, provisional). Nil
+	// uses leios.DefaultPipelineTiming.
+	leiosPipelineTiming *leios.PipelineTiming
 	// Blockfrost API port (0 = disabled)
 	blockfrostPort uint
 	// Chainsync multi-client configuration
@@ -830,6 +834,18 @@ func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
 	return func(c *Config) {
 		// Copy so later caller mutations cannot change live config
 		c.leiosVoterPublicKeys = maps.Clone(keys)
+	}
+}
+
+// WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
+// timing windows. CIP-0164 has not finalized these parameters, so they are
+// kept off-chain and overridable here rather than as protocol parameters.
+// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
+// runMode only.
+func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
+	return func(c *Config) {
+		t := timing
+		c.leiosPipelineTiming = &t
 	}
 }
 

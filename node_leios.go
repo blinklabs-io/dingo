@@ -117,8 +117,12 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// committee computation and the stake snapshot queries behind
 		// it.
 		SlotProvider: n.ledgerState,
-		Registry:     registry,
-		PromRegistry: n.config.promRegistry,
+		// Source the vote-acceptance past bound from the same pipeline
+		// timing the pipeline manager uses, so the two components admit
+		// votes over the same window and cannot drift.
+		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
+		Registry:        registry,
+		PromRegistry:    n.config.promRegistry,
 	})
 	if err != nil {
 		return fmt.Errorf("create leios vote manager: %w", err)
@@ -134,6 +138,43 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 			"component", "node",
 		)
 	}
+	return nil
+}
+
+// leiosPipelineTiming returns the configured pipeline timing, falling back
+// to the provisional defaults when no override is set.
+func (n *Node) leiosPipelineTiming() leios.PipelineTiming {
+	if n.config.leiosPipelineTiming != nil {
+		return *n.config.leiosPipelineTiming
+	}
+	return leios.DefaultPipelineTiming()
+}
+
+// initLeiosPipelineManager builds and starts the Leios pipeline manager and
+// wires it into the ouroboros component so received endorser blocks are
+// tracked through the pipeline. It reuses the same epoch and slot adapters
+// as the vote manager.
+func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
+	mgr, err := leios.NewPipelineManager(leios.PipelineManagerConfig{
+		Logger:   n.config.logger,
+		EventBus: n.eventBus,
+		// LedgerState satisfies leios.SlotProvider directly via
+		// CurrentOrTipSlot; pipeline window decisions are slot-driven.
+		SlotProvider: n.ledgerState,
+		EpochProvider: &epochInfoAdapter{
+			ledgerState: n.ledgerState,
+		},
+		Timing:       n.leiosPipelineTiming(),
+		PromRegistry: n.config.promRegistry,
+	})
+	if err != nil {
+		return fmt.Errorf("create leios pipeline manager: %w", err)
+	}
+	if err := mgr.Start(ctx); err != nil {
+		return fmt.Errorf("start leios pipeline manager: %w", err)
+	}
+	n.leiosPipelineManager = mgr
+	n.ouroboros.LeiosPipeline = mgr
 	return nil
 }
 

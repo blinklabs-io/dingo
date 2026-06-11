@@ -1505,10 +1505,14 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 }
 
 func TestVoteManagerSlotWindowRejects(t *testing.T) {
+	// The past bound is the vote window (offset after the EB produce slot at
+	// which voting closes); the future bound is the clock-skew tolerance.
+	const voteWindow = 10
 	fixture := newManagerFixture(
 		t,
 		func(f *managerFixture, cfg *VoteManagerConfig) {
 			cfg.SlotProvider = &fakeSlotProvider{slot: 1000}
+			cfg.VoteWindowSlots = voteWindow
 		},
 	)
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
@@ -1518,8 +1522,8 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 		voterId  uint64
 		accepted bool
 	}{
-		{"past edge accepted", 1000 - slotWindowPastTolerance, 0, true},
-		{"too far past", 1000 - slotWindowPastTolerance - 1, 1, false},
+		{"past edge accepted", 1000 - voteWindow + 1, 0, true},
+		{"vote window closed", 1000 - voteWindow, 1, false},
 		{"future edge accepted", 1000 + slotWindowFutureTolerance, 2, true},
 		{"too far future", 1000 + slotWindowFutureTolerance + 1, 3, false},
 	} {
@@ -1548,7 +1552,7 @@ func TestVoteManagerSlotWindowRejects(t *testing.T) {
 	key := fixture.keys[3]
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
-	oldSlot := uint64(1000 - slotWindowPastTolerance - 100)
+	oldSlot := uint64(1000 - voteWindow - 100)
 	fixture.mgr.HandleEndorserBlock(oldSlot, ebHash)
 	assert.Empty(
 		t,
