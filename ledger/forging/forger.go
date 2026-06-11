@@ -32,6 +32,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
+// are filtered out (invalid hash, zero size, or size > uint16). It is
+// treated as a skip rather than a hard failure by checkAndForgeLeiosEB.
+var errNoValidTxRefs = errors.New(
+	"no valid transaction references for endorser block",
+)
+
 // Mode represents the forging mode.
 type Mode int
 
@@ -730,6 +737,13 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 
 	ebCbor, ebHash, txRefCount, err := buildLeiosEB(txs)
 	if err != nil {
+		if errors.Is(err, errNoValidTxRefs) {
+			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
+			if f.metrics != nil {
+				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
+			}
+			return nil
+		}
 		return fmt.Errorf("build leios EB: %w", err)
 	}
 
@@ -772,9 +786,7 @@ func buildLeiosEB(
 		})
 	}
 	if len(refs) == 0 {
-		return nil, nil, 0, errors.New(
-			"no valid transaction references for endorser block",
-		)
+		return nil, nil, 0, errNoValidTxRefs
 	}
 	eb := gleios.LeiosEndorserBlock{TransactionReferences: refs}
 	ebCbor, marshalErr := eb.MarshalCBOR()

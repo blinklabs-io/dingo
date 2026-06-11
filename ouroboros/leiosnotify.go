@@ -193,10 +193,16 @@ func (o *Ouroboros) leiosnotifyClientStart(connId ouroboros.ConnectionId) error 
 		)
 	}
 	if conn.LeiosNotify() == nil {
-		// Return silently if LeiosNotify protocol is not supported by peer
+		// Peer does not support LeiosNotify; skip cursor registration.
 		return nil
 	}
+	connKey := leiosConnectionIdString(connId)
+	// Pre-register the server-side cursor now that we know the peer
+	// supports LeiosNotify. This ensures EBs forged between here and
+	// the peer's first RequestNext are not pruned.
+	o.leiosEBLog.registerConn(connKey)
 	if err := conn.LeiosNotify().Client.Sync(); err != nil {
+		o.leiosEBLog.removeConn(connKey)
 		return err
 	}
 	return nil
