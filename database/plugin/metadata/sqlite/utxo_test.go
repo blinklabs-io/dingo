@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 func TestGetLiveUtxosBySlot(t *testing.T) {
@@ -452,4 +453,77 @@ func TestGetScriptLockedSupplyEmpty(t *testing.T) {
 	got, err := store.GetScriptLockedSupply(nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), got)
+}
+
+func TestGetUtxosByAddressUsesPaymentScript(t *testing.T) {
+	store := setupTestDB(t)
+
+	paymentHash := bytes.Repeat([]byte{0xAB}, lcommon.AddressHashSize)
+	stakeHash := bytes.Repeat([]byte{0xCD}, lcommon.AddressHashSize)
+	keyAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeKeyKey,
+		lcommon.AddressNetworkMainnet,
+		paymentHash,
+		stakeHash,
+	)
+	require.NoError(t, err)
+	scriptAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptKey,
+		lcommon.AddressNetworkMainnet,
+		paymentHash,
+		stakeHash,
+	)
+	require.NoError(t, err)
+
+	txID := uint(1)
+	require.NoError(t, store.DB().Create(&models.Transaction{
+		ID:         txID,
+		Hash:       bytes.Repeat([]byte{0x01}, 32),
+		Slot:       10,
+		BlockIndex: 0,
+	}).Error)
+	keyUtxo := models.Utxo{
+		TransactionID: &txID,
+		TxId:          bytes.Repeat([]byte{0x10}, 32),
+		OutputIdx:     0,
+		PaymentKey:    paymentHash,
+		StakingKey:    stakeHash,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		Amount:        types.Uint64(1_000_000),
+	}
+	scriptUtxo := models.Utxo{
+		TransactionID: &txID,
+		TxId:          bytes.Repeat([]byte{0x20}, 32),
+		OutputIdx:     0,
+		PaymentKey:    paymentHash,
+		StakingKey:    stakeHash,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		Amount:        types.Uint64(2_000_000),
+		PaymentScript: true,
+	}
+	require.NoError(t, store.DB().Create(&keyUtxo).Error)
+	require.NoError(t, store.DB().Create(&scriptUtxo).Error)
+
+	keyRows, err := store.GetUtxosByAddress(keyAddr, nil)
+	require.NoError(t, err)
+	require.Len(t, keyRows, 1)
+	assert.False(t, keyRows[0].PaymentScript)
+	assert.Equal(t, keyUtxo.TxId, keyRows[0].TxId)
+
+	scriptRows, err := store.GetUtxosByAddress(scriptAddr, nil)
+	require.NoError(t, err)
+	require.Len(t, scriptRows, 1)
+	assert.True(t, scriptRows[0].PaymentScript)
+	assert.Equal(t, scriptUtxo.TxId, scriptRows[0].TxId)
+
+	orderedRows, err := store.GetUtxosByAddressWithOrdering(
+		&models.UtxoWithOrderingQuery{Addresses: []lcommon.Address{scriptAddr}},
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, orderedRows, 1)
+	assert.True(t, orderedRows[0].PaymentScript)
+	assert.Equal(t, scriptUtxo.TxId, orderedRows[0].TxId)
 }
