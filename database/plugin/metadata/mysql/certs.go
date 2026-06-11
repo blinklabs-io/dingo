@@ -39,7 +39,9 @@ func (d *MetadataStoreMysql) GetStakeRegistrationsByCredential(
 		credentialTag,
 		stakingKey,
 	).
-		Order("id DESC").
+		Joins("LEFT JOIN certs ON certs.id = stake_registration.certificate_id").
+		Joins("LEFT JOIN `transaction` ON `transaction`.id = certs.transaction_id").
+		Order("stake_registration.added_slot DESC, COALESCE(`transaction`.block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
 		Find(&certs)
 	if result.Error != nil {
 		return ret, result.Error
