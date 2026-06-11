@@ -37,27 +37,42 @@ func AppendUtxoAddressOrBranch(
 	ors *[]string,
 	args *[]any,
 	addr ledger.Address,
-) {
+) error {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	pk := addr.PaymentKeyHash()
 	sk := addr.StakeKeyHash()
 	hasPayment := pk != zeroHash
 	hasStake := sk != zeroHash
-	credentialTag, _ := StakeCredentialTagFromAddress(addr)
+	paymentScript := PaymentScriptFromAddress(addr)
 	switch {
 	case hasPayment && hasStake:
+		credentialTag, ok := StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return errors.New("derive stake credential tag from address")
+		}
 		*ors = append(
 			*ors,
-			"(utxo.payment_key = ? AND utxo.credential_tag = ? AND utxo.staking_key = ?)",
+			"(utxo.payment_script = ? AND utxo.payment_key = ? AND utxo.credential_tag = ? AND utxo.staking_key = ?)",
 		)
-		*args = append(*args, pk.Bytes(), credentialTag, sk.Bytes())
+		*args = append(
+			*args,
+			paymentScript,
+			pk.Bytes(),
+			credentialTag,
+			sk.Bytes(),
+		)
 	case hasPayment:
-		*ors = append(*ors, "(utxo.payment_key = ?)")
-		*args = append(*args, pk.Bytes())
+		*ors = append(*ors, "(utxo.payment_script = ? AND utxo.payment_key = ?)")
+		*args = append(*args, paymentScript, pk.Bytes())
 	case hasStake:
+		credentialTag, ok := StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return errors.New("derive stake credential tag from address")
+		}
 		*ors = append(*ors, "(utxo.credential_tag = ? AND utxo.staking_key = ?)")
 		*args = append(*args, credentialTag, sk.Bytes())
 	}
+	return nil
 }
 
 // Utxo represents an unspent transaction output
@@ -163,7 +178,7 @@ func UtxoLedgerToModel(
 	// credential from a key-hash credential. Byron addresses (type
 	// 0b1000) never have this bit set, so they are correctly treated
 	// as non-script.
-	if outAddr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
+	if PaymentScriptFromAddress(outAddr) {
 		ret.PaymentScript = true
 	}
 	skh := outAddr.StakeKeyHash()
@@ -197,6 +212,10 @@ func StakeCredentialTagFromAddress(addr ledger.Address) (uint8, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func PaymentScriptFromAddress(addr ledger.Address) bool {
+	return addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit
 }
 
 // UtxoSlot allows providing a slot number with a ledger.Utxo object

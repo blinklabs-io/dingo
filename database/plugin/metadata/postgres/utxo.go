@@ -239,34 +239,43 @@ func (d *MetadataStorePostgres) GetUtxosDeletedBeforeSlot(
 func addressWhereClause(
 	db *gorm.DB,
 	addr lcommon.Address,
-) *gorm.DB {
+) (*gorm.DB, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	hasPayment := addr.PaymentKeyHash() != zeroHash
 	hasStake := addr.StakeKeyHash() != zeroHash
+	paymentScript := models.PaymentScriptFromAddress(addr)
 
 	switch {
 	case hasPayment && hasStake:
-		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
+		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, fmt.Errorf("derive stake credential tag from address")
+		}
 		return db.Where(
-			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
+			"payment_script = ? AND payment_key = ? AND credential_tag = ? AND staking_key = ?",
+			paymentScript,
 			addr.PaymentKeyHash().Bytes(),
 			credentialTag,
 			addr.StakeKeyHash().Bytes(),
-		)
+		), nil
 	case hasPayment:
 		return db.Where(
-			"payment_key = ?",
+			"payment_script = ? AND payment_key = ?",
+			paymentScript,
 			addr.PaymentKeyHash().Bytes(),
-		)
+		), nil
 	case hasStake:
-		credentialTag, _ := models.StakeCredentialTagFromAddress(addr)
+		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, fmt.Errorf("derive stake credential tag from address")
+		}
 		return db.Where(
 			"credential_tag = ? AND staking_key = ?",
 			credentialTag,
 			addr.StakeKeyHash().Bytes(),
-		)
+		), nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -280,7 +289,10 @@ func (d *MetadataStorePostgres) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
 	if addrQuery == nil {
 		return ret, nil
 	}
@@ -325,7 +337,12 @@ func (d *MetadataStorePostgres) GetUtxosByAddressWithOrdering(
 		var ors []string
 		var args []any
 		for i := range addrs {
-			models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i])
+			if err := models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i]); err != nil {
+				return nil, fmt.Errorf(
+					"GetUtxosByAddressWithOrdering: %w",
+					err,
+				)
+			}
 		}
 		if len(ors) == 0 {
 			base = base.Where("1 = 0")
@@ -437,7 +454,10 @@ func (d *MetadataStorePostgres) GetUtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
 	if addrQuery == nil {
 		return ret, nil
 	}
