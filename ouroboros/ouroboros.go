@@ -89,6 +89,9 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+
+	// Locally-forged EB broadcast log (cursors are owned by the log).
+	leiosEBLog *leiosForgedEBLog
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -155,6 +158,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosEBLog:               newLeiosForgedEBLog(),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -431,6 +435,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.LeiosVotes != nil {
 		o.LeiosVotes.RemoveConnection(leiosConnectionIdString(connId))
 	}
+	// Release the EB log cursor for this connection; frees any log
+	// entries that were only being held for this connection.
+	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
