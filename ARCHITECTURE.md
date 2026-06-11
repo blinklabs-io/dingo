@@ -90,9 +90,9 @@ graph TB
     end
 
     subgraph "External Interfaces"
-        URPC["UTxO RPC<br/><i>utxorpc/</i>"]
-        BFA["Blockfrost API<br/><i>blockfrost/</i>"]
-        Mesh["Mesh API<br/><i>mesh/</i>"]
+        URPC["UTxO RPC<br/><i>api/utxorpc/</i>"]
+        BFA["Blockfrost API<br/><i>api/blockfrost/</i>"]
+        Mesh["Mesh API<br/><i>api/mesh/</i>"]
         Bark["Bark<br/><i>bark/</i>"]
     end
 
@@ -166,9 +166,9 @@ graph LR
     topology["topology"]
     intcfg["internal/config"]
     intnode["internal/node"]
-    utxorpc["utxorpc"]
-    blockfrost["blockfrost"]
-    mesh["mesh"]
+    utxorpc["api/utxorpc"]
+    blockfrost["api/blockfrost"]
+    mesh["api/mesh"]
     bark["bark"]
     mithril["mithril<br/>(no internal dingo imports)"]
     keystore["keystore"]
@@ -512,27 +512,28 @@ dingo/
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
 │   └── topology.go      # Topology and peer-snapshot configuration
-├── blockfrost/          # Blockfrost-compatible REST API
-│   ├── blockfrost.go    # Server lifecycle
-│   ├── adapter.go       # Node state adapter
-│   ├── handlers.go      # HTTP handlers
-│   ├── pagination.go    # Cursor-based pagination
-│   └── types.go         # API response types
-├── mesh/                # Mesh (Rosetta) API
-│   ├── mesh.go          # Server lifecycle
-│   ├── network.go       # /network/* endpoints
-│   ├── account.go       # /account/* endpoints
-│   ├── block.go         # /block/* endpoints
-│   ├── construction.go  # /construction/* endpoints
-│   ├── mempool_api.go   # /mempool/* endpoints
-│   ├── operations.go    # Cardano operation mapping
-│   └── convert.go       # Type conversion utilities
-├── utxorpc/             # UTxO RPC gRPC server
-│   ├── utxorpc.go       # Server setup
-│   ├── query.go         # Query service
-│   ├── submit.go        # Submit service
-│   ├── sync.go          # Sync service
-│   └── watch.go         # Watch service
+├── api/                     # Transport-facing API packages
+│   ├── blockfrost/          # Blockfrost-compatible REST API
+│   │   ├── blockfrost.go    # Server lifecycle
+│   │   ├── adapter.go       # Node state adapter
+│   │   ├── handlers.go      # HTTP handlers
+│   │   ├── pagination.go    # Cursor-based pagination
+│   │   └── types.go         # API response types
+│   ├── mesh/                # Mesh (Rosetta) API
+│   │   ├── mesh.go          # Server lifecycle
+│   │   ├── network.go       # /network/* endpoints
+│   │   ├── account.go       # /account/* endpoints
+│   │   ├── block.go         # /block/* endpoints
+│   │   ├── construction.go  # /construction/* endpoints
+│   │   ├── mempool_api.go   # /mempool/* endpoints
+│   │   ├── operations.go    # Cardano operation mapping
+│   │   └── convert.go       # Type conversion utilities
+│   └── utxorpc/             # UTxO RPC gRPC server
+│       ├── utxorpc.go       # Server setup
+│       ├── query.go         # Query service
+│       ├── submit.go        # Submit service
+│       ├── sync.go          # Sync service
+│       └── watch.go         # Watch service
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
@@ -1164,7 +1165,7 @@ repairs the full manifest synchronously before serving.
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
 
-### Blockfrost API (`blockfrost/`)
+### Blockfrost API (`api/blockfrost/`)
 
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
@@ -1175,11 +1176,11 @@ signers, and account/delegation/registration/reward endpoints. It uses an
 adapter pattern to translate between Dingo's internal state and Blockfrost
 response types and supports Blockfrost-style pagination headers.
 
-### Mesh API (`mesh/`)
+### Mesh API (`api/mesh/`)
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
-### UTxO RPC (`utxorpc/`)
+### UTxO RPC (`api/utxorpc/`)
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
 
@@ -1224,7 +1225,7 @@ Package isolation is enforced by direction, ownership, and composition:
   concrete ledger implementation.
 - `database/` and `database/plugin/*` own persistence and storage backends.
   They should not import node, ledger, mempool, networking, or API packages.
-- API packages (`blockfrost/`, `mesh/`, `utxorpc/`) should expose server logic
+- API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
   through local interfaces. Concrete adapters to `ledger`, `database`, and
   `mempool` are integration boundaries and should remain narrow.
 

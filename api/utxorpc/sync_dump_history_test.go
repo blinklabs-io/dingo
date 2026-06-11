@@ -42,7 +42,7 @@ func (f *fakeDumpHistoryIter) Next(blocking bool) (*chain.ChainIteratorResult, e
 
 func loadTestChainBlocks(t *testing.T, n int) []models.Block {
 	t.Helper()
-	imm, err := immutable.New("../database/immutable/testdata")
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
 	it, err := imm.BlocksFromPoint(ocommon.Point{})
 	require.NoError(t, err)

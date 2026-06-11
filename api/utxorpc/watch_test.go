@@ -47,7 +47,7 @@ func TestWatchTxBuildRollbackMessages_EmitsUndoWhenPointNotFound(t *testing.T) {
 
 func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 	t.Parallel()
-	imm, err := immutable.New("../database/immutable/testdata")
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
 	require.NoError(t, err)
@@ -81,7 +81,7 @@ func TestWatchTxBuildMessages_IdleOnEmptyBlock(t *testing.T) {
 
 func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 	t.Parallel()
-	imm, err := immutable.New("../database/immutable/testdata")
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
 	require.NoError(t, err)
@@ -123,7 +123,7 @@ func TestWatchTxBuildMessages_IdleWhenNoPredicateMatch(t *testing.T) {
 
 func TestWatchTxBuildMessages_ApplyWhenMatching(t *testing.T) {
 	t.Parallel()
-	imm, err := immutable.New("../database/immutable/testdata")
+	imm, err := immutable.New("../../database/immutable/testdata")
 	require.NoError(t, err)
 	iter, err := imm.BlocksFromPoint(ocommon.Point{})
 	require.NoError(t, err)
