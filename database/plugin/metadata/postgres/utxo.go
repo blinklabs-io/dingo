@@ -249,7 +249,7 @@ func addressWhereClause(
 	case hasPayment && hasStake:
 		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
 		if !ok {
-			return nil, fmt.Errorf("derive stake credential tag from address")
+			return nil, errors.New("derive stake credential tag from address")
 		}
 		return db.Where(
 			"payment_script = ? AND payment_key = ? AND credential_tag = ? AND staking_key = ?",
@@ -267,7 +267,7 @@ func addressWhereClause(
 	case hasStake:
 		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
 		if !ok {
-			return nil, fmt.Errorf("derive stake credential tag from address")
+			return nil, errors.New("derive stake credential tag from address")
 		}
 		return db.Where(
 			"credential_tag = ? AND staking_key = ?",
