@@ -553,9 +553,9 @@ func (d *BlobStoreGCS) DeleteBlock(
 // What stays:
 //   - bi<id>: required by BlockByIndex (the chain iterator translates
 //     id→key here; no equivalent index exists in metadata).
-//   - bh<hash>: BlockByHash has a sequential-scan fallback over bp keys,
-//     but on a deep chain that scan is O(N) per call — keeping the index
-//     preserves the fast path.
+//   - bh<hash>: BlockByHash resolves only through this index and treats
+//     a missing entry as a hard miss (ErrBlockNotFound), so the entry
+//     must survive tombstoning to keep the block reachable by hash.
 //
 // What goes:
 //   - bp_metadata: GetBlock short-circuits on the expiry marker before

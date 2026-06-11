@@ -21,9 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
 	"testing"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -176,67 +174,6 @@ func (m *mockBlobTxn) Commit() error {
 func (m *mockBlobTxn) Rollback() error {
 	m.rollbackCount++
 	return nil
-}
-
-// alwaysValidIterator is a test-only helper whose Valid() and
-// ValidForPrefix() methods always return true. That would normally cause
-// infinite iteration; it is safe here only because the test uses an
-// expired/negative deadline to force an immediate timeout. Do not use it where
-// Valid() must eventually transition to false.
-type alwaysValidIterator struct{}
-
-func (it *alwaysValidIterator) Rewind()                    {}
-func (it *alwaysValidIterator) Seek([]byte)                {}
-func (it *alwaysValidIterator) Valid() bool                { return true }
-func (it *alwaysValidIterator) ValidForPrefix([]byte) bool { return true }
-func (it *alwaysValidIterator) Next()                      {}
-func (it *alwaysValidIterator) Item() types.BlobItem       { return nil }
-func (it *alwaysValidIterator) Close()                     {}
-func (it *alwaysValidIterator) Err() error                 { return nil }
-
-func TestBlockByHashScanDeadlineLogsWarningOnce(t *testing.T) {
-	prevDeadline := blockByHashScanDeadline
-	blockByHashScanDeadline = -time.Nanosecond
-	blockByHashScanDeadlineExceededWarned.Store(false)
-	t.Cleanup(func() {
-		blockByHashScanDeadline = prevDeadline
-		blockByHashScanDeadlineExceededWarned.Store(false)
-	})
-
-	var logs bytes.Buffer
-	store := &mockBlobStore{
-		iterator: &alwaysValidIterator{},
-	}
-	db := &Database{
-		blob: store,
-		logger: slog.New(
-			slog.NewJSONHandler(
-				&logs,
-				&slog.HandlerOptions{Level: slog.LevelDebug},
-			),
-		),
-	}
-	txn := db.BlobTxn(false)
-	defer func() {
-		require.NoError(t, txn.Rollback())
-	}()
-
-	_, err := BlockByHashTxn(txn, bytes.Repeat([]byte{0x01}, 32))
-	require.ErrorIs(t, err, models.ErrBlockNotFound)
-
-	_, err = BlockByHashTxn(txn, bytes.Repeat([]byte{0x02}, 32))
-	require.ErrorIs(t, err, models.ErrBlockNotFound)
-
-	logText := logs.String()
-	require.Contains(t, logText, `"level":"WARN"`)
-	require.Equal(
-		t,
-		1,
-		strings.Count(
-			logText,
-			"block hash fallback scan deadline exceeded",
-		),
-	)
 }
 
 func TestDeleteTxBlobsUsesCallerBlobTxn(t *testing.T) {
