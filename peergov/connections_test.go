@@ -456,6 +456,38 @@ func TestCreateOutboundConnection_SuppressesRetryWhenReusableInboundSatisfiesVal
 	}
 }
 
+func TestCreateOutboundConnection_ReturnsWhenGovernorStopped(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	peer := &Peer{
+		Address:           "127.0.0.1:1",
+		NormalizedAddress: "127.0.0.1:1",
+		Source:            PeerSourceTopologyLocalRoot,
+		State:             PeerStateCold,
+		ReconnectDelay:    time.Nanosecond,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	// A nil stopCh means the governor has not started or has already stopped.
+	pg.stopCh = nil
+	pg.mu.Unlock()
+
+	pg.createOutboundConnection(peer)
+
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	if peer.Reconnecting {
+		t.Fatal("reconnecting flag should remain clear when governor is stopped")
+	}
+	if peer.ReconnectCount != 0 {
+		t.Fatalf("reconnect count changed unexpectedly: %d", peer.ReconnectCount)
+	}
+	if peer.ReconnectDelay != time.Nanosecond {
+		t.Fatalf("reconnect delay changed unexpectedly: %s", peer.ReconnectDelay)
+	}
+}
+
 func outboundTestConnId() ouroboros.ConnectionId {
 	return ouroboros.ConnectionId{
 		LocalAddr: &net.TCPAddr{

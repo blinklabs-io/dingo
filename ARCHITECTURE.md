@@ -1023,6 +1023,18 @@ The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
     -------------------------------------------------
 ```
 
+Connection recovery is both edge-triggered and level-triggered. The
+connection-closed event spawns a one-shot reconnect goroutine for the affected
+peer, and each reconcile cycle additionally redials known peers that have no
+connection and no active reconnect goroutine: topology local/public roots
+always (and bootstrap peers while bootstrap promotion is still allowed),
+gossip/ledger peers only when the node has no chain-selection-eligible
+upstream connection left, capped per cycle. This guarantees the node converges
+back to connected even when a close event cannot be attributed to its peer or
+a dial loop exited early. Gossip churn never demotes the peer holding the last
+eligible upstream connection, so routine churn cannot leave the node without a
+chainsync source.
+
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
 falling back to the legacy network bootstrap-peer list only when no embedded

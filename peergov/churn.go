@@ -63,11 +63,28 @@ func (p *PeerGovernor) gossipChurn() {
 
 	// Demote the lowest-scoring peers
 	demoted := 0
+	eligibleUpstreams := p.countEligibleUpstreamsLocked()
 	for i := 0; i < len(hotNonRoot) && demoted < churnCount; i++ {
 		peer := hotNonRoot[i]
 		targetState, canDemote := p.demotionTarget(peer.Source)
 		if !canDemote {
 			continue // Never demote this peer (e.g., local roots)
+		}
+		demotionRemovesEligibleUpstream := targetState == PeerStateCold &&
+			chainSelectionState(
+				p.bootstrapExited,
+				peer.Source,
+				peer.Connection,
+			).eligible
+		// Never close the node's last eligible upstream connection.
+		// Demoting it to cold would leave the node with no chainsync
+		// source until the reconcile redial path recovers it.
+		if demotionRemovesEligibleUpstream && eligibleUpstreams <= 1 {
+			p.config.Logger.Info(
+				"gossip churn: skipping demotion of last eligible upstream peer",
+				"address", peer.Address,
+			)
+			continue
 		}
 		oldSource := peer.Source
 		oldConn := clonePeerConnection(peer.Connection)
@@ -97,6 +114,9 @@ func (p *PeerGovernor) gossipChurn() {
 			oldConn,
 			peer,
 		)
+		if demotionRemovesEligibleUpstream {
+			eligibleUpstreams--
+		}
 
 		demoted++
 		p.config.Logger.Debug(
