@@ -206,9 +206,14 @@ func ProcessVotes(
 
 		// Update DRep activity when a DRep votes (once per DRep per tx)
 		if voterType == models.VoterTypeDRep {
-			credKey := string(voter.Hash[:])
+			var drepCredTag uint8
+			if voter.Type == lcommon.VoterTypeDRepScriptHash {
+				drepCredTag = 1
+			}
+			credKey := string([]byte{drepCredTag}) + string(voter.Hash[:])
 			if !drepActivityUpdated[credKey] {
 				err := db.UpdateDRepActivity(
+					drepCredTag,
 					voter.Hash[:],
 					currentEpoch,
 					drepInactivityPeriod,
@@ -223,6 +228,7 @@ func ProcessVotes(
 					// anchor_hash, active) is preserved and rollback semantics
 					// in RestoreDrepStateAtSlot remain intact.
 					if setErr := db.InsertDrepIfAbsent(
+						drepCredTag,
 						voter.Hash[:],
 						point.Slot,
 						"",
@@ -246,6 +252,7 @@ func ProcessVotes(
 						)
 					}
 					err = db.UpdateDRepActivity(
+						drepCredTag,
 						voter.Hash[:],
 						currentEpoch,
 						drepInactivityPeriod,
@@ -327,12 +334,13 @@ func ProcessVotes(
 			// code handles both cases correctly.
 			updatedSlot := point.Slot
 			vote := &models.GovernanceVote{
-				ProposalID:      proposal.ID,
-				VoterType:       voterType,
-				VoterCredential: voter.Hash[:],
-				Vote:            procedure.Vote,
-				AddedSlot:       point.Slot,
-				VoteUpdatedSlot: &updatedSlot,
+				ProposalID:         proposal.ID,
+				VoterType:          voterType,
+				VoterCredentialTag: voterCredentialTag(voter.Type),
+				VoterCredential:    voter.Hash[:],
+				Vote:               procedure.Vote,
+				AddedSlot:          point.Slot,
+				VoteUpdatedSlot:    &updatedSlot,
 			}
 
 			if procedure.Anchor != nil {
@@ -604,6 +612,16 @@ func extractGovActionInfo(
 		)
 	}
 	return actionType, parentTxHash, parentActionIdx, policyHash, nil
+}
+
+func voterCredentialTag(voterType uint8) uint8 {
+	switch voterType {
+	case lcommon.VoterTypeDRepScriptHash,
+		lcommon.VoterTypeConstitutionalCommitteeHotScriptHash:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // mapVoterType maps gouroboros voter type constants to the database model

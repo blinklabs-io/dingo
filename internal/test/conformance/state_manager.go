@@ -596,12 +596,16 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := drepCert.DrepCredential.Credential
 			m.drepRegistrations[credential] = true
 			m.govState.RegisterDRep(credential)
+			credentialTag, _ := models.CredentialTagFromUint(
+				drepCert.DrepCredential.CredType,
+			)
 
 			// Insert into database
 			drep := models.Drep{
-				Credential: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				CredentialTag: credentialTag,
+				Credential:    credential[:],
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&drep)
 		}
@@ -611,10 +615,17 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := drepCert.DrepCredential.Credential
 			delete(m.drepRegistrations, credential)
 			m.govState.DeregisterDRep(credential)
+			credentialTag, _ := models.CredentialTagFromUint(
+				drepCert.DrepCredential.CredType,
+			)
 
 			// Update database
 			m.db.Model(&models.Drep{}).
-				Where("credential = ?", credential[:]).
+				Where(
+					"credential_tag = ? AND credential = ?",
+					credentialTag,
+					credential[:],
+				).
 				Update("active", false)
 		}
 

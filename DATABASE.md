@@ -121,13 +121,13 @@ erDiagram
 
 ```mermaid
 erDiagram
-    DREP ||..o{ REGISTRATION_DREP : "credential = drep_credential"
-    DREP ||..o{ DEREGISTRATION_DREP : "credential = drep_credential"
-    DREP ||..o{ UPDATE_DREP : "credential"
-    DREP ||..o{ VOTE_DELEGATION : "credential = drep"
-    DREP ||..o{ VOTE_REGISTRATION_DELEGATION : "credential = drep"
-    DREP ||..o{ STAKE_VOTE_DELEGATION : "credential = drep"
-    DREP ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "credential = drep"
+    DREP ||..o{ REGISTRATION_DREP : "credential_tag + credential"
+    DREP ||..o{ DEREGISTRATION_DREP : "credential_tag + credential"
+    DREP ||..o{ UPDATE_DREP : "credential_tag + credential"
+    DREP ||..o{ VOTE_DELEGATION : "drep_type + drep"
+    DREP ||..o{ VOTE_REGISTRATION_DELEGATION : "drep_type + drep"
+    DREP ||..o{ STAKE_VOTE_DELEGATION : "drep_type + drep"
+    DREP ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "drep_type + drep"
     REGISTRATION_DREP ||..|| CERTS : "certificate_id -> certs.id"
     DEREGISTRATION_DREP ||..|| CERTS : "certificate_id -> certs.id"
     UPDATE_DREP ||..|| CERTS : "certificate_id -> certs.id"
@@ -234,12 +234,12 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `credential`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch` | Current DRep state. |
-| `registration_drep` | `id`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. |
-| `deregistration_drep` | `id`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `drep_credential`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
-| `update_drep` | `id`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `credential`, `certificate_id`, `added_slot` | DRep update certificate. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. |
+| `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
+| `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
+| `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
 | `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. |
-| `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `vote`: 0 No, 1 Yes, 2 Abstain. |
+| `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_cred_hash`, `expires_epoch`, `added_slot`, `deleted_slot` | PK `id`; unique `cold_cred_hash`; indexes `added_slot`, `deleted_slot` | Snapshot-imported committee state. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
@@ -834,6 +834,7 @@ SELECT
   gp.action_index,
   gp.action_type,
   gv.voter_type,
+  gv.voter_credential_tag,
   encode(gv.voter_credential, 'hex') AS voter,
   gv.vote
 FROM governance_proposal gp

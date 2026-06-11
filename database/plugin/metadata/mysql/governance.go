@@ -298,6 +298,7 @@ func (d *MetadataStoreMysql) SetGovernanceVote(
 		Columns: []clause.Column{
 			{Name: "proposal_id"},
 			{Name: "voter_type"},
+			{Name: "voter_credential_tag"},
 			{Name: "voter_credential"},
 		},
 		// Note: added_slot is NOT updated on conflict to preserve rollback safety.

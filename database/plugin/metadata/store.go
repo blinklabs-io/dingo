@@ -365,8 +365,20 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Datum, error)
 
-	// GetDrep retrieves a DRep by its credential, optionally including inactive DReps.
+	// GetDrep retrieves a DRep by credential hash only (no tag filter).
+	// Used for the protocol validation path where only a Blake2b224 hash
+	// is available (e.g. LedgerView.DRepRegistration from gouroboros).
 	GetDrep(
+		[]byte, // credential
+		bool, // includeInactive
+		types.Txn,
+	) (*models.Drep, error)
+
+	// GetDrepByCredential retrieves a DRep using the full credential
+	// identity: tag (0=key, 1=script) plus 28-byte hash. Use this for
+	// all internal callers that know the credential type.
+	GetDrepByCredential(
+		uint8, // credentialTag
 		[]byte, // credential
 		bool, // includeInactive
 		types.Txn,
@@ -1127,12 +1139,13 @@ type MetadataStore interface {
 	// DRep voting power and activity methods
 
 	// InsertDrepIfAbsent inserts a minimal DRep row when no record
-	// exists for the given credential. If a row already exists, it is
-	// left untouched: added_slot, anchor_url, anchor_hash, and active
-	// are never overwritten. Used on the vote-replay recovery path to
-	// recreate rows lost during recovery/bootstrap without clobbering
-	// real registration metadata.
+	// exists for the given full credential identity (tag + hash). If a
+	// row already exists, it is left untouched: added_slot, anchor_url,
+	// anchor_hash, and active are never overwritten. Used on the
+	// vote-replay recovery path to recreate rows lost during
+	// recovery/bootstrap without clobbering real registration metadata.
 	InsertDrepIfAbsent(
+		credentialTag uint8,
 		cred []byte,
 		slot uint64,
 		url string,
@@ -1143,18 +1156,21 @@ type MetadataStore interface {
 
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
 	// the current stake of all delegated accounts, approximated from live
-	// UTxO balance plus reward-account balance.
+	// UTxO balance plus reward-account balance. credentialTag distinguishes
+	// key (0) from script (1) DRep credentials that share the same hash.
 	GetDRepVotingPower(
+		uint8, // credentialTag
 		[]byte, // drepCredential
 		types.Txn,
 	) (uint64, error)
 
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
-	// Returns a credential-to-power map; credentials with no delegated
-	// stake are omitted. Used by governance tallying to avoid N+1
-	// per-DRep lookups.
+	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
+	// no delegated stake are omitted. Use StakeCredentialRef to carry both
+	// the tag and hash so that key-hash and script-hash DReps sharing a
+	// 28-byte hash are tallied independently.
 	GetDRepVotingPowerBatch(
-		drepCredentials [][]byte,
+		drepCredentials []models.StakeCredentialRef,
 		txn types.Txn,
 	) (map[string]uint64, error)
 
@@ -1168,8 +1184,10 @@ type MetadataStore interface {
 	) (map[uint64]uint64, error)
 
 	// UpdateDRepActivity updates the DRep's last activity epoch and
-	// recalculates the expiry epoch.
+	// recalculates the expiry epoch. credentialTag distinguishes key (0)
+	// from script (1) DRep credentials that share the same 28-byte hash.
 	UpdateDRepActivity(
+		uint8, // credentialTag
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod

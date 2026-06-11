@@ -747,7 +747,11 @@ func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
 	db := a.ledgerState.Database()
-	drep, err := db.GetDrep(credential.Hash, true, nil)
+	var credentialTag uint8
+	if credential.HasScript {
+		credentialTag = 1
+	}
+	drep, err := db.GetDrepByCredential(credentialTag, credential.Hash, true, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return DRepInfo{}, fmt.Errorf(
@@ -762,7 +766,7 @@ func (a *NodeAdapter) DRep(
 			err,
 		)
 	}
-	power, err := db.GetDRepVotingPower(credential.Hash, nil)
+	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, nil)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get drep voting power %x: %w",

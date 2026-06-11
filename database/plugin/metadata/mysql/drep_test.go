@@ -41,8 +41,8 @@ func TestMysqlGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	multiUtxoCred := testHash28("drep_multi_utxo")
 	multiUtxoStake := testHash28("stake_multi_utxo")
 
-	require.NoError(t, store.SetDrep(rewardOnlyCred, 1000, "", nil, true, nil))
-	require.NoError(t, store.SetDrep(multiUtxoCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, rewardOnlyCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(0, multiUtxoCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.DB().Create(&models.Account{
 		StakingKey: rewardOnlyStake,
 		Drep:       rewardOnlyCred,
@@ -73,18 +73,21 @@ func TestMysqlGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	}).Error)
 
 	powers, err := store.GetDRepVotingPowerBatch(
-		[][]byte{rewardOnlyCred, multiUtxoCred},
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: rewardOnlyCred},
+			{Tag: 0, Key: multiUtxoCred},
+		},
 		nil,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(700), powers[string(rewardOnlyCred)])
-	assert.Equal(t, uint64(1000), powers[string(multiUtxoCred)])
+	assert.Equal(t, uint64(700), powers[models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey()])
+	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
 
-	singlePower, err := store.GetDRepVotingPower(rewardOnlyCred, nil)
+	singlePower, err := store.GetDRepVotingPower(0, rewardOnlyCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), singlePower)
 
-	singlePower, err = store.GetDRepVotingPower(multiUtxoCred, nil)
+	singlePower, err = store.GetDRepVotingPower(0, multiUtxoCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), singlePower)
 }

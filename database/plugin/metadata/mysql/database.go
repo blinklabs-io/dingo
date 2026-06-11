@@ -325,6 +325,20 @@ func (d *MetadataStoreMysql) Start() error {
 			"account credential tag index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateDrepCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"drep credential tag index migration failed: %w", err,
+		)
+	}
+	if err := models.MigrateGovernanceVoteCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"governance vote credential tag index migration failed: %w", err,
+		)
+	}
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",

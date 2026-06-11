@@ -76,6 +76,13 @@ func newDrepCertCache(capacity int) *drepCertCache {
 	}
 }
 
+// drepCertCacheKey returns a composite cache key combining credential_tag and
+// credential so key-hash and script-hash DReps with the same hash are tracked
+// independently.
+func drepCertCacheKey(credentialTag uint8, credential []byte) string {
+	return string([]byte{credentialTag}) + string(credential)
+}
+
 // batchFetchDrepCerts fetches all relevant certificates for the given credentials
 // at or before the given slot. Uses one query per certificate table with JOIN
 // to get cert_index for same-slot disambiguation. Chunks queries to avoid
@@ -100,6 +107,7 @@ func batchFetchDrepCerts(
 		// orders certs within a tx.
 		type regResult struct {
 			DrepCredential []byte
+			CredentialTag  uint8
 			AddedSlot      uint64
 			BlockIndex     uint32
 			CertIndex      uint32
@@ -108,7 +116,7 @@ func batchFetchDrepCerts(
 		}
 		var regRecords []regResult
 		if err := db.Table("registration_drep").
-			Select(`registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index`).
+			Select(`registration_drep.credential_tag, registration_drep.drep_credential, registration_drep.added_slot, registration_drep.anchor_url, registration_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, COALESCE(certs.cert_index, 0) AS cert_index`).
 			Joins("LEFT JOIN certs ON certs.id = registration_drep.certificate_id").
 			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("drep_credential IN ? AND registration_drep.added_slot <= ?", credChunk, slot).
@@ -116,7 +124,7 @@ func batchFetchDrepCerts(
 			return nil, err
 		}
 		for _, r := range regRecords {
-			key := string(r.DrepCredential)
+			key := drepCertCacheKey(r.CredentialTag, r.DrepCredential)
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
 				blockIndex: r.BlockIndex,
@@ -133,13 +141,14 @@ func batchFetchDrepCerts(
 		// Fetch deregistration certificates with block_index + cert_index.
 		type deregResult struct {
 			DrepCredential []byte
+			CredentialTag  uint8
 			AddedSlot      uint64
 			BlockIndex     uint32
 			CertIndex      uint32
 		}
 		var deregRecords []deregResult
 		if err := db.Table("deregistration_drep").
-			Select(`deregistration_drep.drep_credential, deregistration_drep.added_slot, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
+			Select(`deregistration_drep.credential_tag, deregistration_drep.drep_credential, deregistration_drep.added_slot, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
 			Joins("INNER JOIN certs ON certs.id = deregistration_drep.certificate_id").
 			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("drep_credential IN ? AND deregistration_drep.added_slot <= ?", credChunk, slot).
@@ -147,7 +156,7 @@ func batchFetchDrepCerts(
 			return nil, err
 		}
 		for _, r := range deregRecords {
-			key := string(r.DrepCredential)
+			key := drepCertCacheKey(r.CredentialTag, r.DrepCredential)
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
 				blockIndex: r.BlockIndex,
@@ -162,16 +171,17 @@ func batchFetchDrepCerts(
 
 		// Fetch update certificates with block_index + cert_index.
 		type updateResult struct {
-			Credential []byte
-			AddedSlot  uint64
-			BlockIndex uint32
-			CertIndex  uint32
-			AnchorURL  string `gorm:"column:anchor_url"`
-			AnchorHash []byte
+			Credential    []byte
+			CredentialTag uint8
+			AddedSlot     uint64
+			BlockIndex    uint32
+			CertIndex     uint32
+			AnchorURL     string `gorm:"column:anchor_url"`
+			AnchorHash    []byte
 		}
 		var updateRecords []updateResult
 		if err := db.Table("update_drep").
-			Select(`update_drep.credential, update_drep.added_slot, update_drep.anchor_url, update_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
+			Select(`update_drep.credential_tag, update_drep.credential, update_drep.added_slot, update_drep.anchor_url, update_drep.anchor_hash, COALESCE("transaction".block_index, 0) AS block_index, certs.cert_index`).
 			Joins("INNER JOIN certs ON certs.id = update_drep.certificate_id").
 			Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
 			Where("credential IN ? AND update_drep.added_slot <= ?", credChunk, slot).
@@ -179,7 +189,7 @@ func batchFetchDrepCerts(
 			return nil, err
 		}
 		for _, r := range updateRecords {
-			key := string(r.Credential)
+			key := drepCertCacheKey(r.CredentialTag, r.Credential)
 			rec := drepCertRecord{
 				addedSlot:  r.AddedSlot,
 				blockIndex: r.BlockIndex,
@@ -197,7 +207,8 @@ func batchFetchDrepCerts(
 	return cache, nil
 }
 
-// GetDrep gets a drep
+// GetDrep gets a drep by hash only (no tag filter). Used for the protocol
+// validation path where only a Blake2b224 hash is available.
 func (d *MetadataStoreSqlite) GetDrep(
 	cred []byte,
 	includeInactive bool,
@@ -212,6 +223,34 @@ func (d *MetadataStoreSqlite) GetDrep(
 		db = db.Where("active = ?", true)
 	}
 	if result := db.First(&drep, "credential = ?", cred); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &drep, nil
+}
+
+// GetDrepByCredential gets a drep by the full credential identity (tag + hash).
+func (d *MetadataStoreSqlite) GetDrepByCredential(
+	credentialTag uint8,
+	cred []byte,
+	includeInactive bool,
+	txn types.Txn,
+) (*models.Drep, error) {
+	var drep models.Drep
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if !includeInactive {
+		db = db.Where("active = ?", true)
+	}
+	if result := db.First(
+		&drep,
+		"credential_tag = ? AND credential = ?",
+		credentialTag, cred,
+	); result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -261,7 +300,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 			"NOT EXISTS (?)",
 			db.Model(&models.RegistrationDrep{}).
 				Select("1").
-				Where("registration_drep.drep_credential = drep.credential AND registration_drep.added_slot <= ?", slot),
+				Where("registration_drep.credential_tag = drep.credential_tag AND registration_drep.drep_credential = drep.credential AND registration_drep.added_slot <= ?", slot),
 		)
 
 	if result := db.Where(
@@ -296,7 +335,7 @@ func (d *MetadataStoreSqlite) RestoreDrepStateAtSlot(
 
 	// Process each DRep using the cached certificate data
 	for _, drep := range drepsToRestore {
-		key := string(drep.Credential)
+		key := drepCertCacheKey(drep.CredentialTag, drep.Credential)
 
 		// Get registration from cache (must exist due to Phase 1 deletion)
 		lastReg, hasRegAtSlot := cache.registration[key], cache.hasReg[key]
@@ -398,6 +437,7 @@ func (d *MetadataStoreSqlite) GetActiveDreps(
 
 // SetDrep saves a drep
 func (d *MetadataStoreSqlite) SetDrep(
+	credentialTag uint8,
 	cred []byte,
 	slot uint64,
 	url string,
@@ -406,14 +446,18 @@ func (d *MetadataStoreSqlite) SetDrep(
 	txn types.Txn,
 ) error {
 	tmpItem := models.Drep{
-		Credential: cred,
-		AddedSlot:  slot,
-		AnchorURL:  url,
-		AnchorHash: hash,
-		Active:     active,
+		CredentialTag: credentialTag,
+		Credential:    cred,
+		AddedSlot:     slot,
+		AnchorURL:     url,
+		AnchorHash:    hash,
+		Active:        active,
 	}
 	onConflict := clause.OnConflict{
-		Columns: []clause.Column{{Name: "credential"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "credential"},
+		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"added_slot",
 			"anchor_url",
@@ -435,6 +479,7 @@ func (d *MetadataStoreSqlite) SetDrep(
 // the given credential. Existing rows are left untouched so the repair
 // path cannot clobber real registration metadata.
 func (d *MetadataStoreSqlite) InsertDrepIfAbsent(
+	credentialTag uint8,
 	cred []byte,
 	slot uint64,
 	url string,
@@ -443,11 +488,12 @@ func (d *MetadataStoreSqlite) InsertDrepIfAbsent(
 	txn types.Txn,
 ) error {
 	tmpItem := models.Drep{
-		Credential: cred,
-		AddedSlot:  slot,
-		AnchorURL:  url,
-		AnchorHash: hash,
-		Active:     active,
+		CredentialTag: credentialTag,
+		Credential:    cred,
+		AddedSlot:     slot,
+		AnchorURL:     url,
+		AnchorHash:    hash,
+		Active:        active,
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -475,6 +521,7 @@ func (d *MetadataStoreSqlite) InsertDrepIfAbsent(
 //
 // Returns 0 if the DRep has no delegators.
 func (d *MetadataStoreSqlite) GetDRepVotingPower(
+	credentialTag uint8,
 	drepCredential []byte,
 	txn types.Txn,
 ) (uint64, error) {
@@ -497,12 +544,12 @@ func (d *MetadataStoreSqlite) GetDRepVotingPower(
 			WHERE deleted_slot = 0
 			  AND staking_key IN (
 				  SELECT staking_key FROM account
-				  WHERE drep = ? AND active = 1
+				  WHERE drep = ? AND drep_type = ? AND active = 1
 			  )
 			GROUP BY staking_key
 		) u ON u.staking_key = a.staking_key
-		WHERE a.drep = ? AND a.active = 1
-	`, drepCredential, drepCredential).Scan(&totalStake).Error; err != nil {
+		WHERE a.drep = ? AND a.drep_type = ? AND a.active = 1
+	`, drepCredential, credentialTag, drepCredential, credentialTag).Scan(&totalStake).Error; err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
 
@@ -516,7 +563,7 @@ func (d *MetadataStoreSqlite) GetDRepVotingPower(
 // batch variant of GetDRepVotingPower and avoids N+1 queries when
 // tallying governance votes across many active DReps.
 func (d *MetadataStoreSqlite) GetDRepVotingPowerBatch(
-	drepCredentials [][]byte,
+	drepCredentials []models.StakeCredentialRef,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	out := make(map[string]uint64, len(drepCredentials))
@@ -528,23 +575,26 @@ func (d *MetadataStoreSqlite) GetDRepVotingPowerBatch(
 		return nil, err
 	}
 	type row struct {
-		Drep  []byte
-		Stake uint64
+		Drep     []byte
+		DrepType uint64
+		Stake    uint64
 	}
 	// Chunk credentials to stay under SQLite's default bind variable
 	// limit (SQLITE_MAX_VARIABLE_NUMBER = 999). A large active DRep
 	// set on mainnet can easily exceed this in a single IN clause.
-	for start := 0; start < len(drepCredentials); start += sqliteBindVarLimit {
-		end := min(start+sqliteBindVarLimit, len(drepCredentials))
-		chunk := drepCredentials[start:end]
+	// Build separate hash and type slices for the IN clauses.
+	hashes := make([][]byte, len(drepCredentials))
+	for i, ref := range drepCredentials {
+		hashes[i] = ref.Key
+	}
+	for start := 0; start < len(hashes); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(hashes))
+		chunk := hashes[start:end]
 		var rows []row
-		// Aggregate UTxO amounts per staking_key in a subquery before
-		// adding account.reward, otherwise the LEFT JOIN would multiply
-		// the per-account reward by the number of live UTxOs and inflate
-		// the totals. Each account contributes (utxo_sum + reward) once
-		// to its DRep bucket.
+		// Aggregate UTxO amounts per (staking_key, drep_type) before
+		// adding account.reward to avoid fan-out from the LEFT JOIN.
 		if err := db.Raw(`
-			SELECT a.drep AS drep,
+			SELECT a.drep AS drep, a.drep_type AS drep_type,
 				   COALESCE(SUM(
 					   COALESCE(u.utxo_sum, 0)
 					   + COALESCE(CAST(a.reward AS INTEGER), 0)
@@ -562,12 +612,13 @@ func (d *MetadataStoreSqlite) GetDRepVotingPowerBatch(
 				GROUP BY staking_key
 			) u ON u.staking_key = a.staking_key
 			WHERE a.active = 1 AND a.drep IN ?
-			GROUP BY a.drep
+			GROUP BY a.drep, a.drep_type
 		`, chunk, chunk).Scan(&rows).Error; err != nil {
 			return nil, fmt.Errorf("get drep voting power batch: %w", err)
 		}
 		for _, r := range rows {
-			out[string(r.Drep)] = r.Stake
+			ref := models.StakeCredentialRef{Tag: uint8(r.DrepType), Key: r.Drep} //nolint:gosec
+			out[ref.MapKey()] = r.Stake
 		}
 	}
 	return out, nil
@@ -634,6 +685,7 @@ func (d *MetadataStoreSqlite) GetDRepVotingPowerByType(
 // registration. The expiryEpoch is set to activityEpoch + inactivityPeriod.
 // Returns ErrDrepActivityNotUpdated if no matching DRep record was found.
 func (d *MetadataStoreSqlite) UpdateDRepActivity(
+	credentialTag uint8,
 	drepCredential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
@@ -645,7 +697,7 @@ func (d *MetadataStoreSqlite) UpdateDRepActivity(
 	}
 	expiryEpoch := activityEpoch + inactivityPeriod
 	result := db.Model(&models.Drep{}).
-		Where("credential = ?", drepCredential).
+		Where("credential_tag = ? AND credential = ?", credentialTag, drepCredential).
 		Updates(map[string]any{
 			"last_activity_epoch": activityEpoch,
 			"expiry_epoch":        expiryEpoch,

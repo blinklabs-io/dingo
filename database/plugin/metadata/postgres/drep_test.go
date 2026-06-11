@@ -40,7 +40,7 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	rewardOnlyCred := []byte("drep_reward_only_123456789012345678901234")
 	rewardOnlyStake := []byte("stake_reward_only_123456789012345678901")
 
-	require.NoError(t, pgStore.SetDrep(rewardOnlyCred, 1000, "", nil, true, nil))
+	require.NoError(t, pgStore.SetDrep(0, rewardOnlyCred, 1000, "", nil, true, nil))
 	require.NoError(t, pgStore.DB().Create(&models.Account{
 		StakingKey: rewardOnlyStake,
 		Drep:       rewardOnlyCred,
@@ -52,7 +52,7 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	multiUtxoCred := []byte("drep_multi_utxo_1234567890123456789012345")
 	multiUtxoStake := []byte("stake_multi_utxo_123456789012345678901234")
 
-	require.NoError(t, pgStore.SetDrep(multiUtxoCred, 1000, "", nil, true, nil))
+	require.NoError(t, pgStore.SetDrep(0, multiUtxoCred, 1000, "", nil, true, nil))
 	require.NoError(t, pgStore.DB().Create(&models.Account{
 		StakingKey: multiUtxoStake,
 		Drep:       multiUtxoCred,
@@ -76,18 +76,21 @@ func TestPostgresGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	}).Error)
 
 	powers, err := pgStore.GetDRepVotingPowerBatch(
-		[][]byte{rewardOnlyCred, multiUtxoCred},
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: rewardOnlyCred},
+			{Tag: 0, Key: multiUtxoCred},
+		},
 		nil,
 	)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(700), powers[string(rewardOnlyCred)])
-	assert.Equal(t, uint64(1000), powers[string(multiUtxoCred)])
+	assert.Equal(t, uint64(700), powers[models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey()])
+	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
 
-	singlePower, err := pgStore.GetDRepVotingPower(rewardOnlyCred, nil)
+	singlePower, err := pgStore.GetDRepVotingPower(0, rewardOnlyCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), singlePower)
 
-	singlePower, err = pgStore.GetDRepVotingPower(multiUtxoCred, nil)
+	singlePower, err = pgStore.GetDRepVotingPower(0, multiUtxoCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), singlePower)
 }
@@ -100,7 +103,7 @@ func TestPostgresGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *test
 	drepCred := []byte("drep_multi_reward_12345678901234567890123")
 	stakeKey := []byte("stake_multi_reward_1234567890123456789012")
 
-	require.NoError(t, pgStore.SetDrep(drepCred, 1000, "", nil, true, nil))
+	require.NoError(t, pgStore.SetDrep(0, drepCred, 1000, "", nil, true, nil))
 	require.NoError(t, pgStore.DB().Create(&models.Account{
 		StakingKey: stakeKey,
 		Drep:       drepCred,
@@ -123,11 +126,14 @@ func TestPostgresGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *test
 		AddedSlot:  1000,
 	}).Error)
 
-	powers, err := pgStore.GetDRepVotingPowerBatch([][]byte{drepCred}, nil)
+	powers, err := pgStore.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{{Tag: 0, Key: drepCred}},
+		nil,
+	)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1200), powers[string(drepCred)])
+	assert.Equal(t, uint64(1200), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
 
-	singlePower, err := pgStore.GetDRepVotingPower(drepCred, nil)
+	singlePower, err := pgStore.GetDRepVotingPower(0, drepCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), singlePower)
 }

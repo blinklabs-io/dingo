@@ -1129,7 +1129,10 @@ func (d *MetadataStoreSqlite) ClearDanglingDRepDelegations(
 	// surprising semantics around NULL values in the subquery result.
 	liveDrepExists := db.Model(&models.Drep{}).
 		Select("1").
-		Where("drep.credential = account.drep AND drep.active = ?", true)
+		Where(
+			"drep.credential_tag = account.drep_type AND drep.credential = account.drep AND drep.active = ?",
+			true,
+		)
 	result := db.Model(&models.Account{}).
 		Where("drep IS NOT NULL").
 		Where(
