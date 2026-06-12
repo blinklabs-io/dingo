@@ -274,6 +274,49 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)")
 }
 
+// --- GetAccountState (ShelleyAccountStateQuery) -----------------------------
+
+// TestQueryShelleyAccountState_Empty proves GetAccountState answers with the
+// treasury/reserves pots even when no network state has been captured yet
+// (zeros). The wire shape is [ [treasury, reserves] ] (CBOR 81 82 00 00),
+// verified against cardano-node's GetAccountState reply.
+func TestQueryShelleyAccountState_Empty(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	result, err := ls.queryShelleyAccountState()
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any wrapper")
+	require.Len(t, arr, 1)
+	st, ok := arr[0].(olocalstatequery.AccountState)
+	require.True(t, ok, "inner element must be an AccountState")
+	assert.Zero(t, st.Treasury)
+	assert.Zero(t, st.Reserves)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	assert.Equal(t, "81820000", hex.EncodeToString(encoded),
+		"empty GetAccountState must encode to [ [0, 0] ] (matches cardano-node)")
+}
+
+// TestAccountStateResult_SignedRoundTrip confirms the [ [treasury, reserves] ]
+// wire shape round-trips through gouroboros' AccountStateResult, including a
+// negative reserves value (Coin is signed; a misconfigured network can drive
+// reserves below zero, as observed on the devnet's cardano-node).
+func TestAccountStateResult_SignedRoundTrip(t *testing.T) {
+	result := []any{
+		olocalstatequery.AccountState{Treasury: 500_000_000, Reserves: -1234},
+	}
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.AccountStateResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, int64(500_000_000), decoded.State.Treasury)
+	assert.Equal(t, int64(-1234), decoded.State.Reserves)
+}
+
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------
 
 // stakeCred28 builds a 28-byte stake-credential hash from a single byte

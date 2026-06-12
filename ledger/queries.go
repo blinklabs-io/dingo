@@ -453,6 +453,8 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyStakePools()
 	case *olocalstatequery.ShelleyDRepStateQuery:
 		return ls.queryShelleyDRepState(q.Credentials.Items())
+	case *olocalstatequery.ShelleyAccountStateQuery:
+		return ls.queryShelleyAccountState()
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -539,6 +541,30 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// expects (verified against cardano-node: an empty result is the CBOR
 	// `81 a0`, i.e. [ {} ]).
 	return []any{result}, nil
+}
+
+// queryShelleyAccountState answers GetAccountState: the chain's treasury and
+// reserves pots. cardano-cli issues this while balancing a transaction, so
+// leaving it unhandled tears down the connection. The account state is wrapped
+// in the single-element result array, so the wire shape is
+// [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
+// reserves negative).
+func (ls *LedgerState) queryShelleyAccountState() (any, error) {
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return nil, err
+	}
+	var treasury, reserves int64
+	if state != nil {
+		treasury = int64(state.Treasury) //nolint:gosec // pot values fit in int64
+		reserves = int64(state.Reserves) //nolint:gosec // pot values fit in int64
+	}
+	return []any{
+		olocalstatequery.AccountState{
+			Treasury: treasury,
+			Reserves: reserves,
+		},
+	}, nil
 }
 
 // drepDeposit returns the current dRepDeposit protocol parameter, which is the
