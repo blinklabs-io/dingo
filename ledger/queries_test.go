@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"math"
@@ -169,6 +170,78 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// --- GetStakePools (ShelleyStakePoolsQuery) ---------------------------------
+
+// poolHash28 builds a 28-byte pool key hash from a single byte pattern.
+func poolHash28(b byte) []byte {
+	out := make([]byte, 28)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+// TestStakePoolsResult_CanonicalEncoding proves the GetStakePools result is
+// wire-compatible with cardano-cli: the pool set is sorted into ascending
+// canonical order and CBOR-encodes to a set (tag 258) wrapped in the
+// single-element result array, round-tripping through gouroboros'
+// StakePoolsResult (the type cardano-node uses on the wire). An untagged or
+// unsorted set is rejected by cardano-cli ("expected tag" / "Canonicity
+// violation while decoding Set").
+func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
+	// Deliberately unsorted input.
+	keyHashes := [][]byte{
+		poolHash28(0xCC),
+		poolHash28(0x11),
+		poolHash28(0x99),
+	}
+	result := stakePoolsResult(keyHashes)
+
+	// Wire shape: []any{ cbor.Set{ poolIds... } }
+	require.Len(t, result, 1)
+	set, ok := result[0].(cbor.Set)
+	require.True(t, ok, "inner element must be a cbor.Set (tag 258)")
+	require.Len(t, set, 3)
+
+	// Elements must be in ascending byte order (canonical set).
+	for i := 1; i < len(set); i++ {
+		prev := set[i-1].(ledger.PoolId)
+		cur := set[i].(ledger.PoolId)
+		assert.Negative(t, bytes.Compare(prev[:], cur[:]),
+			"pool ids must be sorted ascending for a canonical set")
+	}
+
+	// Encode and decode through gouroboros' StakePoolsResult, which is the
+	// exact type cardano clients use to read GetStakePools off the wire.
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakePoolsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err, "result must decode as cardano-cli expects")
+	require.Len(t, decoded.Results, 3)
+	// The decoded order matches the canonical (sorted) order we emitted.
+	assert.Equal(t, ledger.PoolId(poolHash28(0x11)), decoded.Results[0])
+	assert.Equal(t, ledger.PoolId(poolHash28(0x99)), decoded.Results[1])
+	assert.Equal(t, ledger.PoolId(poolHash28(0xCC)), decoded.Results[2])
+}
+
+// TestStakePoolsResult_Empty verifies an empty pool set still produces the
+// tagged, wrapped wire shape (an empty set), not a bare/absent value.
+func TestStakePoolsResult_Empty(t *testing.T) {
+	result := stakePoolsResult(nil)
+	require.Len(t, result, 1)
+	set, ok := result[0].(cbor.Set)
+	require.True(t, ok, "inner element must be a cbor.Set")
+	require.Empty(t, set)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakePoolsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	require.Empty(t, decoded.Results)
 }
 
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------

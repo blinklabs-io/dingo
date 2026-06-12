@@ -15,10 +15,12 @@
 package ledger
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -445,6 +447,8 @@ func (ls *LedgerState) queryShelley(
 		)
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
 		return ls.queryLedgerPeerSnapshot(q.PeerKind)
+	case *olocalstatequery.ShelleyStakePoolsQuery:
+		return ls.queryShelleyStakePools()
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -457,7 +461,6 @@ func (ls *LedgerState) queryShelley(
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyStakePoolsQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
@@ -472,6 +475,36 @@ func (ls *LedgerState) queryShelley(
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
+}
+
+// queryShelleyStakePools answers GetStakePools: the set of currently
+// registered (active, non-retired) stake pool IDs. cardano-cli issues this
+// query unconditionally while balancing a transaction (e.g. `transaction
+// build`), so leaving it unhandled tears down the local-state-query
+// connection.
+func (ls *LedgerState) queryShelleyStakePools() (any, error) {
+	keyHashes, err := ls.db.GetActivePoolKeyHashes(nil)
+	if err != nil {
+		return nil, err
+	}
+	return stakePoolsResult(keyHashes), nil
+}
+
+// stakePoolsResult builds the GetStakePools wire result from a list of pool
+// key hashes: a CBOR set (tag 258) of pool IDs wrapped in the single-element
+// array the query's StructAsArray result type decodes from. cardano-cli is
+// strict about both: a plain (untagged) array fails to decode with "expected
+// tag", and an unsorted set fails with "Canonicity violation while decoding
+// Set". The hashes are therefore emitted in ascending byte order.
+func stakePoolsResult(keyHashes [][]byte) []any {
+	slices.SortFunc(keyHashes, bytes.Compare)
+	poolIds := make(cbor.Set, 0, len(keyHashes))
+	for _, kh := range keyHashes {
+		var id ledger.PoolId
+		copy(id[:], kh)
+		poolIds = append(poolIds, id)
+	}
+	return []any{poolIds}
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(
