@@ -1679,3 +1679,128 @@ func testHashBytes(seed string) []byte {
 	sum := sha256.Sum256([]byte(seed))
 	return append([]byte(nil), sum[:]...)
 }
+
+// A peer whose own reported tip is below the Mithril trust boundary is
+// merely behind (still syncing or stuck) — its FindIntersect matched an
+// old rung of our intersect ladder, which is not evidence of a competing
+// fork. The rollback must still be refused, but the resync reason must
+// classify the peer as stale rather than divergent so peer governance
+// can back off instead of treating it as hostile.
+func TestHandleEventChainsyncRollbackClassifiesStalePeerBelowMithrilBoundary(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+			// The peer's own tip sits below our trust boundary.
+			Tip: fixture.ancestorTip,
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected stale-peer resync event",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonPeerTipBehindMithril,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
+}
+
+// A peer that claims a tip at or above the Mithril trust boundary yet
+// asks us to roll back below it does not carry our certified boundary
+// block (always offered as an intersect point), so its chain genuinely
+// diverges below the trust anchor and must be rejected as divergent.
+func TestHandleEventChainsyncRollbackRejectsDivergentPeerTipAboveMithrilBoundary(
+	t *testing.T,
+) {
+	fixture := newChainsyncRollbackFixture(t)
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	fixture.ls.config.EventBus = bus
+	fixture.ls.mithrilLedgerSlot = fixture.currentTip.Point.Slot
+
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+
+	err := fixture.ls.handleEventChainsyncRollback(
+		ChainsyncEvent{
+			ConnectionId: fixture.connId,
+			Point:        fixture.ancestorTip.Point,
+			// The peer claims a tip past our boundary while demanding a
+			// rollback below it.
+			Tip: ochainsync.Tip{
+				Point: ocommon.NewPoint(
+					fixture.currentTip.Point.Slot+10,
+					testHashBytes("divergent-peer-tip"),
+				),
+				BlockNumber: fixture.currentTip.BlockNumber + 1,
+			},
+		},
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
+	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
+
+	e := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected divergent-peer resync event",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		e.Reason,
+	)
+	assert.Equal(t, fixture.connId, e.ConnectionId)
+}

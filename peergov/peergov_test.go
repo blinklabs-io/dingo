@@ -7376,6 +7376,57 @@ func TestHandleInboundConnection_TopologyHostMatch(t *testing.T) {
 		"event-carried IsDuplex must be recorded when no connmanager is wired")
 }
 
+// TestHandleInboundConnection_ResetsOutboundBackoff pins the invariant
+// that an inbound connection from a topology peer clears the full
+// outbound backoff state, including OutboundShortLivedCount — the
+// counter shortLivedReconnectDelay derives the backoff rung from. If
+// only ReconnectDelay/ReconnectCount were cleared, the next
+// short-lived outbound session would resume at the old elevated rung
+// instead of restarting from initialReconnectDelay.
+func TestHandleInboundConnection_ResetsOutboundBackoff(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	seedTopologyPeer(
+		pg,
+		"44.0.0.1:3001",
+		"44.0.0.1:3001",
+		"local-root-0",
+		PeerSourceTopologyLocalRoot,
+	)
+	pg.mu.Lock()
+	pg.peers[0].ReconnectDelay = 8 * time.Second
+	pg.peers[0].ReconnectCount = 3
+	pg.peers[0].OutboundShortLivedCount = 5
+	pg.mu.Unlock()
+
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	peer := peers[0]
+	assert.Equal(t, time.Duration(0), peer.ReconnectDelay,
+		"inbound from topology peer must clear ReconnectDelay")
+	assert.Equal(t, 0, peer.ReconnectCount,
+		"inbound from topology peer must clear ReconnectCount")
+	assert.Equal(t, uint32(0), peer.OutboundShortLivedCount,
+		"inbound from topology peer must clear OutboundShortLivedCount so the next short-lived outbound restarts from the initial backoff rung")
+}
+
 func TestHandleInboundConnection_AmbiguousHostCreatesNewPeer(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),

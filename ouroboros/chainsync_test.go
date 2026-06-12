@@ -1597,3 +1597,53 @@ func TestChainsyncServerFindIntersect_NormalPointListAccepted(t *testing.T) {
 	)
 	require.NoError(t, err)
 }
+
+// Both Mithril-boundary rejection reasons must close the connection for a
+// fresh intersect AND deny the peer for a cooldown. Without the deny, a
+// peer whose chain is refused at the trust boundary is redialed roughly
+// every backoff interval and rejected ~600ms later, forever.
+func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
+	t *testing.T,
+) {
+	tests := []struct {
+		reason         string
+		wantFresh      bool
+		wantDeniesPeer bool
+	}{
+		{
+			reason:         event.ChainsyncResyncReasonRollbackExceedsMithril,
+			wantFresh:      true,
+			wantDeniesPeer: true,
+		},
+		{
+			reason:         event.ChainsyncResyncReasonPeerTipBehindMithril,
+			wantFresh:      true,
+			wantDeniesPeer: true,
+		},
+		// Existing behavior pins
+		{
+			reason:         event.ChainsyncResyncReasonRollbackExceedsK,
+			wantFresh:      true,
+			wantDeniesPeer: true,
+		},
+		{
+			reason:         event.ChainsyncResyncReasonLocalTipPlateau,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+	}
+	for _, tt := range tests {
+		if got := chainsyncResyncRequiresFreshConnection(tt.reason); got != tt.wantFresh {
+			t.Errorf(
+				"chainsyncResyncRequiresFreshConnection(%q) = %v, want %v",
+				tt.reason, got, tt.wantFresh,
+			)
+		}
+		if got := chainsyncResyncDeniesPeer(tt.reason); got != tt.wantDeniesPeer {
+			t.Errorf(
+				"chainsyncResyncDeniesPeer(%q) = %v, want %v",
+				tt.reason, got, tt.wantDeniesPeer,
+			)
+		}
+	}
+}

@@ -500,3 +500,70 @@ func outboundTestConnId() ouroboros.ConnectionId {
 		},
 	}
 }
+
+// Repeated short-lived sessions must keep escalating the reconnect delay
+// even though the reconnect goroutine consumes and zeroes ReconnectDelay
+// before each redial. Without escalation a peer that accepts connections
+// but is rejected ~600ms later (e.g. its chain fails the Mithril trust
+// boundary check) is redialed every ~2s forever.
+func TestHandleConnectionClosedEvent_ShortLivedBackoffEscalatesAfterDelayConsumed(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	connId := outboundTestConnId()
+	peer := &Peer{
+		Address:           "192.168.12.101:3003",
+		NormalizedAddress: "192.168.12.101:3003",
+		Source:            PeerSourceTopologyLocalRoot,
+		// Suppress reconnect goroutine; this test only checks close accounting.
+		Reconnecting: true,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{peer}
+	pg.mu.Unlock()
+
+	wantDelays := []time.Duration{
+		1 * time.Second,
+		2 * time.Second,
+		4 * time.Second,
+		8 * time.Second,
+		16 * time.Second,
+		32 * time.Second,
+		64 * time.Second,
+		128 * time.Second,
+		128 * time.Second, // capped at maxReconnectDelay
+	}
+	for i, want := range wantDelays {
+		// Simulate the production cycle: the reconnect goroutine consumed
+		// and zeroed the stored delay, redialed successfully, and the new
+		// session lasted well under minStableConnectionDuration.
+		pg.mu.Lock()
+		peer.ReconnectDelay = 0
+		peer.Connection = &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		}
+		peer.State = PeerStateWarm
+		peer.ConnectedAt = time.Now().Add(-600 * time.Millisecond)
+		pg.mu.Unlock()
+
+		pg.handleConnectionClosedEvent(event.NewEvent(
+			connmanager.ConnectionClosedEventType,
+			connmanager.ConnectionClosedEvent{
+				ConnectionId: connId,
+			},
+		))
+
+		pg.mu.Lock()
+		got := peer.ReconnectDelay
+		pg.mu.Unlock()
+		if got != want {
+			t.Fatalf(
+				"close %d: ReconnectDelay = %s, want %s",
+				i+1, got, want,
+			)
+		}
+	}
+}

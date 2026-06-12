@@ -154,6 +154,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonPersistentFork,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
@@ -165,7 +166,9 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 func chainsyncResyncDeniesPeer(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonForkResolutionExceedsK:
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonPeerTipBehindMithril:
 		return true
 	default:
 		return false
@@ -184,7 +187,7 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 	address := connId.RemoteAddr.String()
 	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
 	o.config.Logger.Warn(
-		"temporarily denying divergent chainsync peer",
+		"temporarily denying chainsync peer whose chain we cannot follow",
 		"connection_id", connId.String(),
 		"address", address,
 		"reason", reason,
