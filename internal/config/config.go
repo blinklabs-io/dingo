@@ -398,6 +398,10 @@ type MithrilConfig struct {
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
 	AggregatorURL string `yaml:"aggregatorUrl"      envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// Backend selects the Mithril artifact backend: "v2" (default) uses
+	// incremental Cardano database artifacts; "v1" uses the legacy full
+	// snapshot archives, which upstream Mithril is phasing out.
+	Backend string `yaml:"backend"            envconfig:"DINGO_MITHRIL_BACKEND"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
@@ -531,6 +535,7 @@ var globalConfig = &Config{
 	// Mithril defaults
 	Mithril: MithrilConfig{
 		Enabled:            true,
+		Backend:            "v2",
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
 	},

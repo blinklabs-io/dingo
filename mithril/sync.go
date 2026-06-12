@@ -82,6 +82,7 @@ type SyncConfig struct {
 	StorageMode            string                     // "api" | "core"
 	CardanoNodeConfig      *cardano.CardanoNodeConfig // genesis + Mithril verification keys; if nil, loaded from EmbeddedConfigFS for Network
 	CardanoConfigPath      string                     // optional explicit config.json path (else "<network>/config.json")
+	Backend                string                     // Mithril artifact backend; same semantics as BootstrapConfig.Backend (empty selects v2)
 	AggregatorURL          string                     // optional; defaults per-network
 	DownloadDir            string                     // optional; defaults to <DataDir>/.mithril-cache
 	DownloadIdleTimeout    string                     // optional; passed to BootstrapConfig
@@ -132,6 +133,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	cfg.Backend = normalizeBackend(cfg.Backend)
 
 	network := cfg.Network
 
@@ -194,6 +196,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		ctx,
 		BootstrapConfig{
 			Network:                network,
+			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
 			DownloadDir:            downloadDir,
 			CleanupAfterLoad:       cfg.CleanupAfterLoad,

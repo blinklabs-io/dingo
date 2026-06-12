@@ -314,11 +314,17 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril list
 
 # Show snapshot details
-./dingo -n preview mithril show <digest>
+./dingo -n preview mithril show <hash>
 
 # Download and import
 ./dingo -n preview mithril sync
 ```
+
+Two Mithril artifact backends are supported via `mithril.backend` (or
+`--mithril-backend`): `v2` (default) restores from incremental per-immutable-file
+archives verified against the certified merkle root, while `v1` uses the legacy
+full snapshot tarballs, which upstream Mithril is phasing out. The `mithril list`
+and `mithril show` subcommands follow the configured backend.
 
 This imports:
 - All blocks from genesis (stored in blob store for serving peers)

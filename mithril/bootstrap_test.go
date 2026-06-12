@@ -153,6 +153,7 @@ func TestBootstrap(t *testing.T) {
 	var progressCalled atomic.Int32
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:          "preprod",
+		Backend:          BackendV1,
 		AggregatorURL:    server.URL,
 		DownloadDir:      downloadDir,
 		CleanupAfterLoad: true,
@@ -227,6 +228,7 @@ func TestBootstrapUsesDigestSpecificExtractDir(t *testing.T) {
 
 	result, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:       "preprod",
+		Backend:       BackendV1,
 		AggregatorURL: server.URL,
 		DownloadDir:   downloadDir,
 	})
@@ -262,6 +264,7 @@ func TestBootstrapCertVerifyNoCertHash(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:                "preprod",
+		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
 		VerifyCertificateChain: true,
 	})
@@ -280,6 +283,7 @@ func TestBootstrapNoSnapshots(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:       "preprod",
+		Backend:       BackendV1,
 		AggregatorURL: server.URL,
 	})
 	require.Error(t, err)
@@ -310,6 +314,7 @@ func TestBootstrapNoLocations(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:       "preprod",
+		Backend:       BackendV1,
 		AggregatorURL: server.URL,
 	})
 	require.Error(t, err)
@@ -876,6 +881,7 @@ func TestBootstrapRejectsUnexpectedSignedEntityKind(t *testing.T) {
 
 	_, err := Bootstrap(context.Background(), BootstrapConfig{
 		Network:                "preprod",
+		Backend:                BackendV1,
 		AggregatorURL:          server.URL,
 		VerifyCertificateChain: true,
 	})

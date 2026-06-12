@@ -154,6 +154,7 @@ var flagSpecs = []flagSpec{
 	// Mithril
 	boolFlag("Mithril.Enabled", "mithril-enabled", "enable Mithril integration"),
 	stringFlag("Mithril.AggregatorURL", "mithril-aggregator-url", "", "Mithril aggregator URL override"),
+	stringFlag("Mithril.Backend", "mithril-backend", "", "Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)"),
 	stringFlag("Mithril.DownloadDir", "mithril-download-dir", "", "Mithril snapshot download directory"),
 	stringFlag("Mithril.DownloadIdleTimeout", "mithril-download-idle-timeout", "", "Mithril snapshot download idle timeout"),
 	intFlag("Mithril.DownloadMaxIdleRetries", "mithril-download-max-idle-retries", "Mithril snapshot download idle retries without progress"),
