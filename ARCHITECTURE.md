@@ -1073,6 +1073,18 @@ a dial loop exited early. Gossip churn never demotes the peer holding the last
 eligible upstream connection, so routine churn cannot leave the node without a
 chainsync source.
 
+Reconnect backoff after short-lived sessions escalates exponentially. The
+reconnect goroutine consumes and zeroes the stored delay before dialing, so
+the close handler derives the next rung from a count of consecutive
+short-lived outbound sessions (1s doubling to a 128s cap) rather than from
+the stored delay; a stable session resets the count, as does an inbound
+connection from a topology peer, which proves reachability. Separately, chainsync
+resync reasons that indicate a peer chain we cannot follow (rollback or fork
+resolution exceeding the security parameter K, and both Mithril
+trust-boundary reasons) place the peer on the deny list for a cooldown in
+addition to closing the connection, so the node does not redial a peer that
+will deterministically be rejected again moments later.
+
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
 falling back to the legacy network bootstrap-peer list only when no embedded
@@ -1214,6 +1226,18 @@ snapshot manager to ensure the initial stake snapshot state before starting the
 client APIs. If the imported database already contains a non-empty Mark snapshot
 window for the current epoch, N-1, and N-2, the snapshot manager reuses that
 window instead of recalculating stake distribution from live UTxO state.
+
+The Mithril snapshot also acts as the local trust anchor during live
+chainsync. The ledger refuses any rollback below the imported ledger slot
+(`mithrilLedgerSlot`), since blocks at or below that boundary were certified
+as a single ledger state and intermediate UTxO states for a replacement fork
+cannot be reconstructed. The boundary block is always offered as an intersect
+point, so the peer's reported tip classifies the refusal: a peer whose own
+tip is below the boundary is treated as stale (it is simply behind and
+matched an old rung of the intersect ladder), while a peer claiming a tip at
+or above the boundary that still demands a rollback below it is rejected as
+genuinely divergent. Both classifications close the connection for a fresh
+intersect and deny the peer for a cooldown via peer governance.
 
 In API storage mode, the SQLite metadata plugin can defer selected query indexes
 during bulk load. Deferred indexes are classified as critical or lazy in

@@ -1304,16 +1304,45 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			// The Mithril snapshot is the local trust anchor. Blocks at
 			// or below its boundary were certified as a single ledger
 			// state, so we cannot reconstruct intermediate UTxO states
-			// for a replacement fork below that point. Reject the peer
-			// chain and force a fresh intersection instead.
-			ls.config.Logger.Error(
-				"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"mithril_ledger_slot", ls.mithrilLedgerSlot,
-				"connection_id", e.ConnectionId.String(),
-			)
+			// for a replacement fork below that point. Refuse the
+			// rollback and force a fresh intersection instead.
+			//
+			// The peer's reported tip distinguishes two situations that
+			// both surface here as a rollback below the boundary:
+			//   - tip below the boundary: the peer is simply behind
+			//     (still syncing or stuck) and its FindIntersect matched
+			//     an old rung of our intersect ladder — stale, not a
+			//     competing fork;
+			//   - tip at/above the boundary: the peer's chain does not
+			//     contain our certified boundary block (always offered
+			//     as an intersect point), so it genuinely diverges below
+			//     the trust anchor.
+			// A zero tip means the peer's tip is unknown; treat it as
+			// divergent to fail safe.
+			reason := event.ChainsyncResyncReasonRollbackExceedsMithril
+			peerTipSlot := e.Tip.Point.Slot
+			if peerTipSlot > 0 && peerTipSlot < ls.mithrilLedgerSlot {
+				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
+				ls.config.Logger.Warn(
+					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"peer_tip_slot", peerTipSlot,
+					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"connection_id", e.ConnectionId.String(),
+				)
+			} else {
+				ls.config.Logger.Error(
+					"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"peer_tip_slot", peerTipSlot,
+					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"connection_id", e.ConnectionId.String(),
+				)
+			}
 			ls.resetChainsyncResyncState()
 			ls.chainsyncState = SyncingChainsyncState
 			if ls.config.EventBus != nil {
@@ -1323,7 +1352,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
+							Reason:       reason,
 						},
 					),
 				)

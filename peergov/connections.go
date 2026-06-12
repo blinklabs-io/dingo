@@ -57,6 +57,20 @@ func isExpectedNetworkDialError(err error) bool {
 		strings.Contains(msg, "timeout waiting on transition")
 }
 
+// shortLivedReconnectDelay returns the exponential backoff rung for the
+// given count of consecutive short-lived outbound sessions, capped at
+// maxReconnectDelay.
+func shortLivedReconnectDelay(count uint32) time.Duration {
+	delay := initialReconnectDelay
+	for i := uint32(1); i < count; i++ {
+		delay *= reconnectBackoffFactor
+		if delay >= maxReconnectDelay {
+			return maxReconnectDelay
+		}
+	}
+	return delay
+}
+
 // isAddrInUseError returns true if the error is a "cannot assign
 // requested address" or EADDRINUSE, indicating a TCP 4-tuple collision.
 func isAddrInUseError(err error) bool {
@@ -624,6 +638,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	if tmpPeer.Source != PeerSourceInboundConn {
 		tmpPeer.ReconnectDelay = 0
 		tmpPeer.ReconnectCount = 0
+		tmpPeer.OutboundShortLivedCount = 0
 	}
 	selectionEvents = p.appendChainSelectionEventsLocked(
 		selectionEvents,
@@ -735,10 +750,18 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
 					peer.ReconnectDelay = 0
+					peer.OutboundShortLivedCount = 0
 				} else if !peer.ConnectedAt.IsZero() {
-					// Short-lived connection: apply exponential backoff
+					// Short-lived connection: apply exponential backoff.
+					// The stored delay is usually zero here because the
+					// reconnect goroutine consumes and zeroes it before
+					// dialing, so derive the rung from the consecutive
+					// short-lived session count instead.
+					peer.OutboundShortLivedCount++
 					if peer.ReconnectDelay == 0 {
-						peer.ReconnectDelay = initialReconnectDelay
+						peer.ReconnectDelay = shortLivedReconnectDelay(
+							peer.OutboundShortLivedCount,
+						)
 					} else if peer.ReconnectDelay < maxReconnectDelay {
 						peer.ReconnectDelay *= reconnectBackoffFactor
 						if peer.ReconnectDelay > maxReconnectDelay {
