@@ -36,16 +36,20 @@ $("#wallet-connect").addEventListener("click", asyncHandler(connectWallet, showS
 $("#stake-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const credential = $("#stake-credential").value.trim().toLowerCase();
+  const credentialTag = $("#stake-credential-tag").value;
   const result = $("#stake-result");
   if (!credential) {
     result.innerHTML = `<div class="empty">Enter a stake credential hex value.</div>`;
     return;
   }
   try {
-    const data = await api(`/api/stake/${encodeURIComponent(credential)}`);
+    const data = await api(
+      `/api/stake/${encodeURIComponent(credential)}?credential_tag=${encodeURIComponent(credentialTag)}`,
+    );
     result.innerHTML = `
       <div class="detail-grid">
         ${metric("Stake", shortHex(data.stakingKey))}
+        ${metric("Type", credentialTypeName(data.credentialTag))}
         ${metric("Active", data.active ? "yes" : "no")}
         ${metric("Reward", lovelace(data.reward))}
         ${metric("DRep type", data.drepType)}
@@ -180,9 +184,10 @@ async function loadDreps() {
     .map((row) => `
       <tr>
         <td>
-          <button class="link-button" data-drep="${row.credential}" type="button">
+          <button class="link-button" data-drep="${row.credential}" data-credential-tag="${row.credentialTag}" type="button">
             <span class="mono">${shortHex(row.credential)}</span>
           </button>
+          <br /><span class="muted">${credentialTypeName(row.credentialTag)}</span>
           ${renderAnchorBreak(row.anchorUrl)}
         </td>
         <td><span class="pill ${row.active ? "active" : "inactive"}">${row.active ? "active" : "inactive"}</span></td>
@@ -193,17 +198,23 @@ async function loadDreps() {
     `)
     .join("");
   drepRows.querySelectorAll("[data-drep]").forEach((button) => {
-    button.addEventListener("click", asyncHandler(() => showDrep(button.dataset.drep)));
+    button.addEventListener(
+      "click",
+      asyncHandler(() => showDrep(button.dataset.drep, button.dataset.credentialTag)),
+    );
   });
 }
 
-async function showDrep(credential) {
-  const data = await api(`/api/dreps/${credential}`);
+async function showDrep(credential, credentialTag) {
+  const data = await api(
+    `/api/dreps/${credential}?credential_tag=${encodeURIComponent(credentialTag)}`,
+  );
   const d = data.drep;
   detailContent.innerHTML = `
     <h2>DRep</h2>
     <p class="mono">${d.credential}</p>
     <div class="detail-grid">
+      ${metric("Type", credentialTypeName(d.credentialTag))}
       ${metric("Status", d.active ? "active" : "inactive")}
       ${metric("Delegators", number(d.delegatorCount))}
       ${metric("Votes", number(d.voteCount))}
@@ -236,7 +247,7 @@ async function showDrep(credential) {
           <tbody>
             ${data.delegations.length ? data.delegations.map((account) => `
               <tr>
-                <td class="mono">${shortHex(account.stakingKey)}</td>
+                <td><span class="mono">${shortHex(account.stakingKey)}</span><br /><span class="muted">${credentialTypeName(account.credentialTag)}</span></td>
                 <td>${lovelace(account.reward)}</td>
                 <td>${account.active ? "yes" : "no"}</td>
               </tr>
@@ -323,6 +334,10 @@ function metric(label, value) {
       <div class="metric-value">${escapeHtml(String(value ?? "n/a"))}</div>
     </div>
   `;
+}
+
+function credentialTypeName(value) {
+  return Number(value) === 1 ? "Script" : "Key";
 }
 
 function voteGrid(votes) {
@@ -441,6 +456,7 @@ async function connectWallet() {
     return;
   }
   $("#stake-credential").value = rewardAddress.slice(2, 58);
+  $("#stake-credential-tag").value = rewardAddress.slice(0, 1) === "f" ? "1" : "0";
   $("#stake-form").requestSubmit();
 }
 

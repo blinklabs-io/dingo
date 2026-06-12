@@ -15,6 +15,8 @@
 package certutil
 
 import (
+	"fmt"
+
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
@@ -37,9 +39,12 @@ import (
 // the cert was parsed via UnmarshalJSON which correctly stores the pure
 // 28-byte hash in RewardAccount, and only key-hash reward accounts appear in
 // genesis, so tag=0 and cert.RewardAccount[:] are returned.
+//
+// Returns an error if rawCbor is non-empty but cannot be decoded correctly,
+// to prevent storing a corrupted reward account hash.
 func PoolRewardAccount(
 	cert *lcommon.PoolRegistrationCertificate,
-) (credentialTag uint8, hash []byte) {
+) (credentialTag uint8, hash []byte, err error) {
 	rawCbor := cert.Cbor()
 	if len(rawCbor) > 0 {
 		// Pool cert CBOR is a flat array:
@@ -47,19 +52,26 @@ func PoolRewardAccount(
 		//    reward_account, pool_owners, relays, pool_metadata]
 		// reward_account is at index 6.
 		var raw []gcbor.RawMessage
-		if _, err := gcbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
-			var rewardAddrBytes []byte
-			if _, err := gcbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
-				len(rewardAddrBytes) == 29 {
-				// Header high nibble: 0xF = script credential, otherwise key.
-				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
-					credentialTag = 1
-				}
-				return credentialTag, rewardAddrBytes[1:] // pure 28-byte hash
-			}
+		if _, decErr := gcbor.Decode(rawCbor, &raw); decErr != nil {
+			return 0, nil, fmt.Errorf("decode pool cert CBOR: %w", decErr)
 		}
+		if len(raw) <= 6 {
+			return 0, nil, fmt.Errorf("pool cert CBOR array too short: got %d fields, want >6", len(raw))
+		}
+		var rewardAddrBytes []byte
+		if _, decErr := gcbor.Decode(raw[6], &rewardAddrBytes); decErr != nil {
+			return 0, nil, fmt.Errorf("decode pool cert reward_account field: %w", decErr)
+		}
+		if len(rewardAddrBytes) != 29 {
+			return 0, nil, fmt.Errorf("pool cert reward_account: got %d bytes, want 29", len(rewardAddrBytes))
+		}
+		// Header high nibble: 0xF = script credential, otherwise key.
+		if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
+			credentialTag = 1
+		}
+		return credentialTag, rewardAddrBytes[1:], nil // pure 28-byte hash
 	}
 	// JSON/genesis path: RewardAccount already holds the pure 28-byte hash
 	// and genesis pools always use key-hash reward accounts.
-	return 0, cert.RewardAccount[:]
+	return 0, cert.RewardAccount[:], nil
 }
