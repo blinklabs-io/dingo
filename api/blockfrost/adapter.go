@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 
@@ -36,7 +37,9 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	gscript "github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -1817,6 +1820,7 @@ func (a *NodeAdapter) Transaction(
 		OutputAmount:       outputAmount,
 		Fees:               strconv.FormatUint(uint64(tx.Fee), 10),
 		Deposit:            strconv.FormatUint(deposit, 10),
+		TreasuryDonation:   bigIntString(decodedTx.Donation()),
 		Size:               size,
 		UtxoCount:          utxoCount,
 		WithdrawalCount:    withdrawalCount,
@@ -2043,6 +2047,15 @@ func utxoRef(utxo models.Utxo) database.UtxoRef {
 	}
 }
 
+func transactionInputRef(input lcommon.TransactionInput) database.UtxoRef {
+	var txID [32]byte
+	copy(txID[:], input.Id().Bytes())
+	return database.UtxoRef{
+		TxId:      txID,
+		OutputIdx: input.Index(),
+	}
+}
+
 // TransactionDelegations returns delegation certificates in the requested
 // transaction.
 func (a *NodeAdapter) TransactionDelegations(
@@ -2110,6 +2123,7 @@ func (a *NodeAdapter) TransactionDelegations(
 		ret = append(ret, TransactionDelegationInfo{
 			Address:     address,
 			PoolID:      lcommon.PoolId(poolKeyHash).String(),
+			Index:       cert.Index,
 			CertIndex:   cert.Index,
 			ActiveEpoch: activeEpoch,
 		})
@@ -2405,20 +2419,9 @@ func (a *NodeAdapter) TransactionPoolRetires(
 func (a *NodeAdapter) TransactionRedeemers(
 	hash []byte,
 ) ([]TransactionRedeemerInfo, error) {
-	tx, err := a.ledgerState.TransactionByHash(hash)
+	tx, _, decodedTx, err := a.decodedTransactionByHash(hash)
 	if err != nil {
-		return nil, fmt.Errorf(
-			"get transaction by hash %x: %w",
-			hash,
-			err,
-		)
-	}
-	if tx == nil {
-		return nil, fmt.Errorf(
-			"transaction %x: %w",
-			hash,
-			ErrTransactionNotFound,
-		)
+		return nil, err
 	}
 
 	redeemers := slices.Clone(tx.Redeemers)
@@ -2428,19 +2431,60 @@ func (a *NodeAdapter) TransactionRedeemers(
 		}
 		return cmp.Compare(a.Index, b.Index)
 	})
+	if len(redeemers) == 0 {
+		return []TransactionRedeemerInfo{}, nil
+	}
 
+	metadata, err := a.transactionRedeemerMetadata(hash, tx, decodedTx)
+	if err != nil {
+		return nil, err
+	}
+	pparams, err := a.protocolParamsForSlot(tx.Slot)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get protocol parameters for transaction %x redeemer fees: %w",
+			hash,
+			err,
+		)
+	}
+	executionCosts, err := executionCostsFromPParams(pparams)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get execution prices for transaction %x redeemer fees: %w",
+			hash,
+			err,
+		)
+	}
 	ret := make([]TransactionRedeemerInfo, 0, len(redeemers))
 	for _, redeemer := range redeemers {
+		key := lcommon.RedeemerKey{
+			Tag:   lcommon.RedeemerTag(redeemer.Tag),
+			Index: redeemer.Index,
+		}
 		dataHash := lcommon.Blake2b256Hash(redeemer.Data)
+		redeemerMetadata, ok := metadata[key]
+		if !ok {
+			return nil, fmt.Errorf(
+				"resolve redeemer metadata for transaction %x tag=%d index=%d",
+				hash,
+				redeemer.Tag,
+				redeemer.Index,
+			)
+		}
+		fee := redeemerExecutionFee(
+			executionCosts,
+			redeemer.ExUnitsMemory,
+			redeemer.ExUnitsCPU,
+		)
 		ret = append(ret, TransactionRedeemerInfo{
-			TxIndex: int(redeemer.Index),
-			Purpose: redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
-			// TODO: Populate script_hash once redeemer-to-script mapping is stored.
-			ScriptHash:       "",
+			DatumHash:        redeemerMetadata.DatumHash,
+			TxIndex:          int(redeemer.Index),
+			Purpose:          redeemerPurpose(lcommon.RedeemerTag(redeemer.Tag)),
+			ScriptHash:       redeemerMetadata.ScriptHash,
 			RedeemerDataHash: hex.EncodeToString(dataHash.Bytes()),
 			UnitMem:          strconv.FormatUint(redeemer.ExUnitsMemory, 10),
 			UnitSteps:        strconv.FormatUint(redeemer.ExUnitsCPU, 10),
-			Fee:              "0",
+			Fee:              strconv.FormatUint(fee, 10),
 		})
 	}
 	return ret, nil
@@ -2577,6 +2621,11 @@ type transactionCertificate struct {
 	Index       int
 }
 
+type transactionRedeemerMetadata struct {
+	DatumHash  *string
+	ScriptHash string
+}
+
 func (a *NodeAdapter) transactionMetadataEntries(
 	hash []byte,
 ) ([]labelcodec.Entry, error) {
@@ -2643,6 +2692,110 @@ func transactionCertificatesByType(
 	slices.SortFunc(ret, func(a, b transactionCertificate) int {
 		return cmp.Compare(a.Index, b.Index)
 	})
+	return ret, nil
+}
+
+func (a *NodeAdapter) transactionRedeemerMetadata(
+	hash []byte,
+	tx *models.Transaction,
+	decodedTx lcommon.Transaction,
+) (map[lcommon.RedeemerKey]transactionRedeemerMetadata, error) {
+	ret := make(map[lcommon.RedeemerKey]transactionRedeemerMetadata)
+	if len(tx.Redeemers) == 0 {
+		return ret, nil
+	}
+
+	inputCbor, err := a.transactionInputCbor(tx.Inputs)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve transaction redeemer input CBOR for %x: %w",
+			hash,
+			err,
+		)
+	}
+	inputsByRef := make(map[database.UtxoRef]models.Utxo, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputsByRef[utxoRef(input)] = input
+	}
+
+	resolvedInputs := make(map[string]lcommon.Utxo, len(decodedTx.Inputs()))
+	for _, input := range decodedTx.Inputs() {
+		ref := transactionInputRef(input)
+		utxo, ok := inputsByRef[ref]
+		if !ok {
+			continue
+		}
+		utxo.Cbor = inputCbor[ref]
+		if len(utxo.Cbor) == 0 {
+			continue
+		}
+		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode redeemer input output %s for transaction %x: %w",
+				input.String(),
+				hash,
+				err,
+			)
+		}
+		resolvedInputs[input.String()] = lcommon.Utxo{
+			Id:     input,
+			Output: output,
+		}
+	}
+
+	witnessDatums := map[lcommon.Blake2b256]*lcommon.Datum{}
+	if witnesses := decodedTx.Witnesses(); witnesses != nil {
+		for _, datum := range witnesses.PlutusData() {
+			tmpDatum := datum
+			witnessDatums[datum.Hash()] = &tmpDatum
+		}
+	}
+
+	var mint lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	if decodedTx.AssetMint() != nil {
+		mint = *decodedTx.AssetMint()
+	}
+
+	for _, redeemer := range tx.Redeemers {
+		key := lcommon.RedeemerKey{
+			Tag:   lcommon.RedeemerTag(redeemer.Tag),
+			Index: redeemer.Index,
+		}
+		purpose := gscript.BuildScriptPurpose(
+			key,
+			resolvedInputs,
+			decodedTx.Inputs(),
+			mint,
+			decodedTx.Certificates(),
+			decodedTx.Withdrawals(),
+			decodedTx.VotingProcedures(),
+			decodedTx.ProposalProcedures(),
+			witnessDatums,
+		)
+		if purpose == nil {
+			return nil, fmt.Errorf(
+				"build script purpose for transaction %x tag=%d index=%d",
+				hash,
+				redeemer.Tag,
+				redeemer.Index,
+			)
+		}
+		metadata := transactionRedeemerMetadata{
+			ScriptHash: hex.EncodeToString(purpose.ScriptHash().Bytes()),
+		}
+		if spending, ok := purpose.(gscript.ScriptPurposeSpending); ok {
+			if datum := spending.Input.Output.Datum(); datum != nil {
+				hash := datum.Hash()
+				hashStr := hex.EncodeToString(hash.Bytes())
+				metadata.DatumHash = &hashStr
+			} else if datumHash := spending.Input.Output.DatumHash(); datumHash != nil {
+				hashStr := hex.EncodeToString(datumHash.Bytes())
+				metadata.DatumHash = &hashStr
+			}
+		}
+		ret[key] = metadata
+	}
 	return ret, nil
 }
 
@@ -2762,6 +2915,61 @@ func redeemerPurpose(tag lcommon.RedeemerTag) string {
 	default:
 		return ""
 	}
+}
+
+func executionCostsFromPParams(
+	pparams lcommon.ProtocolParameters,
+) (lcommon.ExUnitPrice, error) {
+	switch pp := pparams.(type) {
+	case *alonzo.AlonzoProtocolParameters:
+		return pp.ExecutionCosts, nil
+	case *babbage.BabbageProtocolParameters:
+		return pp.ExecutionCosts, nil
+	case *conway.ConwayProtocolParameters:
+		return pp.ExecutionCosts, nil
+	case *dijkstra.DijkstraProtocolParameters:
+		return pp.ExecutionCosts, nil
+	default:
+		return lcommon.ExUnitPrice{}, fmt.Errorf(
+			"protocol parameters %T do not include execution prices",
+			pparams,
+		)
+	}
+}
+
+func redeemerExecutionFee(
+	executionCosts lcommon.ExUnitPrice,
+	memory uint64,
+	steps uint64,
+) uint64 {
+	if executionCosts.MemPrice == nil || executionCosts.StepPrice == nil {
+		return 0
+	}
+	memCost := new(big.Rat).Mul(
+		executionCosts.MemPrice.ToBigRat(),
+		new(big.Rat).SetUint64(memory),
+	)
+	stepCost := new(big.Rat).Mul(
+		executionCosts.StepPrice.ToBigRat(),
+		new(big.Rat).SetUint64(steps),
+	)
+	return ceilRatToUint64(new(big.Rat).Add(memCost, stepCost))
+}
+
+func ceilRatToUint64(v *big.Rat) uint64 {
+	if v == nil || v.Sign() <= 0 {
+		return 0
+	}
+	num := new(big.Int).Set(v.Num())
+	den := new(big.Int).Set(v.Denom())
+	q, r := new(big.Int).QuoRem(num, den, new(big.Int))
+	if r.Sign() > 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	if !q.IsUint64() {
+		return math.MaxUint64
+	}
+	return q.Uint64()
 }
 
 func transactionPoolRelaysInfo(
@@ -2975,6 +3183,13 @@ func optionalHexString(data []byte) *string {
 	}
 	ret := hex.EncodeToString(data)
 	return &ret
+}
+
+func bigIntString(v *big.Int) string {
+	if v == nil {
+		return "0"
+	}
+	return v.String()
 }
 
 func paginateUtxos(

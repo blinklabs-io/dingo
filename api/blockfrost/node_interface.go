@@ -401,6 +401,7 @@ type TransactionInfo struct {
 	Block              string
 	Deposit            string
 	Fees               string
+	TreasuryDonation   string
 	Slot               uint64
 	BlockHeight        uint64
 	BlockTime          int64
@@ -466,6 +467,7 @@ type TransactionOutputInfo struct {
 type TransactionDelegationInfo struct {
 	Address     string
 	PoolID      string
+	Index       int
 	CertIndex   int
 	ActiveEpoch uint64
 }
@@ -530,6 +532,7 @@ type TransactionPoolRetireInfo struct {
 
 // TransactionRedeemerInfo holds one Plutus redeemer.
 type TransactionRedeemerInfo struct {
+	DatumHash        *string
 	TxIndex          int
 	Purpose          string
 	ScriptHash       string

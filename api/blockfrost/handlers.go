@@ -805,6 +805,11 @@ func (b *Blockfrost) handleTransaction(
 		return
 	}
 
+	treasuryDonation := tx.TreasuryDonation
+	if treasuryDonation == "" {
+		treasuryDonation = "0"
+	}
+
 	writeJSON(w, http.StatusOK, TransactionResponse{
 		Hash:               tx.Hash,
 		Block:              tx.Block,
@@ -815,6 +820,7 @@ func (b *Blockfrost) handleTransaction(
 		OutputAmount:       convertAddressAmounts(tx.OutputAmount),
 		Fees:               tx.Fees,
 		Deposit:            tx.Deposit,
+		TreasuryDonation:   treasuryDonation,
 		Size:               tx.Size,
 		UtxoCount:          tx.UtxoCount,
 		WithdrawalCount:    tx.WithdrawalCount,
