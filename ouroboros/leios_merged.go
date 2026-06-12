@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -71,7 +70,7 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if len(blockRaw) == 0 {
 		return errors.New("leios endorser block cache: empty block")
 	}
-	block, err := gleios.NewLeiosEndorserBlockFromCbor(blockRaw)
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}

@@ -23,7 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/leios"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
@@ -52,10 +52,10 @@ func shelleyGenesisCfgForNonceWindow(t *testing.T) *cardano.CardanoNodeConfig {
 //
 //   - Shelley, Allegra, Mary, Alonzo (TPraos): 3k/f
 //   - Babbage (Praos, but 3k/f for backwards compatibility): 3k/f
-//   - Conway, Leios (Praos): 4k/f
+//   - Conway, Dijkstra (Praos): 4k/f
 //
 // Each Praos era is enumerated explicitly in
-// nonceStabilityWindowKMultiplier; the Leios row here is the
+// nonceStabilityWindowKMultiplier; the Dijkstra row here is the
 // regression guard that the post-Conway Praos cohort still gets 4k/f
 // after the Babbage→Conway split moved.
 //
@@ -79,7 +79,7 @@ func TestNonceStabilityWindow_EraDispatch(t *testing.T) {
 		{name: "alonzo", eraId: alonzo.EraIdAlonzo, expectedSlot: 60},
 		{name: "babbage", eraId: babbage.EraIdBabbage, expectedSlot: 60},
 		{name: "conway", eraId: conway.EraIdConway, expectedSlot: 80},
-		{name: "leios", eraId: leios.EraIdLeios, expectedSlot: 80},
+		{name: "dijkstra", eraId: dijkstra.EraIdDijkstra, expectedSlot: 80},
 	}
 
 	for _, tc := range cases {

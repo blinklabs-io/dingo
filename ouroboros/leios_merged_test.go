@@ -26,7 +26,6 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
@@ -98,17 +97,17 @@ func testLeiosEndorserBlockRawWithRefs(
 	refCount int,
 ) (ocommon.Point, cbor.RawMessage) {
 	t.Helper()
-	refs := make([]gleios.LeiosTransactionReference, refCount)
+	refs := make([]lcommon.LeiosTransactionReference, refCount)
 	for refIdx := range refs {
 		var hashSeed [12]byte
 		binary.BigEndian.PutUint64(hashSeed[:8], uint64(idx))
 		binary.BigEndian.PutUint32(hashSeed[8:], uint32(refIdx))
-		refs[refIdx] = gleios.LeiosTransactionReference{
+		refs[refIdx] = lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.Blake2b256Hash(hashSeed[:]),
 			TransactionSize: uint16(refIdx + 1),
 		}
 	}
-	block := gleios.LeiosEndorserBlock{
+	block := lcommon.LeiosEndorserBlock{
 		TransactionReferences: refs,
 	}
 	raw, err := cbor.Encode(&block)

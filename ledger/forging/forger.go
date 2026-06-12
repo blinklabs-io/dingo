@@ -27,7 +27,6 @@ import (
 
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -770,7 +769,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 func buildLeiosEB(
 	txs []MempoolTransaction,
 ) (cbor []byte, hash []byte, txRefCount int, err error) {
-	refs := make([]gleios.LeiosTransactionReference, 0, len(txs))
+	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
 	for _, tx := range txs {
 		raw, hexErr := hex.DecodeString(tx.Hash)
 		if hexErr != nil || len(raw) != 32 {
@@ -780,7 +779,7 @@ func buildLeiosEB(
 		if sz == 0 || sz > math.MaxUint16 {
 			continue
 		}
-		refs = append(refs, gleios.LeiosTransactionReference{
+		refs = append(refs, lcommon.LeiosTransactionReference{
 			TransactionHash: lcommon.NewBlake2b256(raw),
 			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
 		})
@@ -788,7 +787,7 @@ func buildLeiosEB(
 	if len(refs) == 0 {
 		return nil, nil, 0, errNoValidTxRefs
 	}
-	eb := gleios.LeiosEndorserBlock{TransactionReferences: refs}
+	eb := lcommon.LeiosEndorserBlock{TransactionReferences: refs}
 	ebCbor, marshalErr := eb.MarshalCBOR()
 	if marshalErr != nil {
 		return nil, nil, 0, fmt.Errorf("marshal leios EB: %w", marshalErr)
