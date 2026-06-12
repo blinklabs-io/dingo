@@ -73,6 +73,11 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	t.Setenv("DINGO_DATABASE_WORKERS", "9")
 	t.Setenv("DINGO_BACKFILL_BATCH_SIZE", "50")
 	t.Setenv("DINGO_HISTORY_EXPIRY_FREQUENCY", "15m")
+	t.Setenv("DINGO_OFFCHAIN_METADATA_MAX_BYTES", "1024")
+	t.Setenv(
+		"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL",
+		"https://env.example/ipfs/",
+	)
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -108,6 +113,18 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.HistoryExpiry.Frequency,
 		)
 	}
+	if cfg.OffchainMetadata.MaxBytes != 1024 {
+		t.Fatalf(
+			"expected env var to set offchain metadata max bytes=1024, got %d",
+			cfg.OffchainMetadata.MaxBytes,
+		)
+	}
+	if cfg.OffchainMetadata.IPFSGatewayURL != "https://env.example/ipfs/" {
+		t.Fatalf(
+			"expected env var to set offchain metadata IPFS gateway, got %q",
+			cfg.OffchainMetadata.IPFSGatewayURL,
+		)
+	}
 
 	cmd := &cobra.Command{Use: "dingo"}
 	RegisterFlags(cmd)
@@ -117,6 +134,8 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		"--backfill-batch-size=200",
 		"--history-expiry-enabled=true",
 		"--history-expiry-frequency=30m",
+		"--offchain-metadata-max-bytes=2048",
+		"--offchain-metadata-ipfs-gateway-url=https://flag.example/ipfs/",
 	}); err != nil {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
@@ -156,6 +175,18 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 		t.Fatalf(
 			"expected --history-expiry-frequency to set 30m, got %s",
 			cfg.HistoryExpiry.Frequency,
+		)
+	}
+	if cfg.OffchainMetadata.MaxBytes != 2048 {
+		t.Fatalf(
+			"expected flag to override offchain metadata max bytes to 2048, got %d",
+			cfg.OffchainMetadata.MaxBytes,
+		)
+	}
+	if cfg.OffchainMetadata.IPFSGatewayURL != "https://flag.example/ipfs/" {
+		t.Fatalf(
+			"expected flag to override offchain metadata IPFS gateway, got %q",
+			cfg.OffchainMetadata.IPFSGatewayURL,
 		)
 	}
 }

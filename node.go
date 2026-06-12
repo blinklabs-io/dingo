@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -67,6 +68,7 @@ type Node struct {
 	historyExpiry                    *historyexpiry.Pruner
 	blockfrostAPI                    *blockfrost.Blockfrost
 	meshAPI                          *mesh.Server
+	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
@@ -940,6 +942,36 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	if n.config.storageMode.IsAPI() {
+		fetcher, err := offchainmetadata.New(
+			offchainmetadata.Config{
+				Logger:                n.config.logger,
+				Store:                 n.db.Metadata(),
+				HTTPClient:            n.config.offchainMetadata.HTTPClient,
+				Interval:              n.config.offchainMetadata.Interval,
+				RequestTimeout:        n.config.offchainMetadata.RequestTimeout,
+				UserAgent:             n.config.offchainMetadata.UserAgent,
+				IPFSGatewayURL:        n.config.offchainMetadata.IPFSGatewayURL,
+				BatchSize:             n.config.offchainMetadata.BatchSize,
+				MaxBytes:              n.config.offchainMetadata.MaxBytes,
+				AllowPrivateAddresses: n.config.offchainMetadata.AllowPrivateAddresses,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("creating off-chain metadata fetcher: %w", err)
+		}
+		n.offchainMetadataFetcher = fetcher
+		if err := n.offchainMetadataFetcher.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting off-chain metadata fetcher: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.offchainMetadataFetcher.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop off-chain metadata fetcher during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
 		started = append(started, n.startDeferredIndexMaintenance())
 	}
 

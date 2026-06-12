@@ -77,6 +77,13 @@ var flagSpecs = []flagSpec{
 	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
 	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
 	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
+	durationFlag("OffchainMetadata.Interval", "offchain-metadata-interval", "off-chain metadata fetch interval (0 = default)"),
+	durationFlag("OffchainMetadata.RequestTimeout", "offchain-metadata-request-timeout", "off-chain metadata HTTP request timeout (0 = default)"),
+	stringFlag("OffchainMetadata.UserAgent", "offchain-metadata-user-agent", "", "off-chain metadata HTTP user agent (empty = default)"),
+	stringFlag("OffchainMetadata.IPFSGatewayURL", "offchain-metadata-ipfs-gateway-url", "", "IPFS gateway URL for off-chain metadata (empty = default)"),
+	intFlag("OffchainMetadata.BatchSize", "offchain-metadata-batch-size", "off-chain metadata rows to claim per pass (0 = default)"),
+	int64Flag("OffchainMetadata.MaxBytes", "offchain-metadata-max-bytes", "off-chain metadata max response bytes (0 = default)"),
+	boolFlag("OffchainMetadata.AllowPrivateAddresses", "offchain-metadata-allow-private-addresses", "allow off-chain metadata fetches to private, loopback, and link-local addresses"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),

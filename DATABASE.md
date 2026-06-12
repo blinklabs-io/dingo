@@ -15,7 +15,7 @@ Use the Go APIs when code runs inside Dingo:
 
 - `database.Database` in `database/database.go` owns both stores and exposes `Blob()`, `Metadata()`, `Transaction()`, `BlobTxn()`, `MetadataTxn()`, `StorageMode()`, and `Close()`.
 - `database.Txn` in `database/txn.go` coordinates sibling metadata/blob transactions. Write commits update commit timestamps in both stores, commit the blob transaction first, then commit metadata.
-- `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the SQL-facing interface. It groups ledger state, transactions, UTxO, accounts, pools, stake snapshots, rewards, governance, committee, rollback, sync-state, and backfill methods.
+- `metadata.MetadataStore` in `database/plugin/metadata/store.go` is the SQL-facing interface. It groups ledger state, transactions, UTxO, accounts, pools, stake snapshots, rewards, governance, committee, rollback, sync-state, backfill, and off-chain metadata cache/fetch methods.
 - `blob.BlobStore` in `database/plugin/blob/store.go` is the blob-facing interface. It provides raw `Get`/`Set`/`Delete`/iteration plus block, UTxO, transaction, signed-URL, tombstone, and commit-timestamp methods.
 - `types.Txn`, `types.BlobIterator`, `types.BlockMetadata`, and blob key helpers live in `database/types/`.
 
@@ -51,7 +51,7 @@ flowchart LR
 - Many relations are logical joins rather than explicit foreign keys. Certificate rows have two logical pointers: each specialized certificate table has `certificate_id -> certs.id`, and `certs.certificate_id` is the polymorphic back-pointer to that specialized row chosen by `certs.cert_type`.
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
-- Storage mode is persisted in `node_settings.storage_mode`. `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, and metadata-label indexes. API-only tables are still migrated in `core` mode but may be empty.
+- Storage mode is persisted in `node_settings.storage_mode`. `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` cache. API-only tables are still migrated in `core` mode but may be empty.
 
 ## ER Diagrams
 
@@ -231,6 +231,21 @@ erDiagram
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
 | `auth_committee_hot` | `id`, `cold_credential`, `host_credential`, `certificate_id`, `added_slot` | PK `id`; indexes `cold_credential`, `host_credential`, `certificate_id`, `added_slot` | Committee hot-key authorization certificate. The SQL column is `host_credential` for backward compatibility. |
 | `resign_committee_cold` | `id`, `cold_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `cold_credential`, `certificate_id`, `added_slot` | Committee cold-key resignation certificate. |
+
+### Off-chain Metadata Cache
+
+| Table | Columns | Keys / indexes | Relationships and notes |
+|---|---|---|---|
+| `offchain_metadata` | `id`, `source_type`, `url`, `hash`, `status`, `content_type`, `content`, `body_hash`, `last_error`, `last_http_status`, `fetch_attempts`, `fetched_at`, `next_fetch_after`, `created_at`, `updated_at` | PK `id`; unique `(source_type, url, hash)`; index `(status, next_fetch_after)` | Best-effort cache for documents referenced by pool metadata URLs and governance anchors. `url` keeps the original on-chain pointer, including HTTP(S) and `ipfs://` URLs; IPFS content is fetched through a gateway. `hash` is the on-chain Blake2b-256 hash. `body_hash` is the Blake2b-256 of the fetched bytes. Only rows with `status = 'fetched'` have hash-verified `content`; failed rows keep retry state and diagnostics. `content_type` is normalized to `application/json`, `application/ld+json`, or `text/plain`; any other response media type is stored as `application/octet-stream` (the header is not covered by the on-chain hash). |
+
+`source_type` values are `pool`, `drep`, `drep_registration`, `drep_update`, `gov_proposal`, `gov_vote`, `constitution`, and `committee_resign`. `status` values are `pending`, `fetched`, and `failed`.
+
+The API-mode off-chain metadata fetcher discovers pointers from `pool_registration.metadata_url`, DRep anchor rows, governance proposal/vote anchors, constitutions, and committee resignations. The cache is not consensus state: rollbacks may leave old cache rows behind, and APIs should join/cache-hit by the current on-chain `(source_type, url, hash)` pointer.
+
+`metadata.MetadataStore` off-chain fetch methods accept a `context.Context`.
+`GetOffchainMetadataFetchBatch` claims due rows before returning them by moving
+`next_fetch_after` forward for a short lease, so concurrent fetchers do not
+process the same pointer unless the claim expires before a result is recorded.
 
 ### Stake Snapshots and Rewards
 

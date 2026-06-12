@@ -15,7 +15,9 @@
 package metadata
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
@@ -126,6 +128,40 @@ type MetadataStore interface {
 		checkpoint *models.ImportCheckpoint,
 		txn types.Txn,
 	) error
+
+	// EnsureOffchainMetadataPointers creates pending cache rows for
+	// on-chain pool metadata and governance anchor URL/hash pointers.
+	EnsureOffchainMetadataPointers(
+		ctx context.Context,
+		now time.Time,
+		txn types.Txn,
+	) (int, error)
+
+	// GetOffchainMetadataFetchBatch returns pending or failed
+	// off-chain metadata rows that are due to be fetched.
+	GetOffchainMetadataFetchBatch(
+		ctx context.Context,
+		limit int,
+		now time.Time,
+		txn types.Txn,
+	) ([]models.OffchainMetadata, error)
+
+	// SetOffchainMetadataFetchResult updates a cache row after a fetch
+	// attempt.
+	SetOffchainMetadataFetchResult(
+		ctx context.Context,
+		doc *models.OffchainMetadata,
+		txn types.Txn,
+	) error
+
+	// GetOffchainMetadata retrieves a cached off-chain document by its
+	// source type and on-chain URL/hash pointer.
+	GetOffchainMetadata(
+		sourceType string,
+		url string,
+		hash []byte,
+		txn types.Txn,
+	) (*models.OffchainMetadata, error)
 
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(

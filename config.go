@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"runtime"
 	"slices"
 	"strconv"
@@ -81,6 +82,19 @@ func (m StorageMode) IsAPI() bool {
 type HistoryExpiryConfig struct {
 	Enabled   bool
 	Frequency time.Duration
+}
+
+// OffchainMetadataConfig controls API-mode off-chain metadata fetching.
+// Zero values use the internal fetcher defaults.
+type OffchainMetadataConfig struct {
+	HTTPClient            *http.Client
+	Interval              time.Duration
+	RequestTimeout        time.Duration
+	UserAgent             string
+	IPFSGatewayURL        string
+	BatchSize             int
+	MaxBytes              int64
+	AllowPrivateAddresses bool
 }
 
 type Config struct {
@@ -160,6 +174,8 @@ type Config struct {
 	leiosPipelineTiming *leios.PipelineTiming
 	// Blockfrost API port (0 = disabled)
 	blockfrostPort uint
+	// Off-chain metadata fetcher configuration
+	offchainMetadata OffchainMetadataConfig
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
@@ -900,6 +916,14 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.corsAllowedOrigins = slices.Clone(origins)
+	}
+}
+
+// WithOffchainMetadataConfig configures the API-mode off-chain metadata
+// fetcher. Zero values use the fetcher's internal defaults.
+func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.offchainMetadata = cfg
 	}
 }
 
