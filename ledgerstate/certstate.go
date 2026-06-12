@@ -23,6 +23,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 )
 
@@ -834,15 +835,12 @@ func parsePoolParams(
 	}
 
 	// Reward account (index 5)
-	if _, err := cbor.Decode(
-		params[5],
-		&pool.RewardAccount,
-	); err != nil {
-		return nil, fmt.Errorf(
-			"decoding reward account: %w",
-			err,
-		)
+	rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[5])
+	if !ok {
+		return nil, errors.New("decoding reward account")
 	}
+	pool.RewardAccount = rewardAccount
+	pool.RewardAccountCredentialTag = rewardAccountTag
 
 	// Owners (index 6) - set of 28-byte key hashes
 	pool.Owners = parsePoolOwners(params[6])
@@ -900,8 +898,9 @@ func parsePoolParamsWithoutOperator(
 		pool.MarginDen = 1
 	}
 
-	if rewardAccount, ok := parseRewardAccount(params[4]); ok {
+	if rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[4]); ok {
 		pool.RewardAccount = rewardAccount
+		pool.RewardAccountCredentialTag = rewardAccountTag
 	}
 
 	pool.Owners = parsePoolOwners(params[5])
@@ -923,29 +922,59 @@ func parsePoolParamsWithoutOperator(
 	return pool, true, nil
 }
 
-func parseRewardAccount(data []byte) ([]byte, bool) {
+func parseRewardAccount(data []byte) ([]byte, uint8, bool) {
 	var direct []byte
 	if _, err := cbor.Decode(data, &direct); err == nil {
-		return direct, true
+		return normalizeRewardAccountBytes(direct)
 	}
 
 	if cred, err := parseCredential(data); err == nil && len(cred.Hash) > 0 {
-		return cred.Hash, true
+		credentialTag, tagErr := models.CredentialTagFromUint(
+			uint(cred.Type),
+		)
+		if tagErr != nil {
+			return nil, 0, false
+		}
+		return cred.Hash, credentialTag, true
 	}
 
 	var parts []cbor.RawMessage
 	if _, err := cbor.Decode(data, &parts); err != nil || len(parts) < 2 {
-		return nil, false
+		return nil, 0, false
 	}
 	if cred, err := parseCredential(parts[1]); err == nil &&
 		len(cred.Hash) > 0 {
-		return cred.Hash, true
+		credentialTag, tagErr := models.CredentialTagFromUint(
+			uint(cred.Type),
+		)
+		if tagErr != nil {
+			return nil, 0, false
+		}
+		return cred.Hash, credentialTag, true
 	}
 	if _, err := cbor.Decode(parts[1], &direct); err == nil {
-		return direct, true
+		return normalizeRewardAccountBytes(direct)
 	}
 
-	return nil, false
+	return nil, 0, false
+}
+
+func normalizeRewardAccountBytes(data []byte) ([]byte, uint8, bool) {
+	switch len(data) {
+	case 28:
+		return slices.Clone(data), 0, true
+	case 29:
+		switch data[0] >> 4 {
+		case 14:
+			return slices.Clone(data[1:]), 0, true
+		case 15:
+			return slices.Clone(data[1:]), 1, true
+		default:
+			return nil, 0, false
+		}
+	default:
+		return nil, 0, false
+	}
 }
 
 func parsePoolOwners(data []byte) [][]byte {

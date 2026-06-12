@@ -237,6 +237,12 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	if !bytes.Equal(pool.RewardAccount, rewardHash) {
 		t.Fatalf("reward account mismatch: %x", pool.RewardAccount)
 	}
+	if pool.RewardAccountCredentialTag != 0 {
+		t.Fatalf(
+			"expected reward account credential tag 0, got %d",
+			pool.RewardAccountCredentialTag,
+		)
+	}
 	if len(pool.Owners) != 1 || !bytes.Equal(pool.Owners[0], ownerHash) {
 		t.Fatalf("owners mismatch: %#v", pool.Owners)
 	}
@@ -253,6 +259,54 @@ func TestParsePStateSelectsUTxOHDPoolMap(t *testing.T) {
 	}
 	if pool.Deposit != 500_000_000 {
 		t.Fatalf("deposit mismatch: %d", pool.Deposit)
+	}
+}
+
+// TestParseRewardAccountNormalizesAddressBytes verifies full reward
+// addresses are stored as 28-byte hashes plus their credential tag.
+func TestParseRewardAccountNormalizesAddressBytes(t *testing.T) {
+	rewardHash := bytes.Repeat([]byte{0x62}, 28)
+
+	cases := []struct {
+		name    string
+		account []byte
+		wantTag uint8
+	}{
+		{
+			name:    "key reward address",
+			account: append([]byte{0xe0}, rewardHash...),
+			wantTag: 0,
+		},
+		{
+			name:    "script reward address",
+			account: append([]byte{0xf0}, rewardHash...),
+			wantTag: 1,
+		},
+		{
+			name:    "legacy hash only",
+			account: rewardHash,
+			wantTag: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := cbor.Encode(tc.account)
+			if err != nil {
+				t.Fatalf("encoding reward account: %v", err)
+			}
+
+			gotHash, gotTag, ok := parseRewardAccount(data)
+			if !ok {
+				t.Fatal("expected reward account to parse")
+			}
+			if !bytes.Equal(gotHash, rewardHash) {
+				t.Fatalf("reward hash mismatch: %x", gotHash)
+			}
+			if gotTag != tc.wantTag {
+				t.Fatalf("expected tag %d, got %d", tc.wantTag, gotTag)
+			}
+		})
 	}
 }
 
