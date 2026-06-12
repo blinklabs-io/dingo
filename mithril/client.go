@@ -562,6 +562,12 @@ type NetworkConfig struct {
 	AncillaryVerificationKeyURL string
 }
 
+// ErrNoSnapshotsAvailable indicates that the aggregator responded
+// successfully but currently has no snapshots to serve.
+var ErrNoSnapshotsAvailable = errors.New(
+	"no snapshots available from aggregator",
+)
+
 // Default network configuration for each supported Cardano network. The
 // verification key URLs follow the official Mithril network configurations.
 var defaultNetworkConfigs = map[string]NetworkConfig{
@@ -884,7 +890,7 @@ func (c *Client) GetLatestSnapshot(
 		return nil, err
 	}
 	if len(snapshots) == 0 {
-		return nil, errors.New("no snapshots available from aggregator")
+		return nil, ErrNoSnapshotsAvailable
 	}
 	slices.SortFunc(snapshots, func(a, b SnapshotListItem) int {
 		if a.Beacon.Epoch != b.Beacon.Epoch {

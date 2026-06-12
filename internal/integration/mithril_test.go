@@ -16,6 +16,7 @@ package integration
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -77,6 +78,9 @@ func TestImportLedgerStateFromMithril(t *testing.T) {
 			},
 		},
 	)
+	if errors.Is(err, mithril.ErrNoSnapshotsAvailable) {
+		t.Skipf("Mithril aggregator has no snapshots: %v", err)
+	}
 	require.NoError(t, err, "bootstrapping from Mithril")
 	t.Logf(
 		"snapshot extracted: epoch=%d, immutable=%s",
