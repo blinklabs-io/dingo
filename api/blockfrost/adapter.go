@@ -746,11 +746,29 @@ func (a *NodeAdapter) Asset(
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
-	db := a.ledgerState.Database()
-	var credentialTag uint8
-	if credential.HasScript {
-		credentialTag = 1
+	if credential.CredentialTagKnown {
+		var credentialTag uint8
+		if credential.HasScript {
+			credentialTag = 1
+		}
+		return a.drepByCredentialTag(credential, credentialTag)
 	}
+
+	info, err := a.drepByCredentialTag(credential, 0)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, ErrDRepNotFound) {
+		return DRepInfo{}, err
+	}
+	return a.drepByCredentialTag(credential, 1)
+}
+
+func (a *NodeAdapter) drepByCredentialTag(
+	credential DRepCredential,
+	credentialTag uint8,
+) (DRepInfo, error) {
+	db := a.ledgerState.Database()
 	drep, err := db.GetDrepByCredential(credentialTag, credential.Hash, true, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
@@ -766,6 +784,7 @@ func (a *NodeAdapter) DRep(
 			err,
 		)
 	}
+	hasScript := credentialTag == 1
 	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, nil)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
@@ -793,7 +812,7 @@ func (a *NodeAdapter) DRep(
 	return DRepInfo{
 		DRepID:      credential.ID,
 		Hex:         hex.EncodeToString(credential.Hash),
-		HasScript:   credential.HasScript,
+		HasScript:   hasScript,
 		Registered:  registered,
 		Epoch:       registrationEpoch.EpochId,
 		Amount:      amount,
