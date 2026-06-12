@@ -47,7 +47,9 @@ func TestIntegrationVerifyCertificateChainPreview(t *testing.T) {
 	// List snapshots and pick the latest one.
 	snapshots, err := client.ListSnapshots(ctx)
 	require.NoError(t, err)
-	require.NotEmpty(t, snapshots, "no snapshots available")
+	if len(snapshots) == 0 {
+		t.Skip("Mithril preview aggregator has no snapshots")
+	}
 
 	latest := snapshots[0]
 	t.Logf(

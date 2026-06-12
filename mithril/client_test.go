@@ -328,7 +328,7 @@ func TestGetLatestSnapshotEmpty(t *testing.T) {
 
 	client := NewClient(server.URL)
 	_, err := client.GetLatestSnapshot(context.Background())
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrNoSnapshotsAvailable)
 	require.Contains(t, err.Error(), "no snapshots available")
 }
 
