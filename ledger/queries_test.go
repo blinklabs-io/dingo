@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math"
@@ -242,6 +243,35 @@ func TestStakePoolsResult_Empty(t *testing.T) {
 	_, err = cbor.Decode(encoded, &decoded)
 	require.NoError(t, err)
 	require.Empty(t, decoded.Results)
+}
+
+// --- GetDRepState (ShelleyDRepStateQuery) -----------------------------------
+
+// TestQueryShelleyDRepState_EmptyDB proves GetDRepState answers (rather than
+// tears down the connection) when no DReps are registered: an empty
+// credential set means "all DReps", which with no data is an empty map. The
+// result is a bare CBOR map that round-trips through gouroboros'
+// DRepStateResult (the type cardano clients decode into).
+func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+	// Wire shape: []any{ map }. cardano-cli expects the result map wrapped in
+	// the single-element result array; verified against cardano-node, whose
+	// empty GetDRepState reply is the CBOR `81 a0` ([ {} ]).
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any wrapper")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(olocalstatequery.DRepStateResult)
+	require.True(t, ok, "inner element must be a DRepStateResult map")
+	require.Empty(t, m)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	assert.Equal(t, "81a0", hex.EncodeToString(encoded),
+		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)")
 }
 
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------

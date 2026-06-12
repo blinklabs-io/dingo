@@ -27,6 +27,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -449,6 +451,8 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryLedgerPeerSnapshot(q.PeerKind)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
 		return ls.queryShelleyStakePools()
+	case *olocalstatequery.ShelleyDRepStateQuery:
+		return ls.queryShelleyDRepState(q.Credentials.Items())
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -488,6 +492,74 @@ func (ls *LedgerState) queryShelleyStakePools() (any, error) {
 		return nil, err
 	}
 	return stakePoolsResult(keyHashes), nil
+}
+
+// queryShelleyDRepState answers GetDRepState: the registration state of the
+// requested DReps, or of all DReps when the credential set is empty (matching
+// the Haskell ledger's "empty set means all" semantics). cardano-cli issues
+// this while balancing a transaction, so leaving it unhandled tears down the
+// connection. The result is a bare CBOR map of stake credential -> {expiry
+// epoch, optional anchor, deposit}.
+func (ls *LedgerState) queryShelleyDRepState(
+	creds []lcommon.Credential,
+) (any, error) {
+	result := make(olocalstatequery.DRepStateResult)
+	var dreps []*models.Drep
+	if len(creds) == 0 {
+		all, err := ls.db.GetActiveDreps(nil)
+		if err != nil {
+			return nil, err
+		}
+		dreps = all
+	} else {
+		for _, cred := range creds {
+			drep, err := ls.db.GetDrep(cred.Credential[:], false, nil)
+			if err != nil {
+				if errors.Is(err, models.ErrDrepNotFound) {
+					continue
+				}
+				return nil, err
+			}
+			dreps = append(dreps, drep)
+		}
+	}
+	// Every DRep locks the dRepDeposit protocol parameter at registration.
+	deposit := ls.drepDeposit()
+	for _, drep := range dreps {
+		key := olocalstatequery.StakeCredential{
+			Bytes: ledger.NewBlake2b224(drep.Credential),
+		}
+		result[key] = olocalstatequery.DRepStateEntry{
+			Expiry:  drep.ExpiryEpoch,
+			Anchor:  drepAnchor(drep),
+			Deposit: deposit,
+		}
+	}
+	// The result map is wrapped in the single-element result array cardano-cli
+	// expects (verified against cardano-node: an empty result is the CBOR
+	// `81 a0`, i.e. [ {} ]).
+	return []any{result}, nil
+}
+
+// drepDeposit returns the current dRepDeposit protocol parameter, which is the
+// deposit every DRep locks at registration. Returns 0 outside Conway.
+func (ls *LedgerState) drepDeposit() uint64 {
+	if cpp, ok := ls.currentPParams.(*conway.ConwayProtocolParameters); ok &&
+		cpp != nil {
+		return cpp.DRepDeposit
+	}
+	return 0
+}
+
+// drepAnchor maps a stored DRep's anchor metadata to the wire type, or nil
+// when the DRep has no anchor.
+func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
+	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
+		return nil
+	}
+	anchor := &lcommon.GovAnchor{Url: drep.AnchorURL}
+	copy(anchor.DataHash[:], drep.AnchorHash)
+	return anchor
 }
 
 // stakePoolsResult builds the GetStakePools wire result from a list of pool
