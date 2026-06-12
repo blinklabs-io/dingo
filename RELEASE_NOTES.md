@@ -2,7 +2,7 @@
 
 ## v0.54.0 (June 12, 2026)
 
-**Title:** Experimental Leios EB forging, Mithril v2 database restore, and metadata caching
+**Title:** Experimental Leios EB forging, Mithril v2 database restore, and off-chain metadata caching
 
 **Date:** June 12, 2026
 
