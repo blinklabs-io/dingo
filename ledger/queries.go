@@ -528,6 +528,9 @@ func (ls *LedgerState) queryShelleyDRepState(
 	// Every DRep locks the dRepDeposit protocol parameter at registration.
 	deposit := ls.drepDeposit()
 	for _, drep := range dreps {
+		if drep == nil {
+			continue
+		}
 		key := olocalstatequery.StakeCredential{
 			Bytes: ledger.NewBlake2b224(drep.Credential),
 		}
