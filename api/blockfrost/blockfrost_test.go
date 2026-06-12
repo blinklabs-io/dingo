@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,8 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +35,18 @@ import (
 //go:fix inline
 func intPtr(v int) *int {
 	return new(v)
+}
+
+func TestRedeemerExecutionFee(t *testing.T) {
+	fee := redeemerExecutionFee(
+		lcommon.ExUnitPrice{
+			MemPrice:  &cbor.Rat{Rat: big.NewRat(577, 10000)},
+			StepPrice: &cbor.Rat{Rat: big.NewRat(721, 10000000)},
+		},
+		245264,
+		103956223,
+	)
+	assert.Equal(t, uint64(21647), fee)
 }
 
 // mockNode implements BlockfrostNode for testing.
@@ -1021,6 +1036,7 @@ func TestHandleTransaction(t *testing.T) {
 			OutputAmount:     []AddressAmountInfo{{Unit: "lovelace", Quantity: "5000"}},
 			Fees:             "170000",
 			Deposit:          "0",
+			TreasuryDonation: "12345",
 			Size:             512,
 			UtxoCount:        3,
 			StakeCertCount:   1,
@@ -1057,6 +1073,7 @@ func TestHandleTransaction(t *testing.T) {
 	assert.Equal(t, int64(1700000000), resp.BlockTime)
 	assert.Equal(t, 2, resp.Index)
 	assert.Equal(t, "170000", resp.Fees)
+	assert.Equal(t, "12345", resp.TreasuryDonation)
 	require.Len(t, resp.OutputAmount, 1)
 	assert.Equal(t, "lovelace", resp.OutputAmount[0].Unit)
 	assert.Equal(t, "5000", resp.OutputAmount[0].Quantity)
@@ -1477,6 +1494,7 @@ func TestHandleTransactionDelegations(t *testing.T) {
 			{
 				Address:     "stake_test1...",
 				PoolID:      "pool1...",
+				Index:       2,
 				CertIndex:   2,
 				ActiveEpoch: 10,
 			},
@@ -1501,7 +1519,53 @@ func TestHandleTransactionDelegations(t *testing.T) {
 	require.Len(t, resp, 1)
 	assert.Equal(t, "stake_test1...", resp[0].Address)
 	assert.Equal(t, "pool1...", resp[0].PoolID)
+	assert.Equal(t, 2, resp[0].Index)
+	assert.Equal(t, 2, resp[0].CertIndex)
 	assert.Equal(t, uint64(10), resp[0].ActiveEpoch)
+}
+
+func TestHandleTransactionRedeemers(t *testing.T) {
+	datumHash := "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
+	b := newTestBlockfrost(&mockNode{
+		transactionRedeemers: []TransactionRedeemerInfo{
+			{
+				DatumHash:        &datumHash,
+				TxIndex:          0,
+				Purpose:          "spend",
+				ScriptHash:       "f00dbeef00112233445566778899aabbccddeeff0011223344556677",
+				RedeemerDataHash: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				UnitMem:          "1700",
+				UnitSteps:        "200000",
+				Fee:              "172345",
+			},
+		},
+	})
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/txs/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/redeemers",
+		nil,
+	)
+	req.SetPathValue(
+		"hash",
+		"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	)
+	w := httptest.NewRecorder()
+	b.handleTransactionRedeemers(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp []TransactionRedeemerResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 1)
+	require.NotNil(t, resp[0].DatumHash)
+	assert.Equal(t, datumHash, *resp[0].DatumHash)
+	assert.Equal(t, 0, resp[0].TxIndex)
+	assert.Equal(t, "spend", resp[0].Purpose)
+	assert.Equal(t, "f00dbeef00112233445566778899aabbccddeeff0011223344556677", resp[0].ScriptHash)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", resp[0].RedeemerDataHash)
+	assert.Equal(t, "1700", resp[0].UnitMem)
+	assert.Equal(t, "200000", resp[0].UnitSteps)
+	assert.Equal(t, "172345", resp[0].Fee)
 }
 
 func TestHandleTransactionStakeAddresses(t *testing.T) {
