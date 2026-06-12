@@ -70,7 +70,7 @@ func TestClearDanglingDRepDelegations_ClearsUnregisteredCredBackedDelegation(t *
 	assert.Equal(t, 1, n,
 		"exactly one account has a dangling delegation and should be cleared")
 
-	liveAcct, err := store.GetAccount(stakeKeyLive, true, nil)
+	liveAcct, err := store.GetAccountByCredential(0, stakeKeyLive, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, liveAcct)
 	assert.True(t, bytes.Equal(liveAcct.Drep, liveCred),
@@ -79,7 +79,7 @@ func TestClearDanglingDRepDelegations_ClearsUnregisteredCredBackedDelegation(t *
 	assert.Equal(t, uint64(100), liveAcct.AddedSlot,
 		"unchanged accounts keep their original AddedSlot")
 
-	deadAcct, err := store.GetAccount(stakeKeyDead, true, nil)
+	deadAcct, err := store.GetAccountByCredential(0, stakeKeyDead, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, deadAcct)
 	assert.Nil(t, deadAcct.Drep,
@@ -123,7 +123,7 @@ func TestClearDanglingDRepDelegations_InactiveDRepCountsAsDangling(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
-	acct, err := store.GetAccount(stakeKey, true, nil)
+	acct, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, acct.Drep)
 	assert.Equal(t, uint64(2_000), acct.AddedSlot)
@@ -150,9 +150,60 @@ func TestClearDanglingDRepDelegations_ScriptCredentialAlsoCleared(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
 
-	acct, err := store.GetAccount(stakeKey, true, nil)
+	acct, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, acct.Drep)
+}
+
+// A key-hash DRep and script-hash DRep can share the same credential bytes.
+// Dangling cleanup must match both the hash and credential tag before preserving a delegation.
+func TestClearDanglingDRepDelegations_DoesNotCrossMatchCredentialTag(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	sharedCred := bytes.Repeat([]byte{0x66}, 28)
+	keyStake := bytes.Repeat([]byte{0xC2}, 28)
+	scriptStake := bytes.Repeat([]byte{0xC3}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Drep{
+		CredentialTag: 0,
+		Credential:    sharedCred,
+		Active:        true,
+		AddedSlot:     50,
+	}).Error)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: keyStake,
+		Drep:       sharedCred,
+		DrepType:   models.DrepTypeAddrKeyHash,
+		Active:     true,
+		AddedSlot:  100,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: scriptStake,
+		Drep:       sharedCred,
+		DrepType:   models.DrepTypeScriptHash,
+		Active:     true,
+		AddedSlot:  100,
+	}).Error)
+
+	n, err := store.ClearDanglingDRepDelegations(1_000, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	keyAcct, err := store.GetAccountByCredential(0, keyStake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, keyAcct)
+	assert.Equal(t, sharedCred, keyAcct.Drep)
+	assert.Equal(t, models.DrepTypeAddrKeyHash, keyAcct.DrepType)
+	assert.Equal(t, uint64(100), keyAcct.AddedSlot)
+
+	scriptAcct, err := store.GetAccountByCredential(0, scriptStake, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, scriptAcct)
+	assert.Nil(t, scriptAcct.Drep)
+	assert.Equal(t, uint64(0), scriptAcct.DrepType)
+	assert.Equal(t, uint64(1_000), scriptAcct.AddedSlot)
 }
 
 // AlwaysAbstain / AlwaysNoConfidence delegations are pseudo-DReps with no
@@ -185,12 +236,12 @@ func TestClearDanglingDRepDelegations_PseudoDRepDelegationsPreserved(t *testing.
 	assert.Equal(t, 0, n,
 		"pseudo-DRep delegations must never be counted as dangling")
 
-	a, err := store.GetAccount(stakeKeyA, true, nil)
+	a, err := store.GetAccountByCredential(0, stakeKeyA, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, models.DrepTypeAlwaysAbstain, a.DrepType)
 	assert.Equal(t, uint64(100), a.AddedSlot, "AddedSlot untouched")
 
-	b, err := store.GetAccount(stakeKeyB, true, nil)
+	b, err := store.GetAccountByCredential(0, stakeKeyB, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, models.DrepTypeAlwaysNoConfidence, b.DrepType)
 	assert.Equal(t, uint64(100), b.AddedSlot)
@@ -213,7 +264,7 @@ func TestClearDanglingDRepDelegations_NoDelegationUntouched(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
-	acct, err := store.GetAccount(stakeKey, true, nil)
+	acct, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), acct.AddedSlot)
 }

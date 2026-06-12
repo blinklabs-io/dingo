@@ -111,6 +111,13 @@
             Stake credential hex
             <input id="stake-credential" placeholder="28-byte credential as hex" spellcheck="false" />
           </label>
+          <label>
+            Credential type
+            <select id="stake-credential-tag">
+              <option value="0">Key</option>
+              <option value="1">Script</option>
+            </select>
+          </label>
           <button type="submit">Lookup</button>
         </form>
         <div id="stake-result" class="lookup-result"></div>

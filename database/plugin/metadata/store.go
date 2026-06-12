@@ -231,8 +231,10 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
-	// GetStakeRegistrations retrieves all stake registration certificates for an account.
-	GetStakeRegistrations(
+	// GetStakeRegistrationsByCredential retrieves stake registration certificates
+	// using the full credential identity: credential tag plus 28-byte hash.
+	GetStakeRegistrationsByCredential(
+		uint8, // credentialTag
 		[]byte, // stakeKey
 		types.Txn,
 	) ([]lcommon.StakeRegistrationCertificate, error)
@@ -240,25 +242,27 @@ type MetadataStore interface {
 	// GetTip retrieves the current chain tip.
 	GetTip(types.Txn) (ochainsync.Tip, error)
 
-	// GetAccount retrieves an account by stake key, optionally including inactive accounts.
-	GetAccount(
+	// GetAccountByCredential retrieves an account using the full stake credential identity.
+	// The credential tag separates key and script credentials that share the same hash.
+	GetAccountByCredential(
+		uint8, // credentialTag
 		[]byte, // stakeKey
 		bool, // includeInactive
 		types.Txn,
 	) (*models.Account, error)
 
-	// GetAccounts retrieves multiple accounts by stake key in a single query,
-	// optionally including inactive accounts. The returned map is keyed by
-	// string(StakingKey); stake keys with no matching row are omitted. An
-	// empty input returns an empty (non-nil) map and no error.
-	GetAccounts(
-		[][]byte, // stakeKeys
+	// GetAccountsByCredential retrieves accounts in batch using tag-aware stake credentials.
+	// The returned map is keyed by StakeCredentialRef.MapKey() for tag plus hash lookups.
+	GetAccountsByCredential(
+		[]models.StakeCredentialRef, // stakeCredentials
 		bool, // includeInactive
 		types.Txn,
 	) (map[string]*models.Account, error)
 
-	// AddAccountReward credits a reward account by stake credential.
-	AddAccountReward(
+	// AddAccountRewardByCredential credits rewards using the full stake credential identity.
+	// The credential tag prevents key and script reward accounts with the same hash from merging.
+	AddAccountRewardByCredential(
+		uint8, // credentialTag
 		[]byte, // stakeKey
 		uint64, // amount
 		uint64, // slot
@@ -296,8 +300,20 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.Datum, error)
 
-	// GetDrep retrieves a DRep by its credential, optionally including inactive DReps.
+	// GetDrep retrieves a DRep by credential hash only (no tag filter).
+	// Used for the protocol validation path where only a Blake2b224 hash
+	// is available (e.g. LedgerView.DRepRegistration from gouroboros).
 	GetDrep(
+		[]byte, // credential
+		bool, // includeInactive
+		types.Txn,
+	) (*models.Drep, error)
+
+	// GetDrepByCredential retrieves a DRep using the full credential
+	// identity: tag (0=key, 1=script) plus 28-byte hash. Use this for
+	// all internal callers that know the credential type.
+	GetDrepByCredential(
+		uint8, // credentialTag
 		[]byte, // credential
 		bool, // includeInactive
 		types.Txn,
@@ -381,9 +397,10 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// GetTransactionsByAddress retrieves transactions involving
-	// the provided payment/staking key pair with pagination and ordering.
+	// the provided payment/staking credential pair with pagination and ordering.
 	GetTransactionsByAddress(
 		[]byte, // paymentKey
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -392,16 +409,17 @@ type MetadataStore interface {
 	) ([]models.Transaction, error)
 
 	// CountTransactionsByAddress returns the total number of
-	// transactions involving the provided payment/staking
-	// key pair.
+	// transactions involving the provided payment/staking credential pair.
 	CountTransactionsByAddress(
 		[]byte, // paymentKey
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
 
-	// GetAddressesByStakingKey retrieves distinct address mappings for a staking key.
-	GetAddressesByStakingKey(
+	// GetAddressesByCredential retrieves distinct address mappings for a stake credential.
+	GetAddressesByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -409,14 +427,17 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AddressTransaction, error)
 
-	// CountAddressesByStakingKey retrieves the total count of distinct address mappings for a staking key.
-	CountAddressesByStakingKey(
+	// CountAddressesByCredential retrieves the total count of distinct address mappings for a stake credential.
+	CountAddressesByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
 
-	// GetAccountDelegationHistory retrieves delegation history rows for a staking key.
-	GetAccountDelegationHistory(
+	// GetAccountDelegationHistoryByCredential retrieves delegation history
+	// rows for a stake credential tag/hash pair.
+	GetAccountDelegationHistoryByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -424,15 +445,18 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AccountDelegationHistoryRow, error)
 
-	// CountAccountDelegationHistory retrieves the total count of
-	// delegation history rows for a staking key.
-	CountAccountDelegationHistory(
+	// CountAccountDelegationHistoryByCredential retrieves the total count of
+	// delegation history rows for a stake credential tag/hash pair.
+	CountAccountDelegationHistoryByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
 
-	// GetAccountRegistrationHistory retrieves registration history rows for a staking key.
-	GetAccountRegistrationHistory(
+	// GetAccountRegistrationHistoryByCredential retrieves registration history
+	// rows for a stake credential tag/hash pair.
+	GetAccountRegistrationHistoryByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		int, // limit
 		int, // offset
@@ -440,9 +464,10 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.AccountRegistrationHistoryRow, error)
 
-	// CountAccountRegistrationHistory retrieves the total count of
-	// registration history rows for a staking key.
-	CountAccountRegistrationHistory(
+	// CountAccountRegistrationHistoryByCredential retrieves the total count of
+	// registration history rows for a stake credential tag/hash pair.
+	CountAccountRegistrationHistoryByCredential(
+		uint8, // credentialTag
 		[]byte, // stakingKey
 		types.Txn,
 	) (int, error)
@@ -678,9 +703,9 @@ type MetadataStore interface {
 	// GetUtxosByAddress retrieves all UTxOs for a given address.
 	GetUtxosByAddress(ledger.Address, types.Txn) ([]models.Utxo, error)
 
-	// GetControlledAmountByStakingKey returns the sum of live UTxO
-	// amounts controlled by the given staking key.
-	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
+	// GetControlledAmountByCredential returns the sum of live UTxO
+	// amounts controlled by the given stake credential.
+	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
 	// GetScriptLockedSupply returns the sum of lovelace held in live
 	// UTxOs whose payment credential is a script. This is the network's
@@ -1038,12 +1063,13 @@ type MetadataStore interface {
 	// DRep voting power and activity methods
 
 	// InsertDrepIfAbsent inserts a minimal DRep row when no record
-	// exists for the given credential. If a row already exists, it is
-	// left untouched: added_slot, anchor_url, anchor_hash, and active
-	// are never overwritten. Used on the vote-replay recovery path to
-	// recreate rows lost during recovery/bootstrap without clobbering
-	// real registration metadata.
+	// exists for the given full credential identity (tag + hash). If a
+	// row already exists, it is left untouched: added_slot, anchor_url,
+	// anchor_hash, and active are never overwritten. Used on the
+	// vote-replay recovery path to recreate rows lost during
+	// recovery/bootstrap without clobbering real registration metadata.
 	InsertDrepIfAbsent(
+		credentialTag uint8,
 		cred []byte,
 		slot uint64,
 		url string,
@@ -1054,18 +1080,21 @@ type MetadataStore interface {
 
 	// GetDRepVotingPower calculates the voting power for a DRep by summing
 	// the current stake of all delegated accounts, approximated from live
-	// UTxO balance plus reward-account balance.
+	// UTxO balance plus reward-account balance. credentialTag distinguishes
+	// key (0) from script (1) DRep credentials that share the same hash.
 	GetDRepVotingPower(
+		uint8, // credentialTag
 		[]byte, // drepCredential
 		types.Txn,
 	) (uint64, error)
 
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
-	// Returns a credential-to-power map; credentials with no delegated
-	// stake are omitted. Used by governance tallying to avoid N+1
-	// per-DRep lookups.
+	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
+	// no delegated stake are omitted. Use StakeCredentialRef to carry both
+	// the tag and hash so that key-hash and script-hash DReps sharing a
+	// 28-byte hash are tallied independently.
 	GetDRepVotingPowerBatch(
-		drepCredentials [][]byte,
+		drepCredentials []models.StakeCredentialRef,
 		txn types.Txn,
 	) (map[string]uint64, error)
 
@@ -1079,8 +1108,10 @@ type MetadataStore interface {
 	) (map[uint64]uint64, error)
 
 	// UpdateDRepActivity updates the DRep's last activity epoch and
-	// recalculates the expiry epoch.
+	// recalculates the expiry epoch. credentialTag distinguishes key (0)
+	// from script (1) DRep credentials that share the same 28-byte hash.
 	UpdateDRepActivity(
+		uint8, // credentialTag
 		[]byte, // drepCredential
 		uint64, // activityEpoch
 		uint64, // inactivityPeriod

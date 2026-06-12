@@ -50,7 +50,7 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	}, 123)
 	require.NoError(t, err)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
@@ -108,7 +108,7 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 1, out.ExpiredCount)
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
@@ -170,10 +170,10 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	require.NoError(t, txn.Commit())
 	assert.Equal(t, 1, out.ExpiredCount)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "refund must not create a reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, account)
 	state, err := store.GetNetworkState(nil)
@@ -329,10 +329,10 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	}, 123)
 	require.NoError(t, err)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "refund must not reactivate the reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.False(t, account.Active)
@@ -369,7 +369,7 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, db.DeleteAccountRewardsAfterSlot(122, nil))
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(5), uint64(account.Reward))

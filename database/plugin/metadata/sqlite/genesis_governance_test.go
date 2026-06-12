@@ -531,7 +531,7 @@ func TestSqliteRollbackPreservesGenesisVoteOnlyAccount(t *testing.T) {
 	// Rollback to slot 200: the genesis-rooted account must remain.
 	require.NoError(t, store.RestoreAccountStateAtSlot(200, nil))
 
-	restored, err := store.GetAccount(stakeCred.Credential[:], true, nil)
+	restored, err := store.GetAccountByCredential(0, stakeCred.Credential[:], true, nil)
 	require.NoError(t, err)
 	require.NotNil(t,
 		restored,
@@ -600,7 +600,7 @@ func TestSqliteRollbackPreservesGenesisStakeVoteAccount(t *testing.T) {
 	// with both pool and DRep restored to their genesis values.
 	require.NoError(t, store.RestoreAccountStateAtSlot(200, nil))
 
-	restored, err := store.GetAccount(stakeCred.Credential[:], true, nil)
+	restored, err := store.GetAccountByCredential(0, stakeCred.Credential[:], true, nil)
 	require.NoError(t, err)
 	require.NotNil(t,
 		restored,
@@ -751,7 +751,7 @@ func TestRollbackPicksLatestByBlockIndexAtSameSlot(t *testing.T) {
 	// block_index).
 	require.NoError(t, store.RestoreAccountStateAtSlot(200, nil))
 
-	restored, err := store.GetAccount(stakeKey, true, nil)
+	restored, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, restored)
 	assert.Equal(t, drepLate, restored.Drep,

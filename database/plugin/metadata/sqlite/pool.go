@@ -28,15 +28,16 @@ import (
 // poolRegRecord holds registration data for batch processing during pool restoration.
 // Includes blockIndex, certIndex, and certID for deterministic same-slot disambiguation.
 type poolRegRecord struct {
-	pledge        types.Uint64
-	cost          types.Uint64
-	margin        *types.Rat
-	vrfKeyHash    []byte
-	rewardAccount []byte
-	addedSlot     uint64
-	blockIndex    uint32
-	certIndex     uint32
-	certID        uint
+	pledge                     types.Uint64
+	cost                       types.Uint64
+	margin                     *types.Rat
+	vrfKeyHash                 []byte
+	rewardAccount              []byte
+	rewardAccountCredentialTag uint8
+	addedSlot                  uint64
+	blockIndex                 uint32
+	certIndex                  uint32
+	certID                     uint
 }
 
 // isMoreRecent checks if this registration is more recent than the other.
@@ -89,20 +90,21 @@ func batchFetchPoolRegs(
 
 		// Fetch registration records with cert_index, block_index, and cert ID from joined tables
 		type regResult struct {
-			PoolID        uint
-			AddedSlot     uint64
-			BlockIndex    uint32
-			CertIndex     uint32
-			CertID        uint
-			Pledge        types.Uint64
-			Cost          types.Uint64
-			Margin        *types.Rat
-			VrfKeyHash    []byte
-			RewardAccount []byte
+			PoolID                     uint
+			AddedSlot                  uint64
+			BlockIndex                 uint32
+			CertIndex                  uint32
+			CertID                     uint
+			Pledge                     types.Uint64
+			Cost                       types.Uint64
+			Margin                     *types.Rat
+			VrfKeyHash                 []byte
+			RewardAccount              []byte
+			RewardAccountCredentialTag uint8
 		}
 		var regRecords []regResult
 		if err := db.Table("pool_registration").
-			Select("pool_registration.pool_id, pool_registration.added_slot, pool_registration.pledge, pool_registration.cost, pool_registration.margin, pool_registration.vrf_key_hash, pool_registration.reward_account, COALESCE(certs.cert_index, 0) AS cert_index, COALESCE(certs.id, 0) AS cert_id, COALESCE(\"transaction\".block_index, 0) AS block_index").
+			Select("pool_registration.pool_id, pool_registration.added_slot, pool_registration.pledge, pool_registration.cost, pool_registration.margin, pool_registration.vrf_key_hash, pool_registration.reward_account, pool_registration.reward_account_credential_tag, COALESCE(certs.cert_index, 0) AS cert_index, COALESCE(certs.id, 0) AS cert_id, COALESCE(\"transaction\".block_index, 0) AS block_index").
 			Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
 			Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
 			Where("pool_registration.pool_id IN ? AND pool_registration.added_slot <= ?", idChunk, slot).
@@ -111,15 +113,16 @@ func batchFetchPoolRegs(
 		}
 		for _, r := range regRecords {
 			rec := poolRegRecord{
-				addedSlot:     r.AddedSlot,
-				blockIndex:    r.BlockIndex,
-				certIndex:     r.CertIndex,
-				certID:        r.CertID,
-				pledge:        r.Pledge,
-				cost:          r.Cost,
-				margin:        r.Margin,
-				vrfKeyHash:    r.VrfKeyHash,
-				rewardAccount: r.RewardAccount,
+				addedSlot:                  r.AddedSlot,
+				blockIndex:                 r.BlockIndex,
+				certIndex:                  r.CertIndex,
+				certID:                     r.CertID,
+				pledge:                     r.Pledge,
+				cost:                       r.Cost,
+				margin:                     r.Margin,
+				vrfKeyHash:                 r.VrfKeyHash,
+				rewardAccount:              r.RewardAccount,
+				rewardAccountCredentialTag: r.RewardAccountCredentialTag,
 			}
 			if !cache.hasReg[r.PoolID] ||
 				rec.isMoreRecent(cache.registration[r.PoolID]) {
@@ -602,11 +605,12 @@ func (d *MetadataStoreSqlite) RestorePoolStateAtSlot(
 
 		// Update the Pool's denormalized fields from the registration
 		if result := db.Model(&pool).Updates(map[string]any{
-			"pledge":         latestReg.pledge,
-			"cost":           latestReg.cost,
-			"margin":         latestReg.margin,
-			"vrf_key_hash":   latestReg.vrfKeyHash,
-			"reward_account": latestReg.rewardAccount,
+			"pledge":                        latestReg.pledge,
+			"cost":                          latestReg.cost,
+			"margin":                        latestReg.margin,
+			"vrf_key_hash":                  latestReg.vrfKeyHash,
+			"reward_account":                latestReg.rewardAccount,
+			"reward_account_credential_tag": latestReg.rewardAccountCredentialTag,
 		}); result.Error != nil {
 			return result.Error
 		}
@@ -1165,7 +1169,7 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 		var chunkResults []poolStakeResult
 		if err := db.Table("account").
 			Select("account.pool, COALESCE(SUM(utxo.amount), 0) as total_stake").
-			Joins("INNER JOIN utxo ON utxo.staking_key = account.staking_key").
+			Joins("INNER JOIN utxo ON utxo.credential_tag = account.credential_tag AND utxo.staking_key = account.staking_key").
 			Where("account.pool IN ? AND account.active = ? AND utxo.deleted_slot = 0", chunk, true).
 			Group("account.pool").
 			Scan(&chunkResults).Error; err != nil {

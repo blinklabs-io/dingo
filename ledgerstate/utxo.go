@@ -440,6 +440,10 @@ func extractAddressKeys(addr []byte, result *ParsedUTxO) {
 		}
 		if addrType <= 1 { // staking is key for types 0,1
 			result.StakingKey = bytes.Clone(addr[29:57])
+			result.CredentialTag = 0
+		} else { // staking is script for types 2,3
+			result.StakingKey = bytes.Clone(addr[29:57])
+			result.CredentialTag = 1
 		}
 	case (addrType == 4 || addrType == 5) && len(addr) >= 29:
 		// Pointer address: 1 header + 28 payment + pointer
@@ -505,6 +509,9 @@ func parseCborTxOut(
 	skh := addr.StakeKeyHash()
 	if skh != zeroBlake2b224 {
 		result.StakingKey = skh.Bytes()
+		if credentialTag, ok := models.StakeCredentialTagFromAddress(addr); ok {
+			result.CredentialTag = credentialTag
+		}
 	}
 	if addr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
 		result.PaymentScript = true
@@ -711,6 +718,7 @@ func UTxOToModel(u *ParsedUTxO, slot uint64) models.Utxo {
 		OutputIdx:     u.OutputIndex,
 		PaymentKey:    u.PaymentKey,
 		StakingKey:    u.StakingKey,
+		CredentialTag: u.CredentialTag,
 		PaymentScript: u.PaymentScript,
 		Amount:        types.Uint64(u.Amount),
 		AddedSlot:     slot,

@@ -518,9 +518,10 @@ func (d *Database) UtxosByAddress(
 	return utxos, nil
 }
 
-// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
-// controlled by the given staking key.
-func (d *Database) GetControlledAmountByStakingKey(
+// GetControlledAmountByCredential returns the sum of live UTxO amounts
+// controlled by the given stake credential.
+func (d *Database) GetControlledAmountByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn *Txn,
 ) (uint64, error) {
@@ -528,13 +529,15 @@ func (d *Database) GetControlledAmountByStakingKey(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	total, err := d.metadata.GetControlledAmountByStakingKey(
+	total, err := d.metadata.GetControlledAmountByCredential(
+		credentialTag,
 		stakingKey,
 		txn.Metadata(),
 	)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"get controlled amount by staking key=%x: %w",
+			"get controlled amount by credential tag=%d key=%x: %w",
+			credentialTag,
 			stakingKey,
 			err,
 		)

@@ -532,7 +532,7 @@ func BenchmarkAccountLookupByStakeKeyNoData(b *testing.B) {
 
 	// Benchmark lookup (on empty database for now)
 	for b.Loop() {
-		_, err := db.Metadata().GetAccount(testStakeKey, false, nil)
+		_, err := db.Metadata().GetAccountByCredential(0, testStakeKey, false, nil)
 		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -609,7 +609,7 @@ func BenchmarkAccountLookupByStakeKeyRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		key := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetAccount(key, false, nil)
+		_, err := db.Metadata().GetAccountByCredential(0, key, false, nil)
 		if err != nil && !errors.Is(err, models.ErrAccountNotFound) {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -1185,7 +1185,7 @@ func BenchmarkStakeRegistrationLookupsNoData(b *testing.B) {
 	// Benchmark lookup (on empty database for now)
 	for i := 0; b.Loop(); i++ {
 		stakeKey := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetStakeRegistrations(stakeKey, nil)
+		_, err := db.Metadata().GetStakeRegistrationsByCredential(0, stakeKey, nil)
 		if err != nil {
 			b.Fatalf("unexpected error: %v", err)
 		}
@@ -1262,7 +1262,7 @@ func BenchmarkStakeRegistrationLookupsRealData(b *testing.B) {
 	// Benchmark lookup against real seeded data
 	for i := 0; b.Loop(); i++ {
 		stakeKey := testStakeKeys[i%len(testStakeKeys)]
-		_, err := db.Metadata().GetStakeRegistrations(stakeKey, nil)
+		_, err := db.Metadata().GetStakeRegistrationsByCredential(0, stakeKey, nil)
 		if err != nil {
 			b.Fatal(err)
 		}

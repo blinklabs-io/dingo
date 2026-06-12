@@ -125,6 +125,7 @@ type ParsedUTxO struct {
 	Address       []byte // raw address bytes
 	PaymentKey    []byte // 28 bytes, extracted from address
 	StakingKey    []byte // 28 bytes, extracted from address
+	CredentialTag uint8  // stake credential tag: 0 key hash, 1 script hash
 	PaymentScript bool   // true when payment credential is a script hash
 	Amount        uint64 // lovelace
 	Assets        []ParsedAsset
@@ -178,18 +179,19 @@ type ParsedAccount struct {
 
 // ParsedPool represents a stake pool registration.
 type ParsedPool struct {
-	PoolKeyHash   []byte // 28 bytes
-	VrfKeyHash    []byte // 32 bytes
-	Pledge        uint64
-	Cost          uint64
-	MarginNum     uint64
-	MarginDen     uint64
-	RewardAccount []byte
-	Owners        [][]byte // list of 28-byte key hashes
-	Relays        []ParsedRelay
-	MetadataUrl   string
-	MetadataHash  []byte // 32 bytes
-	Deposit       uint64
+	PoolKeyHash                []byte // 28 bytes
+	VrfKeyHash                 []byte // 32 bytes
+	Pledge                     uint64
+	Cost                       uint64
+	MarginNum                  uint64
+	MarginDen                  uint64
+	RewardAccount              []byte
+	RewardAccountCredentialTag uint8
+	Owners                     [][]byte // list of 28-byte key hashes
+	Relays                     []ParsedRelay
+	MetadataUrl                string
+	MetadataHash               []byte // 32 bytes
+	Deposit                    uint64
 }
 
 // ParsedRelay represents a pool relay from the stake pool
@@ -802,14 +804,27 @@ func importAccounts(
 		default:
 		}
 
+		credentialTag, err := models.CredentialTagFromUint(
+			uint(acct.StakingKey.Type),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"importing account %x credential type %d: %w",
+				acct.StakingKey.Hash,
+				acct.StakingKey.Type,
+				err,
+			)
+		}
+
 		model := &models.Account{
-			StakingKey: acct.StakingKey.Hash,
-			Pool:       acct.PoolKeyHash,
-			Drep:       acct.DRepCred.Hash,
-			DrepType:   acct.DRepCred.Type,
-			AddedSlot:  slot,
-			Reward:     types.Uint64(acct.Reward),
-			Active:     acct.Active,
+			StakingKey:    acct.StakingKey.Hash,
+			CredentialTag: credentialTag,
+			Pool:          acct.PoolKeyHash,
+			Drep:          acct.DRepCred.Hash,
+			DrepType:      acct.DRepCred.Type,
+			AddedSlot:     slot,
+			Reward:        types.Uint64(acct.Reward),
+			Active:        acct.Active,
 		}
 
 		if err := store.ImportAccount(
@@ -892,12 +907,13 @@ func importPools(
 		}
 
 		model := &models.Pool{
-			PoolKeyHash:   pool.PoolKeyHash,
-			VrfKeyHash:    pool.VrfKeyHash,
-			Pledge:        types.Uint64(pool.Pledge),
-			Cost:          types.Uint64(pool.Cost),
-			Margin:        margin,
-			RewardAccount: pool.RewardAccount,
+			PoolKeyHash:                pool.PoolKeyHash,
+			VrfKeyHash:                 pool.VrfKeyHash,
+			Pledge:                     types.Uint64(pool.Pledge),
+			Cost:                       types.Uint64(pool.Cost),
+			Margin:                     margin,
+			RewardAccount:              pool.RewardAccount,
+			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
 		}
 
 		var owners []models.PoolRegistrationOwner
@@ -926,18 +942,19 @@ func importPools(
 		}
 
 		reg := &models.PoolRegistration{
-			PoolKeyHash:   pool.PoolKeyHash,
-			VrfKeyHash:    pool.VrfKeyHash,
-			Pledge:        types.Uint64(pool.Pledge),
-			Cost:          types.Uint64(pool.Cost),
-			Margin:        margin,
-			RewardAccount: pool.RewardAccount,
-			AddedSlot:     slot,
-			DepositAmount: types.Uint64(pool.Deposit),
-			Owners:        owners,
-			Relays:        relays,
-			MetadataUrl:   pool.MetadataUrl,
-			MetadataHash:  pool.MetadataHash,
+			PoolKeyHash:                pool.PoolKeyHash,
+			VrfKeyHash:                 pool.VrfKeyHash,
+			Pledge:                     types.Uint64(pool.Pledge),
+			Cost:                       types.Uint64(pool.Cost),
+			Margin:                     margin,
+			RewardAccount:              pool.RewardAccount,
+			RewardAccountCredentialTag: pool.RewardAccountCredentialTag,
+			AddedSlot:                  slot,
+			DepositAmount:              types.Uint64(pool.Deposit),
+			Owners:                     owners,
+			Relays:                     relays,
+			MetadataUrl:                pool.MetadataUrl,
+			MetadataHash:               pool.MetadataHash,
 		}
 
 		if err := store.ImportPool(
@@ -1010,15 +1027,28 @@ func importDReps(
 		default:
 		}
 
+		credentialTag, err := models.CredentialTagFromUint(
+			uint(drep.Credential.Type),
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"importing DRep %x credential type %d: %w",
+				drep.Credential.Hash,
+				drep.Credential.Type,
+				err,
+			)
+		}
 		model := &models.Drep{
-			Credential: drep.Credential.Hash,
-			AnchorURL:  drep.AnchorURL,
-			AnchorHash: drep.AnchorHash,
-			AddedSlot:  slot,
-			Active:     drep.Active,
+			CredentialTag: credentialTag,
+			Credential:    drep.Credential.Hash,
+			AnchorURL:     drep.AnchorURL,
+			AnchorHash:    drep.AnchorHash,
+			AddedSlot:     slot,
+			Active:        drep.Active,
 		}
 
 		reg := &models.RegistrationDrep{
+			CredentialTag:  credentialTag,
 			DrepCredential: drep.Credential.Hash,
 			AnchorURL:      drep.AnchorURL,
 			AnchorHash:     drep.AnchorHash,

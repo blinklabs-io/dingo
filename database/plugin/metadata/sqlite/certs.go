@@ -21,8 +21,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// GetStakeRegistrations returns stake registration certificates
-func (d *MetadataStoreSqlite) GetStakeRegistrations(
+// GetStakeRegistrationsByCredential returns stake registration certificates
+// for a specific key/script credential tag and hash.
+func (d *MetadataStoreSqlite) GetStakeRegistrationsByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
@@ -32,8 +34,14 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 	if err != nil {
 		return ret, err
 	}
-	result := db.Where("staking_key = ?", stakingKey).
-		Order("id DESC").
+	result := db.Where(
+		"credential_tag = ? AND staking_key = ?",
+		credentialTag,
+		stakingKey,
+	).
+		Joins("LEFT JOIN certs ON certs.id = stake_registration.certificate_id").
+		Joins(`LEFT JOIN "transaction" ON "transaction".id = certs.transaction_id`).
+		Order(`stake_registration.added_slot DESC, COALESCE("transaction".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC`).
 		Find(&certs)
 	if result.Error != nil {
 		return ret, result.Error
@@ -43,14 +51,20 @@ func (d *MetadataStoreSqlite) GetStakeRegistrations(
 		tmpCert = lcommon.StakeRegistrationCertificate{
 			CertType: uint(lcommon.CertificateTypeStakeRegistration),
 			StakeCredential: lcommon.Credential{
-				// TODO: determine correct type
-				// CredType: lcommon.CredentialTypeAddrKeyHash,
+				CredType:   stakeCredentialTypeFromTag(cert.CredentialTag),
 				Credential: lcommon.CredentialHash(cert.StakingKey),
 			},
 		}
 		ret = append(ret, tmpCert)
 	}
 	return ret, nil
+}
+
+func stakeCredentialTypeFromTag(tag uint8) uint {
+	if tag == 1 {
+		return lcommon.CredentialTypeScriptHash
+	}
+	return lcommon.CredentialTypeAddrKeyHash
 }
 
 // DeleteCertificatesAfterSlot removes all certificate records added after the given slot.

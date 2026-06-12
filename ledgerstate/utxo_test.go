@@ -40,11 +40,12 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 	stakeHash := bytes.Repeat([]byte{0x22}, 28)
 
 	tests := []struct {
-		name          string
-		addr          []byte
-		wantScript    bool
-		wantPayKey    bool
-		wantStakeKey  bool
+		name         string
+		addr         []byte
+		wantScript   bool
+		wantPayKey   bool
+		wantStakeKey bool
+		wantStakeTag uint8
 	}{
 		{
 			// Type 0: key payment + key staking — NOT script
@@ -53,6 +54,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			wantScript:   false,
 			wantPayKey:   true,
 			wantStakeKey: true,
+			wantStakeTag: 0,
 		},
 		{
 			// Type 1: script payment + key staking
@@ -61,13 +63,32 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			wantScript:   true,
 			wantPayKey:   false,
 			wantStakeKey: true,
+			wantStakeTag: 0,
+		},
+		{
+			// Type 2: key payment + script staking
+			name:         "type2_key_payment_script_staking",
+			addr:         buildShelleyAddr(2, 1, payHash, stakeHash),
+			wantScript:   false,
+			wantPayKey:   true,
+			wantStakeKey: true,
+			wantStakeTag: 1,
+		},
+		{
+			// Type 3: script payment + script staking
+			name:         "type3_script_payment_script_staking",
+			addr:         buildShelleyAddr(3, 1, payHash, stakeHash),
+			wantScript:   true,
+			wantPayKey:   false,
+			wantStakeKey: true,
+			wantStakeTag: 1,
 		},
 		{
 			// Type 5: script payment + pointer staking (enterprise-like min length)
-			name:        "type5_script_payment_pointer",
-			addr:        buildShelleyAddr(5, 1, payHash, nil),
-			wantScript:  true,
-			wantPayKey:  false,
+			name:       "type5_script_payment_pointer",
+			addr:       buildShelleyAddr(5, 1, payHash, nil),
+			wantScript: true,
+			wantPayKey: false,
 		},
 		{
 			// Type 6: enterprise key payment — NOT script
@@ -98,6 +119,7 @@ func TestExtractAddressKeys_ScriptPaymentTypes(t *testing.T) {
 			}
 			if tc.wantStakeKey {
 				require.Equal(t, stakeHash, result.StakingKey, "StakingKey")
+				require.Equal(t, tc.wantStakeTag, result.CredentialTag, "CredentialTag")
 			} else {
 				require.Empty(t, result.StakingKey, "StakingKey should be empty for non-staking-key address types")
 			}
@@ -116,8 +138,10 @@ func TestUTxOToModel_PropagatesPaymentScript(t *testing.T) {
 			OutputIndex:   0,
 			Amount:        1_000_000,
 			PaymentScript: wantScript,
+			CredentialTag: 1,
 		}
 		m := UTxOToModel(u, 100)
 		require.Equal(t, wantScript, m.PaymentScript)
+		require.Equal(t, uint8(1), m.CredentialTag)
 	}
 }

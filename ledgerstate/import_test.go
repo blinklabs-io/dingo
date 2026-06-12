@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/stretchr/testify/require"
 )
@@ -357,10 +358,10 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 	}
 
 	cases := []struct {
-		name           string
-		targetEpoch    uint64
-		wantResolved   bool
-		wantAutoVote   uint8
+		name         string
+		targetEpoch  uint64
+		wantResolved bool
+		wantAutoVote uint8
 	}{
 		{
 			name:         "mark",
@@ -450,6 +451,108 @@ func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pparams, 1)
 	require.Equal(t, uint64(17_700), pparams[0].AddedSlot)
+}
+
+func TestImportAccountsPreservesCredentialTag(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	stakeKey := bytes.Repeat([]byte{0xA4}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+	}
+
+	require.NoError(t, importAccounts(
+		context.Background(),
+		cfg,
+		[]ParsedAccount{
+			{
+				StakingKey: Credential{
+					Type: CredentialTypeKey,
+					Hash: stakeKey,
+				},
+				Reward: 1,
+				Active: true,
+			},
+			{
+				StakingKey: Credential{
+					Type: CredentialTypeScript,
+					Hash: stakeKey,
+				},
+				Reward: 2,
+				Active: true,
+			},
+		},
+		123,
+	))
+
+	keyAcct, err := db.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint8(0), keyAcct.CredentialTag)
+	require.Equal(t, types.Uint64(1), keyAcct.Reward)
+
+	scriptAcct, err := db.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint8(1), scriptAcct.CredentialTag)
+	require.Equal(t, types.Uint64(2), scriptAcct.Reward)
+}
+
+// TestImportPoolsPreservesRewardAccountCredentialTag verifies snapshot
+// pool import stores reward account tags on Pool and PoolRegistration.
+func TestImportPoolsPreservesRewardAccountCredentialTag(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	poolKeyHash := bytes.Repeat([]byte{0x51}, 28)
+	vrfKeyHash := bytes.Repeat([]byte{0x52}, 32)
+	rewardAccount := bytes.Repeat([]byte{0x53}, 28)
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+	}
+
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{
+			{
+				PoolKeyHash:                poolKeyHash,
+				VrfKeyHash:                 vrfKeyHash,
+				RewardAccount:              rewardAccount,
+				RewardAccountCredentialTag: 1,
+				MarginDen:                  1,
+			},
+		},
+		456,
+	))
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires the sqlite metadata backend")
+
+	var pool models.Pool
+	require.NoError(t, store.DB().
+		Where("pool_key_hash = ?", poolKeyHash).
+		First(&pool).Error)
+	require.Equal(t, rewardAccount, []byte(pool.RewardAccount))
+	require.Equal(t, uint8(1), pool.RewardAccountCredentialTag)
+
+	var registration models.PoolRegistration
+	require.NoError(t, store.DB().
+		Where("pool_key_hash = ?", poolKeyHash).
+		First(&registration).Error)
+	require.Equal(t, rewardAccount, []byte(registration.RewardAccount))
+	require.Equal(t, uint8(1), registration.RewardAccountCredentialTag)
 }
 
 func TestImportGovStateAnchorsProposalAndConstitutionSlots(t *testing.T) {

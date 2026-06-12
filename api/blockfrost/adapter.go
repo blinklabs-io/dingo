@@ -743,8 +743,30 @@ func (a *NodeAdapter) Asset(
 func (a *NodeAdapter) DRep(
 	credential DRepCredential,
 ) (DRepInfo, error) {
+	if credential.CredentialTagKnown {
+		var credentialTag uint8
+		if credential.HasScript {
+			credentialTag = 1
+		}
+		return a.drepByCredentialTag(credential, credentialTag)
+	}
+
+	info, err := a.drepByCredentialTag(credential, 0)
+	if err == nil {
+		return info, nil
+	}
+	if !errors.Is(err, ErrDRepNotFound) {
+		return DRepInfo{}, err
+	}
+	return a.drepByCredentialTag(credential, 1)
+}
+
+func (a *NodeAdapter) drepByCredentialTag(
+	credential DRepCredential,
+	credentialTag uint8,
+) (DRepInfo, error) {
 	db := a.ledgerState.Database()
-	drep, err := db.GetDrep(credential.Hash, true, nil)
+	drep, err := db.GetDrepByCredential(credentialTag, credential.Hash, true, nil)
 	if err != nil {
 		if errors.Is(err, models.ErrDrepNotFound) {
 			return DRepInfo{}, fmt.Errorf(
@@ -759,7 +781,8 @@ func (a *NodeAdapter) DRep(
 			err,
 		)
 	}
-	power, err := db.GetDRepVotingPower(credential.Hash, nil)
+	hasScript := credentialTag == 1
+	power, err := db.GetDRepVotingPower(credentialTag, credential.Hash, nil)
 	if err != nil {
 		return DRepInfo{}, fmt.Errorf(
 			"get drep voting power %x: %w",
@@ -786,7 +809,7 @@ func (a *NodeAdapter) DRep(
 	return DRepInfo{
 		DRepID:      credential.ID,
 		Hex:         hex.EncodeToString(credential.Hash),
-		HasScript:   credential.HasScript,
+		HasScript:   hasScript,
 		Registered:  registered,
 		Epoch:       registrationEpoch.EpochId,
 		Amount:      amount,
@@ -974,7 +997,7 @@ func (a *NodeAdapter) PoolsExtended() (
 func (a *NodeAdapter) Account(
 	stakeAddress string,
 ) (AccountInfo, error) {
-	_, stakeKey, err := parseStakeAddress(
+	_, credentialTag, stakeKey, err := parseStakeAddress(
 		stakeAddress,
 	)
 	if err != nil {
@@ -982,12 +1005,17 @@ func (a *NodeAdapter) Account(
 	}
 
 	db := a.ledgerState.Database()
-	account, err := db.GetAccount(stakeKey, true, nil)
+	account, err := db.GetAccountByCredential(
+		credentialTag,
+		stakeKey,
+		true,
+		nil,
+	)
 	if err != nil {
 		return AccountInfo{}, err
 	}
 	controlledAmount, err := a.ledgerState.Database().
-		GetControlledAmountByStakingKey(stakeKey, nil)
+		GetControlledAmountByCredential(credentialTag, stakeKey, nil)
 	if err != nil {
 		return AccountInfo{}, fmt.Errorf(
 			"get controlled amount: %w",
@@ -1044,7 +1072,7 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountAssociatedAddressInfo, int, error) {
-	stakeAddr, stakeKey, err := parseStakeAddress(
+	stakeAddr, credentialTag, stakeKey, err := parseStakeAddress(
 		stakeAddress,
 	)
 	if err != nil {
@@ -1058,11 +1086,16 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	total, err := a.ledgerState.Database().
-		CountAddressesByStakingKey(stakeKey, nil)
+		CountAddressesByCredential(credentialTag, stakeKey, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count associated addresses: %w",
@@ -1072,7 +1105,8 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 	offset := (params.Page - 1) * params.Count
 
 	rows, err := a.ledgerState.Database().
-		GetAddressesByStakingKey(
+		GetAddressesByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,
@@ -1091,9 +1125,13 @@ func (a *NodeAdapter) AccountAssociatedAddresses(
 		0,
 		len(rows),
 	)
+	addressType := uint8(lcommon.AddressTypeKeyKey)
+	if credentialTag == 1 {
+		addressType = lcommon.AddressTypeKeyScript
+	}
 	for _, row := range rows {
 		addr, err := lcommon.NewAddressFromParts(
-			lcommon.AddressTypeKeyKey,
+			addressType,
 			networkID,
 			row.PaymentKey,
 			stakeKey,
@@ -1117,18 +1155,27 @@ func (a *NodeAdapter) AccountDelegationHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountDelegationHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
-		CountAccountDelegationHistory(stakeKey, nil)
+		CountAccountDelegationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -1139,7 +1186,8 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		return []AccountDelegationHistoryInfo{}, total, nil
 	}
 	rows, err := a.ledgerState.Database().
-		GetAccountDelegationHistory(
+		GetAccountDelegationHistoryByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,
@@ -1184,18 +1232,27 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountRegistrationHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	offset := (params.Page - 1) * params.Count
 	total, err := a.ledgerState.Database().
-		CountAccountRegistrationHistory(stakeKey, nil)
+		CountAccountRegistrationHistoryByCredential(
+			credentialTag,
+			stakeKey,
+			nil,
+		)
 	if err != nil {
 		return nil, 0, fmt.Errorf(
 			"count account registration history: %w",
@@ -1206,7 +1263,8 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 		return []AccountRegistrationHistoryInfo{}, total, nil
 	}
 	rows, err := a.ledgerState.Database().
-		GetAccountRegistrationHistory(
+		GetAccountRegistrationHistoryByCredential(
+			credentialTag,
 			stakeKey,
 			params.Count,
 			offset,
@@ -1240,12 +1298,17 @@ func (a *NodeAdapter) AccountRewardHistory(
 	stakeAddress string,
 	params PaginationParams,
 ) ([]AccountRewardHistoryInfo, int, error) {
-	_, stakeKey, err := parseStakeAddress(stakeAddress)
+	_, credentialTag, stakeKey, err := parseStakeAddress(stakeAddress)
 	if err != nil {
 		return nil, 0, err
 	}
 	if _, err := a.ledgerState.Database().
-		GetAccount(stakeKey, true, nil); err != nil {
+		GetAccountByCredential(
+			credentialTag,
+			stakeKey,
+			true,
+			nil,
+		); err != nil {
 		return nil, 0, err
 	}
 	// TODO(#1875): Implement reward history once Dingo persists
@@ -1264,18 +1327,27 @@ func blockIssuer(issuer lcommon.IssuerVkey) string {
 
 func parseStakeAddress(
 	stakeAddress string,
-) (lcommon.Address, []byte, error) {
+) (lcommon.Address, uint8, []byte, error) {
 	addr, err := lcommon.NewAddress(stakeAddress)
 	if err != nil {
-		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
 	}
 	zeroHash := lcommon.NewBlake2b224(nil)
 	if addr.PaymentKeyHash() != zeroHash ||
 		addr.StakeKeyHash() == zeroHash {
-		return lcommon.Address{}, nil, ErrInvalidStakeAddress
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
+	}
+	var credentialTag uint8
+	switch addr.StakingPayload().(type) {
+	case lcommon.AddressPayloadKeyHash:
+		credentialTag = 0
+	case lcommon.AddressPayloadScriptHash:
+		credentialTag = 1
+	default:
+		return lcommon.Address{}, 0, nil, ErrInvalidStakeAddress
 	}
 	stakeKey := addr.StakeKeyHash().Bytes()
-	return addr, stakeKey, nil
+	return addr, credentialTag, stakeKey, nil
 }
 
 func blockHashString(hash []byte) string {
@@ -2325,11 +2397,9 @@ func (a *NodeAdapter) TransactionPoolUpdates(
 			owners = append(owners, address)
 		}
 
+		rewardAccountCredential := poolRewardAccountCredential(c)
 		rewardAccount, err := stakeAddressFromCredential(
-			lcommon.Credential{
-				CredType:   lcommon.CredentialTypeAddrKeyHash,
-				Credential: lcommon.CredentialHash(c.RewardAccount),
-			},
+			rewardAccountCredential,
 			networkID,
 		)
 		if err != nil {
@@ -2741,6 +2811,31 @@ func stakeAddressFromCredential(
 		return "", err
 	}
 	return addr.String(), nil
+}
+
+func poolRewardAccountCredential(
+	cert *lcommon.PoolRegistrationCertificate,
+) lcommon.Credential {
+	credType := uint(lcommon.CredentialTypeAddrKeyHash)
+	hash := cert.RewardAccount[:]
+	rawCbor := cert.Cbor()
+	if len(rawCbor) > 0 {
+		var raw []cbor.RawMessage
+		if _, err := cbor.Decode(rawCbor, &raw); err == nil && len(raw) > 6 {
+			var rewardAddrBytes []byte
+			if _, err := cbor.Decode(raw[6], &rewardAddrBytes); err == nil &&
+				len(rewardAddrBytes) == 29 {
+				if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
+					credType = lcommon.CredentialTypeScriptHash
+				}
+				hash = rewardAddrBytes[1:]
+			}
+		}
+	}
+	return lcommon.Credential{
+		CredType:   credType,
+		Credential: lcommon.CredentialHash(lcommon.NewBlake2b224(hash)),
+	}
 }
 
 func redeemerPurpose(tag lcommon.RedeemerTag) string {
