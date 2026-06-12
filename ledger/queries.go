@@ -570,6 +570,8 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 // drepDeposit returns the current dRepDeposit protocol parameter, which is the
 // deposit every DRep locks at registration. Returns 0 outside Conway.
 func (ls *LedgerState) drepDeposit() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
 	if cpp, ok := ls.currentPParams.(*conway.ConwayProtocolParameters); ok &&
 		cpp != nil {
 		return cpp.DRepDeposit
