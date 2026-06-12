@@ -2431,6 +2431,9 @@ func (a *NodeAdapter) TransactionRedeemers(
 		}
 		return cmp.Compare(a.Index, b.Index)
 	})
+	if len(redeemers) == 0 {
+		return []TransactionRedeemerInfo{}, nil
+	}
 
 	metadata, err := a.transactionRedeemerMetadata(hash, tx, decodedTx)
 	if err != nil {
@@ -2459,7 +2462,15 @@ func (a *NodeAdapter) TransactionRedeemers(
 			Index: redeemer.Index,
 		}
 		dataHash := lcommon.Blake2b256Hash(redeemer.Data)
-		redeemerMetadata := metadata[key]
+		redeemerMetadata, ok := metadata[key]
+		if !ok {
+			return nil, fmt.Errorf(
+				"resolve redeemer metadata for transaction %x tag=%d index=%d",
+				hash,
+				redeemer.Tag,
+				redeemer.Index,
+			)
+		}
 		fee := redeemerExecutionFee(
 			executionCosts,
 			redeemer.ExUnitsMemory,
@@ -2763,7 +2774,12 @@ func (a *NodeAdapter) transactionRedeemerMetadata(
 			witnessDatums,
 		)
 		if purpose == nil {
-			continue
+			return nil, fmt.Errorf(
+				"build script purpose for transaction %x tag=%d index=%d",
+				hash,
+				redeemer.Tag,
+				redeemer.Index,
+			)
 		}
 		metadata := transactionRedeemerMetadata{
 			ScriptHash: hex.EncodeToString(purpose.ScriptHash().Bytes()),
