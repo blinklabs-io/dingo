@@ -144,8 +144,8 @@ Open `http://127.0.0.1:8088`.
 - `GET /api/proposals?lifecycle=active&action_type=6`
 - `GET /api/proposals/{txHash}/{actionIndex}`
 - `GET /api/dreps?active=true`
-- `GET /api/dreps/{credentialHex}`
-- `GET /api/stake/{stakeCredentialHex}`
+- `GET /api/dreps/{credentialHex}?credential_tag=0`
+- `GET /api/stake/{stakeCredentialHex}?credential_tag=0`
 
 All query handlers use direct SQL against Dingo metadata tables. The browser
 never connects to Postgres directly.

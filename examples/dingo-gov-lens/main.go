@@ -131,6 +131,7 @@ type voteRow struct {
 
 type drep struct {
 	Credential        string `json:"credential"`
+	CredentialTag     uint8  `json:"credentialTag"`
 	AnchorURL         string `json:"anchorUrl,omitempty"`
 	AnchorHash        string `json:"anchorHash,omitempty"`
 	AddedSlot         uint64 `json:"addedSlot"`
@@ -160,9 +161,10 @@ type drepVote struct {
 }
 
 type accountSummary struct {
-	StakingKey string `json:"stakingKey"`
-	Reward     string `json:"reward"`
-	Active     bool   `json:"active"`
+	StakingKey    string `json:"stakingKey"`
+	CredentialTag uint8  `json:"credentialTag"`
+	Reward        string `json:"reward"`
+	Active        bool   `json:"active"`
 }
 
 type drepHistoryItem struct {
@@ -175,12 +177,13 @@ type drepHistoryItem struct {
 }
 
 type stakeLookup struct {
-	StakingKey string `json:"stakingKey"`
-	Pool       string `json:"pool,omitempty"`
-	DRep       string `json:"drep,omitempty"`
-	DRepType   int64  `json:"drepType"`
-	Reward     string `json:"reward"`
-	Active     bool   `json:"active"`
+	StakingKey    string `json:"stakingKey"`
+	CredentialTag uint8  `json:"credentialTag"`
+	Pool          string `json:"pool,omitempty"`
+	DRep          string `json:"drep,omitempty"`
+	DRepType      int64  `json:"drepType"`
+	Reward        string `json:"reward"`
+	Active        bool   `json:"active"`
 }
 
 func main() {
@@ -600,6 +603,7 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
 			encode(d.credential, 'hex'),
+			d.credential_tag,
 			COALESCE(d.anchor_url, ''),
 			COALESCE(encode(d.anchor_hash, 'hex'), ''),
 			d.added_slot,
@@ -610,7 +614,10 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 			COUNT(DISTINCT gv.id) FILTER (WHERE gv.deleted_slot IS NULL) AS vote_count
 		FROM drep d
 		LEFT JOIN account a ON a.drep = d.credential
-		LEFT JOIN governance_vote gv ON gv.voter_type = 1 AND gv.voter_credential = d.credential
+			AND a.drep_type = d.credential_tag
+		LEFT JOIN governance_vote gv ON gv.voter_type = 1
+			AND gv.voter_credential = d.credential
+			AND gv.voter_credential_tag = d.credential_tag
 		WHERE `+strings.Join(where, " AND ")+`
 		GROUP BY d.id
 		ORDER BY d.active DESC, d.last_activity_epoch DESC, d.added_slot DESC
@@ -627,6 +634,7 @@ func (a *app) handleDreps(w http.ResponseWriter, r *http.Request) {
 		var item drep
 		if err := rows.Scan(
 			&item.Credential,
+			&item.CredentialTag,
 			&item.AnchorURL,
 			&item.AnchorHash,
 			&item.AddedSlot,
@@ -655,10 +663,16 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid drep credential", http.StatusBadRequest)
 		return
 	}
+	credentialTag, ok := parseCredentialTagParam(r)
+	if !ok {
+		http.Error(w, "invalid or missing credential_tag", http.StatusBadRequest)
+		return
+	}
 	var ret drepDetail
 	err := a.db.QueryRowContext(ctx, `
 		SELECT
 			encode(d.credential, 'hex'),
+			d.credential_tag,
 			COALESCE(d.anchor_url, ''),
 			COALESCE(encode(d.anchor_hash, 'hex'), ''),
 			d.added_slot,
@@ -669,11 +683,16 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 			COUNT(DISTINCT gv.id) FILTER (WHERE gv.deleted_slot IS NULL) AS vote_count
 		FROM drep d
 		LEFT JOIN account a ON a.drep = d.credential
-		LEFT JOIN governance_vote gv ON gv.voter_type = 1 AND gv.voter_credential = d.credential
+			AND a.drep_type = d.credential_tag
+		LEFT JOIN governance_vote gv ON gv.voter_type = 1
+			AND gv.voter_credential = d.credential
+			AND gv.voter_credential_tag = d.credential_tag
 		WHERE d.credential = decode($1, 'hex')
+			AND d.credential_tag = $2
 		GROUP BY d.id
-	`, credential).Scan(
+	`, credential, credentialTag).Scan(
 		&ret.DRep.Credential,
+		&ret.DRep.CredentialTag,
 		&ret.DRep.AnchorURL,
 		&ret.DRep.AnchorHash,
 		&ret.DRep.AddedSlot,
@@ -691,17 +710,17 @@ func (a *app) handleDrepDetail(w http.ResponseWriter, r *http.Request) {
 		serverError(w, r, "query drep", err)
 		return
 	}
-	ret.RecentVotes, err = a.drepVotes(ctx, credential)
+	ret.RecentVotes, err = a.drepVotes(ctx, credential, credentialTag)
 	if err != nil {
 		serverError(w, r, "query drep votes", err)
 		return
 	}
-	ret.Delegations, err = a.drepDelegations(ctx, credential)
+	ret.Delegations, err = a.drepDelegations(ctx, credential, credentialTag)
 	if err != nil {
 		serverError(w, r, "query drep delegations", err)
 		return
 	}
-	ret.History, err = a.drepHistory(ctx, credential)
+	ret.History, err = a.drepHistory(ctx, credential, credentialTag)
 	if err != nil {
 		serverError(w, r, "query drep history", err)
 		return
@@ -716,10 +735,16 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid stake credential", http.StatusBadRequest)
 		return
 	}
+	credentialTag, ok := parseCredentialTagParam(r)
+	if !ok {
+		http.Error(w, "invalid or missing credential_tag", http.StatusBadRequest)
+		return
+	}
 	var ret stakeLookup
 	err := a.db.QueryRowContext(ctx, `
 		SELECT
 			encode(staking_key, 'hex'),
+			credential_tag,
 			COALESCE(encode(pool, 'hex'), ''),
 			COALESCE(encode(drep, 'hex'), ''),
 			drep_type,
@@ -727,7 +752,16 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 			active
 		FROM account
 		WHERE staking_key = decode($1, 'hex')
-	`, credential).Scan(&ret.StakingKey, &ret.Pool, &ret.DRep, &ret.DRepType, &ret.Reward, &ret.Active)
+			AND credential_tag = $2
+	`, credential, credentialTag).Scan(
+		&ret.StakingKey,
+		&ret.CredentialTag,
+		&ret.Pool,
+		&ret.DRep,
+		&ret.DRepType,
+		&ret.Reward,
+		&ret.Active,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		http.NotFound(w, r)
 		return
@@ -781,7 +815,11 @@ func (a *app) proposalVotes(ctx context.Context, proposalID int64) ([]voteRow, v
 	return ret, stats, rows.Err()
 }
 
-func (a *app) drepVotes(ctx context.Context, credential string) ([]drepVote, error) {
+func (a *app) drepVotes(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) ([]drepVote, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT
 			encode(gp.tx_hash, 'hex'),
@@ -794,11 +832,12 @@ func (a *app) drepVotes(ctx context.Context, credential string) ([]drepVote, err
 		JOIN governance_proposal gp ON gp.id = gv.proposal_id
 		WHERE gv.voter_type = 1
 			AND gv.voter_credential = decode($1, 'hex')
+			AND gv.voter_credential_tag = $2
 			AND gv.deleted_slot IS NULL
 			AND gp.deleted_slot IS NULL
 		ORDER BY gv.added_slot DESC
 		LIMIT 50
-	`, credential)
+	`, credential, credentialTag)
 	if err != nil {
 		return nil, err
 	}
@@ -825,15 +864,20 @@ func (a *app) drepVotes(ctx context.Context, credential string) ([]drepVote, err
 	return ret, rows.Err()
 }
 
-func (a *app) drepDelegations(ctx context.Context, credential string) ([]accountSummary, error) {
+func (a *app) drepDelegations(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) ([]accountSummary, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT encode(staking_key, 'hex'), reward::text, active
+		SELECT encode(staking_key, 'hex'), credential_tag, reward::text, active
 		FROM account
 		WHERE drep = decode($1, 'hex')
+			AND drep_type = $2
 			AND active = true
 		ORDER BY reward DESC, staking_key ASC
 		LIMIT 50
-	`, credential)
+	`, credential, credentialTag)
 	if err != nil {
 		return nil, err
 	}
@@ -841,7 +885,12 @@ func (a *app) drepDelegations(ctx context.Context, credential string) ([]account
 	ret := []accountSummary{}
 	for rows.Next() {
 		var item accountSummary
-		if err := rows.Scan(&item.StakingKey, &item.Reward, &item.Active); err != nil {
+		if err := rows.Scan(
+			&item.StakingKey,
+			&item.CredentialTag,
+			&item.Reward,
+			&item.Active,
+		); err != nil {
 			return nil, err
 		}
 		ret = append(ret, item)
@@ -849,7 +898,11 @@ func (a *app) drepDelegations(ctx context.Context, credential string) ([]account
 	return ret, rows.Err()
 }
 
-func (a *app) drepHistory(ctx context.Context, credential string) ([]drepHistoryItem, error) {
+func (a *app) drepHistory(
+	ctx context.Context,
+	credential string,
+	credentialTag uint8,
+) ([]drepHistoryItem, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT kind, added_slot, tx_hash, anchor_url, anchor_hash, deposit
 		FROM (
@@ -864,6 +917,7 @@ func (a *app) drepHistory(ctx context.Context, credential string) ([]drepHistory
 			LEFT JOIN certs c ON c.id = rd.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE rd.drep_credential = decode($1, 'hex')
+				AND rd.credential_tag = $2
 
 			UNION ALL
 			SELECT
@@ -877,6 +931,7 @@ func (a *app) drepHistory(ctx context.Context, credential string) ([]drepHistory
 			LEFT JOIN certs c ON c.id = ud.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE ud.credential = decode($1, 'hex')
+				AND ud.credential_tag = $2
 
 			UNION ALL
 			SELECT
@@ -890,10 +945,11 @@ func (a *app) drepHistory(ctx context.Context, credential string) ([]drepHistory
 			LEFT JOIN certs c ON c.id = dd.certificate_id
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE dd.drep_credential = decode($1, 'hex')
+				AND dd.credential_tag = $2
 		) h
 		ORDER BY added_slot DESC
 		LIMIT 50
-	`, credential)
+	`, credential, credentialTag)
 	if err != nil {
 		return nil, err
 	}
@@ -1023,6 +1079,18 @@ func boundedLimit(raw string, def, max int) int {
 		return max
 	}
 	return n
+}
+
+func parseCredentialTagParam(r *http.Request) (uint8, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("credential_tag"))
+	if raw == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseUint(raw, 10, 8)
+	if err != nil || n > 1 {
+		return 0, false
+	}
+	return uint8(n), true
 }
 
 func isHex(s string, length int) bool {

@@ -1539,7 +1539,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					rewardAcctTag, rewardAcctHash := certutil.PoolRewardAccount(c)
+					rewardAcctTag, rewardAcctHash, err := certutil.PoolRewardAccount(c)
+					if err != nil {
+						return fmt.Errorf("pool reward account: %w", err)
+					}
 					tmpPool.RewardAccount = rewardAcctHash
 					tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
@@ -3045,7 +3048,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					rewardAcctTag2, rewardAcctHash2 := certutil.PoolRewardAccount(c)
+					rewardAcctTag2, rewardAcctHash2, err := certutil.PoolRewardAccount(c)
+					if err != nil {
+						return fmt.Errorf("pool reward account: %w", err)
+					}
 					tmpPool.RewardAccount = rewardAcctHash2
 					tmpPool.RewardAccountCredentialTag = rewardAcctTag2
 					tmpReg := models.PoolRegistration{
@@ -4034,7 +4040,10 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 		tmpPool.Pledge = types.Uint64(cert.Pledge)
 		tmpPool.Cost = types.Uint64(cert.Cost)
 		tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
-		rewardAcctTag, rewardAcctHash := certutil.PoolRewardAccount(&cert)
+		rewardAcctTag, rewardAcctHash, err := certutil.PoolRewardAccount(&cert)
+		if err != nil {
+			return fmt.Errorf("pool reward account: %w", err)
+		}
 		tmpPool.RewardAccount = rewardAcctHash
 		tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
