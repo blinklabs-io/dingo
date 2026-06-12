@@ -277,6 +277,7 @@ const (
 	signedEntityTypeCardanoStakeDistribution  = "CardanoStakeDistribution"
 	signedEntityTypeCardanoImmutableFilesFull = "CardanoImmutableFilesFull"
 	signedEntityTypeCardanoTransactions       = "CardanoTransactions"
+	signedEntityTypeCardanoDatabase           = "CardanoDatabase"
 )
 
 // UnmarshalJSON implements json.Unmarshaler for SignedEntityType.
@@ -386,6 +387,13 @@ func (s *SignedEntityType) feedHash(hasher hash.Hash) error {
 		}
 		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
 		hasher.Write(uint64ToBigEndianBytes(beacon.BlockNumber))
+	case signedEntityTypeCardanoDatabase:
+		beacon := s.CardanoDatabase()
+		if beacon == nil {
+			return fmt.Errorf("cannot parse beacon for %s", kind)
+		}
+		hasher.Write(uint64ToBigEndianBytes(beacon.Epoch))
+		hasher.Write(uint64ToBigEndianBytes(beacon.ImmutableFileNumber))
 	default:
 		return fmt.Errorf("unsupported signed entity type: %s", kind)
 	}
@@ -417,6 +425,13 @@ func int64ToBigEndianBytes(v int64) []byte {
 // type does not match.
 func (s *SignedEntityType) CardanoImmutableFilesFull() *Beacon {
 	return s.beaconForType(signedEntityTypeCardanoImmutableFilesFull)
+}
+
+// CardanoDatabase attempts to parse the signed entity as a
+// CardanoDatabase beacon. Returns nil if the entity type does not
+// match.
+func (s *SignedEntityType) CardanoDatabase() *Beacon {
+	return s.beaconForType(signedEntityTypeCardanoDatabase)
 }
 
 // MithrilStakeDistribution attempts to parse the signed entity as a

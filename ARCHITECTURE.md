@@ -1129,14 +1129,43 @@ The manager implements the `ouroboros.LeiosPipelineHandler` interface (`ObserveE
 
 ## Mithril Bootstrap
 
-The `mithril/` package enables fast initial sync by downloading and verifying a
-Mithril snapshot rather than syncing from genesis:
+The `mithril/` package enables fast initial sync by downloading and verifying
+Mithril artifacts rather than syncing from genesis. Two artifact backends are
+supported, selected by `mithril.backend` (`--mithril-backend`,
+`DINGO_MITHRIL_BACKEND`):
 
-1. `client.go` queries the Mithril aggregator for the latest certified snapshot
-2. `download.go` downloads and extracts the snapshot archive, including
-   resumable downloads with idle-stall retry handling
-3. `bootstrap.go` verifies the certificate chain and orchestrates the snapshot
-   artifact workflow
+- `v2` (default): the incremental Cardano database backend
+  (`CardanoDatabase` signed entity, `/artifact/cardano-database`). The
+  artifact's self-hash is checked, the certificate chain is verified, then the
+  immutable-file digest list is fetched and authenticated by rebuilding its
+  merkle root (a Blake2s-256 Merkle Mountain Range over the digest strings,
+  `merkle_tree.go`) and comparing it with the `cardano_database_merkle_root`
+  protocol message part certified by the leaf certificate. Per-immutable
+  archives are then downloaded with a bounded worker pool
+  (`bootstrap_v2.go`), each extracted trio is SHA-256-verified against the
+  digest map (already-verified trios are skipped on resume), and the ancillary
+  archive (ledger state) is verified via its Ed25519-signed
+  `ancillary_manifest.json` using the per-network ancillary verification key.
+- `v1` (legacy): the full-database snapshot backend
+  (`CardanoImmutableFilesFull`, `/artifact/snapshots`), a single tarball
+  download bound to the certificate chain via the `snapshot_digest` protocol
+  message part. Upstream Mithril is phasing this artifact type out. At the
+  library level an empty `BootstrapConfig.Backend`/`SyncConfig.Backend`
+  selects v2; callers must specify `v1` explicitly to use the legacy backend.
+
+Package layout:
+
+1. `client.go` / `client_v2.go` query the Mithril aggregator artifact and
+   certificate endpoints for the respective backends
+2. `download.go` downloads and extracts archives, including resumable
+   downloads with idle-stall retry handling (shared by both backends)
+3. `bootstrap.go` verifies the certificate chain, dispatches on the
+   configured backend, and orchestrates the v1 snapshot workflow;
+   `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+
+Both backends produce the same `BootstrapResult` (immutable directory,
+ancillary ledger-state directory, synthesized snapshot metadata), so
+everything downstream of `Bootstrap()` is backend-agnostic.
 
 The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are

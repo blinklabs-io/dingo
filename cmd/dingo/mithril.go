@@ -66,6 +66,24 @@ func resolveAggregatorURL(
 	return url, nil
 }
 
+// resolveMithrilBackend normalizes the configured Mithril artifact
+// backend, applying the node default (v2) when unset.
+func resolveMithrilBackend(backend string) (string, error) {
+	switch backend {
+	case "":
+		return mithril.BackendV2, nil
+	case mithril.BackendV1, mithril.BackendV2:
+		return backend, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported Mithril backend %q (expected %q or %q)",
+			backend,
+			mithril.BackendV1,
+			mithril.BackendV2,
+		)
+	}
+}
+
 func mithrilListCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -88,7 +106,17 @@ func mithrilListCommand() *cobra.Command {
 				return err
 			}
 
+			backend, err := resolveMithrilBackend(
+				cfg.Mithril.Backend,
+			)
+			if err != nil {
+				return err
+			}
+
 			client := mithril.NewClient(aggregatorURL)
+			if backend == mithril.BackendV2 {
+				return runMithrilListV2(cmd.Context(), client)
+			}
 			snapshots, err := client.ListSnapshots(
 				cmd.Context(),
 			)
@@ -134,11 +162,53 @@ func mithrilListCommand() *cobra.Command {
 	return cmd
 }
 
+// runMithrilListV2 lists Cardano database (v2) artifacts.
+func runMithrilListV2(ctx context.Context, client *mithril.Client) error {
+	items, err := client.ListCardanoDatabaseSnapshots(ctx)
+	if err != nil {
+		return fmt.Errorf("listing Cardano database snapshots: %w", err)
+	}
+	if len(items) == 0 {
+		fmt.Println("No Cardano database snapshots available.")
+		return nil
+	}
+	fmt.Printf(
+		"%-16s  %-8s  %-8s  %12s  %s\n",
+		"HASH",
+		"EPOCH",
+		"IMMUT#",
+		"SIZE",
+		"CREATED",
+	)
+	for _, s := range items {
+		hash := s.Hash
+		if len(hash) > 16 {
+			hash = hash[:16]
+		}
+		created := s.CreatedAt
+		if len(created) > 19 {
+			created = created[:19]
+		}
+		fmt.Printf(
+			"%-16s  %-8d  %-8d  %12s  %s\n",
+			hash,
+			s.Beacon.Epoch,
+			s.Beacon.ImmutableFileNumber,
+			mithril.HumanBytes(s.TotalDbSizeUncompressed),
+			created,
+		)
+	}
+	return nil
+}
+
 func mithrilShowCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "show <digest>",
+		Use:   "show <hash>",
 		Short: "Show details of a specific Mithril snapshot",
-		Args:  cobra.ExactArgs(1),
+		Long: "Show details of a specific Mithril snapshot.\n\n" +
+			"With the default v2 backend, pass the Cardano database artifact hash. " +
+			"With the legacy v1 backend, pass the snapshot digest.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -157,7 +227,19 @@ func mithrilShowCommand() *cobra.Command {
 				return err
 			}
 
+			backend, err := resolveMithrilBackend(
+				cfg.Mithril.Backend,
+			)
+			if err != nil {
+				return err
+			}
+
 			client := mithril.NewClient(aggregatorURL)
+			if backend == mithril.BackendV2 {
+				return runMithrilShowV2(
+					cmd.Context(), client, args[0],
+				)
+			}
 			snapshot, err := client.GetSnapshot(
 				cmd.Context(),
 				args[0],
@@ -199,6 +281,59 @@ func mithrilShowCommand() *cobra.Command {
 		},
 	}
 	return cmd
+}
+
+// runMithrilShowV2 shows the details of a Cardano database (v2)
+// artifact identified by its hash.
+func runMithrilShowV2(
+	ctx context.Context,
+	client *mithril.Client,
+	hash string,
+) error {
+	snapshot, err := client.GetCardanoDatabaseSnapshot(ctx, hash)
+	if err != nil {
+		return fmt.Errorf("getting Cardano database snapshot: %w", err)
+	}
+
+	fmt.Printf("Hash:                  %s\n", snapshot.Hash)
+	fmt.Printf("Merkle Root:           %s\n", snapshot.MerkleRoot)
+	fmt.Printf("Network:               %s\n", snapshot.Network)
+	fmt.Printf(
+		"Epoch:                 %d\n",
+		snapshot.Beacon.Epoch,
+	)
+	fmt.Printf(
+		"Immutable File Number: %d\n",
+		snapshot.Beacon.ImmutableFileNumber,
+	)
+	fmt.Printf(
+		"Total DB Size:         %s\n",
+		mithril.HumanBytes(snapshot.TotalDbSizeUncompressed),
+	)
+	fmt.Printf(
+		"Certificate Hash:      %s\n",
+		snapshot.CertificateHash,
+	)
+	fmt.Printf(
+		"Cardano Node Version:  %s\n",
+		snapshot.CardanoNodeVersion,
+	)
+	fmt.Printf("Created:               %s\n", snapshot.CreatedAt)
+	printLocations := func(label string, locs []mithril.CardanoDatabaseLocation) {
+		fmt.Printf("%s Locations:\n", label)
+		for _, loc := range locs {
+			uri := loc.URI
+			if uri == "" {
+				uri = loc.URITemplate
+			}
+			fmt.Printf("  - [%s] %s\n", loc.Type, uri)
+		}
+	}
+	printLocations("Digest", snapshot.Digests.Locations)
+	printLocations("Immutable", snapshot.Immutables.Locations)
+	printLocations("Ancillary", snapshot.Ancillary.Locations)
+
+	return nil
 }
 
 func mithrilSyncCommand() *cobra.Command {
@@ -383,11 +518,17 @@ func runMithrilSync(
 		}
 	}
 
+	backend, err := resolveMithrilBackend(cfg.Mithril.Backend)
+	if err != nil {
+		return err
+	}
+
 	res, err := mithril.Sync(ctx, mithril.SyncConfig{
 		Network:                network,
 		DataDir:                cfg.DatabasePath,
 		StorageMode:            cfg.StorageMode,
 		CardanoConfigPath:      cfg.CardanoConfig,
+		Backend:                backend,
 		AggregatorURL:          cfg.Mithril.AggregatorURL,
 		DownloadDir:            cfg.Mithril.DownloadDir,
 		DownloadIdleTimeout:    cfg.Mithril.DownloadIdleTimeout,

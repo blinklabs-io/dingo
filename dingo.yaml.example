@@ -443,6 +443,12 @@ mithril:
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   aggregatorUrl: ""
+  # Mithril artifact backend: "v2" (default) restores from incremental
+  # per-immutable-file archives verified against the certified merkle
+  # root; "v1" uses the legacy full snapshot tarballs (being phased
+  # out upstream)
+  # CLI: --mithril-backend
+  backend: "v2"
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""

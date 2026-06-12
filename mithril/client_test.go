@@ -1448,6 +1448,7 @@ func TestBootstrapWithCertVerification(t *testing.T) {
 		context.Background(),
 		BootstrapConfig{
 			Network:                "preprod",
+			Backend:                BackendV1,
 			AggregatorURL:          server.URL,
 			DownloadDir:            downloadDir,
 			GenesisVerificationKey: genesisKeyText,
