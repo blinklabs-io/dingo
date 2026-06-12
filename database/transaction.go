@@ -886,7 +886,11 @@ func (d *Database) GetTransactionsByAddress(
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
+		var ok bool
+		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, errors.New("derive stake credential tag from address")
+		}
 		stakingKey = skh.Bytes()
 	}
 	return d.GetTransactionsByAddressKeys(
@@ -917,7 +921,11 @@ func (d *Database) GetTransactionsByAddressWithOrder(
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
+		var ok bool
+		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, errors.New("derive stake credential tag from address")
+		}
 		stakingKey = skh.Bytes()
 	}
 	return d.GetTransactionsByAddressKeys(
@@ -983,7 +991,11 @@ func (d *Database) CountTransactionsByAddress(
 		paymentKey = pkh.Bytes()
 	}
 	if skh := addr.StakeKeyHash(); skh != zeroHash {
-		credentialTag, _ = models.StakeCredentialTagFromAddress(addr)
+		var ok bool
+		credentialTag, ok = models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return 0, errors.New("derive stake credential tag from address")
+		}
 		stakingKey = skh.Bytes()
 	}
 	return d.CountTransactionsByAddressKeys(

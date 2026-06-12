@@ -43,6 +43,16 @@ import (
 // given network is irrelevant here — so a single fixed value is fine.
 const conformanceSlotsPerEpoch uint64 = 432000
 
+func conformanceCredentialTag(credential common.Credential) uint8 {
+	credentialTag, err := models.CredentialTagFromUint(
+		credential.CredType,
+	)
+	if err != nil {
+		return 0
+	}
+	return credentialTag
+}
+
 // DingoStateManager implements conformance.StateManager using dingo's database
 // with an in-memory SQLite backend for testing.
 type DingoStateManager struct {
@@ -460,100 +470,127 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 	switch certType {
 	case common.CertificateTypeStakeRegistration:
 		if regCert, ok := cert.(*common.StakeRegistrationCertificate); ok {
-			credential := regCert.StakeCredential.Credential
+			stakeCredential := regCert.StakeCredential
+			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
 			account := models.Account{
-				StakingKey: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				StakingKey:    credential[:],
+				CredentialTag: credentialTag,
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&account)
 		}
 
 	case common.CertificateTypeRegistration:
 		if regCert, ok := cert.(*common.RegistrationCertificate); ok {
-			credential := regCert.StakeCredential.Credential
+			stakeCredential := regCert.StakeCredential
+			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
 			account := models.Account{
-				StakingKey: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				StakingKey:    credential[:],
+				CredentialTag: credentialTag,
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&account)
 		}
 
 	case common.CertificateTypeStakeRegistrationDelegation:
 		if regCert, ok := cert.(*common.StakeRegistrationDelegationCertificate); ok {
-			credential := regCert.StakeCredential.Credential
+			stakeCredential := regCert.StakeCredential
+			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
 			account := models.Account{
-				StakingKey: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				StakingKey:    credential[:],
+				CredentialTag: credentialTag,
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&account)
 		}
 
 	case common.CertificateTypeVoteRegistrationDelegation:
 		if regCert, ok := cert.(*common.VoteRegistrationDelegationCertificate); ok {
-			credential := regCert.StakeCredential.Credential
+			stakeCredential := regCert.StakeCredential
+			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
 			account := models.Account{
-				StakingKey: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				StakingKey:    credential[:],
+				CredentialTag: credentialTag,
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&account)
 		}
 
 	case common.CertificateTypeStakeVoteRegistrationDelegation:
 		if regCert, ok := cert.(*common.StakeVoteRegistrationDelegationCertificate); ok {
-			credential := regCert.StakeCredential.Credential
+			stakeCredential := regCert.StakeCredential
+			credential := stakeCredential.Credential
 			m.stakeRegistrations[credential] = 0
 			m.govState.RegisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Insert into database
 			account := models.Account{
-				StakingKey: credential[:],
-				AddedSlot:  slot,
-				Active:     true,
+				StakingKey:    credential[:],
+				CredentialTag: credentialTag,
+				AddedSlot:     slot,
+				Active:        true,
 			}
 			m.db.Create(&account)
 		}
 
 	case common.CertificateTypeStakeDeregistration:
 		if deregCert, ok := cert.(*common.StakeDeregistrationCertificate); ok {
-			credential := deregCert.StakeCredential.Credential
+			stakeCredential := deregCert.StakeCredential
+			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
 			m.govState.DeregisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Update database
 			m.db.Model(&models.Account{}).
-				Where("staking_key = ?", credential[:]).
+				Where(
+					"credential_tag = ? AND staking_key = ?",
+					credentialTag,
+					credential[:],
+				).
 				Update("active", false)
 		}
 
 	case common.CertificateTypeDeregistration:
 		if deregCert, ok := cert.(*common.DeregistrationCertificate); ok {
-			credential := deregCert.StakeCredential.Credential
+			stakeCredential := deregCert.StakeCredential
+			credential := stakeCredential.Credential
 			delete(m.stakeRegistrations, credential)
 			m.govState.DeregisterStake(credential)
+			credentialTag := conformanceCredentialTag(stakeCredential)
 
 			// Update database
 			m.db.Model(&models.Account{}).
-				Where("staking_key = ?", credential[:]).
+				Where(
+					"credential_tag = ? AND staking_key = ?",
+					credentialTag,
+					credential[:],
+				).
 				Update("active", false)
 		}
 
@@ -596,8 +633,8 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := drepCert.DrepCredential.Credential
 			m.drepRegistrations[credential] = true
 			m.govState.RegisterDRep(credential)
-			credentialTag, _ := models.CredentialTagFromUint(
-				drepCert.DrepCredential.CredType,
+			credentialTag := conformanceCredentialTag(
+				drepCert.DrepCredential,
 			)
 
 			// Insert into database
@@ -615,8 +652,8 @@ func (m *DingoStateManager) processCertificate(cert common.Certificate, slot uin
 			credential := drepCert.DrepCredential.Credential
 			delete(m.drepRegistrations, credential)
 			m.govState.DeregisterDRep(credential)
-			credentialTag, _ := models.CredentialTagFromUint(
-				drepCert.DrepCredential.CredType,
+			credentialTag := conformanceCredentialTag(
+				drepCert.DrepCredential,
 			)
 
 			// Update database
