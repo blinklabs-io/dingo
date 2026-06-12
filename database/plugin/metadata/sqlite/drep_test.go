@@ -155,6 +155,112 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 	assert.Equal(t, uint64(1200), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
 }
 
+// Voting power must aggregate UTxOs by the full stake credential identity.
+// Same-hash key/script stake accounts must not share UTxO sums.
+func TestSqliteGetDRepVotingPowerUsesStakeCredentialTag(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	drepCred := []byte("drep_same_stake_hash_123456789012345")
+	stakeKey := []byte("same_stake_hash_123456789012345678")
+
+	require.NoError(t, store.SetDrep(0, drepCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Drep:          drepCred,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Reward:        10,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Drep:          drepCred,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Reward:        20,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_same_hash_key_12345678901234567890"),
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Amount:        100,
+		OutputIdx:     0,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_same_hash_script_12345678901234567"),
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Amount:        200,
+		OutputIdx:     1,
+		AddedSlot:     1000,
+	}).Error)
+
+	power, err := store.GetDRepVotingPower(0, drepCred, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(330), power)
+
+	powers, err := store.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{{Tag: 0, Key: drepCred}},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(330), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
+}
+
+// Predefined DRep voting power uses account drep_type instead of DRep hash.
+// It must still join UTxOs by (credential_tag, staking_key), not hash only.
+func TestSqliteGetDRepVotingPowerByTypeUsesStakeCredentialTag(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	stakeKey := []byte("same_predefined_hash_1234567890123")
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		DrepType:      models.DrepTypeAlwaysAbstain,
+		Reward:        10,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		DrepType:      models.DrepTypeAlwaysAbstain,
+		Reward:        20,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_predefined_key_123456789012345678"),
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Amount:        100,
+		OutputIdx:     0,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_predefined_script_123456789012345"),
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Amount:        200,
+		OutputIdx:     1,
+		AddedSlot:     1000,
+	}).Error)
+
+	powers, err := store.GetDRepVotingPowerByType(
+		[]uint64{models.DrepTypeAlwaysAbstain},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(330), powers[models.DrepTypeAlwaysAbstain])
+}
+
 func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)

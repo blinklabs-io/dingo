@@ -186,16 +186,19 @@ func (d *MetadataStoreMysql) GetDRepVotingPower(
 			   ), 0)
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
+			SELECT credential_tag, staking_key,
 				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
 			FROM utxo
 			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE drep = ? AND drep_type = ? AND active = 1
+			  AND EXISTS (
+				  SELECT 1 FROM account ax
+				  WHERE ax.credential_tag = utxo.credential_tag
+				    AND ax.staking_key = utxo.staking_key
+				    AND ax.drep = ? AND ax.drep_type = ? AND ax.active = 1
 			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
+			GROUP BY credential_tag, staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
 		WHERE a.drep = ? AND a.drep_type = ? AND a.active = 1
 	`, drepCredential, credentialTag, drepCredential, credentialTag).Scan(&totalStake).Error; err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
@@ -223,8 +226,10 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
 		Stake    uint64
 	}
 	hashes := make([][]byte, len(drepCredentials))
+	requested := make(map[string]struct{}, len(drepCredentials))
 	for i, ref := range drepCredentials {
 		hashes[i] = ref.Key
+		requested[ref.MapKey()] = struct{}{}
 	}
 	var rows []row
 	if err := db.Raw(`
@@ -235,16 +240,19 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
+			SELECT credential_tag, staking_key,
 				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
 			FROM utxo
 			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE active = 1 AND drep IN ?
+			  AND EXISTS (
+				  SELECT 1 FROM account ax
+				  WHERE ax.credential_tag = utxo.credential_tag
+				    AND ax.staking_key = utxo.staking_key
+				    AND ax.active = 1 AND ax.drep IN ?
 			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
+			GROUP BY credential_tag, staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
 		WHERE a.active = 1 AND a.drep IN ?
 		GROUP BY a.drep, a.drep_type
 	`, hashes, hashes).Scan(&rows).Error; err != nil {
@@ -252,6 +260,9 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
 	}
 	for _, r := range rows {
 		ref := models.StakeCredentialRef{Tag: uint8(r.DrepType), Key: r.Drep} //nolint:gosec
+		if _, ok := requested[ref.MapKey()]; !ok {
+			continue
+		}
 		out[ref.MapKey()] = r.Stake
 	}
 	return out, nil
@@ -292,16 +303,19 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerByType(
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
+			SELECT credential_tag, staking_key,
 				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
 			FROM utxo
 			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE active = 1 AND drep_type IN ?
+			  AND EXISTS (
+				  SELECT 1 FROM account ax
+				  WHERE ax.credential_tag = utxo.credential_tag
+				    AND ax.staking_key = utxo.staking_key
+				    AND ax.active = 1 AND ax.drep_type IN ?
 			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
+			GROUP BY credential_tag, staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
 		WHERE a.active = 1 AND a.drep_type IN ?
 		GROUP BY a.drep_type
 	`, drepTypes, drepTypes).Scan(&rows).Error; err != nil {
