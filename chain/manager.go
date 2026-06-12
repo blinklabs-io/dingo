@@ -113,6 +113,16 @@ func (cm *ChainManager) primaryChainLocked() *Chain {
 	return cm.chains[primaryChainId]
 }
 
+func (cm *ChainManager) primaryChain() (*Chain, error) {
+	cm.mutex.RLock()
+	defer cm.mutex.RUnlock()
+	chain := cm.primaryChainLocked()
+	if chain == nil {
+		return nil, errors.New("primary chain not available")
+	}
+	return chain, nil
+}
+
 func (cm *ChainManager) Chain(id ChainId) *Chain {
 	cm.mutex.RLock()
 	defer cm.mutex.RUnlock()
@@ -121,15 +131,18 @@ func (cm *ChainManager) Chain(id ChainId) *Chain {
 
 // NewChain creates a new Chain that forks from the primary chain at the specified point. This is useful for managing outbound ChainSync clients
 func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
-	cm.mutex.Lock()
-	defer cm.mutex.Unlock()
-	primaryChain := cm.primaryChainLocked()
-	if primaryChain == nil {
-		return nil, errors.New("primary chain not available")
+	primaryChain, err := cm.primaryChain()
+	if err != nil {
+		return nil, err
 	}
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
-	intersectBlock, err := cm.BlockByPoint(point, nil)
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	if cm.primaryChainLocked() != primaryChain {
+		return nil, errors.New("primary chain changed during fork creation")
+	}
+	intersectBlock, err := cm.blockByPoint(point, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -159,18 +172,20 @@ func (cm *ChainManager) NewChain(point ocommon.Point) (*Chain, error) {
 func (cm *ChainManager) NewChainFromIntersect(
 	points []ocommon.Point,
 ) (*Chain, error) {
-	cm.mutex.Lock()
-	defer cm.mutex.Unlock()
-	primaryChain := cm.primaryChainLocked()
-	if primaryChain == nil {
-		return nil, errors.New("primary chain not available")
+	primaryChain, err := cm.primaryChain()
+	if err != nil {
+		return nil, err
 	}
 	primaryChain.mutex.Lock()
 	defer primaryChain.mutex.Unlock()
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+	if cm.primaryChainLocked() != primaryChain {
+		return nil, errors.New("primary chain changed during fork creation")
+	}
 	tip := primaryChain.currentTip
 	var intersectPoint ocommon.Point
 	var intersectBlock models.Block
-	var err error
 	foundOrigin := false
 	txn := cm.db.BlobTxn(false)
 	err = txn.Do(func(txn *database.Txn) error {
@@ -347,22 +362,25 @@ func (cm *ChainManager) loadPrimaryChain() error {
 func (cm *ChainManager) RewindPrimaryChainToPoint(
 	point ocommon.Point,
 ) error {
+	primaryChain, err := cm.primaryChain()
+	if err != nil {
+		return err
+	}
+	primaryChain.mutex.Lock()
+	defer primaryChain.mutex.Unlock()
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
-	primaryChain := cm.primaryChainLocked()
-	if primaryChain == nil {
-		return errors.New("primary chain not available")
+	if cm.primaryChainLocked() != primaryChain {
+		return errors.New("primary chain changed during rewind")
 	}
 	if !primaryChain.persistent {
 		return errors.New("primary chain is not persistent")
 	}
-	primaryChain.mutex.Lock()
-	defer primaryChain.mutex.Unlock()
 
 	rollbackIndex := uint64(0)
 	rollbackBlockNumber := uint64(0)
 	targetTip := ochainsync.Tip{}
-	err := func() error {
+	err = func() error {
 		if point.Slot > 0 || len(point.Hash) > 0 {
 			readTxn := cm.db.BlobTxn(false)
 			defer readTxn.Rollback() //nolint:errcheck
