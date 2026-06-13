@@ -1,5 +1,56 @@
 # Dingo Releases
 
+## v0.54.0 (June 12, 2026)
+
+**Title:** Experimental Leios EB forging, Mithril v2 database restore, and off-chain metadata caching
+
+**Date:** June 12, 2026
+
+**Version:** v0.54.0
+
+Hi folks! Here’s what we shipped in v0.54.0.
+
+### ✨ What's New
+
+* Added **cache metadata through API storage:** API storage can now fetch off chain metadata, verify fetched content against the on chain hash, and keep cached results available through the configured offchain metadata settings. ([#2544](https://github.com/blinklabs-io/dingo/pull/2544))
+* Introduced **restore Mithril databases through the v2 backend by default:** Mithril restores now use the v2 database backend by default, which gives operators the current restore path without extra setup. ([#2548](https://github.com/blinklabs-io/dingo/pull/2548))
+* Expanded **generate Midnight state services from bundled protocol definitions:** Midnight integrations can now use bundled state definitions with generated service support, which makes integration easier to keep aligned. ([#2518](https://github.com/blinklabs-io/dingo/pull/2518))
+* Delivered **forge experimental Leios endorser blocks during leader turns:** Experimental Leios mode can now forge endorser blocks during leader turns, which moves Leios testing closer to a fuller production path. ([#2540](https://github.com/blinklabs-io/dingo/pull/2540))
+* Enabled **time experimental Leios pipeline stages more precisely:** Experimental Leios mode now tracks pipeline timing and stage progression more explicitly, which makes its endorser block flow easier to observe. ([#2531](https://github.com/blinklabs-io/dingo/pull/2531))
+
+### 💪 Improvements
+
+* Improved **move public Go API packages under the api namespace:** Go integrators now get a clearer public package layout under `api/`, which makes library use easier to follow. ([#2545](https://github.com/blinklabs-io/dingo/pull/2545))
+* Refined **keep the published v0.53.0 release history current:** The release history now includes the finalized v0.53.0 entry, which keeps recent release context easier to review. ([#2539](https://github.com/blinklabs-io/dingo/pull/2539))
+
+### 🔧 Fixes
+
+* Fixed **recover from stale sync peers more decisively:** Sync can now move away from stale peers more reliably, which helps nodes keep progress moving. ([#2549](https://github.com/blinklabs-io/dingo/pull/2549))
+* Corrected **resume sync after peer disconnects without stalling:** Peer recovery now keeps sync moving after a disconnect, which reduces the chance of stalled recovery. ([#2543](https://github.com/blinklabs-io/dingo/pull/2543))
+* Strengthened **reject unsafe experimental Leios votes before they proceed:** Experimental Leios vote handling now stops endorser block hash and slot mismatches before voting, which makes vote checks stricter. ([#2532](https://github.com/blinklabs-io/dingo/pull/2532))
+
+### 📋 What You Need to Know
+
+* Clarified **expect Mithril v2 as the default restore path:** Mithril now uses the v2 backend by default, operators who need legacy behavior must explicitly choose v1, and `mithril show` now expects the v2 CardanoDatabase artifact hash when the default backend is in use.
+* Highlighted **update Go import paths for public API packages:** Go integrators should move imports from the former root level package names to the new paths under `api/`.
+* Emphasized **configure off chain metadata fetching through API settings:** Off chain metadata fetching runs in `storageMode: api`, verifies fetched content against on chain hashes, and follows the configured offchain metadata settings.
+* Summarized **expect broader experimental Leios timing, forging, and vote safety checks:** Experimental Leios mode now includes endorser block pipeline timing, endorser block forging, and stricter vote safety checks.
+* Reviewed **use the finalized v0.53.0 notes as the latest prior release context:** The repository release history now includes the finalized v0.53.0 entry for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.53.0 (June 10, 2026)
 
 **Title:** Experimental Leios quorum voting, public Mithril sync API, and Blockfrost network accuracy
