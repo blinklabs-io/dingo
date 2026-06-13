@@ -15,6 +15,8 @@
 package ledger
 
 import (
+	"bytes"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"math"
@@ -169,6 +171,150 @@ func TestQueryShelleyUtxoByTxIn_EmptySlice(t *testing.T) {
 	m, ok := arr[0].(map[olocalstatequery.UtxoId]ledger.TransactionOutput)
 	require.True(t, ok, "expected UtxoId map")
 	require.Empty(t, m)
+}
+
+// --- GetStakePools (ShelleyStakePoolsQuery) ---------------------------------
+
+// poolHash28 builds a 28-byte pool key hash from a single byte pattern.
+func poolHash28(b byte) []byte {
+	out := make([]byte, 28)
+	for i := range out {
+		out[i] = b
+	}
+	return out
+}
+
+// TestStakePoolsResult_CanonicalEncoding proves the GetStakePools result is
+// wire-compatible with cardano-cli: the pool set is sorted into ascending
+// canonical order and CBOR-encodes to a set (tag 258) wrapped in the
+// single-element result array, round-tripping through gouroboros'
+// StakePoolsResult (the type cardano-node uses on the wire). An untagged or
+// unsorted set is rejected by cardano-cli ("expected tag" / "Canonicity
+// violation while decoding Set").
+func TestStakePoolsResult_CanonicalEncoding(t *testing.T) {
+	// Deliberately unsorted input.
+	keyHashes := [][]byte{
+		poolHash28(0xCC),
+		poolHash28(0x11),
+		poolHash28(0x99),
+	}
+	result := stakePoolsResult(keyHashes)
+
+	// Wire shape: []any{ cbor.Set{ poolIds... } }
+	require.Len(t, result, 1)
+	set, ok := result[0].(cbor.Set)
+	require.True(t, ok, "inner element must be a cbor.Set (tag 258)")
+	require.Len(t, set, 3)
+
+	// Elements must be in ascending byte order (canonical set).
+	for i := 1; i < len(set); i++ {
+		prev := set[i-1].(ledger.PoolId)
+		cur := set[i].(ledger.PoolId)
+		assert.Negative(t, bytes.Compare(prev[:], cur[:]),
+			"pool ids must be sorted ascending for a canonical set")
+	}
+
+	// Encode and decode through gouroboros' StakePoolsResult, which is the
+	// exact type cardano clients use to read GetStakePools off the wire.
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakePoolsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err, "result must decode as cardano-cli expects")
+	require.Len(t, decoded.Results, 3)
+	// The decoded order matches the canonical (sorted) order we emitted.
+	assert.Equal(t, ledger.PoolId(poolHash28(0x11)), decoded.Results[0])
+	assert.Equal(t, ledger.PoolId(poolHash28(0x99)), decoded.Results[1])
+	assert.Equal(t, ledger.PoolId(poolHash28(0xCC)), decoded.Results[2])
+}
+
+// TestStakePoolsResult_Empty verifies an empty pool set still produces the
+// tagged, wrapped wire shape (an empty set), not a bare/absent value.
+func TestStakePoolsResult_Empty(t *testing.T) {
+	result := stakePoolsResult(nil)
+	require.Len(t, result, 1)
+	set, ok := result[0].(cbor.Set)
+	require.True(t, ok, "inner element must be a cbor.Set")
+	require.Empty(t, set)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.StakePoolsResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	require.Empty(t, decoded.Results)
+}
+
+// --- GetDRepState (ShelleyDRepStateQuery) -----------------------------------
+
+// TestQueryShelleyDRepState_EmptyDB proves GetDRepState answers (rather than
+// tears down the connection) when no DReps are registered: an empty
+// credential set means "all DReps", which with no data is an empty map. The
+// result is a bare CBOR map that round-trips through gouroboros'
+// DRepStateResult (the type cardano clients decode into).
+func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+	// Wire shape: []any{ map }. cardano-cli expects the result map wrapped in
+	// the single-element result array; verified against cardano-node, whose
+	// empty GetDRepState reply is the CBOR `81 a0` ([ {} ]).
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any wrapper")
+	require.Len(t, arr, 1)
+	m, ok := arr[0].(olocalstatequery.DRepStateResult)
+	require.True(t, ok, "inner element must be a DRepStateResult map")
+	require.Empty(t, m)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	assert.Equal(t, "81a0", hex.EncodeToString(encoded),
+		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)")
+}
+
+// --- GetAccountState (ShelleyAccountStateQuery) -----------------------------
+
+// TestQueryShelleyAccountState_Empty proves GetAccountState answers with the
+// treasury/reserves pots even when no network state has been captured yet
+// (zeros). The wire shape is [ [treasury, reserves] ] (CBOR 81 82 00 00),
+// verified against cardano-node's GetAccountState reply.
+func TestQueryShelleyAccountState_Empty(t *testing.T) {
+	db := newTestDB(t)
+	ls := &LedgerState{db: db}
+
+	result, err := ls.queryShelleyAccountState()
+	require.NoError(t, err)
+	arr, ok := result.([]any)
+	require.True(t, ok, "expected []any wrapper")
+	require.Len(t, arr, 1)
+	st, ok := arr[0].(olocalstatequery.AccountState)
+	require.True(t, ok, "inner element must be an AccountState")
+	assert.Zero(t, st.Treasury)
+	assert.Zero(t, st.Reserves)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	assert.Equal(t, "81820000", hex.EncodeToString(encoded),
+		"empty GetAccountState must encode to [ [0, 0] ] (matches cardano-node)")
+}
+
+// TestAccountStateResult_SignedRoundTrip confirms the [ [treasury, reserves] ]
+// wire shape round-trips through gouroboros' AccountStateResult, including a
+// negative reserves value (Coin is signed; a misconfigured network can drive
+// reserves below zero, as observed on the devnet's cardano-node).
+func TestAccountStateResult_SignedRoundTrip(t *testing.T) {
+	result := []any{
+		olocalstatequery.AccountState{Treasury: 500_000_000, Reserves: -1234},
+	}
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+	var decoded olocalstatequery.AccountStateResult
+	_, err = cbor.Decode(encoded, &decoded)
+	require.NoError(t, err)
+	assert.Equal(t, int64(500_000_000), decoded.State.Treasury)
+	assert.Equal(t, int64(-1234), decoded.State.Reserves)
 }
 
 // --- ShelleyFilteredDelegationAndRewardAccountsQuery -----------------------
