@@ -20,7 +20,6 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 )
 
@@ -52,7 +51,7 @@ func (s *Server) handleBlock(
 
 	txs, err := s.config.Database.
 		GetTransactionsByBlockHash(
-			block.Hash, nil,
+			block.Hash,
 		)
 	if err != nil {
 		s.logger.Error(
@@ -114,7 +113,7 @@ func (s *Server) handleBlockTransaction(
 	}
 
 	tx, err := s.config.Database.GetTransactionByHash(
-		hashBytes, nil,
+		hashBytes,
 	)
 	if err != nil {
 		s.logger.Error(
@@ -176,8 +175,8 @@ func (s *Server) lookupBlock(
 				ErrInvalidRequest, decErr,
 			)
 		}
-		block, err = database.BlockByHash(
-			s.config.Database, hashBytes,
+		block, err = s.config.Database.BlockByHash(
+			hashBytes,
 		)
 	case id.Index != nil:
 		if *id.Index < 0 {
@@ -185,7 +184,7 @@ func (s *Server) lookupBlock(
 		}
 		// #nosec G115 -- validated non-negative
 		block, err = s.config.Database.BlockByIndex(
-			uint64(*id.Index), nil,
+			uint64(*id.Index),
 		)
 	default:
 		return block, ErrInvalidRequest

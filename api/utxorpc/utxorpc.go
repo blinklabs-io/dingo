@@ -29,10 +29,7 @@ import (
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -57,9 +54,9 @@ type Utxorpc struct {
 
 type UtxorpcConfig struct {
 	Logger          *slog.Logger
-	EventBus        *event.EventBus
-	LedgerState     *ledger.LedgerState
-	Mempool         *mempool.Mempool
+	EventBus        UtxorpcEventBus
+	LedgerState     UtxorpcLedgerState
+	Mempool         UtxorpcMempool
 	TlsCertFilePath string
 	TlsKeyFilePath  string
 	Host            string
