@@ -183,8 +183,8 @@ func (n *Node) initBlockForger(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	// Create mempool adapter for the forging package
-	mempoolAdapter := &mempoolAdapter{mempool: n.mempool}
+	// Create mempool adapter for the forging package.
+	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
 
 	// Create epoch nonce adapter for the builder
 	epochNonceAdapter := &epochNonceAdapter{ledgerState: n.ledgerState}
@@ -302,13 +302,54 @@ func (n *Node) initBlockForger(
 	return nil
 }
 
-// mempoolAdapter adapts the mempool.Mempool to forging.MempoolProvider.
-type mempoolAdapter struct {
-	mempool *mempool.Mempool
+type mempoolTxView struct {
+	Hash string
+	Cbor []byte
+	Type uint
 }
 
-func (a *mempoolAdapter) Transactions() []forging.MempoolTransaction {
-	txs := a.mempool.Transactions()
+type mempoolTransactionSource interface {
+	Transactions() []mempool.MempoolTransaction
+}
+
+func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
+	txs := source.Transactions()
+	result := make([]mempoolTxView, len(txs))
+	for i, tx := range txs {
+		result[i] = mempoolTxView{
+			Hash: tx.Hash,
+			Cbor: tx.Cbor,
+			Type: tx.Type,
+		}
+	}
+	return result
+}
+
+// ledgerMempoolAdapter adapts mempool.Mempool to ledger.MempoolProvider.
+type ledgerMempoolAdapter struct {
+	source mempoolTransactionSource
+}
+
+func (a *ledgerMempoolAdapter) Transactions() []ledger.PendingTransaction {
+	txs := mempoolTransactions(a.source)
+	result := make([]ledger.PendingTransaction, len(txs))
+	for i, tx := range txs {
+		result[i] = ledger.PendingTransaction{
+			Hash: tx.Hash,
+			Cbor: tx.Cbor,
+			Type: tx.Type,
+		}
+	}
+	return result
+}
+
+// forgingMempoolAdapter adapts mempool.Mempool to forging.MempoolProvider.
+type forgingMempoolAdapter struct {
+	source mempoolTransactionSource
+}
+
+func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
+	txs := mempoolTransactions(a.source)
 	result := make([]forging.MempoolTransaction, len(txs))
 	for i, tx := range txs {
 		result[i] = forging.MempoolTransaction{

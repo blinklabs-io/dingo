@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,7 +25,9 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
+	"github.com/blinklabs-io/dingo/mempool"
 )
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
@@ -244,5 +247,63 @@ func TestHandleGenesisSnapshotError_RelayWarnsAndContinues(t *testing.T) {
 	err := n.handleGenesisSnapshotError(errors.New("db unavailable"))
 	if err != nil {
 		t.Errorf("expected nil for relay node, got: %v", err)
+	}
+}
+
+type testMempoolTransactionSource struct {
+	txs []mempool.MempoolTransaction
+}
+
+func (s testMempoolTransactionSource) Transactions() []mempool.MempoolTransaction {
+	return s.txs
+}
+
+// TestMempoolAdaptersPreservePendingTransactionView verifies the node-level
+// adapters preserve the pending transaction fields needed for block building.
+func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
+	source := testMempoolTransactionSource{
+		txs: []mempool.MempoolTransaction{
+			{
+				Hash: "0123456789abcdef",
+				Cbor: []byte{0x84, 0xa0, 0xa0, 0xf5, 0xf6},
+				Type: 7,
+			},
+		},
+	}
+
+	var _ ledger.MempoolProvider = (*ledgerMempoolAdapter)(nil)
+	ledgerTxs := (&ledgerMempoolAdapter{source: source}).Transactions()
+	if len(ledgerTxs) != 1 {
+		t.Fatalf("expected 1 ledger transaction, got %d", len(ledgerTxs))
+	}
+	if ledgerTxs[0].Hash != source.txs[0].Hash {
+		t.Fatalf("ledger hash mismatch: got %q want %q",
+			ledgerTxs[0].Hash, source.txs[0].Hash)
+	}
+	if ledgerTxs[0].Type != source.txs[0].Type {
+		t.Fatalf("ledger type mismatch: got %d want %d",
+			ledgerTxs[0].Type, source.txs[0].Type)
+	}
+	if !bytes.Equal(ledgerTxs[0].Cbor, source.txs[0].Cbor) {
+		t.Fatalf("ledger CBOR mismatch: got %x want %x",
+			ledgerTxs[0].Cbor, source.txs[0].Cbor)
+	}
+
+	var _ forging.MempoolProvider = (*forgingMempoolAdapter)(nil)
+	forgingTxs := (&forgingMempoolAdapter{source: source}).Transactions()
+	if len(forgingTxs) != 1 {
+		t.Fatalf("expected 1 forging transaction, got %d", len(forgingTxs))
+	}
+	if forgingTxs[0].Hash != source.txs[0].Hash {
+		t.Fatalf("forging hash mismatch: got %q want %q",
+			forgingTxs[0].Hash, source.txs[0].Hash)
+	}
+	if forgingTxs[0].Type != source.txs[0].Type {
+		t.Fatalf("forging type mismatch: got %d want %d",
+			forgingTxs[0].Type, source.txs[0].Type)
+	}
+	if !bytes.Equal(forgingTxs[0].Cbor, source.txs[0].Cbor) {
+		t.Fatalf("forging CBOR mismatch: got %x want %x",
+			forgingTxs[0].Cbor, source.txs[0].Cbor)
 	}
 }
