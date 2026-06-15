@@ -27,12 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chain"
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/mempool"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -55,21 +50,19 @@ const (
 
 // ServerConfig holds configuration for the Mesh API server.
 type ServerConfig struct {
-	Logger        *slog.Logger
-	EventBus      *event.EventBus
-	LedgerState   *ledger.LedgerState
-	Database      *database.Database
-	Chain         *chain.Chain
-	Mempool       *mempool.Mempool
+	Logger      *slog.Logger
+	LedgerState MeshLedgerState
+	Database    MeshDatabase
+	Chain       MeshChain
+	Mempool     MeshMempool
+	// ListenAddress is the TCP address to listen on (e.g. ":8080").
 	ListenAddress string
 	Network       string
 	NetworkMagic  uint32
-	// GenesisHash is the Byron genesis block hash
-	// (hex-encoded).
+	// GenesisHash is the Byron genesis block hash (hex-encoded).
 	GenesisHash string
-	// GenesisStartTimeSec is the Unix timestamp (seconds)
-	// of slot 0 for the configured network. Used to
-	// convert slot numbers to absolute timestamps.
+	// GenesisStartTimeSec is the Unix timestamp (seconds) of slot 0 for the
+	// configured network. Used to convert slot numbers to absolute timestamps.
 	GenesisStartTimeSec int64
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.

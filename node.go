@@ -908,9 +908,8 @@ func (n *Node) Run(ctx context.Context) error {
 		n.meshAPI, meshErr = mesh.NewServer(
 			mesh.ServerConfig{
 				Logger:              n.config.logger,
-				EventBus:            n.eventBus,
 				LedgerState:         n.ledgerState,
-				Database:            n.db,
+				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
 				ListenAddress:       listenAddr,

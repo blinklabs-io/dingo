@@ -23,16 +23,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"sync"
 	"time"
 
 	"connectrpc.com/connect"
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
-	"github.com/blinklabs-io/dingo/ledger"
-	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -57,9 +55,9 @@ type Utxorpc struct {
 
 type UtxorpcConfig struct {
 	Logger          *slog.Logger
-	EventBus        *event.EventBus
-	LedgerState     *ledger.LedgerState
-	Mempool         *mempool.Mempool
+	EventBus        UtxorpcEventBus
+	LedgerState     UtxorpcLedgerState
+	Mempool         UtxorpcMempool
 	TlsCertFilePath string
 	TlsKeyFilePath  string
 	Host            string
@@ -111,7 +109,36 @@ func NewUtxorpc(cfg UtxorpcConfig) *Utxorpc {
 	}
 }
 
+// isNilInterface reports whether v is nil at either the interface level
+// (untyped nil) or the underlying pointer level (typed nil such as
+// (*T)(nil) stored in an interface). Calling methods on either kind of
+// nil interface value causes a runtime panic, so both must be rejected.
+func isNilInterface(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() { //nolint:exhaustive
+	case reflect.Chan, reflect.Func, reflect.Interface,
+		reflect.Map, reflect.Pointer, reflect.Slice:
+		return rv.IsNil()
+	}
+	return false
+}
+
 func (u *Utxorpc) Start(ctx context.Context) error {
+	if isNilInterface(u.config.EventBus) {
+		return errors.New("utxorpc: EventBus is required")
+	}
+	// Typed-nil guard for optional deps — untyped nil is allowed at startup
+	// (handlers check per-request), but a typed nil (*T)(nil) stored in the
+	// interface field would bypass handler nil-checks and cause a panic.
+	if u.config.LedgerState != nil && isNilInterface(u.config.LedgerState) {
+		return errors.New("utxorpc: LedgerState must not be a typed nil")
+	}
+	if u.config.Mempool != nil && isNilInterface(u.config.Mempool) {
+		return errors.New("utxorpc: Mempool must not be a typed nil")
+	}
 	u.mu.Lock()
 	if u.server != nil {
 		u.mu.Unlock()
