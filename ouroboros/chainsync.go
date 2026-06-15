@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -742,7 +743,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		}
 		if ingressEligible && o.ChainsyncState != nil {
 			o.ChainsyncState.RecordObservedHeader(
-				ledger.ChainsyncEvent{
+				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
 					Point:        point,
 					Type:         blockType,

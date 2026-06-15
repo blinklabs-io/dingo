@@ -317,7 +317,19 @@ func (n *Node) Run(ctx context.Context) error {
 				if n.chainsyncState == nil {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
-				return n.chainsyncState.LookupObservedHeader(connId, hash)
+				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(connId, hash)
+				if !ok {
+					return ledger.ChainsyncEvent{}, nil, false
+				}
+				return ledger.ChainsyncEvent{
+					ConnectionId: h.ConnectionId,
+					BlockHeader:  h.BlockHeader,
+					Point:        h.Point,
+					Tip:          h.Tip,
+					BlockNumber:  h.BlockNumber,
+					Type:         h.Type,
+					Rollback:     h.Rollback,
+				}, prevHash, true
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
