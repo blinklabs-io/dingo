@@ -583,6 +583,29 @@ func (n *Node) Run(ctx context.Context) error {
 			n.deleteChainsyncIngressEligibility(e.ConnectionId)
 		},
 	)
+	// Forward peer-governance eligibility and priority updates to the chain
+	// selector. Subscription is placed here (node composition layer) so that
+	// chainselection/ has no dependency on peergov/.
+	n.eventBus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		peergov.PeerPriorityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionPriority(e.ConnectionId, e.Priority)
+		},
+	)
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start chain selector: %w", err)
