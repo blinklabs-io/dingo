@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 )
@@ -141,14 +140,6 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		cs.mode = SelectionModeGenesis
 	}
 	if cfg.EventBus != nil {
-		cfg.EventBus.SubscribeFunc(
-			peergov.PeerEligibilityChangedEventType,
-			cs.handlePeerEligibilityChangedEvent,
-		)
-		cfg.EventBus.SubscribeFunc(
-			peergov.PeerPriorityChangedEventType,
-			cs.handlePeerPriorityChangedEvent,
-		)
 		cfg.EventBus.SubscribeFunc(
 			PeerRollbackEventType,
 			cs.handlePeerRollbackEvent,
@@ -954,24 +945,28 @@ func sameSelectionTip(a, b ochainsync.Tip) bool {
 		bytes.Equal(a.Point.Hash, b.Point.Hash)
 }
 
-func (cs *ChainSelector) handlePeerEligibilityChangedEvent(evt event.Event) {
-	e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
-	if !ok {
-		return
-	}
+// SetConnectionEligible marks whether a peer connection is eligible for chain
+// selection. Ineligible peers are skipped during best-peer evaluation.
+// Calling this triggers a re-evaluation of the best peer.
+func (cs *ChainSelector) SetConnectionEligible(
+	connId ouroboros.ConnectionId,
+	eligible bool,
+) {
 	cs.mutex.Lock()
-	cs.eligible[e.ConnectionId] = e.Eligible
+	cs.eligible[connId] = eligible
 	cs.mutex.Unlock()
 	cs.triggerEvaluation()
 }
 
-func (cs *ChainSelector) handlePeerPriorityChangedEvent(evt event.Event) {
-	e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
-	if !ok {
-		return
-	}
+// SetConnectionPriority sets the selection priority for a peer connection.
+// When two peers advertise the same chain tip, the peer with the higher
+// priority wins. Calling this triggers a re-evaluation of the best peer.
+func (cs *ChainSelector) SetConnectionPriority(
+	connId ouroboros.ConnectionId,
+	priority int,
+) {
 	cs.mutex.Lock()
-	cs.priority[e.ConnectionId] = e.Priority
+	cs.priority[connId] = priority
 	cs.mutex.Unlock()
 	cs.triggerEvaluation()
 }

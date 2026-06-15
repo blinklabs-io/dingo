@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -710,57 +709,23 @@ func TestChainSelectorPreservesEqualTipIncumbentAtSamePriorityWithVRF(
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 }
 
-func TestChainSelectorUpdatesConnectionStateFromPeerGovEvents(t *testing.T) {
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
-	cs := NewChainSelector(ChainSelectorConfig{
-		EventBus: eventBus,
-	})
+func TestChainSelectorUpdatesConnectionStateViaSetters(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{})
 	connId := newTestConnectionId(1)
 
-	require.Eventually(t, func() bool {
-		cs.mutex.RLock()
-		defer cs.mutex.RUnlock()
-		return cs.isConnectionEligible(connId) &&
-			cs.connectionPriority(connId) == 0
-	}, time.Second, 5*time.Millisecond)
+	// Default state: eligible (not in map), priority 0.
+	assert.True(t, cs.isConnectionEligible(connId))
+	assert.Equal(t, 0, cs.connectionPriority(connId))
 
-	eventBus.Publish(
-		peergov.PeerEligibilityChangedEventType,
-		event.NewEvent(
-			peergov.PeerEligibilityChangedEventType,
-			peergov.PeerEligibilityChangedEvent{
-				ConnectionId: connId,
-				Eligible:     false,
-			},
-		),
-	)
-	eventBus.Publish(
-		peergov.PeerPriorityChangedEventType,
-		event.NewEvent(
-			peergov.PeerPriorityChangedEventType,
-			peergov.PeerPriorityChangedEvent{
-				ConnectionId: connId,
-				Priority:     40,
-			},
-		),
-	)
+	cs.SetConnectionEligible(connId, false)
+	cs.SetConnectionPriority(connId, 40)
 
-	require.Eventually(t, func() bool {
-		cs.mutex.RLock()
-		defer cs.mutex.RUnlock()
-		return !cs.isConnectionEligible(connId) &&
-			cs.connectionPriority(connId) == 40
-	}, time.Second, 5*time.Millisecond)
+	assert.False(t, cs.isConnectionEligible(connId))
+	assert.Equal(t, 40, cs.connectionPriority(connId))
 }
 
-func TestChainSelectorSwitchesImmediatelyOnEligibilityEvent(t *testing.T) {
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
+func TestChainSelectorSwitchesImmediatelyOnEligibilityChange(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
-		EventBus:           eventBus,
 		EvaluationInterval: time.Hour,
 	})
 	ctx := t.Context()
@@ -778,16 +743,7 @@ func TestChainSelectorSwitchesImmediatelyOnEligibilityEvent(t *testing.T) {
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	eventBus.Publish(
-		peergov.PeerEligibilityChangedEventType,
-		event.NewEvent(
-			peergov.PeerEligibilityChangedEventType,
-			peergov.PeerEligibilityChangedEvent{
-				ConnectionId: incumbentConn,
-				Eligible:     false,
-			},
-		),
-	)
+	cs.SetConnectionEligible(incumbentConn, false)
 
 	require.Eventually(t, func() bool {
 		bestPeer := cs.GetBestPeer()
@@ -795,14 +751,10 @@ func TestChainSelectorSwitchesImmediatelyOnEligibilityEvent(t *testing.T) {
 	}, time.Second, 5*time.Millisecond)
 }
 
-func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityEvent(
+func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityChange(
 	t *testing.T,
 ) {
-	eventBus := event.NewEventBus(nil, nil)
-	defer eventBus.Stop()
-
 	cs := NewChainSelector(ChainSelectorConfig{
-		EventBus:           eventBus,
 		EvaluationInterval: time.Hour,
 	})
 	ctx := t.Context()
@@ -820,16 +772,7 @@ func TestChainSelectorDoesNotSwitchEqualTipIncumbentOnPriorityEvent(
 	require.NotNil(t, cs.GetBestPeer())
 	assert.Equal(t, incumbentConn, *cs.GetBestPeer())
 
-	eventBus.Publish(
-		peergov.PeerPriorityChangedEventType,
-		event.NewEvent(
-			peergov.PeerPriorityChangedEventType,
-			peergov.PeerPriorityChangedEvent{
-				ConnectionId: challengerConn,
-				Priority:     40,
-			},
-		),
-	)
+	cs.SetConnectionPriority(challengerConn, 40)
 
 	require.Never(t, func() bool {
 		bestPeer := cs.GetBestPeer()
