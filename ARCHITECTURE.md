@@ -166,6 +166,7 @@ graph LR
     topology["topology"]
     intcfg["internal/config"]
     intnode["internal/node"]
+    intnode_ledgerpeers["internal/node/ledgerpeers"]
     utxorpc["api/utxorpc"]
     blockfrost["api/blockfrost"]
     mesh["api/mesh"]
@@ -176,6 +177,7 @@ graph LR
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology
+    root --> intnode_ledgerpeers
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
     cmd --> root & cardano_cfg & db & db_models & db_plugin
@@ -187,6 +189,7 @@ graph LR
     chainsel --> ev & peergov
     connmgr --> ev
     peergov --> connmgr & ev & topology
+    intnode_ledgerpeers --> ledger & peergov
 
     ouroboros --> chain & chainsel & chainsync & connmgr
     ouroboros --> ev & ledger & mempool & peergov
@@ -194,7 +197,7 @@ graph LR
     ledger --> chain & chainsel & cardano_cfg & connmgr
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
-    ledger --> mempool & peergov
+    ledger --> mempool
     ledger_eras --> cardano_cfg & ledger_hardfork
     ledger_forging --> ev & ledger_eras
     ledger_governance --> db & db_models & db_types & ledger_eras
@@ -1101,6 +1104,11 @@ later ledger peer refreshes still query the live ledger/database provider.
 If the snapshot produces no usable peers, startup falls back to topology
 bootstrap peers.
 
+Live ledger peer discovery is adapted at the node composition boundary:
+`ledger/` exposes stake pool relay data and current slot through neutral
+ledger/database types, while `internal/node/ledgerpeers` converts that data to
+the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
+
 Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
 be triggered by enough connected ledger peers, or by the configured slot/progress
 thresholds once at least one non-bootstrap client-capable successor is
@@ -1310,6 +1318,8 @@ Package isolation is enforced by direction, ownership, and composition:
 - `ledger/` owns validation, ledger state, rollback state repair, nonce/epoch
   logic, and ledger queries. Network connection action should be requested via
   neutral events or callbacks rather than direct connection-manager coupling.
+  Peer-governance policy types should be adapted outside `ledger/`, at the
+  node composition boundary.
 - `mempool/` owns pending transaction admission, eviction, and relay state. It
   depends on a transaction-validation interface supplied by ledger, not on a
   concrete ledger implementation.
@@ -1339,7 +1349,7 @@ Storage backends are loaded dynamically through a plugin registry, allowing exte
 
 ### Adapter Pattern
 
-The block production system uses adapters (`mempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations.
+The block production system uses adapters (`mempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations. Node wiring also adapts neutral ledger relay data to `peergov.LedgerPeerProvider` in `internal/node/ledgerpeers`.
 
 ### Observer Pattern
 
