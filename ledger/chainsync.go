@@ -3895,8 +3895,7 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 }
 
 // SyncProgress returns the current sync progress as a value between
-// 0.0 (unknown/just started) and 1.0 (fully synced). This implements
-// the peergov.SyncProgressProvider interface, allowing the peer
+// 0.0 (unknown/just started) and 1.0 (fully synced), allowing the peer
 // governor to exit bootstrap mode once sync reaches its threshold.
 func (ls *LedgerState) SyncProgress() float64 {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()

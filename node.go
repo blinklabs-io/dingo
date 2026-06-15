@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
@@ -624,15 +625,16 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	// Configure peer governor before opening listeners so topology-driven
 	// outbound connections start first and do not lose the race to inbounds.
-	// Create ledger peer provider for discovering peers from stake pool relays.
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+	// Create ledger relay provider for discovering peers from stake pool relays.
+	ledgerRelayProvider, err := ledger.NewPoolRelayProvider(
 		n.ledgerState,
 		n.db,
 		n.eventBus,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create ledger peer provider: %w", err)
+		return fmt.Errorf("failed to create ledger relay provider: %w", err)
 	}
+	ledgerPeerProvider := ledgerpeers.NewProvider(ledgerRelayProvider)
 
 	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
 	var useLedgerAfterSlot int64 = -1

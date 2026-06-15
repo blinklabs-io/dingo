@@ -21,7 +21,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/peergov"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +38,7 @@ func newTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-// newTestAdapter creates a LedgerPeerProviderAdapter with the given
+// newTestAdapter creates a PoolRelayProvider with the given
 // parameters. It uses a minimal LedgerState and the provided database.
 // The cacheTTL is set to the given value.
 func newTestAdapter(
@@ -47,20 +46,20 @@ func newTestAdapter(
 	db *database.Database,
 	eventBus *event.EventBus,
 	cacheTTL time.Duration,
-) *LedgerPeerProviderAdapter {
+) *PoolRelayProvider {
 	t.Helper()
 	ls := &LedgerState{db: db}
-	adapter, err := NewLedgerPeerProvider(ls, db, eventBus)
+	adapter, err := NewPoolRelayProvider(ls, db, eventBus)
 	require.NoError(t, err)
 	adapter.cacheTTL = cacheTTL
 	return adapter
 }
 
 // sampleRelays returns a slice of pool relays for use in tests.
-func sampleRelays() []peergov.PoolRelay {
+func sampleRelays() []PoolRelay {
 	ipv4 := net.ParseIP("192.168.1.1").To4()
 	ipv6 := net.ParseIP("::1")
-	return []peergov.PoolRelay{
+	return []PoolRelay{
 		{
 			Hostname: "relay1.example.com",
 			Port:     3001,
@@ -77,8 +76,8 @@ func sampleRelays() []peergov.PoolRelay {
 // seedCache injects relay data directly into the adapter's cache,
 // simulating a previous successful fetch from the database.
 func seedCache(
-	adapter *LedgerPeerProviderAdapter,
-	relays []peergov.PoolRelay,
+	adapter *PoolRelayProvider,
+	relays []PoolRelay,
 ) {
 	adapter.cacheMu.Lock()
 	adapter.cachedRelays = relays
@@ -86,24 +85,24 @@ func seedCache(
 	adapter.cacheMu.Unlock()
 }
 
-func TestLedgerPeerProviderNewErrors(t *testing.T) {
+func TestPoolRelayProviderNewErrors(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
 	t.Run("nil ledgerState", func(t *testing.T) {
-		_, err := NewLedgerPeerProvider(nil, db, nil)
+		_, err := NewPoolRelayProvider(nil, db, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "ledgerState")
 	})
 
 	t.Run("nil db", func(t *testing.T) {
-		_, err := NewLedgerPeerProvider(ls, nil, nil)
+		_, err := NewPoolRelayProvider(ls, nil, nil)
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "db")
 	})
 }
 
-func TestLedgerPeerProviderCacheHit(t *testing.T) {
+func TestPoolRelayProviderCacheHit(t *testing.T) {
 	db := newTestDB(t)
 	// Use a long TTL so the cache never expires during the test
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
@@ -131,7 +130,7 @@ func TestLedgerPeerProviderCacheHit(t *testing.T) {
 	adapter.cacheMu.RUnlock()
 }
 
-func TestLedgerPeerProviderCacheTTLExpiry(t *testing.T) {
+func TestPoolRelayProviderCacheTTLExpiry(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Millisecond)
 
@@ -158,7 +157,7 @@ func TestLedgerPeerProviderCacheTTLExpiry(t *testing.T) {
 	require.Empty(t, result, "expected empty relays after TTL expiry since DB has no data")
 }
 
-func TestLedgerPeerProviderInvalidateCache(t *testing.T) {
+func TestPoolRelayProviderInvalidateCache(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -189,7 +188,7 @@ func TestLedgerPeerProviderInvalidateCache(t *testing.T) {
 	)
 }
 
-func TestLedgerPeerProviderEventDrivenInvalidation(t *testing.T) {
+func TestPoolRelayProviderEventDrivenInvalidation(t *testing.T) {
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -229,7 +228,7 @@ func TestLedgerPeerProviderEventDrivenInvalidation(t *testing.T) {
 	require.Empty(t, result)
 }
 
-func TestLedgerPeerProviderDeepCopy(t *testing.T) {
+func TestPoolRelayProviderDeepCopy(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -249,7 +248,7 @@ func TestLedgerPeerProviderDeepCopy(t *testing.T) {
 	}
 
 	// Append to the slice to verify slice header independence
-	result1 = append(result1, peergov.PoolRelay{
+	result1 = append(result1, PoolRelay{
 		Hostname: "extra.example.com",
 		Port:     1234,
 	})
@@ -286,12 +285,12 @@ func TestLedgerPeerProviderDeepCopy(t *testing.T) {
 	require.Equal(t, net.ParseIP("::1"), *result2[1].IPv6)
 }
 
-func TestLedgerPeerProviderDeepCopyIPv6(t *testing.T) {
+func TestPoolRelayProviderDeepCopyIPv6(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
 	ipv6 := net.ParseIP("2001:db8::1")
-	relays := []peergov.PoolRelay{
+	relays := []PoolRelay{
 		{
 			Hostname: "relay.example.com",
 			Port:     3001,
@@ -318,12 +317,12 @@ func TestLedgerPeerProviderDeepCopyIPv6(t *testing.T) {
 	)
 }
 
-func TestLedgerPeerProviderNilEventBus(t *testing.T) {
+func TestPoolRelayProviderNilEventBus(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
 	// Constructing with nil eventBus should not panic
-	adapter, err := NewLedgerPeerProvider(ls, db, nil)
+	adapter, err := NewPoolRelayProvider(ls, db, nil)
 	require.NoError(t, err)
 	require.NotNil(t, adapter)
 
@@ -336,7 +335,7 @@ func TestLedgerPeerProviderNilEventBus(t *testing.T) {
 	adapter.InvalidateCache()
 }
 
-func TestLedgerPeerProviderCacheMissFetchesFromDB(t *testing.T) {
+func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -352,18 +351,18 @@ func TestLedgerPeerProviderCacheMissFetchesFromDB(t *testing.T) {
 	adapter.cacheMu.RUnlock()
 }
 
-func TestLedgerPeerProviderCurrentSlot(t *testing.T) {
+func TestPoolRelayProviderCurrentSlot(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
-	adapter, err := NewLedgerPeerProvider(ls, db, nil)
+	adapter, err := NewPoolRelayProvider(ls, db, nil)
 	require.NoError(t, err)
 
 	// Default tip is zero
 	require.Equal(t, uint64(0), adapter.CurrentSlot())
 }
 
-func TestLedgerPeerProviderInvalidateCacheIdempotent(t *testing.T) {
+func TestPoolRelayProviderInvalidateCacheIdempotent(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
@@ -379,7 +378,7 @@ func TestLedgerPeerProviderInvalidateCacheIdempotent(t *testing.T) {
 	adapter.cacheMu.RUnlock()
 }
 
-func TestLedgerPeerProviderConcurrentAccess(t *testing.T) {
+func TestPoolRelayProviderConcurrentAccess(t *testing.T) {
 	db := newTestDB(t)
 	bus := event.NewEventBus(nil, nil)
 	t.Cleanup(func() { bus.Stop() })
@@ -429,12 +428,12 @@ func TestLedgerPeerProviderConcurrentAccess(t *testing.T) {
 	}
 }
 
-func TestLedgerPeerProviderCacheNilIPFields(t *testing.T) {
+func TestPoolRelayProviderCacheNilIPFields(t *testing.T) {
 	db := newTestDB(t)
 	adapter := newTestAdapter(t, db, nil, 10*time.Minute)
 
 	// Relay with no IP addresses (hostname-only relay)
-	relays := []peergov.PoolRelay{
+	relays := []PoolRelay{
 		{
 			Hostname: "hostname-only.example.com",
 			Port:     3001,
@@ -453,11 +452,11 @@ func TestLedgerPeerProviderCacheNilIPFields(t *testing.T) {
 	require.Nil(t, result[0].IPv6)
 }
 
-func TestLedgerPeerProviderDefaultTTL(t *testing.T) {
+func TestPoolRelayProviderDefaultTTL(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
 
-	adapter, err := NewLedgerPeerProvider(ls, db, nil)
+	adapter, err := NewPoolRelayProvider(ls, db, nil)
 	require.NoError(t, err)
 	require.Equal(
 		t,
@@ -471,7 +470,7 @@ func TestCopyPoolRelaysEmpty(t *testing.T) {
 	result := copyPoolRelays(nil)
 	require.Empty(t, result)
 
-	result = copyPoolRelays([]peergov.PoolRelay{})
+	result = copyPoolRelays([]PoolRelay{})
 	require.Empty(t, result)
 	require.NotNil(t, result)
 }
@@ -479,7 +478,7 @@ func TestCopyPoolRelaysEmpty(t *testing.T) {
 func TestCopyPoolRelaysFull(t *testing.T) {
 	ipv4 := net.ParseIP("10.0.0.1").To4()
 	ipv6 := net.ParseIP("fe80::1")
-	original := []peergov.PoolRelay{
+	original := []PoolRelay{
 		{
 			Hostname: "test.example.com",
 			Port:     3001,
