@@ -304,23 +304,29 @@ func TestCompareVRFOutputs_InvalidLength(t *testing.T) {
 // for Byron<->Shelley boundaries. Byron blocks have no VRF (PBFT, not Praos),
 // so any chain-selection tie that includes a Byron tip must not use a
 // VRF-derived field.
+//
+// The Shelley header is populated with a real 64-byte VRF output so the
+// comparison is nil vs. valid — not nil vs. nil — making this a meaningful
+// assertion that the Byron nil does not win the tiebreaker even against a
+// fully-populated peer.
 func TestGetVRFOutput_ByronReturnsNil(t *testing.T) {
 	byronHeader := &byron.ByronMainBlockHeader{}
 	assert.Nil(t, GetVRFOutput(byronHeader),
 		"Byron headers must yield nil VRF output (no VRF in PBFT)")
 
 	shelleyHeader := &shelley.ShelleyBlockHeader{}
-	cmp := CompareVRFOutputs(
-		GetVRFOutput(byronHeader),
-		GetVRFOutput(shelleyHeader),
-	)
+	shelleyHeader.Body.LeaderVrf.Output = make64ByteVRF(0x01)
+
+	shelleyVRF := GetVRFOutput(shelleyHeader)
+	assert.Len(t, shelleyVRF, VRFOutputSize,
+		"Shelley header with populated LeaderVrf must return a 64-byte VRF output")
+
+	cmp := CompareVRFOutputs(GetVRFOutput(byronHeader), shelleyVRF)
 	assert.Equal(t, ChainEqual, cmp,
-		"a tie that includes a Byron tip must not be broken by VRF "+
+		"Byron nil VRF vs. valid Shelley VRF must not break the tie "+
 			"(NoTiebreakerAcrossEras at Byron<->Shelley)")
-	cmp = CompareVRFOutputs(
-		GetVRFOutput(shelleyHeader),
-		GetVRFOutput(byronHeader),
-	)
+
+	cmp = CompareVRFOutputs(shelleyVRF, GetVRFOutput(byronHeader))
 	assert.Equal(t, ChainEqual, cmp,
 		"NoTiebreakerAcrossEras must be symmetric")
 }
