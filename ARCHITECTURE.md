@@ -863,7 +863,7 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide state tracking (treasury/reserves) |
+| `NetworkState` | Network-wide state tracking (treasury/reserves); updated at the epoch boundary by treasury withdrawals, donations, and unclaimed pool-retirement deposit refunds |
 | `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
@@ -1491,8 +1491,31 @@ slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
 
+### Epoch Boundary State Transitions
+
+`processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
+a fixed order, mirroring `cardano-ledger`'s sequencing:
+
+1. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+2. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+   whose retirement epoch is the new epoch. Each deposit is credited to the
+   pool's registered, active reward account, or added to the treasury when that
+   account is missing or inactive. Active pool membership itself is query-derived
+   (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
+   the retirement certificate rows remain for rollback safety.
+3. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+   proposal-deposit returns, which observe the post-POOLREAP treasury.
+4. Treasury donations (`applyEpochDonations`), added after withdrawals.
+
+POOLREAP runs before governance so any deposit that lands in the treasury is
+visible to the withdrawals checked in step 3. The ordering is locked in by
+`TestProcessEpochRollover_OrderingInvariant`.
+
 ### Rollback Support
 
 On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
+- Reward-account credits (`account_reward_delta` journal) and treasury/reserves
+  writes (`network_state`) from governance refunds and POOLREAP deposit refunds
+  are slot-keyed, so they are reverted by slot and re-derived on forward replay

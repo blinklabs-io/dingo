@@ -3283,15 +3283,19 @@ func (ls *LedgerState) processEpochRollover(
 	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
 	//      voting path; produces newPParams from on-chain pparam-update
 	//      proposals.
-	//   2. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   2. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      before enactment so any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in step 3.
+	//   3. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   3. SetPParams                    — persist the enacted pparams.
-	//   4. IsHardForkTransition check    — detect inter-era boundary from
+	//   4. SetPParams                    — persist the enacted pparams.
+	//   5. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   5. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   6. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
 	//
-	// Steps 4 and 5 must observe the post-enactment major version. Step 5
+	// Steps 5 and 6 must observe the post-enactment major version. Step 6
 	// must observe the persisted pparams (not just the in-memory ones)
 	// because its body issues SQL within `txn` that may join against
 	// `pparams` rows.
@@ -3311,6 +3315,17 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+
+	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
+	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
+	// this runs before governance enactment and treasury accounting, so any
+	// deposit that lands in the treasury (unregistered/inactive reward account)
+	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	if err := ls.applyPoolRetirements(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply pool retirements: %w", err)
 	}
 
 	// Run the CIP-1694 governance tick: enact proposals ratified in the
