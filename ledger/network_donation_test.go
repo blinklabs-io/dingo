@@ -15,9 +15,16 @@
 package ledger
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/ledger/governance"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -122,4 +129,139 @@ func TestEpochDonationWithdrawalRollback(t *testing.T) {
 	sum, err := db.Metadata().SumNetworkDonationsForEpoch(7, nil)
 	require.NoError(t, err)
 	assert.Zero(t, sum, "rolled-back donation rows are gone")
+}
+
+// donationTestConwayPParams builds Conway pparams with voting thresholds so
+// governance.ProcessEpoch's ratification phase has the fields it reads.
+func donationTestConwayPParams(major uint) *conway.ConwayProtocolParameters {
+	rat := func(n, d int64) cbor.Rat { return cbor.Rat{Rat: big.NewRat(n, d)} }
+	p := &conway.ConwayProtocolParameters{}
+	p.ProtocolVersion.Major = major
+	p.MinCommitteeSize = 3
+	p.DRepVotingThresholds = conway.DRepVotingThresholds{
+		MotionNoConfidence:    rat(67, 100),
+		CommitteeNormal:       rat(67, 100),
+		CommitteeNoConfidence: rat(60, 100),
+		UpdateToConstitution:  rat(75, 100),
+		HardForkInitiation:    rat(60, 100),
+		PpNetworkGroup:        rat(67, 100),
+		PpEconomicGroup:       rat(67, 100),
+		PpTechnicalGroup:      rat(67, 100),
+		PpGovGroup:            rat(75, 100),
+		TreasuryWithdrawal:    rat(67, 100),
+	}
+	p.PoolVotingThresholds = conway.PoolVotingThresholds{
+		MotionNoConfidence:    rat(51, 100),
+		CommitteeNormal:       rat(51, 100),
+		CommitteeNoConfidence: rat(51, 100),
+		HardForkInitiation:    rat(51, 100),
+		PpSecurityGroup:       rat(51, 100),
+	}
+	return p
+}
+
+// TestEpochProcessWithdrawalThenDonation drives the real Conway enactment path:
+// a ratified treasury withdrawal is enacted by governance.ProcessEpoch and then
+// the ending epoch's donation is applied, exactly as processEpochRollover
+// sequences them. It proves the withdrawal is checked/applied against the
+// pre-donation treasury (the value the ledger uses at the boundary) and the
+// donation is added afterwards.
+func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
+	db := newDonationTestDB(t)
+	ls := &LedgerState{db: db}
+
+	const (
+		initialTreasury = uint64(1_000)
+		initialReserves = uint64(200)
+		withdrawal      = uint64(400)
+		donation        = uint64(300)
+		endedEpoch      = uint64(4)
+		boundarySlot    = uint64(500)
+	)
+
+	// Registered reward account that the withdrawal pays out to.
+	stakeCred := make([]byte, 28)
+	for i := range stakeCred {
+		stakeCred[i] = 0x42
+	}
+	withdrawAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	withdrawAddrBytes, err := withdrawAddr.Bytes()
+	require.NoError(t, err)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}))
+
+	// A ratified treasury-withdrawal proposal so ProcessEpoch enacts it.
+	withdrawalCbor, err := cbor.Encode(&lcommon.TreasuryWithdrawalGovAction{
+		Type:        2,
+		Withdrawals: map[*lcommon.Address]uint64{&withdrawAddr: withdrawal},
+	})
+	require.NoError(t, err)
+	ratifiedEpoch := endedEpoch
+	ratifiedSlot := uint64(400)
+	require.NoError(t, db.SetGovernanceProposal(&models.GovernanceProposal{
+		TxHash:        make([]byte, 32),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeTreasuryWithdrawal),
+		ProposedEpoch: 3,
+		ExpiresEpoch:  10,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+		AnchorURL:     "https://example.invalid/withdrawal",
+		AnchorHash:    make([]byte, 32),
+		Deposit:       0,
+		ReturnAddress: withdrawAddrBytes,
+		GovActionCbor: withdrawalCbor,
+		AddedSlot:     101,
+	}, nil))
+
+	// Initial treasury/reserves and the ending epoch's donation.
+	require.NoError(t, db.Metadata().SetNetworkState(
+		initialTreasury, initialReserves, 1, nil,
+	))
+	require.NoError(t, db.Metadata().AddNetworkDonation(
+		70, endedEpoch, donation, nil,
+	))
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		if _, err := governance.ProcessEpoch(&governance.EpochInput{
+			DB:           db,
+			Txn:          txn,
+			PrevEpoch:    endedEpoch,
+			NewEpoch:     endedEpoch + 1,
+			BoundarySlot: boundarySlot,
+			PParams:      donationTestConwayPParams(10),
+			UpdateFn: func(
+				p lcommon.ProtocolParameters, _ any,
+			) (lcommon.ProtocolParameters, error) {
+				return p, nil
+			},
+		}); err != nil {
+			return err
+		}
+		return ls.applyEpochDonations(txn, endedEpoch, boundarySlot)
+	}))
+
+	// Withdrawal (400) was applied against the pre-donation treasury (1000),
+	// then the donation (300) was added: 1000 - 400 + 300 = 900.
+	treasury, reserves, _ := networkState(t, db)
+	assert.Equal(t, uint64(900), treasury,
+		"treasury = initial - withdrawal + donation")
+	assert.Equal(t, initialReserves, reserves)
+
+	// The withdrawal credited the registered reward account.
+	account, err := db.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, withdrawal, uint64(account.Reward),
+		"withdrawal paid to the reward account")
 }
