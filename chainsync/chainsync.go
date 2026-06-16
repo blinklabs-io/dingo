@@ -784,6 +784,8 @@ func (s *State) RecordObservedHeader(h ObservedHeader) {
 	if _, exists := chainHistory.byHash[hashKey]; exists {
 		return
 	}
+	h.Point.Hash = cloneBytes(h.Point.Hash)
+	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
 	chainHistory.order = append(chainHistory.order, hashKey)
 	chainHistory.byHash[hashKey] = observedHeaderRecord{
 		header:   h,
