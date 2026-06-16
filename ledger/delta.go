@@ -161,6 +161,35 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		}
 	}
 
+	// Accumulate Conway treasury donations from this block. Donations move
+	// into the treasury at the next epoch boundary (see processEpochRollover);
+	// they are recorded here keyed by block slot so a rollback drops them.
+	// Only valid transactions contribute: an invalid (phase-2 failed)
+	// transaction consumes collateral and its body, including any donation,
+	// is not applied.
+	var donation uint64
+	for _, tr := range d.Transactions {
+		if !tr.Tx.IsValid() {
+			continue
+		}
+		if don := tr.Tx.Donation(); don != nil && don.Sign() > 0 {
+			donation += don.Uint64()
+		}
+	}
+	if donation > 0 {
+		ls.RLock()
+		epoch := ls.currentEpoch.EpochId
+		ls.RUnlock()
+		if err := ls.db.Metadata().AddNetworkDonation(
+			d.Point.Slot,
+			epoch,
+			donation,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("record network donation: %w", err)
+		}
+	}
+
 	// Emit transaction events only after all processing succeeds,
 	// so subscribers never see an "applied" event for a transaction
 	// whose governance processing failed and caused the apply to abort.

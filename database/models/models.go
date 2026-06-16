@@ -39,6 +39,7 @@ var MigrateModels = []any{
 	&KeyWitness{},
 	&MoveInstantaneousRewards{},
 	&MoveInstantaneousRewardsReward{},
+	&NetworkDonation{},
 	&NetworkState{},
 	&OffchainMetadata{},
 	&Pool{},

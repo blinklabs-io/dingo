@@ -863,7 +863,8 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide state tracking |
+| `NetworkState` | Network-wide state tracking (treasury/reserves) |
+| `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
 

@@ -1714,6 +1714,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
+		// Delete rolled-back treasury donation records
+		if err := ls.db.DeleteNetworkDonationsAfterSlot(
+			point.Slot,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"delete network donations after rollback: %w",
+				err,
+			)
+		}
 		// Delete rolled-back UTxOs (blob offsets and metadata).
 		//
 		// Floor the deletion slot at mithrilLedgerSlot. UTxOs produced
