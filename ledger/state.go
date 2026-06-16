@@ -1565,9 +1565,8 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 				err,
 			)
 		}
-		// Revert reward-account credits from rolled-back governance
-		// finalization before account restoration can delete accounts
-		// registered after the rollback slot.
+		// Revert reward-account changes before account restoration can delete
+		// accounts registered after the rollback slot.
 		if err := ls.db.DeleteAccountRewardsAfterSlot(
 			point.Slot,
 			txn,

@@ -69,6 +69,7 @@ type mockTransaction struct {
 	refInputs    []lcommon.TransactionInput
 	outputs      []lcommon.TransactionOutput
 	collReturn   lcommon.TransactionOutput
+	withdrawals  map[*lcommon.Address]*big.Int
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -168,7 +169,7 @@ func (m *mockTransaction) TotalCollateral() *big.Int {
 }
 
 func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
-	return nil
+	return m.withdrawals
 }
 
 func (m *mockTransaction) RequiredSigners() []lcommon.Blake2b224 {
@@ -318,6 +319,79 @@ func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
 		Count(&count).Error)
 	if count != 1 {
 		t.Fatalf("expected one collateral return UTxO, got %d", count)
+	}
+}
+
+// TestSetTransactionWithdrawalsClearRewardBalance verifies transaction reward
+// withdrawals clear persisted rewards and rollback restores the prior balance.
+func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
+	t.Parallel()
+	sqliteStore := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
+	account := &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000),
+		Active:     true,
+	}
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	requireNoError(sqliteStore.DB().Create(account).Error)
+
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	requireNoError(err)
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x50
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&withdrawalAddr: big.NewInt(1_000),
+		},
+	}
+	point := ocommon.NewPoint(1556771, bytes.Repeat([]byte{0xf9}, 32))
+
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+
+	var got models.Account
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != 0 {
+		t.Fatalf(
+			"expected withdrawal to clear reward balance, got %d",
+			uint64(got.Reward),
+		)
+	}
+	var deltaCount int64
+	requireNoError(sqliteStore.DB().
+		Model(&models.AccountRewardDelta{}).
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Count(&deltaCount).Error)
+	if deltaCount != 1 {
+		t.Fatalf("expected one withdrawal delta, got %d", deltaCount)
+	}
+
+	requireNoError(sqliteStore.DeleteAccountRewardsAfterSlot(point.Slot-1, nil))
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != account.Reward {
+		t.Fatalf(
+			"expected rollback to restore reward balance %d, got %d",
+			uint64(account.Reward),
+			uint64(got.Reward),
+		)
 	}
 }
 

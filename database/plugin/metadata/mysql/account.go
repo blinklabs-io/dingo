@@ -140,7 +140,80 @@ func (d *MetadataStoreMysql) AddAccountReward(
 	return db.Transaction(credit)
 }
 
-// DeleteAccountRewardsAfterSlot reverts account reward credits recorded
+// ApplyAccountRewardWithdrawal clears a registered reward account after a
+// validated transaction withdrawal and records the previous balance for
+// rollback. The ledger rule clears the reward account when a withdrawal for
+// the credential appears in a valid transaction.
+func (d *MetadataStoreMysql) ApplyAccountRewardWithdrawal(
+	stakeKey []byte,
+	amount uint64,
+	slot uint64,
+	txHash []byte,
+	txn types.Txn,
+) error {
+	if amount == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	withdraw := func(tx *gorm.DB) error {
+		if len(txHash) > 0 {
+			var existing models.AccountRewardDelta
+			result := tx.Where(
+				"withdrawal = ? AND tx_hash = ? AND staking_key = ?",
+				true,
+				txHash,
+				stakeKey,
+			).First(&existing)
+			if result.Error == nil {
+				return nil
+			}
+			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
+				return result.Error
+			}
+		}
+		var account models.Account
+		if err := tx.Where(
+			"staking_key = ? AND active = ?",
+			stakeKey,
+			true,
+		).First(&account).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.ErrAccountNotFound
+			}
+			return err
+		}
+		current := uint64(account.Reward)
+		if current < amount {
+			return fmt.Errorf(
+				"account reward withdrawal underflow for stake key %x",
+				stakeKey,
+			)
+		}
+		if result := tx.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Update("reward", types.Uint64(0)); result.Error != nil {
+			return result.Error
+		}
+		delta := &models.AccountRewardDelta{
+			StakingKey:     stakeKey,
+			TxHash:         txHash,
+			Amount:         types.Uint64(amount),
+			PreviousReward: types.Uint64(current),
+			AddedSlot:      slot,
+			Withdrawal:     true,
+		}
+		return tx.Create(delta).Error
+	}
+	if txn != nil {
+		return withdraw(db)
+	}
+	return db.Transaction(withdraw)
+}
+
+// DeleteAccountRewardsAfterSlot reverts account reward changes recorded
 // after the given slot and deletes their journal rows.
 func (d *MetadataStoreMysql) DeleteAccountRewardsAfterSlot(
 	slot uint64,
@@ -155,37 +228,37 @@ func (d *MetadataStoreMysql) DeleteAccountRewardsAfterSlot(
 		if result := tx.Where(
 			"added_slot > ?",
 			slot,
-		).Find(&deltas); result.Error != nil {
+		).Order("added_slot DESC, id DESC").Find(&deltas); result.Error != nil {
 			return result.Error
 		}
-		byStakeKey := make(map[string]uint64, len(deltas))
 		for _, delta := range deltas {
-			key := string(delta.StakingKey)
-			amount := uint64(delta.Amount)
-			if byStakeKey[key] > ^uint64(0)-amount {
-				return fmt.Errorf(
-					"account reward rollback overflow for stake key %x",
-					delta.StakingKey,
-				)
-			}
-			byStakeKey[key] += amount
-		}
-		for key, amount := range byStakeKey {
 			var account models.Account
 			if result := tx.Where(
 				"staking_key = ?",
-				[]byte(key),
+				delta.StakingKey,
 			).First(&account); result.Error != nil {
 				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 					return models.ErrAccountNotFound
 				}
 				return result.Error
 			}
+			if delta.Withdrawal {
+				if result := tx.Model(&models.Account{}).
+					Where("id = ?", account.ID).
+					Update(
+						"reward",
+						types.Uint64(delta.PreviousReward),
+					); result.Error != nil {
+					return result.Error
+				}
+				continue
+			}
 			current := uint64(account.Reward)
+			amount := uint64(delta.Amount)
 			if current < amount {
 				return fmt.Errorf(
 					"account reward rollback underflow for stake key %x",
-					[]byte(key),
+					delta.StakingKey,
 				)
 			}
 			if result := tx.Model(&models.Account{}).

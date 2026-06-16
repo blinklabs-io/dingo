@@ -192,7 +192,7 @@ erDiagram
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `account` | `id`, `staking_key`, `pool`, `drep`, `added_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique `staking_key`; indexes pool/DRep/active lookup combinations | Current stake account state. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. |
-| `account_reward_delta` | `id`, `staking_key`, `amount`, `added_slot` | PK `id`; indexes `staking_key`, `added_slot` | Rollback-aware reward-account credit journal. Logical join to `account.staking_key`. |
+| `account_reward_delta` | `id`, `staking_key`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes `staking_key`, `tx_hash`, `added_slot`, `withdrawal` | Rollback-aware reward-account change journal. Credit rows add `amount`; withdrawal rows clear `account.reward`, store `previous_reward`, and use `tx_hash` to keep transaction re-ingest idempotent. Logical join to `account.staking_key`. |
 | `registration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
 | `deregistration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
 | `stake_registration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Shelley-era stake registration certificate. |
