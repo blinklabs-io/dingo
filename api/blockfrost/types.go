@@ -304,6 +304,7 @@ type TransactionResponse struct {
 	Block              string                  `json:"block"`
 	Deposit            string                  `json:"deposit"`
 	Fees               string                  `json:"fees"`
+	TreasuryDonation   string                  `json:"treasury_donation"`
 	Slot               uint64                  `json:"slot"`
 	BlockHeight        uint64                  `json:"block_height"`
 	BlockTime          int64                   `json:"block_time"`
@@ -378,6 +379,7 @@ type TransactionOutputResponse struct {
 type TransactionDelegationResponse struct {
 	Address     string `json:"address"`
 	PoolID      string `json:"pool_id"`
+	Index       int    `json:"index"`
 	CertIndex   int    `json:"cert_index"`
 	ActiveEpoch uint64 `json:"active_epoch"`
 }
@@ -442,13 +444,14 @@ type TransactionPoolRetireResponse struct {
 
 // TransactionRedeemerResponse represents one Plutus redeemer.
 type TransactionRedeemerResponse struct {
-	TxIndex          int    `json:"tx_index"`
-	Purpose          string `json:"purpose"`
-	ScriptHash       string `json:"script_hash"`
-	RedeemerDataHash string `json:"redeemer_data_hash"`
-	UnitMem          string `json:"unit_mem"`
-	UnitSteps        string `json:"unit_steps"`
-	Fee              string `json:"fee"`
+	DatumHash        *string `json:"datum_hash"`
+	TxIndex          int     `json:"tx_index"`
+	Purpose          string  `json:"purpose"`
+	ScriptHash       string  `json:"script_hash"`
+	RedeemerDataHash string  `json:"redeemer_data_hash"`
+	UnitMem          string  `json:"unit_mem"`
+	UnitSteps        string  `json:"unit_steps"`
+	Fee              string  `json:"fee"`
 }
 
 // TransactionRequiredSignerResponse represents one required signing key hash.
