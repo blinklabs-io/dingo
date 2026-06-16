@@ -21,10 +21,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -521,19 +521,19 @@ func TestObservedHeaderHistoryPersistsAcrossDedupAndClearsOnRemove(
 		slot:        point.Slot,
 	}
 
-	s.RecordObservedHeader(ledger.ChainsyncEvent{
+	s.RecordObservedHeader(chainsync.ObservedHeader{
 		ConnectionId: conn,
 		Point:        point,
 		BlockHeader:  header,
 		Tip:          tip,
 	})
 
-	recordedEvent, recordedPrevHash, ok := s.LookupObservedHeader(
+	recordedHeader, recordedPrevHash, ok := s.LookupObservedHeader(
 		conn,
 		hash,
 	)
 	require.True(t, ok)
-	require.Equal(t, point, recordedEvent.Point)
+	require.Equal(t, point, recordedHeader.Point)
 	require.Equal(t, header.prevHash.Bytes(), recordedPrevHash)
 
 	s.RemoveClientConnId(conn)
@@ -1429,4 +1429,109 @@ func TestTryAddClientConnIdWithDirection_LimitEnforced(t *testing.T) {
 	require.True(t, s.TryAddClientConnIdWithDirection(connA, 1, true))
 	require.False(t, s.TryAddClientConnIdWithDirection(connB, 1, true))
 	require.Equal(t, 1, s.ClientConnCount())
+}
+
+// --- ChainProvider interface and ObservedHeader record tests ---
+
+// mockChainProvider is a test double for the ChainProvider interface.
+type mockChainProvider struct {
+	iter          *chain.ChainIterator
+	iterErr       error
+	stabilityWin  uint64
+}
+
+func (m *mockChainProvider) GetChainFromPoint(
+	_ ocommon.Point,
+	_ bool,
+) (*chain.ChainIterator, error) {
+	return m.iter, m.iterErr
+}
+
+func (m *mockChainProvider) StabilityWindow() uint64 {
+	return m.stabilityWin
+}
+
+// TestAddClient_NilChainProvider_ReturnsError verifies that AddClient returns
+// an error rather than panicking when no ChainProvider has been wired.
+func TestAddClient_NilChainProvider_ReturnsError(t *testing.T) {
+	s := chainsync.NewStateWithConfig(nil, nil, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	_, err := s.AddClient(conn, ocommon.Point{})
+	require.Error(t, err)
+}
+
+// TestAddClient_ChainProviderErrorPropagated verifies that an error from
+// ChainProvider.GetChainFromPoint is returned by AddClient unchanged.
+func TestAddClient_ChainProviderErrorPropagated(t *testing.T) {
+	provider := &mockChainProvider{iterErr: fmt.Errorf("chain lookup failed")}
+	s := chainsync.NewStateWithConfig(nil, provider, chainsync.DefaultConfig())
+	conn := newTestConnId(1)
+	_, err := s.AddClient(conn, ocommon.Point{})
+	require.ErrorContains(t, err, "chain lookup failed")
+}
+
+// TestSeenHeadersRetention_DerivedFromChainProvider verifies that the
+// stability window reported by ChainProvider drives the header dedup cache
+// pruning boundary when no explicit SeenHeadersRetention override is set.
+func TestSeenHeadersRetention_DerivedFromChainProvider(t *testing.T) {
+	const providerWindow = 500
+	provider := &mockChainProvider{stabilityWin: providerWindow}
+	cfg := chainsync.DefaultConfig() // SeenHeadersRetention == 0, falls back to provider
+	s := chainsync.NewStateWithConfig(nil, provider, cfg)
+
+	conn := newTestConnId(1)
+	s.AddClientConnId(conn)
+
+	// Seed an old header then advance the frontier past the prune interval
+	// (seenHeadersPruneInterval = 1000) so a prune scan fires.
+	// slot 100 is older than frontier(1600) − window(500) = 1100, so it
+	// should be evicted.
+	require.True(t, feedHeader(s, conn, 100, "old"))
+	require.True(t, feedHeader(s, conn, 1600, "new"))
+
+	require.Equal(t, 1, s.SeenHeadersLen(),
+		"slot 100 should be pruned by the provider stability window")
+}
+
+// TestObservedHeader_RoundTrip verifies that an ObservedHeader recorded via
+// RecordObservedHeader is returned intact by LookupObservedHeader, with the
+// prev-hash extracted from BlockHeader.PrevHash().
+func TestObservedHeader_RoundTrip(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig())
+
+	conn := newTestConnId(42)
+	s.AddClientConnId(conn)
+
+	hash := []byte("block-hash")
+	prev := []byte("prev-hash")
+	point := ocommon.NewPoint(200, hash)
+	tip := ochainsync.Tip{Point: point, BlockNumber: 5}
+	hdr := testBlockHeader{
+		hash:        lcommon.NewBlake2b256(hash),
+		prevHash:    lcommon.NewBlake2b256(prev),
+		blockNumber: 5,
+		slot:        200,
+	}
+
+	s.RecordObservedHeader(chainsync.ObservedHeader{
+		ConnectionId: conn,
+		BlockHeader:  hdr,
+		Point:        point,
+		Tip:          tip,
+		BlockNumber:  5,
+		Type:         1,
+	})
+
+	got, gotPrev, ok := s.LookupObservedHeader(conn, hash)
+	require.True(t, ok)
+	require.Equal(t, point, got.Point)
+	require.Equal(t, tip, got.Tip)
+	require.Equal(t, uint64(5), got.BlockNumber)
+	require.Equal(t, uint(1), got.Type)
+	require.Equal(t, hdr.PrevHash().Bytes(), gotPrev)
+
+	// LookupObservedHeader must not be visible from a different connection.
+	_, _, ok = s.LookupObservedHeader(newTestConnId(99), hash)
+	require.False(t, ok)
 }
