@@ -279,6 +279,33 @@ func DefaultLoggingConfig() LoggingConfig {
 	}
 }
 
+// MidnightConfig holds configuration for the Midnight indexer and its
+// optional gRPC API surface. Indexing is only active when Dingo is running
+// in API storage mode; Port 0 disables only the gRPC server.
+type MidnightConfig struct {
+	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+
+	CNightPolicyID              string `yaml:"cnight_policy_id" envconfig:"DINGO_MIDNIGHT_CNIGHT_POLICY_ID"`
+	CNightAssetName             string `yaml:"cnight_asset_name" envconfig:"DINGO_MIDNIGHT_CNIGHT_ASSET_NAME"`
+	MappingValidatorAddress     string `yaml:"mapping_validator_address" envconfig:"DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS"`
+	AuthTokenAssetName          string `yaml:"auth_token_asset_name" envconfig:"DINGO_MIDNIGHT_AUTH_TOKEN_ASSET_NAME"`
+	CommitteeCandidateAddress   string `yaml:"committee_candidate_address" envconfig:"DINGO_MIDNIGHT_COMMITTEE_CANDIDATE_ADDRESS"`
+	TechnicalCommitteeAddress   string `yaml:"technical_committee_address" envconfig:"DINGO_MIDNIGHT_TECHNICAL_COMMITTEE_ADDRESS"`
+	TechnicalCommitteePolicyID  string `yaml:"technical_committee_policy_id" envconfig:"DINGO_MIDNIGHT_TECHNICAL_COMMITTEE_POLICY_ID"`
+	CouncilAddress              string `yaml:"council_address" envconfig:"DINGO_MIDNIGHT_COUNCIL_ADDRESS"`
+	CouncilPolicyID             string `yaml:"council_policy_id" envconfig:"DINGO_MIDNIGHT_COUNCIL_POLICY_ID"`
+	PermissionedCandidatePolicy string `yaml:"permissioned_candidate_policy" envconfig:"DINGO_MIDNIGHT_PERMISSIONED_CANDIDATE_POLICY"`
+}
+
+// DefaultMidnightConfig returns the default Midnight indexer settings.
+func DefaultMidnightConfig() MidnightConfig {
+	return MidnightConfig{
+		Port: 50051,
+		Host: "0.0.0.0",
+	}
+}
+
 type Config struct {
 	MetadataPlugin       string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
 	TlsKeyFilePath       string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
@@ -357,6 +384,9 @@ type Config struct {
 	// Logging configuration (output format and level)
 	Logging LoggingConfig `yaml:"logging"`
 
+	// Midnight indexer and gRPC API configuration.
+	Midnight MidnightConfig `yaml:"midnight"`
+
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
 	// After this many slots, the KES key must be evolved to the next period.
@@ -412,6 +442,68 @@ type Config struct {
 
 	// Mithril snapshot bootstrap configuration
 	Mithril MithrilConfig `yaml:"mithril"`
+}
+
+// midnightNetworkDefaults holds per-network Midnight constants sourced from
+// https://github.com/input-output-hk/acropolis/tree/master/processes/midnight_indexer
+var midnightNetworkDefaults = map[string]MidnightConfig{
+	"mainnet": {
+		CNightPolicyID:             "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa",
+		CNightAssetName:            "NIGHT",
+		MappingValidatorAddress:    "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		TechnicalCommitteeAddress:  "addr_test1wqx3yfmsp82nmtyjj4k86s3l04l6lvwaqh2vk2ygcge7kdsk4xc7j",
+		TechnicalCommitteePolicyID: "0d12277009d53dac92956c7d423f7d7fafb1dd05d4cb2888c233eb36",
+		CouncilAddress:             "addr_test1wqqwkauz0ypglg5e4u780kcp8hzt75u72yg6z7td62gnk0qed0p06",
+		CouncilPolicyID:            "00eb778279028fa299af3c77db013dc4bf539e5111a1796dd2913b3c",
+		PermissionedCandidatePolicy: "f8625f11a58fa5ab5b85502a8fe5c843ece460c9c5f9273be17d3424",
+	},
+	"preview": {
+		CNightPolicyID:              "d2dbff622e509dda256fedbd31ef6e9fd98ed49ad91d5c0e07f68af1",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		CommitteeCandidateAddress:   "addr_test1wz5ax0hjvhx2uqef8sqrxnmfywd37hea4truhqxu4yxp9hsvggkfm",
+		TechnicalCommitteeAddress:   "addr_test1wptcy7h9rmkhdnhn3jvm6tuhehcq2hhhzntvn00nq79ph8c44v43j",
+		TechnicalCommitteePolicyID:  "57827ae51eed76cef38c99bd2f97cdf0055ef714d6c9bdf3078a1b9f",
+		CouncilAddress:              "addr_test1wzy47zdsq22pg9l48c5v0f835ljdjzkz47sa5za9cehcejcw28k2d",
+		CouncilPolicyID:             "895f09b002941417f53e28c7a4f1a7e4d90ac2afa1da0ba5c66f8ccb",
+		PermissionedCandidatePolicy: "24dccfce2576ae6fa7149bc485850656ae6faf9f4158891316773a78",
+	},
+}
+
+func applyMidnightNetworkDefaults(cfg *Config) {
+	defaults, ok := midnightNetworkDefaults[cfg.Network]
+	if !ok {
+		return
+	}
+	if cfg.Midnight.CNightPolicyID == "" {
+		cfg.Midnight.CNightPolicyID = defaults.CNightPolicyID
+	}
+	if cfg.Midnight.CNightAssetName == "" {
+		cfg.Midnight.CNightAssetName = defaults.CNightAssetName
+	}
+	if cfg.Midnight.MappingValidatorAddress == "" {
+		cfg.Midnight.MappingValidatorAddress = defaults.MappingValidatorAddress
+	}
+	if cfg.Midnight.AuthTokenAssetName == "" {
+		cfg.Midnight.AuthTokenAssetName = defaults.AuthTokenAssetName
+	}
+	if cfg.Midnight.CommitteeCandidateAddress == "" {
+		cfg.Midnight.CommitteeCandidateAddress = defaults.CommitteeCandidateAddress
+	}
+	if cfg.Midnight.TechnicalCommitteeAddress == "" {
+		cfg.Midnight.TechnicalCommitteeAddress = defaults.TechnicalCommitteeAddress
+	}
+	if cfg.Midnight.TechnicalCommitteePolicyID == "" {
+		cfg.Midnight.TechnicalCommitteePolicyID = defaults.TechnicalCommitteePolicyID
+	}
+	if cfg.Midnight.CouncilAddress == "" {
+		cfg.Midnight.CouncilAddress = defaults.CouncilAddress
+	}
+	if cfg.Midnight.CouncilPolicyID == "" {
+		cfg.Midnight.CouncilPolicyID = defaults.CouncilPolicyID
+	}
+	if cfg.Midnight.PermissionedCandidatePolicy == "" {
+		cfg.Midnight.PermissionedCandidatePolicy = defaults.PermissionedCandidatePolicy
+	}
 }
 
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
@@ -552,6 +644,8 @@ var globalConfig = &Config{
 	HistoryExpiry: DefaultHistoryExpiryConfig(),
 	// Logging defaults (text output at info level)
 	Logging: DefaultLoggingConfig(),
+	// Midnight defaults
+	Midnight: DefaultMidnightConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
@@ -819,6 +913,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	if err := ValidateNetworkName(globalConfig.Network); err != nil {
 		return nil, err
 	}
+	applyMidnightNetworkDefaults(globalConfig)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go

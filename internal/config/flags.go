@@ -84,6 +84,8 @@ var flagSpecs = []flagSpec{
 	intFlag("OffchainMetadata.BatchSize", "offchain-metadata-batch-size", "off-chain metadata rows to claim per pass (0 = default)"),
 	int64Flag("OffchainMetadata.MaxBytes", "offchain-metadata-max-bytes", "off-chain metadata max response bytes (0 = default)"),
 	boolFlag("OffchainMetadata.AllowPrivateAddresses", "offchain-metadata-allow-private-addresses", "allow off-chain metadata fetches to private, loopback, and link-local addresses"),
+	uintFlag("Midnight.Port", "midnight-port", "Midnight gRPC port (0 disables gRPC server)"),
+	stringFlag("Midnight.Host", "midnight-host", "", "Midnight gRPC listen address"),
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
@@ -187,6 +189,7 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 			return err
 		}
 	}
+	applyMidnightNetworkDefaults(cfg)
 	globalConfig = cfg
 	if _, err := LoadTopologyConfig(); err != nil {
 		return fmt.Errorf("loading topology after flags: %w", err)
