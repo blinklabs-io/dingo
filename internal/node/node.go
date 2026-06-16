@@ -276,7 +276,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
 		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
-		"midnight", storageMode.IsAPI(),
+		"midnight_indexing", storageMode.IsAPI(),
 		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
