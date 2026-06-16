@@ -445,6 +445,8 @@ type Config struct {
 }
 
 // midnightNetworkDefaults holds per-network Midnight constants sourced from
+// Acropolis. At the time these defaults were added, Acropolis published
+// constants for mainnet and preview only.
 // https://github.com/input-output-hk/acropolis/tree/master/processes/midnight_indexer
 var midnightNetworkDefaults = map[string]MidnightConfig{
 	"mainnet": {
