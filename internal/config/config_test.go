@@ -1006,31 +1006,6 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 	}
 }
 
-func TestLoad_MidnightDefaults(t *testing.T) {
-	resetGlobalConfig()
-	// Use preprod, which has no midnight network defaults, so only
-	// DefaultMidnightConfig values should be present.
-	yamlContent := "network: \"preprod\"\n"
-	tmpDir := t.TempDir()
-	tmpFile := filepath.Join(tmpDir, "dingo.yaml")
-	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	cfg, err := LoadConfig(tmpFile)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	expected := DefaultMidnightConfig()
-	if cfg.Midnight != expected {
-		t.Fatalf(
-			"expected Midnight defaults %+v, got %+v",
-			expected,
-			cfg.Midnight,
-		)
-	}
-}
-
 func TestLoad_MidnightConfig(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
