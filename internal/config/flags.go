@@ -184,10 +184,14 @@ func RegisterFlags(cmd *cobra.Command) {
 // not pass are ignored so YAML and env-var values survive.
 func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	flags := cmd.Root().PersistentFlags()
+	previousNetwork := cfg.Network
 	for _, spec := range flagSpecs {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
+	}
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
 	globalConfig = cfg

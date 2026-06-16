@@ -508,6 +508,43 @@ func applyMidnightNetworkDefaults(cfg *Config) {
 	}
 }
 
+func clearMidnightNetworkDefaults(cfg *Config, network string) {
+	defaults, ok := midnightNetworkDefaults[network]
+	if !ok {
+		return
+	}
+	if cfg.Midnight.CNightPolicyID == defaults.CNightPolicyID {
+		cfg.Midnight.CNightPolicyID = ""
+	}
+	if cfg.Midnight.CNightAssetName == defaults.CNightAssetName {
+		cfg.Midnight.CNightAssetName = ""
+	}
+	if cfg.Midnight.MappingValidatorAddress == defaults.MappingValidatorAddress {
+		cfg.Midnight.MappingValidatorAddress = ""
+	}
+	if cfg.Midnight.AuthTokenAssetName == defaults.AuthTokenAssetName {
+		cfg.Midnight.AuthTokenAssetName = ""
+	}
+	if cfg.Midnight.CommitteeCandidateAddress == defaults.CommitteeCandidateAddress {
+		cfg.Midnight.CommitteeCandidateAddress = ""
+	}
+	if cfg.Midnight.TechnicalCommitteeAddress == defaults.TechnicalCommitteeAddress {
+		cfg.Midnight.TechnicalCommitteeAddress = ""
+	}
+	if cfg.Midnight.TechnicalCommitteePolicyID == defaults.TechnicalCommitteePolicyID {
+		cfg.Midnight.TechnicalCommitteePolicyID = ""
+	}
+	if cfg.Midnight.CouncilAddress == defaults.CouncilAddress {
+		cfg.Midnight.CouncilAddress = ""
+	}
+	if cfg.Midnight.CouncilPolicyID == defaults.CouncilPolicyID {
+		cfg.Midnight.CouncilPolicyID = ""
+	}
+	if cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
+		cfg.Midnight.PermissionedCandidatePolicy = ""
+	}
+}
+
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
 	// Enabled controls whether Mithril integration is available.

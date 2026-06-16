@@ -259,6 +259,91 @@ func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 	}
 }
 
+func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
+	resetGlobalConfig()
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Fatalf("expected initial network preview, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["preview"].CNightPolicyID {
+		t.Fatalf(
+			"expected preview Midnight default before flags, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=mainnet"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Network != "mainnet" {
+		t.Fatalf("expected network mainnet, got %q", cfg.Network)
+	}
+	if cfg.Midnight.CNightPolicyID != midnightNetworkDefaults["mainnet"].CNightPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight policy default, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected mainnet Midnight council policy default, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+}
+
+func TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+network: "preview"
+midnight:
+  cnight_policy_id: "yaml-policy"
+`
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yamlContent), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--network=mainnet"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("failed to apply flags: %v", err)
+	}
+
+	if cfg.Midnight.CNightPolicyID != "yaml-policy" {
+		t.Fatalf(
+			"expected explicit Midnight YAML policy to be preserved, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["mainnet"].CouncilPolicyID {
+		t.Fatalf(
+			"expected remaining Midnight defaults to switch to mainnet, got %q",
+			cfg.Midnight.CouncilPolicyID,
+		)
+	}
+}
+
 func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	resetGlobalConfig()
 
