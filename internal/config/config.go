@@ -286,16 +286,16 @@ type MidnightConfig struct {
 	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
 	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
 
-	CNightPolicyID              string `yaml:"cnight_policy_id"`
-	CNightAssetName             string `yaml:"cnight_asset_name"`
-	MappingValidatorAddress     string `yaml:"mapping_validator_address"`
-	AuthTokenAssetName          string `yaml:"auth_token_asset_name"`
-	CommitteeCandidateAddress   string `yaml:"committee_candidate_address"`
-	TechnicalCommitteeAddress   string `yaml:"technical_committee_address"`
-	TechnicalCommitteePolicyID  string `yaml:"technical_committee_policy_id"`
-	CouncilAddress              string `yaml:"council_address"`
-	CouncilPolicyID             string `yaml:"council_policy_id"`
-	PermissionedCandidatePolicy string `yaml:"permissioned_candidate_policy"`
+	CNightPolicyID              string `yaml:"cnightPolicyId"`
+	CNightAssetName             string `yaml:"cnightAssetName"`
+	MappingValidatorAddress     string `yaml:"mappingValidatorAddress"`
+	AuthTokenAssetName          string `yaml:"authTokenAssetName"`
+	CommitteeCandidateAddress   string `yaml:"committeeCandidateAddress"`
+	TechnicalCommitteeAddress   string `yaml:"technicalCommitteeAddress"`
+	TechnicalCommitteePolicyID  string `yaml:"technicalCommitteePolicyId"`
+	CouncilAddress              string `yaml:"councilAddress"`
+	CouncilPolicyID             string `yaml:"councilPolicyId"`
+	PermissionedCandidatePolicy string `yaml:"permissionedCandidatePolicy"`
 }
 
 // DefaultMidnightConfig returns the default Midnight indexer settings.

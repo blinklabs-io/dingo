@@ -308,7 +308,7 @@ func TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML(t *testing.T) {
 	yamlContent := `
 network: "preview"
 midnight:
-  cnight_policy_id: "yaml-policy"
+  cnightPolicyId: "yaml-policy"
 `
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")

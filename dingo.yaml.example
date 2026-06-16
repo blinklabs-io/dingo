@@ -422,16 +422,16 @@ midnight:
   host: "0.0.0.0"
   # Midnight network constants. Known network defaults are applied when
   # available; set these explicitly for custom networks or overrides.
-  cnight_policy_id: ""
-  cnight_asset_name: ""
-  mapping_validator_address: ""
-  auth_token_asset_name: ""
-  committee_candidate_address: ""
-  technical_committee_address: ""
-  technical_committee_policy_id: ""
-  council_address: ""
-  council_policy_id: ""
-  permissioned_candidate_policy: ""
+  cnightPolicyId: ""
+  cnightAssetName: ""
+  mappingValidatorAddress: ""
+  authTokenAssetName: ""
+  committeeCandidateAddress: ""
+  technicalCommitteeAddress: ""
+  technicalCommitteePolicyId: ""
+  councilAddress: ""
+  councilPolicyId: ""
+  permissionedCandidatePolicy: ""
 
 # Cache configuration for tiered CBOR cache system
 # This controls the in-memory caching of UTxO and transaction CBOR data

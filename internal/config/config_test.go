@@ -106,16 +106,16 @@ genesisBootstrap:
 midnight:
   port: 50052
   host: "127.0.0.1"
-  cnight_policy_id: "policy1"
-  cnight_asset_name: "434e49474854"
-  mapping_validator_address: "addr_mapping"
-  auth_token_asset_name: "auth"
-  committee_candidate_address: "addr_candidate"
-  technical_committee_address: "addr_technical"
-  technical_committee_policy_id: "policy_technical"
-  council_address: "addr_council"
-  council_policy_id: "policy_council"
-  permissioned_candidate_policy: "policy_permissioned"
+  cnightPolicyId: "policy1"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "policy_technical"
+  councilAddress: "addr_council"
+  councilPolicyId: "policy_council"
+  permissionedCandidatePolicy: "policy_permissioned"
 mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
@@ -1012,16 +1012,16 @@ func TestLoad_MidnightConfig(t *testing.T) {
 midnight:
   port: 50060
   host: "127.0.0.2"
-  cnight_policy_id: "cnight-policy"
-  cnight_asset_name: "434e49474854"
-  mapping_validator_address: "addr_mapping"
-  auth_token_asset_name: "auth-token"
-  committee_candidate_address: "addr_candidate"
-  technical_committee_address: "addr_technical"
-  technical_committee_policy_id: "technical-policy"
-  council_address: "addr_council"
-  council_policy_id: "council-policy"
-  permissioned_candidate_policy: "permissioned-policy"
+  cnightPolicyId: "cnight-policy"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth-token"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "technical-policy"
+  councilAddress: "addr_council"
+  councilPolicyId: "council-policy"
+  permissionedCandidatePolicy: "permissioned-policy"
 network: "preview"
 `
 
@@ -1099,8 +1099,8 @@ func TestLoad_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 	t.Setenv("DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS", "env-address")
 	yamlContent := `
 midnight:
-  cnight_policy_id: "yaml-policy"
-  mapping_validator_address: "yaml-address"
+  cnightPolicyId: "yaml-policy"
+  mappingValidatorAddress: "yaml-address"
 network: "preprod"
 `
 
@@ -1177,7 +1177,7 @@ func TestLoad_MidnightExplicitOverridesNetworkDefault(t *testing.T) {
 	yamlContent := `
 network: "preview"
 midnight:
-  cnight_policy_id: "explicit-override"
+  cnightPolicyId: "explicit-override"
 `
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "dingo.yaml")
