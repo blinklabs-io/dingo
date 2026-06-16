@@ -197,7 +197,6 @@ graph LR
     ledger --> chain & chainsel & cardano_cfg & connmgr
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
-    ledger --> mempool
     ledger_eras --> cardano_cfg & ledger_hardfork
     ledger_forging --> ev & ledger_eras
     ledger_governance --> db & db_models & db_types & ledger_eras
@@ -1151,7 +1150,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 `BlockForger` runs a slot-based loop that:
 1. Waits for the next slot boundary using the wall-clock slot timer
 2. Checks leader eligibility via the `Election`
-3. Assembles a block from mempool transactions using `DefaultBlockBuilder`
+3. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 4. Broadcasts the forged block through the chain manager
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
@@ -1322,7 +1321,9 @@ Package isolation is enforced by direction, ownership, and composition:
   node composition boundary.
 - `mempool/` owns pending transaction admission, eviction, and relay state. It
   depends on a transaction-validation interface supplied by ledger, not on a
-  concrete ledger implementation.
+  concrete ledger implementation. Node composition adapts mempool transaction
+  DTOs to the neutral transaction views consumed by ledger block construction
+  and `ledger/forging`.
 - `database/` and `database/plugin/*` own persistence and storage backends.
   They should not import node, ledger, mempool, networking, or API packages.
 - API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
@@ -1349,7 +1350,7 @@ Storage backends are loaded dynamically through a plugin registry, allowing exte
 
 ### Adapter Pattern
 
-The block production system uses adapters (`mempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations. Node wiring also adapts neutral ledger relay data to `peergov.LedgerPeerProvider` in `internal/node/ledgerpeers`.
+The block production system uses adapters (`ledgerMempoolAdapter`, `forgingMempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations. Node wiring also adapts neutral ledger relay data to `peergov.LedgerPeerProvider` in `internal/node/ledgerpeers`.
 
 ### Observer Pattern
 

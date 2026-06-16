@@ -450,8 +450,8 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
-	// Set mempool in ledger state for block forging
-	n.ledgerState.SetMempool(n.mempool)
+	// Set mempool adapter in ledger state for block forging.
+	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()

@@ -44,7 +44,6 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
-	"github.com/blinklabs-io/dingo/mempool"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -425,9 +424,16 @@ type BlockfetchLatencyFunc func(ouroboros.ConnectionId) (time.Duration, bool)
 // peer population (primary > 1.5× median triggers shadow dispatch).
 type BlockfetchLatencyMedianFunc func() (time.Duration, int)
 
-// In ledger/state.go or a shared package
+// PendingTransaction is the transaction view ledger block construction needs.
+type PendingTransaction struct {
+	Hash string
+	Cbor []byte
+	Type uint
+}
+
+// MempoolProvider provides pending transactions without exposing mempool DTOs.
 type MempoolProvider interface {
-	Transactions() []mempool.MempoolTransaction
+	Transactions() []PendingTransaction
 }
 type rollbackRecord struct {
 	point     ocommon.Point
@@ -6123,7 +6129,7 @@ func (ls *LedgerState) forgeBlock() {
 		"max_ex_units", maxExUnits,
 	)
 
-	var mempoolTxs []mempool.MempoolTransaction
+	var mempoolTxs []PendingTransaction
 	if ls.mempool != nil {
 		mempoolTxs = ls.mempool.Transactions()
 		ls.config.Logger.Debug(
