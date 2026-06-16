@@ -3147,6 +3147,49 @@ func (ls *LedgerState) calculateEpochNonce(
 //   - currentEra: current era descriptor (read-only input)
 //   - currentPParams: current protocol parameters (read-only input)
 //
+// applyEpochDonations moves the treasury donations accumulated during the
+// ended epoch into the treasury at the epoch boundary. The donation rows are
+// left in place (keyed by slot) so a rollback past the boundary drops both the
+// donation rows and the boundary NetworkState row, and re-applying the
+// boundary re-derives the same total. It writes the updated treasury at the
+// boundary slot, the same slot governance treasury-withdrawal enactment uses,
+// so the row reflects withdrawals first and donations second.
+func (ls *LedgerState) applyEpochDonations(
+	txn *database.Txn,
+	endedEpoch uint64,
+	boundarySlot uint64,
+) error {
+	donations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		endedEpoch, txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"sum donations for epoch %d: %w", endedEpoch, err,
+		)
+	}
+	if donations == 0 {
+		return nil
+	}
+	state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("get network state: %w", err)
+	}
+	var treasury, reserves uint64
+	if state != nil {
+		treasury = uint64(state.Treasury)
+		reserves = uint64(state.Reserves)
+	}
+	if err := ls.db.Metadata().SetNetworkState(
+		treasury+donations,
+		reserves,
+		boundarySlot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set network state with donations: %w", err)
+	}
+	return nil
+}
+
 // Returns EpochRolloverResult with all computed state, or an error.
 // The caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
@@ -3292,6 +3335,16 @@ func (ls *LedgerState) processEpochRollover(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)
+	}
+	// Move the ending epoch's accumulated treasury donations into the
+	// treasury. Per the Conway EPOCH rule, donations are added after enacted
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
+	// withdrawal is checked against the pre-donation treasury and the donation
+	// is reflected for subsequent epochs' accounting.
+	if err := ls.applyEpochDonations(
+		txn, currentEpoch.EpochId, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply epoch donations: %w", err)
 	}
 	if govOut.PParamsChanged {
 		newPParams = govOut.UpdatedPParams
