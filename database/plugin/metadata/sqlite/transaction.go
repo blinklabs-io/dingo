@@ -2419,7 +2419,7 @@ func (d *MetadataStoreSqlite) applyTransactionRewardWithdrawals(
 		zeroHash := lcommon.Blake2b224{}
 		stakeKeyHash := addr.StakeKeyHash()
 		if stakeKeyHash == zeroHash {
-			return fmt.Errorf("reward withdrawal missing stake credential")
+			return errors.New("reward withdrawal missing stake credential")
 		}
 		if err := d.ApplyAccountRewardWithdrawal(
 			stakeKeyHash.Bytes(),
