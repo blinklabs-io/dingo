@@ -227,39 +227,39 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:             1048576,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Resolved by consumers using cfg.Network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          false,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
-		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		MempoolCapacity:      1048576,
+		EvictionWatermark:    0.90,
+		RejectionWatermark:   0.95,
+		BindAddr:             "0.0.0.0",
+		CardanoConfig:        "", // Resolved by consumers using cfg.Network
+		DatabasePath:         ".dingo",
+		SocketPath:           "dingo.socket",
+		IntersectTip:         false,
+		ValidateHistorical:   false,
+		Network:              "preview",
+		MetricsPort:          12798,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          3002,
+		RelayPort:            3001,
+		UtxorpcPort:          9090,
+		CORSAllowedOrigins:   []string{"*"},
+		BlockfrostPort:       3000,
+		MeshPort:             8080,
+		Topology:             "",
+		TlsCertFilePath:      "",
+		TlsKeyFilePath:       "",
+		BlobPlugin:           DefaultBlobPlugin,
+		MetadataPlugin:       DefaultMetadataPlugin,
+		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		BackfillBatchSize:    100,
+		GenesisBootstrap:     DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight: func() MidnightConfig {
 			m := midnightNetworkDefaults["preview"]
 			m.Port = DefaultMidnightConfig().Port
@@ -1115,6 +1115,44 @@ network: "preview"
 	}
 	if cfg.Midnight.Host != "127.0.0.3" {
 		t.Fatalf("expected env midnight host 127.0.0.3, got %q", cfg.Midnight.Host)
+	}
+}
+
+func TestLoad_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_CNIGHT_POLICY_ID", "env-policy")
+	t.Setenv("DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS", "env-address")
+	yamlContent := `
+midnight:
+  cnight_policy_id: "yaml-policy"
+  mapping_validator_address: "yaml-address"
+network: "preprod"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight-yaml-only.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Midnight.CNightPolicyID != "yaml-policy" {
+		t.Fatalf(
+			"expected YAML cnight policy to win, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.MappingValidatorAddress != "yaml-address" {
+		t.Fatalf(
+			"expected YAML mapping validator address to win, got %q",
+			cfg.Midnight.MappingValidatorAddress,
+		)
 	}
 }
 

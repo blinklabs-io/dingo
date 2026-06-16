@@ -286,16 +286,16 @@ type MidnightConfig struct {
 	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
 	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
 
-	CNightPolicyID              string `yaml:"cnight_policy_id" envconfig:"DINGO_MIDNIGHT_CNIGHT_POLICY_ID"`
-	CNightAssetName             string `yaml:"cnight_asset_name" envconfig:"DINGO_MIDNIGHT_CNIGHT_ASSET_NAME"`
-	MappingValidatorAddress     string `yaml:"mapping_validator_address" envconfig:"DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS"`
-	AuthTokenAssetName          string `yaml:"auth_token_asset_name" envconfig:"DINGO_MIDNIGHT_AUTH_TOKEN_ASSET_NAME"`
-	CommitteeCandidateAddress   string `yaml:"committee_candidate_address" envconfig:"DINGO_MIDNIGHT_COMMITTEE_CANDIDATE_ADDRESS"`
-	TechnicalCommitteeAddress   string `yaml:"technical_committee_address" envconfig:"DINGO_MIDNIGHT_TECHNICAL_COMMITTEE_ADDRESS"`
-	TechnicalCommitteePolicyID  string `yaml:"technical_committee_policy_id" envconfig:"DINGO_MIDNIGHT_TECHNICAL_COMMITTEE_POLICY_ID"`
-	CouncilAddress              string `yaml:"council_address" envconfig:"DINGO_MIDNIGHT_COUNCIL_ADDRESS"`
-	CouncilPolicyID             string `yaml:"council_policy_id" envconfig:"DINGO_MIDNIGHT_COUNCIL_POLICY_ID"`
-	PermissionedCandidatePolicy string `yaml:"permissioned_candidate_policy" envconfig:"DINGO_MIDNIGHT_PERMISSIONED_CANDIDATE_POLICY"`
+	CNightPolicyID              string `yaml:"cnight_policy_id"`
+	CNightAssetName             string `yaml:"cnight_asset_name"`
+	MappingValidatorAddress     string `yaml:"mapping_validator_address"`
+	AuthTokenAssetName          string `yaml:"auth_token_asset_name"`
+	CommitteeCandidateAddress   string `yaml:"committee_candidate_address"`
+	TechnicalCommitteeAddress   string `yaml:"technical_committee_address"`
+	TechnicalCommitteePolicyID  string `yaml:"technical_committee_policy_id"`
+	CouncilAddress              string `yaml:"council_address"`
+	CouncilPolicyID             string `yaml:"council_policy_id"`
+	PermissionedCandidatePolicy string `yaml:"permissioned_candidate_policy"`
 }
 
 // DefaultMidnightConfig returns the default Midnight indexer settings.
@@ -448,13 +448,13 @@ type Config struct {
 // https://github.com/input-output-hk/acropolis/tree/master/processes/midnight_indexer
 var midnightNetworkDefaults = map[string]MidnightConfig{
 	"mainnet": {
-		CNightPolicyID:             "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa",
-		CNightAssetName:            "NIGHT",
-		MappingValidatorAddress:    "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
-		TechnicalCommitteeAddress:  "addr_test1wqx3yfmsp82nmtyjj4k86s3l04l6lvwaqh2vk2ygcge7kdsk4xc7j",
-		TechnicalCommitteePolicyID: "0d12277009d53dac92956c7d423f7d7fafb1dd05d4cb2888c233eb36",
-		CouncilAddress:             "addr_test1wqqwkauz0ypglg5e4u780kcp8hzt75u72yg6z7td62gnk0qed0p06",
-		CouncilPolicyID:            "00eb778279028fa299af3c77db013dc4bf539e5111a1796dd2913b3c",
+		CNightPolicyID:              "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa",
+		CNightAssetName:             "4e49474854",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		TechnicalCommitteeAddress:   "addr_test1wqx3yfmsp82nmtyjj4k86s3l04l6lvwaqh2vk2ygcge7kdsk4xc7j",
+		TechnicalCommitteePolicyID:  "0d12277009d53dac92956c7d423f7d7fafb1dd05d4cb2888c233eb36",
+		CouncilAddress:              "addr_test1wqqwkauz0ypglg5e4u780kcp8hzt75u72yg6z7td62gnk0qed0p06",
+		CouncilPolicyID:             "00eb778279028fa299af3c77db013dc4bf539e5111a1796dd2913b3c",
 		PermissionedCandidatePolicy: "f8625f11a58fa5ab5b85502a8fe5c843ece460c9c5f9273be17d3424",
 	},
 	"preview": {

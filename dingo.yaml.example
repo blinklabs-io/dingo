@@ -414,7 +414,7 @@ genesisBootstrap:
 # the Midnight gRPC server while leaving indexing eligible to run.
 # CLI: --midnight-port, --midnight-host
 # Env: DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
-# Address and policy fields are YAML/env only.
+# Address and policy fields are YAML only.
 midnight:
   # gRPC listen port
   port: 50051
