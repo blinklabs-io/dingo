@@ -26,6 +26,7 @@ import (
 )
 
 func resetGlobalConfig() {
+	midnightYAMLFields = nil
 	globalConfig = &Config{
 		// MempoolCapacity left as the zero sentinel; LoadConfig fills
 		// it in from RunMode after CLI/env/YAML processing.

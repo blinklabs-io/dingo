@@ -305,10 +305,11 @@ func TestApplyFlags_NetworkOverrideReappliesMidnightDefaults(t *testing.T) {
 
 func TestApplyFlags_NetworkOverridePreservesExplicitMidnightYAML(t *testing.T) {
 	resetGlobalConfig()
+	previewPolicy := midnightNetworkDefaults["preview"].CNightPolicyID
 	yamlContent := `
 network: "preview"
 midnight:
-  cnightPolicyId: "yaml-policy"
+  cnightPolicyId: "` + previewPolicy + `"
 `
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -330,7 +331,7 @@ midnight:
 		t.Fatalf("failed to apply flags: %v", err)
 	}
 
-	if cfg.Midnight.CNightPolicyID != "yaml-policy" {
+	if cfg.Midnight.CNightPolicyID != previewPolicy {
 		t.Fatalf(
 			"expected explicit Midnight YAML policy to be preserved, got %q",
 			cfg.Midnight.CNightPolicyID,

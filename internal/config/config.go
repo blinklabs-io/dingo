@@ -152,6 +152,48 @@ type databaseConfig struct {
 	Metadata map[string]any `yaml:"metadata,omitempty"`
 }
 
+var midnightYAMLFields map[string]struct{}
+
+func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(buf, &doc); err != nil {
+		return nil
+	}
+	if len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	midnight := mappingValue(root, "midnight")
+	if configNode := mappingValue(root, "config"); configNode != nil {
+		midnight = mappingValue(configNode, "midnight")
+	}
+	if midnight == nil || midnight.Kind != yaml.MappingNode {
+		return nil
+	}
+	fields := map[string]struct{}{}
+	for i := 0; i+1 < len(midnight.Content); i += 2 {
+		fields[midnight.Content[i].Value] = struct{}{}
+	}
+	return fields
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func midnightYAMLFieldSet(field string) bool {
+	_, ok := midnightYAMLFields[field]
+	return ok
+}
+
 // ChainsyncConfig holds configuration for the multi-client chainsync
 // subsystem.
 type ChainsyncConfig struct {
@@ -513,34 +555,44 @@ func clearMidnightNetworkDefaults(cfg *Config, network string) {
 	if !ok {
 		return
 	}
-	if cfg.Midnight.CNightPolicyID == defaults.CNightPolicyID {
+	if !midnightYAMLFieldSet("cnightPolicyId") &&
+		cfg.Midnight.CNightPolicyID == defaults.CNightPolicyID {
 		cfg.Midnight.CNightPolicyID = ""
 	}
-	if cfg.Midnight.CNightAssetName == defaults.CNightAssetName {
+	if !midnightYAMLFieldSet("cnightAssetName") &&
+		cfg.Midnight.CNightAssetName == defaults.CNightAssetName {
 		cfg.Midnight.CNightAssetName = ""
 	}
-	if cfg.Midnight.MappingValidatorAddress == defaults.MappingValidatorAddress {
+	if !midnightYAMLFieldSet("mappingValidatorAddress") &&
+		cfg.Midnight.MappingValidatorAddress == defaults.MappingValidatorAddress {
 		cfg.Midnight.MappingValidatorAddress = ""
 	}
-	if cfg.Midnight.AuthTokenAssetName == defaults.AuthTokenAssetName {
+	if !midnightYAMLFieldSet("authTokenAssetName") &&
+		cfg.Midnight.AuthTokenAssetName == defaults.AuthTokenAssetName {
 		cfg.Midnight.AuthTokenAssetName = ""
 	}
-	if cfg.Midnight.CommitteeCandidateAddress == defaults.CommitteeCandidateAddress {
+	if !midnightYAMLFieldSet("committeeCandidateAddress") &&
+		cfg.Midnight.CommitteeCandidateAddress == defaults.CommitteeCandidateAddress {
 		cfg.Midnight.CommitteeCandidateAddress = ""
 	}
-	if cfg.Midnight.TechnicalCommitteeAddress == defaults.TechnicalCommitteeAddress {
+	if !midnightYAMLFieldSet("technicalCommitteeAddress") &&
+		cfg.Midnight.TechnicalCommitteeAddress == defaults.TechnicalCommitteeAddress {
 		cfg.Midnight.TechnicalCommitteeAddress = ""
 	}
-	if cfg.Midnight.TechnicalCommitteePolicyID == defaults.TechnicalCommitteePolicyID {
+	if !midnightYAMLFieldSet("technicalCommitteePolicyId") &&
+		cfg.Midnight.TechnicalCommitteePolicyID == defaults.TechnicalCommitteePolicyID {
 		cfg.Midnight.TechnicalCommitteePolicyID = ""
 	}
-	if cfg.Midnight.CouncilAddress == defaults.CouncilAddress {
+	if !midnightYAMLFieldSet("councilAddress") &&
+		cfg.Midnight.CouncilAddress == defaults.CouncilAddress {
 		cfg.Midnight.CouncilAddress = ""
 	}
-	if cfg.Midnight.CouncilPolicyID == defaults.CouncilPolicyID {
+	if !midnightYAMLFieldSet("councilPolicyId") &&
+		cfg.Midnight.CouncilPolicyID == defaults.CouncilPolicyID {
 		cfg.Midnight.CouncilPolicyID = ""
 	}
-	if cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
+	if !midnightYAMLFieldSet("permissionedCandidatePolicy") &&
+		cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
 		cfg.Midnight.PermissionedCandidatePolicy = ""
 	}
 }
@@ -701,6 +753,8 @@ var globalConfig = &Config{
 }
 
 func LoadConfig(configFile string) (*Config, error) {
+	midnightYAMLFields = nil
+
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -725,6 +779,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
+		midnightYAMLFields = collectMidnightYAMLFields(buf)
 
 		// First unmarshal into temp config to handle plugin sections
 		var tempCfg tempConfig
