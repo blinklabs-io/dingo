@@ -24,13 +24,15 @@ import (
 )
 
 const (
-	BlockfetchEventType          event.EventType = "ledger.blockfetch"
-	BlockEventType               event.EventType = "ledger.block"
-	ChainsyncEventType           event.EventType = "ledger.chainsync"
-	ChainsyncAwaitReplyEventType event.EventType = "ledger.chainsync_await_reply"
-	LedgerErrorEventType         event.EventType = "ledger.error"
-	PoolStateRestoredEventType   event.EventType = "ledger.pool_restored"
-	TransactionEventType         event.EventType = "ledger.tx"
+	BlockfetchEventType                 event.EventType = "ledger.blockfetch"
+	BlockEventType                      event.EventType = "ledger.block"
+	ChainsyncEventType                  event.EventType = "ledger.chainsync"
+	ChainsyncAwaitReplyEventType        event.EventType = "ledger.chainsync_await_reply"
+	ConnectionClosedEventType           event.EventType = "ledger.conn_closed"
+	ConnectionRecycleRequestedEventType event.EventType = "ledger.connection_recycle_requested"
+	LedgerErrorEventType                event.EventType = "ledger.error"
+	PoolStateRestoredEventType          event.EventType = "ledger.pool_restored"
+	TransactionEventType                event.EventType = "ledger.tx"
 )
 
 // It represents the direction a block is applied to the ledger.
@@ -97,4 +99,20 @@ type TransactionEvent struct {
 	BlockNumber uint64
 	TxIndex     uint32
 	Rollback    bool
+}
+
+// ConnectionClosedEvent is emitted by the node layer when a connection closes.
+// Ledger subscribes to this ledger-owned event type instead of connmanager directly,
+// so ledger/ does not need to import connmanager/.
+type ConnectionClosedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Error        error
+}
+
+// ConnectionRecycleRequestedEvent is emitted by the ledger when header or block
+// crypto verification fails on a peer connection. Node wiring translates this to
+// a connmanager recycle request, keeping ledger/ free of connmanager/ imports.
+type ConnectionRecycleRequestedEvent struct {
+	ConnectionId ouroboros.ConnectionId
+	Reason       string
 }

@@ -34,7 +34,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
@@ -740,7 +739,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ls.handleChainSwitchEvent,
 		)
 		ls.connClosedSubID = ls.config.EventBus.SubscribeFunc(
-			connmanager.ConnectionClosedEventType,
+			ConnectionClosedEventType,
 			ls.handleConnectionClosedEvent,
 		)
 	}
@@ -1082,7 +1081,7 @@ func (ls *LedgerState) Close() error {
 			ls.chainSwitchSubID,
 		)
 		ls.config.EventBus.Unsubscribe(
-			connmanager.ConnectionClosedEventType,
+			ConnectionClosedEventType,
 			ls.connClosedSubID,
 		)
 	}

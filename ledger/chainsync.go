@@ -28,7 +28,6 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
@@ -291,10 +290,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 					"hash", hex.EncodeToString(e.Point.Hash),
 				)
 				ls.config.EventBus.Publish(
-					connmanager.ConnectionRecycleRequestedEventType,
+					ConnectionRecycleRequestedEventType,
 					event.NewEvent(
-						connmanager.ConnectionRecycleRequestedEventType,
-						connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionRecycleRequestedEventType,
+						ConnectionRecycleRequestedEvent{
 							ConnectionId: e.ConnectionId,
 							Reason:       "block_header_verification_failure",
 						},
@@ -396,7 +395,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 }
 
 func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
-	e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	e, ok := evt.Data.(ConnectionClosedEvent)
 	if !ok {
 		return
 	}
@@ -1701,10 +1700,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 					"hash", hex.EncodeToString(e.Point.Hash),
 				)
 				ls.config.EventBus.Publish(
-					connmanager.ConnectionRecycleRequestedEventType,
+					ConnectionRecycleRequestedEventType,
 					event.NewEvent(
-						connmanager.ConnectionRecycleRequestedEventType,
-						connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionRecycleRequestedEventType,
+						ConnectionRecycleRequestedEvent{
 							ConnectionId: e.ConnectionId,
 							Reason:       "header_verification_failure",
 						},
