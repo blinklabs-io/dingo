@@ -1163,6 +1163,23 @@ type MetadataStore interface {
 	// rollbacks.
 	DeleteNetworkStateAfterSlot(uint64, types.Txn) error
 
+	// Network donation methods
+
+	// AddNetworkDonation records a block's total Conway treasury
+	// donation for the given slot and epoch. Idempotent per slot.
+	AddNetworkDonation(
+		slot, epoch, amount uint64,
+		txn types.Txn,
+	) error
+
+	// SumNetworkDonationsForEpoch returns the total donation
+	// contributed by blocks in the given epoch.
+	SumNetworkDonationsForEpoch(epoch uint64, txn types.Txn) (uint64, error)
+
+	// DeleteNetworkDonationsAfterSlot removes donation records added
+	// after the given slot. This is used during chain rollbacks.
+	DeleteNetworkDonationsAfterSlot(uint64, types.Txn) error
+
 	// Governance rollback methods
 
 	// DeleteGovernanceProposalsAfterSlot removes proposals added after the given slot
