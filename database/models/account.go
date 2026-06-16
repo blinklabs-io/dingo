@@ -93,13 +93,13 @@ func (a *Account) TableName() string {
 // credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
 // TxHash so rollback can restore the cleared reward balance.
 type AccountRewardDelta struct {
-	StakingKey     []byte       `gorm:"index;size:28;not null"`
-	TxHash         []byte       `gorm:"index;size:32"`
+	StakingKey     []byte       `gorm:"index;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:3"`
+	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:2"`
 	Amount         types.Uint64 `gorm:"not null"`
 	PreviousReward types.Uint64
 	ID             uint   `gorm:"primarykey"`
 	AddedSlot      uint64 `gorm:"index;not null"`
-	Withdrawal     bool   `gorm:"index;not null;default:false"`
+	Withdrawal     bool   `gorm:"index;not null;default:false;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:1"`
 }
 
 func (AccountRewardDelta) TableName() string {

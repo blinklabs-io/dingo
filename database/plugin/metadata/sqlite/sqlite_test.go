@@ -395,6 +395,67 @@ func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 	}
 }
 
+// TestSetTransactionInvalidWithdrawalsDoNotClearRewardBalance verifies script
+// invalid transactions do not apply reward withdrawal state transitions.
+func TestSetTransactionInvalidWithdrawalsDoNotClearRewardBalance(t *testing.T) {
+	t.Parallel()
+	sqliteStore := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0x43}, lcommon.AddressHashSize)
+	account := &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000),
+		Active:     true,
+	}
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	requireNoError(sqliteStore.DB().Create(account).Error)
+
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	requireNoError(err)
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x51
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: false,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&withdrawalAddr: big.NewInt(1_000),
+		},
+	}
+	point := ocommon.NewPoint(1556772, bytes.Repeat([]byte{0xfa}, 32))
+
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+
+	var got models.Account
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != account.Reward {
+		t.Fatalf(
+			"expected invalid tx withdrawal to leave reward balance %d, got %d",
+			uint64(account.Reward),
+			uint64(got.Reward),
+		)
+	}
+	var deltaCount int64
+	requireNoError(sqliteStore.DB().
+		Model(&models.AccountRewardDelta{}).
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Count(&deltaCount).Error)
+	if deltaCount != 0 {
+		t.Fatalf("expected no withdrawal delta for invalid tx, got %d", deltaCount)
+	}
+}
+
 func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 	t.Parallel()
 	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)

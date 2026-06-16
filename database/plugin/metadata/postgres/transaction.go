@@ -902,13 +902,15 @@ func (d *MetadataStorePostgres) SetTransaction(
 		}
 		tmpTx.ID = existingTx.ID
 	}
-	if err := d.applyTransactionRewardWithdrawals(
-		tx.Withdrawals(),
-		point.Slot,
-		txHash,
-		txn,
-	); err != nil {
-		return fmt.Errorf("apply reward withdrawals for tx %x: %w", txHash, err)
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
+			txHash,
+			txn,
+		); err != nil {
+			return fmt.Errorf("apply reward withdrawals for tx %x: %w", txHash, err)
+		}
 	}
 	if len(metadataLabels) > 0 {
 		labelRecords := make(
@@ -2399,17 +2401,19 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 		tmpTx.ID = existing.ID
 	}
 
-	if err := d.applyTransactionRewardWithdrawals(
-		tx.Withdrawals(),
-		point.Slot,
-		txHash,
-		txn,
-	); err != nil {
-		return fmt.Errorf(
-			"apply reward withdrawals for tx %x: %w",
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
 			txHash,
-			err,
-		)
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"apply reward withdrawals for tx %x: %w",
+				txHash,
+				err,
+			)
+		}
 	}
 
 	// metadata labels – small, write immediately just like SetTransaction.

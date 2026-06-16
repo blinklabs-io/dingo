@@ -841,7 +841,15 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 			AddedSlot:      slot,
 			Withdrawal:     true,
 		}
-		return tx.Create(delta).Error
+		result := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "withdrawal"},
+				{Name: "tx_hash"},
+				{Name: "staking_key"},
+			},
+			DoNothing: true,
+		}).Create(delta)
+		return result.Error
 	}
 	if txn != nil {
 		return withdraw(db)

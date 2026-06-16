@@ -440,6 +440,8 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(t *test
 	require.NoError(t, err)
 	_, rwds := unwrapFilteredDelegationResult(t, result)
 
+	require.Contains(t, rwds, cred,
+		"queried credential must be present in rewards map")
 	assert.Equal(t, uint64(0), rwds[cred],
 		"withdrawn reward balance must be reflected in LocalStateQuery")
 }
