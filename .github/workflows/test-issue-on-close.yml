@@ -4,6 +4,9 @@ on:
   issues:
     types: [closed]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     uses: blinklabs-io/actions/.github/workflows/reuseable-test-issue-on-close.yml@main

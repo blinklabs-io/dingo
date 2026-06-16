@@ -4,6 +4,9 @@ on:
   issues:
     types: [closed]
 
+permissions:
+  contents: read
+
 jobs:
   set-date:
     uses: blinklabs-io/actions/.github/workflows/reuseable-set-project-closed-date.yml@main
