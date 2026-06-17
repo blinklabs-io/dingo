@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainselection"
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -1398,9 +1399,9 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 
 func (ls *LedgerState) localTipPraosView(
 	localTip ochainsync.Tip,
-) chainselection.PraosTiebreakerView {
+) praos.PraosTiebreakerView {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
 	if err != nil {
@@ -1413,7 +1414,7 @@ func (ls *LedgerState) localTipPraosView(
 				"error", err,
 			)
 		}
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	decoded, err := block.Decode()
 	if err != nil {
@@ -1426,32 +1427,32 @@ func (ls *LedgerState) localTipPraosView(
 				"error", err,
 			)
 		}
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	if decoded == nil {
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
-	view, _ := chainselection.GetPraosTiebreakerView(decoded.Header())
+	view, _ := praos.GetPraosTiebreakerView(decoded.Header())
 	return view
 }
 
 func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
-) chainselection.ChainComparisonResult {
+) praos.ChainComparisonResult {
 	observedTip := observedHeaderTip(e)
 	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
 		observedTip = e.Tip
 	}
 
-	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
-	result := chainselection.ComparePraosTips(
+	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+	result := praos.ComparePraosTips(
 		observedTip,
 		localTip,
 		incomingView,
 		ls.localTipPraosView(localTip),
 	)
-	if result != chainselection.ChainEqual {
+	if result != praos.ChainEqual {
 		return result
 	}
 
@@ -1461,9 +1462,9 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	if e.Tip.BlockNumber > observedTip.BlockNumber {
 		switch {
 		case e.Tip.BlockNumber > localTip.BlockNumber:
-			return chainselection.ChainABetter
+			return praos.ChainABetter
 		case e.Tip.BlockNumber < localTip.BlockNumber:
-			return chainselection.ChainBBetter
+			return praos.ChainBBetter
 		}
 	}
 	return result
@@ -1480,13 +1481,13 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 	if observedTip.BlockNumber < localTip.BlockNumber {
 		return false
 	}
-	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
-	return chainselection.ComparePraosTips(
+	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+	return praos.ComparePraosTips(
 		observedTip,
 		localTip,
 		incomingView,
 		ls.localTipPraosView(localTip),
-	) == chainselection.ChainABetter
+	) == praos.ChainABetter
 }
 
 type LocalRollbackRecoveryResult struct {
@@ -1985,7 +1986,7 @@ func (ls *LedgerState) tryResolveFork(
 	if ls.compareIncomingHeaderToLocalTip(
 		e,
 		localTip,
-	) != chainselection.ChainABetter {
+	) != praos.ChainABetter {
 		return false, nil
 	}
 

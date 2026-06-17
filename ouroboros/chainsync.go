@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -677,8 +678,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// Extract VRF output from block header once for chain
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
-		vrfOutput := chainselection.GetVRFOutput(v)
-		praosView, _ := chainselection.GetPraosTiebreakerView(v)
+		vrfOutput := praos.GetVRFOutput(v)
+		praosView, _ := praos.GetPraosTiebreakerView(v)
 		// Ingress eligibility is the sole gate for feeding the ledger
 		// and chain selection. reconcileChainsyncIngressAdmission
 		// defers to ChainsyncIngressEligible (peergov), which already
