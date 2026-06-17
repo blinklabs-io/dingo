@@ -2158,6 +2158,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					tmpMIR := models.MoveInstantaneousRewards{
 						Pot:           c.Reward.Source,
+						OtherPot:      types.Uint64(c.Reward.OtherPot),
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -3494,6 +3495,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					tmpMIR := models.MoveInstantaneousRewards{
 						Pot:           c.Reward.Source,
+						OtherPot:      types.Uint64(c.Reward.OtherPot),
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}

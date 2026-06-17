@@ -22,6 +22,28 @@ type MoveInstantaneousRewards struct {
 	CertificateID uint                             `gorm:"index"`
 	ID            uint                             `gorm:"primarykey"`
 	AddedSlot     uint64                           `gorm:"index"`
+	// OtherPot holds the lovelace amount for a pot-to-pot transfer (non-zero
+	// only when the cert moves coins between treasury and reserves rather than
+	// distributing to staking credentials).
+	OtherPot types.Uint64 `gorm:"default:0"`
+}
+
+// MIREffect is the processed form of a single MIR certificate used by the
+// epoch-boundary application logic. One of OtherPot > 0 (pot-to-pot transfer)
+// or len(Rewards) > 0 (credential distribution) will be non-empty.
+type MIREffect struct {
+	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
+	Pot      uint
+	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).
+	OtherPot uint64
+	// Rewards lists credential→amount pairs for a distribution MIR.
+	Rewards  []MIRReward
+}
+
+// MIRReward is a single credential→amount entry from a distribution MIR cert.
+type MIRReward struct {
+	Credential []byte
+	Amount     uint64
 }
 
 func (MoveInstantaneousRewards) TableName() string {
