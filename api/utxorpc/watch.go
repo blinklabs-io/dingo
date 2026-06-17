@@ -82,7 +82,7 @@ func watchTxBuildForwardMessages(
 				},
 			},
 		}
-		return nil, []*watch.WatchTxResponse{idle}, nil
+		return applied, []*watch.WatchTxResponse{idle}, nil
 	}
 	return applied, applies, nil
 }

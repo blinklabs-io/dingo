@@ -63,8 +63,9 @@ format: mod-tidy ## Format code and tidy go.mod
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-lint: ## Run linters (golangci-lint + modernize)
+lint: ## Run linters (golangci-lint + nilaway + modernize)
 	golangci-lint run ./...
+	nilaway ./...
 	modernize ./...
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions

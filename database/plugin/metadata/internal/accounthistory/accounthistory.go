@@ -87,6 +87,10 @@ func delegationHistoryUnionQuery(
 	parts := make([]string, 0, len(tables))
 	args := make([]any, 0, len(tables)*2)
 	for _, table := range tables {
+		certType, ok := DelegationTableCertType(table)
+		if !ok {
+			continue
+		}
 		parts = append(parts, fmt.Sprintf(
 			`SELECT %[1]s.added_slot AS added_slot,
 				tx.block_index AS block_index,
@@ -104,7 +108,7 @@ func delegationHistoryUnionQuery(
 		))
 		args = append(
 			args,
-			DelegationTableCertTypes(table)[0],
+			certType,
 			stakingKey,
 		)
 	}
@@ -155,27 +159,27 @@ func transactionJoinClause(db *gorm.DB) string {
 	}
 }
 
-func DelegationTableCertTypes(table string) []uint {
+func DelegationTableCertType(table string) (uint, bool) {
 	switch table {
 	case "stake_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeDelegation),
-		}
+		return uint(lcommon.CertificateTypeStakeDelegation), true
 	case "stake_registration_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeRegistrationDelegation),
-		}
+		return uint(lcommon.CertificateTypeStakeRegistrationDelegation), true
 	case "stake_vote_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeVoteDelegation),
-		}
+		return uint(lcommon.CertificateTypeStakeVoteDelegation), true
 	case "stake_vote_registration_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
-		}
+		return uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation), true
 	default:
+		return 0, false
+	}
+}
+
+func DelegationTableCertTypes(table string) []uint {
+	certType, ok := DelegationTableCertType(table)
+	if !ok {
 		return []uint{}
 	}
+	return []uint{certType}
 }
 
 func CountRegistrationHistory(
@@ -209,6 +213,10 @@ func registrationHistoryUnionQuery(
 	parts := make([]string, 0, len(sources))
 	args := make([]any, 0, len(sources)*3)
 	for _, source := range sources {
+		certType, ok := RegistrationTableCertType(source.table)
+		if !ok {
+			continue
+		}
 		parts = append(parts, fmt.Sprintf(
 			`SELECT %[1]s.added_slot AS added_slot,
 				tx.block_index AS block_index,
@@ -227,7 +235,7 @@ func registrationHistoryUnionQuery(
 		args = append(
 			args,
 			source.action,
-			RegistrationTableCertTypes(source.table)[0],
+			certType,
 			stakingKey,
 		)
 	}
@@ -246,41 +254,35 @@ func registrationHistorySources() []registrationHistorySource {
 	}
 }
 
+func RegistrationTableCertType(table string) (uint, bool) {
+	switch table {
+	case "stake_registration":
+		return uint(lcommon.CertificateTypeStakeRegistration), true
+	case "stake_registration_delegation":
+		return uint(lcommon.CertificateTypeStakeRegistrationDelegation), true
+	case "stake_vote_registration_delegation":
+		return uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation), true
+	case "vote_registration_delegation":
+		return uint(lcommon.CertificateTypeVoteRegistrationDelegation), true
+	case "registration":
+		return uint(lcommon.CertificateTypeRegistration), true
+	case "stake_deregistration":
+		return uint(lcommon.CertificateTypeStakeDeregistration), true
+	case "deregistration":
+		return uint(lcommon.CertificateTypeDeregistration), true
+	default:
+		return 0, false
+	}
+}
+
 func RegistrationTableCertTypes(
 	table string,
 ) []uint {
-	switch table {
-	case "stake_registration":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeRegistration),
-		}
-	case "stake_registration_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeRegistrationDelegation),
-		}
-	case "stake_vote_registration_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
-		}
-	case "vote_registration_delegation":
-		return []uint{
-			uint(lcommon.CertificateTypeVoteRegistrationDelegation),
-		}
-	case "registration":
-		return []uint{
-			uint(lcommon.CertificateTypeRegistration),
-		}
-	case "stake_deregistration":
-		return []uint{
-			uint(lcommon.CertificateTypeStakeDeregistration),
-		}
-	case "deregistration":
-		return []uint{
-			uint(lcommon.CertificateTypeDeregistration),
-		}
-	default:
+	certType, ok := RegistrationTableCertType(table)
+	if !ok {
 		return []uint{}
 	}
+	return []uint{certType}
 }
 
 func CompareDelegationRows(

@@ -169,7 +169,7 @@ func UtxoLedgerToModel(
 		ret.StakingKey = skh.Bytes()
 	}
 	if dh := utxo.Output.DatumHash(); dh != nil {
-		ret.DatumHash = dh.Bytes()
+		ret.DatumHash = append([]byte(nil), dh[:]...)
 	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
 		ret.Assets = ConvertMultiAssetToModels(multiAsset)

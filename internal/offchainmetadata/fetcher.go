@@ -292,6 +292,10 @@ func (f *Fetcher) fetchOne(
 		f.markFailure(doc, 0, err)
 		return nil
 	}
+	if resp == nil {
+		f.markFailure(doc, 0, errors.New("metadata fetch returned nil response"))
+		return nil
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		f.markFailure(

@@ -29,3 +29,7 @@ jobs:
             ${{ runner.os }}-go-1.26.x-
       - name: golangci-lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1 https://github.com/golangci/golangci-lint-action/releases/tag/v9.2.1
+      - name: nilaway
+        run: |
+          go install go.uber.org/nilaway/cmd/nilaway@latest
+          nilaway ./...
