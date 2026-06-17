@@ -411,6 +411,41 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredUndelegated(t
 		"reward balance must be returned for registered account")
 }
 
+// TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal verifies
+// LocalStateQuery observes the persisted reward balance after a withdrawal.
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0xAB)
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000_000),
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
+		stakeKey,
+		1_000_000,
+		42,
+		bytes.Repeat([]byte{0x55}, 32),
+		nil,
+	))
+	ls := &LedgerState{db: db}
+
+	cred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{cred},
+	)
+	require.NoError(t, err)
+	_, rwds := unwrapFilteredDelegationResult(t, result)
+
+	require.Contains(t, rwds, cred,
+		"queried credential must be present in rewards map")
+	assert.Equal(t, uint64(0), rwds[cred],
+		"withdrawn reward balance must be reflected in LocalStateQuery")
+}
+
 func TestQueryShelleyFilteredDelegationAndRewardAccounts_RegisteredDelegated(t *testing.T) {
 	db := newTestDB(t)
 	stakeKey := stakeCred28(0xBB)

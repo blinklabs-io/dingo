@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -898,6 +899,16 @@ func (d *MetadataStoreMysql) SetTransaction(
 			return fmt.Errorf("transaction not found after upsert: %x", txHash)
 		}
 		tmpTx.ID = existingTx.ID
+	}
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
+			txHash,
+			txn,
+		); err != nil {
+			return fmt.Errorf("apply reward withdrawals for tx %x: %w", txHash, err)
+		}
 	}
 	if len(metadataLabels) > 0 {
 		labelRecords := make(
@@ -2218,6 +2229,40 @@ func (d *MetadataStoreMysql) SetTransaction(
 	return nil
 }
 
+func (d *MetadataStoreMysql) applyTransactionRewardWithdrawals(
+	withdrawals map[*lcommon.Address]*big.Int,
+	slot uint64,
+	txHash []byte,
+	txn types.Txn,
+) error {
+	for addr, amount := range withdrawals {
+		if addr == nil || amount == nil || amount.Sign() == 0 {
+			continue
+		}
+		if amount.Sign() < 0 || !amount.IsUint64() {
+			return fmt.Errorf(
+				"invalid reward withdrawal amount %s",
+				amount.String(),
+			)
+		}
+		zeroHash := lcommon.Blake2b224{}
+		stakeKeyHash := addr.StakeKeyHash()
+		if stakeKeyHash == zeroHash {
+			return errors.New("reward withdrawal missing stake credential")
+		}
+		if err := d.ApplyAccountRewardWithdrawal(
+			stakeKeyHash.Bytes(),
+			amount.Uint64(),
+			slot,
+			txHash,
+			txn,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetTransactionBatched performs the same logical work as SetTransaction but
 // accumulates all per-item metadata rows into acc for later bulk flushing via
 // FlushBatch.  The transaction record itself is still written immediately so
@@ -2346,6 +2391,21 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			)
 		}
 		tmpTx.ID = existing.ID
+	}
+
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
+			txHash,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"apply reward withdrawals for tx %x: %w",
+				txHash,
+				err,
+			)
+		}
 	}
 
 	// metadata labels – small, write immediately just like SetTransaction.

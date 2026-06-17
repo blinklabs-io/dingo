@@ -88,14 +88,18 @@ func (a *Account) TableName() string {
 	return "account"
 }
 
-// AccountRewardDelta records reward-account credits that are not otherwise
-// represented by a rollback-aware certificate row. Rollback subtracts deltas
-// added after the rollback slot before deleting the journal entries.
+// AccountRewardDelta records reward-account balance changes that are not
+// otherwise represented by a rollback-aware certificate row. Credits store the
+// credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
+// TxHash so rollback can restore the cleared reward balance.
 type AccountRewardDelta struct {
-	StakingKey []byte       `gorm:"index;size:28;not null"`
-	Amount     types.Uint64 `gorm:"not null"`
-	ID         uint         `gorm:"primarykey"`
-	AddedSlot  uint64       `gorm:"index;not null"`
+	StakingKey     []byte       `gorm:"index;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:3"`
+	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:2"`
+	Amount         types.Uint64 `gorm:"not null"`
+	PreviousReward types.Uint64
+	ID             uint   `gorm:"primarykey"`
+	AddedSlot      uint64 `gorm:"index;not null"`
+	Withdrawal     bool   `gorm:"index;not null;default:false;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:1"`
 }
 
 func (AccountRewardDelta) TableName() string {

@@ -301,8 +301,18 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
-	// DeleteAccountRewardsAfterSlot reverts reward credits recorded after
-	// the given slot and deletes their journal entries.
+	// ApplyAccountRewardWithdrawal clears a registered reward account after a
+	// validated transaction withdrawal and records rollback state.
+	ApplyAccountRewardWithdrawal(
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
+		[]byte, // txHash
+		types.Txn,
+	) error
+
+	// DeleteAccountRewardsAfterSlot reverts reward balance changes recorded
+	// after the given slot and deletes their journal entries.
 	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
 
 	// GetBlockNonce retrieves a block nonce for a given point.

@@ -15,6 +15,7 @@
 package postgres
 
 import (
+	"bytes"
 	"math/big"
 	"os"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
+	"github.com/blinklabs-io/dingo/database/types"
 )
 
 // TestTable is a simple table for testing concurrent transactions
@@ -43,6 +45,7 @@ type mockTransaction struct {
 	isValid      bool
 	produced     []lcommon.Utxo
 	collReturn   lcommon.TransactionOutput
+	withdrawals  map[*lcommon.Address]*big.Int
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -142,7 +145,7 @@ func (m *mockTransaction) TotalCollateral() *big.Int {
 }
 
 func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
-	return nil
+	return m.withdrawals
 }
 
 func (m *mockTransaction) RequiredSigners() []lcommon.Blake2b224 {
@@ -469,6 +472,85 @@ func TestPostgresMultipleTransaction(t *testing.T) {
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("goroutine error: %s", err)
+	}
+}
+
+func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+
+	stakeKey := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
+	account := &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000),
+		Active:     true,
+	}
+	if result := store.DB().Create(account); result.Error != nil {
+		t.Fatalf("create account: %v", result.Error)
+	}
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	if err != nil {
+		t.Fatalf("create withdrawal address: %v", err)
+	}
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x50
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&withdrawalAddr: big.NewInt(1_000),
+		},
+	}
+	point := ocommon.NewPoint(1556771, bytes.Repeat([]byte{0xf9}, 32))
+
+	if err := store.SetTransaction(tx, point, 0, nil, nil); err != nil {
+		t.Fatalf("set transaction: %v", err)
+	}
+	if err := store.SetTransaction(tx, point, 0, nil, nil); err != nil {
+		t.Fatalf("set transaction replay: %v", err)
+	}
+
+	var got models.Account
+	if result := store.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got); result.Error != nil {
+		t.Fatalf("get account: %v", result.Error)
+	}
+	if got.Reward != 0 {
+		t.Fatalf(
+			"expected withdrawal to clear reward balance, got %d",
+			uint64(got.Reward),
+		)
+	}
+	var deltaCount int64
+	if result := store.DB().
+		Model(&models.AccountRewardDelta{}).
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Count(&deltaCount); result.Error != nil {
+		t.Fatalf("count withdrawal deltas: %v", result.Error)
+	}
+	if deltaCount != 1 {
+		t.Fatalf("expected one withdrawal delta, got %d", deltaCount)
+	}
+	if err := store.DeleteAccountRewardsAfterSlot(point.Slot-1, nil); err != nil {
+		t.Fatalf("rollback account rewards: %v", err)
+	}
+	if result := store.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got); result.Error != nil {
+		t.Fatalf("get account after rollback: %v", result.Error)
+	}
+	if got.Reward != account.Reward {
+		t.Fatalf(
+			"expected rollback to restore reward balance %d, got %d",
+			uint64(account.Reward),
+			uint64(got.Reward),
+		)
 	}
 }
 

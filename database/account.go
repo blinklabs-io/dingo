@@ -194,9 +194,9 @@ func (d *Database) AddAccountReward(
 	return nil
 }
 
-// DeleteAccountRewardsAfterSlot reverts reward-account credits recorded after
-// the given slot. Used during chain rollback for governance deposit refunds
-// and treasury withdrawals.
+// DeleteAccountRewardsAfterSlot reverts reward-account balance changes recorded
+// after the given slot. Used during chain rollback for governance credits and
+// transaction withdrawals.
 func (d *Database) DeleteAccountRewardsAfterSlot(
 	slot uint64,
 	txn *Txn,
