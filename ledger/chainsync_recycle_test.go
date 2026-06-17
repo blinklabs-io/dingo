@@ -42,6 +42,7 @@ func testRecycleConnId() ouroboros.ConnectionId {
 // ledger.ConnectionRecycleRequestedEvent with reason "header_verification_failure".
 func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
 	recycled := make(chan ConnectionRecycleRequestedEvent, 1)
@@ -80,6 +81,7 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 // ledger.ConnectionRecycleRequestedEvent with reason "block_header_verification_failure".
 func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
 	connId := testRecycleConnId()
 
 	recycled := make(chan ConnectionRecycleRequestedEvent, 1)

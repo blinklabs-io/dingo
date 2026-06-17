@@ -657,6 +657,8 @@ func (n *Node) Run(ctx context.Context) error {
 					connmanager.ConnectionRecycleRequestedEvent{
 						ConnectionId: e.ConnectionId,
 						Reason:       e.Reason,
+						// ConnKey is intentionally omitted: HandleConnectionRecycleRequestedEvent
+						// closes the connection by ConnectionId alone and never reads ConnKey.
 					},
 				),
 			)
