@@ -30,6 +30,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1 https://github.com/golangci/golangci-lint-action/releases/tag/v9.2.1
       - name: nilaway
+        timeout-minutes: 10
         run: |
-          go install go.uber.org/nilaway/cmd/nilaway@latest
+          go install go.uber.org/nilaway/cmd/nilaway@v0.0.0-20260617183540-d3e528f335e3
           nilaway ./...
