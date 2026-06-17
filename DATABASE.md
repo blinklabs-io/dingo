@@ -766,7 +766,8 @@ quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (
-  SELECT pr.pool_id, pr.added_slot, pr.reward_account, pr.deposit_amount,
+  SELECT pr.pool_id, pr.added_slot, pr.reward_account,
+    pr.reward_account_credential_tag, pr.deposit_amount,
     COALESCE(t.block_index, 0) AS blk_idx,
     COALESCE(c.cert_index, 0)  AS cert_idx,
     ROW_NUMBER() OVER (
@@ -791,7 +792,8 @@ latest_ret AS (
   LEFT JOIN "transaction" t ON t.id = c.transaction_id
   WHERE rt.added_slot < $boundarySlot
 )
-SELECT p.pool_key_hash, lr.reward_account, lr.deposit_amount
+SELECT p.pool_key_hash, lr.reward_account, lr.reward_account_credential_tag,
+  lr.deposit_amount
 FROM pool p
 INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
 INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
@@ -804,7 +806,8 @@ WHERE lrt.epoch = $epoch
 ```
 
 The `reward_account` is the 28-byte stake credential stored on the registration,
-used directly to look up the reward account (see `AddAccountReward`). Deposit
+and `reward_account_credential_tag` distinguishes key-hash vs script-hash reward
+credentials when looking up the reward account. Deposit
 refunds are applied in `applyPoolRetirements` (ledger): the deposit is credited
 to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
