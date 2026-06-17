@@ -58,6 +58,7 @@ type EpochOutput struct {
 	EnactedCount      int
 	RatifiedCount     int
 	ExpiredCount      int
+	OrphanedCount     int
 	HardForkInitiated bool
 }
 
@@ -185,6 +186,28 @@ func ProcessEpoch(
 		}
 		out.ExpiredCount++
 	}
+
+	// --- ORPHAN REMOVAL --------------------------------------------------
+	// Proposals that reference a just-enacted or just-expired proposal as
+	// their parent are "orphaned": their anchor is gone from the active
+	// pool and can never become a chain root. The spec (Conway EPOCH)
+	// calls this set `removedDueToEnactment` and requires deposits to be
+	// returned (or sent to treasury) for all of them. The sweep is
+	// transitive — orphans of orphans are also removed — so we run a BFS
+	// over the dependency graph seeded with every enacted and expired
+	// proposal from this tick.
+	orphanSeeds := make(
+		[]*models.GovernanceProposal, 0, len(ratified)+len(expired),
+	)
+	orphanSeeds = append(orphanSeeds, ratified...)
+	orphanSeeds = append(orphanSeeds, expired...)
+	orphanCount, err := removeOrphanedProposals(
+		in.DB, in.Txn, orphanSeeds, in.NewEpoch, in.BoundarySlot, in.Logger,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("remove orphaned proposals: %w", err)
+	}
+	out.OrphanedCount = orphanCount
 
 	// Active proposals still in play: not expired past the new epoch,
 	// not enacted, not marked expired, not soft-deleted.
@@ -538,6 +561,78 @@ func refundProposalDeposit(
 		}
 	}
 	return nil
+}
+
+// removeOrphanedProposals performs a BFS over the live proposal dependency
+// graph starting from seeds (enacted + expired proposals from this tick).
+// For each seed it finds active proposals that reference it as their parent.
+// Those dependents are "orphaned" — their anchor is no longer pending and can
+// never become a chain root — so their deposits are refunded and they are
+// marked expired at the boundary slot (using expired_epoch/expired_slot so
+// the existing slot-based rollback path reverts this tick cleanly). The sweep
+// is transitive: each newly-orphaned proposal is itself added to the queue so
+// its dependents are also swept.
+func removeOrphanedProposals(
+	db *database.Database,
+	txn *database.Txn,
+	seeds []*models.GovernanceProposal,
+	epoch uint64,
+	slot uint64,
+	logger *slog.Logger,
+) (int, error) {
+	queue := append(make([]*models.GovernanceProposal, 0, len(seeds)), seeds...)
+	count := 0
+	for len(queue) > 0 {
+		parent := queue[0]
+		queue = queue[1:]
+		children, err := db.GetChildGovernanceProposals(
+			parent.TxHash, parent.ActionIndex, txn,
+		)
+		if err != nil {
+			return count, fmt.Errorf(
+				"get children of proposal %s#%d: %w",
+				shortHash(parent.TxHash),
+				parent.ActionIndex,
+				err,
+			)
+		}
+		for _, child := range children {
+			if err := refundProposalDeposit(db, txn, child, slot); err != nil {
+				return count, fmt.Errorf(
+					"refund orphaned proposal deposit %s#%d: %w",
+					shortHash(child.TxHash),
+					child.ActionIndex,
+					err,
+				)
+			}
+			expiredEpoch := epoch
+			expiredSlot := slot
+			child.ExpiredEpoch = &expiredEpoch
+			child.ExpiredSlot = &expiredSlot
+			if err := db.SetGovernanceProposal(child, txn); err != nil {
+				return count, fmt.Errorf(
+					"mark orphaned proposal expired %s#%d: %w",
+					shortHash(child.TxHash),
+					child.ActionIndex,
+					err,
+				)
+			}
+			if logger != nil {
+				logger.Info(
+					"removed orphaned governance proposal",
+					"component", "governance",
+					"tx_hash", shortHash(child.TxHash),
+					"action_index", child.ActionIndex,
+					"parent_tx_hash", shortHash(parent.TxHash),
+					"parent_action_index", parent.ActionIndex,
+					"epoch", epoch,
+				)
+			}
+			queue = append(queue, child)
+			count++
+		}
+	}
+	return count, nil
 }
 
 func rewardAccountStakeCredential(returnAddress []byte) ([]byte, error) {

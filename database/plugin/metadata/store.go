@@ -992,6 +992,17 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// GetChildGovernanceProposals returns all active proposals whose parent
+	// is the given proposal (matched by txHash + actionIndex). Only returns
+	// proposals not yet enacted, expired, or soft-deleted. Used during
+	// epoch boundary orphan sweeps to find dependents of enacted/expired
+	// proposals and remove them transitively.
+	GetChildGovernanceProposals(
+		parentTxHash []byte,
+		parentActionIdx uint32,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetGovernanceVotes retrieves all votes for a governance proposal.
 	GetGovernanceVotes(
 		uint, // proposalID
