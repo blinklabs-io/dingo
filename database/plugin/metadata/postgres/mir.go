@@ -36,6 +36,7 @@ func (d *MetadataStorePostgres) GetMIRCertsInSlotRange(
 	var mirs []models.MoveInstantaneousRewards
 	if err := db.Preload("Rewards").
 		Where("added_slot >= ? AND added_slot < ?", startSlot, endSlot).
+		Order("added_slot ASC, id ASC").
 		Find(&mirs).Error; err != nil {
 		return nil, fmt.Errorf("GetMIRCertsInSlotRange: query: %w", err)
 	}

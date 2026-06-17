@@ -33,11 +33,11 @@ type MoveInstantaneousRewards struct {
 // or len(Rewards) > 0 (credential distribution) will be non-empty.
 type MIREffect struct {
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
-	Pot      uint
+	Pot uint
 	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).
 	OtherPot uint64
 	// Rewards lists credential→amount pairs for a distribution MIR.
-	Rewards  []MIRReward
+	Rewards []MIRReward
 }
 
 // MIRReward is a single credential→amount entry from a distribution MIR cert.
