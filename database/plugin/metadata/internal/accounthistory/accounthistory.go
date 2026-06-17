@@ -174,14 +174,6 @@ func DelegationTableCertType(table string) (uint, bool) {
 	}
 }
 
-func DelegationTableCertTypes(table string) []uint {
-	certType, ok := DelegationTableCertType(table)
-	if !ok {
-		return []uint{}
-	}
-	return []uint{certType}
-}
-
 func CountRegistrationHistory(
 	db *gorm.DB,
 	stakingKey []byte,
@@ -273,16 +265,6 @@ func RegistrationTableCertType(table string) (uint, bool) {
 	default:
 		return 0, false
 	}
-}
-
-func RegistrationTableCertTypes(
-	table string,
-) []uint {
-	certType, ok := RegistrationTableCertType(table)
-	if !ok {
-		return []uint{}
-	}
-	return []uint{certType}
 }
 
 func CompareDelegationRows(
