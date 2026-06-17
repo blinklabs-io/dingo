@@ -317,6 +317,7 @@ type MetadataStore interface {
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
 	// validated transaction withdrawal and records rollback state.
 	ApplyAccountRewardWithdrawal(
+		uint8, // credentialTag
 		[]byte, // stakeKey
 		uint64, // amount
 		uint64, // slot

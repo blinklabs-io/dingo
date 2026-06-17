@@ -422,6 +422,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(t *test
 		Active:     true,
 	}))
 	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
+		0,
 		stakeKey,
 		1_000_000,
 		42,

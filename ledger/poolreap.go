@@ -72,6 +72,7 @@ func (ls *LedgerState) applyPoolRetirements(
 		credited, err := governance.CreditRegisteredRewardAccount(
 			ls.db,
 			txn,
+			refund.RewardAccountCredentialTag,
 			refund.RewardAccount,
 			deposit,
 			boundarySlot,

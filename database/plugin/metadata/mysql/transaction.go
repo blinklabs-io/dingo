@@ -2378,7 +2378,12 @@ func (d *MetadataStoreMysql) applyTransactionRewardWithdrawals(
 		if stakeKeyHash == zeroHash {
 			return errors.New("reward withdrawal missing stake credential")
 		}
+		credentialTag, ok := models.StakeCredentialTagFromAddress(*addr)
+		if !ok {
+			return errors.New("derive reward withdrawal credential tag")
+		}
 		if err := d.ApplyAccountRewardWithdrawal(
+			credentialTag,
 			stakeKeyHash.Bytes(),
 			amount.Uint64(),
 			slot,

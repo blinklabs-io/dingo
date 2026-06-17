@@ -515,7 +515,16 @@ func (ls *LedgerState) queryShelleyDRepState(
 		dreps = all
 	} else {
 		for _, cred := range creds {
-			drep, err := ls.db.GetDrep(cred.Credential[:], false, nil)
+			credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+			if err != nil {
+				return nil, err
+			}
+			drep, err := ls.db.GetDrepByCredential(
+				credentialTag,
+				cred.Credential[:],
+				false,
+				nil,
+			)
 			if err != nil {
 				if errors.Is(err, models.ErrDrepNotFound) {
 					continue
@@ -532,6 +541,7 @@ func (ls *LedgerState) queryShelleyDRepState(
 			continue
 		}
 		key := olocalstatequery.StakeCredential{
+			Tag:   uint64(drep.CredentialTag),
 			Bytes: ledger.NewBlake2b224(drep.Credential),
 		}
 		result[key] = olocalstatequery.DRepStateEntry{

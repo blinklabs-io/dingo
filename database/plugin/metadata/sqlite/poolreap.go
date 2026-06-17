@@ -39,15 +39,16 @@ func (d *MetadataStoreSqlite) GetPoolsRetiringAtEpoch(
 	}
 
 	type row struct {
-		PoolKeyHash   []byte
-		RewardAccount []byte
-		DepositAmount types.Uint64
+		PoolKeyHash                []byte
+		RewardAccount              []byte
+		RewardAccountCredentialTag uint8
+		DepositAmount              types.Uint64
 	}
 	var rows []row
 
 	query := `
 		WITH latest_reg AS (
-			SELECT pr.pool_id, pr.added_slot, pr.reward_account, pr.deposit_amount,
+			SELECT pr.pool_id, pr.added_slot, pr.reward_account, pr.reward_account_credential_tag, pr.deposit_amount,
 				COALESCE(t.block_index, 0) as blk_idx,
 				COALESCE(c.cert_index, 0) as cert_idx,
 				ROW_NUMBER() OVER (
@@ -72,7 +73,7 @@ func (d *MetadataStoreSqlite) GetPoolsRetiringAtEpoch(
 			LEFT JOIN "transaction" t ON t.id = c.transaction_id
 			WHERE rt.added_slot < ?
 		)
-		SELECT p.pool_key_hash, lr.reward_account, lr.deposit_amount
+		SELECT p.pool_key_hash, lr.reward_account, lr.reward_account_credential_tag, lr.deposit_amount
 		FROM pool p
 		INNER JOIN latest_reg lr ON lr.pool_id = p.id AND lr.rn = 1
 		INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
@@ -94,9 +95,10 @@ func (d *MetadataStoreSqlite) GetPoolsRetiringAtEpoch(
 	refunds := make([]models.PoolRetirementRefund, len(rows))
 	for i, r := range rows {
 		refunds[i] = models.PoolRetirementRefund{
-			PoolKeyHash:   r.PoolKeyHash,
-			RewardAccount: r.RewardAccount,
-			DepositAmount: r.DepositAmount,
+			PoolKeyHash:                r.PoolKeyHash,
+			RewardAccount:              r.RewardAccount,
+			RewardAccountCredentialTag: r.RewardAccountCredentialTag,
+			DepositAmount:              r.DepositAmount,
 		}
 	}
 	return refunds, nil

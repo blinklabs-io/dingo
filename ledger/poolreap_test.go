@@ -122,7 +122,7 @@ func TestApplyPoolRetirements_CreditsRegisteredRewardAccount(t *testing.T) {
 
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
 
-	account, err := db.GetAccount(rewardAccount, false, nil)
+	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, deposit, uint64(account.Reward),
@@ -178,7 +178,7 @@ func TestApplyPoolRetirements_UnregisteredAccountToTreasury(t *testing.T) {
 		"treasury update written at the boundary slot")
 
 	// The inactive account was not credited.
-	account, err := db.GetAccount(inactive, true, nil)
+	account, err := db.GetAccountByCredential(0, inactive, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -202,7 +202,7 @@ func TestApplyPoolRetirements_WrongEpoch(t *testing.T) {
 
 	runApplyPoolRetirements(t, ls, db, 5, 1_000)
 
-	account, err := db.GetAccount(rewardAccount, false, nil)
+	account, err := db.GetAccountByCredential(0, rewardAccount, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -236,7 +236,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
 
-	account, err := db.GetAccount(registered, false, nil)
+	account, err := db.GetAccountByCredential(0, registered, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, uint64(500), uint64(account.Reward),
 		"registered pool deposit refunded")
@@ -249,7 +249,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 	require.NoError(t, db.DeleteAccountRewardsAfterSlot(preBoundary, nil))
 	require.NoError(t, db.DeleteNetworkStateAfterSlot(preBoundary, nil))
 
-	account, err = db.GetAccount(registered, false, nil)
+	account, err = db.GetAccountByCredential(0, registered, false, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"reward credit reverted on rollback")
@@ -261,7 +261,7 @@ func TestApplyPoolRetirements_Rollback(t *testing.T) {
 
 	// Re-applying the boundary reproduces the same effects (determinism).
 	runApplyPoolRetirements(t, ls, db, newEpoch, boundarySlot)
-	account, err = db.GetAccount(registered, false, nil)
+	account, err = db.GetAccountByCredential(0, registered, false, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(500), uint64(account.Reward),
 		"re-applied refund is deterministic")

@@ -126,9 +126,10 @@ type PoolRetirement struct {
 // with the reward account and deposit needed to refund its POOLREAP deposit.
 // It is a query result, not a persisted table.
 type PoolRetirementRefund struct {
-	PoolKeyHash   []byte
-	RewardAccount []byte
-	DepositAmount types.Uint64
+	PoolKeyHash                []byte
+	RewardAccount              []byte
+	RewardAccountCredentialTag uint8
+	DepositAmount              types.Uint64
 }
 
 func (PoolRetirement) TableName() string {

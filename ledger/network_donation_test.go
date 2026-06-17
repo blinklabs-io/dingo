@@ -259,7 +259,7 @@ func TestEpochProcessWithdrawalThenDonation(t *testing.T) {
 	assert.Equal(t, initialReserves, reserves)
 
 	// The withdrawal credited the registered reward account.
-	account, err := db.GetAccount(stakeCred, false, nil)
+	account, err := db.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, withdrawal, uint64(account.Reward),

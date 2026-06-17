@@ -822,6 +822,7 @@ func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
 // rollback. The ledger rule clears the reward account when a withdrawal for
 // the credential appears in a valid transaction.
 func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
+	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
@@ -838,7 +839,8 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 	withdraw := func(tx *gorm.DB) error {
 		var account models.Account
 		if err := tx.Where(
-			"staking_key = ? AND active = ?",
+			"credential_tag = ? AND staking_key = ? AND active = ?",
+			credentialTag,
 			stakeKey,
 			true,
 		).First(&account).Error; err != nil {
@@ -853,7 +855,7 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 				"withdrawal = ? AND tx_hash = ? AND credential_tag = ? AND staking_key = ?",
 				true,
 				txHash,
-				account.CredentialTag,
+				credentialTag,
 				stakeKey,
 			).First(&existing)
 			if result.Error == nil {
@@ -875,7 +877,7 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 		}
 		delta := &models.AccountRewardDelta{
 			StakingKey:     stakeKey,
-			CredentialTag:  account.CredentialTag,
+			CredentialTag:  credentialTag,
 			TxHash:         txHash,
 			Amount:         types.Uint64(amount),
 			PreviousReward: types.Uint64(current),
