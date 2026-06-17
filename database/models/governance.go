@@ -52,14 +52,14 @@ func (Constitution) TableName() string {
 // GovernanceProposal represents a governance action submitted to the chain.
 // Proposals have a lifecycle: submitted -> (ratified) -> (enacted) or expired.
 type GovernanceProposal struct {
-	ID              uint   `gorm:"primarykey"`
-	TxHash          []byte `gorm:"uniqueIndex:idx_proposal_tx_action,priority:1;size:32;not null"`
-	ActionIndex     uint32 `gorm:"uniqueIndex:idx_proposal_tx_action,priority:2;not null"`
-	ActionType      uint8  `gorm:"index;not null"` // GovActionType enum
-	ProposedEpoch   uint64 `gorm:"index;not null"`
-	ExpiresEpoch    uint64 `gorm:"index;not null"`
-	ParentTxHash    []byte `gorm:"size:32"`
-	ParentActionIdx *uint32
+	ID              uint    `gorm:"primarykey"`
+	TxHash          []byte  `gorm:"uniqueIndex:idx_proposal_tx_action,priority:1;size:32;not null"`
+	ActionIndex     uint32  `gorm:"uniqueIndex:idx_proposal_tx_action,priority:2;not null"`
+	ActionType      uint8   `gorm:"index;not null"` // GovActionType enum
+	ProposedEpoch   uint64  `gorm:"index;not null"`
+	ExpiresEpoch    uint64  `gorm:"index;not null"`
+	ParentTxHash    []byte  `gorm:"index:idx_gov_proposal_parent,priority:1;size:32"`
+	ParentActionIdx *uint32 `gorm:"index:idx_gov_proposal_parent,priority:2"`
 	EnactedEpoch    *uint64
 	EnactedSlot     *uint64 `gorm:"index"` // Slot when enacted (for rollback safety)
 	RatifiedEpoch   *uint64
