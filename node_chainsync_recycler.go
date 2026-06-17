@@ -131,6 +131,9 @@ func (n *Node) processChainsyncRecyclerTick(
 	effectivePlateau := time.Duration(catchUpMultiplier) * plateauRecoveryThreshold
 	effectiveCooldown := time.Duration(catchUpMultiplier) * cooldown
 	n.chainsyncState.CheckStalledClients()
+	// Rotate the round-robin header-ingress driver on the stall-check
+	// cadence. No-op under the primary/parallel strategies.
+	n.chainsyncState.AdvanceHeaderSyncRotation()
 	trackedClients := n.chainsyncState.GetTrackedClients()
 	trackedByID := make(
 		map[string]chainsync.TrackedClient,

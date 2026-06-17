@@ -378,6 +378,50 @@ historyExpiry:
 	}
 }
 
+func TestLoad_ChainsyncStrategyConfig(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	yamlContent := `
+chainsync:
+  strategy: parallel
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "chainsync-strategy.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Chainsync.Strategy != "parallel" {
+		t.Fatalf(
+			"expected Chainsync.Strategy to be parallel, got %q",
+			cfg.Chainsync.Strategy,
+		)
+	}
+}
+
+func TestLoad_ChainsyncStrategyEnvVar(t *testing.T) {
+	resetGlobalConfig()
+	globalConfig.RunMode = RunModeDev
+
+	t.Setenv("DINGO_CHAINSYNC_STRATEGY", "round-robin")
+
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if cfg.Chainsync.Strategy != "round-robin" {
+		t.Fatalf(
+			"expected Chainsync.Strategy to be round-robin, got %q",
+			cfg.Chainsync.Strategy,
+		)
+	}
+}
+
 func TestLoad_HistoryExpiryEnvVars(t *testing.T) {
 	resetGlobalConfig()
 	globalConfig.RunMode = RunModeDev

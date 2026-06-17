@@ -249,6 +249,12 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			)
 		}
 	}
+	chainsyncStrategy, err := chainsync.ParseHeaderSyncStrategy(
+		cfg.Chainsync.Strategy,
+	)
+	if err != nil {
+		return fmt.Errorf("invalid chainsync strategy: %w", err)
+	}
 
 	// Validate storage mode
 	storageMode := dingo.StorageMode(cfg.StorageMode)
@@ -388,6 +394,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			),
 			dingo.WithChainsyncStallTimeout(
 				chainsyncStallTimeout,
+			),
+			dingo.WithChainsyncHeaderStrategy(
+				chainsyncStrategy,
 			),
 			dingo.WithBindAddr(cfg.BindAddr),
 			dingo.WithBlockfrostPort(cfg.BlockfrostPort),

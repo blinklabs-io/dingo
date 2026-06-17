@@ -458,6 +458,31 @@ cache:
   # CLI: --cache-warmup-sync
   warmupSync: true
 
+# Multi-client ChainSync (header synchronization) configuration
+chainsync:
+  # Maximum number of concurrent ChainSync client connections
+  # Default: 3
+  # CLI: --chainsync-max-clients  Env: DINGO_CHAINSYNC_MAX_CLIENTS
+  maxClients: 3
+  # Duration with no activity after which a ChainSync client is
+  # considered stalled and eligible for failover/recycling
+  # Default: "2m"
+  # CLI: --chainsync-stall-timeout  Env: DINGO_CHAINSYNC_STALL_TIMEOUT
+  stallTimeout: "2m"
+  # Header-sync strategy: how headers from multiple eligible peers drive
+  # ledger ingress.
+  # - "primary":     a single active peer drives ingress, failing over to
+  #                  another eligible peer when it stalls or disconnects
+  #                  (default; preserves prior behavior).
+  # - "parallel":    every eligible peer may supply headers concurrently;
+  #                  duplicates are deduplicated before ledger ingress so a
+  #                  header never enters ledger processing twice.
+  # - "round-robin": a single ingress-driving peer that rotates across the
+  #                  eligible peers over time.
+  # Default: "primary"
+  # CLI: --chainsync-strategy  Env: DINGO_CHAINSYNC_STRATEGY
+  strategy: "primary"
+
 # Mithril snapshot bootstrap configuration
 # Use 'dingo mithril sync' or 'dingo sync --mithril' to bootstrap from a snapshot
 # CLI: --mithril-enabled, --mithril-verify-certs

@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net"
 	"sync"
 	"time"
 
@@ -131,21 +130,6 @@ func normalizeIntersectPoints(points []ocommon.Point) []ocommon.Point {
 
 func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
-}
-
-// sameNetAddr compares addresses by string form, treating nil as equal
-// only to nil. ConnectionId.String() panics when either net.Addr field
-// is nil, so the addresses are compared individually instead.
-func sameNetAddr(a, b net.Addr) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	return a.String() == b.String()
-}
-
-func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	return sameNetAddr(a.LocalAddr, b.LocalAddr) &&
-		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
@@ -763,29 +747,33 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
-		if !isNew {
-			shouldReplayDuplicate := false
-			if o.ChainsyncState != nil {
-				activeConnId := o.ChainsyncState.GetClientConnId()
-				if activeConnId != nil &&
-					sameConnectionId(*activeConnId, ctx.ConnectionId) &&
-					o.ChainsyncState.HeaderPreviouslySeenFromOtherConn(
-						ctx.ConnectionId,
-						point,
-					) {
-					shouldReplayDuplicate = true
-				}
+		// Header-sync strategy gate: cross-peer deduplication (isNew) has run
+		// above; the configured strategy now decides whether this eligible
+		// peer is permitted to drive ledger ingress. Primary lets any eligible
+		// peer publish new headers and the active peer replay duplicates first
+		// seen elsewhere (prior behavior); parallel lets every eligible peer
+		// publish new headers but never replays duplicates; round-robin admits
+		// only the current rotation driver.
+		if o.ChainsyncState != nil &&
+			!o.ChainsyncState.ShouldPublishHeader(
+				ctx.ConnectionId,
+				point,
+				isNew,
+			) {
+			dropReason := "duplicate"
+			if isNew {
+				dropReason = "not ingress driver"
 			}
-			if !shouldReplayDuplicate {
-				o.config.Logger.Debug(
-					"chainsync: header dropped (duplicate)",
-					"component", "ouroboros",
-					"slot", blockSlot,
-					"connection_id", ctx.ConnectionId.String(),
-				)
-				o.updateChainsyncMetrics(ctx.ConnectionId, tip)
-				return nil
-			}
+			o.config.Logger.Debug(
+				"chainsync: header dropped",
+				"component", "ouroboros",
+				"reason", dropReason,
+				"strategy", o.ChainsyncState.HeaderSyncStrategy().String(),
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
 		}
 		if err := o.EventBus.PublishBlocking(
 			ledger.ChainsyncEventType,

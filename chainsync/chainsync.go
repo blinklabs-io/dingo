@@ -132,6 +132,10 @@ type TrackedClient struct {
 type Config struct {
 	MaxClients   int
 	StallTimeout time.Duration
+	// HeaderSyncStrategy selects how headers from multiple eligible peers
+	// drive ledger ingress. The zero value is HeaderSyncStrategyPrimary,
+	// which preserves single-active behavior.
+	HeaderSyncStrategy HeaderSyncStrategy
 	// SeenHeadersRetention overrides the retention window, in slots, for
 	// the header deduplication cache. When zero, the retention window is
 	// derived from the ledger's current stability window (falling back to
@@ -186,6 +190,9 @@ type State struct {
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
 	activeClientConnId *ouroboros.ConnectionId
 	clientConnIdMutex  sync.RWMutex
+	// roundRobinIndex is the rotation cursor for the round-robin header-sync
+	// strategy. Guarded by clientConnIdMutex.
+	roundRobinIndex uint64
 
 	// Header deduplication: maps slot -> list of distinct
 	// block hashes seen at that slot

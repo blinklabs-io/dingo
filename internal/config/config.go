@@ -203,6 +203,10 @@ type ChainsyncConfig struct {
 	// StallTimeout is the duration after which a client with no
 	// activity is considered stalled. Default: "2m".
 	StallTimeout string `yaml:"stallTimeout" envconfig:"DINGO_CHAINSYNC_STALL_TIMEOUT"`
+	// Strategy selects how headers from multiple eligible peers drive
+	// ledger ingress: "primary", "parallel", or "round-robin".
+	// Default: "primary".
+	Strategy string `yaml:"strategy"     envconfig:"DINGO_CHAINSYNC_STRATEGY"`
 }
 
 // GenesisBootstrapConfig holds configuration for Genesis-mode chain
@@ -254,6 +258,7 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 	return ChainsyncConfig{
 		MaxClients:   3,
 		StallTimeout: "2m",
+		Strategy:     "primary",
 	}
 }
 

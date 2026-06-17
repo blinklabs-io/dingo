@@ -131,6 +131,7 @@ var flagSpecs = []flagSpec{
 	// Chainsync
 	intFlag("Chainsync.MaxClients", "chainsync-max-clients", "max chainsync clients"),
 	stringFlag("Chainsync.StallTimeout", "chainsync-stall-timeout", "", "chainsync stall timeout"),
+	stringFlag("Chainsync.Strategy", "chainsync-strategy", "", "chainsync header sync strategy (primary|parallel|round-robin)"),
 
 	// Genesis bootstrap
 	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable Genesis bootstrap mode when starting from origin"),

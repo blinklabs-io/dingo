@@ -687,6 +687,152 @@ func TestChainsyncClientRollForwardDropsDuplicateFromSameSelectedPeer(
 	}
 }
 
+// Under the parallel strategy, two eligible peers offering the same header
+// must not push that header into ledger processing twice: the first reporter
+// publishes it and the duplicate from the other peer is suppressed (no
+// active-peer replay).
+func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+	cfg := dchainsync.DefaultConfig()
+	cfg.HeaderSyncStrategy = dchainsync.HeaderSyncStrategyParallel
+	state := dchainsync.NewStateWithConfig(bus, nil, cfg)
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// First reporter (B) publishes the header.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	))
+	evt1 := <-ch
+	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
+	require.True(t, ok)
+	require.Equal(t, connB, data1.ConnectionId)
+
+	// The active peer (A) reporting the same header must NOT replay it under
+	// the parallel strategy.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt2 := <-ch:
+		t.Fatalf(
+			"expected duplicate from second peer to be suppressed, got: %#v",
+			evt2,
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// Under the parallel strategy, multiple eligible peers can supply different
+// headers concurrently without corrupting ledger ingress ordering. Each
+// distinct header enters the ledger queue exactly once, in arrival order,
+// attributed to the peer that reported it first.
+func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ch := bus.Subscribe(ledger.ChainsyncEventType)
+	cfg := dchainsync.DefaultConfig()
+	cfg.HeaderSyncStrategy = dchainsync.HeaderSyncStrategyParallel
+	state := dchainsync.NewStateWithConfig(bus, nil, cfg)
+	connA := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "2.2.2.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	type step struct {
+		conn   ouroboros.ConnectionId
+		slot   uint64
+		block  uint64
+		hashID byte
+	}
+	// Interleave reporters; the duplicate (B re-reporting slot 100) must be
+	// dropped, leaving an ordered, deduplicated ingress stream.
+	steps := []step{
+		{connA, 100, 1, 0xa0},
+		{connB, 101, 2, 0xb1},
+		{connB, 100, 1, 0xa0}, // duplicate of slot 100 -> suppressed
+		{connA, 102, 3, 0xa2},
+	}
+	for _, s := range steps {
+		header := newTestBlockHeader(s.slot, s.block, s.hashID)
+		tip := ochainsync.Tip{
+			Point:       ocommon.NewPoint(s.slot, header.Hash().Bytes()),
+			BlockNumber: s.block,
+		}
+		require.NoError(t, o.chainsyncClientRollForward(
+			ochainsync.CallbackContext{ConnectionId: s.conn},
+			0,
+			header,
+			tip,
+		))
+	}
+
+	type ingress struct {
+		slot uint64
+		conn ouroboros.ConnectionId
+	}
+	want := []ingress{
+		{100, connA},
+		{101, connB},
+		{102, connA},
+	}
+	for i, w := range want {
+		select {
+		case evt := <-ch:
+			data, ok := evt.Data.(ledger.ChainsyncEvent)
+			require.True(t, ok)
+			require.Equal(t, w.slot, data.Point.Slot, "event %d slot", i)
+			require.Equal(t, w.conn, data.ConnectionId, "event %d conn", i)
+		case <-time.After(time.Second):
+			t.Fatalf("missing expected ingress event %d (slot %d)", i, w.slot)
+		}
+	}
+	select {
+	case evt := <-ch:
+		t.Fatalf("unexpected extra ingress event: %#v", evt.Data)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
 func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(
 	t *testing.T,
 ) {

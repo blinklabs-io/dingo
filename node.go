@@ -473,6 +473,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.chainsyncStallTimeout > 0 {
 		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
 	}
+	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
 	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
