@@ -114,6 +114,15 @@ type PoolRetirement struct {
 	AddedSlot     uint64 `gorm:"index"`
 }
 
+// PoolRetirementRefund identifies a pool retiring at an epoch boundary along
+// with the reward account and deposit needed to refund its POOLREAP deposit.
+// It is a query result, not a persisted table.
+type PoolRetirementRefund struct {
+	PoolKeyHash   []byte
+	RewardAccount []byte
+	DepositAmount types.Uint64
+}
+
 func (PoolRetirement) TableName() string {
 	return "pool_retirement"
 }

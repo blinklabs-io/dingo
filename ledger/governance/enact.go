@@ -259,7 +259,7 @@ func applyTreasuryWithdrawal(
 		if err != nil {
 			return fmt.Errorf("treasury withdrawal reward account: %w", err)
 		}
-		credited, err := creditRegisteredRewardAccount(
+		credited, err := CreditRegisteredRewardAccount(
 			ctx.DB,
 			ctx.Txn,
 			stakeCredential,
@@ -284,7 +284,13 @@ func applyTreasuryWithdrawal(
 	)
 }
 
-func creditRegisteredRewardAccount(
+// CreditRegisteredRewardAccount credits a reward account by its stake
+// credential, returning (true, nil) when the account exists and is active. It
+// returns (false, nil) when no active account matches — the caller is expected
+// to route the amount to the treasury instead. Shared by governance deposit
+// refunds and POOLREAP pool-deposit refunds so both follow identical
+// registered-vs-unclaimed accounting.
+func CreditRegisteredRewardAccount(
 	db *database.Database,
 	txn *database.Txn,
 	stakeCredential []byte,
@@ -301,7 +307,11 @@ func creditRegisteredRewardAccount(
 	return false, fmt.Errorf("credit reward account: %w", err)
 }
 
-func addUnclaimedToTreasury(
+// AddUnclaimedToTreasury adds an unclaimable amount (e.g. a deposit refund
+// whose reward account is missing or inactive) to the treasury, leaving
+// reserves unchanged and writing the updated NetworkState at the given slot.
+// Shared by governance and POOLREAP for consistent treasury accounting.
+func AddUnclaimedToTreasury(
 	db *database.Database,
 	txn *database.Txn,
 	amount uint64,

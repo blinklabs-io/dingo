@@ -514,7 +514,7 @@ func refundProposalDeposit(
 	if err != nil {
 		return err
 	}
-	credited, err := creditRegisteredRewardAccount(
+	credited, err := CreditRegisteredRewardAccount(
 		db,
 		txn,
 		stakeCredential,
@@ -525,7 +525,7 @@ func refundProposalDeposit(
 		return err
 	}
 	if !credited {
-		if err := addUnclaimedToTreasury(
+		if err := AddUnclaimedToTreasury(
 			db,
 			txn,
 			proposal.Deposit,

@@ -697,6 +697,64 @@ ORDER BY r.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_ind
 LIMIT 1;
 ```
 
+### `GetPoolsRetiringAtEpoch`
+
+Pools whose effective retirement takes effect at a given epoch, with the reward
+account and deposit needed to refund their POOLREAP deposit at the epoch
+boundary. A pool is included when, as of the boundary slot, its latest
+retirement certificate names the target epoch and has not been cancelled by a
+later re-registration (same-slot disambiguation uses `block_index` then
+`cert_index`, matching `GetActivePoolKeyHashesAtSlot`). The deposit and reward
+account come from the latest registration. Backends differ only in identifier
+quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
+
+```sql
+WITH latest_reg AS (
+  SELECT pr.pool_id, pr.added_slot, pr.reward_account, pr.deposit_amount,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY pr.pool_id
+      ORDER BY pr.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_registration pr
+  LEFT JOIN certs c ON c.id = pr.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE pr.added_slot < $boundarySlot
+),
+latest_ret AS (
+  SELECT rt.pool_id, rt.added_slot, rt.epoch,
+    COALESCE(t.block_index, 0) AS blk_idx,
+    COALESCE(c.cert_index, 0)  AS cert_idx,
+    ROW_NUMBER() OVER (
+      PARTITION BY rt.pool_id
+      ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+    ) AS rn
+  FROM pool_retirement rt
+  LEFT JOIN certs c ON c.id = rt.certificate_id
+  LEFT JOIN "transaction" t ON t.id = c.transaction_id
+  WHERE rt.added_slot < $boundarySlot
+)
+SELECT p.pool_key_hash, lr.reward_account, lr.deposit_amount
+FROM pool p
+INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
+INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
+WHERE lrt.epoch = $epoch
+  AND NOT (
+    lrt.added_slot < lr.added_slot
+    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
+    OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+  );
+```
+
+The `reward_account` is the 28-byte stake credential stored on the registration,
+used directly to look up the reward account (see `AddAccountReward`). Deposit
+refunds are applied in `applyPoolRetirements` (ledger): the deposit is credited
+to the registered, active reward account, or added to `network_state.treasury`
+when that account is missing or inactive. Both writes are slot-keyed (the
+`account_reward_delta` journal and the boundary `network_state` row), so a
+rollback past the boundary reverts them and re-application is deterministic.
+
 ### `GetGovernanceProposal` and `GetGovernanceVotes`
 
 Governance proposal and votes:

@@ -1,0 +1,97 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package sqlite
+
+import (
+	"testing"
+
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func poolreapBytes(seed byte) []byte {
+	out := make([]byte, 28)
+	for i := range out {
+		out[i] = seed
+	}
+	return out
+}
+
+// seedRetiringPool creates a pool with a registration and (optionally) a
+// retirement, returning the pool ID.
+func seedRetiringPool(
+	t *testing.T,
+	store *MetadataStoreSqlite,
+	keyHash, rewardAccount []byte,
+	deposit, regSlot uint64,
+) *models.Pool {
+	t.Helper()
+	pool := &models.Pool{PoolKeyHash: keyHash}
+	require.NoError(t, store.DB().Create(pool).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:        pool.ID,
+		PoolKeyHash:   keyHash,
+		RewardAccount: rewardAccount,
+		DepositAmount: types.Uint64(deposit),
+		AddedSlot:     regSlot,
+	}).Error)
+	return pool
+}
+
+// TestGetPoolsRetiringAtEpoch covers: a pool retiring at the target epoch is
+// returned with its reward account and deposit; a pool retiring at a different
+// epoch is excluded; and a pool that re-registers after its retirement (later
+// slot) is excluded because the retirement was cancelled.
+func TestGetPoolsRetiringAtEpoch(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	// Pool A: retires at epoch 5 — expected in results.
+	poolA := seedRetiringPool(t, store, poolreapBytes(0xAA), poolreapBytes(0x11), 500, 100)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID: poolA.ID, PoolKeyHash: poolA.PoolKeyHash, Epoch: 5, AddedSlot: 200,
+	}).Error)
+
+	// Pool B: retires at epoch 6 — excluded (wrong epoch).
+	poolB := seedRetiringPool(t, store, poolreapBytes(0xBB), poolreapBytes(0x22), 500, 100)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID: poolB.ID, PoolKeyHash: poolB.PoolKeyHash, Epoch: 6, AddedSlot: 200,
+	}).Error)
+
+	// Pool C: retires at epoch 5 then re-registers at a later slot — excluded
+	// (retirement cancelled).
+	poolC := seedRetiringPool(t, store, poolreapBytes(0xCC), poolreapBytes(0x33), 500, 100)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID: poolC.ID, PoolKeyHash: poolC.PoolKeyHash, Epoch: 5, AddedSlot: 200,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID: poolC.ID, PoolKeyHash: poolC.PoolKeyHash,
+		RewardAccount: poolreapBytes(0x33), DepositAmount: types.Uint64(500), AddedSlot: 300,
+	}).Error)
+
+	refunds, err := store.GetPoolsRetiringAtEpoch(5, 1000, nil)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1, "only pool A retires at epoch 5")
+	assert.Equal(t, poolA.PoolKeyHash, refunds[0].PoolKeyHash)
+	assert.Equal(t, poolreapBytes(0x11), refunds[0].RewardAccount)
+	assert.Equal(t, uint64(500), uint64(refunds[0].DepositAmount))
+
+	// Retirement certs added at/after the boundary slot are not yet effective.
+	none, err := store.GetPoolsRetiringAtEpoch(5, 150, nil)
+	require.NoError(t, err)
+	assert.Empty(t, none, "retirement cert added at slot 200 is excluded before slot 150")
+}

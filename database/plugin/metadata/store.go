@@ -253,6 +253,17 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
+	// (the latest retirement not cancelled by a later re-registration, as of
+	// the boundary slot) takes effect at the given epoch, along with the
+	// reward account and deposit from their active registration. Used to apply
+	// POOLREAP deposit refunds at the epoch boundary.
+	GetPoolsRetiringAtEpoch(
+		epoch uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([]models.PoolRetirementRefund, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(

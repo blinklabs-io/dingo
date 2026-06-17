@@ -46,10 +46,11 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// Ident for unqualified calls).
 	wantOrder := []string{
 		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"ProcessEpoch",                 // (2) Conway-style governance enact
-		"SetPParams",                   // (3) persist enacted pparams
-		"isHardForkTransition",         // (4) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (5) per-major-version HARDFORK rule
+		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
+		"ProcessEpoch",                 // (3) Conway-style governance enact
+		"SetPParams",                   // (4) persist enacted pparams
+		"isHardForkTransition",         // (5) inter-era boundary detection
+		"applyIntraEraHardForkRule",    // (6) per-major-version HARDFORK rule
 	}
 
 	fset := token.NewFileSet()
