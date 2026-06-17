@@ -223,6 +223,30 @@ func (d *Database) SetGovernanceProposal(
 	return nil
 }
 
+// GetChildGovernanceProposals returns all active proposals whose parent is
+// the given proposal (parentTxHash + parentActionIdx). Only proposals not
+// yet enacted, expired, or soft-deleted are returned. Used during epoch
+// boundary orphan sweeps.
+func (d *Database) GetChildGovernanceProposals(
+	parentTxHash []byte,
+	parentActionIdx uint32,
+	txn *Txn,
+) ([]*models.GovernanceProposal, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	proposals, err := d.metadata.GetChildGovernanceProposals(
+		parentTxHash, parentActionIdx, txn.Metadata(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to get child governance proposals: %w", err,
+		)
+	}
+	return proposals, nil
+}
+
 // GetGovernanceVotes returns all votes for a governance proposal
 func (d *Database) GetGovernanceVotes(
 	proposalID uint,
