@@ -97,6 +97,25 @@ type OffchainMetadataConfig struct {
 	AllowPrivateAddresses bool
 }
 
+// MidnightConfig controls the Midnight indexer and optional gRPC listener.
+// Indexing is only active in API storage mode. Port 0 disables the gRPC
+// listener while leaving indexing eligible to run.
+type MidnightConfig struct {
+	Port uint
+	Host string
+
+	CNightPolicyID              string
+	CNightAssetName             string
+	MappingValidatorAddress     string
+	AuthTokenAssetName          string
+	CommitteeCandidateAddress   string
+	TechnicalCommitteeAddress   string
+	TechnicalCommitteePolicyID  string
+	CouncilAddress              string
+	CouncilPolicyID             string
+	PermissionedCandidatePolicy string
+}
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
@@ -176,6 +195,8 @@ type Config struct {
 	blockfrostPort uint
 	// Off-chain metadata fetcher configuration
 	offchainMetadata OffchainMetadataConfig
+	// Midnight indexer and gRPC API configuration
+	midnight MidnightConfig
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
@@ -422,6 +443,10 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		genesisBootstrap: true,
 		historyExpiry: HistoryExpiryConfig{
 			Frequency: time.Hour,
+		},
+		midnight: MidnightConfig{
+			Port: 50051,
+			Host: "0.0.0.0",
 		},
 		corsAllowedOrigins: []string{
 			"*",
@@ -924,6 +949,13 @@ func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 	return func(c *Config) {
 		c.offchainMetadata = cfg
+	}
+}
+
+// WithMidnightConfig configures the Midnight indexer and optional gRPC API.
+func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.midnight = cfg
 	}
 }
 

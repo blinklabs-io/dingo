@@ -152,6 +152,48 @@ type databaseConfig struct {
 	Metadata map[string]any `yaml:"metadata,omitempty"`
 }
 
+var midnightYAMLFields map[string]struct{}
+
+func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(buf, &doc); err != nil {
+		return nil
+	}
+	if len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	midnight := mappingValue(root, "midnight")
+	if configNode := mappingValue(root, "config"); configNode != nil {
+		midnight = mappingValue(configNode, "midnight")
+	}
+	if midnight == nil || midnight.Kind != yaml.MappingNode {
+		return nil
+	}
+	fields := map[string]struct{}{}
+	for i := 0; i+1 < len(midnight.Content); i += 2 {
+		fields[midnight.Content[i].Value] = struct{}{}
+	}
+	return fields
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func midnightYAMLFieldSet(field string) bool {
+	_, ok := midnightYAMLFields[field]
+	return ok
+}
+
 // ChainsyncConfig holds configuration for the multi-client chainsync
 // subsystem.
 type ChainsyncConfig struct {
@@ -279,6 +321,33 @@ func DefaultLoggingConfig() LoggingConfig {
 	}
 }
 
+// MidnightConfig holds configuration for the Midnight indexer and its
+// optional gRPC API surface. Indexing is only active when Dingo is running
+// in API storage mode; Port 0 disables only the gRPC server.
+type MidnightConfig struct {
+	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+
+	CNightPolicyID              string `yaml:"cnightPolicyId"`
+	CNightAssetName             string `yaml:"cnightAssetName"`
+	MappingValidatorAddress     string `yaml:"mappingValidatorAddress"`
+	AuthTokenAssetName          string `yaml:"authTokenAssetName"`
+	CommitteeCandidateAddress   string `yaml:"committeeCandidateAddress"`
+	TechnicalCommitteeAddress   string `yaml:"technicalCommitteeAddress"`
+	TechnicalCommitteePolicyID  string `yaml:"technicalCommitteePolicyId"`
+	CouncilAddress              string `yaml:"councilAddress"`
+	CouncilPolicyID             string `yaml:"councilPolicyId"`
+	PermissionedCandidatePolicy string `yaml:"permissionedCandidatePolicy"`
+}
+
+// DefaultMidnightConfig returns the default Midnight indexer settings.
+func DefaultMidnightConfig() MidnightConfig {
+	return MidnightConfig{
+		Port: 50051,
+		Host: "0.0.0.0",
+	}
+}
+
 type Config struct {
 	MetadataPlugin       string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
 	TlsKeyFilePath       string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
@@ -357,6 +426,9 @@ type Config struct {
 	// Logging configuration (output format and level)
 	Logging LoggingConfig `yaml:"logging"`
 
+	// Midnight indexer and gRPC API configuration.
+	Midnight MidnightConfig `yaml:"midnight"`
+
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
 	// After this many slots, the KES key must be evolved to the next period.
@@ -412,6 +484,117 @@ type Config struct {
 
 	// Mithril snapshot bootstrap configuration
 	Mithril MithrilConfig `yaml:"mithril"`
+}
+
+// midnightNetworkDefaults holds per-network Midnight constants sourced from
+// Acropolis. At the time these defaults were added, Acropolis published
+// constants for mainnet and preview only.
+// https://github.com/input-output-hk/acropolis/tree/master/processes/midnight_indexer
+var midnightNetworkDefaults = map[string]MidnightConfig{
+	"mainnet": {
+		CNightPolicyID:              "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa",
+		CNightAssetName:             "4e49474854",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		TechnicalCommitteeAddress:   "addr_test1wqx3yfmsp82nmtyjj4k86s3l04l6lvwaqh2vk2ygcge7kdsk4xc7j",
+		TechnicalCommitteePolicyID:  "0d12277009d53dac92956c7d423f7d7fafb1dd05d4cb2888c233eb36",
+		CouncilAddress:              "addr_test1wqqwkauz0ypglg5e4u780kcp8hzt75u72yg6z7td62gnk0qed0p06",
+		CouncilPolicyID:             "00eb778279028fa299af3c77db013dc4bf539e5111a1796dd2913b3c",
+		PermissionedCandidatePolicy: "f8625f11a58fa5ab5b85502a8fe5c843ece460c9c5f9273be17d3424",
+	},
+	"preview": {
+		CNightPolicyID:              "d2dbff622e509dda256fedbd31ef6e9fd98ed49ad91d5c0e07f68af1",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		CommitteeCandidateAddress:   "addr_test1wz5ax0hjvhx2uqef8sqrxnmfywd37hea4truhqxu4yxp9hsvggkfm",
+		TechnicalCommitteeAddress:   "addr_test1wptcy7h9rmkhdnhn3jvm6tuhehcq2hhhzntvn00nq79ph8c44v43j",
+		TechnicalCommitteePolicyID:  "57827ae51eed76cef38c99bd2f97cdf0055ef714d6c9bdf3078a1b9f",
+		CouncilAddress:              "addr_test1wzy47zdsq22pg9l48c5v0f835ljdjzkz47sa5za9cehcejcw28k2d",
+		CouncilPolicyID:             "895f09b002941417f53e28c7a4f1a7e4d90ac2afa1da0ba5c66f8ccb",
+		PermissionedCandidatePolicy: "24dccfce2576ae6fa7149bc485850656ae6faf9f4158891316773a78",
+	},
+}
+
+func applyMidnightNetworkDefaults(cfg *Config) {
+	defaults, ok := midnightNetworkDefaults[cfg.Network]
+	if !ok {
+		return
+	}
+	if cfg.Midnight.CNightPolicyID == "" {
+		cfg.Midnight.CNightPolicyID = defaults.CNightPolicyID
+	}
+	if cfg.Midnight.CNightAssetName == "" {
+		cfg.Midnight.CNightAssetName = defaults.CNightAssetName
+	}
+	if cfg.Midnight.MappingValidatorAddress == "" {
+		cfg.Midnight.MappingValidatorAddress = defaults.MappingValidatorAddress
+	}
+	if cfg.Midnight.AuthTokenAssetName == "" {
+		cfg.Midnight.AuthTokenAssetName = defaults.AuthTokenAssetName
+	}
+	if cfg.Midnight.CommitteeCandidateAddress == "" {
+		cfg.Midnight.CommitteeCandidateAddress = defaults.CommitteeCandidateAddress
+	}
+	if cfg.Midnight.TechnicalCommitteeAddress == "" {
+		cfg.Midnight.TechnicalCommitteeAddress = defaults.TechnicalCommitteeAddress
+	}
+	if cfg.Midnight.TechnicalCommitteePolicyID == "" {
+		cfg.Midnight.TechnicalCommitteePolicyID = defaults.TechnicalCommitteePolicyID
+	}
+	if cfg.Midnight.CouncilAddress == "" {
+		cfg.Midnight.CouncilAddress = defaults.CouncilAddress
+	}
+	if cfg.Midnight.CouncilPolicyID == "" {
+		cfg.Midnight.CouncilPolicyID = defaults.CouncilPolicyID
+	}
+	if cfg.Midnight.PermissionedCandidatePolicy == "" {
+		cfg.Midnight.PermissionedCandidatePolicy = defaults.PermissionedCandidatePolicy
+	}
+}
+
+func clearMidnightNetworkDefaults(cfg *Config, network string) {
+	defaults, ok := midnightNetworkDefaults[network]
+	if !ok {
+		return
+	}
+	if !midnightYAMLFieldSet("cnightPolicyId") &&
+		cfg.Midnight.CNightPolicyID == defaults.CNightPolicyID {
+		cfg.Midnight.CNightPolicyID = ""
+	}
+	if !midnightYAMLFieldSet("cnightAssetName") &&
+		cfg.Midnight.CNightAssetName == defaults.CNightAssetName {
+		cfg.Midnight.CNightAssetName = ""
+	}
+	if !midnightYAMLFieldSet("mappingValidatorAddress") &&
+		cfg.Midnight.MappingValidatorAddress == defaults.MappingValidatorAddress {
+		cfg.Midnight.MappingValidatorAddress = ""
+	}
+	if !midnightYAMLFieldSet("authTokenAssetName") &&
+		cfg.Midnight.AuthTokenAssetName == defaults.AuthTokenAssetName {
+		cfg.Midnight.AuthTokenAssetName = ""
+	}
+	if !midnightYAMLFieldSet("committeeCandidateAddress") &&
+		cfg.Midnight.CommitteeCandidateAddress == defaults.CommitteeCandidateAddress {
+		cfg.Midnight.CommitteeCandidateAddress = ""
+	}
+	if !midnightYAMLFieldSet("technicalCommitteeAddress") &&
+		cfg.Midnight.TechnicalCommitteeAddress == defaults.TechnicalCommitteeAddress {
+		cfg.Midnight.TechnicalCommitteeAddress = ""
+	}
+	if !midnightYAMLFieldSet("technicalCommitteePolicyId") &&
+		cfg.Midnight.TechnicalCommitteePolicyID == defaults.TechnicalCommitteePolicyID {
+		cfg.Midnight.TechnicalCommitteePolicyID = ""
+	}
+	if !midnightYAMLFieldSet("councilAddress") &&
+		cfg.Midnight.CouncilAddress == defaults.CouncilAddress {
+		cfg.Midnight.CouncilAddress = ""
+	}
+	if !midnightYAMLFieldSet("councilPolicyId") &&
+		cfg.Midnight.CouncilPolicyID == defaults.CouncilPolicyID {
+		cfg.Midnight.CouncilPolicyID = ""
+	}
+	if !midnightYAMLFieldSet("permissionedCandidatePolicy") &&
+		cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
+		cfg.Midnight.PermissionedCandidatePolicy = ""
+	}
 }
 
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
@@ -552,6 +735,8 @@ var globalConfig = &Config{
 	HistoryExpiry: DefaultHistoryExpiryConfig(),
 	// Logging defaults (text output at info level)
 	Logging: DefaultLoggingConfig(),
+	// Midnight defaults
+	Midnight: DefaultMidnightConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
@@ -568,6 +753,8 @@ var globalConfig = &Config{
 }
 
 func LoadConfig(configFile string) (*Config, error) {
+	midnightYAMLFields = nil
+
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -592,6 +779,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
+		midnightYAMLFields = collectMidnightYAMLFields(buf)
 
 		// First unmarshal into temp config to handle plugin sections
 		var tempCfg tempConfig
@@ -819,6 +1007,7 @@ func LoadConfig(configFile string) (*Config, error) {
 	if err := ValidateNetworkName(globalConfig.Network); err != nil {
 		return nil, err
 	}
+	applyMidnightNetworkDefaults(globalConfig)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go

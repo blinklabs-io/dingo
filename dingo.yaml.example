@@ -409,6 +409,30 @@ genesisBootstrap:
   # 0 uses the peer-governor default.
   promotionMinDiversityGroups: 0
 
+# Midnight indexer configuration
+# Indexing is active only in API storage mode. Setting port to 0 disables
+# the Midnight gRPC server while leaving indexing eligible to run.
+# CLI: --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Address and policy fields are YAML only.
+midnight:
+  # gRPC listen port
+  port: 50051
+  # gRPC listen address
+  host: "0.0.0.0"
+  # Midnight network constants. Known network defaults are applied when
+  # available; set these explicitly for custom networks or overrides.
+  cnightPolicyId: ""
+  cnightAssetName: ""
+  mappingValidatorAddress: ""
+  authTokenAssetName: ""
+  committeeCandidateAddress: ""
+  technicalCommitteeAddress: ""
+  technicalCommitteePolicyId: ""
+  councilAddress: ""
+  councilPolicyId: ""
+  permissionedCandidatePolicy: ""
+
 # Cache configuration for tiered CBOR cache system
 # This controls the in-memory caching of UTxO and transaction CBOR data
 cache:

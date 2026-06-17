@@ -276,6 +276,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
 		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
+		"midnight_indexing", storageMode.IsAPI(),
+		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
 	d, err := dingo.New(
@@ -318,6 +320,20 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 						AllowPrivateAddresses,
 				},
 			),
+			dingo.WithMidnightConfig(dingo.MidnightConfig{
+				Port:                        cfg.Midnight.Port,
+				Host:                        cfg.Midnight.Host,
+				CNightPolicyID:              cfg.Midnight.CNightPolicyID,
+				CNightAssetName:             cfg.Midnight.CNightAssetName,
+				MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
+				AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
+				CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
+				TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,
+				TechnicalCommitteePolicyID:  cfg.Midnight.TechnicalCommitteePolicyID,
+				CouncilAddress:              cfg.Midnight.CouncilAddress,
+				CouncilPolicyID:             cfg.Midnight.CouncilPolicyID,
+				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
+			}),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithStartEra(string(cfg.StartEra)),

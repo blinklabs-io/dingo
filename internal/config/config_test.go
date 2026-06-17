@@ -26,6 +26,7 @@ import (
 )
 
 func resetGlobalConfig() {
+	midnightYAMLFields = nil
 	globalConfig = &Config{
 		// MempoolCapacity left as the zero sentinel; LoadConfig fills
 		// it in from RunMode after CLI/env/YAML processing.
@@ -62,6 +63,7 @@ func resetGlobalConfig() {
 		BackfillBatchSize:           100,
 		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
 		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		Midnight:                    DefaultMidnightConfig(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -102,6 +104,19 @@ genesisBootstrap:
   enabled: false
   windowSlots: 4321
   promotionMinDiversityGroups: 4
+midnight:
+  port: 50052
+  host: "127.0.0.1"
+  cnightPolicyId: "policy1"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "policy_technical"
+  councilAddress: "addr_council"
+  councilPolicyId: "policy_council"
+  permissionedCandidatePolicy: "policy_permissioned"
 mithril:
   enabled: false
   aggregatorUrl: "https://mithril.example.net"
@@ -161,7 +176,21 @@ mithril:
 			WindowSlots:                 4321,
 			PromotionMinDiversityGroups: 4,
 		},
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		HistoryExpiry: DefaultHistoryExpiryConfig(),
+		Midnight: MidnightConfig{
+			Port:                        50052,
+			Host:                        "127.0.0.1",
+			CNightPolicyID:              "policy1",
+			CNightAssetName:             "434e49474854",
+			MappingValidatorAddress:     "addr_mapping",
+			AuthTokenAssetName:          "auth",
+			CommitteeCandidateAddress:   "addr_candidate",
+			TechnicalCommitteeAddress:   "addr_technical",
+			TechnicalCommitteePolicyID:  "policy_technical",
+			CouncilAddress:              "addr_council",
+			CouncilPolicyID:             "policy_council",
+			PermissionedCandidatePolicy: "policy_permissioned",
+		},
 		ForgeSyncToleranceSlots:     321,
 		ForgeStaleGapThresholdSlots: 654,
 		Mithril: MithrilConfig{
@@ -199,39 +228,45 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:             1048576,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
-		BindAddr:                    "0.0.0.0",
-		CardanoConfig:               "", // Resolved by consumers using cfg.Network
-		DatabasePath:                ".dingo",
-		SocketPath:                  "dingo.socket",
-		IntersectTip:                false,
-		ValidateHistorical:          false,
-		Network:                     "preview",
-		MetricsPort:                 12798,
-		PrivateBindAddr:             "127.0.0.1",
-		PrivatePort:                 3002,
-		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
-		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
-		Topology:                    "",
-		TlsCertFilePath:             "",
-		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
-		RunMode:                     RunModeServe,
-		StartEra:                    StartEraDefault,
-		ImmutableDbPath:             "",
-		ShutdownTimeout:             DefaultShutdownTimeout,
-		LedgerCatchupTimeout:        DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:             5,
-		DatabaseQueueSize:           50,
-		BackfillBatchSize:           100,
-		GenesisBootstrap:            DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:               DefaultHistoryExpiryConfig(),
+		MempoolCapacity:      1048576,
+		EvictionWatermark:    0.90,
+		RejectionWatermark:   0.95,
+		BindAddr:             "0.0.0.0",
+		CardanoConfig:        "", // Resolved by consumers using cfg.Network
+		DatabasePath:         ".dingo",
+		SocketPath:           "dingo.socket",
+		IntersectTip:         false,
+		ValidateHistorical:   false,
+		Network:              "preview",
+		MetricsPort:          12798,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          3002,
+		RelayPort:            3001,
+		UtxorpcPort:          9090,
+		CORSAllowedOrigins:   []string{"*"},
+		BlockfrostPort:       3000,
+		MeshPort:             8080,
+		Topology:             "",
+		TlsCertFilePath:      "",
+		TlsKeyFilePath:       "",
+		BlobPlugin:           DefaultBlobPlugin,
+		MetadataPlugin:       DefaultMetadataPlugin,
+		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		BackfillBatchSize:    100,
+		GenesisBootstrap:     DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
+		Midnight: func() MidnightConfig {
+			m := midnightNetworkDefaults["preview"]
+			m.Port = DefaultMidnightConfig().Port
+			m.Host = DefaultMidnightConfig().Host
+			return m
+		}(),
 		ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: DefaultForgeStaleGapThresholdSlots,
 		Mithril: MithrilConfig{
@@ -968,6 +1003,200 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 		t.Errorf(
 			"expected MeshPort default to be 8080, got %d",
 			cfg.MeshPort,
+		)
+	}
+}
+
+func TestLoad_MidnightConfig(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+midnight:
+  port: 50060
+  host: "127.0.0.2"
+  cnightPolicyId: "cnight-policy"
+  cnightAssetName: "434e49474854"
+  mappingValidatorAddress: "addr_mapping"
+  authTokenAssetName: "auth-token"
+  committeeCandidateAddress: "addr_candidate"
+  technicalCommitteeAddress: "addr_technical"
+  technicalCommitteePolicyId: "technical-policy"
+  councilAddress: "addr_council"
+  councilPolicyId: "council-policy"
+  permissionedCandidatePolicy: "permissioned-policy"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	expected := MidnightConfig{
+		Port:                        50060,
+		Host:                        "127.0.0.2",
+		CNightPolicyID:              "cnight-policy",
+		CNightAssetName:             "434e49474854",
+		MappingValidatorAddress:     "addr_mapping",
+		AuthTokenAssetName:          "auth-token",
+		CommitteeCandidateAddress:   "addr_candidate",
+		TechnicalCommitteeAddress:   "addr_technical",
+		TechnicalCommitteePolicyID:  "technical-policy",
+		CouncilAddress:              "addr_council",
+		CouncilPolicyID:             "council-policy",
+		PermissionedCandidatePolicy: "permissioned-policy",
+	}
+	if cfg.Midnight != expected {
+		t.Fatalf(
+			"expected Midnight config %+v, got %+v",
+			expected,
+			cfg.Midnight,
+		)
+	}
+}
+
+func TestLoad_MidnightEnvOverridesYAML(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_PORT", "50070")
+	t.Setenv("DINGO_MIDNIGHT_HOST", "127.0.0.3")
+	yamlContent := `
+midnight:
+  port: 50060
+  host: "127.0.0.2"
+network: "preview"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight-env.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Midnight.Port != 50070 {
+		t.Fatalf("expected env midnight port 50070, got %d", cfg.Midnight.Port)
+	}
+	if cfg.Midnight.Host != "127.0.0.3" {
+		t.Fatalf("expected env midnight host 127.0.0.3, got %q", cfg.Midnight.Host)
+	}
+}
+
+func TestLoad_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_MIDNIGHT_CNIGHT_POLICY_ID", "env-policy")
+	t.Setenv("DINGO_MIDNIGHT_MAPPING_VALIDATOR_ADDRESS", "env-address")
+	yamlContent := `
+midnight:
+  cnightPolicyId: "yaml-policy"
+  mappingValidatorAddress: "yaml-address"
+network: "preprod"
+`
+
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-midnight-yaml-only.yaml")
+
+	err := os.WriteFile(tmpFile, []byte(yamlContent), 0644)
+	if err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if cfg.Midnight.CNightPolicyID != "yaml-policy" {
+		t.Fatalf(
+			"expected YAML cnight policy to win, got %q",
+			cfg.Midnight.CNightPolicyID,
+		)
+	}
+	if cfg.Midnight.MappingValidatorAddress != "yaml-address" {
+		t.Fatalf(
+			"expected YAML mapping validator address to win, got %q",
+			cfg.Midnight.MappingValidatorAddress,
+		)
+	}
+}
+
+func TestLoad_MidnightNetworkDefaults(t *testing.T) {
+	tests := []struct {
+		network  string
+		expected MidnightConfig
+	}{
+		{
+			network:  "mainnet",
+			expected: midnightNetworkDefaults["mainnet"],
+		},
+		{
+			network:  "preview",
+			expected: midnightNetworkDefaults["preview"],
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.network, func(t *testing.T) {
+			resetGlobalConfig()
+			yamlContent := "network: \"" + tc.network + "\"\n"
+			tmpDir := t.TempDir()
+			tmpFile := filepath.Join(tmpDir, "dingo.yaml")
+			if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := LoadConfig(tmpFile)
+			if err != nil {
+				t.Fatalf("load config: %v", err)
+			}
+			got := cfg.Midnight
+			// Port and Host come from DefaultMidnightConfig, not network defaults.
+			got.Port = 0
+			got.Host = ""
+			want := tc.expected
+			want.Port = 0
+			want.Host = ""
+			if got != want {
+				t.Fatalf("network %q: expected %+v, got %+v", tc.network, want, got)
+			}
+		})
+	}
+}
+
+func TestLoad_MidnightExplicitOverridesNetworkDefault(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+network: "preview"
+midnight:
+  cnightPolicyId: "explicit-override"
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if cfg.Midnight.CNightPolicyID != "explicit-override" {
+		t.Fatalf("expected explicit override, got %q", cfg.Midnight.CNightPolicyID)
+	}
+	// Other fields should still get the network default.
+	if cfg.Midnight.CouncilPolicyID != midnightNetworkDefaults["preview"].CouncilPolicyID {
+		t.Fatalf(
+			"expected network default for CouncilPolicyID, got %q",
+			cfg.Midnight.CouncilPolicyID,
 		)
 	}
 }
