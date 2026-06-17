@@ -25,7 +25,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
-	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -185,8 +184,8 @@ func TestHandleConnectionClosedEventClearsUpstreamTipWhenActiveUnavailable(
 			ls.syncUpstreamTipSlot.Store(114220800)
 
 			ls.handleConnectionClosedEvent(event.NewEvent(
-				connmanager.ConnectionClosedEventType,
-				connmanager.ConnectionClosedEvent{
+				ConnectionClosedEventType,
+				ConnectionClosedEvent{
 					ConnectionId: closedConnId,
 				},
 			))

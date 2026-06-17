@@ -641,6 +641,29 @@ func (n *Node) Run(ctx context.Context) error {
 		connmanager.ConnectionRecycleRequestedEventType,
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
+	// Translate ledger-owned recycle events to connmanager recycle events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		ledger.ConnectionRecycleRequestedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				connmanager.ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					connmanager.ConnectionRecycleRequestedEventType,
+					connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       e.Reason,
+						// ConnKey is intentionally omitted: HandleConnectionRecycleRequestedEvent
+						// closes the connection by ConnectionId alone and never reads ConnKey.
+					},
+				),
+			)
+		},
+	)
 	n.ouroboros.ConnManager = n.connManager
 	// Subscribe ouroboros to chainsync resync events from the
 	// ledger. This replaces the previous ChainsyncResyncFunc
@@ -653,6 +676,27 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		connmanager.ConnectionClosedEventType,
 		n.ouroboros.HandleConnClosedEvent,
+	)
+	// Translate connmanager connection-closed events to ledger-owned events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				ledger.ConnectionClosedEventType,
+				event.NewEvent(
+					ledger.ConnectionClosedEventType,
+					ledger.ConnectionClosedEvent{
+						ConnectionId: e.ConnectionId,
+						Error:        e.Error,
+					},
+				),
+			)
+		},
 	)
 	n.eventBus.SubscribeFunc(
 		connmanager.InboundConnectionEventType,
