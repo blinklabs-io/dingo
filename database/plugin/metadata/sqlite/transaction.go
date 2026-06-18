@@ -4284,9 +4284,13 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 
 		account := &models.Account{
 			StakingKey: stakerBytes,
-			Pool:       poolBytes,
-			Active:     true,
-			AddedSlot:  0,
+			// Shelley genesis staking section encodes stake credentials as
+			// raw 28-byte hashes with no type metadata. All Shelley-era
+			// genesis stake credentials are key-hash by protocol design.
+			CredentialTag: 0,
+			Pool:          poolBytes,
+			Active:        true,
+			AddedSlot:     0,
 		}
 		// DoUpdates intentionally omits added_slot: RestoreAccountStateAtSlot
 		// selects rows by `added_slot > rollback_slot`, so resetting a

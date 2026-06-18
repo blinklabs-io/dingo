@@ -1478,3 +1478,61 @@ func TestRollbackConcurrentUtxoSpend(t *testing.T) {
 		"UTxO should be spent by tx2",
 	)
 }
+
+// TestRollbackRewardDeltaIsCredentialTagAware verifies that
+// DeleteAccountRewardsAfterSlot matches AccountRewardDelta rows to accounts
+// by the composite (credential_tag, staking_key) key. A credit delta for
+// tag=1 must adjust only the script-hash account, not the key-hash account
+// that shares the same 28-byte hash.
+func TestRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0xD1}, 28)
+	const baseReward = uint64(1_000_000)
+	const creditAmount = uint64(500_000)
+	const slot = uint64(200)
+
+	// Two accounts sharing the same hash, differing only in credential_tag.
+	keyAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        types.Uint64(baseReward),
+	}
+	scriptAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        types.Uint64(baseReward),
+	}
+	require.NoError(t, store.DB().Create(keyAccount).Error)
+	require.NoError(t, store.DB().Create(scriptAccount).Error)
+
+	// Record a reward credit only for the script-hash account at slot 200.
+	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+
+	// Verify only the script-hash account received the credit.
+	keyBefore, err := store.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), keyBefore.Reward, "key-hash account must not be affected by script-hash credit")
+
+	scriptBefore, err := store.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward+creditAmount), scriptBefore.Reward, "script-hash account must have received credit")
+
+	// Roll back past the credit slot.
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(slot-1, nil))
+
+	// Key-hash account reward must be unchanged.
+	keyAfter, err := store.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), keyAfter.Reward, "key-hash account reward must be unchanged after rollback")
+
+	// Script-hash account reward must be restored to base.
+	scriptAfter, err := store.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), scriptAfter.Reward, "script-hash account reward must be restored to base after rollback")
+}
