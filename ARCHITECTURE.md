@@ -412,7 +412,8 @@ dingo/
 │   ├── peer_tip.go      # Peer tip tracking
 │   └── vrf.go           # VRF verification
 ├── chainsync/           # Block synchronization protocol state
-│   └── chainsync.go     # Multi-client sync state, stall detection
+│   ├── chainsync.go     # Multi-client sync state, stall detection
+│   └── strategy.go      # Configurable multi-active header-sync strategy
 ├── connmanager/         # Network connection lifecycle
 │   ├── connection_manager.go
 │   └── event.go         # Connection events
@@ -1029,6 +1030,16 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Cooldown to prevent rapid reconnection flapping
 - Plateau detection: if the local tip stops advancing while peers are ahead, the active chainsync connection is recycled
 - Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs; when no active chainsync client remains, ledger clears its cached upstream tip so slot-clock epoch work does not run against a disconnected tip
+
+#### Header-Sync Strategy
+
+A configurable strategy (`chainsync.HeaderSyncStrategy`, `chainsync/strategy.go`) decides which eligible peer is permitted to drive ledger ingress when several peers offer valid next headers. The Ouroboros roll-forward handler runs cross-peer deduplication and fork detection first, then calls `State.ShouldPublishHeader` to apply the strategy before publishing a `ChainsyncEvent` into the ledger:
+
+- **primary** (default) — a single active peer drives ingress; new headers from any eligible peer publish, and the active peer replays a header first observed from another peer so it stays the contiguous driver. Stall detection promotes a replacement active peer, so a stalled or disconnected peer does not strand ingestion. This preserves the behavior from before the strategy existed.
+- **parallel** — every eligible peer may supply headers concurrently. The first peer to report a header drives it; duplicates from other peers are deduplicated before ledger ingress (no replay), so a header never enters ledger processing twice.
+- **round-robin** — a single ingress-driving peer that rotates across the eligible peers; the rotation advances on the stall-check cadence (`AdvanceHeaderSyncRotation`).
+
+Under every strategy, all eligible peers still update tip tracking, observed-header history (for blockfetch peer discovery), and fork detection, so divergent peer headers produce fork/candidate-chain handling rather than silent suppression. The strategy is set via `chainsync.strategy` (YAML), `DINGO_CHAINSYNC_STRATEGY` (env), or `--chainsync-strategy` (CLI).
 
 ## Peer Governance
 

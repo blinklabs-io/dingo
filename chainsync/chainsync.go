@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"sync"
 	"time"
@@ -132,6 +133,10 @@ type TrackedClient struct {
 type Config struct {
 	MaxClients   int
 	StallTimeout time.Duration
+	// HeaderSyncStrategy selects how headers from multiple eligible peers
+	// drive ledger ingress. The zero value is HeaderSyncStrategyPrimary,
+	// which preserves single-active behavior.
+	HeaderSyncStrategy HeaderSyncStrategy
 	// SeenHeadersRetention overrides the retention window, in slots, for
 	// the header deduplication cache. When zero, the retention window is
 	// derived from the ledger's current stability window (falling back to
@@ -186,6 +191,9 @@ type State struct {
 	trackedClients     map[ouroboros.ConnectionId]*TrackedClient
 	activeClientConnId *ouroboros.ConnectionId
 	clientConnIdMutex  sync.RWMutex
+	// roundRobinIndex is the rotation cursor for the round-robin header-sync
+	// strategy. Guarded by clientConnIdMutex.
+	roundRobinIndex uint64
 
 	// Header deduplication: maps slot -> list of distinct
 	// block hashes seen at that slot
@@ -949,11 +957,18 @@ func trackedConnIdsEqual(
 	a,
 	b ouroboros.ConnectionId,
 ) bool {
-	if a.LocalAddr == nil && a.RemoteAddr == nil {
-		return b.LocalAddr == nil && b.RemoteAddr == nil
-	}
-	if b.LocalAddr == nil && b.RemoteAddr == nil {
-		return false
+	// Compare each address individually rather than via ConnectionId.String():
+	// that method dereferences LocalAddr/RemoteAddr unconditionally and panics
+	// when either is nil (e.g. a partial-nil tracked connection id).
+	return sameTrackedNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameTrackedNetAddr(a.RemoteAddr, b.RemoteAddr)
+}
+
+// sameTrackedNetAddr compares two addresses by string form, treating nil as
+// equal only to nil.
+func sameTrackedNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
 	return a.String() == b.String()
 }

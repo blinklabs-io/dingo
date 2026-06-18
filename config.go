@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
@@ -200,6 +201,7 @@ type Config struct {
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
+	chainsyncStrategy     chainsync.HeaderSyncStrategy
 	// Mesh API port (0 = disabled)
 	meshPort uint
 	// Storage mode: "core" or "api"
@@ -977,6 +979,18 @@ func WithChainsyncStallTimeout(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.chainsyncStallTimeout = timeout
+	}
+}
+
+// WithChainsyncHeaderStrategy selects how headers from multiple
+// eligible chainsync peers drive ledger ingress. The default is
+// chainsync.HeaderSyncStrategyPrimary (single active peer with
+// failover).
+func WithChainsyncHeaderStrategy(
+	strategy chainsync.HeaderSyncStrategy,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.chainsyncStrategy = strategy
 	}
 }
 
