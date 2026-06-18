@@ -65,9 +65,18 @@ func PoolRewardAccount(
 		if len(rewardAddrBytes) != 29 {
 			return 0, nil, fmt.Errorf("pool cert reward_account: got %d bytes, want 29", len(rewardAddrBytes))
 		}
-		// Header high nibble: 0xF = script credential, otherwise key.
-		if (rewardAddrBytes[0] & 0xF0) == 0xF0 {
+		// High nibble 0xE = key-hash reward address, 0xF = script-hash reward address.
+		// Any other value is invalid for a pool registration reward account.
+		switch rewardAddrBytes[0] & 0xF0 {
+		case 0xE0:
+			credentialTag = 0
+		case 0xF0:
 			credentialTag = 1
+		default:
+			return 0, nil, fmt.Errorf(
+				"pool cert reward_account: unexpected address header 0x%02X",
+				rewardAddrBytes[0],
+			)
 		}
 		return credentialTag, rewardAddrBytes[1:], nil // pure 28-byte hash
 	}

@@ -330,7 +330,7 @@ func TestBatchFetchCerts_SameSlotTiebreakByBlockIndex(t *testing.T) {
 		AddedSlot:     slot,
 	}).Error)
 
-	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
+	cache, err := batchFetchCerts(db, []models.StakeCredentialRef{{Tag: 0, Key: stakeKey}}, slot)
 	require.NoError(t, err)
 
 	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]
@@ -425,7 +425,7 @@ func TestBatchFetchCerts_CrossTableTiebreakByBlockIndex(t *testing.T) {
 		AddedSlot:     slot,
 	}).Error)
 
-	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
+	cache, err := batchFetchCerts(db, []models.StakeCredentialRef{{Tag: 0, Key: stakeKey}}, slot)
 	require.NoError(t, err)
 
 	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]

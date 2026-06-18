@@ -221,9 +221,9 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 		return nil, err
 	}
 	type row struct {
-		Drep     []byte
-		DrepType uint64
-		Stake    uint64
+		Drep          []byte
+		CredentialTag uint64
+		Stake         uint64
 	}
 	hashes := make([][]byte, len(drepCredentials))
 	requested := make(map[string]struct{}, len(drepCredentials))
@@ -233,7 +233,7 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 	}
 	var rows []row
 	if err := db.Raw(`
-		SELECT a.drep AS drep, a.drep_type AS drep_type,
+		SELECT a.drep AS drep, a.drep_type AS credential_tag,
 			   COALESCE(SUM(
 				   COALESCE(u.utxo_sum, 0)
 				   + COALESCE(CAST(a.reward AS BIGINT), 0)
@@ -259,7 +259,13 @@ func (d *MetadataStorePostgres) GetDRepVotingPowerBatch(
 		return nil, fmt.Errorf("get drep voting power batch: %w", err)
 	}
 	for _, r := range rows {
-		ref := models.StakeCredentialRef{Tag: uint8(r.DrepType), Key: r.Drep} //nolint:gosec
+		// account.drep_type 0=key and 1=script align with credential_tag values
+		// by protocol spec; types ≥2 (ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE)
+		// carry no credential hash and are never in the requested map.
+		if r.CredentialTag > 1 {
+			continue
+		}
+		ref := models.StakeCredentialRef{Tag: uint8(r.CredentialTag), Key: r.Drep}
 		if _, ok := requested[ref.MapKey()]; !ok {
 			continue
 		}
@@ -454,20 +460,43 @@ func drepCertCacheKey(credentialTag uint8, credential []byte) string {
 	return string([]byte{credentialTag}) + string(credential)
 }
 
-// batchFetchDrepCerts fetches all relevant certificates for the given DRep credentials
+// batchFetchDrepCerts fetches all relevant certificates for the given DRep credential refs
 // at or before the given slot.
+//
+// The SQL IN clause filters on credential hash only (not credential_tag) for
+// simplicity; the cache is post-filtered to entries whose composite (tag, hash)
+// key matches one of the input refs, so credentials sharing a 28-byte hash but
+// differing in tag are kept isolated.
 func batchFetchDrepCerts(
 	db *gorm.DB,
-	credentials [][]byte,
+	refs []models.StakeCredentialRef,
 	slot uint64,
 ) (*drepCertCache, error) {
 	cache := &drepCertCache{
-		registration:   make(map[string]drepCertRecord, len(credentials)),
-		hasReg:         make(map[string]bool, len(credentials)),
-		deregistration: make(map[string]drepCertRecord, len(credentials)),
-		hasDereg:       make(map[string]bool, len(credentials)),
-		update:         make(map[string]drepCertRecord, len(credentials)),
-		hasUpdate:      make(map[string]bool, len(credentials)),
+		registration:   make(map[string]drepCertRecord, len(refs)),
+		hasReg:         make(map[string]bool, len(refs)),
+		deregistration: make(map[string]drepCertRecord, len(refs)),
+		hasDereg:       make(map[string]bool, len(refs)),
+		update:         make(map[string]drepCertRecord, len(refs)),
+		hasUpdate:      make(map[string]bool, len(refs)),
+	}
+
+	// Build unique credential list for the SQL IN clause and a requested
+	// set (by composite cache key) for post-filtering.
+	requested := make(map[string]struct{}, len(refs))
+	seenHash := make(map[string]struct{}, len(refs))
+	var credentials [][]byte
+	for _, ref := range refs {
+		requested[drepCertCacheKey(ref.Tag, ref.Key)] = struct{}{}
+		h := string(ref.Key)
+		if _, ok := seenHash[h]; !ok {
+			seenHash[h] = struct{}{}
+			credentials = append(credentials, ref.Key)
+		}
+	}
+
+	if len(credentials) == 0 {
+		return cache, nil
 	}
 
 	// Fetch registrations
@@ -583,6 +612,26 @@ func batchFetchDrepCerts(
 		}
 	}
 
+	// Remove entries for DRep credential variants not present in the input refs.
+	for key := range cache.registration {
+		if _, ok := requested[key]; !ok {
+			delete(cache.registration, key)
+			delete(cache.hasReg, key)
+		}
+	}
+	for key := range cache.deregistration {
+		if _, ok := requested[key]; !ok {
+			delete(cache.deregistration, key)
+			delete(cache.hasDereg, key)
+		}
+	}
+	for key := range cache.update {
+		if _, ok := requested[key]; !ok {
+			delete(cache.update, key)
+			delete(cache.hasUpdate, key)
+		}
+	}
+
 	return cache, nil
 }
 
@@ -635,14 +684,14 @@ func (d *MetadataStorePostgres) RestoreDrepStateAtSlot(
 		return nil
 	}
 
-	// Extract credentials for batch fetching
-	credentials := make([][]byte, len(drepsToRestore))
+	// Extract credential refs for batch fetching
+	drepRefs := make([]models.StakeCredentialRef, len(drepsToRestore))
 	for i, drep := range drepsToRestore {
-		credentials[i] = drep.Credential
+		drepRefs[i] = models.NewStakeCredentialRef(drep.CredentialTag, drep.Credential)
 	}
 
 	// Batch-fetch all certificates for all affected DReps
-	cache, err := batchFetchDrepCerts(db, credentials, slot)
+	cache, err := batchFetchDrepCerts(db, drepRefs, slot)
 	if err != nil {
 		return err
 	}

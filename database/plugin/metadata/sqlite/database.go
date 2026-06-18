@@ -498,6 +498,13 @@ func (d *MetadataStoreSqlite) Start() error {
 			"governance vote credential tag index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateAccountRewardDeltaCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"account reward delta credential tag index migration failed: %w", err,
+		)
+	}
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
 		"creating table",

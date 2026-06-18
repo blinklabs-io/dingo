@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -259,6 +260,70 @@ func TestSqliteGetDRepVotingPowerByTypeUsesStakeCredentialTag(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(330), powers[models.DrepTypeAlwaysAbstain])
+}
+
+// TestSqliteGetDRepVotingPowerCrossTagIsolation verifies that key-hash and
+// script-hash DReps sharing the same 28-byte credential hash are treated as
+// independent identities. GetDRepVotingPower and GetDRepVotingPowerBatch must
+// only aggregate stake delegated to the exact (tag, hash) pair requested.
+func TestSqliteGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	// One 28-byte hash, two DRep identities.
+	sharedHash := bytes.Repeat([]byte{0x01}, 28)
+
+	// Register both DReps.
+	require.NoError(t, store.SetDrep(0, sharedHash, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(1, sharedHash, 1000, "", nil, true, nil))
+
+	// Account delegated to key-hash DRep (tag=0).
+	keyStake := []byte("key_stake_123456789012345678901234567")
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    keyStake,
+		CredentialTag: 0,
+		Drep:          sharedHash,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Reward:        100,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+
+	// Account delegated to script-hash DRep (tag=1).
+	scriptStake := []byte("script_stake_1234567890123456789012345")
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    scriptStake,
+		CredentialTag: 1,
+		Drep:          sharedHash,
+		DrepType:      models.DrepTypeScriptHash,
+		Reward:        200,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+
+	// GetDRepVotingPower for key-hash DRep must only see the key account (100).
+	keyPower, err := store.GetDRepVotingPower(0, sharedHash, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), keyPower, "key-hash DRep power should be 100")
+
+	// GetDRepVotingPower for script-hash DRep must only see the script account (200).
+	scriptPower, err := store.GetDRepVotingPower(1, sharedHash, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(200), scriptPower, "script-hash DRep power should be 200")
+
+	// GetDRepVotingPowerBatch must return correct isolated values for both.
+	powers, err := store.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: sharedHash},
+			{Tag: 1, Key: sharedHash},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), powers[models.StakeCredentialRef{Tag: 0, Key: sharedHash}.MapKey()],
+		"batch: key-hash DRep power should be 100")
+	assert.Equal(t, uint64(200), powers[models.StakeCredentialRef{Tag: 1, Key: sharedHash}.MapKey()],
+		"batch: script-hash DRep power should be 200")
 }
 
 func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {

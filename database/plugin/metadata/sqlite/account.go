@@ -85,13 +85,7 @@ func newAccountCertCache(capacity int) *accountCertCache {
 }
 
 func accountCertCacheKey(credentialTag uint8, stakingKey []byte) string {
-	if credentialTag == 0 {
-		return string(stakingKey)
-	}
-	return models.StakeCredentialRef{
-		Tag: credentialTag,
-		Key: stakingKey,
-	}.MapKey()
+	return models.StakeCredentialRef{Tag: credentialTag, Key: stakingKey}.MapKey()
 }
 
 // updateReg updates the registration if this one is more recent.
@@ -126,21 +120,41 @@ func (c *accountCertCache) updateDrepDelegation(key string, rec certRecord) {
 	}
 }
 
-// batchFetchCerts fetches all relevant certificates for the given staking keys
+// batchFetchCerts fetches all relevant certificates for the given credential refs
 // at or before the given slot. Uses one query per certificate table. Chunks
 // queries to avoid exceeding SQLite bind variable limits.
+//
+// The SQL IN clause filters on staking_key hash only (not credential_tag) for
+// simplicity; the cache is post-filtered to entries whose composite (tag, hash)
+// key matches one of the input refs, so credentials sharing a 28-byte hash but
+// differing in tag are kept isolated.
 func batchFetchCerts(
 	db *gorm.DB,
-	stakingKeys [][]byte,
+	refs []models.StakeCredentialRef,
 	slot uint64,
 ) (*accountCertCache, error) {
-	cache := newAccountCertCache(len(stakingKeys))
+	cache := newAccountCertCache(len(refs))
+
+	// Build unique staking-key list for the SQL IN clause and a requested
+	// set (by composite cache key) for post-filtering.
+	requested := make(map[string]struct{}, len(refs))
+	seenHash := make(map[string]struct{}, len(refs))
+	var stakingKeys [][]byte
+	for _, ref := range refs {
+		requested[accountCertCacheKey(ref.Tag, ref.Key)] = struct{}{}
+		h := string(ref.Key)
+		if _, ok := seenHash[h]; !ok {
+			seenHash[h] = struct{}{}
+			stakingKeys = append(stakingKeys, ref.Key)
+		}
+	}
+
+	if len(stakingKeys) == 0 {
+		return cache, nil
+	}
 
 	// Process staking keys in chunks to avoid SQLite bind variable limits
-	for start := 0; start < len(stakingKeys); start += sqliteBindVarLimit {
-		end := min(start+sqliteBindVarLimit, len(stakingKeys))
-		keyChunk := stakingKeys[start:end]
-
+	for keyChunk := range slices.Chunk(stakingKeys, sqliteBindVarLimit) {
 		// Registration certificates (5 types)
 		if err := batchFetchStakeRegistration(db, keyChunk, slot, cache); err != nil {
 			return nil, err
@@ -178,6 +192,30 @@ func batchFetchCerts(
 		// DRep delegation certificates - VoteDelegation is DRep-only
 		if err := batchFetchVoteDelegation(db, keyChunk, slot, cache); err != nil {
 			return nil, err
+		}
+	}
+
+	// Remove entries for credential variants not present in the input refs.
+	for key := range cache.latestReg {
+		if _, ok := requested[key]; !ok {
+			delete(cache.latestReg, key)
+			delete(cache.hasReg, key)
+		}
+	}
+	for key := range cache.latestDereg {
+		if _, ok := requested[key]; !ok {
+			delete(cache.latestDereg, key)
+			delete(cache.hasDereg, key)
+		}
+	}
+	for key := range cache.poolDelegation {
+		if _, ok := requested[key]; !ok {
+			delete(cache.poolDelegation, key)
+		}
+	}
+	for key := range cache.drepDelegation {
+		if _, ok := requested[key]; !ok {
+			delete(cache.drepDelegation, key)
 		}
 	}
 
@@ -1033,14 +1071,14 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 		return nil
 	}
 
-	// Extract staking keys for batch fetching
-	stakingKeys := make([][]byte, len(accountsToRestore))
+	// Extract credential refs for batch fetching
+	refs := make([]models.StakeCredentialRef, len(accountsToRestore))
 	for i, account := range accountsToRestore {
-		stakingKeys[i] = account.StakingKey
+		refs[i] = models.NewStakeCredentialRef(account.CredentialTag, account.StakingKey)
 	}
 
 	// Batch-fetch all certificates for all affected accounts
-	cache, err := batchFetchCerts(db, stakingKeys, slot)
+	cache, err := batchFetchCerts(db, refs, slot)
 	if err != nil {
 		return err
 	}

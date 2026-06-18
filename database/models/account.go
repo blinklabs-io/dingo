@@ -49,14 +49,7 @@ func DrepTypeFromInt(drepType int) (uint64, error) {
 }
 
 func CredentialTagFromUint(tag uint) (uint8, error) {
-	switch tag {
-	case 0:
-		return 0, nil
-	case 1:
-		return 1, nil
-	default:
-		return 0, fmt.Errorf("unsupported stake credential tag: %d", tag)
-	}
+	return CredentialTagFromUint64(uint64(tag))
 }
 
 func CredentialTagFromUint64(tag uint64) (uint8, error) {
@@ -133,6 +126,37 @@ func MigrateAccountCredentialTagIndex(db *gorm.DB, logger *slog.Logger) error {
 		"idx_account_staking_key",
 	); err != nil {
 		return fmt.Errorf("drop account staking_key index: %w", err)
+	}
+	return nil
+}
+
+// MigrateAccountRewardDeltaCredentialTagIndex drops the legacy unique index on
+// account_reward_delta before AutoMigrate adds credential_tag to it. The old
+// index covers (withdrawal, tx_hash, staking_key); the new one adds
+// credential_tag so key and script reward accounts with the same hash are
+// tracked independently.
+func MigrateAccountRewardDeltaCredentialTagIndex(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&AccountRewardDelta{}) {
+		return nil
+	}
+	// If credential_tag is already present the index has already been migrated.
+	if db.Migrator().HasColumn(&AccountRewardDelta{}, "credential_tag") {
+		return nil
+	}
+	if !db.Migrator().HasIndex(&AccountRewardDelta{}, "idx_account_reward_delta_w_tx_s") {
+		return nil
+	}
+	logger.Info(
+		"dropping legacy account_reward_delta unique index before tag-aware migration",
+	)
+	if err := db.Migrator().DropIndex(
+		&AccountRewardDelta{},
+		"idx_account_reward_delta_w_tx_s",
+	); err != nil {
+		return fmt.Errorf("drop account_reward_delta unique index: %w", err)
 	}
 	return nil
 }
