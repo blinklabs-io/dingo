@@ -138,6 +138,20 @@ func BuildEraParams(cfg *cardano.CardanoNodeConfig, era EraDesc) (hardfork.EraPa
 // EraParams are built via BuildEraParams; the protocol-version range
 // is read directly from EraDesc.MinMajorVersion / MaxMajorVersion.
 func BuildShape(cfg *cardano.CardanoNodeConfig) (hardfork.Shape, error) {
+	return BuildShapeForEras(cfg, Eras)
+}
+
+func BuildShapeWithDijkstra(
+	cfg *cardano.CardanoNodeConfig,
+	enableDijkstra bool,
+) (hardfork.Shape, error) {
+	return BuildShapeForEras(cfg, ActiveEras(enableDijkstra))
+}
+
+func BuildShapeForEras(
+	cfg *cardano.CardanoNodeConfig,
+	eraList []EraDesc,
+) (hardfork.Shape, error) {
 	if cfg == nil {
 		return hardfork.Shape{}, errors.New("eras: nil CardanoNodeConfig")
 	}
@@ -146,8 +160,8 @@ func BuildShape(cfg *cardano.CardanoNodeConfig) (hardfork.Shape, error) {
 		return hardfork.Shape{}, errors.New("eras: Shelley genesis unavailable (required for SystemStart)")
 	}
 
-	entries := make([]hardfork.ShapeEntry, 0, len(Eras))
-	for _, era := range Eras {
+	entries := make([]hardfork.ShapeEntry, 0, len(eraList))
+	for _, era := range eraList {
 		params, err := BuildEraParams(cfg, era)
 		if err != nil {
 			return hardfork.Shape{}, err

@@ -285,8 +285,10 @@ var errUtxoNotFound = errors.New("UTxO not found")
 // mockLedgerState implements lcommon.LedgerState for testing
 // UTxO-aware Byron validation rules.
 type mockLedgerState struct {
-	utxos     map[string]lcommon.Utxo
-	networkId uint
+	utxos                map[string]lcommon.Utxo
+	networkId            uint
+	skipPhase2Validation bool
+	utxoLookups          int
 }
 
 func newMockLedgerState() *mockLedgerState {
@@ -309,6 +311,7 @@ func (m *mockLedgerState) addUtxo(
 func (m *mockLedgerState) UtxoById(
 	input lcommon.TransactionInput,
 ) (lcommon.Utxo, error) {
+	m.utxoLookups++
 	key := fmt.Sprintf("%s#%d", input.Id(), input.Index())
 	utxo, ok := m.utxos[key]
 	if !ok {
@@ -318,6 +321,10 @@ func (m *mockLedgerState) UtxoById(
 }
 
 func (m *mockLedgerState) NetworkId() uint { return m.networkId }
+
+func (m *mockLedgerState) SkipPhase2Validation() bool {
+	return m.skipPhase2Validation
+}
 
 // Stub implementations for the remaining LedgerState
 // interface methods. These are unused by Byron validation.

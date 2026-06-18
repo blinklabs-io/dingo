@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -43,6 +44,14 @@ const sqliteBindVarLimit = 400
 // is effectively unbounded, which performs poorly for API backfill because many
 // bulk INSERT/UPDATE statements have batch-dependent SQL text.
 const sqlitePrepareStmtMaxSize = 1024
+
+// inMemoryDBSeq hands each in-memory store a distinct shared-cache database
+// name. An anonymous "file::memory:?cache=shared" URI resolves to a single
+// process-global database, so every such store would otherwise share one set
+// of tables. A unique name per store keeps connections within a store sharing
+// the same in-memory database while isolating separate stores from each other,
+// which lets tests run in parallel.
+var inMemoryDBSeq atomic.Uint64
 
 // sqliteTxn wraps a gorm transaction and implements types.Txn
 type sqliteTxn struct {
@@ -252,16 +261,29 @@ func (d *MetadataStoreSqlite) Start() error {
 		// from multiple connections. This is needed for tests that
 		// verify concurrent transaction behavior.
 		//
+		// The database name is unique per store so that separate
+		// in-memory stores get separate databases. An anonymous
+		// "file::memory:?cache=shared" URI resolves to one shared
+		// process-global database, which would let independent stores
+		// (e.g. parallel tests) clobber each other's tables.
+		//
 		// Note: cache=shared can cause SQLITE_LOCKED with concurrent
 		// writes, but in-memory databases are only used for testing
 		// where write concurrency is controlled. The production
 		// file-based database uses WAL mode with separate read/write
 		// pools which handles concurrency properly.
+		memName := fmt.Sprintf(
+			"dingo_memdb_%d",
+			inMemoryDBSeq.Add(1),
+		)
 		metadataDb, err = gorm.Open(
 			sqlite.Open(
-				"file::memory:?cache=shared"+
-					"&_pragma=busy_timeout(30000)"+
-					"&_pragma=foreign_keys(1)",
+				fmt.Sprintf(
+					"file:%s?mode=memory&cache=shared"+
+						"&_pragma=busy_timeout(30000)"+
+						"&_pragma=foreign_keys(1)",
+					memName,
+				),
 			),
 			&gorm.Config{
 				Logger:                 d.gormLogger(),
@@ -499,8 +521,13 @@ func (d *MetadataStoreSqlite) Close() error {
 	d.timerMutex.Unlock()
 
 	var errs []error
-	// Close read pool first (if separate from write pool)
+	// Close read pool first (if separate from write pool). Stop the
+	// PreparedStmtDB LRU goroutine first so it does not access the pool
+	// after the underlying sql.DB is closed.
 	if d.readDB != nil && d.readDB != d.db {
+		if ps, ok := d.readDB.ConnPool.(*gorm.PreparedStmtDB); ok {
+			ps.Close()
+		}
 		if readSqlDB, err := d.readDB.DB(); err != nil {
 			errs = append(errs, err)
 		} else {
@@ -511,6 +538,9 @@ func (d *MetadataStoreSqlite) Close() error {
 	}
 	// Close write pool
 	if d.db != nil {
+		if ps, ok := d.db.ConnPool.(*gorm.PreparedStmtDB); ok {
+			ps.Close()
+		}
 		if db, err := d.DB().DB(); err != nil {
 			errs = append(errs, err)
 		} else {

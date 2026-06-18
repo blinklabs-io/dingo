@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"strings"
 	"time"
 
@@ -985,6 +986,17 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			)
 		}
 		tmpTx.ID = existing.ID
+	}
+
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
+			txHash,
+			txn,
+		); err != nil {
+			return fmt.Errorf("apply reward withdrawals for tx %x: %w", txHash, err)
+		}
 	}
 
 	if len(metadataLabels) > 0 {
@@ -2390,6 +2402,40 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	return nil
 }
 
+func (d *MetadataStoreSqlite) applyTransactionRewardWithdrawals(
+	withdrawals map[*lcommon.Address]*big.Int,
+	slot uint64,
+	txHash []byte,
+	txn types.Txn,
+) error {
+	for addr, amount := range withdrawals {
+		if addr == nil || amount == nil || amount.Sign() == 0 {
+			continue
+		}
+		if amount.Sign() < 0 || !amount.IsUint64() {
+			return fmt.Errorf(
+				"invalid reward withdrawal amount %s",
+				amount.String(),
+			)
+		}
+		zeroHash := lcommon.Blake2b224{}
+		stakeKeyHash := addr.StakeKeyHash()
+		if stakeKeyHash == zeroHash {
+			return errors.New("reward withdrawal missing stake credential")
+		}
+		if err := d.ApplyAccountRewardWithdrawal(
+			stakeKeyHash.Bytes(),
+			amount.Uint64(),
+			slot,
+			txHash,
+			txn,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetTransactionBatched performs the same logical work as SetTransaction but
 // accumulates all per-item metadata rows into acc for later bulk flushing via
 // FlushBatch.  The transaction record itself is still written immediately so
@@ -2486,25 +2532,47 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 	// Clear Outputs on tmpTx so the upsert doesn't try to create them.
 	tmpTx.Outputs = nil
 
-	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "hash"}},
-		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
-		),
-	}).Create(tmpTx)
-	needsIdFetch := tmpTx.ID == 0
-
-	if result.Error != nil {
+	// Fixed-shape upsert. The common path is a single INSERT ... ON CONFLICT
+	// DO NOTHING RETURNING id: a returned id means a fresh insert. On conflict
+	// the row already exists (a retry), so preserve the prior DO UPDATE
+	// behavior on the mutable columns, refetch the id, and flag needsIdFetch so
+	// previously flushed child rows are deleted before re-insert.
+	insertSQL := buildBulkInsertSQL(
+		"transaction",
+		transactionCols,
+		`ON CONFLICT ("hash") DO NOTHING RETURNING id`,
+		1,
+	)
+	id, inserted, err := insertReturningID(
+		db, insertSQL, appendTransactionRow(nil, tmpTx),
+	)
+	if err != nil {
 		return fmt.Errorf(
 			"create transaction (batched) at slot %d, block %x, txHash %x, txIndex %d: %w",
 			point.Slot,
 			point.Hash,
 			txHash,
 			idx,
-			result.Error,
+			err,
 		)
 	}
-	if needsIdFetch {
+	needsIdFetch := !inserted
+	if inserted {
+		tmpTx.ID = id
+	} else {
+		if _, err := execRawOnConn(
+			db,
+			`UPDATE "transaction" SET "block_hash" = ?, "block_index" = ?, `+
+				`"slot" = ? WHERE "hash" = ?`,
+			[]any{tmpTx.BlockHash, tmpTx.BlockIndex, tmpTx.Slot, txHash},
+		); err != nil {
+			return fmt.Errorf(
+				"update existing transaction (batched) at slot %d, txHash %x: %w",
+				point.Slot,
+				txHash,
+				err,
+			)
+		}
 		var existing struct{ ID uint }
 		if err := db.Model(&models.Transaction{}).
 			Select("id").
@@ -2516,6 +2584,21 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			)
 		}
 		tmpTx.ID = existing.ID
+	}
+
+	if tx.IsValid() {
+		if err := d.applyTransactionRewardWithdrawals(
+			tx.Withdrawals(),
+			point.Slot,
+			txHash,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"apply reward withdrawals for tx %x: %w",
+				txHash,
+				err,
+			)
+		}
 	}
 
 	// metadata labels – small, write immediately just like SetTransaction.

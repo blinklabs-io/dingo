@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,8 +46,11 @@ import (
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 )
 
 func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
@@ -950,6 +954,20 @@ func newNonceReadyTestLedgerState(
 	}
 }
 
+func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newNonceReadyTestConfig(t),
+		},
+		currentEra: eras.ShelleyEraDesc,
+	}
+	ls.syncUpstreamTipSlot.Store(1000)
+
+	assert.False(t, ls.isNearTip(993), "gap above 3k/f should be catch-up")
+	assert.True(t, ls.isNearTip(994), "gap equal to 3k/f should be near tip")
+	assert.True(t, ls.isNearTip(1001), "local tip beyond upstream is near tip")
+}
+
 func TestNextEpochNonceReadyCutoffSlot(t *testing.T) {
 	byronGenesisJSON := `{
 		"protocolConsts": {
@@ -1822,6 +1840,111 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTransitionToEraTranslatesConwayGovernanceWhenProtocolAlreadyDijkstra(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+
+	fee := uint(1234)
+	action := &conway.ConwayParameterChangeGovAction{
+		Type: uint(lcommon.GovActionTypeParameterChange),
+		ParamUpdate: conway.ConwayProtocolParameterUpdate{
+			MinFeeA: &fee,
+		},
+		PolicyHash: []byte{0xaa, 0xbb},
+	}
+	actionCbor, err := cbor.Encode(action)
+	require.NoError(t, err)
+	ratifiedEpoch := uint64(10)
+	ratifiedSlot := uint64(200)
+	proposal := &models.GovernanceProposal{
+		TxHash:        bytes.Repeat([]byte{0xe1}, 32),
+		ActionIndex:   0,
+		ActionType:    uint8(lcommon.GovActionTypeParameterChange),
+		ProposedEpoch: 9,
+		ExpiresEpoch:  20,
+		GovActionCbor: actionCbor,
+		RatifiedEpoch: &ratifiedEpoch,
+		RatifiedSlot:  &ratifiedSlot,
+		AddedSlot:     100,
+		AnchorURL:     "https://example.invalid/transition-translate",
+		AnchorHash:    bytes.Repeat([]byte{0xe2}, 32),
+		ReturnAddress: bytes.Repeat([]byte{0xe3}, 29),
+	}
+	require.NoError(t, db.SetGovernanceProposal(proposal, nil))
+
+	newCborRat := func(num, denom int64) *cbor.Rat {
+		return &cbor.Rat{Rat: big.NewRat(num, denom)}
+	}
+	newRat := func(num, denom int64) cbor.Rat {
+		return cbor.Rat{Rat: big.NewRat(num, denom)}
+	}
+	currentPParams := &conway.ConwayProtocolParameters{
+		A0:  newCborRat(0, 1),
+		Rho: newCborRat(0, 1),
+		Tau: newCborRat(0, 1),
+		ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+			Major: dijkstra.MinProtocolVersionDijkstra,
+		},
+		ExecutionCosts: lcommon.ExUnitPrice{
+			MemPrice:  newCborRat(1, 1),
+			StepPrice: newCborRat(1, 1),
+		},
+		PoolVotingThresholds: conway.PoolVotingThresholds{
+			MotionNoConfidence:    newRat(1, 2),
+			CommitteeNormal:       newRat(1, 2),
+			CommitteeNoConfidence: newRat(1, 2),
+			HardForkInitiation:    newRat(1, 2),
+			PpSecurityGroup:       newRat(1, 2),
+		},
+		DRepVotingThresholds: conway.DRepVotingThresholds{
+			MotionNoConfidence:    newRat(1, 2),
+			CommitteeNormal:       newRat(1, 2),
+			CommitteeNoConfidence: newRat(1, 2),
+			UpdateToConstitution:  newRat(1, 2),
+			HardForkInitiation:    newRat(1, 2),
+			PpNetworkGroup:        newRat(1, 2),
+			PpEconomicGroup:       newRat(1, 2),
+			PpTechnicalGroup:      newRat(1, 2),
+			PpGovGroup:            newRat(1, 2),
+			TreasuryWithdrawal:    newRat(1, 2),
+		},
+		MinFeeRefScriptCostPerByte: newCborRat(1, 1),
+	}
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ConwayEraDesc,
+		activeEras:     eras.ErasWithDijkstra,
+		currentPParams: currentPParams,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	txn := db.Transaction(true)
+	err = txn.Do(func(txn *database.Txn) error {
+		_, err := ls.transitionToEra(
+			txn,
+			eras.DijkstraEraDesc.Id,
+			11,
+			300,
+			currentPParams,
+		)
+		return err
+	})
+	require.NoError(t, err)
+
+	got, err := db.GetGovernanceProposal(proposal.TxHash, 0, nil)
+	require.NoError(t, err)
+	var translated dijkstra.DijkstraParameterChangeGovAction
+	_, err = cbor.Decode(got.GovActionCbor, &translated)
+	require.NoError(t, err)
+	require.NotNil(t, translated.ParamUpdate.MinFeeA)
+	require.Equal(t, uint(1234), *translated.ParamUpdate.MinFeeA)
+	require.Equal(t, []byte{0xaa, 0xbb}, translated.PolicyHash)
+}
+
 // TestEpochRolloverResult_FieldsPopulated tests that EpochRolloverResult
 // contains all expected fields after processEpochRollover
 func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
@@ -2230,7 +2353,7 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 
 // TestTransitionToEra_ErrorHandling tests error conditions in transitionToEra
 func TestTransitionToEra_ErrorHandling(t *testing.T) {
-	t.Run("invalid era ID panics", func(t *testing.T) {
+	t.Run("invalid era ID returns error", func(t *testing.T) {
 		db, err := database.New(&database.Config{
 			BlobPlugin:     "badger",
 			MetadataPlugin: "sqlite",
@@ -2247,15 +2370,13 @@ func TestTransitionToEra_ErrorHandling(t *testing.T) {
 			},
 		}
 
-		// Attempting to transition to an invalid era ID should panic
-		// because eras.Eras[invalidId] will be out of bounds
-		assert.Panics(t, func() {
-			txn := db.Transaction(true)
-			_ = txn.Do(func(txn *database.Txn) error {
-				_, _ = ls.transitionToEra(txn, 999, 0, 0, nil)
-				return nil
-			})
+		txn := db.Transaction(true)
+		err = txn.Do(func(txn *database.Txn) error {
+			_, err := ls.transitionToEra(txn, 999, 0, 0, nil)
+			return err
 		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown era ID 999")
 	})
 }
 
@@ -3089,6 +3210,45 @@ func babbagePParams(major uint) *babbage.BabbageProtocolParameters {
 	return &babbage.BabbageProtocolParameters{ProtocolMajor: major}
 }
 
+func TestNewLedgerStateHardForkTransitionUsesConfiguredEraList(t *testing.T) {
+	tests := []struct {
+		name           string
+		enableDijkstra bool
+		expected       bool
+	}{
+		{
+			name:     "default era table gates off Dijkstra",
+			expected: false,
+		},
+		{
+			name:           "Dijkstra-enabled era table detects transition",
+			enableDijkstra: true,
+			expected:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := newTestDB(t)
+			cm, err := chain.NewManager(db, nil)
+			require.NoError(t, err)
+			ls, err := NewLedgerState(LedgerStateConfig{
+				Database:       db,
+				ChainManager:   cm,
+				Logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				EnableDijkstra: tt.enableDijkstra,
+			})
+			require.NoError(t, err)
+
+			got := ls.isHardForkTransition(
+				ProtocolVersion{Major: 10},
+				ProtocolVersion{Major: 12},
+			)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
 // newTestEpoch is a convenience builder for models.Epoch.
 func newTestEpoch(id, startSlot uint64, lengthInSlots uint, eraId uint) models.Epoch {
 	return models.Epoch{
@@ -3373,8 +3533,8 @@ func TestEvaluateTriggerAtEpoch_NoOpOnFinalEra(t *testing.T) {
 		t,
 		eras.ConwayEraDesc.Id, 3,
 		hardfork.NewTransitionUnknown(),
-		// Conway is final today; there is no TestDijkstraHardForkAtEpoch
-		// field on the config, so no override can ever match.
+		// This test uses the default active era table, where Dijkstra is
+		// gated off and Conway has no successor.
 		"", &target, true,
 	)
 	ls.evaluateTriggerAtEpoch()

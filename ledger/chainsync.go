@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"slices"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	cardano "github.com/blinklabs-io/dingo/config/cardano"
-	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
@@ -289,10 +290,10 @@ func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
 					"hash", hex.EncodeToString(e.Point.Hash),
 				)
 				ls.config.EventBus.Publish(
-					connmanager.ConnectionRecycleRequestedEventType,
+					ConnectionRecycleRequestedEventType,
 					event.NewEvent(
-						connmanager.ConnectionRecycleRequestedEventType,
-						connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionRecycleRequestedEventType,
+						ConnectionRecycleRequestedEvent{
 							ConnectionId: e.ConnectionId,
 							Reason:       "block_header_verification_failure",
 						},
@@ -394,7 +395,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 }
 
 func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
-	e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+	e, ok := evt.Data.(ConnectionClosedEvent)
 	if !ok {
 		return
 	}
@@ -426,6 +427,12 @@ func (ls *LedgerState) handleConnectionClosedEvent(evt event.Event) {
 	}
 	if sameConnectionId(ls.headerPipelineConnId, e.ConnectionId) {
 		ls.clearQueuedHeaders()
+	}
+	if ls.config.GetActiveConnectionFunc != nil {
+		activeConnId := ls.config.GetActiveConnectionFunc()
+		if activeConnId == nil || sameConnectionId(*activeConnId, e.ConnectionId) {
+			ls.syncUpstreamTipSlot.Store(0)
+		}
 	}
 }
 
@@ -777,20 +784,26 @@ func (ls *LedgerState) blockByHash(hash []byte) (models.Block, error) {
 	return database.BlockByHash(ls.db, hash)
 }
 
+func netAddrString(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
+}
+
+// connIdKey builds the key from nil-safe per-address strings because
+// ConnectionId.String() panics when either net.Addr field is nil.
 func connIdKey(connId ouroboros.ConnectionId) string {
 	if connId.LocalAddr == nil && connId.RemoteAddr == nil {
 		return ""
 	}
-	return connId.String()
+	return netAddrString(connId.LocalAddr) +
+		"<->" +
+		netAddrString(connId.RemoteAddr)
 }
 
 func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	keyA := connIdKey(a)
-	keyB := connIdKey(b)
-	if keyA == "" || keyB == "" {
-		return keyA == keyB
-	}
-	return keyA == keyB
+	return connIdKey(a) == connIdKey(b)
 }
 
 func desiredBlockfetchBatchHeaders(
@@ -1291,16 +1304,45 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			// The Mithril snapshot is the local trust anchor. Blocks at
 			// or below its boundary were certified as a single ledger
 			// state, so we cannot reconstruct intermediate UTxO states
-			// for a replacement fork below that point. Reject the peer
-			// chain and force a fresh intersection instead.
-			ls.config.Logger.Error(
-				"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
-				"component", "ledger",
-				"slot", e.Point.Slot,
-				"hash", hex.EncodeToString(e.Point.Hash),
-				"mithril_ledger_slot", ls.mithrilLedgerSlot,
-				"connection_id", e.ConnectionId.String(),
-			)
+			// for a replacement fork below that point. Refuse the
+			// rollback and force a fresh intersection instead.
+			//
+			// The peer's reported tip distinguishes two situations that
+			// both surface here as a rollback below the boundary:
+			//   - tip below the boundary: the peer is simply behind
+			//     (still syncing or stuck) and its FindIntersect matched
+			//     an old rung of our intersect ladder — stale, not a
+			//     competing fork;
+			//   - tip at/above the boundary: the peer's chain does not
+			//     contain our certified boundary block (always offered
+			//     as an intersect point), so it genuinely diverges below
+			//     the trust anchor.
+			// A zero tip means the peer's tip is unknown; treat it as
+			// divergent to fail safe.
+			reason := event.ChainsyncResyncReasonRollbackExceedsMithril
+			peerTipSlot := e.Tip.Point.Slot
+			if peerTipSlot > 0 && peerTipSlot < ls.mithrilLedgerSlot {
+				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
+				ls.config.Logger.Warn(
+					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"peer_tip_slot", peerTipSlot,
+					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"connection_id", e.ConnectionId.String(),
+				)
+			} else {
+				ls.config.Logger.Error(
+					"chainsync rollback exceeds Mithril trust boundary, rejecting peer chain",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"peer_tip_slot", peerTipSlot,
+					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"connection_id", e.ConnectionId.String(),
+				)
+			}
 			ls.resetChainsyncResyncState()
 			ls.chainsyncState = SyncingChainsyncState
 			if ls.config.EventBus != nil {
@@ -1310,7 +1352,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 						event.ChainsyncResyncEventType,
 						event.ChainsyncResyncEvent{
 							ConnectionId: e.ConnectionId,
-							Reason:       event.ChainsyncResyncReasonRollbackExceedsMithril,
+							Reason:       reason,
 						},
 					),
 				)
@@ -1356,9 +1398,9 @@ func observedHeaderTip(e ChainsyncEvent) ochainsync.Tip {
 
 func (ls *LedgerState) localTipPraosView(
 	localTip ochainsync.Tip,
-) chainselection.PraosTiebreakerView {
+) praos.PraosTiebreakerView {
 	if ls == nil || ls.db == nil || len(localTip.Point.Hash) == 0 {
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	block, err := database.BlockByHash(ls.db, localTip.Point.Hash)
 	if err != nil {
@@ -1371,7 +1413,7 @@ func (ls *LedgerState) localTipPraosView(
 				"error", err,
 			)
 		}
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	decoded, err := block.Decode()
 	if err != nil {
@@ -1384,32 +1426,32 @@ func (ls *LedgerState) localTipPraosView(
 				"error", err,
 			)
 		}
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
 	if decoded == nil {
-		return chainselection.PraosTiebreakerView{}
+		return praos.PraosTiebreakerView{}
 	}
-	view, _ := chainselection.GetPraosTiebreakerView(decoded.Header())
+	view, _ := praos.GetPraosTiebreakerView(decoded.Header())
 	return view
 }
 
 func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	e ChainsyncEvent,
 	localTip ochainsync.Tip,
-) chainselection.ChainComparisonResult {
+) praos.ChainComparisonResult {
 	observedTip := observedHeaderTip(e)
 	if observedTip.BlockNumber == 0 && e.Tip.BlockNumber > 0 {
 		observedTip = e.Tip
 	}
 
-	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
-	result := chainselection.ComparePraosTips(
+	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+	result := praos.ComparePraosTips(
 		observedTip,
 		localTip,
 		incomingView,
 		ls.localTipPraosView(localTip),
 	)
-	if result != chainselection.ChainEqual {
+	if result != praos.ChainEqual {
 		return result
 	}
 
@@ -1419,9 +1461,9 @@ func (ls *LedgerState) compareIncomingHeaderToLocalTip(
 	if e.Tip.BlockNumber > observedTip.BlockNumber {
 		switch {
 		case e.Tip.BlockNumber > localTip.BlockNumber:
-			return chainselection.ChainABetter
+			return praos.ChainABetter
 		case e.Tip.BlockNumber < localTip.BlockNumber:
-			return chainselection.ChainBBetter
+			return praos.ChainBBetter
 		}
 	}
 	return result
@@ -1438,13 +1480,13 @@ func (ls *LedgerState) earlierHeaderCanBeatLocalTip(
 	if observedTip.BlockNumber < localTip.BlockNumber {
 		return false
 	}
-	incomingView, _ := chainselection.GetPraosTiebreakerView(e.BlockHeader)
-	return chainselection.ComparePraosTips(
+	incomingView, _ := praos.GetPraosTiebreakerView(e.BlockHeader)
+	return praos.ComparePraosTips(
 		observedTip,
 		localTip,
 		incomingView,
 		ls.localTipPraosView(localTip),
-	) == chainselection.ChainABetter
+	) == praos.ChainABetter
 }
 
 type LocalRollbackRecoveryResult struct {
@@ -1658,10 +1700,10 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 					"hash", hex.EncodeToString(e.Point.Hash),
 				)
 				ls.config.EventBus.Publish(
-					connmanager.ConnectionRecycleRequestedEventType,
+					ConnectionRecycleRequestedEventType,
 					event.NewEvent(
-						connmanager.ConnectionRecycleRequestedEventType,
-						connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionRecycleRequestedEventType,
+						ConnectionRecycleRequestedEvent{
 							ConnectionId: e.ConnectionId,
 							Reason:       "header_verification_failure",
 						},
@@ -1943,7 +1985,7 @@ func (ls *LedgerState) tryResolveFork(
 	if ls.compareIncomingHeaderToLocalTip(
 		e,
 		localTip,
-	) != chainselection.ChainABetter {
+	) != praos.ChainABetter {
 		return false, nil
 	}
 
@@ -3105,6 +3147,49 @@ func (ls *LedgerState) calculateEpochNonce(
 //   - currentEra: current era descriptor (read-only input)
 //   - currentPParams: current protocol parameters (read-only input)
 //
+// applyEpochDonations moves the treasury donations accumulated during the
+// ended epoch into the treasury at the epoch boundary. The donation rows are
+// left in place (keyed by slot) so a rollback past the boundary drops both the
+// donation rows and the boundary NetworkState row, and re-applying the
+// boundary re-derives the same total. It writes the updated treasury at the
+// boundary slot, the same slot governance treasury-withdrawal enactment uses,
+// so the row reflects withdrawals first and donations second.
+func (ls *LedgerState) applyEpochDonations(
+	txn *database.Txn,
+	endedEpoch uint64,
+	boundarySlot uint64,
+) error {
+	donations, err := ls.db.Metadata().SumNetworkDonationsForEpoch(
+		endedEpoch, txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"sum donations for epoch %d: %w", endedEpoch, err,
+		)
+	}
+	if donations == 0 {
+		return nil
+	}
+	state, err := ls.db.Metadata().GetNetworkState(txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("get network state: %w", err)
+	}
+	var treasury, reserves uint64
+	if state != nil {
+		treasury = uint64(state.Treasury)
+		reserves = uint64(state.Reserves)
+	}
+	if err := ls.db.Metadata().SetNetworkState(
+		treasury+donations,
+		reserves,
+		boundarySlot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("set network state with donations: %w", err)
+	}
+	return nil
+}
+
 // Returns EpochRolloverResult with all computed state, or an error.
 // The caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
@@ -3166,8 +3251,8 @@ func (ls *LedgerState) processEpochRollover(
 		result.NewEpochCache = epochs
 		if len(epochs) > 0 {
 			result.NewCurrentEpoch = epochs[len(epochs)-1]
-			eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
-			if eraDesc == nil {
+			eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
+			if !ok || eraDesc == nil {
 				return nil, fmt.Errorf(
 					"unknown era ID %d",
 					result.NewCurrentEpoch.EraId,
@@ -3198,15 +3283,19 @@ func (ls *LedgerState) processEpochRollover(
 	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
 	//      voting path; produces newPParams from on-chain pparam-update
 	//      proposals.
-	//   2. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   2. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      before enactment so any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in step 3.
+	//   3. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   3. SetPParams                    — persist the enacted pparams.
-	//   4. IsHardForkTransition check    — detect inter-era boundary from
+	//   4. SetPParams                    — persist the enacted pparams.
+	//   5. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   5. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   6. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
 	//
-	// Steps 4 and 5 must observe the post-enactment major version. Step 5
+	// Steps 5 and 6 must observe the post-enactment major version. Step 6
 	// must observe the persisted pparams (not just the in-memory ones)
 	// because its body issues SQL within `txn` that may join against
 	// `pparams` rows.
@@ -3226,6 +3315,17 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
+	}
+
+	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
+	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
+	// this runs before governance enactment and treasury accounting, so any
+	// deposit that lands in the treasury (unregistered/inactive reward account)
+	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	if err := ls.applyPoolRetirements(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply pool retirements: %w", err)
 	}
 
 	// Run the CIP-1694 governance tick: enact proposals ratified in the
@@ -3250,6 +3350,16 @@ func (ls *LedgerState) processEpochRollover(
 	})
 	if err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)
+	}
+	// Move the ending epoch's accumulated treasury donations into the
+	// treasury. Per the Conway EPOCH rule, donations are added after enacted
+	// treasury withdrawals (handled in governance.ProcessEpoch above), so a
+	// withdrawal is checked against the pre-donation treasury and the donation
+	// is reflected for subsequent epochs' accounting.
+	if err := ls.applyEpochDonations(
+		txn, currentEpoch.EpochId, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply epoch donations: %w", err)
 	}
 	if govOut.PParamsChanged {
 		newPParams = govOut.UpdatedPParams
@@ -3300,9 +3410,9 @@ func (ls *LedgerState) processEpochRollover(
 		)
 	}
 	if oldErr == nil && newErr == nil {
-		if IsHardForkTransition(oldVer, newVer) {
-			fromEra, _ := EraForVersion(oldVer.Major)
-			toEra, _ := EraForVersion(newVer.Major)
+		if ls.isHardForkTransition(oldVer, newVer) {
+			fromEra, _ := ls.eraForVersion(oldVer.Major)
+			toEra, _ := ls.eraForVersion(newVer.Major)
 			result.HardFork = &HardForkInfo{
 				OldVersion: oldVer,
 				NewVersion: newVer,
@@ -3385,8 +3495,8 @@ func (ls *LedgerState) processEpochRollover(
 	result.NewEpochCache = epochs
 	if len(epochs) > 0 {
 		result.NewCurrentEpoch = epochs[len(epochs)-1]
-		eraDesc := eras.GetEraById(result.NewCurrentEpoch.EraId)
-		if eraDesc == nil {
+		eraDesc, ok := ls.eraById(result.NewCurrentEpoch.EraId)
+		if !ok || eraDesc == nil {
 			return nil, fmt.Errorf(
 				"unknown era ID %d",
 				result.NewCurrentEpoch.EraId,
@@ -3853,8 +3963,7 @@ func (ls *LedgerState) logSyncProgress(currentSlot uint64) {
 }
 
 // SyncProgress returns the current sync progress as a value between
-// 0.0 (unknown/just started) and 1.0 (fully synced). This implements
-// the peergov.SyncProgressProvider interface, allowing the peer
+// 0.0 (unknown/just started) and 1.0 (fully synced), allowing the peer
 // governor to exit bootstrap mode once sync reaches its threshold.
 func (ls *LedgerState) SyncProgress() float64 {
 	upstreamTip := ls.syncUpstreamTipSlot.Load()

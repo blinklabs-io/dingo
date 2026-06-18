@@ -25,7 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -41,8 +41,8 @@ var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached
 type leiosEndorserBlockData struct {
 	point      ocommon.Point
 	blockRaw   []byte
-	refs       []gleios.TxReference
 	txsRaw     []cbor.RawMessage
+	txCount    int
 	cacheKeys  []string
 	insertedAt time.Time
 }
@@ -70,44 +70,60 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if len(blockRaw) == 0 {
 		return errors.New("leios endorser block cache: empty block")
 	}
-	block, err := gleios.NewLeiosEndorserBlockFromCbor(blockRaw)
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
 	if err != nil {
 		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
-	var refs []gleios.TxReference
-	if block.Body != nil {
-		refs = slices.Clone(block.Body.TxReferences)
+	if len(point.Hash) == 0 {
+		return errors.New("leios endorser block cache: empty point hash")
 	}
-	blockHash := block.Hash()
-	cacheKeys := []string{leiosBlockKey(blockHash.Bytes())}
-	if len(point.Hash) > 0 {
-		pointKey := leiosBlockKey(point.Hash)
-		if pointKey != cacheKeys[0] {
-			cacheKeys = append(cacheKeys, pointKey)
-		}
+	blockHash := lcommon.Blake2b256Hash(blockRaw)
+	if !slices.Equal(blockHash.Bytes(), point.Hash) {
+		return errors.New("leios endorser block cache: point hash mismatch")
 	}
+	cacheKeys := []string{leiosBlockKey(point.Hash)}
 	data := &leiosEndorserBlockData{
 		point:      point,
 		blockRaw:   slices.Clone(blockRaw),
-		refs:       refs,
 		txsRaw:     cloneRawMessages(txsRaw),
+		txCount:    len(block.TransactionReferences),
 		cacheKeys:  cacheKeys,
 		insertedAt: time.Now(),
 	}
 	o.leiosMu.Lock()
-	defer o.leiosMu.Unlock()
 	if o.leiosEndorserBlocks == nil {
 		o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	}
+	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	if existing := o.leiosEndorserBlocks[cacheKeys[0]]; existing != nil &&
+		existing.point.Slot != point.Slot {
+		o.leiosMu.Unlock()
+		return fmt.Errorf(
+			"leios endorser block cache: point slot mismatch for hash: cached %d, got %d",
+			existing.point.Slot,
+			point.Slot,
+		)
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
+	o.leiosMu.Unlock()
+	// Trigger local vote emission for the stored block, outside the
+	// cache lock
+	if o.LeiosVotes != nil {
+		o.LeiosVotes.HandleEndorserBlock(point.Slot, blockHash)
+	}
+	// Register the block into the Leios pipeline for stage/timing
+	// tracking and EB equivocation detection
+	if o.LeiosPipeline != nil {
+		o.LeiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
+	}
 	return nil
 }
 
 func (data *leiosEndorserBlockData) completeTxCache() bool {
-	return data != nil && len(data.txsRaw) == len(data.refs)
+	return data != nil && len(data.txsRaw) == data.txCount
 }
 
 func (data *leiosEndorserBlockData) expired(now time.Time) bool {
@@ -199,21 +215,6 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	return data, true
 }
 
-func leiosAllTxBitmap(count int) (map[uint16]uint64, error) {
-	if count <= 0 {
-		return nil, nil
-	}
-	if count > (math.MaxUint16+1)*64 {
-		return nil, fmt.Errorf("too many leios txs for bitmap: %d", count)
-	}
-	ret := make(map[uint16]uint64, (count+63)/64)
-	for idx := range count {
-		bucket := uint16(idx / 64) // #nosec G115 -- bounded above
-		ret[bucket] |= 1 << uint(idx%64)
-	}
-	return ret, nil
-}
-
 func leiosTxsFromBitmap(
 	txs []cbor.RawMessage,
 	bitmaps map[uint16]uint64,
@@ -259,153 +260,13 @@ func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 	return nil
 }
 
-func cborRawIsNull(raw cbor.RawMessage) bool {
-	return len(raw) == 1 && raw[0] == 0xf6
-}
-
-func decodeRawArray(raw cbor.RawMessage, name string) ([]cbor.RawMessage, error) {
-	var ret []cbor.RawMessage
-	if _, err := cbor.Decode(raw, &ret); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", name, err)
-	}
-	return ret, nil
-}
-
-func decodeUintArray(raw cbor.RawMessage, name string) ([]uint64, error) {
-	items, err := decodeRawArray(raw, name)
-	if err != nil {
-		return nil, err
-	}
-	ret := make([]uint64, 0, len(items))
-	for _, item := range items {
-		var idx uint64
-		if _, err := cbor.Decode(item, &idx); err != nil {
-			return nil, fmt.Errorf("decode %s item: %w", name, err)
-		}
-		ret = append(ret, idx)
-	}
-	return ret, nil
-}
-
-func encodeRaw(value any, name string) (cbor.RawMessage, error) {
-	encoded, err := cbor.Encode(value)
-	if err != nil {
-		return nil, fmt.Errorf("encode %s: %w", name, err)
-	}
-	return cbor.RawMessage(encoded), nil
-}
-
-func mergeLeiosTransactionArrays(
-	blockCbor []byte,
-	txsRaw []cbor.RawMessage,
-) ([]byte, error) {
-	blockItems, err := decodeRawArray(blockCbor, "leios ranking block")
-	if err != nil {
-		return nil, err
-	}
-	if len(blockItems) < 5 {
-		return nil, fmt.Errorf(
-			"leios ranking block: expected at least 5 fields, got %d",
-			len(blockItems),
-		)
-	}
-	bodies, err := decodeRawArray(blockItems[1], "transaction bodies")
-	if err != nil {
-		return nil, err
-	}
-	witnesses, err := decodeRawArray(blockItems[2], "transaction witness sets")
-	if err != nil {
-		return nil, err
-	}
-	if len(bodies) != len(witnesses) {
-		return nil, fmt.Errorf(
-			"leios ranking block: body/witness count mismatch: %d != %d",
-			len(bodies),
-			len(witnesses),
-		)
-	}
-	metadata := map[uint64]cbor.RawMessage{}
-	if !cborRawIsNull(blockItems[3]) {
-		if _, err := cbor.Decode(blockItems[3], &metadata); err != nil {
-			return nil, fmt.Errorf("decode transaction metadata set: %w", err)
-		}
-	}
-	invalid, err := decodeUintArray(blockItems[4], "invalid transactions")
-	if err != nil {
-		return nil, err
-	}
-	baseTxCount := len(bodies)
-	for idx, txRaw := range txsRaw {
-		txItems, err := decodeRawArray(txRaw, "leios endorser transaction")
-		if err != nil {
-			return nil, err
-		}
-		if len(txItems) != 4 {
-			return nil, fmt.Errorf(
-				"leios endorser transaction: expected 4 fields, got %d",
-				len(txItems),
-			)
-		}
-		bodies = append(bodies, txItems[0])
-		witnesses = append(witnesses, txItems[1])
-		var isValid bool
-		if _, err := cbor.Decode(txItems[2], &isValid); err != nil {
-			return nil, fmt.Errorf("decode leios tx validity flag: %w", err)
-		}
-		mergedTxIndex := uint64(baseTxCount + idx) // #nosec G115 -- slice length fits uint64
-		if !isValid {
-			invalid = append(invalid, mergedTxIndex)
-		}
-		if !cborRawIsNull(txItems[3]) {
-			metadata[mergedTxIndex] = slices.Clone(txItems[3])
-		}
-	}
-	blockItems[1], err = encodeRaw(bodies, "merged transaction bodies")
-	if err != nil {
-		return nil, err
-	}
-	blockItems[2], err = encodeRaw(witnesses, "merged transaction witness sets")
-	if err != nil {
-		return nil, err
-	}
-	blockItems[3], err = encodeRaw(metadata, "merged transaction metadata set")
-	if err != nil {
-		return nil, err
-	}
-	blockItems[4], err = encodeRaw(invalid, "merged invalid transactions")
-	if err != nil {
-		return nil, err
-	}
-	merged, err := cbor.Encode(blockItems)
-	if err != nil {
-		return nil, fmt.Errorf("encode merged leios block: %w", err)
-	}
-	return merged, nil
-}
-
 func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	blockCbor []byte,
 ) ([]byte, bool, error) {
-	blockItems, err := decodeRawArray(blockCbor, "leios ranking block")
-	if err != nil {
-		return nil, false, err
-	}
-	if len(blockItems) < 6 || cborRawIsNull(blockItems[5]) {
-		return blockCbor, false, nil
-	}
-	var cert lcommon.LeiosEbCertificate
-	if _, err := cbor.Decode(blockItems[5], &cert); err != nil {
-		return nil, false, fmt.Errorf("decode leios EB certificate: %w", err)
-	}
-	data, ok := o.lookupLeiosEndorserBlock(cert.EndorserBlockHash.Bytes())
-	if !ok || !data.completeTxCache() || len(data.txsRaw) == 0 {
-		return blockCbor, false, nil
-	}
-	merged, err := mergeLeiosTransactionArrays(blockCbor, data.txsRaw)
-	if err != nil {
-		return nil, false, err
-	}
-	return merged, true, nil
+	// Dijkstra carries nullable Leios/Peras certificate slots, but the current
+	// Leios certificate placeholder is an empty list and does not contain an
+	// endorser-block hash to drive the old merge path.
+	return blockCbor, false, nil
 }
 
 func (o *Ouroboros) chainsyncServerBlockCbor(
@@ -413,7 +274,7 @@ func (o *Ouroboros) chainsyncServerBlockCbor(
 	block models.Block,
 ) []byte {
 	if !o.config.EnableLeios ||
-		block.Type != uint(gleios.BlockTypeLeiosRanking) ||
+		block.Type != uint(gdijkstra.BlockTypeDijkstra) ||
 		ctx.Server == nil {
 		return block.Cbor
 	}

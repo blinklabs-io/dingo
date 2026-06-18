@@ -48,6 +48,17 @@ type loadedKey struct {
 	OpCertColdVKey    []byte
 }
 
+// CheckOpenFilePermissions verifies that an already-opened key file is
+// not accessible beyond its owner, returning ErrInsecureFileMode
+// otherwise. On Unix this checks the file mode via fstat on the open
+// handle (avoiding a TOCTOU race between check and read); on Windows it
+// inspects the file's DACL for well-known insecure groups. Exported for
+// other packages that load their own key material (e.g. Leios vote
+// signing keys).
+func CheckOpenFilePermissions(f *os.File) error {
+	return checkOpenFilePermissions(f)
+}
+
 // loadKeyFromFile loads a key from a file path (cardano-cli format).
 // Supports VRF, KES, and operational certificates.
 // Returns ErrInsecureFileMode if the file has group or other access.

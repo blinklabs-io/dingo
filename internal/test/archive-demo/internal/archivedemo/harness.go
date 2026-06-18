@@ -42,7 +42,7 @@ type Endpoint struct {
 	Address string
 }
 
-// DefaultEndpoints returns the archive and pruning Dingo endpoints,
+// DefaultEndpoints returns the archive and history-expiry Dingo endpoints,
 // honoring env overrides for CI flexibility.
 func DefaultEndpoints() (archive, pruning Endpoint) {
 	arch := os.Getenv("ARCHIVEDEMO_DINGO_ARCHIVE_ADDR")
@@ -249,12 +249,15 @@ func FetchBlock(
 		return nil
 	}
 
-	cfg := blockfetch.NewConfig(
+	cfg, err := blockfetch.NewConfig(
 		blockfetch.WithBlockFunc(blockFunc),
 		blockfetch.WithBatchDoneFunc(batchDone),
 		blockfetch.WithBatchStartTimeout(timeout),
 		blockfetch.WithBlockTimeout(timeout),
 	)
+	if err != nil {
+		return nil, err
+	}
 	oc, err := dial(ep, magic, ouroboros.WithBlockFetchConfig(cfg))
 	if err != nil {
 		return nil, err

@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,5 +21,5 @@ import "embed"
 // config.json and all genesis files required for network operation when
 // no external config files are available.
 //
-//go:embed preview mainnet preprod devnet
+//go:embed preview mainnet preprod devnet leios
 var EmbeddedConfigFS embed.FS

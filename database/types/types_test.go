@@ -141,19 +141,19 @@ func TestParseBlockBlobKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestBlockTombstonedErrorWraps ensures the typed error keeps satisfying
-// errors.Is(err, ErrBlockTombstoned) for callers that just want to detect
+// TestHistoryExpiredErrorWraps ensures the typed error keeps satisfying
+// errors.Is(err, ErrHistoryExpired) for callers that just want to detect
 // the condition, while errors.As lets archive-proxy wrappers extract the
 // (slot, hash).
-func TestBlockTombstonedErrorWraps(t *testing.T) {
+func TestHistoryExpiredErrorWraps(t *testing.T) {
 	hash := bytes.Repeat([]byte{0xCD}, 32)
-	original := &types.BlockTombstonedError{Slot: 42, Hash: hash}
+	original := &types.HistoryExpiredError{Slot: 42, Hash: hash}
 
-	if !errors.Is(original, types.ErrBlockTombstoned) {
-		t.Fatal("typed error must satisfy errors.Is(..., ErrBlockTombstoned)")
+	if !errors.Is(original, types.ErrHistoryExpired) {
+		t.Fatal("typed error must satisfy errors.Is(..., ErrHistoryExpired)")
 	}
 
-	var extracted *types.BlockTombstonedError
+	var extracted *types.HistoryExpiredError
 	if !errors.As(original, &extracted) {
 		t.Fatal("errors.As did not extract the typed error")
 	}

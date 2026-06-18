@@ -15,7 +15,7 @@
 # Archive node demo Docker Compose configuration.
 #
 # Mirrors internal/test/devnet/ in shape but exercises the S3 blob plugin,
-# Bark archive server, and Bark client + pruner together.
+# Bark archive server, Bark client fallback, and History Expiry together.
 #
 # Services:
 #   configurator     - one-shot, generates pool keys and genesis files
@@ -23,8 +23,8 @@
 #   minio-init       - one-shot, creates the "dingo-archive" bucket
 #   cardano-producer - sole block producer (cardano-node 11.0.1)
 #   dingo-archive    - non-producer; S3 blob plugin + Bark server :3002
-#   dingo-pruning    - non-producer; Badger blob plugin + Bark client
-#                      pointed at dingo-archive
+#   dingo-pruning    - non-producer; Badger blob plugin + History Expiry
+#                      plus Bark client pointed at dingo-archive
 #
 # Usage:
 #   ./start.sh         # bring up

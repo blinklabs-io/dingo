@@ -32,7 +32,7 @@ import (
 func serveRun(
 	cmd *cobra.Command, _ []string, cfg *config.Config,
 ) {
-	logger := commonRun()
+	logger := commonRun(cfg)
 
 	// Check for an in-progress sync. If the "sync_status" key in
 	// the sync_state table holds a non-empty value, a previous sync
@@ -132,10 +132,7 @@ func checkSyncState(
 }
 
 // repairDeferredIndexes rebuilds any deferred metadata indexes left
-// outstanding by a prior interrupted bulk-load run. This is the
-// "repair" path the issue references: API/query paths cannot be
-// exposed with a partial index set, so serve waits for the rebuild
-// instead of immediately exposing the node.
+// outstanding by a prior interrupted bulk-load run.
 func repairDeferredIndexes(
 	cfg *config.Config, logger *slog.Logger,
 ) error {
@@ -236,9 +233,10 @@ func resumeBackfill(
 	if !needed {
 		// Still rebuild deferred indexes if a prior bulk-load
 		// run left them pending — the previous backfill may
-		// have completed but crashed before BuildDeferredIndexes
-		// ran.
-		if err := node.RepairDeferredIndexes(db, logger); err != nil {
+		// have completed but crashed before the critical rebuild
+		// ran. The lazy remainder is handled by background
+		// maintenance after the API starts.
+		if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 			return err
 		}
 		return clearBackfillSyncStatus(db)
@@ -259,10 +257,10 @@ func resumeBackfill(
 	if err := bf.Run(ctx); err != nil {
 		return fmt.Errorf("backfill: %w", err)
 	}
-	// Rebuild deferred indexes before clearing sync_status so a
+	// Rebuild critical deferred indexes before clearing sync_status so a
 	// crash between the two leaves both markers set and the next
 	// startup re-runs the rebuild.
-	if err := node.RepairDeferredIndexes(db, logger); err != nil {
+	if err := node.RepairCriticalDeferredIndexes(db, logger); err != nil {
 		return err
 	}
 	if err := clearBackfillSyncStatus(db); err != nil {

@@ -1,0 +1,28 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: dingo-blockfrost-explorer-api
+  labels:
+    app.kubernetes.io/name: dingo
+    cardano_network: preview
+    cardano_service: dingo
+spec:
+  type: LoadBalancer
+  ports:
+    - name: blockfrost
+      port: 3000
+      targetPort: blockfrost
+    - name: utxorpc
+      port: 9090
+      targetPort: utxorpc
+    - name: mesh
+      port: 8080
+      targetPort: mesh
+    - name: metrics
+      port: 12798
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/name: dingo
+    dingo.blinklabs.io/blockfrost-explorer: "true"
+    cardano_network: preview
+    cardano_service: dingo

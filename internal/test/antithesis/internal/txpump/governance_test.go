@@ -55,6 +55,7 @@ func TestBuildDRepRegistrationTx_Success(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildDRepRegistrationTx_NoInputs(t *testing.T) {
@@ -127,6 +128,7 @@ func TestBuildVoteTx_Success(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildVoteTx_NoInputs(t *testing.T) {

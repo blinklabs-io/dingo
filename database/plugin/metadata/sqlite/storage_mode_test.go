@@ -57,6 +57,7 @@ func newTestWitnessTransaction(
 }
 
 func TestStorageMode_CoreSkipsWitnesses(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	tx := newTestWitnessTransaction(
@@ -89,6 +90,7 @@ func TestStorageMode_CoreSkipsWitnesses(t *testing.T) {
 }
 
 func TestStorageMode_APIStoresWitnesses(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "api")
 
 	tx := newTestWitnessTransaction(
@@ -121,6 +123,7 @@ func TestStorageMode_APIStoresWitnesses(t *testing.T) {
 }
 
 func TestStorageMode_CoreSkipsDatumIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	tx := newTestWitnessTransaction(
@@ -146,6 +149,7 @@ func TestStorageMode_CoreSkipsDatumIndex(t *testing.T) {
 }
 
 func TestStorageMode_DefaultIsCore(t *testing.T) {
+	t.Parallel()
 	// A store created without specifying storage mode should default to "core"
 	store, err := NewWithOptions()
 	require.NoError(t, err)
@@ -155,18 +159,21 @@ func TestStorageMode_DefaultIsCore(t *testing.T) {
 }
 
 func TestStorageMode_InvalidRejected(t *testing.T) {
+	t.Parallel()
 	_, err := NewWithOptions(WithStorageMode("invalid"))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid storage mode")
 }
 
 func TestStorageMode_CaseNormalized(t *testing.T) {
+	t.Parallel()
 	store, err := NewWithOptions(WithStorageMode("API"))
 	require.NoError(t, err)
 	assert.Equal(t, "api", store.storageMode, "storage mode should be lowercased")
 }
 
 func TestNodeSettingsNilBeforeFirstSet(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	settings, err := store.GetNodeSettings()
@@ -175,6 +182,7 @@ func TestNodeSettingsNilBeforeFirstSet(t *testing.T) {
 }
 
 func TestNodeSettingsRemainImmutable(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	original := &types.NodeSettings{
@@ -194,6 +202,7 @@ func TestNodeSettingsRemainImmutable(t *testing.T) {
 }
 
 func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	require.NoError(t, store.SetNodeSettings(&types.NodeSettings{
@@ -215,6 +224,7 @@ func TestNodeSettingsAllowDeferredNetworkInitialization(t *testing.T) {
 }
 
 func TestNodeSettingsReadsOnlySingletonRow(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, "core")
 
 	require.NoError(t, store.DB().Create(&NodeSettings{

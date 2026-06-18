@@ -1,5 +1,297 @@
 # Dingo Releases
 
+## v0.54.0 (June 12, 2026)
+
+**Title:** Experimental Leios EB forging, Mithril v2 database restore, and off-chain metadata caching
+
+**Date:** June 12, 2026
+
+**Version:** v0.54.0
+
+Hi folks! Here’s what we shipped in v0.54.0.
+
+### ✨ What's New
+
+* Added **cache metadata through API storage:** API storage can now fetch off chain metadata, verify fetched content against the on chain hash, and keep cached results available through the configured offchain metadata settings. ([#2544](https://github.com/blinklabs-io/dingo/pull/2544))
+* Introduced **restore Mithril databases through the v2 backend by default:** Mithril restores now use the v2 database backend by default, which gives operators the current restore path without extra setup. ([#2548](https://github.com/blinklabs-io/dingo/pull/2548))
+* Expanded **generate Midnight state services from bundled protocol definitions:** Midnight integrations can now use bundled state definitions with generated service support, which makes integration easier to keep aligned. ([#2518](https://github.com/blinklabs-io/dingo/pull/2518))
+* Delivered **forge experimental Leios endorser blocks during leader turns:** Experimental Leios mode can now forge endorser blocks during leader turns, which moves Leios testing closer to a fuller production path. ([#2540](https://github.com/blinklabs-io/dingo/pull/2540))
+* Enabled **time experimental Leios pipeline stages more precisely:** Experimental Leios mode now tracks pipeline timing and stage progression more explicitly, which makes its endorser block flow easier to observe. ([#2531](https://github.com/blinklabs-io/dingo/pull/2531))
+
+### 💪 Improvements
+
+* Improved **move public Go API packages under the api namespace:** Go integrators now get a clearer public package layout under `api/`, which makes library use easier to follow. ([#2545](https://github.com/blinklabs-io/dingo/pull/2545))
+* Refined **keep the published v0.53.0 release history current:** The release history now includes the finalized v0.53.0 entry, which keeps recent release context easier to review. ([#2539](https://github.com/blinklabs-io/dingo/pull/2539))
+
+### 🔧 Fixes
+
+* Fixed **recover from stale sync peers more decisively:** Sync can now move away from stale peers more reliably, which helps nodes keep progress moving. ([#2549](https://github.com/blinklabs-io/dingo/pull/2549))
+* Corrected **resume sync after peer disconnects without stalling:** Peer recovery now keeps sync moving after a disconnect, which reduces the chance of stalled recovery. ([#2543](https://github.com/blinklabs-io/dingo/pull/2543))
+* Strengthened **reject unsafe experimental Leios votes before they proceed:** Experimental Leios vote handling now stops endorser block hash and slot mismatches before voting, which makes vote checks stricter. ([#2532](https://github.com/blinklabs-io/dingo/pull/2532))
+
+### 📋 What You Need to Know
+
+* Clarified **expect Mithril v2 as the default restore path:** Mithril now uses the v2 backend by default, operators who need legacy behavior must explicitly choose v1, and `mithril show` now expects the v2 CardanoDatabase artifact hash when the default backend is in use.
+* Highlighted **update Go import paths for public API packages:** Go integrators should move imports from the former root level package names to the new paths under `api/`.
+* Emphasized **configure off chain metadata fetching through API settings:** Off chain metadata fetching runs in `storageMode: api`, verifies fetched content against on chain hashes, and follows the configured offchain metadata settings.
+* Summarized **expect broader experimental Leios timing, forging, and vote safety checks:** Experimental Leios mode now includes endorser block pipeline timing, endorser block forging, and stricter vote safety checks.
+* Reviewed **use the finalized v0.53.0 notes as the latest prior release context:** The repository release history now includes the finalized v0.53.0 entry for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.53.0 (June 10, 2026)
+
+**Title:** Experimental Leios quorum voting, public Mithril sync API, and Blockfrost network accuracy
+
+**Date:** June 10, 2026
+
+**Version:** v0.53.0
+
+Hi folks! Here’s what we shipped in v0.53.0.
+
+### ✨ What's New
+
+* Added **enable experimental Leios quorum voting and certificate handling:** Leios mode can now enforce committee voting and quorum handling for experimental voting flows, and operators can turn it on with the required voting credentials and public key settings. ([#2509](https://github.com/blinklabs-io/dingo/pull/2509))
+* Introduced **open the Mithril sync API for direct public use:** Mithril users and integrators can now call the sync API directly, which makes snapshot and sync workflows easier to integrate. ([#2524](https://github.com/blinklabs-io/dingo/pull/2524))
+
+### 💪 Improvements
+
+* Improved **speed fresh Mithril backfills by skipping consumed input recovery:** Fresh Mithril backfills now avoid recovery work that is not needed on that path, which helps historical catch up finish sooner. ([#2508](https://github.com/blinklabs-io/dingo/pull/2508))
+* Refined **stop publishing ancillary txpump, configurator, and analysis images in this release train:** Release automation now publishes only the main release images in this release train, which keeps published outputs aligned with the supported artifacts. ([#2538](https://github.com/blinklabs-io/dingo/pull/2538))
+* Updated **keep untagged publish runs moving when build attestations are unavailable:** Untagged publish runs now continue when attestation steps are unavailable, while tagged releases still require successful attestations. ([#2536](https://github.com/blinklabs-io/dingo/pull/2536))
+* Enhanced **strengthen Antithesis startup and validation checks:** Antithesis runs now load network bootstrap data more reliably and validate newer era data more safely, which makes test environments steadier. ([#2535](https://github.com/blinklabs-io/dingo/pull/2535))
+* Corrected **report expired transaction metrics accurately in tests:** Validation now checks expired transaction metrics against the intended behavior, which keeps monitoring coverage aligned with runtime results. ([#2537](https://github.com/blinklabs-io/dingo/pull/2537))
+* Modernized **keep the published v0.52.1 release history current:** The release history now includes the prior v0.52.1 entry, which keeps recent release context easier to review. ([#2529](https://github.com/blinklabs-io/dingo/pull/2529))
+
+### 🔧 Fixes
+
+* Fixed **return accurate Blockfrost network supply and script details:** Blockfrost network responses now report locked and circulating supply more accurately, carry script details through metadata, and align the network eras response with the supported schema. ([#2510](https://github.com/blinklabs-io/dingo/pull/2510))
+* Repaired **connect Leios endorser and ranking blocks correctly:** Leios block handling now connects endorser and ranking blocks through the intended paths, which keeps experimental Leios processing aligned. ([#2507](https://github.com/blinklabs-io/dingo/pull/2507))
+* Hardened **protect static analysis from malformed Mithril data and unknown eras:** Static analysis now rejects malformed Mithril data and unknown era data more safely, which prevents avoidable failures during analysis. ([#2534](https://github.com/blinklabs-io/dingo/pull/2534))
+* Stabilized **use the correct slot in Leios vote handling:** Leios vote handling now uses the intended slot and applies stronger empty value guards, which keeps experimental voting behavior more reliable. ([#2533](https://github.com/blinklabs-io/dingo/pull/2533))
+
+### 📋 What You Need to Know
+
+* Clarified **configure Leios voting before enabling experimental quorum handling:** The largest runtime addition is experimental Leios quorum voting and certificate handling, and operators who enable it need the required voting key and voter public key configuration. ([#2509](https://github.com/blinklabs-io/dingo/pull/2509), [#2533](https://github.com/blinklabs-io/dingo/pull/2533))
+* Highlighted **expect more accurate Blockfrost network data and review older metadata stores:** Blockfrost API users should now see accurate `supply.locked` and `supply.circulating` values, they must stop relying on the `era` field in `/api/v0/network/eras`, and older metadata databases may need a rebuild or reimport to fully reflect `payment_script` on existing UTxOs. ([#2510](https://github.com/blinklabs-io/dingo/pull/2510))
+* Emphasized **call the public Mithril sync API directly and expect faster fresh backfills:** Mithril users and integrators can now use the public sync API directly, and fresh Mithril backfills should finish faster because this path skips consumed input recovery. ([#2524](https://github.com/blinklabs-io/dingo/pull/2524), [#2508](https://github.com/blinklabs-io/dingo/pull/2508))
+* Summarized **expect ancillary txpump, configurator, and analysis images to stay unpublished while tagged releases stay strict:** Release automation no longer publishes ancillary txpump, configurator, and analysis images in this release train, while tagged releases still require successful attestations. ([#2538](https://github.com/blinklabs-io/dingo/pull/2538), [#2536](https://github.com/blinklabs-io/dingo/pull/2536))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.52.1 (June 9, 2026)
+
+**Title:** Mithril snapshot reuse, steadier epoch timing, and Blockfrost explorer improvements
+
+**Date:** June 9, 2026
+
+**Version:** v0.52.1
+
+Hi folks! Here’s what we shipped in v0.52.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, example polish, testing, and release history maintenance.
+
+### 💪 Improvements
+
+* Improved **keep protocol support aligned and steady Leios cache behavior:** Protocol and transaction handling now stay aligned with newer upstream support, and Leios endorser block caching now behaves more reliably. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Refined **refresh the Blockfrost explorer example for easier local evaluation:** The Blockfrost explorer example now offers a clearer dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure, which makes local API evaluation easier to use. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
+* Updated **keep the published v0.52.0 release history current:** The release history now includes the prior v0.52.0 entry, which keeps recent release context easier to review. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
+* Strengthened **let metadata tests run safely in parallel:** Metadata test coverage now runs with better isolation, which makes routine validation steadier and reduces test interference. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
+
+### 🔧 Fixes
+
+* Fixed **reuse a valid Mithril snapshot window during API startup:** API mode startup now reuses an existing post Mithril snapshot window instead of rebuilding that state again, which makes startup smoother after Mithril based recovery. ([#2525](https://github.com/blinklabs-io/dingo/pull/2525))
+* Corrected **keep epoch timing moving through reconnects more reliably:** Epoch timing now clears stale upstream tip state and matches connection identity more safely across reconnects, which helps nodes avoid timing stalls. ([#2523](https://github.com/blinklabs-io/dingo/pull/2523))
+
+### 📋 What You Need to Know
+
+* Clarified **expect more reliable protocol behavior and steadier Leios caching:** Protocol handling now stays aligned with newer upstream support, and Leios endorser block caching should behave more reliably where it is in use. ([#2526](https://github.com/blinklabs-io/dingo/pull/2526))
+* Highlighted **use the refreshed Blockfrost explorer example for smoother local API evaluation:** Teams using the example can expect an easier dashboard flow, search, compose setup, fallback metrics proxy handling, and broader port exposure. ([#2527](https://github.com/blinklabs-io/dingo/pull/2527))
+* Emphasized **review the published v0.52.0 notes alongside this patch:** The release history now includes the prior v0.52.0 entry, which makes recent patch context easier to follow. ([#2522](https://github.com/blinklabs-io/dingo/pull/2522))
+* Summarized **trust steadier parallel metadata test coverage around this release:** Validation now runs with better metadata test isolation, which supports more dependable routine verification. ([#2521](https://github.com/blinklabs-io/dingo/pull/2521))
+* Reviewed **expect smoother API startup after Mithril based recovery:** API mode startup now reuses a valid post Mithril snapshot window when it is available, which avoids unnecessary rebuild work. ([#2525](https://github.com/blinklabs-io/dingo/pull/2525))
+* Noted **expect steadier epoch timing across reconnect events:** Nodes should avoid timing stalls more reliably because stale upstream tip state no longer lingers across reconnects. ([#2523](https://github.com/blinklabs-io/dingo/pull/2523))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.52.0 (June 8, 2026)
+
+**Title:** Configurable history expiry, corrected Conway fees, and safer near-tip sync
+
+**Date:** June 8, 2026
+
+**Version:** v0.52.0
+
+Hi folks! Here’s what we shipped in v0.52.0.
+
+### ✨ What's New
+
+* Added **configure history expiry separately from Bark pruning:** Operators can now enable local history expiry with dedicated settings while still using Bark as a fallback for archived block access when a remote archive is configured. ([#2519](https://github.com/blinklabs-io/dingo/pull/2519))
+
+### 💪 Improvements
+
+* Improved **refresh AWS credential support for authenticated integrations:** AWS authenticated integrations now stay aligned with newer upstream credential handling, which helps related storage and service connections behave more reliably. ([#2517](https://github.com/blinklabs-io/dingo/pull/2517))
+* Refined **keep core AWS integration support current:** AWS backed storage and transfer paths now stay aligned with newer upstream SDK behavior, which supports steadier compatibility for those integrations. ([#2515](https://github.com/blinklabs-io/dingo/pull/2515))
+* Updated **keep Google integration support current:** Google backed integrations now stay aligned with a newer client release, which supports ongoing compatibility and maintenance. ([#2516](https://github.com/blinklabs-io/dingo/pull/2516))
+* Modernized **keep AWS protocol support aligned with upstream changes:** AWS related protocol and serialization handling now stays aligned with a newer upstream release, which supports steadier compatibility across those integration paths. ([#2513](https://github.com/blinklabs-io/dingo/pull/2513))
+* Strengthened **keep the published v0.51.0 release history current:** The release history now includes the prior v0.51.0 entry, which keeps recent release context easier to review. ([#2512](https://github.com/blinklabs-io/dingo/pull/2512))
+
+### 🔧 Fixes
+
+* Fixed **correct Conway transaction checks for fees and required witnesses:** Conway transaction validation now includes reference-script costs in minimum-fee checks and enforces required redeemers locally, which helps reduce the chance of accepting invalid transactions. ([#2462](https://github.com/blinklabs-io/dingo/pull/2462))
+* Corrected **avoid stalls while syncing close to the tip:** Near-tip sync now waits for a usable non-bootstrap successor path before leaving bootstrap mode, which helps nodes continue syncing instead of stalling near the tip. ([#2511](https://github.com/blinklabs-io/dingo/pull/2511))
+
+### 📋 What You Need to Know
+
+* Clarified **move history expiry settings to the new opt-in configuration:** Operators who previously used `barkPrunerFrequency` must move to `historyExpiry.enabled` and `historyExpiry.frequency`, and history expiry remains off until it is explicitly enabled.
+* Highlighted **expect stricter Conway transaction checks on this release:** Minimum-fee validation now includes reference-script costs, and required redeemers must be present during local validation.
+* Emphasized **expect more reliable near tip sync and bootstrap exit behavior:** Near-tip sync and bootstrap exit should now behave more reliably, which reduces the chance of stalls close to the tip.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.51.0 (June 7, 2026)
+
+**Title:** Advance Leios support, expand protocol APIs, and smooth sync and backfill
+
+**Date:** June 7, 2026
+
+**Version:** v0.51.0
+
+Hi folks! Here’s what we shipped in v0.51.0.
+
+### ✨ What's New
+
+* Added **try experimental next era support with early Leios groundwork:** Early support for the next era expands preview testing, which helps upcoming Leios work move forward with less setup friction. ([#2495](https://github.com/blinklabs-io/dingo/pull/2495))
+* Introduced **relay Leios votes across the network path:** Leios mode can now diffuse votes through the dedicated relay flow, which makes early vote handling behave more like a complete network path. ([#2502](https://github.com/blinklabs-io/dingo/pull/2502))
+* Expanded **read Conway protocol settings through Blockfrost epoch endpoints:** Blockfrost compatible epoch responses now expose Conway era protocol parameters, which gives API users a clearer view of current network settings. ([#2504](https://github.com/blinklabs-io/dingo/pull/2504))
+* Delivered **request ledger based peer snapshots directly:** Peer snapshot consumers can now fetch ledger based snapshot data directly, which makes peer selection and network insight easier to use with live ledger state. ([#2496](https://github.com/blinklabs-io/dingo/pull/2496))
+* Enabled **run a local Blockfrost explorer example for API testing:** A local explorer example now helps teams try Dingo’s Blockfrost compatible APIs in a more realistic workflow before deploying elsewhere. ([#2482](https://github.com/blinklabs-io/dingo/pull/2482))
+
+### 💪 Improvements
+
+* Improved **speed SQLite writes during heavy API backfill:** API backfill can now write SQLite data more efficiently on busy paths, which helps long historical catch up finish more smoothly. ([#2499](https://github.com/blinklabs-io/dingo/pull/2499))
+* Refined **rebuild the most important indexes first after API backfill:** Critical indexes now return sooner while the remaining maintenance continues in the background, which makes recovered services more usable earlier and shutdown behavior safer. ([#2497](https://github.com/blinklabs-io/dingo/pull/2497))
+* Updated **refresh bundled peer snapshots and seed startup from them:** Bundled topology data now stays fresher and startup can seed peers from embedded peer snapshots, which makes initial network connections more dependable. ([#2506](https://github.com/blinklabs-io/dingo/pull/2506))
+* Modernized **use stronger compression controls when compression is on:** Compressed storage can now use a more efficient compression mode with a selectable compression level, which gives operators more direct control over storage behavior. ([#2501](https://github.com/blinklabs-io/dingo/pull/2501))
+* Strengthened **keep the published v0.50.2 release history current:** The release history now includes the prior v0.50.2 entry, which keeps recent release context easier to review. ([#2498](https://github.com/blinklabs-io/dingo/pull/2498))
+
+### 🔧 Fixes
+
+* Fixed **avoid near tip stalls during bootstrap exit and tip detection:** Near tip sync now leaves bootstrap mode more safely and detects tip conditions more reliably, which helps nodes avoid stalling close to the tip. ([#2511](https://github.com/blinklabs-io/dingo/pull/2511))
+* Corrected **match devnet startup with protocol version 11:** Devnet now starts with the intended minimum protocol version, which keeps test environments aligned with current network expectations. ([#2505](https://github.com/blinklabs-io/dingo/pull/2505))
+
+### 📋 What You Need to Know
+
+* Clarified **start bundled Leios testnets without separate network files:** Leios testnet configuration, topology, peer snapshot, and genesis data now ship inside the binary, which makes bundled Leios startup simpler. ([#2503](https://github.com/blinklabs-io/dingo/pull/2503))
+* Highlighted **set JSON logging explicitly when machine readable logs are required:** The default log format is now text, and JSON log consumers must set `logging.format=json` or the matching environment variable or flag to keep machine readable JSON logs. ([#2500](https://github.com/blinklabs-io/dingo/pull/2500))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.50.2 (June 3, 2026)
+
+**Title:** Faster leader scheduling, sturdier backfill provenance, and safer chainsync intersections
+
+**Date:** June 3, 2026
+
+**Version:** v0.50.2
+
+Hi folks! Here’s what we shipped in v0.50.2.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, testing coverage, and release history updates.
+
+### 💪 Improvements
+
+* Improved **speed leader scheduling checks during block production planning:** Leader schedule lookups now finish faster, which keeps block production planning more responsive. ([#2493](https://github.com/blinklabs-io/dingo/pull/2493))
+* Refined **strengthen recovery coverage with real chain replay paths:** Regression checks now cover real chain replay paths more directly, which increases confidence in recovery behavior. ([#2479](https://github.com/blinklabs-io/dingo/pull/2479))
+* Updated **keep the published v0.50.1 release history current:** The release history now includes the v0.50.1 notes, which makes recent release context easier to review. ([#2480](https://github.com/blinklabs-io/dingo/pull/2480))
+
+### 🔧 Fixes
+
+* Fixed **preserve backfill history more reliably during historical recovery:** Historical backfill now keeps output history aligned more reliably during resumed recovery, which improves tracking accuracy after interruptions. ([#2481](https://github.com/blinklabs-io/dingo/pull/2481))
+* Corrected **fail oversized sync intersection requests earlier:** Oversized sync intersection requests now stop sooner, which avoids unnecessary intersection work and keeps sync behavior safer. ([#2494](https://github.com/blinklabs-io/dingo/pull/2494))
+
+### 📋 What You Need to Know
+
+* Clarified **follow normal patch release upgrade steps for this release:** Normal patch release upgrade steps are generally sufficient for this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.50.1 (June 2, 2026)
 
 **Title:** Stuck-peer recovery, corrected chain density, and maintenance polish

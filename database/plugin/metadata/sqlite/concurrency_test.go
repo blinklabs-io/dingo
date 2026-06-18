@@ -48,6 +48,7 @@ func setupFileBasedStore(
 // do not produce SQLITE_BUSY errors while writes are in progress.
 // This is the core scenario the read/write pool separation fixes.
 func TestConcurrentReadsDuringWrites(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -151,6 +152,7 @@ func TestConcurrentReadsDuringWrites(t *testing.T) {
 // errors. With a single-writer connection pool, writes serialize
 // naturally at the Go connection pool level.
 func TestConcurrentWriteTransactions(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -223,6 +225,7 @@ func TestConcurrentWriteTransactions(t *testing.T) {
 // TestReadWritePoolSeparation verifies that the file-based store
 // has separate read and write database handles.
 func TestReadWritePoolSeparation(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -246,6 +249,7 @@ func TestReadWritePoolSeparation(t *testing.T) {
 // TestInMemorySharedPool verifies that the in-memory store shares
 // a single pool for reads and writes.
 func TestInMemorySharedPool(t *testing.T) {
+	t.Parallel()
 	store, err := New("", nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, store.Start())
@@ -264,6 +268,7 @@ func TestInMemorySharedPool(t *testing.T) {
 // with many goroutines performing mixed read/write operations. This
 // is a stress test to verify the fix under load.
 func TestHighContentionReadWrite(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("skipping stress test in short mode")
 	}
@@ -365,6 +370,7 @@ func TestHighContentionReadWrite(t *testing.T) {
 // TestWritePoolSingleConnection verifies that the write pool has
 // exactly 1 max open connection for file-based databases.
 func TestWritePoolSingleConnection(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -383,6 +389,7 @@ func TestWritePoolSingleConnection(t *testing.T) {
 // TestReadPoolMultipleConnections verifies that the read pool
 // allows multiple connections for file-based databases.
 func TestReadPoolMultipleConnections(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 
@@ -401,6 +408,7 @@ func TestReadPoolMultipleConnections(t *testing.T) {
 // TestConcurrentReadsDontBlock verifies that many concurrent reads
 // complete quickly and don't block each other.
 func TestConcurrentReadsDontBlock(t *testing.T) {
+	t.Parallel()
 	store := setupFileBasedStore(t)
 	defer store.Close() //nolint:errcheck
 

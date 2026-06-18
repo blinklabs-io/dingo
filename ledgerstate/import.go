@@ -120,16 +120,17 @@ type EraBound struct {
 // ParsedUTxO represents a parsed unspent transaction output ready
 // for conversion to Dingo's database model.
 type ParsedUTxO struct {
-	TxHash      []byte // 32 bytes
-	OutputIndex uint32
-	Address     []byte // raw address bytes
-	PaymentKey  []byte // 28 bytes, extracted from address
-	StakingKey  []byte // 28 bytes, extracted from address
-	Amount      uint64 // lovelace
-	Assets      []ParsedAsset
-	DatumHash   []byte // optional
-	Datum       []byte // optional inline datum CBOR
-	ScriptRef   []byte // optional reference script CBOR
+	TxHash        []byte // 32 bytes
+	OutputIndex   uint32
+	Address       []byte // raw address bytes
+	PaymentKey    []byte // 28 bytes, extracted from address
+	StakingKey    []byte // 28 bytes, extracted from address
+	PaymentScript bool   // true when payment credential is a script hash
+	Amount        uint64 // lovelace
+	Assets        []ParsedAsset
+	DatumHash     []byte // optional
+	Datum         []byte // optional inline datum CBOR
+	ScriptRef     []byte // optional reference script CBOR
 }
 
 // ParsedAsset represents a native asset within a UTxO.

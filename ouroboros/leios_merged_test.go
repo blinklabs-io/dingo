@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 	"time"
@@ -22,8 +23,9 @@ import (
 	"github.com/blinklabs-io/dingo/connmanager"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
@@ -37,163 +39,85 @@ func mustCbor(t *testing.T, value any) cbor.RawMessage {
 	return cbor.RawMessage(data)
 }
 
-func testTxRaw(
-	t *testing.T,
-	body cbor.RawMessage,
-	witness cbor.RawMessage,
-	valid bool,
-	metadata cbor.RawMessage,
-) cbor.RawMessage {
-	t.Helper()
-	return mustCbor(t, []any{
-		body,
-		witness,
-		valid,
-		metadata,
-	})
-}
-
-func testEndorserBlockRaw(
-	t *testing.T,
-	refs []gleios.TxReference,
-) cbor.RawMessage {
-	t.Helper()
-	block := &gleios.LeiosEndorserBlock{
-		Body: &gleios.LeiosEndorserBlockBody{
-			TxReferences: refs,
-		},
-	}
-	data, err := block.MarshalCBOR()
-	require.NoError(t, err)
-	return cbor.RawMessage(data)
-}
-
-func testIndexedEndorserBlock(
+func testDijkstraBlockRaw(
 	t *testing.T,
 	idx int,
 ) (ocommon.Point, cbor.RawMessage) {
 	t.Helper()
-	var txHash lcommon.Blake2b256
-	txHash[0] = byte(idx)
-	txHash[1] = byte(idx >> 8)
-	ebRaw := testEndorserBlockRaw(t, []gleios.TxReference{
-		{TxHash: txHash, TxSize: uint16(idx + 1)},
-	})
-	ebHash := lcommon.Blake2b256Hash(ebRaw)
-	return ocommon.NewPoint(uint64(idx), ebHash.Bytes()), ebRaw
+	blockBody := gdijkstra.DijkstraBlockBody{
+		TransactionBodies:      []gdijkstra.DijkstraTransactionBody{},
+		TransactionWitnessSets: []gdijkstra.DijkstraTransactionWitnessSet{},
+		InvalidTransactions:    []uint{},
+		LeiosCertificate:       &gdijkstra.DijkstraLeiosCertificate{},
+		PerasCertificate:       &gdijkstra.DijkstraPerasCertificate{},
+	}
+	block := gdijkstra.DijkstraBlock{
+		BlockHeader: &gdijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					Slot:          uint64(idx),
+					BlockBodyHash: blockBody.Hash(),
+					VrfKey:        make([]byte, 32),
+					VrfResult: lcommon.VrfResult{
+						Output: []byte{},
+						Proof:  make([]byte, 80),
+					},
+					OpCert: babbage.BabbageOpCert{
+						HotVkey:   make([]byte, 32),
+						Signature: make([]byte, 64),
+					},
+					ProtoVersion: babbage.BabbageProtoVersion{
+						Major: gdijkstra.MinProtocolVersionDijkstra,
+					},
+				},
+				Signature: make([]byte, 448),
+			},
+		},
+		BlockBody: blockBody,
+	}
+	raw, err := block.MarshalCBOR()
+	require.NoError(t, err)
+	decoded, err := gdijkstra.NewDijkstraBlockFromCbor(raw)
+	require.NoError(t, err)
+	hash := decoded.Hash()
+	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
 }
 
-func testCertifiedRankingBlockRaw(
+func testLeiosEndorserBlockRaw(
 	t *testing.T,
-	ebHash lcommon.Blake2b256,
-	baseBody cbor.RawMessage,
-	baseWitness cbor.RawMessage,
-	baseMetadata cbor.RawMessage,
-) cbor.RawMessage {
+	idx int,
+) (ocommon.Point, cbor.RawMessage) {
 	t.Helper()
-	cert := lcommon.LeiosEbCertificate{
-		ElectionId:        lcommon.Blake2b256{0x01},
-		EndorserBlockHash: ebHash,
-		AggregatedVoteSig: make([]byte, 48),
-	}
-	certRaw := mustCbor(t, cert)
-	return mustCbor(t, []any{
-		cbor.RawMessage{0x80}, // header, not inspected by merge logic
-		[]cbor.RawMessage{baseBody},
-		[]cbor.RawMessage{baseWitness},
-		map[uint64]cbor.RawMessage{0: baseMetadata},
-		[]uint64{},
-		certRaw,
-	})
+	return testLeiosEndorserBlockRawWithRefs(t, idx, 1)
 }
 
-func TestMergedLeiosRankingBlockCborAppendsEndorserTransactions(
+func testLeiosEndorserBlockRawWithRefs(
 	t *testing.T,
-) {
-	baseBody := mustCbor(t, map[uint64]uint64{0: 1})
-	baseWitness := mustCbor(t, map[uint64]uint64{})
-	baseMetadata := mustCbor(t, map[uint64]string{1: "base"})
-
-	ebRefHash1 := lcommon.Blake2b256{0x11}
-	ebRefHash2 := lcommon.Blake2b256{0x22}
-	ebRaw := testEndorserBlockRaw(t, []gleios.TxReference{
-		{TxHash: ebRefHash1, TxSize: 123},
-		{TxHash: ebRefHash2, TxSize: 456},
-	})
-	ebHash := lcommon.Blake2b256Hash(ebRaw)
-	blockRaw := testCertifiedRankingBlockRaw(
-		t,
-		ebHash,
-		baseBody,
-		baseWitness,
-		baseMetadata,
-	)
-
-	ebBody1 := mustCbor(t, map[uint64]uint64{0: 2})
-	ebWitness1 := mustCbor(t, map[uint64]uint64{1: 1})
-	ebMetadata1 := mustCbor(t, map[uint64]string{2: "endorser"})
-	ebBody2 := mustCbor(t, map[uint64]uint64{0: 3})
-	ebWitness2 := mustCbor(t, map[uint64]uint64{2: 1})
-	ebTxs := []cbor.RawMessage{
-		testTxRaw(t, ebBody1, ebWitness1, true, ebMetadata1),
-		testTxRaw(t, ebBody2, ebWitness2, false, cbor.RawMessage{0xf6}),
+	idx int,
+	refCount int,
+) (ocommon.Point, cbor.RawMessage) {
+	t.Helper()
+	refs := make([]lcommon.LeiosTransactionReference, refCount)
+	for refIdx := range refs {
+		var hashSeed [12]byte
+		binary.BigEndian.PutUint64(hashSeed[:8], uint64(idx))
+		binary.BigEndian.PutUint32(hashSeed[8:], uint32(refIdx))
+		refs[refIdx] = lcommon.LeiosTransactionReference{
+			TransactionHash: lcommon.Blake2b256Hash(hashSeed[:]),
+			TransactionSize: uint16(refIdx + 1),
+		}
 	}
-
-	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	require.NoError(
-		t,
-		o.storeLeiosEndorserBlock(
-			ocommon.NewPoint(10, ebHash.Bytes()),
-			ebRaw,
-			ebTxs,
-		),
-	)
-
-	mergedRaw, ok, err := o.mergedLeiosRankingBlockCbor(blockRaw)
+	block := lcommon.LeiosEndorserBlock{
+		TransactionReferences: refs,
+	}
+	raw, err := cbor.Encode(&block)
 	require.NoError(t, err)
-	require.True(t, ok)
-
-	var mergedItems []cbor.RawMessage
-	_, err = cbor.Decode(mergedRaw, &mergedItems)
-	require.NoError(t, err)
-	require.Len(t, mergedItems, 6)
-
-	var bodies []cbor.RawMessage
-	_, err = cbor.Decode(mergedItems[1], &bodies)
-	require.NoError(t, err)
-	require.Equal(t, []cbor.RawMessage{baseBody, ebBody1, ebBody2}, bodies)
-
-	var witnesses []cbor.RawMessage
-	_, err = cbor.Decode(mergedItems[2], &witnesses)
-	require.NoError(t, err)
-	require.Equal(
-		t,
-		[]cbor.RawMessage{baseWitness, ebWitness1, ebWitness2},
-		witnesses,
-	)
-
-	var metadata map[uint64]cbor.RawMessage
-	_, err = cbor.Decode(mergedItems[3], &metadata)
-	require.NoError(t, err)
-	require.Equal(t, baseMetadata, metadata[0])
-	require.Equal(t, ebMetadata1, metadata[1])
-	require.NotContains(t, metadata, uint64(2))
-
-	var invalid []uint64
-	_, err = cbor.Decode(mergedItems[4], &invalid)
-	require.NoError(t, err)
-	require.Equal(t, []uint64{2}, invalid)
+	hash := lcommon.Blake2b256Hash(raw)
+	return ocommon.NewPoint(uint64(idx), hash.Bytes()), cbor.RawMessage(raw)
 }
 
-func TestMergedLeiosRankingBlockCborFallsBackWithoutCachedTxs(t *testing.T) {
-	ebHash := lcommon.Blake2b256{0xaa}
-	blockRaw := testCertifiedRankingBlockRaw(
-		t,
-		ebHash,
-		mustCbor(t, map[uint64]uint64{}),
-		mustCbor(t, map[uint64]uint64{}),
-		mustCbor(t, map[uint64]uint64{}),
-	)
+func TestMergedLeiosRankingBlockCborIsNoopForDijkstra(t *testing.T) {
+	_, blockRaw := testDijkstraBlockRaw(t, 1)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	got, ok, err := o.mergedLeiosRankingBlockCbor(blockRaw)
@@ -215,21 +139,14 @@ func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
-	txRefHash1 := lcommon.Blake2b256{0x11}
-	txRefHash2 := lcommon.Blake2b256{0x22}
-	ebRaw := testEndorserBlockRaw(t, []gleios.TxReference{
-		{TxHash: txRefHash1, TxSize: 123},
-		{TxHash: txRefHash2, TxSize: 456},
-	})
-	ebHash := lcommon.Blake2b256Hash(ebRaw)
-	point := ocommon.NewPoint(10, ebHash.Bytes())
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
 			point,
-			ebRaw,
+			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0")},
 		),
 	)
@@ -245,21 +162,14 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
-	txRefHash1 := lcommon.Blake2b256{0x11}
-	txRefHash2 := lcommon.Blake2b256{0x22}
-	ebRaw := testEndorserBlockRaw(t, []gleios.TxReference{
-		{TxHash: txRefHash1, TxSize: 123},
-		{TxHash: txRefHash2, TxSize: 456},
-	})
-	ebHash := lcommon.Blake2b256Hash(ebRaw)
-	point := ocommon.NewPoint(10, ebHash.Bytes())
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
 			point,
-			ebRaw,
+			blockRaw,
 			[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
 		),
 	)
@@ -296,12 +206,7 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	t *testing.T,
 ) {
-	txRefHash := lcommon.Blake2b256{0x11}
-	ebRaw := testEndorserBlockRaw(t, []gleios.TxReference{
-		{TxHash: txRefHash, TxSize: 123},
-	})
-	ebHash := lcommon.Blake2b256Hash(ebRaw)
-	point := ocommon.NewPoint(10, ebHash.Bytes())
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
 	txRaw := mustCbor(t, "tx0")
 
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
@@ -309,13 +214,14 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 		t,
 		o.storeLeiosEndorserBlock(
 			point,
-			ebRaw,
+			blockRaw,
 			[]cbor.RawMessage{txRaw},
 		),
 	)
 
-	got, err := o.fetchCachedLeiosEndorserBlockTxs(nil, point)
+	got, err := o.fetchCachedLeiosEndorserBlockTxs(point)
 	require.NoError(t, err)
+	require.Len(t, got, 1)
 	require.Equal(t, []cbor.RawMessage{txRaw}, got)
 
 	got[0][0] ^= 0xff
@@ -324,9 +230,25 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	require.Equal(t, txRaw, cached.txsRaw[0])
 }
 
+func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+	point.Hash[0] ^= 0xff
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	err := o.storeLeiosEndorserBlock(point, blockRaw, nil)
+	require.ErrorContains(
+		t,
+		err,
+		"leios endorser block cache: point hash mismatch",
+	)
+
+	_, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.False(t, ok)
+}
+
 func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	point, raw := testIndexedEndorserBlock(t, 1)
+	point, raw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
@@ -346,7 +268,7 @@ func TestLeiosEndorserBlockLookupExpiresStaleEntries(t *testing.T) {
 
 func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
-	oldPoint, oldRaw := testIndexedEndorserBlock(t, 1)
+	oldPoint, oldRaw := testLeiosEndorserBlockRaw(t, 1)
 	require.NoError(t, o.storeLeiosEndorserBlock(oldPoint, oldRaw, nil))
 	oldData, ok := o.lookupLeiosEndorserBlock(oldPoint.Hash)
 	require.True(t, ok)
@@ -355,7 +277,7 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 	oldData.insertedAt = time.Now().Add(-leiosEndorserBlockCacheTTL - time.Second)
 	o.leiosMu.Unlock()
 
-	newPoint, newRaw := testIndexedEndorserBlock(t, 2)
+	newPoint, newRaw := testLeiosEndorserBlockRaw(t, 2)
 	require.NoError(t, o.storeLeiosEndorserBlock(newPoint, newRaw, nil))
 
 	_, ok = o.lookupLeiosEndorserBlock(oldPoint.Hash)
@@ -367,8 +289,8 @@ func TestLeiosEndorserBlockCachePrunesExpiredEntries(t *testing.T) {
 func TestLeiosEndorserBlockCachePrunesBySize(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	var lastPoint ocommon.Point
-	for idx := 0; idx < leiosEndorserBlockCacheMaxEntries+1; idx++ {
-		point, raw := testIndexedEndorserBlock(t, idx)
+	for idx := range leiosEndorserBlockCacheMaxEntries + 1 {
+		point, raw := testLeiosEndorserBlockRaw(t, idx)
 		require.NoError(t, o.storeLeiosEndorserBlock(point, raw, nil))
 		lastPoint = point
 	}

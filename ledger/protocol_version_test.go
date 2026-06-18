@@ -17,11 +17,13 @@ package ledger
 import (
 	"testing"
 
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
@@ -99,6 +101,21 @@ func TestGetProtocolVersion_Conway(t *testing.T) {
 	assert.Equal(t, uint(0), pv.Minor)
 }
 
+func TestGetProtocolVersion_Dijkstra(t *testing.T) {
+	pp := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 12,
+				Minor: 0,
+			},
+		},
+	}
+	pv, err := GetProtocolVersion(pp)
+	require.NoError(t, err)
+	assert.Equal(t, uint(12), pv.Major)
+	assert.Equal(t, uint(0), pv.Minor)
+}
+
 func TestGetProtocolVersion_Nil(t *testing.T) {
 	_, err := GetProtocolVersion(nil)
 	require.Error(t, err)
@@ -112,6 +129,7 @@ func TestGetProtocolVersion_Nil(t *testing.T) {
 func TestEraForVersion(t *testing.T) {
 	tests := []struct {
 		name          string
+		eraList       []eras.EraDesc
 		majorVersion  uint
 		expectedEraId uint
 		expectedOk    bool
@@ -183,6 +201,18 @@ func TestEraForVersion(t *testing.T) {
 			expectedOk:    true,
 		},
 		{
+			name:         "Dijkstra version gated off by default",
+			majorVersion: 12,
+			expectedOk:   false,
+		},
+		{
+			name:          "Dijkstra version enabled",
+			eraList:       eras.ErasWithDijkstra,
+			majorVersion:  12,
+			expectedEraId: 7,
+			expectedOk:    true,
+		},
+		{
 			name:         "Unknown version 99",
 			majorVersion: 99,
 			expectedOk:   false,
@@ -191,7 +221,11 @@ func TestEraForVersion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			eraId, ok := EraForVersion(tt.majorVersion)
+			eraList := eras.Eras
+			if tt.eraList != nil {
+				eraList = tt.eraList
+			}
+			eraId, ok := EraForVersion(eraList, tt.majorVersion)
 			assert.Equal(t, tt.expectedOk, ok)
 			if tt.expectedOk {
 				assert.Equal(
@@ -207,6 +241,7 @@ func TestEraForVersion(t *testing.T) {
 func TestIsHardForkTransition(t *testing.T) {
 	tests := []struct {
 		name     string
+		eraList  []eras.EraDesc
 		old      ProtocolVersion
 		new      ProtocolVersion
 		expected bool
@@ -271,11 +306,28 @@ func TestIsHardForkTransition(t *testing.T) {
 			new:      ProtocolVersion{Major: 99, Minor: 0},
 			expected: false,
 		},
+		{
+			name:     "Conway to Dijkstra gated off",
+			old:      ProtocolVersion{Major: 10, Minor: 0},
+			new:      ProtocolVersion{Major: 12, Minor: 0},
+			expected: false,
+		},
+		{
+			name:     "Conway to Dijkstra enabled",
+			eraList:  eras.ErasWithDijkstra,
+			old:      ProtocolVersion{Major: 10, Minor: 0},
+			new:      ProtocolVersion{Major: 12, Minor: 0},
+			expected: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := IsHardForkTransition(tt.old, tt.new)
+			eraList := tt.eraList
+			if eraList == nil {
+				eraList = eras.Eras
+			}
+			result := IsHardForkTransition(eraList, tt.old, tt.new)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

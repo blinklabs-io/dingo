@@ -94,11 +94,11 @@ func main() {
 	}
 }
 
-// isNotFound treats both "not found" and "tombstoned" errors as the
-// locally-absent case. A tombstone means the bp value has been replaced
-// with a small marker so the bark proxy can resolve the block remotely;
-// from the perspective of "is the real CBOR stored locally?" the answer
-// is no, same as a hard delete.
+// isNotFound treats both "not found" and "history expired" errors as the
+// locally-absent case. Expired history means the bp value has been replaced
+// with a small marker so the bark proxy can resolve the block remotely; from
+// the perspective of "is the real CBOR stored locally?" the answer is no,
+// same as a hard delete.
 func isNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -106,5 +106,5 @@ func isNotFound(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
 		strings.Contains(msg, "errkeynotfound") ||
-		strings.Contains(msg, "tombstoned")
+		strings.Contains(msg, "history expired")
 }

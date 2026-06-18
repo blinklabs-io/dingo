@@ -69,6 +69,7 @@ type mockTransaction struct {
 	refInputs    []lcommon.TransactionInput
 	outputs      []lcommon.TransactionOutput
 	collReturn   lcommon.TransactionOutput
+	withdrawals  map[*lcommon.Address]*big.Int
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -168,7 +169,7 @@ func (m *mockTransaction) TotalCollateral() *big.Int {
 }
 
 func (m *mockTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
-	return nil
+	return m.withdrawals
 }
 
 func (m *mockTransaction) RequiredSigners() []lcommon.Blake2b224 {
@@ -273,6 +274,7 @@ func (m *mockTransactionOutput) String() string {
 }
 
 func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
+	t.Parallel()
 	sqliteStore := setupTestDB(t)
 
 	var txHash lcommon.Blake2b256
@@ -320,7 +322,142 @@ func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
 	}
 }
 
+// TestSetTransactionWithdrawalsClearRewardBalance verifies transaction reward
+// withdrawals clear persisted rewards and rollback restores the prior balance.
+func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
+	t.Parallel()
+	sqliteStore := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0x42}, lcommon.AddressHashSize)
+	account := &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000),
+		Active:     true,
+	}
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	requireNoError(sqliteStore.DB().Create(account).Error)
+
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	requireNoError(err)
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x50
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&withdrawalAddr: big.NewInt(1_000),
+		},
+	}
+	point := ocommon.NewPoint(1556771, bytes.Repeat([]byte{0xf9}, 32))
+
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+
+	var got models.Account
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != 0 {
+		t.Fatalf(
+			"expected withdrawal to clear reward balance, got %d",
+			uint64(got.Reward),
+		)
+	}
+	var deltaCount int64
+	requireNoError(sqliteStore.DB().
+		Model(&models.AccountRewardDelta{}).
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Count(&deltaCount).Error)
+	if deltaCount != 1 {
+		t.Fatalf("expected one withdrawal delta, got %d", deltaCount)
+	}
+
+	requireNoError(sqliteStore.DeleteAccountRewardsAfterSlot(point.Slot-1, nil))
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != account.Reward {
+		t.Fatalf(
+			"expected rollback to restore reward balance %d, got %d",
+			uint64(account.Reward),
+			uint64(got.Reward),
+		)
+	}
+}
+
+// TestSetTransactionInvalidWithdrawalsDoNotClearRewardBalance verifies script
+// invalid transactions do not apply reward withdrawal state transitions.
+func TestSetTransactionInvalidWithdrawalsDoNotClearRewardBalance(t *testing.T) {
+	t.Parallel()
+	sqliteStore := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0x43}, lcommon.AddressHashSize)
+	account := &models.Account{
+		StakingKey: stakeKey,
+		Reward:     types.Uint64(1_000),
+		Active:     true,
+	}
+	requireNoError := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	requireNoError(sqliteStore.DB().Create(account).Error)
+
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeKey,
+	)
+	requireNoError(err)
+	var txHash lcommon.Blake2b256
+	txHash[0] = 0x51
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: false,
+		withdrawals: map[*lcommon.Address]*big.Int{
+			&withdrawalAddr: big.NewInt(1_000),
+		},
+	}
+	point := ocommon.NewPoint(1556772, bytes.Repeat([]byte{0xfa}, 32))
+
+	requireNoError(sqliteStore.SetTransaction(tx, point, 0, nil, nil))
+
+	var got models.Account
+	requireNoError(sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Take(&got).Error)
+	if got.Reward != account.Reward {
+		t.Fatalf(
+			"expected invalid tx withdrawal to leave reward balance %d, got %d",
+			uint64(account.Reward),
+			uint64(got.Reward),
+		)
+	}
+	var deltaCount int64
+	requireNoError(sqliteStore.DB().
+		Model(&models.AccountRewardDelta{}).
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Count(&deltaCount).Error)
+	if deltaCount != 0 {
+		t.Fatalf("expected no withdrawal delta for invalid tx, got %d", deltaCount)
+	}
+}
+
 func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
+	t.Parallel()
 	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
 	highBitLabel := uint64(16450635129309362000)
 
@@ -485,6 +622,7 @@ func TestTransactionMetadataLabelsIndexAndQuery(t *testing.T) {
 }
 
 func TestDeleteTransactionMetadataLabelsAfterSlot(t *testing.T) {
+	t.Parallel()
 	sqliteStore := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	makeMetadata := func(label uint64, value string) lcommon.TransactionMetadatum {
@@ -575,6 +713,7 @@ func createTestTransaction(db *gorm.DB, id uint, slot uint64) error {
 }
 
 func TestGetTransactionsByAddressIndex(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	if err := createTestTransaction(store.DB(), 1, 100); err != nil {
@@ -625,6 +764,7 @@ func TestGetTransactionsByAddressIndex(t *testing.T) {
 }
 
 func TestGetAddressesByStakingKey(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stake := bytes.Repeat([]byte{0x55}, 28)
@@ -657,6 +797,7 @@ func TestGetAddressesByStakingKey(t *testing.T) {
 }
 
 func TestDeleteAddressTransactionsAfterSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	rows := []models.AddressTransaction{
@@ -685,6 +826,7 @@ func TestDeleteAddressTransactionsAfterSlot(t *testing.T) {
 // concurrent transactions when using in-memory mode. This requires special URI flags, and
 // this is mostly making sure that we don't lose them
 func TestInMemorySqliteMultipleTransaction(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -730,6 +872,7 @@ func TestInMemorySqliteMultipleTransaction(t *testing.T) {
 // TestUnifiedCertificateCreation tests that unified certificate records are created
 // correctly and linked to specialized certificate records
 func TestUnifiedCertificateCreation(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -921,6 +1064,7 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 
 // TestDeleteCertificatesAfterSlot tests that certificates added after a given slot are deleted
 func TestDeleteCertificatesAfterSlot(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -1035,6 +1179,7 @@ func TestDeleteCertificatesAfterSlot(t *testing.T) {
 
 // TestRestoreAccountStateAtSlot tests that account delegation state is correctly restored
 func TestRestoreAccountStateAtSlot(t *testing.T) {
+	t.Parallel()
 	t.Run("account delegation is restored to prior pool", func(t *testing.T) {
 		sqliteStore, err := New("", nil, nil)
 		if err != nil {
@@ -1473,6 +1618,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 
 // TestDeletePParamsAfterSlot tests that protocol parameters after a slot are deleted
 func TestDeletePParamsAfterSlot(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -1529,6 +1675,7 @@ func TestDeletePParamsAfterSlot(t *testing.T) {
 
 // TestDeletePParamUpdatesAfterSlot tests that protocol parameter updates after a slot are deleted
 func TestDeletePParamUpdatesAfterSlot(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -1590,6 +1737,7 @@ func TestDeletePParamUpdatesAfterSlot(t *testing.T) {
 
 // TestDeleteTransactionsAfterSlot tests that transactions and their child records are deleted
 func TestDeleteTransactionsAfterSlot(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -1755,6 +1903,7 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 
 // TestRestorePoolStateAtSlot tests that pool state is correctly restored during rollback
 func TestRestorePoolStateAtSlot(t *testing.T) {
+	t.Parallel()
 	t.Run("pool with no prior registrations is deleted", func(t *testing.T) {
 		sqliteStore, err := New("", nil, nil)
 		if err != nil {
@@ -1969,6 +2118,7 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 
 // TestGetActivePoolKeyHashesAtSlot tests that pools active at a specific slot are returned
 func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
+	t.Parallel()
 	t.Run("returns error when no epoch data", func(t *testing.T) {
 		sqliteStore := setupTestDB(t)
 
@@ -2811,6 +2961,7 @@ func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
 
 // TestRestoreDrepStateAtSlot tests that DRep state is correctly restored during rollback
 func TestRestoreDrepStateAtSlot(t *testing.T) {
+	t.Parallel()
 	t.Run("DRep with no prior registrations is deleted", func(t *testing.T) {
 		sqliteStore, err := New("", nil, nil)
 		if err != nil {
@@ -3515,6 +3666,7 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 
 // TestPoolCascadeDelete tests that Pool deletion cascades correctly to child records
 func TestPoolCascadeDelete(t *testing.T) {
+	t.Parallel()
 	t.Run(
 		"pool deletion cascades to registrations, owners, relays",
 		func(t *testing.T) {
@@ -3740,6 +3892,7 @@ func TestPoolCascadeDelete(t *testing.T) {
 // TestPoolCrossPoolOwnerRelay tests that owners/relays with the same key hash
 // across different pools are stored as separate records and don't affect each other
 func TestPoolCrossPoolOwnerRelay(t *testing.T) {
+	t.Parallel()
 	t.Run(
 		"same owner key hash in different pools are independent records",
 		func(t *testing.T) {
@@ -3878,6 +4031,7 @@ func TestPoolCrossPoolOwnerRelay(t *testing.T) {
 
 // TestUtxoCascadeDelete tests that Utxo deletion cascades correctly to Asset records
 func TestUtxoCascadeDelete(t *testing.T) {
+	t.Parallel()
 	t.Run("utxo deletion cascades to assets", func(t *testing.T) {
 		sqliteStore, err := New("", nil, nil)
 		if err != nil {
@@ -4072,6 +4226,7 @@ func TestUtxoCascadeDelete(t *testing.T) {
 //   - Two UTXOs with the same non-NULL CollateralReturnForTxID are rejected (per Cardano protocol,
 //     a transaction has at most one collateral return output)
 func TestCollateralReturnUniqueConstraint(t *testing.T) {
+	t.Parallel()
 	t.Run("multiple NULL CollateralReturnForTxID allowed", func(t *testing.T) {
 		sqliteStore, err := New("", nil, nil)
 		if err != nil {
@@ -4206,6 +4361,7 @@ func TestCollateralReturnUniqueConstraint(t *testing.T) {
 
 // TestPoolStakeSnapshotCRUD tests basic CRUD operations for pool stake snapshots
 func TestPoolStakeSnapshotCRUD(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -4328,6 +4484,7 @@ func TestPoolStakeSnapshotCRUD(t *testing.T) {
 
 // TestEpochSummaryCRUD tests basic CRUD operations for epoch summaries
 func TestEpochSummaryCRUD(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -4414,6 +4571,7 @@ func TestEpochSummaryCRUD(t *testing.T) {
 
 // TestPoolStakeSnapshotEmptyBatch tests that empty batch save works
 func TestPoolStakeSnapshotEmptyBatch(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)
@@ -4431,6 +4589,7 @@ func TestPoolStakeSnapshotEmptyBatch(t *testing.T) {
 
 // TestGetTotalActiveStakeEmpty tests GetTotalActiveStake when no snapshots exist
 func TestGetTotalActiveStakeEmpty(t *testing.T) {
+	t.Parallel()
 	sqliteStore, err := New("", nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %s", err)

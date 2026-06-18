@@ -20,10 +20,10 @@ import (
 )
 
 // shouldExitBootstrap checks if conditions are met to exit bootstrap mode.
-// Returns true if ANY of these conditions are met:
-// 1. Current slot > UseLedgerAfterSlot (ledger peers are enabled)
-// 2. Ledger peer count >= MinLedgerPeersForExit
-// 3. Sync progress >= SyncProgressForExit
+// Returns true if any of these conditions are met:
+// 1. Ledger peer count >= MinLedgerPeersForExit
+// 2. Current slot > UseLedgerAfterSlot and a non-bootstrap successor exists
+// 3. Sync progress >= SyncProgressForExit and a non-bootstrap successor exists
 // Must be called with p.mu held.
 func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 	// Already exited
@@ -43,17 +43,7 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 		return false, ""
 	}
 
-	// Condition 1: Current slot > UseLedgerAfterSlot
-	if p.config.UseLedgerAfterSlot > 0 && p.config.LedgerPeerProvider != nil {
-		currentSlot := p.config.LedgerPeerProvider.CurrentSlot()
-		// Safe conversion: UseLedgerAfterSlot is already checked to be > 0
-		useLedgerAfterSlot := uint64(p.config.UseLedgerAfterSlot) // #nosec G115
-		if currentSlot > useLedgerAfterSlot {
-			return true, "slot threshold reached"
-		}
-	}
-
-	// Condition 2: Ledger peer count >= MinLedgerPeersForExit
+	// Condition 1: Ledger peer count >= MinLedgerPeersForExit
 	if p.config.MinLedgerPeersForExit > 0 {
 		ledgerPeerCount := 0
 		for _, peer := range p.peers {
@@ -72,20 +62,73 @@ func (p *PeerGovernor) shouldExitBootstrap() (bool, string) {
 		}
 	}
 
-	// Condition 3: Sync progress >= SyncProgressForExit
+	successorCount := p.bootstrapExitSuccessorCountLocked()
+
+	// Condition 2: Current slot > UseLedgerAfterSlot. The slot threshold
+	// only means ledger peers may be discovered; do not disable the
+	// bootstrap source until some non-bootstrap client-capable peer can
+	// carry ChainSync/BlockFetch forward.
+	if p.config.UseLedgerAfterSlot > 0 && p.config.LedgerPeerProvider != nil {
+		currentSlot := p.config.LedgerPeerProvider.CurrentSlot()
+		// Safe conversion: UseLedgerAfterSlot is already checked to be > 0
+		useLedgerAfterSlot := uint64(p.config.UseLedgerAfterSlot) // #nosec G115
+		if currentSlot > useLedgerAfterSlot {
+			if successorCount > 0 {
+				return true, "slot threshold reached"
+			}
+			p.config.Logger.Debug(
+				"bootstrap exit delayed: no non-bootstrap successor peers",
+				"reason", "slot threshold reached",
+				"successor_count", successorCount,
+			)
+		}
+	}
+
+	// Condition 3: Sync progress >= SyncProgressForExit. Absolute slot
+	// ratios can report 99%+ while still tens of thousands of slots behind;
+	// use the threshold only after another trusted client-capable source is
+	// available so bootstrap exit cannot strand chain sync.
 	if p.config.SyncProgressForExit > 0 &&
 		p.config.SyncProgressProvider != nil {
 		syncProgress := p.config.SyncProgressProvider.SyncProgress()
 		if syncProgress >= p.config.SyncProgressForExit {
-			return true, fmt.Sprintf(
-				"sync progress (%.2f%%) >= threshold (%.2f%%)",
-				syncProgress*100,
-				p.config.SyncProgressForExit*100,
+			if successorCount > 0 {
+				return true, fmt.Sprintf(
+					"sync progress (%.2f%%) >= threshold (%.2f%%)",
+					syncProgress*100,
+					p.config.SyncProgressForExit*100,
+				)
+			}
+			p.config.Logger.Debug(
+				"bootstrap exit delayed: no non-bootstrap successor peers",
+				"reason", "sync progress threshold reached",
+				"sync_progress", syncProgress,
+				"sync_progress_threshold", p.config.SyncProgressForExit,
+				"successor_count", successorCount,
 			)
 		}
 	}
 
 	return false, ""
+}
+
+// bootstrapExitSuccessorCountLocked returns the number of connected,
+// non-bootstrap peers that can continue feeding ChainSync/BlockFetch after
+// bootstrap priority is lowered. Must be called with p.mu held.
+func (p *PeerGovernor) bootstrapExitSuccessorCountLocked() int {
+	successorCount := 0
+	for _, peer := range p.peers {
+		if peer == nil ||
+			peer.Source == PeerSourceTopologyBootstrapPeer ||
+			chainSelectionPriority(peer.Source) == 0 ||
+			(peer.State != PeerStateHot && peer.State != PeerStateWarm) {
+			continue
+		}
+		if chainSelectionEligible(peer.Source, peer.Connection) {
+			successorCount++
+		}
+	}
+	return successorCount
 }
 
 // exitBootstrap marks bootstrap as exited while preserving bootstrap-source

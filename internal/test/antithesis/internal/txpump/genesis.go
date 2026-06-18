@@ -15,10 +15,14 @@
 package txpump
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 // GenesisUTxO represents a single pre-funded UTxO from the genesis
@@ -29,13 +33,17 @@ type GenesisUTxO struct {
 	Amount uint64 `json:"amount"`
 }
 
+type shelleyGenesisFile struct {
+	InitialFunds map[string]uint64 `json:"initialFunds"`
+}
+
 // LoadGenesisUTxOs reads pre-funded UTxOs from a JSON file or directory
 // produced by the testnet-generation-tool configurator.
 //
 // If path is a directory, all .json files in it are read (non-JSON files such
 // as key files are skipped). If path is a file, it is read directly. The
-// expected JSON format is an array of objects with txHash, index, and amount
-// fields.
+// expected JSON format is either an array of objects with txHash, index, and
+// amount fields or a Shelley genesis file containing initialFunds.
 func LoadGenesisUTxOs(path string) ([]UTxO, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -80,13 +88,52 @@ func loadGenesisFile(path string) ([]UTxO, error) {
 	}
 
 	var raw []GenesisUTxO
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	rawErr := json.Unmarshal(data, &raw)
+	if rawErr == nil {
+		utxos := make([]UTxO, len(raw))
+		for i, r := range raw {
+			utxos[i] = UTxO(r)
+		}
+		return utxos, nil
 	}
 
-	utxos := make([]UTxO, len(raw))
-	for i, r := range raw {
-		utxos[i] = UTxO(r)
+	var shelley shelleyGenesisFile
+	if err := json.Unmarshal(data, &shelley); err != nil {
+		return nil, fmt.Errorf("unmarshal UTxO list: %w", rawErr)
+	}
+	if len(shelley.InitialFunds) == 0 {
+		return nil, fmt.Errorf(
+			"unmarshal UTxO list: %w; no Shelley initialFunds",
+			rawErr,
+		)
+	}
+	return utxosFromShelleyInitialFunds(shelley.InitialFunds)
+}
+
+func utxosFromShelleyInitialFunds(
+	initialFunds map[string]uint64,
+) ([]UTxO, error) {
+	addresses := make([]string, 0, len(initialFunds))
+	for address := range initialFunds {
+		addresses = append(addresses, address)
+	}
+	sort.Strings(addresses)
+
+	utxos := make([]UTxO, 0, len(addresses))
+	for _, address := range addresses {
+		addrBytes, err := hex.DecodeString(address)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"Shelley initialFunds address %q: %w",
+				address, err,
+			)
+		}
+		txHash := common.Blake2b256Hash(addrBytes)
+		utxos = append(utxos, UTxO{
+			TxHash: txHash.String(),
+			Index:  0,
+			Amount: initialFunds[address],
+		})
 	}
 	return utxos, nil
 }

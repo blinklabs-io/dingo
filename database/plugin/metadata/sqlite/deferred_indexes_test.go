@@ -26,6 +26,7 @@ import (
 // accidentally being emptied — without entries we'd silently fall
 // back to no-op behavior and silently lose the bulk-load speed-up.
 func TestDeferredManifestNotEmpty(t *testing.T) {
+	t.Parallel()
 	if len(deferred.Manifest) == 0 {
 		t.Fatal("deferred.Manifest is empty; bulk-load optimization disabled")
 	}
@@ -38,6 +39,7 @@ func TestDeferredManifestNotEmpty(t *testing.T) {
 // renamed a field or dropped the `gorm:"index"` tag without
 // updating the manifest.
 func TestDeferredManifestResolvesToRealIndexes(t *testing.T) {
+	t.Parallel()
 	d := setupTestDB(t)
 	migrator := d.DB().Migrator()
 	for _, idx := range deferred.Manifest {
@@ -59,6 +61,7 @@ func TestDeferredManifestResolvesToRealIndexes(t *testing.T) {
 // state transitions are checked at each step so callers (mithril
 // sync, serve repair path) can rely on them.
 func TestDropAndBuildDeferredIndexesRoundTrip(t *testing.T) {
+	t.Parallel()
 	d := setupTestDB(t)
 
 	pending, err := d.HasDeferredIndexesPending()
@@ -113,11 +116,64 @@ func TestDropAndBuildDeferredIndexesRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBuildCriticalDeferredIndexesOnlyRebuildsCriticalSubset verifies the
+// split rebuild contract: critical indexes are restored first, lazy indexes
+// remain missing, and the pending marker is not cleared until the full rebuild.
+func TestBuildCriticalDeferredIndexesOnlyRebuildsCriticalSubset(t *testing.T) {
+	t.Parallel()
+	d := setupTestDB(t)
+	if err := d.DropDeferredIndexes(); err != nil {
+		t.Fatalf("DropDeferredIndexes: %v", err)
+	}
+
+	if err := d.BuildCriticalDeferredIndexes(); err != nil {
+		t.Fatalf("BuildCriticalDeferredIndexes: %v", err)
+	}
+
+	pending, err := d.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after critical build: %v", err)
+	}
+	if !pending {
+		t.Fatal("indexes_pending should remain true after critical-only build")
+	}
+
+	critical := map[string]bool{}
+	for _, idx := range deferred.CriticalManifest() {
+		critical[idx.Table+"\x00"+idx.ResolvedName()] = true
+	}
+
+	migrator := d.DB().Migrator()
+	for _, idx := range deferred.Manifest {
+		name := idx.ResolvedName()
+		hasIndex := migrator.HasIndex(idx.Model, name)
+		isCritical := critical[idx.Table+"\x00"+name]
+		switch {
+		case isCritical && !hasIndex:
+			t.Errorf("critical index %q on %q missing after critical rebuild", name, idx.Table)
+		case !isCritical && hasIndex:
+			t.Errorf("lazy index %q on %q rebuilt during critical rebuild", name, idx.Table)
+		}
+	}
+
+	if err := d.BuildDeferredIndexes(); err != nil {
+		t.Fatalf("BuildDeferredIndexes after critical build: %v", err)
+	}
+	pending, err = d.HasDeferredIndexesPending()
+	if err != nil {
+		t.Fatalf("HasDeferredIndexesPending after full build: %v", err)
+	}
+	if pending {
+		t.Fatal("indexes_pending should be false after full rebuild")
+	}
+}
+
 // TestDropDeferredIndexesPreservesAssetImportConflictTarget covers the
 // #2457 failure mode: dropping the asset policy-id query index must not drop
 // idx_asset_unique, because ledger-state UTxO import uses it as the
 // ON CONFLICT target for asset inserts.
 func TestDropDeferredIndexesPreservesAssetImportConflictTarget(t *testing.T) {
+	t.Parallel()
 	d := setupTestDB(t)
 	migrator := d.DB().Migrator()
 
@@ -184,6 +240,7 @@ func TestDropDeferredIndexesPreservesAssetImportConflictTarget(t *testing.T) {
 // already has every manifest entry). This is the path the serve
 // repair flow takes when no rebuild is actually outstanding.
 func TestBuildDeferredIndexesIsIdempotent(t *testing.T) {
+	t.Parallel()
 	d := setupTestDB(t)
 	if err := d.BuildDeferredIndexes(); err != nil {
 		t.Fatalf("first BuildDeferredIndexes: %v", err)
@@ -204,6 +261,7 @@ func TestBuildDeferredIndexesIsIdempotent(t *testing.T) {
 // path: a re-run of mithril sync after a partial drop should
 // complete without errors and leave the pending marker set.
 func TestDropDeferredIndexesIsIdempotent(t *testing.T) {
+	t.Parallel()
 	d := setupTestDB(t)
 	if err := d.DropDeferredIndexes(); err != nil {
 		t.Fatalf("first DropDeferredIndexes: %v", err)
@@ -227,6 +285,7 @@ func TestDropDeferredIndexesIsIdempotent(t *testing.T) {
 // recovery contract that `dingo serve` and `dingo mithril sync`
 // rely on: the pending marker must survive a process exit.
 func TestCrashRecoveryDetectedAcrossReopen(t *testing.T) {
+	t.Parallel()
 	dataDir := t.TempDir()
 
 	first, err := NewWithOptions(WithDataDir(dataDir))

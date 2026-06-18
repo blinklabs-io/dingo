@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -29,20 +28,17 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database/plugin/blob"
 	"github.com/blinklabs-io/dingo/database/types"
-	"github.com/blinklabs-io/dingo/ledger"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // archiveFetchTimeout bounds a single archive round-trip (signed-URL request
 // plus the follow-up download). Used by both GetBlock and the iterator's
-// per-item tombstone resolution.
+// per-item expired-history resolution.
 const archiveFetchTimeout = 20 * time.Second
 
 type BlobStoreBarkConfig struct {
-	BaseUrl     string
-	HTTPClient  *http.Client
-	LedgerState *ledger.LedgerState
-	Logger      *slog.Logger
+	BaseUrl    string
+	HTTPClient *http.Client
 }
 
 type BlobStoreBark struct {
@@ -56,8 +52,8 @@ func NewBarkBlobStore(
 	config BlobStoreBarkConfig,
 	upstream blob.BlobStore,
 ) (*BlobStoreBark, error) {
-	if config.LedgerState == nil {
-		return nil, errors.New("bark: ledger state is required")
+	if upstream == nil {
+		return nil, errors.New("bark: upstream blob store is required")
 	}
 
 	httpClient := config.HTTPClient
@@ -113,10 +109,10 @@ func (b *BlobStoreBark) NewIterator(
 }
 
 // barkIterator wraps an upstream blob iterator so that values returned via
-// Item().ValueCopy() transparently resolve archive tombstones. Tombstones
-// only appear at "bp"+slot+hash keys; values at any other key (bi/bh,
-// bp_metadata, …) pass through unchanged, so wrapping is zero-cost for
-// non-block-CBOR iterations.
+// Item().ValueCopy() transparently resolve expired history from the archive.
+// Expiry markers only appear at "bp"+slot+hash keys; values at any other key
+// (bi/bh, bp_metadata, …) pass through unchanged, so wrapping is zero-cost
+// for non-block-CBOR iterations.
 type barkIterator struct {
 	upstream types.BlobIterator
 	store    *BlobStoreBark
@@ -139,7 +135,7 @@ func (it *barkIterator) Item() types.BlobItem {
 }
 
 // barkItem wraps an upstream blob item. Key() passes through. ValueCopy()
-// catches the typed *types.BlockTombstonedError surfaced by the upstream
+// catches the typed *types.HistoryExpiredError surfaced by the upstream
 // plugin's iterator and resolves the block via the archive using the
 // (slot, hash) carried by the error — keeping the wrapper transparent to
 // callers without coupling it to any blob-key format.
@@ -155,8 +151,8 @@ func (i *barkItem) ValueCopy(dst []byte) ([]byte, error) {
 	if err == nil {
 		return val, nil
 	}
-	var tombErr *types.BlockTombstonedError
-	if !errors.As(err, &tombErr) {
+	var historyErr *types.HistoryExpiredError
+	if !errors.As(err, &historyErr) {
 		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(
@@ -164,12 +160,12 @@ func (i *barkItem) ValueCopy(dst []byte) ([]byte, error) {
 	)
 	defer cancel()
 	cbor, _, fetchErr := i.store.fetchBlockFromArchive(
-		ctx, tombErr.Slot, tombErr.Hash,
+		ctx, historyErr.Slot, historyErr.Hash,
 	)
 	if fetchErr != nil {
 		return nil, fmt.Errorf(
-			"bark iterator: resolving tombstoned block at slot=%d: %w",
-			tombErr.Slot, fetchErr,
+			"bark iterator: resolving expired history at slot=%d: %w",
+			historyErr.Slot, fetchErr,
 		)
 	}
 	return cbor, nil
@@ -205,16 +201,16 @@ func (b *BlobStoreBark) GetBlock(
 	// Always consult the upstream first so we can pick up the local
 	// BlockMetadata (most importantly the block ID, which the chain
 	// iterator's BlockByIndex path depends on). Upstream reports
-	// ErrBlockTombstoned for archive-only blocks while still returning
+	// ErrHistoryExpired for locally expired blocks while still returning
 	// the metadata it kept around for exactly this purpose. Fall through
-	// to the archive on ErrBlobKeyNotFound too: blocks pruned before the
-	// tombstone-on-prune fix (or never indexed locally, e.g. snapshot
-	// bootstrap) have no bp entry, but the archive can still serve them.
+	// to the archive on ErrBlobKeyNotFound too: blocks expired before the
+	// marker-preserving fix (or never indexed locally, e.g. snapshot bootstrap)
+	// have no bp entry, but the archive can still serve them.
 	upstreamCbor, upstreamMeta, err := b.upstream.GetBlock(txn, slot, hash)
 	if err == nil {
 		return upstreamCbor, upstreamMeta, nil
 	}
-	if !errors.Is(err, types.ErrBlockTombstoned) &&
+	if !errors.Is(err, types.ErrHistoryExpired) &&
 		!errors.Is(err, types.ErrBlobKeyNotFound) {
 		return nil, types.BlockMetadata{}, err
 	}
@@ -230,7 +226,7 @@ func (b *BlobStoreBark) GetBlock(
 	// Prefer the local metadata for ID (the archive does not know our
 	// local block IDs), but trust the archive for Type/Height/PrevHash
 	// in case upstream returned a zero metadata struct alongside the
-	// tombstone error.
+	// expired-history error.
 	merged := upstreamMeta
 	if merged.Type == 0 {
 		merged.Type = archiveMeta.Type

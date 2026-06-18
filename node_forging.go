@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -182,8 +183,8 @@ func (n *Node) initBlockForger(
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	// Create mempool adapter for the forging package
-	mempoolAdapter := &mempoolAdapter{mempool: n.mempool}
+	// Create mempool adapter for the forging package.
+	mempoolAdapter := &forgingMempoolAdapter{source: n.mempool}
 
 	// Create epoch nonce adapter for the builder
 	epochNonceAdapter := &epochNonceAdapter{ledgerState: n.ledgerState}
@@ -247,6 +248,18 @@ func (n *Node) initBlockForger(
 	// Create slot clock adapter for the forger
 	slotClock := &slotClockAdapter{ledgerState: n.ledgerState}
 
+	// Wire Leios EB forging when the pipeline manager is available
+	// (i.e. Dijkstra era is enabled). Relay nodes and pre-Dijkstra
+	// block producers leave these nil and skip EB production.
+	var leiosChecker forging.LeiosProduceChecker
+	var leiosEBCaster forging.EndorserBlockBroadcaster
+	var leiosMempool forging.MempoolProvider
+	if n.leiosPipelineManager != nil && n.ouroboros != nil {
+		leiosChecker = &leiosPipelineAdapter{mgr: n.leiosPipelineManager}
+		leiosEBCaster = n.ouroboros
+		leiosMempool = mempoolAdapter
+	}
+
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
 		Mode:                        forging.ModeProduction,
@@ -260,6 +273,9 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
 		PromRegistry:                n.config.promRegistry,
+		LeiosProduceChecker:         leiosChecker,
+		LeiosEBBroadcaster:          leiosEBCaster,
+		LeiosMempool:                leiosMempool,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -286,13 +302,54 @@ func (n *Node) initBlockForger(
 	return nil
 }
 
-// mempoolAdapter adapts the mempool.Mempool to forging.MempoolProvider.
-type mempoolAdapter struct {
-	mempool *mempool.Mempool
+type mempoolTxView struct {
+	Hash string
+	Cbor []byte
+	Type uint
 }
 
-func (a *mempoolAdapter) Transactions() []forging.MempoolTransaction {
-	txs := a.mempool.Transactions()
+type mempoolTransactionSource interface {
+	Transactions() []mempool.MempoolTransaction
+}
+
+func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
+	txs := source.Transactions()
+	result := make([]mempoolTxView, len(txs))
+	for i, tx := range txs {
+		result[i] = mempoolTxView{
+			Hash: tx.Hash,
+			Cbor: tx.Cbor,
+			Type: tx.Type,
+		}
+	}
+	return result
+}
+
+// ledgerMempoolAdapter adapts mempool.Mempool to ledger.MempoolProvider.
+type ledgerMempoolAdapter struct {
+	source mempoolTransactionSource
+}
+
+func (a *ledgerMempoolAdapter) Transactions() []ledger.PendingTransaction {
+	txs := mempoolTransactions(a.source)
+	result := make([]ledger.PendingTransaction, len(txs))
+	for i, tx := range txs {
+		result[i] = ledger.PendingTransaction{
+			Hash: tx.Hash,
+			Cbor: tx.Cbor,
+			Type: tx.Type,
+		}
+	}
+	return result
+}
+
+// forgingMempoolAdapter adapts mempool.Mempool to forging.MempoolProvider.
+type forgingMempoolAdapter struct {
+	source mempoolTransactionSource
+}
+
+func (a *forgingMempoolAdapter) Transactions() []forging.MempoolTransaction {
+	txs := mempoolTransactions(a.source)
 	result := make([]forging.MempoolTransaction, len(txs))
 	for i, tx := range txs {
 		result[i] = forging.MempoolTransaction{
@@ -496,6 +553,23 @@ func (a *slotClockAdapter) NextSlotTime() (time.Time, error) {
 
 func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
+}
+
+// leiosPipelineAdapter adapts leios.PipelineManager to
+// forging.LeiosProduceChecker. It translates the ProduceDecision return
+// value into the (bool, string, error) form the forge loop expects.
+type leiosPipelineAdapter struct {
+	mgr *leios.PipelineManager
+}
+
+func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
+	slot uint64,
+) (bool, string, error) {
+	dec, err := a.mgr.MayProduceEndorserBlock(slot)
+	if err != nil {
+		return false, "", err
+	}
+	return dec.Allowed, dec.Reason, nil
 }
 
 // epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.

@@ -20,16 +20,169 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
-	gleios "github.com/blinklabs-io/gouroboros/ledger/leios"
 	"github.com/blinklabs-io/gouroboros/protocol"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 )
+
+// leiosForgedEBEntry holds one locally-forged endorser block ready to
+// be announced to peers via LeiosNotify.
+type leiosForgedEBEntry struct {
+	point ocommon.Point
+}
+
+// leiosForgedEBLog is an append-only log of locally-forged EBs with
+// per-connection cursors owned by the log itself.
+//
+// Head entries are pruned whenever every registered connection's cursor
+// has advanced past them, so memory scales with the largest per-connection
+// backlog rather than total uptime. When no connections are registered the
+// log is always empty. A new connection registers at the current tail and
+// does not receive EBs forged before it connected. Connections are
+// removed via removeConn, which triggers an immediate prune.
+//
+// The wake channel is closed and replaced on every append so all server
+// goroutines waiting for new entries unblock at once.
+type leiosForgedEBLog struct {
+	mu      sync.Mutex
+	items   []leiosForgedEBEntry
+	base    int            // logical index of items[0]
+	cursors map[string]int // connKey → next logical index to serve
+	wakeCh  chan struct{}
+}
+
+func newLeiosForgedEBLog() *leiosForgedEBLog {
+	return &leiosForgedEBLog{
+		cursors: make(map[string]int),
+		wakeCh:  make(chan struct{}),
+	}
+}
+
+// append adds an entry, prunes head entries that all registered connections
+// have advanced past (or all entries when none are registered), and signals
+// all server goroutines waiting for new entries to wake and retry.
+func (l *leiosForgedEBLog) append(entry leiosForgedEBEntry) {
+	l.mu.Lock()
+	l.items = append(l.items, entry)
+	l.pruneLocked()
+	wake := l.wakeCh
+	l.wakeCh = make(chan struct{})
+	l.mu.Unlock()
+	close(wake)
+}
+
+// next returns the next unserved entry for connKey and the current wake
+// channel. If no entry is available it returns (nil, wakeCh); the caller
+// should wait on wakeCh and retry. A connKey that has never called next
+// is registered at the current tail so it does not receive stale EBs.
+func (l *leiosForgedEBLog) next(connKey string) (*leiosForgedEBEntry, chan struct{}) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	cursor, exists := l.cursors[connKey]
+	if !exists {
+		// New connection: start at the current tail.
+		cursor = l.base + len(l.items)
+		l.cursors[connKey] = cursor
+	}
+	idx := cursor - l.base
+	if idx < len(l.items) {
+		entry := l.items[idx]
+		l.cursors[connKey] = cursor + 1
+		l.pruneLocked()
+		return &entry, l.wakeCh
+	}
+	return nil, l.wakeCh
+}
+
+// removeConn unregisters a connection cursor and prunes newly freed entries.
+func (l *leiosForgedEBLog) removeConn(connKey string) {
+	l.mu.Lock()
+	delete(l.cursors, connKey)
+	l.pruneLocked()
+	l.mu.Unlock()
+}
+
+// registerConn pre-registers connKey at the current tail so that EBs
+// appended between connection open and the peer's first RequestNext are
+// not pruned before the cursor is established. It is a no-op when connKey
+// is already registered (e.g. on reconnect within the same session).
+func (l *leiosForgedEBLog) registerConn(connKey string) {
+	l.mu.Lock()
+	if _, exists := l.cursors[connKey]; !exists {
+		l.cursors[connKey] = l.base + len(l.items)
+	}
+	l.mu.Unlock()
+}
+
+// leiosEBLogMaxEntries is the maximum number of forged-EB entries the log
+// retains. When the log grows beyond this limit, the oldest entries are
+// evicted and any lagging cursors are advanced to the new base. This
+// bounds memory even when a pre-registered or slow peer never calls next.
+const leiosEBLogMaxEntries = 64
+
+// pruneLocked drops head entries whose logical index falls below every
+// registered connection's cursor (i.e. all connections have advanced past
+// them, whether by consuming the entry or by registering after it). When
+// no connections are registered the entire log is pruned. If the log still
+// exceeds leiosEBLogMaxEntries after cursor-based pruning, the oldest
+// entries are evicted and lagging cursors are advanced to the new base.
+// Callers must hold l.mu.
+func (l *leiosForgedEBLog) pruneLocked() {
+	if len(l.items) == 0 {
+		return
+	}
+	// Start at the tail: if no cursors constrain it, prune the full log.
+	minCursor := l.base + len(l.items)
+	for _, c := range l.cursors {
+		if c < minCursor {
+			minCursor = c
+		}
+	}
+	prunable := minCursor - l.base
+	// Size cap: if the log still exceeds leiosEBLogMaxEntries after
+	// cursor-based pruning, evict the excess from the head. Any cursor
+	// that falls behind the new base (e.g. a pre-registered idle peer)
+	// is advanced to the new base so it does not pin future entries.
+	if capped := len(l.items) - prunable - leiosEBLogMaxEntries; capped > 0 {
+		prunable += capped
+		newBase := l.base + prunable
+		for k, c := range l.cursors {
+			if c < newBase {
+				l.cursors[k] = newBase
+			}
+		}
+	}
+	if prunable <= 0 {
+		return
+	}
+	// Zero pruned slots so the GC can reclaim the point.Hash []byte
+	// backing arrays before the backing slice is eventually reallocated.
+	clear(l.items[:prunable])
+	l.items = l.items[prunable:]
+	l.base += prunable
+}
+
+// BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
+// LeiosNotify server goroutines so they can announce it to peers.
+// It satisfies forging.EndorserBlockBroadcaster.
+func (o *Ouroboros) BroadcastEndorserBlock(
+	slot uint64,
+	hash []byte,
+	data []byte,
+) error {
+	point := ocommon.Point{Slot: slot, Hash: hash}
+	if err := o.storeLeiosEndorserBlock(point, data, nil); err != nil {
+		return fmt.Errorf("store forged endorser block: %w", err)
+	}
+	o.leiosEBLog.append(leiosForgedEBEntry{point: point})
+	return nil
+}
 
 func (o *Ouroboros) leiosnotifyServerConnOpts() []oleiosnotify.LeiosNotifyOptionFunc {
 	return []oleiosnotify.LeiosNotifyOptionFunc{
@@ -61,10 +214,16 @@ func (o *Ouroboros) leiosnotifyClientStart(connId ouroboros.ConnectionId) error 
 		)
 	}
 	if conn.LeiosNotify() == nil {
-		// Return silently if LeiosNotify protocol is not supported by peer
+		// Peer does not support LeiosNotify; skip cursor registration.
 		return nil
 	}
+	connKey := leiosConnectionIdString(connId)
+	// Pre-register the server-side cursor now that we know the peer
+	// supports LeiosNotify. This ensures EBs forged between here and
+	// the peer's first RequestNext are not pruned.
+	o.leiosEBLog.registerConn(connKey)
 	if err := conn.LeiosNotify().Client.Sync(); err != nil {
+		o.leiosEBLog.removeConn(connKey)
 		return err
 	}
 	return nil
@@ -124,27 +283,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				resp,
 			)
 		}
-		txsRaw, err := o.fetchLeiosEndorserBlockTxs(
-			conn,
-			m.Point,
-			respBlock.BlockRaw,
-		)
-		if err != nil {
-			o.config.Logger.Warn(
-				"failed to fetch Leios EB transactions",
-				"component", "network",
-				"protocol", "leios-fetch",
-				"role", "client",
-				"connection_id", connId,
-				"slot", m.Point.Slot,
-				"hash", hex.EncodeToString(m.Point.Hash),
-				"error", err,
-			)
-		}
 		if err := o.storeLeiosEndorserBlock(
 			m.Point,
 			respBlock.BlockRaw,
-			txsRaw,
+			nil,
 		); err != nil {
 			return err
 		}
@@ -154,7 +296,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				m.Point.Slot,
 				m.Point.Hash,
 				len(respBlock.BlockRaw),
-				len(txsRaw),
+				0,
 			),
 			"component", "network",
 			"protocol", "leios-fetch",
@@ -162,7 +304,7 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			"connection_id", connId,
 		)
 	case *oleiosnotify.MsgBlockTxsOffer:
-		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(conn, m.Point)
+		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(m.Point)
 		if err != nil {
 			level := slog.LevelWarn
 			msg := "failed to fetch Leios EB transactions"
@@ -199,7 +341,6 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 }
 
 func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
-	conn *ouroboros.Connection,
 	point ocommon.Point,
 ) ([]cbor.RawMessage, error) {
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
@@ -211,66 +352,40 @@ func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
 			point.Hash,
 		)
 	}
-	if data.completeTxCache() {
-		return cloneRawMessages(data.txsRaw), nil
-	}
-	txsRaw, err := o.fetchLeiosEndorserBlockTxs(
-		conn,
-		point,
-		cbor.RawMessage(data.blockRaw),
-	)
-	if err != nil {
-		return nil, err
-	}
-	if err := o.storeLeiosEndorserBlock(point, data.blockRaw, txsRaw); err != nil {
-		return nil, err
-	}
-	return txsRaw, nil
-}
-
-func (o *Ouroboros) fetchLeiosEndorserBlockTxs(
-	conn *ouroboros.Connection,
-	point ocommon.Point,
-	blockRaw cbor.RawMessage,
-) ([]cbor.RawMessage, error) {
-	if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
-		return nil, errors.New("leios-fetch client unavailable")
-	}
-	block, err := gleios.NewLeiosEndorserBlockFromCbor(blockRaw)
-	if err != nil {
-		return nil, err
-	}
-	if block.Body == nil || len(block.Body.TxReferences) == 0 {
-		return nil, nil
-	}
-	bitmaps, err := leiosAllTxBitmap(len(block.Body.TxReferences))
-	if err != nil {
-		return nil, err
-	}
-	resp, err := conn.LeiosFetch().Client.BlockTxsRequest(point, bitmaps)
-	if err != nil {
-		return nil, err
-	}
-	respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
-	if !ok {
-		return nil, fmt.Errorf(
-			"unexpected leios-fetch BlockTxs response type %T",
-			resp,
-		)
-	}
-	if len(respTxs.TxsRaw) != len(block.Body.TxReferences) {
-		return nil, fmt.Errorf(
-			"leios-fetch BlockTxs returned %d txs for %d references",
-			len(respTxs.TxsRaw),
-			len(block.Body.TxReferences),
-		)
-	}
-	return cloneRawMessages(respTxs.TxsRaw), nil
+	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
+	// The current Dijkstra CDDL has no transaction-reference list, so there
+	// is no extra BlockTxsRequest to make here.
+	return cloneRawMessages(data.txsRaw), nil
 }
 
 func (o *Ouroboros) leiosnotifyServerRequestNext(
 	ctx oleiosnotify.CallbackContext,
 ) (protocol.Message, error) {
-	// TODO
-	return nil, nil
+	if ctx.Server == nil {
+		return nil, nil
+	}
+	connKey := leiosConnectionIdString(ctx.ConnectionId)
+	done := ctx.Server.DoneChan()
+
+	// If the connection is already closing, return without touching the
+	// cursor map. This prevents re-registering a stale cursor after
+	// removeConn has already run (which would block future log pruning).
+	select {
+	case <-done:
+		return nil, nil
+	default:
+	}
+
+	for {
+		entry, wakeCh := o.leiosEBLog.next(connKey)
+		if entry != nil {
+			return &oleiosnotify.MsgBlockOffer{Point: entry.point}, nil
+		}
+		select {
+		case <-wakeCh:
+			// new EB appended — re-check
+		case <-done:
+			return nil, nil
+		}
+	}
 }

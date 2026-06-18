@@ -156,6 +156,29 @@ func (d *MetadataStoreMysql) GetLastEnactedGovernanceProposal(
 	return &proposal, nil
 }
 
+// GetChildGovernanceProposals returns all active proposals whose parent is
+// the specified proposal (identified by parentTxHash + parentActionIdx).
+// Only proposals not yet enacted, expired, or soft-deleted are returned.
+func (d *MetadataStoreMysql) GetChildGovernanceProposals(
+	parentTxHash []byte,
+	parentActionIdx uint32,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"parent_tx_hash = ? AND parent_action_idx = ? AND enacted_epoch IS NULL AND expired_epoch IS NULL AND deleted_slot IS NULL",
+		parentTxHash,
+		parentActionIdx,
+	).Order(governanceProposalOrder).Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
 // govProposalUpsertColumns is the list of columns whose values are
 // always replaced on upsert. Lifecycle columns (enacted_*, ratified_*,
 // expired_*, deleted_slot) and gov_action_cbor are handled separately

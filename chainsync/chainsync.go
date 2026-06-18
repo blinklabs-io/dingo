@@ -17,6 +17,7 @@ package chainsync
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 	"sync"
@@ -24,9 +25,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
-	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/connection"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -149,13 +150,34 @@ func DefaultConfig() Config {
 	}
 }
 
+// ChainProvider is the minimal interface chainsync requires from the ledger
+// layer: local chain iteration for N2C server clients and the stability-window
+// value used to bound the seen-header deduplication cache.
+type ChainProvider interface {
+	GetChainFromPoint(point ocommon.Point, inclusive bool) (*chain.ChainIterator, error)
+	StabilityWindow() uint64
+}
+
+// ObservedHeader is a chainsync-owned record of a header received from a peer
+// before cross-peer deduplication may suppress it. It carries enough context
+// for fork resolution to reconstruct a peer's candidate fragment later.
+type ObservedHeader struct {
+	ConnectionId ouroboros.ConnectionId
+	BlockHeader  gledger.BlockHeader
+	Point        ocommon.Point
+	Tip          ochainsync.Tip
+	BlockNumber  uint64
+	Type         uint
+	Rollback     bool
+}
+
 // State manages chainsync client connections and header
 // tracking for both server-side (N2C) and outbound (N2N)
 // connections.
 type State struct {
-	eventBus    *event.EventBus
-	ledgerState *ledger.LedgerState
-	config      Config
+	eventBus      *event.EventBus
+	chainProvider ChainProvider
+	config        Config
 
 	// Server-side clients (node-to-client connections)
 	clients map[ouroboros.ConnectionId]*ChainsyncClientState
@@ -195,7 +217,7 @@ type headerRecord struct {
 }
 
 type observedHeaderRecord struct {
-	event    ledger.ChainsyncEvent
+	header   ObservedHeader
 	prevHash []byte
 }
 
@@ -207,19 +229,19 @@ type observedHeaderChain struct {
 const maxObservedHeadersPerConn = 256
 
 // NewState creates a new chainsync State with the given
-// event bus and ledger state using default configuration.
+// event bus and chain provider using default configuration.
 func NewState(
 	eventBus *event.EventBus,
-	ledgerState *ledger.LedgerState,
+	chainProvider ChainProvider,
 ) *State {
-	return NewStateWithConfig(eventBus, ledgerState, DefaultConfig())
+	return NewStateWithConfig(eventBus, chainProvider, DefaultConfig())
 }
 
 // NewStateWithConfig creates a new chainsync State with the
-// given event bus, ledger state, and configuration.
+// given event bus, chain provider, and configuration.
 func NewStateWithConfig(
 	eventBus *event.EventBus,
-	ledgerState *ledger.LedgerState,
+	chainProvider ChainProvider,
 	cfg Config,
 ) *State {
 	if cfg.MaxClients <= 0 {
@@ -230,7 +252,7 @@ func NewStateWithConfig(
 	}
 	s := &State{
 		eventBus:       eventBus,
-		ledgerState:    ledgerState,
+		chainProvider:  chainProvider,
 		config:         cfg,
 		clients:        make(map[ouroboros.ConnectionId]*ChainsyncClientState),
 		trackedClients: make(map[ouroboros.ConnectionId]*TrackedClient),
@@ -262,7 +284,10 @@ func (s *State) AddClient(
 		return existing, nil
 	}
 	// Create initial chainsync state for connection
-	chainIter, err := s.ledgerState.GetChainFromPoint(
+	if s.chainProvider == nil {
+		return nil, errors.New("no chain provider available")
+	}
+	chainIter, err := s.chainProvider.GetChainFromPoint(
 		intersectPoint,
 		false,
 	)
@@ -733,11 +758,11 @@ func (s *State) RewindTrackedClientsTo(
 // cross-peer dedup can suppress delivery into the ledger queue. This lets
 // fork resolution reconstruct the selected peer's candidate fragment even
 // when earlier headers were first seen from another peer.
-func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
-	if e.BlockHeader == nil || len(e.Point.Hash) == 0 {
+func (s *State) RecordObservedHeader(h ObservedHeader) {
+	if h.BlockHeader == nil || len(h.Point.Hash) == 0 {
 		return
 	}
-	prevHash := e.BlockHeader.PrevHash().Bytes()
+	prevHash := h.BlockHeader.PrevHash().Bytes()
 	if len(prevHash) == 0 {
 		return
 	}
@@ -745,23 +770,25 @@ func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
 	s.observedHeadersMutex.Lock()
 	defer s.observedHeadersMutex.Unlock()
 
-	chainHistory := s.observedHeaders[e.ConnectionId]
+	chainHistory := s.observedHeaders[h.ConnectionId]
 	if chainHistory == nil {
 		chainHistory = &observedHeaderChain{
 			order: make([]string, 0, maxObservedHeadersPerConn),
 			byHash: make(map[string]observedHeaderRecord,
 				maxObservedHeadersPerConn),
 		}
-		s.observedHeaders[e.ConnectionId] = chainHistory
+		s.observedHeaders[h.ConnectionId] = chainHistory
 	}
 
-	hashKey := hex.EncodeToString(e.Point.Hash)
+	hashKey := hex.EncodeToString(h.Point.Hash)
 	if _, exists := chainHistory.byHash[hashKey]; exists {
 		return
 	}
+	h.Point.Hash = cloneBytes(h.Point.Hash)
+	h.Tip.Point.Hash = cloneBytes(h.Tip.Point.Hash)
 	chainHistory.order = append(chainHistory.order, hashKey)
 	chainHistory.byHash[hashKey] = observedHeaderRecord{
-		event:    e,
+		header:   h,
 		prevHash: append([]byte(nil), prevHash...),
 	}
 	if len(chainHistory.order) <= maxObservedHeadersPerConn {
@@ -777,21 +804,21 @@ func (s *State) RecordObservedHeader(e ledger.ChainsyncEvent) {
 func (s *State) LookupObservedHeader(
 	connId ouroboros.ConnectionId,
 	hash []byte,
-) (ledger.ChainsyncEvent, []byte, bool) {
+) (ObservedHeader, []byte, bool) {
 	s.observedHeadersMutex.RLock()
 	defer s.observedHeadersMutex.RUnlock()
 
 	chainHistory := s.observedHeaders[connId]
 	if chainHistory == nil {
-		return ledger.ChainsyncEvent{}, nil, false
+		return ObservedHeader{}, nil, false
 	}
 	record, ok := chainHistory.byHash[hex.EncodeToString(hash)]
 	if !ok {
-		return ledger.ChainsyncEvent{}, nil, false
+		return ObservedHeader{}, nil, false
 	}
-	record.event.Point.Hash = cloneBytes(record.event.Point.Hash)
-	record.event.Tip.Point.Hash = cloneBytes(record.event.Tip.Point.Hash)
-	return record.event, append([]byte(nil), record.prevHash...), true
+	record.header.Point.Hash = cloneBytes(record.header.Point.Hash)
+	record.header.Tip.Point.Hash = cloneBytes(record.header.Tip.Point.Hash)
+	return record.header, append([]byte(nil), record.prevHash...), true
 }
 
 func (s *State) clearObservedHeaderHistory(
@@ -1118,8 +1145,8 @@ func (s *State) seenHeadersRetention() uint64 {
 	if s.config.SeenHeadersRetention > 0 {
 		return s.config.SeenHeadersRetention
 	}
-	if s.ledgerState != nil {
-		if w := s.ledgerState.StabilityWindow(); w > 0 {
+	if s.chainProvider != nil {
+		if w := s.chainProvider.StabilityWindow(); w > 0 {
 			return w
 		}
 	}

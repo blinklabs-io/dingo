@@ -152,21 +152,21 @@ func TestPruneBlock_MaterializesLiveUtxoAndTombstonesBlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "exactly one live UTxO should be materialized")
 
-	// Block CBOR has been replaced with a tombstone marker; GetBlock
-	// signals this with ErrBlockTombstoned so a wrapping archive proxy
+	// Block CBOR has been replaced with an expiry marker; GetBlock
+	// signals this with ErrHistoryExpired so a wrapping archive proxy
 	// can intercept and resolve from the archive. The bp key still
-	// exists (carrying just the tombstone bytes), and the bi/bh index
+	// exists (carrying just the marker bytes), and the bi/bh index
 	// pointers and metadata remain so chain-iterator lookups still
 	// translate id/hash into a block key.
 	blobTxn = db.BlobTxn(false)
 	defer blobTxn.Release()
 	_, _, err = db.Blob().GetBlock(blobTxn.Blob(), slot, hash)
-	assert.ErrorIs(t, err, types.ErrBlockTombstoned)
+	assert.ErrorIs(t, err, types.ErrHistoryExpired)
 	rawBp, err := db.Blob().Get(blobTxn.Blob(), types.BlockBlobKey(slot, hash))
 	require.NoError(t, err,
 		"bp key must still exist post-prune so bi/bh references stay valid")
 	assert.True(t, types.IsBlockTombstone(rawBp),
-		"bp value must be the tombstone marker after prune")
+		"bp value must be the expiry marker after prune")
 
 	// Live UTxO entry is now raw CBOR matching the in-block slice.
 	postLive, err := db.Blob().GetUtxo(blobTxn.Blob(), txId, 0)
@@ -220,16 +220,16 @@ func TestPruneBlock_ResolverReadsMaterializedUtxoAfterPrune(t *testing.T) {
 	)
 }
 
-// TestPruneBlock_LeavesChainIteratorAtTombstone exercises the post-fix
+// TestPruneBlock_LeavesChainIteratorAtHistoryExpired exercises the post-fix
 // behavior for issue #2104. After prune the chain-iterator path resolves
 // the (id|hash) → block-key mapping locally (bi/bh and metadata are kept)
 // and reaches the GetBlock call inside blockByKey, which now surfaces
-// ErrBlockTombstoned. That sentinel is the explicit handoff point for a
+// ErrHistoryExpired. That sentinel is the explicit handoff point for a
 // wrapping archive proxy (bark) to fetch from the archive. Without a
 // proxy installed, the error propagates so the operator sees a clear
-// "block was archived; no proxy configured" signal — not the silent
-// chain-tip closure that BlockFetch produced before the fix.
-func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
+// "history expired" signal — not the silent chain-tip closure that
+// BlockFetch produced before the fix.
+func TestPruneBlock_LeavesChainIteratorAtHistoryExpired(t *testing.T) {
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -252,13 +252,13 @@ func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
 
 	// BlockByIndex is the path the chain iterator walks. After prune the
 	// id→key indirection still resolves (bi is preserved), so the lookup
-	// reaches blob.GetBlock; that now returns ErrBlockTombstoned, which
+	// reaches blob.GetBlock; that now returns ErrHistoryExpired, which
 	// blockByKey propagates verbatim. A bark wrapper would intercept this
 	// error and proxy to the archive. Without a wrapper the error reaches
 	// the iterator as a clear, actionable signal.
 	_, err = db.BlockByIndex(blockID, nil)
-	assert.ErrorIs(t, err, types.ErrBlockTombstoned,
-		"BlockByIndex must reach the GetBlock handoff (tombstone) so a "+
+	assert.ErrorIs(t, err, types.ErrHistoryExpired,
+		"BlockByIndex must reach the GetBlock handoff (history expired) so a "+
 			"bark archive proxy can intercept and resolve")
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound,
 		"the lookup must not collapse to ErrBlockNotFound — that is the "+
@@ -266,8 +266,8 @@ func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
 
 	// BlockByHash exercises the parallel hash-keyed path; same handoff.
 	_, err = BlockByHash(db, hash)
-	assert.ErrorIs(t, err, types.ErrBlockTombstoned,
-		"BlockByHash must also reach the tombstone handoff post-prune")
+	assert.ErrorIs(t, err, types.ErrHistoryExpired,
+		"BlockByHash must also reach the history-expired handoff post-prune")
 	assert.NotErrorIs(t, err, models.ErrBlockNotFound)
 }
 
@@ -276,8 +276,8 @@ func TestPruneBlock_LeavesChainIteratorAtTombstone(t *testing.T) {
 // UTxOs at the slot as well as live ones. This is the counterpart fix
 // to skipping cleanupConsumedUtxos in API mode: with spent rows
 // retained for historical transaction queries, the source block can
-// still be tombstoned, but the spent UTxO blob entries — which hold
-// offset references into the (now-tombstoned) block — must be rewritten
+// still be expired, but the spent UTxO blob entries — which hold
+// offset references into the expired block — must be rewritten
 // to raw CBOR up front so resolution does not require a wrapping
 // archive proxy to fetch the source block.
 func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
@@ -296,7 +296,7 @@ func TestPruneBlock_APIModeMaterializesSpentUtxos(t *testing.T) {
 	// Live UTxO at slot 100; spent UTxO consumed at slot 150. In API mode
 	// the spent row is retained past the stability window, and its blob
 	// entry — still an offset reference to slot 100 — must be materialized
-	// before the block is tombstoned.
+	// before the block is expired.
 	seedUtxoMetadata(t, db, txId, 0, slot, 0)
 	seedUtxoMetadata(t, db, txId, 1, slot, 150)
 

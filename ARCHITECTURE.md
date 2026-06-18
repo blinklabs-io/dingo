@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-06-04
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -90,20 +90,20 @@ graph TB
     end
 
     subgraph "External Interfaces"
-        URPC["UTxO RPC<br/><i>utxorpc/</i>"]
-        BFA["Blockfrost API<br/><i>blockfrost/</i>"]
-        Mesh["Mesh API<br/><i>mesh/</i>"]
+        URPC["UTxO RPC<br/><i>api/utxorpc/</i>"]
+        BFA["Blockfrost API<br/><i>api/blockfrost/</i>"]
+        Mesh["Mesh API<br/><i>api/mesh/</i>"]
         Bark["Bark<br/><i>bark/</i>"]
     end
 
-    subgraph "Archive Support"
-        BPruner["Bark Pruner<br/><i>bark/pruner.go</i>"]
+    subgraph "History Expiry"
+        HExpiry["History Expiry<br/><i>internal/historyexpiry/</i>"]
     end
 
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & BPruner
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & HExpiry
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -113,7 +113,7 @@ graph TB
     LS -->|"validate txs"| MP
     ChM --> DB
     DB --> Blob & Meta
-    BPruner --> LS & DB
+    HExpiry --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
     CSel -->|"switch active peer"| CS
@@ -157,6 +157,7 @@ graph LR
     ledger_governance["ledger/governance"]
     ledger_hardfork["ledger/hardfork"]
     ledger_leader["ledger/leader"]
+    ledger_leios["ledger/leios"]
     ledger_snapshot["ledger/snapshot"]
     ledgerstate["ledgerstate"]
     mempool["mempool"]
@@ -165,16 +166,18 @@ graph LR
     topology["topology"]
     intcfg["internal/config"]
     intnode["internal/node"]
-    utxorpc["utxorpc"]
-    blockfrost["blockfrost"]
-    mesh["mesh"]
+    intnode_ledgerpeers["internal/node/ledgerpeers"]
+    utxorpc["api/utxorpc"]
+    blockfrost["api/blockfrost"]
+    mesh["api/mesh"]
     bark["bark"]
     mithril["mithril<br/>(no internal dingo imports)"]
     keystore["keystore"]
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
-    root --> ledger & ledger_forging & ledger_leader & ledger_snapshot
+    root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
     root --> mempool & ouroboros & peergov & topology
+    root --> intnode_ledgerpeers
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
     cmd --> root & cardano_cfg & db & db_models & db_plugin
@@ -186,6 +189,7 @@ graph LR
     chainsel --> ev & peergov
     connmgr --> ev
     peergov --> connmgr & ev & topology
+    intnode_ledgerpeers --> ledger & peergov
 
     ouroboros --> chain & chainsel & chainsync & connmgr
     ouroboros --> ev & ledger & mempool & peergov
@@ -193,11 +197,11 @@ graph LR
     ledger --> chain & chainsel & cardano_cfg & connmgr
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
-    ledger --> mempool & peergov
     ledger_eras --> cardano_cfg & ledger_hardfork
     ledger_forging --> ev & ledger_eras
     ledger_governance --> db & db_models & db_types & ledger_eras
     ledger_leader --> db_types & ev
+    ledger_leios --> chain & ev
     ledger_snapshot --> db & db_models & db_meta & db_types & ev
 
     mempool --> chain & ev
@@ -221,7 +225,7 @@ graph LR
     utxorpc --> ledger & ledger_eras & mempool
     mesh --> chain & db & db_models & ev & ledger & mempool
     blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool
-    bark --> db & db_blob & db_types & ledger
+    bark --> db & db_blob & db_types
 ```
 
 ### Data Flow
@@ -305,7 +309,7 @@ graph TB
             TXs["TxSubmission2<br/>bidirectional"]
             KA["KeepAlive"]
             PS["PeerSharing<br/>client + server"]
-            Leios["LeiosFetch / Notify<br/>(experimental)"]
+            Leios["LeiosFetch / Notify / Votes<br/>(experimental)"]
         end
         subgraph "Node-to-Client (N2C)"
             CSn2c["ChainSync<br/>server"]
@@ -329,7 +333,7 @@ graph TB
     Outbound -->|"TCP dial"| ConnTrack
     Listeners -->|"TCP accept"| ConnTrack
 
-    ConnTrack -->|"handshake"| CSc & BFc & TXs & KA & PS
+    ConnTrack -->|"handshake"| CSc & BFc & TXs & KA & PS & Leios
     ConnTrack -->|"N2C handshake"| CSn2c & LSQ & LTM & LTS
 
     CSc -->|"headers"| CSel
@@ -470,6 +474,14 @@ dingo/
 │   ├── leader/          # Leader election
 │   │   ├── election.go  # Ouroboros Praos leader checks
 │   │   └── schedule.go  # Epoch leader schedule computation
+│   ├── leios/           # CIP-0164 Leios voting + pipeline (experimental)
+│   │   ├── committee.go # Stake-truncated committee selection
+│   │   ├── quorum.go    # Stake-quorum predicate
+│   │   ├── bls.go       # BLS12-381 MinSig sign/verify/aggregate
+│   │   ├── keys.go      # Vote signing key + voter pubkey registry
+│   │   ├── certificate.go # EB certificate build/validate
+│   │   ├── manager.go   # VoteManager: store, tally, serve, emit
+│   │   └── pipeline.go  # PipelineManager: stage/timing, EB equivocation, inclusion eligibility
 │   └── snapshot/        # Stake snapshot management
 │       ├── manager.go   # Snapshot manager, event-driven capture
 │       ├── calculator.go# Stake distribution calculation
@@ -501,33 +513,33 @@ dingo/
 │   ├── ledger.go        # Ledger-based peer discovery
 │   └── event.go         # Peer events
 ├── topology/            # Network topology handling
-│   └── topology.go      # Topology configuration
-├── blockfrost/          # Blockfrost-compatible REST API
-│   ├── blockfrost.go    # Server lifecycle
-│   ├── adapter.go       # Node state adapter
-│   ├── handlers.go      # HTTP handlers
-│   ├── pagination.go    # Cursor-based pagination
-│   └── types.go         # API response types
-├── mesh/                # Mesh (Rosetta) API
-│   ├── mesh.go          # Server lifecycle
-│   ├── network.go       # /network/* endpoints
-│   ├── account.go       # /account/* endpoints
-│   ├── block.go         # /block/* endpoints
-│   ├── construction.go  # /construction/* endpoints
-│   ├── mempool_api.go   # /mempool/* endpoints
-│   ├── operations.go    # Cardano operation mapping
-│   └── convert.go       # Type conversion utilities
-├── utxorpc/             # UTxO RPC gRPC server
-│   ├── utxorpc.go       # Server setup
-│   ├── query.go         # Query service
-│   ├── submit.go        # Submit service
-│   ├── sync.go          # Sync service
-│   └── watch.go         # Watch service
+│   └── topology.go      # Topology and peer-snapshot configuration
+├── api/                     # Transport-facing API packages
+│   ├── blockfrost/          # Blockfrost-compatible REST API
+│   │   ├── blockfrost.go    # Server lifecycle
+│   │   ├── adapter.go       # Node state adapter
+│   │   ├── handlers.go      # HTTP handlers
+│   │   ├── pagination.go    # Cursor-based pagination
+│   │   └── types.go         # API response types
+│   ├── mesh/                # Mesh (Rosetta) API
+│   │   ├── mesh.go          # Server lifecycle
+│   │   ├── network.go       # /network/* endpoints
+│   │   ├── account.go       # /account/* endpoints
+│   │   ├── block.go         # /block/* endpoints
+│   │   ├── construction.go  # /construction/* endpoints
+│   │   ├── mempool_api.go   # /mempool/* endpoints
+│   │   ├── operations.go    # Cardano operation mapping
+│   │   └── convert.go       # Type conversion utilities
+│   └── utxorpc/             # UTxO RPC gRPC server
+│       ├── utxorpc.go       # Server setup
+│       ├── query.go         # Query service
+│       ├── submit.go        # Submit service
+│       ├── sync.go          # Sync service
+│       └── watch.go         # Watch service
 ├── bark/                # Bark Dingo-to-Dingo C2 and archive protocol
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
-│   ├── blob.go          # Remote archive blob adapter
-│   └── pruner.go        # Ledger-window-based local block pruning
+│   └── blob.go          # Remote archive blob adapter
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -545,6 +557,8 @@ dingo/
 │   ├── node/            # Node orchestration (CLI wiring)
 │   │   ├── node.go      # Run(), signal handling, metrics server
 │   │   └── load.go      # Block loading implementation
+│   ├── historyexpiry/   # Ledger-window-based local block history expiry
+│   │   └── pruner.go    # Background expiry scanner
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Amaru conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
@@ -573,9 +587,10 @@ type Node struct {
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
-    barkPruner     *bark.Pruner                   // Archive-backed local pruning
+    historyExpiry  *historyexpiry.Pruner          // Local block history expiry
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
+    offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
@@ -593,10 +608,11 @@ When `Node.Run()` is called, components are initialized in this order:
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
  5. LedgerState creation (UTXO tracking, validation)
- 6. Bark remote archive adapter and pruner (if configured)
+ 6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
  8. LedgerState start
- 9. Snapshot manager start (captures genesis snapshot)
+ 9. Snapshot manager start (captures genesis snapshot, or reuses an existing
+    post-Mithril Mark snapshot window)
 10. Mempool setup and injection into LedgerState/Ouroboros
 11. ChainsyncState (multi-client tracking, stall detection)
 12. ChainSelector (genesis/Praos comparison) start
@@ -608,8 +624,9 @@ When `Node.Run()` is called, components are initialized in this order:
 18. Bark C2/archive server (if port configured)
 19. Blockfrost API (if API storage mode and port configured)
 20. Mesh API (if API storage mode and port configured)
-21. Block forger + leader election (if block producer mode)
-22. Wait for shutdown signal
+21. Off-chain metadata fetcher (if API storage mode)
+22. Block forger + leader election (if block producer mode)
+23. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -620,7 +637,8 @@ Graceful shutdown proceeds in phases:
 Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
-  Bark C2/archive server, Blockfrost API, Mesh API
+  Bark C2/archive server, Blockfrost API, Mesh API,
+  off-chain metadata fetcher
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager
@@ -682,6 +700,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `hardfork.transition` | LedgerState | Hard fork transition |
 | `block.forged` | BlockForger | Block successfully forged |
 | `forging.slot_battle` | SlotTracker | Competing blocks at same slot |
+| `leios.eb_quorum` | Leios VoteManager | Endorser block reached stake quorum; certificate built (consumed by the Leios PipelineManager for inclusion eligibility) |
 | `peergov.outbound_conn` | PeerGov | Outbound connection initiated |
 | `peergov.peer_demoted` | PeerGov | Peer demoted |
 | `peergov.peer_promoted` | PeerGov | Peer promoted |
@@ -725,24 +744,60 @@ Dingo supports two storage modes, configured via `storageMode`:
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
 
-### Archive And Pruning Topology
+### Off-chain Metadata Fetching
 
-Dingo's blob-store abstraction supports an archive/pruning deployment pattern:
+In `storageMode: api`, `node.go` also starts `internal/offchainmetadata.Fetcher`
+as a background worker. The worker asks the metadata store to discover on-chain
+URL/hash pointers from pool registrations, DRep anchors, governance
+proposal/vote anchors, constitutions, and committee resignations. It then fetches
+due rows asynchronously into the `offchain_metadata` table.
+
+Fetched content is never fed back into consensus or ledger validation. The
+on-chain Blake2b-256 hash remains authoritative: fetched bytes are stored as
+usable only when their Blake2b-256 digest matches the ledger-provided hash.
+Failed, unsupported, or oversized fetches remain in the table with retry
+metadata and diagnostic state. HTTP(S) pointers are fetched directly. `ipfs://`
+pointers are translated to the fetcher's configured IPFS gateway URL, which
+defaults to `https://gateway.pinata.cloud/ipfs/`, while the cache key remains
+the original on-chain URL. Operators can override fetch interval, request
+timeout, user agent, IPFS gateway URL, batch size, max response bytes, and
+private-address allowance through the `offchainMetadata` YAML block, matching
+`DINGO_OFFCHAIN_METADATA_*` environment variables, or
+`--offchain-metadata-*` CLI flags.
+If the worker context is canceled while a request is in flight, the worker drops
+that in-memory result instead of recording a failed fetch, so shutdown does not
+advance retry state. Metadata-store discovery, batch claim, and result update
+calls receive the same worker context, and the worker returns before issuing new
+store work after cancellation.
+The default HTTP transport caps response bytes, follows a small redirect budget,
+and refuses localhost, private, link-local, multicast, and other non-public
+targets so arbitrary ledger URLs and gateway targets do not become unrestricted
+node-side network access.
+
+The worker is intentionally composed at the node boundary. Ledger and database
+indexing code persist the URL/hash pointers; APIs read the local cache through
+the metadata store when they need off-chain documents.
+
+### Archive And History Expiry Topology
+
+Dingo's blob-store abstraction supports independent history expiry and archive
+fallback:
 
 - An archive node uses a signed-URL-capable object-storage blob plugin (`s3` or
   `gcs`) and enables the Bark server with `barkPort`. Bark's archive service
   maps a requested `(slot, hash)` to the blob store's `GetBlockURL`, returning
   a signed object URL plus compact block metadata.
-- A pruning node keeps its local blob plugin, configures `barkBaseUrl`, and is
-  wired by `node.go` with a `bark.BlobStoreBark` wrapper plus
-  `bark.Pruner`. Normal block writes still go to the local blob plugin. Reads
-  first check local storage; tombstoned or missing historical blocks fall back
-  to the remote Bark archive and download the signed URL response.
-- The pruner derives its safety window from `LedgerState.StabilityWindow()` and
-  scans only blocks older than that window. `Database.PruneBlock` materializes
-  any UTxO CBOR still stored as block offsets before replacing the block CBOR
-  value with a tombstone, leaving block indexes and metadata intact for archive
-  resolution.
+- A node with `historyExpiry.enabled` keeps its local blob plugin and starts
+  `internal/historyexpiry.Pruner`. The worker derives its safety window from
+  `LedgerState.StabilityWindow()` and scans only blocks older than that window.
+  `Database.PruneBlock` materializes any UTxO CBOR still stored as block
+  offsets before replacing the block CBOR value with an expired-history marker,
+  leaving block indexes and metadata intact.
+- A node with `barkBaseUrl` is wired by `node.go` with a `bark.BlobStoreBark`
+  wrapper. Normal block writes still go to the local blob plugin. Reads first
+  check local storage; expired or missing historical blocks fall back to the
+  remote Bark archive and download the signed URL response. This wrapper can be
+  used with or without local History Expiry.
 
 ### Tiered CBOR Cache
 
@@ -808,7 +863,8 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide state tracking |
+| `NetworkState` | Network-wide state tracking (treasury/reserves); updated at the epoch boundary by treasury withdrawals, donations, and unclaimed pool-retirement deposit refunds |
+| `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
 
@@ -839,7 +895,11 @@ The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
 ### Era-Specific Validation
 
-The `ledger/eras/` package provides era-specific validation rules for each Cardano era (Byron through Conway). Each era implements protocol parameter extraction, fee calculation, and era-specific transaction rules.
+The `ledger/eras/` package provides era-specific validation rules for each Cardano era. The default active era table is Byron through Conway. Experimental Dijkstra support is added to the active table only when Dingo starts with `runMode: "leios"` or `startEra: "dijkstra"`; the Dijkstra descriptor uses `github.com/blinklabs-io/gouroboros/ledger/dijkstra` from gouroboros v0.180.0, including that release's generated CDDL shape for the nullable Leios/Peras certificate slots.
+
+Era transitions run the target era's `HardForkFunc` to translate protocol parameters before persisting the new pparams. Transitions can also rewrite ratified-but-not-yet-enacted governance action payloads into the target era's CBOR shape; the Conway to Dijkstra path translates parameter-change proposals so the Dijkstra enactment update function receives `DijkstraProtocolParameterUpdate` rather than a stale Conway update.
+
+When the Dijkstra/Leios gate is active, `node.go` also enables the experimental N2N Leios protocols. `ouroboros/` registers LeiosFetch, LeiosNotify, and LeiosVotes. LeiosNotify/LeiosFetch cache endorser-block material in-memory; the LeiosVotes and LeiosFetch vote handlers delegate vote collection, serving, and emission to the `ledger/leios` vote manager (see "Leios Voting"), and return an explicit unavailable error when the manager is not wired. A cached endorser block is also handed to the `ledger/leios` pipeline manager (see "Leios Pipeline") for stage/timing tracking and equivocation detection. LeiosVotes pull requests remain outstanding while no servable votes exist and complete when new vote material arrives or the protocol shuts down, so an empty relay store is not treated as a mini-protocol error. Durable vote storage and RB certificate embedding are still gated by the current gouroboros/Dijkstra certificate shape, where the generated Leios certificate slot remains a placeholder.
 
 During accepted block replay, Alonzo-and-newer validation runs the UTXO/Phase 1 rule set and keeps declared ExUnit limit checks. Plutus Phase 2 execution is skipped only for blocks at or before the immutable tip (`tipBlockNo - securityParam`), where the block producer's `isValid` flag is treated as authoritative until the local Plutus VM is consensus-equivalent. Volatile block replay, local transaction validation for mempool submission, and forging continue to run Plutus execution.
 
@@ -904,6 +964,11 @@ The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
 connection when a better chain is found.
 
+Bootstrap topology peers remain chain-selection eligible after bootstrap exit
+as a fallback ingress source, but peer governance lowers their priority to zero.
+This lets non-bootstrap peers win same-tip transport selection without
+stranding ChainSync when the bootstrap peer is still the only usable upstream.
+
 ## Network and Protocol Handling
 
 ### Ouroboros Protocol Stack
@@ -926,6 +991,10 @@ The `Ouroboros` struct (`ouroboros/ouroboros.go`) manages all protocol handlers:
     |                     |                     |
     | PeerSharing         | LocalStateQuery     |
     |   Peer discovery    |   Ledger queries    |
+    |                     |                     |
+    | LeiosFetch/Notify/  |                     |
+    | Votes (experimental)|                     |
+    |   EB + vote relay   |                     |
     -------------------------------------------
 ```
 
@@ -959,6 +1028,7 @@ The `chainsync.State` tracks multiple concurrent chainsync clients:
 - Grace period before recycling stalled connections
 - Cooldown to prevent rapid reconnection flapping
 - Plateau detection: if the local tip stops advancing while peers are ahead, the active chainsync connection is recycled
+- Peer-governance connection-close lookup uses stable endpoint identity so reconnect and eligibility cleanup still run for equivalent connection IDs; when no active chainsync client remains, ledger clears its cached upstream tip so slot-clock epoch work does not run against a disconnected tip
 
 ## Peer Governance
 
@@ -993,6 +1063,58 @@ The `PeerGovernor` (`peergov/peergov.go`) manages peer selection and topology:
     |   (30 min timeout)                             |
     -------------------------------------------------
 ```
+
+Connection recovery is both edge-triggered and level-triggered. The
+connection-closed event spawns a one-shot reconnect goroutine for the affected
+peer, and each reconcile cycle additionally redials known peers that have no
+connection and no active reconnect goroutine: topology local/public roots
+always (and bootstrap peers while bootstrap promotion is still allowed),
+gossip/ledger peers only when the node has no chain-selection-eligible
+upstream connection left, capped per cycle. This guarantees the node converges
+back to connected even when a close event cannot be attributed to its peer or
+a dial loop exited early. Gossip churn never demotes the peer holding the last
+eligible upstream connection, so routine churn cannot leave the node without a
+chainsync source.
+
+Reconnect backoff after short-lived sessions escalates exponentially. The
+reconnect goroutine consumes and zeroes the stored delay before dialing, so
+the close handler derives the next rung from a count of consecutive
+short-lived outbound sessions (1s doubling to a 128s cap) rather than from
+the stored delay; a stable session resets the count, as does an inbound
+connection from a topology peer, which proves reachability. Separately, chainsync
+resync reasons that indicate a peer chain we cannot follow (rollback or fork
+resolution exceeding the security parameter K, and both Mithril
+trust-boundary reasons) place the peer on the deny list for a cooldown in
+addition to closing the connection, so the node does not redial a peer that
+will deterministically be rejected again moments later.
+
+Topology configuration is loaded from an explicit topology file when provided,
+otherwise from the embedded `network/topology.json` for built-in networks,
+falling back to the legacy network bootstrap-peer list only when no embedded
+topology exists. A topology `peerSnapshotFile` is resolved relative to the
+topology file or embedded network directory and parsed as a cardano-node ledger
+peer snapshot.
+
+When Genesis chain selection is active and a peer snapshot contains relays, the
+node loads topology local/public roots without topology bootstrap peers, then
+seeds the snapshot relays as `PeerSourceP2PLedger` peers before outbound
+connection startup. This avoids relying on bootstrap peers for Ouroboros
+Genesis initial sync while preserving the existing `UseLedgerAfterSlot` path:
+later ledger peer refreshes still query the live ledger/database provider.
+If the snapshot produces no usable peers, startup falls back to topology
+bootstrap peers.
+
+Live ledger peer discovery is adapted at the node composition boundary:
+`ledger/` exposes stake pool relay data and current slot through neutral
+ledger/database types, while `internal/node/ledgerpeers` converts that data to
+the `peergov.LedgerPeerProvider` interface consumed by the peer governor.
+
+Bootstrap peers are used during initial sync and recovery. Bootstrap exit can
+be triggered by enough connected ledger peers, or by the configured slot/progress
+thresholds once at least one non-bootstrap client-capable successor is
+available. Exiting bootstrap preserves bootstrap peer identity for recovery and
+lowers bootstrap chain-selection priority instead of making connected bootstrap
+ChainSync streams ineligible.
 
 ## Transaction Mempool
 
@@ -1029,7 +1151,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 `BlockForger` runs a slot-based loop that:
 1. Waits for the next slot boundary using the wall-clock slot timer
 2. Checks leader eligibility via the `Election`
-3. Assembles a block from mempool transactions using `DefaultBlockBuilder`
+3. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
 4. Broadcasts the forged block through the chain manager
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
@@ -1038,27 +1160,110 @@ The forger tracks slot battles (competing blocks at the same slot) and skips for
 
 VRF signing keys, KES signing keys, and operational certificates are loaded from files at startup. The `keystore` package handles platform-specific file permission checks (Unix file modes, Windows ACLs) and KES key evolution.
 
+### Leios Voting (`ledger/leios/`)
+
+Experimental CIP-0164 stake-truncated committee voting, active only under the Dijkstra/Leios gate. `VoteManager` collects, validates, serves, and emits Leios votes:
+
+- **Committee selection**: the voting committee for an epoch is a pure function of the stake snapshot two epochs back (the same Mark→Set→Go cadence as leader election) and the Dijkstra `CommitteeStakeCoverage` (sigma_c) protocol parameter. Pools are ordered by stake descending (pool key hash ascending on ties) and selected until cumulative stake reaches sigma_c; the 0-based position in that order is the voter's stable `voter_id`. Committees are memoized in memory and recomputed on demand — there is no database table.
+- **Vote validation**: incoming votes are checked structurally, windowed against the current (or tip) slot (CIP-0164's L_vote timing window is not yet specified, so a provisional slot window bounds the forgeable vote-id space and keeps fabricated far-past/future slots away from stake snapshot queries), mapped to a committee by slot epoch, membership-checked by `voter_id`, deduplicated by `(slot, voter_id)` (first vote wins on equivocation), and BLS-verified when the voter's public key is known. CIP-0164 key registration is not yet specified, so voter public keys come from a static config registry (`leiosVoterPublicKeys`); votes from unknown voters pass lenient validation but cannot contribute to certificates. The registry is the trust root discharging the proof-of-possession requirement of BLS aggregate verification — operators vouch for the keys they configure.
+- **Stake quorum and certificates**: per endorser block, the manager tracks observed stake (all membership-valid votes) and verified stake (signature-verified votes). When verified stake reaches the `QuorumStakeThreshold` (tau) fraction of *total active stake* (exact rational arithmetic, never a head count), it builds a `LeiosEbCertificate` — signers bitfield over the committee plus one aggregated BLS12-381 MinSig signature — from verified votes only, and publishes `leios.eb_quorum`. The tau < sigma_c invariant is revalidated whenever parameters are read; failures disable committee computation. Certificate *validation* (`ValidateEbCertificate`) is exposed but not yet wired into block validation: the Dijkstra CDDL's `leios_cert` block slot is still an empty placeholder in gouroboros v0.180.0.
+- **Vote emission**: a block producer with a `leiosVoteSigningKeyFile` configured signs exactly one uniform vote (`slot_no`, `endorser_block_hash`, `voter_id`, BLS signature over `concat(slot_no, eb_hash)`) per observed endorser block while its pool is a committee member.
+- **State lifecycle**: all state is in-memory, split across two stores. Raw votes live in a TTL- and size-bounded *serving store* (10 minutes, 8192 entries, oldest evicted) used only for relaying to peers. Dedup and tally accounting live in a separate *record ledger* (one record per accepted `(slot, voter_id)`, admission-capped at 4x the serving store with reject-new semantics — the cap gates only unverified peer votes; verified and locally emitted votes bypass it, being unforgeable and dedup-bounded to one record per slot and registered voter) that is never size-evicted: records are pruned only in lockstep with their endorser block's tally, so a vote whose tally is still accumulating can never be re-counted after its serving entry is evicted, and first-wins equivocation detection stays durable. The record cap also transitively bounds the tally map. Epoch transitions prune state older than the previous epoch; chain rollbacks drop votes, tallies, and records past the rollback point and clear the committee memo.
+
+The manager implements the `ouroboros.LeiosVoteHandler` interface and is assigned to the Ouroboros component post-construction. The LeiosVotes server callback must return exactly the requested number of votes, so it blocks (with a per-connection cursor over the append-ordered vote log, never echoing a vote back to its origin) until enough votes arrive or the protocol shuts down; dingo's LeiosVotes client requests one vote at a time with pipelining for streaming delivery.
+
+### Leios Pipeline (`ledger/leios/`)
+
+Experimental CIP-0164 Linear Leios stage/timing orchestration, active only under the Dijkstra/Leios gate. `PipelineManager` tracks endorser blocks through the pipeline's phases under provisional timing windows and exposes the producer- and inclusion-facing seams the forge loop will consume. It is deliberately decoupled from `VoteManager`: both observe the same endorser blocks independently, and the only channel between them is the `leios.eb_quorum` event.
+
+- **Stages and timing**: an endorser block advances `produce → diffuse → vote → certify → eligible → expired`, derived purely from the distance between its produce slot and the current slot (plus whether a certificate has been observed) by the single `stageFor` function. The per-phase window lengths live in one provisional `PipelineTiming` struct (off-chain, overridable via `WithLeiosPipelineTiming`) because CIP-0164 has not finalized them; they are not protocol parameters. Window decisions are slot-driven via `SlotProvider.CurrentOrTipSlot` (the `SlotClock` is private to `LedgerState`), mirroring how `VoteManager` advances. The pipeline's `VoteWindowSlots` is the single source for `VoteManager`'s vote-acceptance past bound (a vote is rejected once its slot is `VoteWindowSlots` or more behind the current slot), passed via `VoteManagerConfig` so the two components admit votes over the same window. Each EB's current stage is surfaced via the `pipeline_ebs_by_stage` gauge and the read-only `StageOf` query.
+- **EB equivocation**: a second distinct endorser block observed for the same slot flags *all* of that slot's blocks as equivocated and excludes them from ranking-block eligibility. Because the CIP-0164 endorser block carries no producer identity yet, the pipeline keys equivocation on slot and cannot pick a winner — distinct from `VoteManager`'s `(slot, voter_id)` first-vote-wins, which protects the tally rather than inclusion.
+- **Certification and inclusion (Stage 3)**: on `leios.eb_quorum` the pipeline marks the matching block certified, capturing the built certificate verbatim (never rebuilt). A certificate arriving at or past `CertifyByDeadlineSlots` is rejected (counted under `pipeline_certs_rejected_total{reason="late"}`): the EB stays tracked but is never certified, so it cannot become eligible. `EligibleCertifiedEbs` returns the certified, non-equivocated, not-yet-embedded blocks within their inclusion window; `MarkEmbedded` records inclusion. The actual ranking-block CBOR embedding is stubbed pending the RB data structure (the `leios_cert` block slot is still a placeholder, see `mergedLeiosRankingBlockCbor`).
+- **Producer seam**: `MayProduceEndorserBlock(slot)` reports whether an EB may be forged for a slot at the current slot. EB forging itself is out of scope here (forge-loop integration is a sibling concern); this is the stable interface that integration consumes.
+- **State lifecycle**: all state is in-memory — pipeline instances keyed by produce slot, indexed by EB hash. Instances are lazily pruned past their TTL on each query/observation, flushed at epoch transitions (older than the previous epoch), and dropped past the rollback point on chain rollbacks so a re-produced EB is not mistaken for equivocation. Committee/stake-snapshot rotation needs no pipeline logic: it consumes already-built certificates and inherits `VoteManager`'s epoch-2 snapshot selection.
+
+The manager implements the `ouroboros.LeiosPipelineHandler` interface (`ObserveEndorserBlock`) and is assigned to the Ouroboros component post-construction, alongside the vote handler; `storeLeiosEndorserBlock` notifies it after the vote manager. In node startup it is constructed and started after `VoteManager` and torn down before it (LIFO), since it depends on the vote manager's `leios.eb_quorum` output.
+
 ## Mithril Bootstrap
 
-The `mithril/` package enables fast initial sync by downloading and verifying a
-Mithril snapshot rather than syncing from genesis:
+The `mithril/` package enables fast initial sync by downloading and verifying
+Mithril artifacts rather than syncing from genesis. Two artifact backends are
+supported, selected by `mithril.backend` (`--mithril-backend`,
+`DINGO_MITHRIL_BACKEND`):
 
-1. `client.go` queries the Mithril aggregator for the latest certified snapshot
-2. `download.go` downloads and extracts the snapshot archive, including
-   resumable downloads with idle-stall retry handling
-3. `bootstrap.go` verifies the certificate chain and orchestrates the snapshot
-   artifact workflow
+- `v2` (default): the incremental Cardano database backend
+  (`CardanoDatabase` signed entity, `/artifact/cardano-database`). The
+  artifact's self-hash is checked, the certificate chain is verified, then the
+  immutable-file digest list is fetched and authenticated by rebuilding its
+  merkle root (a Blake2s-256 Merkle Mountain Range over the digest strings,
+  `merkle_tree.go`) and comparing it with the `cardano_database_merkle_root`
+  protocol message part certified by the leaf certificate. Per-immutable
+  archives are then downloaded with a bounded worker pool
+  (`bootstrap_v2.go`), each extracted trio is SHA-256-verified against the
+  digest map (already-verified trios are skipped on resume), and the ancillary
+  archive (ledger state) is verified via its Ed25519-signed
+  `ancillary_manifest.json` using the per-network ancillary verification key.
+- `v1` (legacy): the full-database snapshot backend
+  (`CardanoImmutableFilesFull`, `/artifact/snapshots`), a single tarball
+  download bound to the certificate chain via the `snapshot_digest` protocol
+  message part. Upstream Mithril is phasing this artifact type out. At the
+  library level an empty `BootstrapConfig.Backend`/`SyncConfig.Backend`
+  selects v2; callers must specify `v1` explicitly to use the legacy backend.
+
+Package layout:
+
+1. `client.go` / `client_v2.go` query the Mithril aggregator artifact and
+   certificate endpoints for the respective backends
+2. `download.go` downloads and extracts archives, including resumable
+   downloads with idle-stall retry handling (shared by both backends)
+3. `bootstrap.go` verifies the certificate chain, dispatches on the
+   configured backend, and orchestrates the v1 snapshot workflow;
+   `bootstrap_v2.go` orchestrates the v2 digest/immutable/ancillary workflow
+
+Both backends produce the same `BootstrapResult` (immutable directory,
+ancillary ledger-state directory, synthesized snapshot metadata), so
+everything downstream of `Bootstrap()` is backend-agnostic.
 
 The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
 
+During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
+snapshot manager to ensure the initial stake snapshot state before starting the
+client APIs. If the imported database already contains a non-empty Mark snapshot
+window for the current epoch, N-1, and N-2, the snapshot manager reuses that
+window instead of recalculating stake distribution from live UTxO state.
+
+The Mithril snapshot also acts as the local trust anchor during live
+chainsync. The ledger refuses any rollback below the imported ledger slot
+(`mithrilLedgerSlot`), since blocks at or below that boundary were certified
+as a single ledger state and intermediate UTxO states for a replacement fork
+cannot be reconstructed. The boundary block is always offered as an intersect
+point, so the peer's reported tip classifies the refusal: a peer whose own
+tip is below the boundary is treated as stale (it is simply behind and
+matched an old rung of the intersect ladder), while a peer claiming a tip at
+or above the boundary that still demands a rollback below it is rejected as
+genuinely divergent. Both classifications close the connection for a fresh
+intersect and deny the peer for a cooldown via peer governance.
+
+In API storage mode, the SQLite metadata plugin can defer selected query indexes
+during bulk load. Deferred indexes are classified as critical or lazy in
+`database/plugin/metadata/deferred`: critical indexes cover startup API queries
+and rollback predicates, while lazy indexes cover secondary query paths. The
+metadata plugin exposes `BuildCriticalDeferredIndexes` for the critical subset
+and `BuildDeferredIndexes` for the full manifest. Mithril sync rebuilds the
+critical subset before clearing `sync_status`, then leaves the pending
+sync-state marker set. API-mode `serve` verifies the critical subset before
+startup and runs the full lazy rebuild as background maintenance; the marker is
+cleared only after the full manifest has been rebuilt. Core-mode startup still
+repairs the full manifest synchronously before serving.
+
 ## External Interfaces
 
 Dingo provides three client-facing APIs plus Bark. All are optional and gated by port configuration. UTxO RPC, Blockfrost, and Mesh are general-purpose external APIs and require `storageMode: api`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API.
 
-### Blockfrost API (`blockfrost/`)
+### Blockfrost API (`api/blockfrost/`)
 
 A Blockfrost-compatible REST API that provides read access to chain data and
 transaction submission. The current router includes health/root, blocks,
@@ -1069,11 +1274,11 @@ signers, and account/delegation/registration/reward endpoints. It uses an
 adapter pattern to translate between Dingo's internal state and Blockfrost
 response types and supports Blockfrost-style pagination headers.
 
-### Mesh API (`mesh/`)
+### Mesh API (`api/mesh/`)
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.
 
-### UTxO RPC (`utxorpc/`)
+### UTxO RPC (`api/utxorpc/`)
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
 
@@ -1081,7 +1286,7 @@ A gRPC server implementing the UTxO RPC specification with query, submit, sync, 
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
 services. It exposes archive access over Connect/gRPC and supplies the remote
-archive adapter used by pruning nodes.
+archive adapter used by nodes that want historical fallback.
 
 The server side (`bark.Bark`) registers the archive service, health endpoint,
 and gRPC reflection. Archive fetches validate the requested block hash, ask the
@@ -1091,11 +1296,10 @@ archive-node blob backends because they can sign object-storage URLs.
 
 The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 `GetBlock` and block iterators pass through local values, but resolve
-`types.ErrBlockTombstoned` or missing historical block CBOR by calling the
-remote Bark archive and downloading the signed URL. `bark.Pruner` runs only
-when `barkBaseUrl` is configured; it uses the ledger-derived stability window,
-not a separate operator-supplied security-window value, to decide which local
-blocks are safe to tombstone.
+`types.ErrHistoryExpired` or missing historical block CBOR by calling the
+remote Bark archive and downloading the signed URL. Bark does not decide which
+local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
+`historyExpiry.enabled` is configured.
 
 ## Architectural Boundaries
 
@@ -1114,12 +1318,16 @@ Package isolation is enforced by direction, ownership, and composition:
 - `ledger/` owns validation, ledger state, rollback state repair, nonce/epoch
   logic, and ledger queries. Network connection action should be requested via
   neutral events or callbacks rather than direct connection-manager coupling.
+  Peer-governance policy types should be adapted outside `ledger/`, at the
+  node composition boundary.
 - `mempool/` owns pending transaction admission, eviction, and relay state. It
   depends on a transaction-validation interface supplied by ledger, not on a
-  concrete ledger implementation.
+  concrete ledger implementation. Node composition adapts mempool transaction
+  DTOs to the neutral transaction views consumed by ledger block construction
+  and `ledger/forging`.
 - `database/` and `database/plugin/*` own persistence and storage backends.
   They should not import node, ledger, mempool, networking, or API packages.
-- API packages (`blockfrost/`, `mesh/`, `utxorpc/`) should expose server logic
+- API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
   through local interfaces. Concrete adapters to `ledger`, `database`, and
   `mempool` are integration boundaries and should remain narrow.
 
@@ -1143,7 +1351,7 @@ Storage backends are loaded dynamically through a plugin registry, allowing exte
 
 ### Adapter Pattern
 
-The block production system uses adapters (`mempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations.
+The block production system uses adapters (`ledgerMempoolAdapter`, `forgingMempoolAdapter`, `stakeDistributionAdapter`, `epochInfoAdapter`, `slotClockAdapter`) to decouple forging interfaces from concrete implementations. Node wiring also adapts neutral ledger relay data to `peergov.LedgerPeerProvider` in `internal/node/ledgerpeers`.
 
 ### Observer Pattern
 
@@ -1191,6 +1399,8 @@ Key configuration areas:
 - Peer targets and quotas
 - CBOR cache sizing (hot entries, block LRU)
 - Chainsync client limits and stall timeout
+- Off-chain metadata fetcher interval, request timeout, IPFS gateway, batch
+  size, response cap, and private-address policy
 - Block producer credentials (VRF key, KES key, operational certificate)
 - External interface ports (Blockfrost, Mesh, UTxO RPC, Bark)
 
@@ -1276,8 +1486,36 @@ type EpochTransitionEvent struct {
 }
 ```
 
+Epoch transition events may come from block processing or the slot clock. The
+slot clock only emits proactive epoch transitions when the ledger tip is within
+the current era's stability window of the upstream tip; while farther behind,
+block processing owns historical epoch transitions during catch-up.
+
+### Epoch Boundary State Transitions
+
+`processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
+a fixed order, mirroring `cardano-ledger`'s sequencing:
+
+1. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+2. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+   whose retirement epoch is the new epoch. Each deposit is credited to the
+   pool's registered, active reward account, or added to the treasury when that
+   account is missing or inactive. Active pool membership itself is query-derived
+   (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
+   the retirement certificate rows remain for rollback safety.
+3. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+   proposal-deposit returns, which observe the post-POOLREAP treasury.
+4. Treasury donations (`applyEpochDonations`), added after withdrawals.
+
+POOLREAP runs before governance so any deposit that lands in the treasury is
+visible to the withdrawals checked in step 3. The ordering is locked in by
+`TestProcessEpochRollover_OrderingInvariant`.
+
 ### Rollback Support
 
 On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
+- Reward-account credits (`account_reward_delta` journal) and treasury/reserves
+  writes (`network_state`) from governance refunds and POOLREAP deposit refunds
+  are slot-keyed, so they are reverted by slot and re-derived on forward replay

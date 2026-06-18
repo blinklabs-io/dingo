@@ -76,25 +76,56 @@ var Eras = []EraDesc{
 	ConwayEraDesc,
 }
 
+var ErasWithDijkstra = []EraDesc{
+	ByronEraDesc,
+	ShelleyEraDesc,
+	AllegraEraDesc,
+	MaryEraDesc,
+	AlonzoEraDesc,
+	BabbageEraDesc,
+	ConwayEraDesc,
+	DijkstraEraDesc,
+}
+
+// ActiveEras returns the era table for a runtime configuration. Dijkstra is
+// experimental and intentionally excluded from the package-level default table.
+func ActiveEras(enableDijkstra bool) []EraDesc {
+	if enableDijkstra {
+		return ErasWithDijkstra
+	}
+	return Eras
+}
+
 // EraForVersion returns the era descriptor whose [MinMajorVersion,
 // MaxMajorVersion] range contains majorVersion. Returns (nil, false) if
 // no era covers the given version.
 func EraForVersion(majorVersion uint) (*EraDesc, bool) {
-	for i := range Eras {
-		if majorVersion >= Eras[i].MinMajorVersion &&
-			majorVersion <= Eras[i].MaxMajorVersion {
-			return &Eras[i], true
+	return EraForVersionIn(Eras, majorVersion)
+}
+
+func EraForVersionIn(
+	eraList []EraDesc,
+	majorVersion uint,
+) (*EraDesc, bool) {
+	for i := range eraList {
+		if majorVersion >= eraList[i].MinMajorVersion &&
+			majorVersion <= eraList[i].MaxMajorVersion {
+			return &eraList[i], true
 		}
 	}
 	return nil, false
 }
 
-// GetEraById returns the era descriptor for the given era ID.
-// Returns nil if the era ID is not found.
+// GetEraById returns the descriptor for any era known to this build. Runtime
+// active-era checks should use GetEraByIdIn with ActiveEras.
 func GetEraById(eraId uint) *EraDesc {
-	for i := range Eras {
-		if Eras[i].Id == eraId {
-			return &Eras[i]
+	return GetEraByIdIn(ErasWithDijkstra, eraId)
+}
+
+func GetEraByIdIn(eraList []EraDesc, eraId uint) *EraDesc {
+	for i := range eraList {
+		if eraList[i].Id == eraId {
+			return &eraList[i]
 		}
 	}
 	return nil
@@ -113,13 +144,20 @@ func GetEraById(eraId uint) *EraDesc {
 // era IDs that don't match, future eras, or eras more
 // than one step back.
 func IsCompatibleEra(txEraId, ledgerEraId uint) bool {
+	return IsCompatibleEraIn(Eras, txEraId, ledgerEraId)
+}
+
+func IsCompatibleEraIn(
+	eraList []EraDesc,
+	txEraId, ledgerEraId uint,
+) bool {
 	if txEraId == ledgerEraId {
 		return true
 	}
 	// Find the ledger era's index in the Eras slice
 	ledgerIdx := -1
-	for i := range Eras {
-		if Eras[i].Id == ledgerEraId {
+	for i := range eraList {
+		if eraList[i].Id == ledgerEraId {
 			ledgerIdx = i
 			break
 		}
@@ -130,7 +168,7 @@ func IsCompatibleEra(txEraId, ledgerEraId uint) bool {
 		return false
 	}
 	// Check if txEraId is the immediately previous era
-	if ledgerIdx > 0 && Eras[ledgerIdx-1].Id == txEraId {
+	if ledgerIdx > 0 && eraList[ledgerIdx-1].Id == txEraId {
 		return true
 	}
 	return false

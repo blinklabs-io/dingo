@@ -276,6 +276,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		"blockfrost", storageMode.IsAPI() && cfg.BlockfrostPort > 0,
 		"utxorpc", storageMode.IsAPI() && cfg.UtxorpcPort > 0,
 		"mesh", storageMode.IsAPI() && cfg.MeshPort > 0,
+		"midnight_indexing", storageMode.IsAPI(),
+		"midnight_grpc", storageMode.IsAPI() && cfg.Midnight.Port > 0,
 	)
 
 	d, err := dingo.New(
@@ -299,10 +301,42 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
 			dingo.WithBarkPort(cfg.BarkPort),
-			dingo.WithBarkPrunerFrequency(cfg.BarkPrunerFrequency),
+			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
+				Enabled:   cfg.HistoryExpiry.Enabled,
+				Frequency: cfg.HistoryExpiry.Frequency,
+			}),
 			dingo.WithCORSAllowedOrigins(cfg.CORSAllowedOrigins),
+			dingo.WithOffchainMetadataConfig(
+				dingo.OffchainMetadataConfig{
+					Interval: cfg.OffchainMetadata.Interval,
+					RequestTimeout: cfg.OffchainMetadata.
+						RequestTimeout,
+					UserAgent: cfg.OffchainMetadata.UserAgent,
+					IPFSGatewayURL: cfg.OffchainMetadata.
+						IPFSGatewayURL,
+					BatchSize: cfg.OffchainMetadata.BatchSize,
+					MaxBytes:  cfg.OffchainMetadata.MaxBytes,
+					AllowPrivateAddresses: cfg.OffchainMetadata.
+						AllowPrivateAddresses,
+				},
+			),
+			dingo.WithMidnightConfig(dingo.MidnightConfig{
+				Port:                        cfg.Midnight.Port,
+				Host:                        cfg.Midnight.Host,
+				CNightPolicyID:              cfg.Midnight.CNightPolicyID,
+				CNightAssetName:             cfg.Midnight.CNightAssetName,
+				MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
+				AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
+				CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
+				TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,
+				TechnicalCommitteePolicyID:  cfg.Midnight.TechnicalCommitteePolicyID,
+				CouncilAddress:              cfg.Midnight.CouncilAddress,
+				CouncilPolicyID:             cfg.Midnight.CouncilPolicyID,
+				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
+			}),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithRunMode(string(cfg.RunMode)),
+			dingo.WithStartEra(string(cfg.StartEra)),
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
@@ -372,6 +406,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithForgeStaleGapThresholdSlots(
 				cfg.ForgeStaleGapThresholdSlots,
 			),
+			// Leios voting (experimental)
+			dingo.WithLeiosVoteSigningKeyFile(
+				cfg.LeiosVoteSigningKeyFile,
+			),
+			dingo.WithLeiosVoterPublicKeys(cfg.LeiosVoterPublicKeys),
 		),
 	)
 	if err != nil {

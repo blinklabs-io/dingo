@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
+	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -130,14 +133,19 @@ func isOriginPoint(point ocommon.Point) bool {
 	return point.Slot == 0 && len(point.Hash) == 0
 }
 
-func sameConnectionId(a, b ouroboros.ConnectionId) bool {
-	if a.LocalAddr == nil && a.RemoteAddr == nil {
-		return b.LocalAddr == nil && b.RemoteAddr == nil
-	}
-	if b.LocalAddr == nil && b.RemoteAddr == nil {
-		return false
+// sameNetAddr compares addresses by string form, treating nil as equal
+// only to nil. ConnectionId.String() panics when either net.Addr field
+// is nil, so the addresses are compared individually instead.
+func sameNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
 	return a.String() == b.String()
+}
+
+func sameConnectionId(a, b ouroboros.ConnectionId) bool {
+	return sameNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameNetAddr(a.RemoteAddr, b.RemoteAddr)
 }
 
 func chainsyncResyncRequiresFreshConnection(reason string) bool {
@@ -148,6 +156,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonPersistentFork,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonPeerTipBehindMithril,
 		event.ChainsyncResyncReasonForkResolutionExceedsK,
 		event.ChainsyncResyncReasonRollbackLoop:
 		return true
@@ -159,7 +168,9 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 func chainsyncResyncDeniesPeer(reason string) bool {
 	switch reason {
 	case event.ChainsyncResyncReasonRollbackExceedsK,
-		event.ChainsyncResyncReasonForkResolutionExceedsK:
+		event.ChainsyncResyncReasonForkResolutionExceedsK,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		event.ChainsyncResyncReasonPeerTipBehindMithril:
 		return true
 	default:
 		return false
@@ -178,7 +189,7 @@ func (o *Ouroboros) denyDivergentChainsyncPeer(
 	address := connId.RemoteAddr.String()
 	o.PeerGov.DenyPeer(address, chainsyncDivergentPeerCooldown)
 	o.config.Logger.Warn(
-		"temporarily denying divergent chainsync peer",
+		"temporarily denying chainsync peer whose chain we cannot follow",
 		"connection_id", connId.String(),
 		"address", address,
 		"reason", reason,
@@ -667,8 +678,8 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		// Extract VRF output from block header once for chain
 		// selection tie-breaking (used in both dedup and normal
 		// paths below).
-		vrfOutput := chainselection.GetVRFOutput(v)
-		praosView, _ := chainselection.GetPraosTiebreakerView(v)
+		vrfOutput := praos.GetVRFOutput(v)
+		praosView, _ := praos.GetPraosTiebreakerView(v)
 		// Ingress eligibility is the sole gate for feeding the ledger
 		// and chain selection. reconcileChainsyncIngressAdmission
 		// defers to ChainsyncIngressEligible (peergov), which already
@@ -733,7 +744,7 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		}
 		if ingressEligible && o.ChainsyncState != nil {
 			o.ChainsyncState.RecordObservedHeader(
-				ledger.ChainsyncEvent{
+				chainsync.ObservedHeader{
 					ConnectionId: ctx.ConnectionId,
 					Point:        point,
 					Type:         blockType,

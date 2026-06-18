@@ -76,9 +76,16 @@ type Utxo struct {
 	CollateralByTxId        []byte       `gorm:"index;size:32"`
 	ID                      uint         `gorm:"primarykey"`
 	AddedSlot               uint64       `gorm:"index"`
-	DeletedSlot             uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:1"`
-	Amount                  types.Uint64 `gorm:"index:idx_utxo_deleted_staking_amount,priority:3"`
+	DeletedSlot             uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_deleted_payment_script,priority:1"`
+	Amount                  types.Uint64 `gorm:"index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:3"`
 	OutputIdx               uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
+	// PaymentScript is true when the output's payment credential is a
+	// script hash (as opposed to a key hash). It is derived from the
+	// address type at index time and used to compute the network's
+	// script-locked supply (see GetScriptLockedSupply). The composite
+	// index (deleted_slot, payment_script, amount) lets the supply sum
+	// scan only live script UTxOs.
+	PaymentScript bool `gorm:"index:idx_utxo_deleted_payment_script,priority:2"`
 }
 
 // UtxoWithOrdering includes UTxO with transaction ordering metadata
@@ -150,12 +157,19 @@ func UtxoLedgerToModel(
 	if pkh != zeroHash {
 		ret.PaymentKey = pkh.Bytes()
 	}
+	// The low bit of the address type distinguishes a script payment
+	// credential from a key-hash credential. Byron addresses (type
+	// 0b1000) never have this bit set, so they are correctly treated
+	// as non-script.
+	if outAddr.Type()&lcommon.AddressTypeScriptBit == lcommon.AddressTypeScriptBit {
+		ret.PaymentScript = true
+	}
 	skh := outAddr.StakeKeyHash()
 	if skh != zeroHash {
 		ret.StakingKey = skh.Bytes()
 	}
 	if dh := utxo.Output.DatumHash(); dh != nil {
-		ret.DatumHash = dh.Bytes()
+		ret.DatumHash = append([]byte(nil), dh[:]...)
 	}
 	if multiAsset := utxo.Output.Assets(); multiAsset != nil {
 		ret.Assets = ConvertMultiAssetToModels(multiAsset)

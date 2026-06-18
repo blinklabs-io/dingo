@@ -131,9 +131,8 @@ func newTestDB(t *testing.T) *database.Database {
 }
 
 // newBarkBlobStoreForTest builds a BlobStoreBark wrapping db's blob store
-// and pointed at baseURL. The constructor's panic on a nil LedgerState is
-// bypassed via direct struct construction — these tests exercise the
-// iterator path, which does not consult ledger state.
+// and pointed at baseURL. Direct struct construction lets the tests inject
+// a fake archive client while focusing on the iterator path.
 func newBarkBlobStoreForTest(
 	db *database.Database, baseURL string,
 ) *BlobStoreBark {
@@ -147,12 +146,10 @@ func newBarkBlobStoreForTest(
 	}
 }
 
-// TestBarkIterator_ResolvesTombstoneViaArchive seeds the database with a
-// block, tombstones it via the same path the pruner uses, then iterates
-// through the bark wrapper. ValueCopy must surface the archive's CBOR,
-// not the tombstone marker — issue #2104: callers iterating bp keys
-// must never observe tombstone bytes through the wrapper.
-func TestBarkIterator_ResolvesTombstoneViaArchive(t *testing.T) {
+// TestBarkIterator_ResolvesExpiredHistoryViaArchive seeds the database with a
+// block, marks it expired locally, then iterates through the bark wrapper.
+// ValueCopy must surface the archive's CBOR, not the local expiry marker.
+func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
 	db := newTestDB(t)
 
 	const slot uint64 = 100
@@ -196,8 +193,8 @@ func TestBarkIterator_ResolvesTombstoneViaArchive(t *testing.T) {
 		require.NotNil(t, item)
 		k := item.Key()
 		// Skip the metadata key — TombstoneBlock removes it, but a fresh
-		// fixture might still see it before commit; either way, tombstones
-		// never live there so it's not interesting for this assertion.
+		// fixture might still see it before commit; either way, expiry
+		// markers never live there so it's not interesting for this assertion.
 		if bytes.HasSuffix(k, []byte(types.BlockBlobMetadataKeySuffix)) {
 			continue
 		}
@@ -212,20 +209,20 @@ func TestBarkIterator_ResolvesTombstoneViaArchive(t *testing.T) {
 	require.True(t, seenBp, "iterator did not visit the bp key")
 
 	assert.False(t, types.IsBlockTombstone(gotValue),
-		"ValueCopy must not surface the raw tombstone marker — the wrapper "+
+		"ValueCopy must not surface the raw expiry marker — the wrapper "+
 			"is supposed to resolve it via the archive")
 	assert.Equal(t, cbor, gotValue,
-		"ValueCopy must return the archive-served CBOR for a tombstoned block")
+		"ValueCopy must return the archive-served CBOR for expired history")
 	assert.Equal(t, 1, archiveSrv.fetchCalls,
-		"exactly one archive FetchBlock call expected for one tombstoned block")
+		"exactly one archive FetchBlock call expected for one expired block")
 }
 
-// TestUpstreamIterator_SurfacesTypedTombstoneError proves the contract
+// TestUpstreamIterator_SurfacesTypedHistoryExpiredError proves the contract
 // bark relies on: the underlying plugin iterator returns a typed
-// *types.BlockTombstonedError (carrying slot+hash) from ValueCopy when
-// it encounters a tombstone, so the bark wrapper can resolve via
+// *types.HistoryExpiredError (carrying slot+hash) from ValueCopy when
+// it encounters an expiry marker, so the bark wrapper can resolve via
 // errors.As without parsing any blob keys.
-func TestUpstreamIterator_SurfacesTypedTombstoneError(t *testing.T) {
+func TestUpstreamIterator_SurfacesTypedHistoryExpiredError(t *testing.T) {
 	db := newTestDB(t)
 
 	const slot uint64 = 300
@@ -263,23 +260,23 @@ func TestUpstreamIterator_SurfacesTypedTombstoneError(t *testing.T) {
 		}
 		_, err := item.ValueCopy(nil)
 		require.Error(t, err,
-			"upstream ValueCopy on a tombstone must surface an error")
-		var tombErr *types.BlockTombstonedError
-		require.True(t, errors.As(err, &tombErr),
-			"upstream error must be (or wrap) *BlockTombstonedError so "+
+			"upstream ValueCopy on expired history must surface an error")
+		var historyErr *types.HistoryExpiredError
+		require.True(t, errors.As(err, &historyErr),
+			"upstream error must be (or wrap) *HistoryExpiredError so "+
 				"bark can extract slot/hash with errors.As")
-		assert.Equal(t, slot, tombErr.Slot)
-		assert.Equal(t, hash, tombErr.Hash)
-		require.True(t, errors.Is(err, types.ErrBlockTombstoned),
-			"typed error must still satisfy errors.Is(ErrBlockTombstoned)")
+		assert.Equal(t, slot, historyErr.Slot)
+		assert.Equal(t, hash, historyErr.Hash)
+		require.True(t, errors.Is(err, types.ErrHistoryExpired),
+			"typed error must still satisfy errors.Is(ErrHistoryExpired)")
 		typedErrSeen = true
 	}
 	require.True(t, typedErrSeen,
-		"iterator did not surface the tombstone we just wrote")
+		"iterator did not surface the expiry marker we just wrote")
 }
 
 // TestBarkIterator_PassesThroughLiveValues checks that values at non-bp
-// keys (here: bi index pointers) and at non-tombstoned bp keys go
+// keys (here: bi index pointers) and at non-expired bp keys go
 // straight through without any archive call.
 func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 	db := newTestDB(t)
@@ -326,7 +323,7 @@ func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 	require.True(t, found)
 
 	// Iterate bi prefix: the value is the bp key reference (not a CBOR
-	// payload); it must pass through unchanged regardless of tombstones
+	// payload); it must pass through unchanged regardless of expiry markers
 	// elsewhere.
 	itBi := store.NewIterator(rTxn, types.BlobIteratorOptions{
 		Prefix: []byte(types.BlockBlobIndexKeyPrefix),

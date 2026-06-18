@@ -242,17 +242,17 @@ func (i *badgerItem) ValueCopy(dst []byte) ([]byte, error) {
 	if !types.IsBlockTombstone(val) {
 		return val, nil
 	}
-	// The tombstone marker only appears at fully-formed bp keys; parse
-	// the key we just emitted to attach (slot, hash) to the typed
-	// error. The plugin owns this key format end-to-end so the parse
-	// is internally safe.
+	// The expiry marker only appears at fully-formed bp keys; parse the
+	// key we just emitted to attach (slot, hash) to the typed error.
+	// The plugin owns this key format end-to-end so the parse is safe.
 	slot, hash, parseErr := types.ParseBlockBlobKey(i.item.KeyCopy(nil))
 	if parseErr != nil {
 		return nil, fmt.Errorf(
-			"tombstone at unexpected key shape: %w", parseErr,
+			"history expiry marker at unexpected key shape: %w",
+			parseErr,
 		)
 	}
-	return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
+	return nil, &types.HistoryExpiredError{Slot: slot, Hash: hash}
 }
 
 // BlobStoreBadger stores all data in badger. Data may not be persisted
@@ -271,6 +271,7 @@ type BlobStoreBadger struct {
 	valueThreshold       int64
 	compactBlockMetadata bool
 	compressionEnabled   bool
+	compressionLevel     int
 	gcEnabled            bool
 	deferOpen            bool // when true, Badger is opened in Start() not New()
 }
@@ -282,7 +283,8 @@ func New(opts ...BlobStoreBadgerOptionFunc) (*BlobStoreBadger, error) {
 	db := &BlobStoreBadger{
 		// Set defaults
 		gcEnabled:          true, // Enable GC by default for disk-backed stores
-		compressionEnabled: true, // Snappy compression by default
+		compressionEnabled: true, // ZSTD compression by default
+		compressionLevel:   DefaultCompressionLevel,
 		blockCacheSize:     DefaultBlockCacheSize,
 		indexCacheSize:     DefaultIndexCacheSize,
 		valueLogFileSize:   int64(DefaultValueLogFileSize),
@@ -315,7 +317,8 @@ func (db *BlobStoreBadger) open() error {
 			WithLoggingLevel(badger.WARNING).
 			WithInMemory(true).
 			WithValueThreshold(db.valueThreshold).
-			WithCompression(db.badgerCompression())
+			WithCompression(db.badgerCompression()).
+			WithZSTDCompressionLevel(db.compressionLevel)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open in-memory: %w", err)
@@ -343,7 +346,8 @@ func (db *BlobStoreBadger) open() error {
 			WithValueLogFileSize(db.valueLogFileSize).
 			WithMemTableSize(db.memTableSize).
 			WithValueThreshold(db.valueThreshold).
-			WithCompression(db.badgerCompression())
+			WithCompression(db.badgerCompression()).
+			WithZSTDCompressionLevel(db.compressionLevel)
 		blobDb, err = badger.Open(badgerOpts)
 		if err != nil {
 			return fmt.Errorf("badger open on-disk: %w", err)
@@ -367,7 +371,7 @@ func (db *BlobStoreBadger) open() error {
 
 func (db *BlobStoreBadger) badgerCompression() options.CompressionType {
 	if db.compressionEnabled {
-		return options.Snappy
+		return options.ZSTD
 	}
 	return options.None
 }
@@ -663,8 +667,8 @@ func (d *BlobStoreBadger) GetBlock(
 	if err != nil {
 		return nil, types.BlockMetadata{}, err
 	}
-	// Read the metadata key whether or not the bp value is a tombstone.
-	// Tombstoned blocks keep their metadata so a wrapping archive proxy
+	// Read the metadata key whether or not the bp value is an expiry marker.
+	// Expired blocks keep their metadata so a wrapping archive proxy
 	// can populate models.Block.ID from the local node's bi index when
 	// fetching the CBOR remotely.
 	metadataKey := types.BlockBlobMetadataKey(key)
@@ -673,7 +677,7 @@ func (d *BlobStoreBadger) GetBlock(
 		if errors.Is(err, badger.ErrKeyNotFound) {
 			if types.IsBlockTombstone(cborData) {
 				return nil, types.BlockMetadata{},
-					&types.BlockTombstonedError{Slot: slot, Hash: hash}
+					&types.HistoryExpiredError{Slot: slot, Hash: hash}
 			}
 			return nil, types.BlockMetadata{}, types.ErrBlobKeyNotFound
 		}
@@ -689,7 +693,7 @@ func (d *BlobStoreBadger) GetBlock(
 	}
 	if types.IsBlockTombstone(cborData) {
 		return nil, tmpMetadata,
-			&types.BlockTombstonedError{Slot: slot, Hash: hash}
+			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	return cborData, tmpMetadata, nil
 }
@@ -725,10 +729,9 @@ func (d *BlobStoreBadger) DeleteBlock(
 	return nil
 }
 
-// TombstoneBlock overwrites a block's CBOR with a tombstone marker so a
-// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// TombstoneBlock overwrites a block's CBOR with an expired-history marker.
 // GetBlock reads the bp value, sees the marker, and returns
-// types.ErrBlockTombstoned for the proxy to intercept.
+// types.ErrHistoryExpired so an archive proxy can intercept it.
 //
 // What stays:
 //

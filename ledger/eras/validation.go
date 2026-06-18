@@ -42,16 +42,26 @@ type indexedUtxoValidationRule struct {
 	validationFunc lcommon.UtxoValidationRuleFunc
 }
 
+type utxoValidationRuleSkip struct {
+	index          int
+	validationFunc lcommon.UtxoValidationRuleFunc
+	name           string
+}
+
 const (
 	noUtxoValidationRuleIndex = -1
 
-	// Positions in gouroboros v0.179.0 UtxoValidationRules. Function
+	// Positions in gouroboros v0.180.1 UtxoValidationRules. Function
 	// values are not directly comparable in Go, so setup guards compare
 	// function pointers before filtering by index.
-	alonzoUtxoValidatePlutusScriptsRuleIndex  = 26
-	babbageUtxoValidatePlutusScriptsRuleIndex = 30
-	conwayUtxoValidateExUnitsTooBigRuleIndex  = 34
-	conwayUtxoValidatePlutusScriptsRuleIndex  = 38
+	alonzoUtxoValidatePlutusScriptsRuleIndex   = 26
+	babbageUtxoValidatePlutusScriptsRuleIndex  = 30
+	conwayUtxoValidateFeeTooSmallRuleIndex     = 19
+	conwayUtxoValidateExUnitsTooBigRuleIndex   = 34
+	conwayUtxoValidatePlutusScriptsRuleIndex   = 38
+	dijkstraUtxoValidatePlutusScriptsRuleIndex = 38
+
+	conwayRefScriptCostStride = 25_600
 )
 
 func shouldSkipPhase2Validation(
@@ -68,17 +78,40 @@ func buildIndexedUtxoValidationRules(
 	skipRuleName string,
 ) []indexedUtxoValidationRule {
 	if skipIndex != noUtxoValidationRuleIndex {
-		validateUtxoValidationSkipIndex(
+		return buildIndexedUtxoValidationRulesWithSkips(
 			rules,
-			skipIndex,
-			skipValidationFunc,
-			skipRuleName,
+			[]utxoValidationRuleSkip{
+				{
+					index:          skipIndex,
+					validationFunc: skipValidationFunc,
+					name:           skipRuleName,
+				},
+			},
 		)
 	}
+	return buildIndexedUtxoValidationRulesWithSkips(rules, nil)
+}
 
+func buildIndexedUtxoValidationRulesWithSkips(
+	rules []lcommon.UtxoValidationRuleFunc,
+	skips []utxoValidationRuleSkip,
+) []indexedUtxoValidationRule {
+	skipIndexes := map[int]struct{}{}
+	for _, skip := range skips {
+		if skip.index == noUtxoValidationRuleIndex {
+			continue
+		}
+		validateUtxoValidationSkipIndex(
+			rules,
+			skip.index,
+			skip.validationFunc,
+			skip.name,
+		)
+		skipIndexes[skip.index] = struct{}{}
+	}
 	ret := make([]indexedUtxoValidationRule, 0, len(rules))
 	for idx, validationFunc := range rules {
-		if idx == skipIndex {
+		if _, ok := skipIndexes[idx]; ok {
 			continue
 		}
 		ret = append(ret, indexedUtxoValidationRule{
@@ -345,29 +378,196 @@ func CalculateMinFee(
 			new(big.Rat).SetInt64(exUnits.Steps),
 		)
 		sum := new(big.Rat).Add(memCost, stepCost)
-		// ceil(sum) using integer arithmetic
-		num := sum.Num()
-		denom := sum.Denom()
-		q, r := new(big.Int).DivMod(
-			num,
-			denom,
-			new(big.Int),
-		)
-		if r.Sign() > 0 {
-			q.Add(q, big.NewInt(1))
-		}
-		if !q.IsUint64() {
-			scriptFee = math.MaxUint64
-		} else {
-			scriptFee = q.Uint64()
-		}
+		scriptFee = ceilRatToUint64(sum)
 	}
 
-	total := baseFee + scriptFee
-	if total < baseFee {
+	return saturatedAddUint64(baseFee, scriptFee)
+}
+
+func saturatedAddUint64(a, b uint64) uint64 {
+	if b > math.MaxUint64-a {
 		return math.MaxUint64
 	}
-	return total
+	return a + b
+}
+
+func ceilRatToUint64(val *big.Rat) uint64 {
+	if val == nil {
+		return 0
+	}
+	num := val.Num()
+	denom := val.Denom()
+	q, r := new(big.Int).DivMod(
+		num,
+		denom,
+		new(big.Int),
+	)
+	if r.Sign() > 0 {
+		q.Add(q, big.NewInt(1))
+	}
+	if !q.IsUint64() {
+		return math.MaxUint64
+	}
+	return q.Uint64()
+}
+
+func floorRatToUint64(val *big.Rat) uint64 {
+	if val == nil {
+		return 0
+	}
+	q := new(big.Int).Div(val.Num(), val.Denom())
+	if q.Sign() < 0 {
+		return 0
+	}
+	if !q.IsUint64() {
+		return math.MaxUint64
+	}
+	return q.Uint64()
+}
+
+func calculateTieredRefScriptFee(
+	refScriptSize uint64,
+	costPerByte *big.Rat,
+	stride uint64,
+	multiplier *big.Rat,
+) uint64 {
+	if refScriptSize == 0 || costPerByte == nil || stride == 0 {
+		return 0
+	}
+	if multiplier == nil {
+		multiplier = big.NewRat(1, 1)
+	}
+	remaining := refScriptSize
+	currentCostPerByte := new(big.Rat).Set(costPerByte)
+	total := new(big.Rat)
+	for remaining > 0 {
+		chunkSize := min(remaining, stride)
+		chunkFee := new(big.Rat).Mul(
+			currentCostPerByte,
+			new(big.Rat).SetInt(
+				new(big.Int).SetUint64(chunkSize),
+			),
+		)
+		total.Add(total, chunkFee)
+		remaining -= chunkSize
+		currentCostPerByte.Mul(currentCostPerByte, multiplier)
+	}
+	return floorRatToUint64(total)
+}
+
+func CalculateConwayRefScriptFee(
+	refScriptSize uint64,
+	costPerByte *big.Rat,
+) uint64 {
+	return calculateTieredRefScriptFee(
+		refScriptSize,
+		costPerByte,
+		conwayRefScriptCostStride,
+		big.NewRat(6, 5),
+	)
+}
+
+func CalculateConwayMinFee(
+	txSize uint64,
+	exUnits lcommon.ExUnits,
+	minFeeA uint,
+	minFeeB uint,
+	pricesMem *big.Rat,
+	pricesSteps *big.Rat,
+	refScriptSize uint64,
+	refScriptCostPerByte *big.Rat,
+) uint64 {
+	baseAndExecutionFee := CalculateMinFee(
+		txSize,
+		exUnits,
+		minFeeA,
+		minFeeB,
+		pricesMem,
+		pricesSteps,
+	)
+	refScriptFee := CalculateConwayRefScriptFee(
+		refScriptSize,
+		refScriptCostPerByte,
+	)
+	return saturatedAddUint64(baseAndExecutionFee, refScriptFee)
+}
+
+func ReferencedScriptSize(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) (uint64, error) {
+	utxos, err := referencedScriptUtxos(tx, ls)
+	if err != nil {
+		return 0, err
+	}
+	return ReferenceScriptSizeFromUtxos(utxos)
+}
+
+func ReferenceScriptSizeFromUtxos(
+	utxos []lcommon.Utxo,
+) (uint64, error) {
+	var total uint64
+	seen := make(map[string]struct{}, len(utxos))
+	for _, utxo := range utxos {
+		if utxo.Output == nil {
+			continue
+		}
+		scriptRef := utxo.Output.ScriptRef()
+		if scriptRef == nil {
+			continue
+		}
+		if utxo.Id != nil {
+			key := utxo.Id.String()
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+		}
+		size := uint64(len(scriptRef.RawScriptBytes()))
+		if size > math.MaxUint64-total {
+			return 0, errors.New("reference script size overflow")
+		}
+		total += size
+	}
+	return total, nil
+}
+
+func referencedScriptUtxos(
+	tx lcommon.Transaction,
+	ls lcommon.LedgerState,
+) ([]lcommon.Utxo, error) {
+	inputs := tx.Inputs()
+	refInputs := tx.ReferenceInputs()
+	if len(inputs) == 0 && len(refInputs) == 0 {
+		return nil, nil
+	}
+	if ls == nil {
+		return nil, errors.New(
+			"ledger state unavailable for reference script fee calculation",
+		)
+	}
+	utxos := make([]lcommon.Utxo, 0, len(inputs)+len(refInputs))
+	for _, input := range inputs {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, lcommon.InputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		utxos = append(utxos, utxo)
+	}
+	for _, input := range refInputs {
+		utxo, err := ls.UtxoById(input)
+		if err != nil {
+			return nil, lcommon.ReferenceInputResolutionError{
+				Input: input,
+				Err:   err,
+			}
+		}
+		utxos = append(utxos, utxo)
+	}
+	return utxos, nil
 }
 
 // DeclaredExUnits returns the total execution units

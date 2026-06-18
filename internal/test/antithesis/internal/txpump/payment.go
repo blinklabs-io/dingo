@@ -40,7 +40,7 @@ const minSendAmount uint64 = 1_000_000
 // txBodyInput is the CBOR representation of a transaction input.
 // Cardano encodes inputs as 2-element arrays: [txHash, txIndex].
 type txBodyInput struct {
-	_    cbor.StructAsArray
+	cbor.StructAsArray
 	Hash []byte
 	Idx  uint32
 }
@@ -48,7 +48,7 @@ type txBodyInput struct {
 // txBodyOutput is the CBOR representation of a transaction output.
 // Pre-Babbage (Shelley/Mary/Alonzo/Babbage compat) format: [address, value].
 type txBodyOutput struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Address []byte
 	Amount  uint64
 }
@@ -73,7 +73,7 @@ type txBody struct {
 // For test transactions the witness set is empty, isValid is true, and
 // auxiliary data is null.
 type conwayTx struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBody
 	Witness map[any]any // empty map
 	IsValid bool

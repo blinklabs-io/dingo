@@ -202,6 +202,102 @@ func TestNewTopologyConfigFromFile_ClosesFile(t *testing.T) {
 	)
 }
 
+func TestNewTopologyConfigFromFile_LoadsPeerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	topologyPath := filepath.Join(dir, "topology.json")
+	snapshotPath := filepath.Join(dir, "peer-snapshot.json")
+
+	require.NoError(
+		t,
+		os.WriteFile(
+			topologyPath,
+			[]byte(`{"peerSnapshotFile":"peer-snapshot.json"}`),
+			0o600,
+		),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			snapshotPath,
+			[]byte(`{
+  "NetworkMagic": 1,
+  "NodeToClientVersion": 23,
+  "Point": {
+    "blockPointHash": "abc",
+    "blockPointSlot": 42
+  },
+  "bigLedgerPools": [
+    {
+      "relativeStake": 0.5,
+      "accumulatedStake": 0.5,
+      "relays": [
+        {"address": "relay.example.com", "port": 3001}
+      ]
+    }
+  ]
+}`),
+			0o600,
+		),
+	)
+
+	cfg, err := topology.NewTopologyConfigFromFile(topologyPath)
+	require.NoError(t, err)
+	require.Equal(t, "peer-snapshot.json", cfg.PeerSnapshotFile)
+	require.NotNil(t, cfg.PeerSnapshot)
+	require.Equal(t, uint64(42), cfg.PeerSnapshot.Point.BlockPointSlot)
+	require.Equal(
+		t,
+		[]topology.TopologyConfigP2PAccessPoint{
+			{Address: "relay.example.com", Port: 3001},
+		},
+		cfg.PeerSnapshot.RelayAccessPoints(),
+	)
+}
+
+func TestNewTopologyConfigFromFS_LoadsPeerSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "preview"), 0o700))
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(dir, "preview", "topology.json"),
+			[]byte(`{"peerSnapshotFile":"peer-snapshot.json"}`),
+			0o600,
+		),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(dir, "preview", "peer-snapshot.json"),
+			[]byte(`{
+  "NetworkMagic": 2,
+  "NodeToClientVersion": 23,
+  "Point": {
+    "blockPointHash": "def",
+    "blockPointSlot": 77
+  },
+  "bigLedgerPools": [
+    {
+      "relays": [
+        {"address": "44.0.0.1", "port": 3001}
+      ]
+    }
+  ]
+}`),
+			0o600,
+		),
+	)
+
+	cfg, err := topology.NewTopologyConfigFromFS(
+		os.DirFS(dir),
+		"preview/topology.json",
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.PeerSnapshot)
+	require.Equal(t, uint64(77), cfg.PeerSnapshot.Point.BlockPointSlot)
+	require.True(t, cfg.PeerSnapshot.HasRelays())
+}
+
 func TestNewTopologyConfigFromFile_NotFound(t *testing.T) {
 	_, err := topology.NewTopologyConfigFromFile(
 		"/nonexistent/topology.json",

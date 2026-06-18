@@ -689,6 +689,11 @@ func (b *Backfill) Run(ctx context.Context) error {
 
 	var startSlot uint64
 	now := time.Now()
+	// Track whether this is a fresh backfill start (not resumed). The
+	// consumed-input recovery optimization is only safe when the metadata
+	// store is in a pristine, monotonic state. Resumed runs may have
+	// inconsistencies from interrupted batches that need repair.
+	isFreshStart := cp == nil
 	if cp == nil {
 		cp = &models.BackfillCheckpoint{
 			Phase:      BackfillPhase,
@@ -934,7 +939,7 @@ func (b *Backfill) Run(ctx context.Context) error {
 					if pErr := b.processBlockTxsBatched(
 						txs, point, epochId, eraId,
 						pp, offsets, acc, batchTxn,
-						&intervalStats,
+						&intervalStats, isFreshStart,
 					); pErr != nil {
 						saveCommittedCheckpoint()
 						return fmt.Errorf(
@@ -1041,6 +1046,7 @@ func (b *Backfill) processBlockTxsBatched(
 	acc database.BatchAccumulator,
 	txn *database.Txn,
 	stats *dbtypes.BackfillHotPathStats,
+	isFreshStart bool,
 ) error {
 	opts := database.BatchedTxIngestOpts{
 		SkipProducedUtxoOffsetWrites: b.immutableUtxoOffsetsTipSlot > 0 &&
@@ -1065,7 +1071,11 @@ func (b *Backfill) processBlockTxsBatched(
 			certDeposits, offsets, acc, txn,
 			database.BatchedTxIngestOpts{
 				SkipProducedUtxoOffsetWrites: opts.SkipProducedUtxoOffsetWrites,
-				Stats:                        stats,
+				// Only skip consumed-input recovery on fresh backfill starts.
+				// Resumed runs may have inconsistencies from interrupted batches
+				// that need repair via the recovery path.
+				SkipConsumedInputRecovery: isFreshStart,
+				Stats:                     stats,
 			},
 		); err != nil {
 			return fmt.Errorf("storing TX: %w", err)

@@ -19,12 +19,15 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"time"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -100,6 +103,14 @@ const (
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 )
 
+// StartEra controls experimental direct startup in a later ledger era.
+type StartEra string
+
+const (
+	StartEraDefault  StartEra = ""
+	StartEraDijkstra StartEra = "dijkstra"
+)
+
 // Valid returns true if the RunMode is a known valid mode
 func (m RunMode) Valid() bool {
 	switch m {
@@ -116,6 +127,19 @@ func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
 }
 
+func (e StartEra) Valid() bool {
+	switch e {
+	case StartEraDefault, StartEraDijkstra:
+		return true
+	default:
+		return false
+	}
+}
+
+func (e StartEra) IsDijkstra() bool {
+	return e == StartEraDijkstra
+}
+
 type tempConfig struct {
 	Config   *Config                   `yaml:"config,omitempty"`
 	Database *databaseConfig           `yaml:"database,omitempty"`
@@ -126,6 +150,48 @@ type tempConfig struct {
 type databaseConfig struct {
 	Blob     map[string]any `yaml:"blob,omitempty"`
 	Metadata map[string]any `yaml:"metadata,omitempty"`
+}
+
+var midnightYAMLFields map[string]struct{}
+
+func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(buf, &doc); err != nil {
+		return nil
+	}
+	if len(doc.Content) == 0 {
+		return nil
+	}
+	root := doc.Content[0]
+	midnight := mappingValue(root, "midnight")
+	if configNode := mappingValue(root, "config"); configNode != nil {
+		midnight = mappingValue(configNode, "midnight")
+	}
+	if midnight == nil || midnight.Kind != yaml.MappingNode {
+		return nil
+	}
+	fields := map[string]struct{}{}
+	for i := 0; i+1 < len(midnight.Content); i += 2 {
+		fields[midnight.Content[i].Value] = struct{}{}
+	}
+	return fields
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+func midnightYAMLFieldSet(field string) bool {
+	_, ok := midnightYAMLFields[field]
+	return ok
 }
 
 // ChainsyncConfig holds configuration for the multi-client chainsync
@@ -153,6 +219,34 @@ type GenesisBootstrapConfig struct {
 	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
 }
 
+// HistoryExpiryConfig controls local expiry of immutable block history.
+type HistoryExpiryConfig struct {
+	// Enabled starts the background expiry worker when true.
+	Enabled bool `yaml:"enabled" envconfig:"DINGO_HISTORY_EXPIRY_ENABLED"`
+	// Frequency controls how often the worker scans for expired block CBOR.
+	Frequency time.Duration `yaml:"frequency" envconfig:"DINGO_HISTORY_EXPIRY_FREQUENCY"`
+}
+
+// OffchainMetadataConfig holds API-mode off-chain metadata fetcher settings.
+// Zero values fall back to the fetcher's internal defaults.
+type OffchainMetadataConfig struct {
+	// Interval controls how often the fetcher discovers and fetches due rows.
+	Interval time.Duration `yaml:"interval" envconfig:"DINGO_OFFCHAIN_METADATA_INTERVAL"`
+	// RequestTimeout limits each HTTP(S) metadata request.
+	RequestTimeout time.Duration `yaml:"requestTimeout" envconfig:"DINGO_OFFCHAIN_METADATA_REQUEST_TIMEOUT"`
+	// UserAgent is sent with outbound metadata requests.
+	UserAgent string `yaml:"userAgent" envconfig:"DINGO_OFFCHAIN_METADATA_USER_AGENT"`
+	// IPFSGatewayURL is the gateway prefix used for ipfs:// URLs.
+	IPFSGatewayURL string `yaml:"ipfsGatewayUrl" envconfig:"DINGO_OFFCHAIN_METADATA_IPFS_GATEWAY_URL"`
+	// BatchSize bounds the number of due rows claimed per fetcher pass.
+	BatchSize int `yaml:"batchSize" envconfig:"DINGO_OFFCHAIN_METADATA_BATCH_SIZE"`
+	// MaxBytes bounds the response body bytes read from each document.
+	MaxBytes int64 `yaml:"maxBytes" envconfig:"DINGO_OFFCHAIN_METADATA_MAX_BYTES"`
+	// AllowPrivateAddresses permits fetching private, loopback, and link-local
+	// addresses. Leave false for the default SSRF guard.
+	AllowPrivateAddresses bool `yaml:"allowPrivateAddresses" envconfig:"DINGO_OFFCHAIN_METADATA_ALLOW_PRIVATE_ADDRESSES"`
+}
+
 // DefaultChainsyncConfig returns the default chainsync configuration.
 // StallTimeout must match chainsync.DefaultStallTimeout and the
 // fallback in internal/node/node.go.
@@ -168,6 +262,13 @@ func DefaultChainsyncConfig() ChainsyncConfig {
 func DefaultGenesisBootstrapConfig() GenesisBootstrapConfig {
 	return GenesisBootstrapConfig{
 		Enabled: true,
+	}
+}
+
+// DefaultHistoryExpiryConfig returns the default history expiry settings.
+func DefaultHistoryExpiryConfig() HistoryExpiryConfig {
+	return HistoryExpiryConfig{
+		Frequency: time.Hour,
 	}
 }
 
@@ -202,37 +303,82 @@ func DefaultCacheConfig() CacheConfig {
 	}
 }
 
+// LoggingConfig holds log output configuration.
+type LoggingConfig struct {
+	// Format selects the log output handler: "text" (default) or "json".
+	// JSON is intended for machine-parseable ingestion (ELK/Loki).
+	Format string `yaml:"format" envconfig:"DINGO_LOGGING_FORMAT"`
+	// Level is the minimum log level: "debug", "info" (default), "warn",
+	// or "error". The --debug flag, when set, overrides this to "debug".
+	Level string `yaml:"level"  envconfig:"DINGO_LOGGING_LEVEL"`
+}
+
+// DefaultLoggingConfig returns the default logging configuration.
+func DefaultLoggingConfig() LoggingConfig {
+	return LoggingConfig{
+		Format: "text",
+		Level:  "info",
+	}
+}
+
+// MidnightConfig holds configuration for the Midnight indexer and its
+// optional gRPC API surface. Indexing is only active when Dingo is running
+// in API storage mode; Port 0 disables only the gRPC server.
+type MidnightConfig struct {
+	Port uint   `yaml:"port" envconfig:"DINGO_MIDNIGHT_PORT"`
+	Host string `yaml:"host" envconfig:"DINGO_MIDNIGHT_HOST"`
+
+	CNightPolicyID              string `yaml:"cnightPolicyId"`
+	CNightAssetName             string `yaml:"cnightAssetName"`
+	MappingValidatorAddress     string `yaml:"mappingValidatorAddress"`
+	AuthTokenAssetName          string `yaml:"authTokenAssetName"`
+	CommitteeCandidateAddress   string `yaml:"committeeCandidateAddress"`
+	TechnicalCommitteeAddress   string `yaml:"technicalCommitteeAddress"`
+	TechnicalCommitteePolicyID  string `yaml:"technicalCommitteePolicyId"`
+	CouncilAddress              string `yaml:"councilAddress"`
+	CouncilPolicyID             string `yaml:"councilPolicyId"`
+	PermissionedCandidatePolicy string `yaml:"permissionedCandidatePolicy"`
+}
+
+// DefaultMidnightConfig returns the default Midnight indexer settings.
+func DefaultMidnightConfig() MidnightConfig {
+	return MidnightConfig{
+		Port: 50051,
+		Host: "0.0.0.0",
+	}
+}
+
 type Config struct {
-	MetadataPlugin       string        `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath       string        `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology             string        `yaml:"topology"`
-	CardanoConfig        string        `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath         string        `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath           string        `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath      string        `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr             string        `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin           string        `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr      string        `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout      string        `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	LedgerCatchupTimeout string        `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network              string        `yaml:"network"`
-	NetworkMagic         uint32        `yaml:"networkMagic"                                                     split_words:"true"`
-	MempoolCapacity      int64         `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark    float64       `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark   float64       `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort          uint          `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort            uint          `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl          string        `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
-	BarkPort             uint          `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
-	BarkPrunerFrequency  time.Duration `yaml:"barkPrunerFrequency" envconfig:"DINGO_BARK_PRUNER_FREQUENCY"`
-	UtxorpcPort          uint          `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
-	CORSAllowedOrigins   []string      `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint          `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort            uint          `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool          `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical   bool          `yaml:"validateHistorical"                                               split_words:"true"`
-	RunMode              RunMode       `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	ImmutableDbPath      string        `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	MetadataPlugin       string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath       string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology             string   `yaml:"topology"`
+	CardanoConfig        string   `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath         string   `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath           string   `yaml:"socketPath"                                                       split_words:"true"`
+	TlsCertFilePath      string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr             string   `yaml:"bindAddr"                                                         split_words:"true"`
+	BlobPlugin           string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr      string   `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout      string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
+	LedgerCatchupTimeout string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network              string   `yaml:"network"`
+	NetworkMagic         uint32   `yaml:"networkMagic"                                                     split_words:"true"`
+	MempoolCapacity      int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	EvictionWatermark    float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark   float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
+	PrivatePort          uint     `yaml:"privatePort"                                                      split_words:"true"`
+	RelayPort            uint     `yaml:"relayPort"          envconfig:"port"`
+	BarkBaseUrl          string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkPort             uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
+	UtxorpcPort          uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort          uint     `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical   bool     `yaml:"validateHistorical"                                               split_words:"true"`
+	RunMode              RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	StartEra             StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
+	ImmutableDbPath      string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -271,6 +417,18 @@ type Config struct {
 	// Genesis bootstrap configuration for from-origin chain selection.
 	GenesisBootstrap GenesisBootstrapConfig `yaml:"genesisBootstrap"`
 
+	// History expiry configuration for local immutable block CBOR expiry.
+	HistoryExpiry HistoryExpiryConfig `yaml:"historyExpiry"`
+
+	// Off-chain metadata fetcher configuration.
+	OffchainMetadata OffchainMetadataConfig `yaml:"offchainMetadata"`
+
+	// Logging configuration (output format and level)
+	Logging LoggingConfig `yaml:"logging"`
+
+	// Midnight indexer and gRPC API configuration.
+	Midnight MidnightConfig `yaml:"midnight"`
+
 	// KES (Key Evolving Signature) configuration for block production
 	// SlotsPerKESPeriod is the number of slots in a KES period.
 	// After this many slots, the KES key must be evolved to the next period.
@@ -291,6 +449,17 @@ type Config struct {
 	ShelleyOperationalCertificate string `yaml:"shelleyOperationalCertificate" envconfig:"SHELLEY_OPERATIONAL_CERTIFICATE"`
 	ForgeSyncToleranceSlots       uint64 `yaml:"forgeSyncToleranceSlots"       envconfig:"DINGO_FORGE_SYNC_TOLERANCE_SLOTS"`
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
+
+	// Leios voting configuration (experimental, leios runMode only).
+	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
+	// vote signing key. When set on a block producer whose pool is a
+	// committee member, the node emits Leios votes for endorser blocks.
+	LeiosVoteSigningKeyFile string `yaml:"leiosVoteSigningKeyFile" envconfig:"DINGO_LEIOS_VOTE_SIGNING_KEY_FILE"`
+	// LeiosVoterPublicKeys maps hex pool key hashes to hex-encoded
+	// BLS12-381 voter public keys for vote signature verification.
+	// CIP-0164 key registration is not yet specified, so this static
+	// registry stands in for it (devnet-style).
+	LeiosVoterPublicKeys map[string]string `yaml:"leiosVoterPublicKeys" envconfig:"DINGO_LEIOS_VOTER_PUBLIC_KEYS"`
 
 	// Blockfrost REST API port (0 = disabled)
 	BlockfrostPort uint `yaml:"blockfrostPort" envconfig:"DINGO_BLOCKFROST_PORT"`
@@ -317,6 +486,117 @@ type Config struct {
 	Mithril MithrilConfig `yaml:"mithril"`
 }
 
+// midnightNetworkDefaults holds per-network Midnight constants sourced from
+// Acropolis. At the time these defaults were added, Acropolis published
+// constants for mainnet and preview only.
+// https://github.com/input-output-hk/acropolis/tree/master/processes/midnight_indexer
+var midnightNetworkDefaults = map[string]MidnightConfig{
+	"mainnet": {
+		CNightPolicyID:              "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1fa",
+		CNightAssetName:             "4e49474854",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		TechnicalCommitteeAddress:   "addr_test1wqx3yfmsp82nmtyjj4k86s3l04l6lvwaqh2vk2ygcge7kdsk4xc7j",
+		TechnicalCommitteePolicyID:  "0d12277009d53dac92956c7d423f7d7fafb1dd05d4cb2888c233eb36",
+		CouncilAddress:              "addr_test1wqqwkauz0ypglg5e4u780kcp8hzt75u72yg6z7td62gnk0qed0p06",
+		CouncilPolicyID:             "00eb778279028fa299af3c77db013dc4bf539e5111a1796dd2913b3c",
+		PermissionedCandidatePolicy: "f8625f11a58fa5ab5b85502a8fe5c843ece460c9c5f9273be17d3424",
+	},
+	"preview": {
+		CNightPolicyID:              "d2dbff622e509dda256fedbd31ef6e9fd98ed49ad91d5c0e07f68af1",
+		MappingValidatorAddress:     "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng",
+		CommitteeCandidateAddress:   "addr_test1wz5ax0hjvhx2uqef8sqrxnmfywd37hea4truhqxu4yxp9hsvggkfm",
+		TechnicalCommitteeAddress:   "addr_test1wptcy7h9rmkhdnhn3jvm6tuhehcq2hhhzntvn00nq79ph8c44v43j",
+		TechnicalCommitteePolicyID:  "57827ae51eed76cef38c99bd2f97cdf0055ef714d6c9bdf3078a1b9f",
+		CouncilAddress:              "addr_test1wzy47zdsq22pg9l48c5v0f835ljdjzkz47sa5za9cehcejcw28k2d",
+		CouncilPolicyID:             "895f09b002941417f53e28c7a4f1a7e4d90ac2afa1da0ba5c66f8ccb",
+		PermissionedCandidatePolicy: "24dccfce2576ae6fa7149bc485850656ae6faf9f4158891316773a78",
+	},
+}
+
+func applyMidnightNetworkDefaults(cfg *Config) {
+	defaults, ok := midnightNetworkDefaults[cfg.Network]
+	if !ok {
+		return
+	}
+	if cfg.Midnight.CNightPolicyID == "" {
+		cfg.Midnight.CNightPolicyID = defaults.CNightPolicyID
+	}
+	if cfg.Midnight.CNightAssetName == "" {
+		cfg.Midnight.CNightAssetName = defaults.CNightAssetName
+	}
+	if cfg.Midnight.MappingValidatorAddress == "" {
+		cfg.Midnight.MappingValidatorAddress = defaults.MappingValidatorAddress
+	}
+	if cfg.Midnight.AuthTokenAssetName == "" {
+		cfg.Midnight.AuthTokenAssetName = defaults.AuthTokenAssetName
+	}
+	if cfg.Midnight.CommitteeCandidateAddress == "" {
+		cfg.Midnight.CommitteeCandidateAddress = defaults.CommitteeCandidateAddress
+	}
+	if cfg.Midnight.TechnicalCommitteeAddress == "" {
+		cfg.Midnight.TechnicalCommitteeAddress = defaults.TechnicalCommitteeAddress
+	}
+	if cfg.Midnight.TechnicalCommitteePolicyID == "" {
+		cfg.Midnight.TechnicalCommitteePolicyID = defaults.TechnicalCommitteePolicyID
+	}
+	if cfg.Midnight.CouncilAddress == "" {
+		cfg.Midnight.CouncilAddress = defaults.CouncilAddress
+	}
+	if cfg.Midnight.CouncilPolicyID == "" {
+		cfg.Midnight.CouncilPolicyID = defaults.CouncilPolicyID
+	}
+	if cfg.Midnight.PermissionedCandidatePolicy == "" {
+		cfg.Midnight.PermissionedCandidatePolicy = defaults.PermissionedCandidatePolicy
+	}
+}
+
+func clearMidnightNetworkDefaults(cfg *Config, network string) {
+	defaults, ok := midnightNetworkDefaults[network]
+	if !ok {
+		return
+	}
+	if !midnightYAMLFieldSet("cnightPolicyId") &&
+		cfg.Midnight.CNightPolicyID == defaults.CNightPolicyID {
+		cfg.Midnight.CNightPolicyID = ""
+	}
+	if !midnightYAMLFieldSet("cnightAssetName") &&
+		cfg.Midnight.CNightAssetName == defaults.CNightAssetName {
+		cfg.Midnight.CNightAssetName = ""
+	}
+	if !midnightYAMLFieldSet("mappingValidatorAddress") &&
+		cfg.Midnight.MappingValidatorAddress == defaults.MappingValidatorAddress {
+		cfg.Midnight.MappingValidatorAddress = ""
+	}
+	if !midnightYAMLFieldSet("authTokenAssetName") &&
+		cfg.Midnight.AuthTokenAssetName == defaults.AuthTokenAssetName {
+		cfg.Midnight.AuthTokenAssetName = ""
+	}
+	if !midnightYAMLFieldSet("committeeCandidateAddress") &&
+		cfg.Midnight.CommitteeCandidateAddress == defaults.CommitteeCandidateAddress {
+		cfg.Midnight.CommitteeCandidateAddress = ""
+	}
+	if !midnightYAMLFieldSet("technicalCommitteeAddress") &&
+		cfg.Midnight.TechnicalCommitteeAddress == defaults.TechnicalCommitteeAddress {
+		cfg.Midnight.TechnicalCommitteeAddress = ""
+	}
+	if !midnightYAMLFieldSet("technicalCommitteePolicyId") &&
+		cfg.Midnight.TechnicalCommitteePolicyID == defaults.TechnicalCommitteePolicyID {
+		cfg.Midnight.TechnicalCommitteePolicyID = ""
+	}
+	if !midnightYAMLFieldSet("councilAddress") &&
+		cfg.Midnight.CouncilAddress == defaults.CouncilAddress {
+		cfg.Midnight.CouncilAddress = ""
+	}
+	if !midnightYAMLFieldSet("councilPolicyId") &&
+		cfg.Midnight.CouncilPolicyID == defaults.CouncilPolicyID {
+		cfg.Midnight.CouncilPolicyID = ""
+	}
+	if !midnightYAMLFieldSet("permissionedCandidatePolicy") &&
+		cfg.Midnight.PermissionedCandidatePolicy == defaults.PermissionedCandidatePolicy {
+		cfg.Midnight.PermissionedCandidatePolicy = ""
+	}
+}
+
 // MithrilConfig holds configuration for Mithril snapshot bootstrapping.
 type MithrilConfig struct {
 	// Enabled controls whether Mithril integration is available.
@@ -324,6 +604,10 @@ type MithrilConfig struct {
 	// AggregatorURL overrides the default aggregator URL for the network.
 	// If empty, the URL is auto-detected from the configured network.
 	AggregatorURL string `yaml:"aggregatorUrl"      envconfig:"DINGO_MITHRIL_AGGREGATOR_URL"`
+	// Backend selects the Mithril artifact backend: "v2" (default) uses
+	// incremental Cardano database artifacts; "v1" uses the legacy full
+	// snapshot archives, which upstream Mithril is phasing out.
+	Backend string `yaml:"backend"            envconfig:"DINGO_MITHRIL_BACKEND"`
 	// DownloadDir is the directory where snapshot archives are downloaded.
 	// If empty, a randomized temporary directory is created automatically.
 	DownloadDir string `yaml:"downloadDir"        envconfig:"DINGO_MITHRIL_DOWNLOAD_DIR"`
@@ -422,7 +706,6 @@ var globalConfig = &Config{
 	RelayPort:            3001,
 	BarkBaseUrl:          "",
 	BarkPort:             0,
-	BarkPrunerFrequency:  time.Hour,
 	UtxorpcPort:          9090,
 	CORSAllowedOrigins:   []string{"*"},
 	BlockfrostPort:       3000,
@@ -434,6 +717,7 @@ var globalConfig = &Config{
 	MetadataPlugin:       DefaultMetadataPlugin,
 	StorageMode:          "core",
 	RunMode:              RunModeServe,
+	StartEra:             StartEraDefault,
 	ImmutableDbPath:      "",
 	ShutdownTimeout:      DefaultShutdownTimeout,
 	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
@@ -447,12 +731,19 @@ var globalConfig = &Config{
 	Chainsync: DefaultChainsyncConfig(),
 	// Genesis bootstrap defaults
 	GenesisBootstrap: DefaultGenesisBootstrapConfig(),
+	// History expiry defaults
+	HistoryExpiry: DefaultHistoryExpiryConfig(),
+	// Logging defaults (text output at info level)
+	Logging: DefaultLoggingConfig(),
+	// Midnight defaults
+	Midnight: DefaultMidnightConfig(),
 	// KES configuration defaults (mainnet values)
 	SlotsPerKESPeriod: 129600, // 1.5 days at 1 second per slot
 	MaxKESEvolutions:  62,     // 2^6 - 2 for KES depth 6
 	// Mithril defaults
 	Mithril: MithrilConfig{
 		Enabled:            true,
+		Backend:            "v2",
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
 	},
@@ -462,6 +753,8 @@ var globalConfig = &Config{
 }
 
 func LoadConfig(configFile string) (*Config, error) {
+	midnightYAMLFields = nil
+
 	// Load config file as YAML if provided
 	if configFile == "" {
 		// Check for config file in this path: ~/.dingo/dingo.yaml
@@ -486,6 +779,7 @@ func LoadConfig(configFile string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("error reading config file: %w", err)
 		}
+		midnightYAMLFields = collectMidnightYAMLFields(buf)
 
 		// First unmarshal into temp config to handle plugin sections
 		var tempCfg tempConfig
@@ -630,6 +924,12 @@ func LoadConfig(configFile string) (*Config, error) {
 	if globalConfig.RunMode == "" {
 		globalConfig.RunMode = RunModeServe
 	}
+	if !globalConfig.StartEra.Valid() {
+		return nil, fmt.Errorf(
+			"invalid startEra: %q (must be empty or 'dijkstra')",
+			globalConfig.StartEra,
+		)
+	}
 
 	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
 	// already been merged at this point; an explicit non-zero setting
@@ -699,11 +999,15 @@ func LoadConfig(configFile string) (*Config, error) {
 	if globalConfig.ForgeStaleGapThresholdSlots == 0 {
 		globalConfig.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
+	if globalConfig.HistoryExpiry.Frequency <= 0 {
+		globalConfig.HistoryExpiry.Frequency = time.Hour
+	}
 
 	// Validate network name to prevent path traversal (INT-03).
 	if err := ValidateNetworkName(globalConfig.Network); err != nil {
 		return nil, err
 	}
+	applyMidnightNetworkDefaults(globalConfig)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go
@@ -724,39 +1028,73 @@ func GetConfig() *Config {
 var globalTopologyConfig = &topology.TopologyConfig{}
 
 func LoadTopologyConfig() (*topology.TopologyConfig, error) {
-	if globalConfig.RunMode.IsDevMode() {
-		return globalTopologyConfig, nil
+	tc, err := LoadTopologyConfigFor(globalConfig)
+	if err != nil {
+		return nil, err
 	}
-	if globalConfig.Topology == "" {
-		// Use default bootstrap peers for specified network
-		network, ok := ouroboros.NetworkByName(globalConfig.Network)
+	globalTopologyConfig = tc
+	return globalTopologyConfig, nil
+}
+
+func LoadTopologyConfigFor(cfg *Config) (*topology.TopologyConfig, error) {
+	if cfg == nil {
+		return nil, errors.New("nil config")
+	}
+	if cfg.RunMode.IsDevMode() {
+		return &topology.TopologyConfig{}, nil
+	}
+	if cfg.Topology == "" {
+		embeddedTopologyPath := path.Join(cfg.Network, "topology.json")
+		tc, err := topology.NewTopologyConfigFromFS(
+			cardano.EmbeddedConfigFS,
+			embeddedTopologyPath,
+		)
+		if err == nil {
+			return tc, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) ||
+			!embeddedTopologyFileMissing(embeddedTopologyPath) {
+			return nil, fmt.Errorf(
+				"failed to load embedded topology file: %w",
+				err,
+			)
+		}
+		network, ok := ouroboros.NetworkByName(cfg.Network)
 		if !ok {
-			return nil, fmt.Errorf("unknown network: %s", globalConfig.Network)
+			return nil, fmt.Errorf("unknown network: %s", cfg.Network)
 		}
 		if len(network.BootstrapPeers) == 0 {
 			return nil, fmt.Errorf(
 				"no known bootstrap peers for network %s",
-				globalConfig.Network,
+				cfg.Network,
 			)
 		}
+		ret := &topology.TopologyConfig{}
 		for _, peer := range network.BootstrapPeers {
-			globalTopologyConfig.BootstrapPeers = append(
-				globalTopologyConfig.BootstrapPeers,
+			ret.BootstrapPeers = append(
+				ret.BootstrapPeers,
 				topology.TopologyConfigP2PAccessPoint{
 					Address: peer.Address,
 					Port:    peer.Port,
 				},
 			)
 		}
-		return globalTopologyConfig, nil
+		return ret, nil
 	}
-	tc, err := topology.NewTopologyConfigFromFile(globalConfig.Topology)
+	tc, err := topology.NewTopologyConfigFromFile(cfg.Topology)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load topology file: %+w", err)
 	}
-	// update globalTopologyConfig
-	globalTopologyConfig = tc
-	return globalTopologyConfig, nil
+	return tc, nil
+}
+
+func embeddedTopologyFileMissing(file string) bool {
+	topologyFile, err := cardano.EmbeddedConfigFS.Open(file)
+	if err == nil {
+		_ = topologyFile.Close()
+		return false
+	}
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 func GetTopologyConfig() *topology.TopologyConfig {

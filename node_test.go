@@ -708,3 +708,90 @@ func TestCloseWithShutdownTimeoutReturnsTimeoutError(t *testing.T) {
 		"close function completion",
 	)
 }
+
+// TestNodePeerEligibilityEventUpdatesChainSelector verifies the node wiring:
+// a PeerEligibilityChangedEvent published on the event bus must be forwarded
+// to the ChainSelector so that the now-ineligible peer is no longer selected.
+func TestNodePeerEligibilityEventUpdatesChainSelector(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		EvaluationInterval: time.Hour, // driven by trigger, not ticker
+	})
+	require.NoError(t, cs.Start(t.Context()))
+
+	connId := newNodeTestConnId(5001)
+	cs.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, []byte("tip")),
+		BlockNumber: 50,
+	}, nil)
+	require.NotNil(t, cs.GetBestPeer(), "peer should be selected before ineligibility")
+
+	// Mirror the subscription wiring in node.go.
+	bus.SubscribeFunc(peergov.PeerEligibilityChangedEventType, func(evt event.Event) {
+		e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+		if !ok {
+			return
+		}
+		cs.SetConnectionEligible(e.ConnectionId, e.Eligible)
+	})
+
+	bus.Publish(
+		peergov.PeerEligibilityChangedEventType,
+		event.NewEvent(
+			peergov.PeerEligibilityChangedEventType,
+			peergov.PeerEligibilityChangedEvent{ConnectionId: connId, Eligible: false},
+		),
+	)
+
+	require.Eventually(t, func() bool {
+		return cs.GetBestPeer() == nil
+	}, time.Second, 5*time.Millisecond,
+		"ineligible peer must not be selected after eligibility event")
+}
+
+// TestNodePeerPriorityEventUpdatesChainSelector verifies the node wiring:
+// a PeerPriorityChangedEvent published on the event bus must be forwarded
+// to the ChainSelector so that the higher-priority peer wins equal-tip
+// selection.
+func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{})
+	lowPrioConn := newNodeTestConnId(5002)
+	highPrioConn := newNodeTestConnId(5003)
+
+	equalTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, []byte("equal")),
+		BlockNumber: 50,
+	}
+	cs.UpdatePeerTip(lowPrioConn, equalTip, nil)
+	cs.UpdatePeerTip(highPrioConn, equalTip, nil)
+
+	// Mirror the subscription wiring in node.go.
+	bus.SubscribeFunc(peergov.PeerPriorityChangedEventType, func(evt event.Event) {
+		e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+		if !ok {
+			return
+		}
+		cs.SetConnectionPriority(e.ConnectionId, e.Priority)
+	})
+
+	bus.Publish(
+		peergov.PeerPriorityChangedEventType,
+		event.NewEvent(
+			peergov.PeerPriorityChangedEventType,
+			peergov.PeerPriorityChangedEvent{ConnectionId: highPrioConn, Priority: 50},
+		),
+	)
+
+	// SelectBestChain does a pure comparison with no incumbent bias, so once
+	// the priority event has been processed the higher-priority peer wins.
+	require.Eventually(t, func() bool {
+		best := cs.SelectBestChain()
+		return best != nil && *best == highPrioConn
+	}, time.Second, 5*time.Millisecond,
+		"higher-priority peer must win equal-tip selection after priority event")
+}

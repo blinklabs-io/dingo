@@ -51,6 +51,7 @@ func TestBuildPayment_Success(t *testing.T) {
 	txBytes, err := BuildPayment(validParams())
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes, "encoded transaction should not be empty")
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPayment_NoInputs(t *testing.T) {
@@ -93,6 +94,7 @@ func TestBuildPayment_NoChange(t *testing.T) {
 	txBytes, err := BuildPayment(p)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPayment_IsDeterministic(t *testing.T) {
@@ -119,6 +121,7 @@ func TestBuildPayment_MultipleInputs(t *testing.T) {
 	txBytes, err := BuildPayment(p)
 	require.NoError(t, err)
 	assert.NotEmpty(t, txBytes)
+	requireConwayDecode(t, txBytes)
 }
 
 func TestBuildPayment_MismatchedTotals(t *testing.T) {

@@ -48,6 +48,7 @@ func seedUtxos(t *testing.T, store *MetadataStoreSqlite, n int) [][]byte {
 // IterateLiveUtxos visits every live row exactly once and the
 // per-row pointer carries the column values we expect.
 func TestIterateLiveUtxos_VisitsEachLiveRow(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	ids := seedUtxos(t, store, 5)
 
@@ -66,6 +67,7 @@ func TestIterateLiveUtxos_VisitsEachLiveRow(t *testing.T) {
 
 // IterateLiveUtxos skips rows already marked deleted.
 func TestIterateLiveUtxos_SkipsDeleted(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	ids := seedUtxos(t, store, 3)
 
@@ -89,6 +91,7 @@ func TestIterateLiveUtxos_SkipsDeleted(t *testing.T) {
 // Returning a non-nil error from the callback aborts iteration and
 // propagates the error.
 func TestIterateLiveUtxos_AbortOnError(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	seedUtxos(t, store, 5)
 
@@ -108,6 +111,7 @@ func TestIterateLiveUtxos_AbortOnError(t *testing.T) {
 
 // Iteration paging: setting more rows than one page returns them all.
 func TestIterateLiveUtxos_Pagination(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	const total = liveUtxoIterPageSize + 17
 	for i := range total {
@@ -133,6 +137,7 @@ func TestIterateLiveUtxos_Pagination(t *testing.T) {
 // MarkUtxosDeletedAtSlot writes deleted_slot for the matching live
 // rows and is a no-op for refs that don't match anything.
 func TestMarkUtxosDeletedAtSlot_MarksOnlyMatching(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	ids := seedUtxos(t, store, 4)
 
@@ -156,6 +161,7 @@ func TestMarkUtxosDeletedAtSlot_MarksOnlyMatching(t *testing.T) {
 // Re-marking a row that's already deleted is a no-op (the WHERE
 // clause filters deleted_slot == 0).
 func TestMarkUtxosDeletedAtSlot_Idempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	ids := seedUtxos(t, store, 1)
 	ref := types.UtxoKey{TxId: ids[0], OutputIdx: 0}
@@ -171,6 +177,7 @@ func TestMarkUtxosDeletedAtSlot_Idempotent(t *testing.T) {
 
 // Empty refs slice is a no-op; no SQL is issued.
 func TestMarkUtxosDeletedAtSlot_EmptyNoop(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	ids := seedUtxos(t, store, 2)
 

@@ -409,3 +409,444 @@ func TestCommitteeNoConfidenceStateUsesEnactedCommitteeRoot(t *testing.T) {
 		ActionType: uint8(lcommon.GovActionTypeNoConfidence),
 	}))
 }
+
+// buildInfoProposal is a test helper that creates a GovernanceProposal with
+// Info action CBOR set, ready for insertion via SetGovernanceProposal.
+func buildInfoProposal(
+	t *testing.T,
+	txHash []byte,
+	actionIndex uint32,
+	expiresEpoch uint64,
+	deposit uint64,
+	returnAddress []byte,
+	addedSlot uint64,
+	parentTxHash []byte,
+	parentActionIdx *uint32,
+	ratifiedEpoch *uint64,
+	ratifiedSlot *uint64,
+) *models.GovernanceProposal {
+	t.Helper()
+	infoCbor, err := cbor.Encode(&lcommon.InfoGovAction{
+		Type: uint(lcommon.GovActionTypeInfo),
+	})
+	require.NoError(t, err)
+	return &models.GovernanceProposal{
+		TxHash:          txHash,
+		ActionIndex:     actionIndex,
+		ActionType:      uint8(lcommon.GovActionTypeInfo),
+		ProposedEpoch:   3,
+		ExpiresEpoch:    expiresEpoch,
+		AnchorURL:       "https://example.invalid/proposal",
+		AnchorHash:      testBytes(32, txHash[0]),
+		Deposit:         deposit,
+		ReturnAddress:   returnAddress,
+		GovActionCbor:   infoCbor,
+		AddedSlot:       addedSlot,
+		ParentTxHash:    parentTxHash,
+		ParentActionIdx: parentActionIdx,
+		RatifiedEpoch:   ratifiedEpoch,
+		RatifiedSlot:    ratifiedSlot,
+	}
+}
+
+// buildRewardAddr returns a reward address byte slice for the given stake
+// credential for use in proposal return-address fields.
+func buildRewardAddr(t *testing.T, stakeCred []byte) []byte {
+	t.Helper()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	b, err := addr.Bytes()
+	require.NoError(t, err)
+	return b
+}
+
+// TestProcessEpochOrphanedChildRemovedAndRefunded verifies that when a
+// ratified proposal is enacted, an active proposal that references it as
+// parent is orphaned: its deposit is returned to the registered reward
+// account and it is marked expired at the boundary slot.
+func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
+	db, store := newTallyTestDB(t)
+
+	stakeCred := testBytes(28, 50)
+	returnAddr := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	parentHash := testBytes(32, 51)
+	childHash := testBytes(32, 52)
+	parentIdx := uint32(0)
+
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 10, 30, returnAddr, 100,
+			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 12, 15, returnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 1, out.EnactedCount)
+	assert.Equal(t, 1, out.OrphanedCount)
+
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
+	require.NotNil(t, child.ExpiredSlot)
+	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
+	assert.Equal(t, uint64(500), *child.ExpiredSlot)
+
+	// Enacted parent's deposit (30) + orphaned child's deposit (15) = 45.
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(45), uint64(account.Reward))
+}
+
+// TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury checks
+// that when an orphaned proposal's return reward account is not registered,
+// its deposit is routed to the treasury rather than credited to the account.
+func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	parentStakeCred := testBytes(28, 53)
+	parentReturnAddr := buildRewardAddr(t, parentStakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: parentStakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	missingStakeCred := testBytes(28, 54)
+	missingReturnAddr := buildRewardAddr(t, missingStakeCred)
+
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	parentHash := testBytes(32, 55)
+	childHash := testBytes(32, 56)
+	parentIdx := uint32(0)
+
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 10, 30, parentReturnAddr, 100,
+			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 12, 25, missingReturnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 1, out.OrphanedCount)
+
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
+
+	missing, err := store.GetAccount(missingStakeCred, false, nil)
+	require.NoError(t, err)
+	assert.Nil(t, missing, "orphan refund must not create a reward account")
+
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(125), uint64(state.Treasury))
+}
+
+// TestProcessEpochTransitiveOrphanRemoval verifies that orphan sweeps
+// cascade: when the direct child of an enacted proposal is orphaned, its own
+// children are also swept and refunded in the same tick.
+func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
+	db, store := newTallyTestDB(t)
+
+	stakeCred := testBytes(28, 57)
+	returnAddr := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	parentHash := testBytes(32, 58)
+	childHash := testBytes(32, 59)
+	grandchildHash := testBytes(32, 60)
+	parentIdx := uint32(0)
+
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
+			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 12, 20, returnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, grandchildHash, 0, 14, 30, returnAddr, 102,
+			childHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 1, out.EnactedCount)
+	assert.Equal(t, 2, out.OrphanedCount)
+
+	for _, hash := range [][]byte{childHash, grandchildHash} {
+		p, err := db.GetGovernanceProposal(hash, 0, nil)
+		require.NoError(t, err)
+		require.NotNil(t, p.ExpiredEpoch,
+			"proposal %x should be orphaned", hash)
+		assert.Equal(t, uint64(5), *p.ExpiredEpoch)
+	}
+
+	// Enacted parent's deposit (10) + orphaned child (20) + grandchild (30) = 60.
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(60), uint64(account.Reward))
+}
+
+// TestProcessEpochOrphanExcludedFromActiveProposals verifies that after
+// orphan removal, GetActiveGovernanceProposals no longer returns orphaned
+// proposals (their expired_epoch field filters them out).
+func TestProcessEpochOrphanExcludedFromActiveProposals(t *testing.T) {
+	db, store := newTallyTestDB(t)
+
+	stakeCred := testBytes(28, 61)
+	returnAddr := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	parentHash := testBytes(32, 62)
+	childHash := testBytes(32, 63)
+	parentIdx := uint32(0)
+
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 10, 5, returnAddr, 100,
+			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 12, 5, returnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	_, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	active, err := db.GetActiveGovernanceProposals(5, nil)
+	require.NoError(t, err)
+	for _, p := range active {
+		assert.NotEqual(t, childHash, p.TxHash,
+			"orphaned proposal must not appear in active pool")
+	}
+}
+
+// TestProcessEpochOrphanedChildRestoredOnRollback verifies that rolling
+// back to a slot before the boundary slot restores orphaned proposals
+// (clears their expired_epoch/expired_slot) and reverses the reward credit.
+func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
+	db, store := newTallyTestDB(t)
+
+	stakeCred := testBytes(28, 64)
+	returnAddr := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	ratifiedEpoch := uint64(4)
+	ratifiedSlot := uint64(400)
+	parentHash := testBytes(32, 65)
+	childHash := testBytes(32, 66)
+	parentIdx := uint32(0)
+
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 10, 10, returnAddr, 100,
+			nil, nil, &ratifiedEpoch, &ratifiedSlot),
+		nil,
+	))
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 12, 20, returnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	_, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch, "child must be orphaned before rollback")
+
+	require.NoError(t, db.DeleteGovernanceProposalsAfterSlot(499, nil))
+	require.NoError(t, db.DeleteAccountRewardsAfterSlot(499, nil))
+
+	child, err = db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	assert.Nil(t, child.ExpiredEpoch, "orphaned status must be reversed by rollback")
+	assert.Nil(t, child.ExpiredSlot)
+
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(0), uint64(account.Reward),
+		"reward credit must be reversed by rollback")
+}
+
+// TestProcessEpochOrphanAfterExpiry verifies that a proposal whose parent
+// expires naturally at this epoch boundary is also orphaned and refunded.
+func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
+	db, store := newTallyTestDB(t)
+
+	stakeCred := testBytes(28, 67)
+	returnAddr := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	parentHash := testBytes(32, 68)
+	childHash := testBytes(32, 69)
+	parentIdx := uint32(0)
+
+	// Parent expires at epoch 4 (ExpiresEpoch < NewEpoch=5).
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, parentHash, 0, 4, 10, returnAddr, 100,
+			nil, nil, nil, nil),
+		nil,
+	))
+	// Child expires at epoch 15 but references parent.
+	require.NoError(t, db.SetGovernanceProposal(
+		buildInfoProposal(t, childHash, 0, 15, 20, returnAddr, 101,
+			parentHash, &parentIdx, nil, nil),
+		nil,
+	))
+
+	txn := db.MetadataTxn(true)
+	defer txn.Release()
+	out, err := ProcessEpoch(&EpochInput{
+		DB:           db,
+		Txn:          txn,
+		PrevEpoch:    4,
+		NewEpoch:     5,
+		BoundarySlot: 500,
+		PParams:      conwayPParamsFixture(10),
+		UpdateFn: func(p lcommon.ProtocolParameters, _ any) (lcommon.ProtocolParameters, error) {
+			return p, nil
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, txn.Commit())
+
+	assert.Equal(t, 1, out.ExpiredCount)
+	assert.Equal(t, 1, out.OrphanedCount)
+
+	child, err := db.GetGovernanceProposal(childHash, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, child.ExpiredEpoch)
+	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
+
+	account, err := store.GetAccount(stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(30), uint64(account.Reward))
+}

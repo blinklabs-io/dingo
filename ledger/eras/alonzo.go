@@ -260,7 +260,7 @@ func ValidateTxAlonzo(
 		}
 	}
 	// Evaluate scripts
-	var txInfoV1 script.TxInfo
+	var txInfoV1 script.TxInfoV1
 	txInfoV1, err = script.NewTxInfoV1FromTransaction(
 		ls,
 		tx,
@@ -269,7 +269,7 @@ func ValidateTxAlonzo(
 	if err != nil {
 		return err
 	}
-	for _, redeemerPair := range txInfoV1.(script.TxInfoV1).Redeemers {
+	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return errors.New("script purpose is nil")
@@ -302,6 +302,7 @@ func ValidateTxAlonzo(
 			if err != nil {
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
+			evalContext.SkipFinalSlippageFlush = true
 			_, err = s.Evaluate(
 				datum,
 				redeemer.Data,
@@ -412,9 +413,8 @@ func EvaluateTxAlonzo(
 	// Evaluate scripts
 	var retTotalExUnits lcommon.ExUnits
 	retRedeemerExUnits := make(map[lcommon.RedeemerKey]lcommon.ExUnits)
-	var txInfoV1 script.TxInfo
 	var err error
-	txInfoV1, err = script.NewTxInfoV1FromTransaction(
+	txInfoV1, err := script.NewTxInfoV1FromTransaction(
 		ls,
 		tx,
 		slices.Concat(resolvedInputs, resolvedRefInputs),
@@ -422,7 +422,7 @@ func EvaluateTxAlonzo(
 	if err != nil {
 		return 0, lcommon.ExUnits{}, nil, err
 	}
-	for _, redeemerPair := range txInfoV1.(script.TxInfoV1).Redeemers {
+	for _, redeemerPair := range txInfoV1.Redeemers {
 		purpose := redeemerPair.Key
 		if purpose == nil {
 			return 0, lcommon.ExUnits{}, nil, errors.New(

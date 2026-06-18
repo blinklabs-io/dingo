@@ -15,7 +15,9 @@
 package metadata
 
 import (
+	"context"
 	"fmt"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
@@ -127,6 +129,40 @@ type MetadataStore interface {
 		txn types.Txn,
 	) error
 
+	// EnsureOffchainMetadataPointers creates pending cache rows for
+	// on-chain pool metadata and governance anchor URL/hash pointers.
+	EnsureOffchainMetadataPointers(
+		ctx context.Context,
+		now time.Time,
+		txn types.Txn,
+	) (int, error)
+
+	// GetOffchainMetadataFetchBatch returns pending or failed
+	// off-chain metadata rows that are due to be fetched.
+	GetOffchainMetadataFetchBatch(
+		ctx context.Context,
+		limit int,
+		now time.Time,
+		txn types.Txn,
+	) ([]models.OffchainMetadata, error)
+
+	// SetOffchainMetadataFetchResult updates a cache row after a fetch
+	// attempt.
+	SetOffchainMetadataFetchResult(
+		ctx context.Context,
+		doc *models.OffchainMetadata,
+		txn types.Txn,
+	) error
+
+	// GetOffchainMetadata retrieves a cached off-chain document by its
+	// source type and on-chain URL/hash pointer.
+	GetOffchainMetadata(
+		sourceType string,
+		url string,
+		hash []byte,
+		txn types.Txn,
+	) (*models.OffchainMetadata, error)
+
 	// GetPoolRegistrations retrieves all registration certificates for a pool.
 	GetPoolRegistrations(
 		lcommon.PoolKeyHash,
@@ -217,6 +253,17 @@ type MetadataStore interface {
 	// for the requested slot. Callers should use errors.Is() to check.
 	GetActivePoolKeyHashesAtSlot(uint64, types.Txn) ([][]byte, error)
 
+	// GetPoolsRetiringAtEpoch returns the pools whose effective retirement
+	// (the latest retirement not cancelled by a later re-registration, as of
+	// the boundary slot) takes effect at the given epoch, along with the
+	// reward account and deposit from their active registration. Used to apply
+	// POOLREAP deposit refunds at the epoch boundary.
+	GetPoolsRetiringAtEpoch(
+		epoch uint64,
+		boundarySlot uint64,
+		txn types.Txn,
+	) ([]models.PoolRetirementRefund, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(
@@ -265,8 +312,18 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
-	// DeleteAccountRewardsAfterSlot reverts reward credits recorded after
-	// the given slot and deletes their journal entries.
+	// ApplyAccountRewardWithdrawal clears a registered reward account after a
+	// validated transaction withdrawal and records rollback state.
+	ApplyAccountRewardWithdrawal(
+		[]byte, // stakeKey
+		uint64, // amount
+		uint64, // slot
+		[]byte, // txHash
+		types.Txn,
+	) error
+
+	// DeleteAccountRewardsAfterSlot reverts reward balance changes recorded
+	// after the given slot and deletes their journal entries.
 	DeleteAccountRewardsAfterSlot(uint64, types.Txn) error
 
 	// GetBlockNonce retrieves a block nonce for a given point.
@@ -682,6 +739,11 @@ type MetadataStore interface {
 	// amounts controlled by the given staking key.
 	GetControlledAmountByStakingKey([]byte, types.Txn) (uint64, error)
 
+	// GetScriptLockedSupply returns the sum of lovelace held in live
+	// UTxOs whose payment credential is a script. This is the network's
+	// script-locked supply (blockfrost /network supply.locked).
+	GetScriptLockedSupply(types.Txn) (uint64, error)
+
 	// GetUtxosByAddressWithOrdering runs q against live UTxOs with ordering metadata.
 	// See models.UtxoWithOrderingQuery. q must be non-nil.
 	GetUtxosByAddressWithOrdering(
@@ -930,6 +992,17 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// GetChildGovernanceProposals returns all active proposals whose parent
+	// is the given proposal (matched by txHash + actionIndex). Only returns
+	// proposals not yet enacted, expired, or soft-deleted. Used during
+	// epoch boundary orphan sweeps to find dependents of enacted/expired
+	// proposals and remove them transitively.
+	GetChildGovernanceProposals(
+		parentTxHash []byte,
+		parentActionIdx uint32,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetGovernanceVotes retrieves all votes for a governance proposal.
 	GetGovernanceVotes(
 		uint, // proposalID
@@ -1121,6 +1194,23 @@ type MetadataStore interface {
 	// added after the given slot. This is used during chain
 	// rollbacks.
 	DeleteNetworkStateAfterSlot(uint64, types.Txn) error
+
+	// Network donation methods
+
+	// AddNetworkDonation records a block's total Conway treasury
+	// donation for the given slot and epoch. Idempotent per slot.
+	AddNetworkDonation(
+		slot, epoch, amount uint64,
+		txn types.Txn,
+	) error
+
+	// SumNetworkDonationsForEpoch returns the total donation
+	// contributed by blocks in the given epoch.
+	SumNetworkDonationsForEpoch(epoch uint64, txn types.Txn) (uint64, error)
+
+	// DeleteNetworkDonationsAfterSlot removes donation records added
+	// after the given slot. This is used during chain rollbacks.
+	DeleteNetworkDonationsAfterSlot(uint64, types.Txn) error
 
 	// Governance rollback methods
 

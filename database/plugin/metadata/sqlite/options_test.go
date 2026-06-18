@@ -22,6 +22,7 @@ import (
 )
 
 func TestWithDataDir(t *testing.T) {
+	t.Parallel()
 	m := &MetadataStoreSqlite{}
 	option := WithDataDir("/tmp/test")
 
@@ -33,6 +34,7 @@ func TestWithDataDir(t *testing.T) {
 }
 
 func TestWithLogger(t *testing.T) {
+	t.Parallel()
 	logger := slog.New(slog.NewTextHandler(nil, nil))
 	m := &MetadataStoreSqlite{}
 	option := WithLogger(logger)
@@ -45,6 +47,7 @@ func TestWithLogger(t *testing.T) {
 }
 
 func TestWithPromRegistry(t *testing.T) {
+	t.Parallel()
 	reg := prometheus.NewRegistry()
 	m := &MetadataStoreSqlite{}
 	option := WithPromRegistry(reg)
@@ -57,6 +60,7 @@ func TestWithPromRegistry(t *testing.T) {
 }
 
 func TestWithMaxConnections(t *testing.T) {
+	t.Parallel()
 	m := &MetadataStoreSqlite{}
 	option := WithMaxConnections(10)
 
@@ -68,6 +72,7 @@ func TestWithMaxConnections(t *testing.T) {
 }
 
 func TestWithStorageMode(t *testing.T) {
+	t.Parallel()
 	m := &MetadataStoreSqlite{}
 	option := WithStorageMode("api")
 
@@ -79,6 +84,7 @@ func TestWithStorageMode(t *testing.T) {
 }
 
 func TestWithMaxConnections_DefaultUsed(t *testing.T) {
+	t.Parallel()
 	// Test that DefaultMaxConnections is used when maxConnections is 0
 	m := &MetadataStoreSqlite{}
 	// Don't set maxConnections, leave it at 0

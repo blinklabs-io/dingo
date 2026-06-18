@@ -2,11 +2,14 @@ FROM ghcr.io/blinklabs-io/go:1.25.7-1 AS build
 WORKDIR /code
 RUN go env -w GOCACHE=/go-cache
 RUN go env -w GOMODCACHE=/gomod-cache
-COPY go.* .
+COPY internal/test/antithesis/go.* ./internal/test/antithesis/
+WORKDIR /code/internal/test/antithesis
 RUN --mount=type=cache,target=/gomod-cache go mod download
+WORKDIR /code
 COPY . .
+WORKDIR /code/internal/test/antithesis
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
-    go build -o analysis ./cmd/analysis/
+    go build -o /code/analysis ./cmd/analysis/
 
 FROM debian:bookworm-slim
 RUN apt-get update -y && \

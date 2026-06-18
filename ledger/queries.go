@@ -15,17 +15,20 @@
 package ledger
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -171,10 +174,11 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	if len(shape.Eras) == 0 {
 		return nil, errors.New("era history: shape unavailable")
 	}
-	if len(shape.Eras) != len(eras.Eras) {
+	activeEras := ls.eraList()
+	if len(shape.Eras) != len(activeEras) {
 		return nil, fmt.Errorf(
-			"era history: shape has %d eras, eras.Eras has %d",
-			len(shape.Eras), len(eras.Eras),
+			"era history: shape has %d eras, active era table has %d",
+			len(shape.Eras), len(activeEras),
 		)
 	}
 
@@ -183,7 +187,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	currentIdx := -1
 
 	for i, entry := range shape.Eras {
-		eraDesc := eras.Eras[i]
+		eraDesc := activeEras[i]
 		epochs, dbErr := ls.db.GetEpochsByEra(entry.EraID, nil)
 		if dbErr != nil {
 			return nil, dbErr
@@ -256,7 +260,7 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 				lastEp.EpochId, verErr,
 			)
 		}
-		pparamsEraId, ok := EraForVersion(ver.Major)
+		pparamsEraId, ok := ls.eraForVersion(ver.Major)
 		if !ok || pparamsEraId <= entry.EraID {
 			continue
 		}
@@ -443,6 +447,14 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			q.Creds.Items(),
 		)
+	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
+		return ls.queryLedgerPeerSnapshot(q.PeerKind)
+	case *olocalstatequery.ShelleyStakePoolsQuery:
+		return ls.queryShelleyStakePools()
+	case *olocalstatequery.ShelleyDRepStateQuery:
+		return ls.queryShelleyDRepState(q.Credentials.Items())
+	case *olocalstatequery.ShelleyAccountStateQuery:
+		return ls.queryShelleyAccountState()
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -455,7 +467,6 @@ func (ls *LedgerState) queryShelley(
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
-		case *olocalstatequery.ShelleyStakePoolsQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
@@ -470,6 +481,133 @@ func (ls *LedgerState) queryShelley(
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	return []any{shelleyGenesis}, nil
+}
+
+// queryShelleyStakePools answers GetStakePools: the set of currently
+// registered (active, non-retired) stake pool IDs. cardano-cli issues this
+// query unconditionally while balancing a transaction (e.g. `transaction
+// build`), so leaving it unhandled tears down the local-state-query
+// connection.
+func (ls *LedgerState) queryShelleyStakePools() (any, error) {
+	keyHashes, err := ls.db.GetActivePoolKeyHashes(nil)
+	if err != nil {
+		return nil, err
+	}
+	return stakePoolsResult(keyHashes), nil
+}
+
+// queryShelleyDRepState answers GetDRepState: the registration state of the
+// requested DReps, or of all DReps when the credential set is empty (matching
+// the Haskell ledger's "empty set means all" semantics). cardano-cli issues
+// this while balancing a transaction, so leaving it unhandled tears down the
+// connection. The result is a bare CBOR map of stake credential -> {expiry
+// epoch, optional anchor, deposit}.
+func (ls *LedgerState) queryShelleyDRepState(
+	creds []lcommon.Credential,
+) (any, error) {
+	result := make(olocalstatequery.DRepStateResult)
+	var dreps []*models.Drep
+	if len(creds) == 0 {
+		all, err := ls.db.GetActiveDreps(nil)
+		if err != nil {
+			return nil, err
+		}
+		dreps = all
+	} else {
+		for _, cred := range creds {
+			drep, err := ls.db.GetDrep(cred.Credential[:], false, nil)
+			if err != nil {
+				if errors.Is(err, models.ErrDrepNotFound) {
+					continue
+				}
+				return nil, err
+			}
+			dreps = append(dreps, drep)
+		}
+	}
+	// Every DRep locks the dRepDeposit protocol parameter at registration.
+	deposit := ls.drepDeposit()
+	for _, drep := range dreps {
+		if drep == nil {
+			continue
+		}
+		key := olocalstatequery.StakeCredential{
+			Bytes: ledger.NewBlake2b224(drep.Credential),
+		}
+		result[key] = olocalstatequery.DRepStateEntry{
+			Expiry:  drep.ExpiryEpoch,
+			Anchor:  drepAnchor(drep),
+			Deposit: deposit,
+		}
+	}
+	// The result map is wrapped in the single-element result array cardano-cli
+	// expects (verified against cardano-node: an empty result is the CBOR
+	// `81 a0`, i.e. [ {} ]).
+	return []any{result}, nil
+}
+
+// queryShelleyAccountState answers GetAccountState: the chain's treasury and
+// reserves pots. cardano-cli issues this while balancing a transaction, so
+// leaving it unhandled tears down the connection. The account state is wrapped
+// in the single-element result array, so the wire shape is
+// [ [treasury, reserves] ] (both are signed; a misconfigured network can drive
+// reserves negative).
+func (ls *LedgerState) queryShelleyAccountState() (any, error) {
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return nil, err
+	}
+	var treasury, reserves int64
+	if state != nil {
+		treasury = int64(state.Treasury) //nolint:gosec // pot values fit in int64
+		reserves = int64(state.Reserves) //nolint:gosec // pot values fit in int64
+	}
+	return []any{
+		olocalstatequery.AccountState{
+			Treasury: treasury,
+			Reserves: reserves,
+		},
+	}, nil
+}
+
+// drepDeposit returns the current dRepDeposit protocol parameter, which is the
+// deposit every DRep locks at registration. Returns 0 outside Conway.
+func (ls *LedgerState) drepDeposit() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	if cpp, ok := ls.currentPParams.(*conway.ConwayProtocolParameters); ok &&
+		cpp != nil {
+		return cpp.DRepDeposit
+	}
+	return 0
+}
+
+// drepAnchor maps a stored DRep's anchor metadata to the wire type, or nil
+// when the DRep has no anchor.
+func drepAnchor(drep *models.Drep) *lcommon.GovAnchor {
+	if drep.AnchorURL == "" && len(drep.AnchorHash) == 0 {
+		return nil
+	}
+	anchor := &lcommon.GovAnchor{Url: drep.AnchorURL}
+	copy(anchor.DataHash[:], drep.AnchorHash)
+	return anchor
+}
+
+// stakePoolsResult builds the GetStakePools wire result from a list of pool
+// key hashes: a CBOR set (tag 258) of pool IDs wrapped in the single-element
+// array the query's StructAsArray result type decodes from. cardano-cli is
+// strict about both: a plain (untagged) array fails to decode with "expected
+// tag", and an unsorted set fails with "Canonicity violation while decoding
+// Set". The hashes are therefore emitted in ascending byte order.
+func stakePoolsResult(keyHashes [][]byte) []any {
+	slices.SortFunc(keyHashes, bytes.Compare)
+	poolIds := make(cbor.Set, 0, len(keyHashes))
+	for _, kh := range keyHashes {
+		var id ledger.PoolId
+		copy(id[:], kh)
+		poolIds = append(poolIds, id)
+	}
+	return []any{poolIds}
 }
 
 func (ls *LedgerState) queryShelleyUtxoByAddress(

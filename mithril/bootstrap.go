@@ -26,12 +26,29 @@ import (
 	"time"
 )
 
+// Mithril artifact backends.
+const (
+	// BackendV1 restores from the legacy full-database snapshot
+	// archives (CardanoImmutableFilesFull, /artifact/snapshots).
+	// Upstream Mithril is phasing this artifact type out.
+	BackendV1 = "v1"
+	// BackendV2 restores from incremental Cardano database artifacts
+	// (CardanoDatabase, /artifact/cardano-database): per-immutable
+	// archives verified against the certified merkle root.
+	BackendV2 = "v2"
+)
+
 // BootstrapConfig holds configuration for the Mithril bootstrap
 // process.
 type BootstrapConfig struct {
 	// Network is the Cardano network name (e.g., "mainnet",
 	// "preprod", "preview").
 	Network string
+	// Backend selects the Mithril artifact backend: BackendV1
+	// downloads the legacy full-database tarball, BackendV2 restores
+	// per-immutable archives verified against the certified merkle
+	// root. Empty selects BackendV2.
+	Backend string
 	// AggregatorURL overrides the default aggregator URL for the
 	// network. If empty, the default URL for the network is used.
 	AggregatorURL string
@@ -89,6 +106,13 @@ type CertificateChainVerificationResult struct {
 	SnapshotDigest     string
 }
 
+func normalizeBackend(backend string) string {
+	if backend == "" {
+		return BackendV2
+	}
+	return backend
+}
+
 // BootstrapResult contains the result of a bootstrap operation.
 type BootstrapResult struct {
 	// Snapshot is the snapshot that was downloaded and extracted.
@@ -131,6 +155,7 @@ func Bootstrap(
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	cfg.Backend = normalizeBackend(cfg.Backend)
 	if cfg.VerifyCertificateChain {
 		if cfg.GenesisVerificationKey != "" {
 			if _, err := ParseVerificationKey(cfg.GenesisVerificationKey); err != nil {
@@ -168,7 +193,25 @@ func Bootstrap(
 		"component", "mithril",
 		"network", cfg.Network,
 		"aggregator", aggregatorURL,
+		"backend", cfg.Backend,
 	)
+
+	// Dispatch to the selected artifact backend. The remainder of
+	// this function implements the legacy v1 (full snapshot
+	// archive) flow.
+	switch cfg.Backend {
+	case BackendV1:
+		// Continue with the legacy v1 flow below
+	case BackendV2:
+		return bootstrapV2(ctx, cfg, aggregatorURL)
+	default:
+		return nil, fmt.Errorf(
+			"unsupported Mithril backend %q (expected %q or %q)",
+			cfg.Backend,
+			BackendV1,
+			BackendV2,
+		)
+	}
 
 	// Step 1: Fetch latest snapshot
 	client := NewClient(aggregatorURL)

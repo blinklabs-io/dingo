@@ -54,6 +54,7 @@ func sqliteStatCount(t *testing.T, store *MetadataStoreSqlite, table string) int
 // TestUpdatePlannerStats_PopulatesStat1 verifies that after inserting rows and
 // calling UpdatePlannerStats, sqlite_stat1 is populated with at least one entry.
 func TestUpdatePlannerStats_PopulatesStat1(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	insertTestUtxos(t, store, 5)
 
@@ -68,6 +69,7 @@ func TestUpdatePlannerStats_PopulatesStat1(t *testing.T) {
 // TestUpdatePlannerStats_CollectsUtxoTableStats verifies that the utxo table
 // specifically gets stats. This is the table that caused bad query plans.
 func TestUpdatePlannerStats_CollectsUtxoTableStats(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	insertTestUtxos(t, store, 3)
 
@@ -84,6 +86,7 @@ func TestUpdatePlannerStats_CollectsUtxoTableStats(t *testing.T) {
 // TestUpdatePlannerStats_EmptyDB verifies UpdatePlannerStats does not error
 // on a freshly created database with no rows.
 func TestUpdatePlannerStats_EmptyDB(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	assert.NoError(t, store.UpdatePlannerStats())
 }
@@ -91,6 +94,7 @@ func TestUpdatePlannerStats_EmptyDB(t *testing.T) {
 // TestUpdatePlannerStats_Idempotent verifies that calling UpdatePlannerStats
 // more than once does not error. This matters for resume/restart paths.
 func TestUpdatePlannerStats_Idempotent(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	insertTestUtxos(t, store, 3)
 
@@ -104,6 +108,7 @@ func TestUpdatePlannerStats_Idempotent(t *testing.T) {
 }
 
 func TestUpdatePlannerStats_ReturnsErrorWhenDatabaseClosed(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 	require.NoError(t, store.Close())
 

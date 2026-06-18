@@ -22,9 +22,68 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/topology"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestLoadPeerSnapshotSeedsLedgerPeers(t *testing.T) {
+	snapshot := &topology.PeerSnapshotConfig{
+		Point: topology.PeerSnapshotPoint{BlockPointSlot: 42},
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{
+				Relays: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "44.0.0.1", Port: 3001},
+					{Address: "44.0.0.2", Port: 3001},
+					{Address: "44.0.0.3", Port: 3001},
+				},
+			},
+		},
+	}
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:         newMockEventBus(),
+		LedgerPeerTarget: 2,
+	})
+
+	added := pg.LoadPeerSnapshot(snapshot)
+
+	require.Equal(t, 2, added)
+	require.Len(t, pg.peers, 2)
+	for _, peer := range pg.peers {
+		require.NotNil(t, peer)
+		assert.Equal(t, PeerSource(PeerSourceP2PLedger), peer.Source)
+		assert.Equal(t, PeerStateCold, peer.State)
+		_, known := pg.ledgerKnownAddrs[peer.NormalizedAddress]
+		assert.True(t, known)
+	}
+}
+
+func TestLoadPeerSnapshotConvertsRelayShapes(t *testing.T) {
+	snapshot := &topology.PeerSnapshotConfig{
+		BigLedgerPools: []topology.PeerSnapshotLedgerPool{
+			{
+				Relays: []topology.TopologyConfigP2PAccessPoint{
+					{Address: "relay.example.com", Port: 3002},
+					{Address: "44.0.1.1", Port: 3003},
+					{Address: "2001:db8::1", Port: 3004},
+				},
+			},
+		},
+	}
+
+	relays := PoolRelaysFromPeerSnapshot(snapshot)
+
+	require.Len(t, relays, 3)
+	assert.Equal(t, "relay.example.com", relays[0].Hostname)
+	assert.Equal(t, uint(3002), relays[0].Port)
+	require.NotNil(t, relays[1].IPv4)
+	assert.Equal(t, "44.0.1.1", relays[1].IPv4.String())
+	assert.Equal(t, uint(3003), relays[1].Port)
+	require.NotNil(t, relays[2].IPv6)
+	assert.Equal(t, "2001:db8::1", relays[2].IPv6.String())
+	assert.Equal(t, uint(3004), relays[2].Port)
+}
 
 func TestDiscoverLedgerPeers_BoundedByTarget(t *testing.T) {
 	// Provide 50 relays but set target to 5

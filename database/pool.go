@@ -165,3 +165,16 @@ func (d *Database) GetActivePoolRelays(
 	}
 	return d.metadata.GetActivePoolRelays(txn.Metadata())
 }
+
+// GetActivePoolKeyHashes returns the key hashes of all currently active
+// (registered, non-retired) stake pools. This backs the GetStakePools
+// local-state-query.
+func (d *Database) GetActivePoolKeyHashes(
+	txn *Txn,
+) ([][]byte, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetActivePoolKeyHashes(txn.Metadata())
+}

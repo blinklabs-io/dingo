@@ -23,6 +23,7 @@ import (
 )
 
 func TestSqliteGetDRepVotingPowerIncludesReward(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := []byte("drep_reward_only_123456789012345678901234")
@@ -65,6 +66,7 @@ func TestSqliteGetDRepVotingPowerIncludesReward(t *testing.T) {
 }
 
 func TestSqliteGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	rewardOnlyCred := []byte("drep_reward_only_22345678901234567890123")
@@ -113,6 +115,7 @@ func TestSqliteGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 }
 
 func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	drepCred := []byte("drep_multi_reward_12345678901234567890123")
@@ -147,6 +150,7 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 }
 
 func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("drep_insert_absent_1234567890123456789012")
@@ -165,6 +169,7 @@ func TestSqliteInsertDrepIfAbsentInsertsNewRow(t *testing.T) {
 }
 
 func TestSqliteInsertDrepIfAbsentLeavesExistingRowUntouched(t *testing.T) {
+	t.Parallel()
 	store := setupTestStore(t)
 
 	cred := []byte("drep_insert_absent_2234567890123456789012")

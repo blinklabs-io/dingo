@@ -21,10 +21,13 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/common/script"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -71,10 +74,117 @@ func (m *mockFeeTx) Witnesses() lcommon.TransactionWitnessSet {
 	return m.witnesses
 }
 
+func (m *mockFeeTx) ScriptDataHash() *lcommon.Blake2b256 {
+	return nil
+}
+
+type mockConwayFeeTx struct {
+	mockFeeTx
+	inputs             []lcommon.TransactionInput
+	referenceInputs    []lcommon.TransactionInput
+	certificates       []lcommon.Certificate
+	withdrawals        map[*lcommon.Address]*big.Int
+	assetMint          *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
+	votingProcedures   lcommon.VotingProcedures
+	proposalProcedures []lcommon.ProposalProcedure
+}
+
+func (m *mockConwayFeeTx) Inputs() []lcommon.TransactionInput {
+	return m.inputs
+}
+
+func (m *mockConwayFeeTx) ReferenceInputs() []lcommon.TransactionInput {
+	return m.referenceInputs
+}
+
+func (m *mockConwayFeeTx) Id() lcommon.Blake2b256 {
+	return lcommon.Blake2b256{}
+}
+
+func (m *mockConwayFeeTx) Produced() []lcommon.Utxo {
+	return nil
+}
+
+func (m *mockConwayFeeTx) Outputs() []lcommon.TransactionOutput {
+	return nil
+}
+
+func (m *mockConwayFeeTx) TTL() uint64 {
+	return 0
+}
+
+func (m *mockConwayFeeTx) ValidityIntervalStart() uint64 {
+	return 0
+}
+
+func (m *mockConwayFeeTx) Certificates() []lcommon.Certificate {
+	return m.certificates
+}
+
+func (m *mockConwayFeeTx) Withdrawals() map[*lcommon.Address]*big.Int {
+	return m.withdrawals
+}
+
+func (m *mockConwayFeeTx) RequiredSigners() []lcommon.Blake2b224 {
+	return nil
+}
+
+func (m *mockConwayFeeTx) AssetMint() *lcommon.MultiAsset[lcommon.MultiAssetTypeMint] {
+	return m.assetMint
+}
+
+func (m *mockConwayFeeTx) IsValid() bool {
+	return true
+}
+
+func (m *mockConwayFeeTx) VotingProcedures() lcommon.VotingProcedures {
+	return m.votingProcedures
+}
+
+func (m *mockConwayFeeTx) ProposalProcedures() []lcommon.ProposalProcedure {
+	return m.proposalProcedures
+}
+
+type testScriptOutput struct {
+	testOutput
+	scriptRef lcommon.Script
+}
+
+func (o testScriptOutput) ScriptRef() lcommon.Script {
+	return o.scriptRef
+}
+
+type testAddressOutput struct {
+	testOutput
+	addr lcommon.Address
+}
+
+func (o testAddressOutput) Address() lcommon.Address {
+	return o.addr
+}
+
+type testAddressScriptOutput struct {
+	testOutput
+	addr      lcommon.Address
+	scriptRef lcommon.Script
+}
+
+func (o testAddressScriptOutput) Address() lcommon.Address {
+	return o.addr
+}
+
+func (o testAddressScriptOutput) ScriptRef() lcommon.Script {
+	return o.scriptRef
+}
+
 // mockWitnessSet implements TransactionWitnessSet for
 // testing, returning only redeemers.
 type mockWitnessSet struct {
-	redeemers lcommon.TransactionWitnessRedeemers
+	redeemers       lcommon.TransactionWitnessRedeemers
+	nativeScripts   []lcommon.NativeScript
+	plutusV1Scripts []lcommon.PlutusV1Script
+	plutusV2Scripts []lcommon.PlutusV2Script
+	plutusV3Scripts []lcommon.PlutusV3Script
 }
 
 func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
@@ -82,7 +192,7 @@ func (m *mockWitnessSet) Vkey() []lcommon.VkeyWitness {
 }
 
 func (m *mockWitnessSet) NativeScripts() []lcommon.NativeScript {
-	return nil
+	return m.nativeScripts
 }
 
 func (m *mockWitnessSet) Bootstrap() []lcommon.BootstrapWitness {
@@ -94,15 +204,15 @@ func (m *mockWitnessSet) PlutusData() []lcommon.Datum {
 }
 
 func (m *mockWitnessSet) PlutusV1Scripts() []lcommon.PlutusV1Script {
-	return nil
+	return m.plutusV1Scripts
 }
 
 func (m *mockWitnessSet) PlutusV2Scripts() []lcommon.PlutusV2Script {
-	return nil
+	return m.plutusV2Scripts
 }
 
 func (m *mockWitnessSet) PlutusV3Scripts() []lcommon.PlutusV3Script {
-	return nil
+	return m.plutusV3Scripts
 }
 
 func (m *mockWitnessSet) Redeemers() lcommon.TransactionWitnessRedeemers {
@@ -177,7 +287,14 @@ func TestBabbageValidationRulesUseLocalPlutusExecution(t *testing.T) {
 	)
 }
 
-func TestConwayValidationRulesIncludePlutusExecutionByDefault(t *testing.T) {
+func TestConwayValidationRulesUseLocalPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateFeeTooSmallRuleIndex,
+		conway.UtxoValidateFeeTooSmallUtxo,
+		"conway.UtxoValidateFeeTooSmallUtxo",
+	)
 	requireRuleIndexResolvesToFunc(
 		t,
 		conway.UtxoValidationRules,
@@ -185,16 +302,29 @@ func TestConwayValidationRulesIncludePlutusExecutionByDefault(t *testing.T) {
 		conway.UtxoValidatePlutusScripts,
 		"conway.UtxoValidatePlutusScripts",
 	)
-	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules))
-	requireIndexedRulesIncludeFunc(
+	require.Len(t, conwayUtxoValidationRules, len(conway.UtxoValidationRules)-2)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayUtxoValidationRules,
+		conway.UtxoValidateFeeTooSmallUtxo,
+		"Conway validation must use Dingo's reference-script-aware fee rule",
+	)
+	requireIndexedRulesExcludeFunc(
 		t,
 		conwayUtxoValidationRules,
 		conway.UtxoValidatePlutusScripts,
-		"Conway validation should include gouroboros Plutus execution by default",
+		"Conway validation must use Dingo's local Plutus execution path",
 	)
 }
 
 func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
+	requireRuleIndexResolvesToFunc(
+		t,
+		conway.UtxoValidationRules,
+		conwayUtxoValidateFeeTooSmallRuleIndex,
+		conway.UtxoValidateFeeTooSmallUtxo,
+		"conway.UtxoValidateFeeTooSmallUtxo",
+	)
 	requireRuleIndexResolvesToFunc(
 		t,
 		conway.UtxoValidationRules,
@@ -212,7 +342,13 @@ func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
 	require.Len(
 		t,
 		conwayPhase1UtxoValidationRules,
-		len(conway.UtxoValidationRules)-1,
+		len(conway.UtxoValidationRules)-2,
+	)
+	requireIndexedRulesExcludeFunc(
+		t,
+		conwayPhase1UtxoValidationRules,
+		conway.UtxoValidateFeeTooSmallUtxo,
+		"Conway phase-1 validation must use Dingo's reference-script-aware fee rule",
 	)
 	requireIndexedRulesIncludeFunc(
 		t,
@@ -225,6 +361,459 @@ func TestConwayPhase1ValidationRulesSkipPlutusExecution(t *testing.T) {
 		conwayPhase1UtxoValidationRules,
 		conway.UtxoValidatePlutusScripts,
 		"Conway phase-1 replay must not execute Plutus scripts",
+	)
+}
+
+func TestValidateTxPlutusConwayMissingScriptWitnessFails(t *testing.T) {
+	var scriptHash lcommon.ScriptHash
+	scriptHash[0] = 0xaa
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{
+					entries: []struct {
+						key lcommon.RedeemerKey
+						val lcommon.RedeemerValue
+					}{
+						{
+							key: lcommon.RedeemerKey{
+								Tag:   lcommon.RedeemerTagSpend,
+								Index: 0,
+							},
+							val: lcommon.RedeemerValue{},
+						},
+					},
+				},
+			},
+		},
+		inputs: []lcommon.TransactionInput{spendInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testAddressOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+		},
+	)
+
+	err = ValidateTxPlutusConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	require.Error(t, err)
+	var missing lcommon.MissingScriptWitnessesError
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, scriptHash, missing.ScriptHash)
+}
+
+func TestValidateTxPlutusConwayMissingScriptWitnessWithoutRedeemerFails(t *testing.T) {
+	var scriptHash lcommon.ScriptHash
+	scriptHash[0] = 0xaa
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testAddressOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+		},
+	)
+
+	tests := []struct {
+		name      string
+		witnesses lcommon.TransactionWitnessSet
+	}{
+		{
+			name: "nil witnesses",
+		},
+		{
+			name:      "nil redeemers",
+			witnesses: &mockWitnessSet{},
+		},
+		{
+			name: "empty redeemers",
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				mockFeeTx: mockFeeTx{
+					txType:    txTypeAlonzo,
+					witnesses: tt.witnesses,
+				},
+				inputs: []lcommon.TransactionInput{spendInput},
+			}
+
+			err := ValidateTxPlutusConway(
+				tx,
+				0,
+				ls,
+				&conway.ConwayProtocolParameters{},
+			)
+			require.Error(t, err)
+			var missing lcommon.MissingScriptWitnessesError
+			require.ErrorAs(t, err, &missing)
+			assert.Equal(t, scriptHash, missing.ScriptHash)
+		})
+	}
+}
+
+func TestValidateTxPlutusConwayNativeScriptWitnessWithoutRedeemerPasses(t *testing.T) {
+	nativeScript := lcommon.NativeScript{}
+	scriptHash := nativeScript.Hash()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				nativeScripts: []lcommon.NativeScript{
+					nativeScript,
+				},
+			},
+		},
+		inputs: []lcommon.TransactionInput{spendInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testAddressOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+		},
+	)
+
+	require.NoError(t, ValidateTxPlutusConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
+}
+
+func TestValidateTxPlutusConwayMissingRedeemerForScriptRefFails(t *testing.T) {
+	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
+	scriptHash := plutusScript.Hash()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	spendInput := newTestInput(0x01, 0)
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+			scriptRef:  plutusScript,
+		},
+	)
+
+	tests := []struct {
+		name      string
+		witnesses lcommon.TransactionWitnessSet
+	}{
+		{
+			name: "nil witnesses",
+		},
+		{
+			name:      "nil redeemers",
+			witnesses: &mockWitnessSet{},
+		},
+		{
+			name: "empty redeemers",
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := &mockConwayFeeTx{
+				mockFeeTx: mockFeeTx{
+					txType:    txTypeAlonzo,
+					witnesses: tt.witnesses,
+				},
+				inputs: []lcommon.TransactionInput{spendInput},
+			}
+
+			err := ValidateTxPlutusConway(
+				tx,
+				0,
+				ls,
+				&conway.ConwayProtocolParameters{},
+			)
+			require.Error(t, err)
+			var missing conway.MissingRedeemerForScriptError
+			require.ErrorAs(t, err, &missing)
+			assert.Equal(t, scriptHash, missing.ScriptHash)
+			assert.Equal(t, lcommon.RedeemerTagSpend, missing.Tag)
+			assert.Equal(t, uint32(0), missing.Index)
+		})
+	}
+}
+
+func TestValidateTxPlutusConwayRegistrationCertificateMissingRedeemerFails(t *testing.T) {
+	plutusScript := lcommon.PlutusV2Script([]byte{0x03, 0x04})
+	scriptHash := plutusScript.Hash()
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				plutusV2Scripts: []lcommon.PlutusV2Script{
+					plutusScript,
+				},
+				redeemers: &mockRedeemers{},
+			},
+		},
+		certificates: []lcommon.Certificate{
+			&lcommon.RegistrationCertificate{
+				StakeCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeScriptHash,
+					Credential: scriptHash,
+				},
+				Amount: 2_000_000,
+			},
+		},
+	}
+
+	err := ValidateTxPlutusConway(
+		tx,
+		0,
+		newMockLedgerState(),
+		&conway.ConwayProtocolParameters{},
+	)
+	require.Error(t, err)
+	var missing conway.MissingRedeemerForScriptError
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, scriptHash, missing.ScriptHash)
+	assert.Equal(t, lcommon.RedeemerTagCert, missing.Tag)
+	assert.Equal(t, uint32(0), missing.Index)
+}
+
+func TestValidateTxPlutusConwayNonSpendMissingScriptWitnessFails(t *testing.T) {
+	var scriptHash lcommon.ScriptHash
+	scriptHash[0] = 0xaa
+
+	scriptCred := lcommon.Credential{
+		CredType:   lcommon.CredentialTypeScriptHash,
+		Credential: scriptHash,
+	}
+	withdrawalAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneScript,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		scriptHash.Bytes(),
+	)
+	require.NoError(t, err)
+	voter := &lcommon.Voter{
+		Type: lcommon.VoterTypeDRepScriptHash,
+		Hash: [28]byte(scriptHash),
+	}
+	assetMint := lcommon.NewMultiAsset[lcommon.MultiAssetTypeMint](
+		map[lcommon.Blake2b224]map[cbor.ByteString]lcommon.MultiAssetTypeMint{
+			lcommon.Blake2b224(scriptHash): {
+				cbor.NewByteString([]byte("asset")): big.NewInt(1),
+			},
+		},
+	)
+	proposal := conway.ConwayProposalProcedure{
+		PPGovAction: conway.ConwayGovAction{
+			Action: &lcommon.TreasuryWithdrawalGovAction{
+				PolicyHash: scriptHash.Bytes(),
+			},
+		},
+	}
+
+	tests := []struct {
+		name string
+		tx   *mockConwayFeeTx
+	}{
+		{
+			name: "mint",
+			tx: &mockConwayFeeTx{
+				assetMint: &assetMint,
+			},
+		},
+		{
+			name: "cert",
+			tx: &mockConwayFeeTx{
+				certificates: []lcommon.Certificate{
+					&lcommon.RegistrationCertificate{
+						StakeCredential: scriptCred,
+						Amount:          2_000_000,
+					},
+				},
+			},
+		},
+		{
+			name: "withdraw",
+			tx: &mockConwayFeeTx{
+				withdrawals: map[*lcommon.Address]*big.Int{
+					&withdrawalAddr: big.NewInt(1_000_000),
+				},
+			},
+		},
+		{
+			name: "vote",
+			tx: &mockConwayFeeTx{
+				votingProcedures: lcommon.VotingProcedures{
+					voter: {
+						&lcommon.GovActionId{}: lcommon.VotingProcedure{
+							Vote: lcommon.GovVoteYes,
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "propose",
+			tx: &mockConwayFeeTx{
+				proposalProcedures: []lcommon.ProposalProcedure{
+					proposal,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.tx.mockFeeTx = mockFeeTx{
+				txType:    txTypeAlonzo,
+				witnesses: &mockWitnessSet{},
+			}
+
+			err := ValidateTxPlutusConway(
+				tt.tx,
+				0,
+				newMockLedgerState(),
+				&conway.ConwayProtocolParameters{},
+			)
+			require.Error(t, err)
+			var missing lcommon.MissingScriptWitnessesError
+			require.ErrorAs(t, err, &missing)
+			assert.Equal(t, scriptHash, missing.ScriptHash)
+		})
+	}
+}
+
+func TestValidateTxPlutusConwayUnusedReferenceScriptWithoutRedeemerPasses(t *testing.T) {
+	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
+	scriptHash := plutusScript.Hash()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+
+	refInput := newTestInput(0x02, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			witnesses: &mockWitnessSet{
+				redeemers: &mockRedeemers{},
+			},
+		},
+		referenceInputs: []lcommon.TransactionInput{refInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		refInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+			scriptRef:  plutusScript,
+		},
+	)
+
+	require.NoError(t, ValidateTxPlutusConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	))
+}
+
+// TestTxInfoV2ContextSortsInputs guards the canonical Plutus requirement that
+// the script context lists transaction inputs sorted by TxOutRef, not in
+// transaction-body order. Building the context in body order (as the reverted
+// txInfoV2WithTxInputOrder wrapper did) makes validators traverse a mis-ordered
+// input list and over-compute the execution budget relative to cardano-node,
+// producing phase-2 "Plutus evaluation disagrees with block producer" failures.
+func TestTxInfoV2ContextSortsInputs(t *testing.T) {
+	// Body order is intentionally unsorted: 0x02 before 0x01.
+	bodyFirst := newTestInput(0x02, 0)
+	bodySecond := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			fee:       big.NewInt(0),
+			witnesses: &mockWitnessSet{},
+		},
+		inputs: []lcommon.TransactionInput{
+			bodyFirst,
+			bodySecond,
+		},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(bodyFirst, newTestOutput(1_000_000))
+	ls.addUtxo(bodySecond, newTestOutput(1_000_000))
+	resolved := []lcommon.Utxo{
+		{Id: bodyFirst, Output: newTestOutput(1_000_000)},
+		{Id: bodySecond, Output: newTestOutput(1_000_000)},
+	}
+
+	txInfo, err := script.NewTxInfoV2FromTransaction(ls, tx, resolved)
+
+	require.NoError(t, err)
+	require.Len(t, txInfo.Inputs, 2)
+	// Canonical order sorts by TxOutRef, so 0x01 must come before 0x02
+	// regardless of the body order or resolved-input order.
+	assert.Equal(
+		t,
+		bodySecond.String(),
+		lcommon.Utxo(txInfo.Inputs[0]).Id.String(),
+	)
+	assert.Equal(
+		t,
+		bodyFirst.String(),
+		lcommon.Utxo(txInfo.Inputs[1]).Id.String(),
 	)
 }
 
@@ -910,6 +1499,264 @@ func TestCalculateMinFee_MultipleScriptsSum(t *testing.T) {
 	// stepFee = ceil(721*200000000/10000000) = 14420
 	// total = 172981 + 34620 + 14420 = 222021
 	assert.Equal(t, uint64(222021), fee)
+}
+
+func TestCalculateConwayRefScriptFee_Tiered(t *testing.T) {
+	fee := CalculateConwayRefScriptFee(
+		30_000,
+		big.NewRat(15, 1),
+	)
+	// First 25,600 bytes cost 15/byte. The remaining 4,400 bytes
+	// cost 18/byte after Conway's 1.2 multiplier.
+	assert.Equal(t, uint64(463_200), fee)
+}
+
+func TestCalculateConwayRefScriptFee_FloorsTieredTotal(t *testing.T) {
+	fee := CalculateConwayRefScriptFee(
+		25_601,
+		big.NewRat(1, 3),
+	)
+	// floor(25,600 / 3 + 1 * 2 / 5) = floor(8,533.733...)
+	assert.Equal(t, uint64(8_533), fee)
+}
+
+func TestValidateTxFeeConwayIncludesReferenceScripts(t *testing.T) {
+	spendInput := newTestInput(0x01, 0)
+	refInput := newTestInput(0x02, 1)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			cbor:   make([]byte, 101),
+			txType: txTypeAlonzo,
+			fee:    big.NewInt(450),
+		},
+		inputs:          []lcommon.TransactionInput{spendInput},
+		referenceInputs: []lcommon.TransactionInput{refInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			scriptRef:  lcommon.PlutusV2Script(make([]byte, 10)),
+		},
+	)
+	ls.addUtxo(
+		refInput,
+		testScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			scriptRef:  lcommon.PlutusV3Script(make([]byte, 20)),
+		},
+	)
+	pp := &conway.ConwayProtocolParameters{
+		MinFeeRefScriptCostPerByte: &cbor.Rat{
+			Rat: big.NewRat(15, 1),
+		},
+	}
+
+	require.NoError(t, ValidateTxFeeConway(tx, ls, pp))
+
+	tx.fee = big.NewInt(449)
+	err := ValidateTxFeeConway(tx, ls, pp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "minimum fee 450")
+}
+
+func TestValidateTxFeeConwayDeduplicatesOverlappingReferenceScriptInput(
+	t *testing.T,
+) {
+	spendInput := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			cbor:   make([]byte, 101),
+			txType: txTypeAlonzo,
+			fee:    big.NewInt(150),
+		},
+		inputs:          []lcommon.TransactionInput{spendInput},
+		referenceInputs: []lcommon.TransactionInput{spendInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(
+		spendInput,
+		testScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			scriptRef:  lcommon.PlutusV2Script(make([]byte, 10)),
+		},
+	)
+	pp := &conway.ConwayProtocolParameters{
+		MinFeeRefScriptCostPerByte: &cbor.Rat{
+			Rat: big.NewRat(15, 1),
+		},
+	}
+
+	require.NoError(t, ValidateTxFeeConway(tx, ls, pp))
+
+	tx.fee = big.NewInt(149)
+	err := ValidateTxFeeConway(tx, ls, pp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "minimum fee 150")
+}
+
+func TestValidateTxConwaySkipPhase2StillValidatesRequiredRedeemers(
+	t *testing.T,
+) {
+	withoutConwayUtxoValidationRules(t)
+
+	plutusScript := lcommon.PlutusV2Script([]byte{0x01, 0x02})
+	scriptHash := plutusScript.Hash()
+	addr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeScriptNone,
+		lcommon.AddressNetworkTestnet,
+		scriptHash.Bytes(),
+		nil,
+	)
+	require.NoError(t, err)
+	spendInput := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			fee:    big.NewInt(0),
+		},
+		inputs: []lcommon.TransactionInput{spendInput},
+	}
+	ls := newMockLedgerState()
+	ls.skipPhase2Validation = true
+	ls.addUtxo(
+		spendInput,
+		testAddressScriptOutput{
+			testOutput: newTestOutput(1_000_000),
+			addr:       addr,
+			scriptRef:  plutusScript,
+		},
+	)
+
+	err = ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	require.Error(t, err)
+	var missing conway.MissingRedeemerForScriptError
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, scriptHash, missing.ScriptHash)
+}
+
+func TestValidateTxConwaySkipPhase2StillValidatesRequiredScriptWitnesses(
+	t *testing.T,
+) {
+	withoutConwayUtxoValidationRules(t)
+
+	var scriptHash lcommon.ScriptHash
+	scriptHash[0] = 0xaa
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			fee:    big.NewInt(0),
+		},
+		certificates: []lcommon.Certificate{
+			&lcommon.RegistrationCertificate{
+				StakeCredential: lcommon.Credential{
+					CredType:   lcommon.CredentialTypeScriptHash,
+					Credential: scriptHash,
+				},
+				Amount: 2_000_000,
+			},
+		},
+	}
+	ls := newMockLedgerState()
+	ls.skipPhase2Validation = true
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	require.Error(t, err)
+	var missing lcommon.MissingScriptWitnessesError
+	require.ErrorAs(t, err, &missing)
+	assert.Equal(t, scriptHash, missing.ScriptHash)
+}
+
+func TestValidateTxConwayReusesResolvedPlutusContext(t *testing.T) {
+	withoutConwayUtxoValidationRules(t)
+
+	spendInput := newTestInput(0x01, 0)
+	tx := &mockConwayFeeTx{
+		mockFeeTx: mockFeeTx{
+			txType: txTypeAlonzo,
+			fee:    big.NewInt(0),
+		},
+		inputs: []lcommon.TransactionInput{spendInput},
+	}
+	ls := newMockLedgerState()
+	ls.addUtxo(spendInput, newTestOutput(1_000_000))
+
+	err := ValidateTxConway(
+		tx,
+		0,
+		ls,
+		&conway.ConwayProtocolParameters{},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 2, ls.utxoLookups)
+}
+
+func TestValidateTxConwayMissingInputReportsBadInputNotFeeResolution(
+	t *testing.T,
+) {
+	inputHash := make([]byte, 32)
+	inputHash[0] = 0xaa
+	bodyMap := map[uint]any{
+		0: cbor.Tag{
+			Number: 258,
+			Content: []any{
+				[]any{inputHash, uint64(0)},
+			},
+		},
+		2: uint64(200_000),
+	}
+	txCbor, err := cbor.Encode([]any{bodyMap, map[uint]any{}, true, nil})
+	require.NoError(t, err)
+
+	tx, err := conway.NewConwayTransactionFromCbor(txCbor)
+	require.NoError(t, err)
+
+	err = ValidateTxConway(
+		tx,
+		0,
+		newMockLedgerState(),
+		&conway.ConwayProtocolParameters{
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: conway.MinProtocolVersionConway,
+			},
+			MaxTxSize:            16_384,
+			MaxValueSize:         5_000,
+			CollateralPercentage: 150,
+			MaxCollateralInputs:  3,
+		},
+	)
+	require.Error(t, err)
+
+	var badInputs shelley.BadInputsUtxoError
+	require.ErrorAs(t, err, &badInputs)
+	require.Len(t, badInputs.Inputs, 1)
+	assert.Equal(t, tx.Inputs()[0].String(), badInputs.Inputs[0].String())
+	assert.NotContains(t, err.Error(), "conway fee validation")
+	assert.NotContains(t, err.Error(), "calculating reference script size")
+}
+
+func withoutConwayUtxoValidationRules(t *testing.T) {
+	t.Helper()
+
+	origRules := conwayUtxoValidationRules
+	origPhase1Rules := conwayPhase1UtxoValidationRules
+	conwayUtxoValidationRules = nil
+	conwayPhase1UtxoValidationRules = nil
+	t.Cleanup(func() {
+		conwayUtxoValidationRules = origRules
+		conwayPhase1UtxoValidationRules = origPhase1Rules
+	})
 }
 
 func TestCalculateMinFee_NilPricesIgnoresExUnits(t *testing.T) {

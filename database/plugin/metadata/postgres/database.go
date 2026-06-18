@@ -316,7 +316,11 @@ func (d *MetadataStorePostgres) Close() error {
 	if d.db == nil {
 		return nil
 	}
-	// get DB handle from gorm.DB
+	// Stop the PreparedStmtDB LRU goroutine before closing the underlying pool
+	// so it cannot access the pool after it is closed.
+	if ps, ok := d.db.ConnPool.(*gorm.PreparedStmtDB); ok {
+		ps.Close()
+	}
 	db, err := d.DB().DB()
 	if err != nil {
 		return err

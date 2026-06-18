@@ -38,11 +38,15 @@ database:
       # index-cache-size: 0
       # Enable garbage collection (default: true)
       gc: true
-      # Enable Snappy compression.
+      # Enable ZSTD compression.
       # Leave unset to use the storage-mode default:
       # - false when storageMode: "core"
       # - true when storageMode: "api"
       # compression: false
+      # ZSTD compression level used when compression is enabled.
+      # Higher levels give a better compression ratio at the cost of
+      # throughput. Badger recommends level 1 (default).
+      # compression-level: 1
     gcs:
       # Google Cloud Storage bucket name
       bucket: ""
@@ -119,6 +123,16 @@ socketPath: "dingo.socket"
 # CLI: --network
 network: "preview"
 
+# Logging output configuration
+# format: "text" (default, human-readable) or "json" (machine-parseable,
+#         for ELK/Loki ingestion)
+# level:  "debug", "info" (default), "warn", or "error".
+#         The --debug flag overrides this to "debug".
+# Env: DINGO_LOGGING_FORMAT, DINGO_LOGGING_LEVEL
+logging:
+  format: text
+  level: info
+
 # TLS certificate file path (for HTTPS)
 #
 # Can be overridden with the TLS_CERT_FILE_PATH environment variable
@@ -183,8 +197,8 @@ blockfrostPort: 3000
 meshPort: 8080
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
-# its configured local blob plugin but wraps it with Bark archive fallback and
-# starts the background pruner.
+# its configured local blob plugin but wraps it with Bark archive fallback for
+# expired or missing historical blocks.
 # Can be overridden with DINGO_BARK_BASE_URL
 # CLI: --bark-url
 barkBaseUrl: ""
@@ -194,11 +208,16 @@ barkBaseUrl: ""
 # CLI: --bark-port
 barkPort: 0
 
-# How often a Bark-backed pruning node scans for blocks older than the
-# ledger-derived stability window. Default: 1h.
-# Can be overridden with DINGO_BARK_PRUNER_FREQUENCY
-# CLI: --bark-pruner-frequency
-barkPrunerFrequency: 1h
+# Local immutable block history expiry. When enabled, Dingo replaces block CBOR
+# older than the ledger-derived stability window with an expired-history marker
+# while retaining local indexes and metadata. Bark fallback is optional.
+historyExpiry:
+  # Can be overridden with DINGO_HISTORY_EXPIRY_ENABLED
+  # CLI: --history-expiry-enabled
+  enabled: false
+  # Can be overridden with DINGO_HISTORY_EXPIRY_FREQUENCY
+  # CLI: --history-expiry-frequency
+  frequency: 1h
 
 # ---
 # Deployment pattern examples (uncomment one block):
@@ -243,13 +262,15 @@ barkPrunerFrequency: 1h
 #         prefix: "preview"
 #   barkPort: 9091
 #
-# Pruning node (local blobs plus remote archive fallback):
+# History-expiry node (local blobs plus remote archive fallback):
 #   storageMode: "core"
 #   database:
 #     blob:
 #       plugin: "badger"
+#   historyExpiry:
+#     enabled: true
+#     frequency: 1h
 #   barkBaseUrl: "http://archive.example.internal:9091"
-#   barkPrunerFrequency: 1h
 #
 # Dev mode (isolated, forge blocks, no outbound):
 #   runMode: "dev"
@@ -273,15 +294,43 @@ intersectTip: false
 forgeSyncToleranceSlots: 0
 forgeStaleGapThresholdSlots: 0
 
-# Operational mode: "serve" (default), "load", or "dev"
+# Operational mode: "serve" (default), "load", "dev", or "leios"
 # - serve: Full node with network connectivity (default)
 # - load: Batch import from ImmutableDB (requires immutableDbPath)
 # - dev: Development mode (forge blocks, disable outbound, skip topology)
+# - leios: Full node with experimental Leios/Dijkstra protocol support
 # Note: CLI commands (serve, load) take priority over this setting
 #
 # Can be overridden with the DINGO_RUN_MODE environment variable
 # CLI: --run-mode
 runMode: "serve"
+
+# Experimental startup era. Empty follows the genesis protocol version.
+# Set to "dijkstra" only for Dijkstra/Leios test networks.
+#
+# Can be overridden with the DINGO_START_ERA environment variable
+# CLI: --start-era
+startEra: ""
+
+# Leios voting (experimental, leios runMode only)
+#
+# leiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381 vote
+# signing key (32-byte scalar; the file must not be group/other readable).
+# When set on a block producer whose pool is a member of the epoch's
+# stake-truncated voting committee, the node signs and emits one Leios
+# vote per observed endorser block.
+#
+# leiosVoterPublicKeys maps hex pool key hashes to hex-encoded 96-byte
+# compressed BLS12-381 public keys. It stands in for CIP-0164 key
+# registration (not yet specified) so vote signatures can be verified on
+# test networks. Votes from voters without a registered key still count
+# toward observed stake but cannot contribute to certificates.
+#
+# Can be overridden with the DINGO_LEIOS_VOTE_SIGNING_KEY_FILE and
+# DINGO_LEIOS_VOTER_PUBLIC_KEYS environment variables
+# leiosVoteSigningKeyFile: "/keys/leios-vote.skey"
+# leiosVoterPublicKeys:
+#   "<pool key hash hex>": "<compressed G2 public key hex>"
 
 # Path to ImmutableDB for batch import (used when runMode is "load")
 # Can also be provided as argument to 'dingo load' command
@@ -360,6 +409,30 @@ genesisBootstrap:
   # 0 uses the peer-governor default.
   promotionMinDiversityGroups: 0
 
+# Midnight indexer configuration
+# Indexing is active only in API storage mode. Setting port to 0 disables
+# the Midnight gRPC server while leaving indexing eligible to run.
+# CLI: --midnight-port, --midnight-host
+# Env: DINGO_MIDNIGHT_PORT, DINGO_MIDNIGHT_HOST
+# Address and policy fields are YAML only.
+midnight:
+  # gRPC listen port
+  port: 50051
+  # gRPC listen address
+  host: "0.0.0.0"
+  # Midnight network constants. Known network defaults are applied when
+  # available; set these explicitly for custom networks or overrides.
+  cnightPolicyId: ""
+  cnightAssetName: ""
+  mappingValidatorAddress: ""
+  authTokenAssetName: ""
+  committeeCandidateAddress: ""
+  technicalCommitteeAddress: ""
+  technicalCommitteePolicyId: ""
+  councilAddress: ""
+  councilPolicyId: ""
+  permissionedCandidatePolicy: ""
+
 # Cache configuration for tiered CBOR cache system
 # This controls the in-memory caching of UTxO and transaction CBOR data
 cache:
@@ -394,6 +467,12 @@ mithril:
   # Override aggregator URL (auto-detected from network if empty)
   # Supported networks: mainnet, preprod, preview
   aggregatorUrl: ""
+  # Mithril artifact backend: "v2" (default) restores from incremental
+  # per-immutable-file archives verified against the certified merkle
+  # root; "v1" uses the legacy full snapshot tarballs (being phased
+  # out upstream)
+  # CLI: --mithril-backend
+  backend: "v2"
   # Directory for downloading snapshot archives
   # If empty, a randomized temporary directory is created automatically
   # downloadDir: ""

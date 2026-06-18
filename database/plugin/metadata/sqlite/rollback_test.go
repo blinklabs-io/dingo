@@ -50,6 +50,7 @@ func (m *mockTransactionWithInputs) Inputs() []lcommon.TransactionInput {
 // --- Optimistic UTxO locking tests ---
 
 func TestSetUtxoDeletedAtSlotBackfillsSameSlotMissingSpender(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	utxoTxId := bytes.Repeat([]byte{0xAB}, 32)
@@ -97,6 +98,7 @@ func TestSetUtxoDeletedAtSlotBackfillsSameSlotMissingSpender(t *testing.T) {
 func TestSetUtxoDeletedAtSlotReturnsNotFoundWhenRowMissing(
 	t *testing.T,
 ) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	input := dbtestutil.NewMockInput(bytes.Repeat([]byte{0xEF}, 32), 0)
@@ -113,6 +115,7 @@ func TestSetUtxoDeletedAtSlotReturnsNotFoundWhenRowMissing(
 func TestSetUtxoDeletedAtSlotReturnsConflictWhenRowAlreadySpent(
 	t *testing.T,
 ) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	utxoTxId := bytes.Repeat([]byte{0xEF}, 32)
@@ -150,6 +153,7 @@ func TestSetUtxoDeletedAtSlotReturnsConflictWhenRowAlreadySpent(
 // locking mechanism in SetTransaction correctly detects when a UTxO
 // has already been spent by another transaction.
 func TestOptimisticLockingConflictDetection(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create a UTxO that both transactions will try to spend
@@ -233,6 +237,7 @@ func TestOptimisticLockingConflictDetection(t *testing.T) {
 // transaction that already successfully consumed a UTxO is safe
 // (idempotent retry detection).
 func TestOptimisticLockingIdempotentRetry(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create a UTxO
@@ -273,6 +278,7 @@ func TestOptimisticLockingIdempotentRetry(t *testing.T) {
 // TestOptimisticLockingMissingUtxo verifies that attempting to spend a
 // non-existent UTxO logs a warning but does not return an error.
 func TestOptimisticLockingMissingUtxo(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Transaction consumes a UTxO that doesn't exist
@@ -305,6 +311,7 @@ func TestOptimisticLockingMissingUtxo(t *testing.T) {
 // Validates AddressTransaction populates the data from transaction(input/output) participant
 // Validates whether it inserts a record per unique address (payment & staking key pair)
 func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	utxoTxId := bytes.Repeat([]byte{0xA1}, 32)
@@ -382,6 +389,7 @@ func TestSetTransactionIndexesAddressTransactions(t *testing.T) {
 // verifies that API-mode batched address indexing includes every input class
 // resolved through the skinny address-key lookup.
 func TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys(t *testing.T) {
+	t.Parallel()
 	store := setupTestDBWithMode(t, types.StorageModeAPI)
 
 	inputTxId := bytes.Repeat([]byte{0xA1}, 32)
@@ -469,6 +477,7 @@ func TestSetTransactionBatchedIndexesInputCollateralAndReferenceAddressKeys(t *t
 // TestRollbackAccountState tests that RestoreAccountStateAtSlot correctly
 // restores account delegation state to a prior slot.
 func TestRollbackAccountState(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stakeKey := bytes.Repeat([]byte{0x01}, 28)
@@ -566,6 +575,7 @@ func TestRollbackAccountState(t *testing.T) {
 // TestRollbackDeletesAccountRegisteredAfterSlot tests that accounts
 // registered only after the rollback slot are deleted.
 func TestRollbackDeletesAccountRegisteredAfterSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stakeKey := bytes.Repeat([]byte{0x02}, 28)
@@ -595,6 +605,7 @@ func TestRollbackDeletesAccountRegisteredAfterSlot(t *testing.T) {
 // TestRollbackPoolState tests that RestorePoolStateAtSlot correctly
 // restores pool state to a prior slot.
 func TestRollbackPoolState(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	poolKeyHash := bytes.Repeat([]byte{0x10}, 28)
@@ -687,6 +698,7 @@ func TestRollbackPoolState(t *testing.T) {
 // TestRollbackDrepState tests that RestoreDrepStateAtSlot correctly
 // restores DRep state to a prior slot.
 func TestRollbackDrepState(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	drepCred := bytes.Repeat([]byte{0x30}, 28)
@@ -770,6 +782,7 @@ func TestRollbackDrepState(t *testing.T) {
 // TestRollbackDeletesCertificatesAfterSlot tests that
 // DeleteCertificatesAfterSlot removes certificates added after the slot.
 func TestRollbackDeletesCertificatesAfterSlot(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create transactions for FK constraints
@@ -835,6 +848,7 @@ func TestRollbackDeletesCertificatesAfterSlot(t *testing.T) {
 // TestRollbackUtxoRestoration tests that UTxOs are correctly unspent
 // and removed during rollback.
 func TestRollbackUtxoRestoration(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create a transaction that will be referenced as the spender
@@ -935,6 +949,7 @@ func TestRollbackUtxoRestoration(t *testing.T) {
 // DeleteTransactionsAfterSlot removes transactions and restores
 // UTxO state correctly.
 func TestRollbackTransactionDeletion(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	spendingTxHash := bytes.Repeat([]byte{0x81}, 32)
@@ -1025,6 +1040,7 @@ func TestRollbackTransactionDeletion(t *testing.T) {
 // TestRollbackAndReplay processes state through slots, rolls back, then
 // replays the same operations and verifies the final state matches.
 func TestRollbackAndReplay(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	stakeKey := bytes.Repeat([]byte{0xD1}, 28)
@@ -1165,6 +1181,7 @@ func TestRollbackAndReplay(t *testing.T) {
 // TestRollbackPParamsDeletion tests that protocol parameters added
 // after the rollback slot are removed.
 func TestRollbackPParamsDeletion(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create protocol parameters at different slots
@@ -1208,6 +1225,7 @@ func TestRollbackPParamsDeletion(t *testing.T) {
 // TestRollbackGovernanceProposalDeletion tests that governance proposals
 // added after the rollback slot are removed.
 func TestRollbackGovernanceProposalDeletion(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	prop1 := &models.GovernanceProposal{
@@ -1256,6 +1274,7 @@ func TestRollbackGovernanceProposalDeletion(t *testing.T) {
 // The optimistic locking should allow the second spend to succeed since
 // the rollback restored the UTxO to unspent state.
 func TestRollbackConcurrentUtxoSpend(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	// Create UTxO at slot 50

@@ -40,6 +40,11 @@ package metadata
 //     decide whether to refuse startup or auto-repair.
 type DeferredIndexManager interface {
 	DropDeferredIndexes() error
+	// BuildCriticalDeferredIndexes rebuilds only the manifest
+	// entries marked Critical=true. Call this before marking the
+	// API ready so queries and rollbacks work immediately; follow
+	// up with BuildDeferredIndexes to finish the lazy remainder.
+	BuildCriticalDeferredIndexes() error
 	BuildDeferredIndexes() error
 	HasDeferredIndexesPending() (bool, error)
 }

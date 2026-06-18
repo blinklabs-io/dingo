@@ -1,5 +1,12 @@
 # Dingo Ledger & Database Benchmark Results
 
+Focused Mithril API-mode metadata backfill results are tracked separately in
+[`benchmark_results_api_backfill.md`](benchmark_results_api_backfill.md).
+The latest local Kubernetes rerun on May 29-30, 2026 measured current `main`
+with a local #2457 workaround at 87.1 blocks/sec for API backfill
+(13h45m16s for 4,312,604 blocks), plus 32m28s to rebuild deferred metadata
+indexes.
+
 ## Latest Results
 
 ### Test Environment

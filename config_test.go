@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -61,6 +62,65 @@ func TestWithStorageMode(t *testing.T) {
 	// Apply core mode
 	WithStorageMode(StorageModeCore)(cfg)
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
+}
+
+func TestWithMidnightConfig(t *testing.T) {
+	cfg := &Config{}
+	midnightCfg := MidnightConfig{
+		Port:                        50052,
+		Host:                        "127.0.0.1",
+		CNightPolicyID:              "policy1",
+		CNightAssetName:             "434e49474854",
+		MappingValidatorAddress:     "addr_mapping",
+		AuthTokenAssetName:          "auth",
+		CommitteeCandidateAddress:   "addr_candidate",
+		TechnicalCommitteeAddress:   "addr_technical",
+		TechnicalCommitteePolicyID:  "policy_technical",
+		CouncilAddress:              "addr_council",
+		CouncilPolicyID:             "policy_council",
+		PermissionedCandidatePolicy: "policy_permissioned",
+	}
+
+	WithMidnightConfig(midnightCfg)(cfg)
+
+	assert.Equal(t, midnightCfg, cfg.midnight)
+}
+
+func TestExperimentalDijkstraEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      Config
+		expected bool
+	}{
+		{name: "default", cfg: Config{}, expected: false},
+		{
+			name:     "leios run mode",
+			cfg:      Config{runMode: runModeLeios},
+			expected: true,
+		},
+		{
+			name:     "dijkstra start era",
+			cfg:      Config{startEra: internalconfig.StartEraDijkstra},
+			expected: true,
+		},
+		{
+			name: "leios and dijkstra",
+			cfg: Config{
+				runMode:  runModeLeios,
+				startEra: internalconfig.StartEraDijkstra,
+			},
+			expected: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(
+				t,
+				tt.expected,
+				tt.cfg.experimentalDijkstraEnabled(),
+			)
+		})
+	}
 }
 
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
@@ -162,4 +222,27 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 		2*time.Second,
 		"updater should exit after ctx cancel",
 	)
+}
+
+func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
+	cfg := &Config{}
+	assert.Equal(t, "", cfg.leiosVoteSigningKeyFile)
+	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
+	assert.Equal(t, "/keys/leios-vote.skey", cfg.leiosVoteSigningKeyFile)
+}
+
+func TestWithLeiosVoterPublicKeys(t *testing.T) {
+	cfg := &Config{}
+	assert.Nil(t, cfg.leiosVoterPublicKeys)
+	keys := map[string]string{"aabbcc": "ddeeff"}
+	WithLeiosVoterPublicKeys(keys)(cfg)
+	assert.Equal(
+		t,
+		map[string]string{"aabbcc": "ddeeff"},
+		cfg.leiosVoterPublicKeys,
+	)
+	// The option copies the map: later caller mutations must not
+	// change live config
+	keys["aabbcc"] = "mutated"
+	assert.Equal(t, "ddeeff", cfg.leiosVoterPublicKeys["aabbcc"])
 }

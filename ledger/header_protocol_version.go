@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -48,9 +49,8 @@ var errUnknownNetwork = errors.New(
 
 // dijkstraMajorVersion is the protocol major version at which the
 // header pvMajor "too high" check becomes mandatory on every network.
-// Until cardano-ledger publishes stable Dijkstra specs and a Dijkstra
-// era table lands here, this value matches the Haskell `natVersion @12`
-// in cardano-ledger's BBODY rule.
+// This value matches the Haskell `natVersion @12` in cardano-ledger's
+// BBODY rule and the Dijkstra era major-version range in gouroboros.
 const dijkstraMajorVersion uint = 12
 
 // HeaderProtocolVersionTooHighError is returned when a block header's
@@ -75,6 +75,13 @@ func (e *HeaderProtocolVersionTooHighError) Error() string {
 // ProtVer field.
 func HeaderProtocolMajor(header lcommon.BlockHeader) (uint, bool) {
 	switch h := header.(type) {
+	case *dijkstra.DijkstraBlockHeader:
+		// DijkstraBlockHeader embeds BabbageBlockHeader but is a
+		// distinct concrete type, so it needs its own case — a type
+		// switch matches the dynamic type, not embedded promotions, and
+		// would otherwise fall through to default and silently skip the
+		// "too high" check for every Dijkstra-era block.
+		return uint(h.Body.ProtoVersion.Major), true
 	case *conway.ConwayBlockHeader:
 		return uint(h.Body.ProtoVersion.Major), true
 	case *babbage.BabbageBlockHeader:
@@ -89,7 +96,10 @@ func HeaderProtocolMajor(header lcommon.BlockHeader) (uint, bool) {
 		return uint(h.Body.ProtoMajorVersion), true
 	default:
 		// Byron and any unknown header type — skip the check rather
-		// than fabricating a value.
+		// than fabricating a value. NOTE: every new Praos-family era
+		// must be given an explicit case above. A missing case lands
+		// here and silently disables the "too high" check for that
+		// era's blocks (see the Dijkstra case).
 		return 0, false
 	}
 }

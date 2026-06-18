@@ -1,0 +1,62 @@
+services:
+  dingo-sync:
+    image: ${DINGO_IMAGE:-ghcr.io/blinklabs-io/dingo:0.52.0}
+    restart: "no"
+    command: ["-n", "preview", "mithril", "sync"]
+    environment: &dingo-env
+      CARDANO_NETWORK: preview
+      CARDANO_DATABASE_PATH: /data/db
+      DINGO_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_STORAGE_MODE: api
+      DINGO_DATABASE_METADATA_PLUGIN: sqlite
+      DINGO_DATABASE_BLOB_PLUGIN: badger
+      DINGO_DATABASE_WORKERS: ${DINGO_DATABASE_WORKERS:-16}
+      DINGO_DATABASE_QUEUE_SIZE: ${DINGO_DATABASE_QUEUE_SIZE:-500}
+      DINGO_BACKFILL_BATCH_SIZE: ${DINGO_BACKFILL_BATCH_SIZE:-1000}
+      DINGO_UTXORPC_PORT: "9090"
+      DINGO_BLOCKFROST_PORT: "3000"
+      DINGO_MESH_PORT: "8080"
+    volumes:
+      - dingo-data:/data/db
+      - dingo-ipc:/ipc
+
+  dingo:
+    image: ${DINGO_IMAGE:-ghcr.io/blinklabs-io/dingo:0.52.0}
+    restart: unless-stopped
+    depends_on:
+      dingo-sync:
+        condition: service_completed_successfully
+    command: ["-n", "preview", "serve"]
+    environment:
+      <<: *dingo-env
+    ports:
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_BLOCKFROST_PORT:-3000}:3000"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_UTXORPC_PORT:-9090}:9090"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_MESH_PORT:-8080}:8080"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_METRICS_PORT:-12798}:12798"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_RELAY_PORT:-3001}:3001"
+    volumes:
+      - dingo-data:/data/db
+      - dingo-ipc:/ipc
+
+  explorer:
+    image: node:24-alpine
+    restart: unless-stopped
+    depends_on:
+      dingo:
+        condition: service_started
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    environment:
+      DINGO_BLOCKFROST_URL: http://dingo:3000
+      DINGO_METRICS_URL: http://dingo:12798
+    ports:
+      - "${EXPLORER_BIND_ADDR:-0.0.0.0}:${EXPLORER_PORT:-5173}:5173"
+    volumes:
+      - .:/app
+      - explorer-node-modules:/app/node_modules
+
+volumes:
+  dingo-data:
+  dingo-ipc:
+  explorer-node-modules:

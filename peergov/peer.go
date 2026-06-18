@@ -92,14 +92,19 @@ type Peer struct {
 	Address            string
 	NormalizedAddress  string // Cached normalized form of Address for deduplication
 	// Performance metrics (used by the peer scoring system)
-	BlockFetchLatencyMs     float64 // Average block fetch latency in ms (EMA)
-	BlockFetchSuccessRate   float64 // Average block fetch success rate 0..1 (EMA)
-	ConnectionStability     float64 // Connection stability score 0..1
-	ReconnectDelay          time.Duration
-	ConnectedAt             time.Time // When current outbound connection was established
-	InboundConnectedAt      time.Time // When current inbound connection was established
-	PerformanceScore        float64   // Composite score from the above metrics
-	ReconnectCount          int
+	BlockFetchLatencyMs   float64 // Average block fetch latency in ms (EMA)
+	BlockFetchSuccessRate float64 // Average block fetch success rate 0..1 (EMA)
+	ConnectionStability   float64 // Connection stability score 0..1
+	ReconnectDelay        time.Duration
+	ConnectedAt           time.Time // When current outbound connection was established
+	InboundConnectedAt    time.Time // When current inbound connection was established
+	PerformanceScore      float64   // Composite score from the above metrics
+	ReconnectCount        int
+	// OutboundShortLivedCount counts consecutive short-lived outbound
+	// sessions (duration < minStableConnectionDuration). The reconnect
+	// goroutine consumes and zeroes ReconnectDelay before each redial,
+	// so this counter is what carries the backoff rung across sessions.
+	OutboundShortLivedCount uint32
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer
 	State                   PeerState
 	Source                  PeerSource

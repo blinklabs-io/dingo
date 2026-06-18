@@ -57,6 +57,20 @@ func isExpectedNetworkDialError(err error) bool {
 		strings.Contains(msg, "timeout waiting on transition")
 }
 
+// shortLivedReconnectDelay returns the exponential backoff rung for the
+// given count of consecutive short-lived outbound sessions, capped at
+// maxReconnectDelay.
+func shortLivedReconnectDelay(count uint32) time.Duration {
+	delay := initialReconnectDelay
+	for i := uint32(1); i < count; i++ {
+		delay *= reconnectBackoffFactor
+		if delay >= maxReconnectDelay {
+			return maxReconnectDelay
+		}
+	}
+	return delay
+}
+
 // isAddrInUseError returns true if the error is a "cannot assign
 // requested address" or EADDRINUSE, indicating a TCP 4-tuple collision.
 func isAddrInUseError(err error) bool {
@@ -146,8 +160,19 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		)
 		return
 	}
-	currentPeer.Reconnecting = true
-	reconnectPeer := currentPeer
+	// Capture the stop channel while holding the lock. Stop() nils
+	// p.stopCh after closing it, so reading the field again without
+	// the lock races with shutdown; the captured copy still receives
+	// the close signal.
+	stopCh := p.stopCh
+	if stopCh == nil {
+		p.mu.Unlock()
+		p.config.Logger.Debug(
+			"outbound: peer governor stopped, skipping connection attempts",
+			"address", peer.Address,
+		)
+		return
+	}
 	// Read any pre-existing reconnect delay set by
 	// handleConnectionClosedEvent for short-lived connections.
 	preDelay := currentPeer.ReconnectDelay
@@ -155,6 +180,8 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	// loop's backoff starts cleanly from the intended rung
 	// and does not double-apply the pre-delay.
 	currentPeer.ReconnectDelay = 0
+	currentPeer.Reconnecting = true
+	reconnectPeer := currentPeer
 	p.mu.Unlock()
 	// Ensure Reconnecting is cleared when this goroutine exits
 	defer func() {
@@ -174,7 +201,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			),
 		)
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			return
 		case <-time.After(preDelay):
 		}
@@ -182,7 +209,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 	for {
 		// Check if PeerGovernor is stopping
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			p.config.Logger.Debug(
 				"outbound: stopping connection attempts due to shutdown",
 				"address", peer.Address,
@@ -251,7 +278,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 				"address", peer.Address,
 			)
 			select {
-			case <-p.stopCh:
+			case <-stopCh:
 				return
 			case <-time.After(inboundCheckDelay):
 			}
@@ -314,7 +341,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		if isConnectionCancellationError(err) {
 			select {
-			case <-p.stopCh:
+			case <-stopCh:
 				p.config.Logger.Debug(
 					"outbound: connection attempt canceled during shutdown",
 					"address", peer.Address,
@@ -357,7 +384,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 				"delay", reconnectDelay,
 			)
 			select {
-			case <-p.stopCh:
+			case <-stopCh:
 				return
 			case <-time.After(reconnectDelay):
 			}
@@ -449,7 +476,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		}
 		p.mu.Unlock()
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			p.config.Logger.Debug(
 				"outbound: stopping connection attempts due to shutdown",
 				"address", peer.Address,
@@ -467,7 +494,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		)
 		// Use select with stopCh for interruptible sleep
 		select {
-		case <-p.stopCh:
+		case <-stopCh:
 			p.config.Logger.Debug(
 				"outbound: stopping connection attempts due to shutdown",
 				"address", peer.Address,
@@ -611,6 +638,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	if tmpPeer.Source != PeerSourceInboundConn {
 		tmpPeer.ReconnectDelay = 0
 		tmpPeer.ReconnectCount = 0
+		tmpPeer.OutboundShortLivedCount = 0
 	}
 	selectionEvents = p.appendChainSelectionEventsLocked(
 		selectionEvents,
@@ -722,10 +750,18 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 					// Connection was stable, reset backoff
 					peer.ReconnectCount = 0
 					peer.ReconnectDelay = 0
+					peer.OutboundShortLivedCount = 0
 				} else if !peer.ConnectedAt.IsZero() {
-					// Short-lived connection: apply exponential backoff
+					// Short-lived connection: apply exponential backoff.
+					// The stored delay is usually zero here because the
+					// reconnect goroutine consumes and zeroes it before
+					// dialing, so derive the rung from the consecutive
+					// short-lived session count instead.
+					peer.OutboundShortLivedCount++
 					if peer.ReconnectDelay == 0 {
-						peer.ReconnectDelay = initialReconnectDelay
+						peer.ReconnectDelay = shortLivedReconnectDelay(
+							peer.OutboundShortLivedCount,
+						)
 					} else if peer.ReconnectDelay < maxReconnectDelay {
 						peer.ReconnectDelay *= reconnectBackoffFactor
 						if peer.ReconnectDelay > maxReconnectDelay {

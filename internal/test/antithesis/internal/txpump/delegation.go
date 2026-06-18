@@ -25,7 +25,7 @@ import (
 // stakeCredential is a [credType, hash] pair used inside certificates.
 // credType 0 = key hash.
 type stakeCredential struct {
-	_    cbor.StructAsArray
+	cbor.StructAsArray
 	Type uint32
 	Hash []byte
 }
@@ -34,7 +34,7 @@ type stakeCredential struct {
 // Conway CDDL: [2, stake_credential, pool_keyhash]
 // Type 2 = delegate_stake.
 type delegCert struct {
-	_          cbor.StructAsArray
+	cbor.StructAsArray
 	CertType   uint32
 	Credential stakeCredential
 	PoolHash   []byte
@@ -55,7 +55,7 @@ type txBodyWithCerts struct {
 
 // conwayTxWithCerts is the top-level Conway transaction carrying certificates.
 type conwayTxWithCerts struct {
-	_       cbor.StructAsArray
+	cbor.StructAsArray
 	Body    txBodyWithCerts
 	Witness map[any]any
 	IsValid bool
@@ -105,7 +105,10 @@ func BuildDelegationTx(
 				u.TxHash, len(hashBytes),
 			)
 		}
-		bodyInputs = append(bodyInputs, txBodyInput{Hash: hashBytes, Idx: u.Index})
+		bodyInputs = append(
+			bodyInputs,
+			txBodyInput{Hash: hashBytes, Idx: u.Index},
+		)
 	}
 
 	// Calculate change: sum of inputs minus fee.
@@ -128,7 +131,10 @@ func BuildDelegationTx(
 		)
 	}
 	if change > 0 {
-		outputs = append(outputs, txBodyOutput{Address: changeAddr, Amount: change})
+		outputs = append(
+			outputs,
+			txBodyOutput{Address: changeAddr, Amount: change},
+		)
 	}
 
 	cert := delegCert{

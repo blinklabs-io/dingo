@@ -24,6 +24,7 @@ import (
 )
 
 func TestGetBackfillCheckpoint_NotFound(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	cp, err := store.GetBackfillCheckpoint("metadata", nil)
@@ -32,6 +33,7 @@ func TestGetBackfillCheckpoint_NotFound(t *testing.T) {
 }
 
 func TestSetBackfillCheckpoint_Create(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	now := time.Now().Truncate(time.Second)
@@ -57,6 +59,7 @@ func TestSetBackfillCheckpoint_Create(t *testing.T) {
 }
 
 func TestSetBackfillCheckpoint_Upsert(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	now := time.Now().Truncate(time.Second)
@@ -86,6 +89,7 @@ func TestSetBackfillCheckpoint_Upsert(t *testing.T) {
 }
 
 func TestSetBackfillCheckpoint_CompletedFlag(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	now := time.Now().Truncate(time.Second)
@@ -107,6 +111,7 @@ func TestSetBackfillCheckpoint_CompletedFlag(t *testing.T) {
 }
 
 func TestSetBackfillCheckpoint_WithTransaction(t *testing.T) {
+	t.Parallel()
 	store := setupTestDB(t)
 
 	now := time.Now().Truncate(time.Second)

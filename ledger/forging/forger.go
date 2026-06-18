@@ -26,8 +26,16 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/gouroboros/ledger"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/vrf"
 	"github.com/prometheus/client_golang/prometheus"
+)
+
+// errNoValidTxRefs is returned by buildLeiosEB when all mempool transactions
+// are filtered out (invalid hash, zero size, or size > uint16). It is
+// treated as a skip rather than a hard failure by checkAndForgeLeiosEB.
+var errNoValidTxRefs = errors.New(
+	"no valid transaction references for endorser block",
 )
 
 // Mode represents the forging mode.
@@ -72,6 +80,11 @@ type BlockForger struct {
 	// Slot battle detection
 	slotTracker *SlotTracker
 
+	// Optional Leios EB forging (nil = relay or pre-Dijkstra era)
+	leiosChecker  LeiosProduceChecker
+	leiosEBCaster EndorserBlockBroadcaster
+	leiosMempool  MempoolProvider
+
 	// Prometheus metrics
 	metrics *forgingMetrics
 
@@ -115,6 +128,20 @@ type BlockForgedObserver func(
 	latency time.Duration,
 )
 
+// LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
+// It reports whether the slot leader may produce an endorser block for
+// the given slot (respects the single-EB-per-slot rule and produce window).
+// A nil checker means Leios EB forging is disabled (relay or pre-Dijkstra era).
+type LeiosProduceChecker interface {
+	MayProduceEndorserBlock(slot uint64) (allowed bool, reason string, err error)
+}
+
+// EndorserBlockBroadcaster stores a locally-forged endorser block and
+// notifies connected peers via the LeiosNotify protocol.
+type EndorserBlockBroadcaster interface {
+	BroadcastEndorserBlock(slot uint64, hash []byte, cbor []byte) error
+}
+
 // SlotClockProvider provides current slot information from the slot clock.
 type SlotClockProvider interface {
 	// CurrentSlot returns the current slot number based on wall-clock time.
@@ -143,6 +170,15 @@ type ForgerConfig struct {
 	BlockBroadcaster BlockBroadcaster
 	BlockForged      BlockForgedObserver
 	SlotClock        SlotClockProvider
+
+	// LeiosProduceChecker enables EB forging when non-nil. Requires
+	// LeiosEBBroadcaster and LeiosMempool to also be set.
+	LeiosProduceChecker LeiosProduceChecker
+	// LeiosEBBroadcaster propagates locally-forged EBs to peers.
+	LeiosEBBroadcaster EndorserBlockBroadcaster
+	// LeiosMempool provides transactions for EB building. May reuse the
+	// same MempoolProvider as the RB builder.
+	LeiosMempool MempoolProvider
 
 	// ForgeSyncToleranceSlots controls how far the local chain can lag the
 	// upstream tip before forging is skipped. Zero uses the default.
@@ -176,6 +212,9 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		blockForged:      cfg.BlockForged,
 		slotClock:        cfg.SlotClock,
 		slotTracker:      NewSlotTracker(),
+		leiosChecker:     cfg.LeiosProduceChecker,
+		leiosEBCaster:    cfg.LeiosEBBroadcaster,
+		leiosMempool:     cfg.LeiosMempool,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -201,6 +240,14 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		}
 		if cfg.SlotClock == nil {
 			return nil, errors.New("production mode requires slot clock")
+		}
+	}
+	if cfg.LeiosProduceChecker != nil {
+		if cfg.LeiosEBBroadcaster == nil {
+			return nil, errors.New("LeiosProduceChecker requires LeiosEBBroadcaster")
+		}
+		if cfg.LeiosMempool == nil {
+			return nil, errors.New("LeiosProduceChecker requires LeiosMempool")
 		}
 	}
 
@@ -472,6 +519,22 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.metrics.forgeNodeIsLeader.Inc()
 	}
 
+	// Leios EB production: attempt before the RB so the EB can begin
+	// diffusing while the RB is being assembled. Failure is non-fatal
+	// for the RB — a missed EB is better than a missed block.
+	if f.leiosChecker != nil {
+		if err := f.checkAndForgeLeiosEB(currentSlot); err != nil {
+			f.logger.Warn(
+				"leios endorser block production failed",
+				"slot", currentSlot,
+				"error", err,
+			)
+			if f.metrics != nil {
+				f.metrics.leiosEbFailed.Inc()
+			}
+		}
+	}
+
 	f.logger.Info("producing block", "slot", currentSlot)
 
 	// Calculate KES period for this slot
@@ -640,6 +703,97 @@ func (f *BlockForger) SignBlockHeader(
 // by other components (e.g., chainsync) to detect slot battles.
 func (f *BlockForger) SlotTracker() *SlotTracker {
 	return f.slotTracker
+}
+
+// checkAndForgeLeiosEB attempts to produce and broadcast a Leios endorser
+// block for the given slot. It is called by the slot leader before RB
+// construction so the EB can begin diffusing while the RB is assembled.
+func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
+	allowed, reason, err := f.leiosChecker.MayProduceEndorserBlock(slot)
+	if err != nil {
+		return fmt.Errorf("leios produce check: %w", err)
+	}
+	if !allowed {
+		f.logger.Debug(
+			"leios EB skipped",
+			"slot", slot,
+			"reason", reason,
+		)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues(reason).Inc()
+		}
+		return nil
+	}
+
+	txs := f.leiosMempool.Transactions()
+	if len(txs) == 0 {
+		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
+		if f.metrics != nil {
+			f.metrics.leiosEbSkipped.WithLabelValues("no_transactions").Inc()
+		}
+		return nil
+	}
+
+	ebCbor, ebHash, txRefCount, err := buildLeiosEB(txs)
+	if err != nil {
+		if errors.Is(err, errNoValidTxRefs) {
+			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
+			if f.metrics != nil {
+				f.metrics.leiosEbSkipped.WithLabelValues("no_valid_tx_refs").Inc()
+			}
+			return nil
+		}
+		return fmt.Errorf("build leios EB: %w", err)
+	}
+
+	if err := f.leiosEBCaster.BroadcastEndorserBlock(slot, ebHash, ebCbor); err != nil {
+		return fmt.Errorf("broadcast leios EB: %w", err)
+	}
+
+	f.logger.Info(
+		"leios endorser block produced",
+		"slot", slot,
+		"hash", hex.EncodeToString(ebHash),
+		"tx_refs", txRefCount,
+	)
+	if f.metrics != nil {
+		f.metrics.leiosEbForged.Inc()
+	}
+	return nil
+}
+
+// buildLeiosEB assembles a LeiosEndorserBlock from mempool transactions.
+// Transactions with invalid hex hashes, non-32-byte hashes, zero sizes,
+// or sizes exceeding uint16 are silently dropped. Returns an error only
+// when no valid references remain after filtering.
+func buildLeiosEB(
+	txs []MempoolTransaction,
+) (cbor []byte, hash []byte, txRefCount int, err error) {
+	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
+	for _, tx := range txs {
+		raw, hexErr := hex.DecodeString(tx.Hash)
+		if hexErr != nil || len(raw) != 32 {
+			continue
+		}
+		sz := len(tx.Cbor)
+		if sz == 0 || sz > math.MaxUint16 {
+			continue
+		}
+		refs = append(refs, lcommon.LeiosTransactionReference{
+			TransactionHash: lcommon.NewBlake2b256(raw),
+			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
+		})
+	}
+	if len(refs) == 0 {
+		return nil, nil, 0, errNoValidTxRefs
+	}
+	eb := lcommon.LeiosEndorserBlock{TransactionReferences: refs}
+	ebCbor, marshalErr := eb.MarshalCBOR()
+	if marshalErr != nil {
+		return nil, nil, 0, fmt.Errorf("marshal leios EB: %w", marshalErr)
+	}
+	h := lcommon.Blake2b256Hash(ebCbor)
+	return ebCbor, h.Bytes(), len(refs), nil
 }
 
 // modeString returns a string representation of the forging mode.

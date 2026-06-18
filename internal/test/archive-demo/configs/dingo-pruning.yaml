@@ -1,7 +1,9 @@
-# Pruning node config: local Badger blob store. The pruner runs every 5s
-# and deletes blocks beyond the chain stability window (derived by Dingo
-# from genesis: 3k/f, which is 300 slots for testnet.yaml). When asked
-# for a pre-window block, the BarkBlobStore wrapper transparently fetches
-# it from the archive node.
+# History-expiry node config: local Badger blob store. The expiry worker runs
+# every 5s and expires blocks beyond the chain stability window (derived by
+# Dingo from genesis: 3k/f, which is 300 slots for testnet.yaml). When asked
+# for a pre-window block, the BarkBlobStore wrapper transparently fetches it
+# from the archive node.
 barkBaseUrl: http://dingo-archive:3003
-barkPrunerFrequency: 5s
+historyExpiry:
+  enabled: true
+  frequency: 5s

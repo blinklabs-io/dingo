@@ -143,39 +143,42 @@ type NodeSettings struct {
 // ErrBlobKeyNotFound is returned by blob operations when a key is missing
 var ErrBlobKeyNotFound = errors.New("blob key not found")
 
-// ErrBlockTombstoned is the sentinel for tombstoned-block errors. Callers
-// can use errors.Is(err, ErrBlockTombstoned) for existence checks. To get
-// the (slot, hash) of the tombstoned block, use errors.As to extract a
-// *BlockTombstonedError. The block was pruned for archival and is expected
-// to be available via an archive proxy; wrappers (notably bark) intercept
-// the typed error and resolve the block from the archive. Unwrapped
-// consumers should treat it as a configuration error (the block is no
-// longer local but no proxy is wired up).
-var ErrBlockTombstoned = errors.New("block tombstoned (archived)")
+// ErrHistoryExpired is returned when a block's local CBOR has expired from
+// history storage. Callers can use errors.Is(err, ErrHistoryExpired) for
+// existence checks. To get the (slot, hash), use errors.As to extract a
+// *HistoryExpiredError. Archive-proxy wrappers can intercept this typed
+// error and resolve the block from remote history; unwrapped consumers should
+// surface the condition as unavailable expired history.
+var ErrHistoryExpired = errors.New("history expired")
 
-// BlockTombstonedError is the typed form of ErrBlockTombstoned, returned
-// by blob plugins on every tombstone observation (GetBlock and iterator
-// ValueCopy). It carries the (slot, hash) of the tombstoned block so an
-// archive-proxy wrapper can resolve it without having to parse the blob
-// key — the wrapper extracts it via:
+// HistoryExpiredError is the typed form of ErrHistoryExpired, returned by
+// blob plugins when GetBlock or iterator ValueCopy observe an expired block.
+// It carries the (slot, hash) so archive-proxy wrappers can resolve it without
+// parsing blob keys — the wrapper extracts it via:
 //
-//	var t *types.BlockTombstonedError
-//	if errors.As(err, &t) { fetchFromArchive(t.Slot, t.Hash) }
-type BlockTombstonedError struct {
+//	var h *types.HistoryExpiredError
+//	if errors.As(err, &h) { fetchFromArchive(h.Slot, h.Hash) }
+type HistoryExpiredError struct {
 	Slot uint64
 	Hash []byte
 }
 
-func (e *BlockTombstonedError) Error() string {
+func (e *HistoryExpiredError) Error() string {
 	return fmt.Sprintf(
 		"%s: slot=%d hash=%s",
-		ErrBlockTombstoned, e.Slot, hex.EncodeToString(e.Hash),
+		ErrHistoryExpired, e.Slot, hex.EncodeToString(e.Hash),
 	)
 }
 
-// Unwrap returns ErrBlockTombstoned so errors.Is(err, ErrBlockTombstoned)
-// keeps working for callers that only need to detect the condition.
-func (e *BlockTombstonedError) Unwrap() error { return ErrBlockTombstoned }
+// Unwrap returns ErrHistoryExpired so errors.Is(err, ErrHistoryExpired) keeps
+// working for callers that only need to detect the condition.
+func (e *HistoryExpiredError) Unwrap() error { return ErrHistoryExpired }
+
+// ErrBlockTombstoned and BlockTombstonedError are retained as aliases for
+// older callers. New code should use ErrHistoryExpired and HistoryExpiredError.
+var ErrBlockTombstoned = ErrHistoryExpired
+
+type BlockTombstonedError = HistoryExpiredError
 
 // ErrTxnWrongType is returned when a transaction has the wrong type
 var ErrTxnWrongType = errors.New("invalid transaction type")
@@ -284,16 +287,16 @@ type SignedURL struct {
 	Expires time.Time
 }
 
-// BlockTombstoneMagic is the four-byte prefix that identifies a tombstone
-// record stored at a block's bp key. The bytes "DBT1" do not appear at the
-// start of any valid Cardano block CBOR (blocks begin with a CBOR array
-// header byte such as 0x82/0x83), so detection is unambiguous.
+// BlockTombstoneMagic is the four-byte prefix that identifies an expired
+// history marker stored at a block's bp key. The bytes "DBT1" do not appear
+// at the start of any valid Cardano block CBOR (blocks begin with a CBOR
+// array header byte such as 0x82/0x83), so detection is unambiguous.
 var BlockTombstoneMagic = [4]byte{'D', 'B', 'T', '1'}
 
 // BlockTombstone returns a fresh copy of the tombstone marker that
-// replaces a block's CBOR when the block has been pruned for archival.
+// replaces a block's CBOR when the block has expired from local history.
 // The marker carries no embedded (slot, hash) — the bp key already does,
-// and surfacing the typed BlockTombstonedError is the responsibility of
+// and surfacing the typed HistoryExpiredError is the responsibility of
 // each blob plugin (which knows its own key format).
 func BlockTombstone() []byte {
 	out := make([]byte, len(BlockTombstoneMagic))

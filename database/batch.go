@@ -69,6 +69,16 @@ type BatchedTxIngestOpts struct {
 	// unaffected.
 	SkipProducedUtxoOffsetWrites bool
 
+	// SkipConsumedInputRecovery elides the per-input GetUtxoIncludingSpent
+	// recovery checks in ensureTransactionConsumedUtxos. Use when replaying
+	// immutable blocks in slot order during Mithril historical backfill,
+	// where consumed inputs are guaranteed to already exist in the metadata
+	// store from earlier producer transactions. The in-flight producer lookup
+	// optimization (same-batch provenance) remains active. Do NOT enable for
+	// gap blocks, resumed backfill with potential missing rows, or normal
+	// replay paths where producer rows may be absent.
+	SkipConsumedInputRecovery bool
+
 	// Stats receives hot-path timings and row-ish counts for operator
 	// visibility during API-mode Mithril backfill. It is optional and is
 	// intentionally updated only at coarse stage boundaries.
@@ -236,7 +246,7 @@ func (d *Database) SetTransactionBatchedWithOpts(
 	}
 
 	recoverStart := time.Now()
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, acc); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, acc, opts); err != nil {
 		return err
 	}
 	if opts.Stats != nil {

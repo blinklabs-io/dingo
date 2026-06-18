@@ -22,13 +22,12 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
-	"github.com/blinklabs-io/gouroboros/ledger/leios"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -305,9 +304,23 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 			)
 		}
 		eraId := uint(parsedBlock.Era().Id)
-		era := eras.GetEraById(eraId)
-		if era == nil || era.CalculateEtaVFunc == nil {
-			return nil
+		era, ok := ls.eraById(eraId)
+		if !ok || era == nil {
+			return fmt.Errorf(
+				"recompute candidate nonce at slot %d block %x: unknown era ID %d",
+				block.Slot,
+				block.Hash,
+				eraId,
+			)
+		}
+		if era.CalculateEtaVFunc == nil {
+			return fmt.Errorf(
+				"recompute candidate nonce at slot %d block %x: era ID %d (%s) has no etaV calculator",
+				block.Slot,
+				block.Hash,
+				eraId,
+				era.Name,
+			)
 		}
 		newNonce, err := era.CalculateEtaVFunc(
 			ls.config.CardanoNodeConfig,
@@ -459,7 +472,7 @@ func nonceStabilityWindowKMultiplier(eraId uint) (int64, bool) {
 		alonzo.EraIdAlonzo,
 		babbage.EraIdBabbage:
 		return 3, true
-	case conway.EraIdConway, leios.EraIdLeios:
+	case conway.EraIdConway, dijkstra.EraIdDijkstra:
 		return 4, true
 	default:
 		return 0, false

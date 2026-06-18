@@ -25,23 +25,28 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/api/blockfrost"
+	"github.com/blinklabs-io/dingo/api/mesh"
+	"github.com/blinklabs-io/dingo/api/utxorpc"
 	"github.com/blinklabs-io/dingo/bark"
-	"github.com/blinklabs-io/dingo/blockfrost"
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
+	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
-	"github.com/blinklabs-io/dingo/mesh"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
-	"github.com/blinklabs-io/dingo/utxorpc"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -57,16 +62,20 @@ type Node struct {
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
 	snapshotMgr                      *snapshot.Manager
+	leiosVoteManager                 *leios.VoteManager
+	leiosPipelineManager             *leios.PipelineManager
 	utxorpc                          *utxorpc.Utxorpc
 	bark                             *bark.Bark
-	barkPruner                       *bark.Pruner
+	historyExpiry                    *historyexpiry.Pruner
 	blockfrostAPI                    *blockfrost.Blockfrost
 	meshAPI                          *mesh.Server
+	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
 	rtsMetrics                       *rtsMetrics
 	shutdownFuncs                    []func(context.Context) error
+	deferredIndexMaintenanceDone     chan struct{}
 	config                           Config
 	ctx                              context.Context
 	cancel                           context.CancelFunc
@@ -208,6 +217,7 @@ func (n *Node) Run(ctx context.Context) error {
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
+	enableDijkstra := n.config.experimentalDijkstraEnabled()
 	// Initialize Ouroboros
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:                   n.config.logger,
@@ -219,7 +229,7 @@ func (n *Node) Run(ctx context.Context) error {
 		IntersectPoints:          n.config.intersectPoints,
 		PromRegistry:             n.config.promRegistry,
 		ChainsyncBlockTimeout:    n.config.chainsyncStallTimeout,
-		EnableLeios:              n.config.runMode == runModeLeios,
+		EnableLeios:              enableDijkstra,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
 	// Load state
@@ -233,6 +243,8 @@ func (n *Node) Run(ctx context.Context) error {
 			PromRegistry:               n.config.promRegistry,
 			ForgeBlocks:                n.config.isDevMode(),
 			ValidateHistorical:         n.config.validateHistorical,
+			EnableDijkstra:             enableDijkstra,
+			StartInDijkstra:            n.config.startEra.IsDijkstra(),
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
@@ -305,7 +317,19 @@ func (n *Node) Run(ctx context.Context) error {
 				if n.chainsyncState == nil {
 					return ledger.ChainsyncEvent{}, nil, false
 				}
-				return n.chainsyncState.LookupObservedHeader(connId, hash)
+				h, prevHash, ok := n.chainsyncState.LookupObservedHeader(connId, hash)
+				if !ok {
+					return ledger.ChainsyncEvent{}, nil, false
+				}
+				return ledger.ChainsyncEvent{
+					ConnectionId: h.ConnectionId,
+					BlockHeader:  h.BlockHeader,
+					Point:        h.Point,
+					Tip:          h.Tip,
+					BlockNumber:  h.BlockNumber,
+					Type:         h.Type,
+					Rollback:     h.Rollback,
+				}, prevHash, true
 			},
 			FatalErrorFunc: func(err error) {
 				n.config.logger.Error(
@@ -331,31 +355,31 @@ func (n *Node) Run(ctx context.Context) error {
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
-			LedgerState: state,
-			Logger:      n.config.logger,
 		}, n.db.Blob())
 		if err != nil {
 			return fmt.Errorf("failed to create bark blob store: %w", err)
 		}
 		n.db.SetBlobStore(barkBlobStore)
+	}
 
-		prunerFreq := n.config.barkPrunerFrequency
+	if n.config.historyExpiry.Enabled {
+		prunerFreq := n.config.historyExpiry.Frequency
 		if prunerFreq <= 0 {
 			prunerFreq = time.Hour
 		}
-		n.barkPruner = bark.NewPruner(bark.PrunerConfig{
+		n.historyExpiry = historyexpiry.NewPruner(historyexpiry.PrunerConfig{
 			LedgerState: state,
 			DB:          n.db,
 			Logger:      n.config.logger,
 			Frequency:   prunerFreq,
 		})
 
-		if err := n.barkPruner.Start(n.ctx); err != nil {
-			return fmt.Errorf("failed to start pruner: %w", err)
+		if err := n.historyExpiry.Start(n.ctx); err != nil {
+			return fmt.Errorf("failed to start history expiry: %w", err)
 		}
 
 		started = append(started, func() {
-			_ = n.barkPruner.Stop(context.Background())
+			_ = n.historyExpiry.Stop(context.Background())
 		})
 	}
 
@@ -387,6 +411,33 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start snapshot manager: %w", err)
 	}
 	started = append(started, func() { _ = n.snapshotMgr.Stop() })
+	// Initialize Leios vote manager (experimental)
+	if enableDijkstra {
+		//nolint:contextcheck // n.ctx is the node's lifecycle context
+		if err := n.initLeiosVoteManager(n.ctx); err != nil {
+			return fmt.Errorf(
+				"failed to initialize leios vote manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.leiosVoteManager.Stop() })
+		// Initialize the Leios pipeline manager after the vote manager so
+		// it stops first (LIFO cleanup): it consumes the vote manager's
+		// EbQuorumEvent.
+		//nolint:contextcheck // n.ctx is the node's lifecycle context
+		if err := n.initLeiosPipelineManager(n.ctx); err != nil {
+			return fmt.Errorf(
+				"failed to initialize leios pipeline manager: %w",
+				err,
+			)
+		}
+		started = append(started, func() { _ = n.leiosPipelineManager.Stop() })
+	} else if n.config.leiosVoteSigningKeyFile != "" {
+		n.config.logger.Warn(
+			"leios vote signing key configured without leios mode; voting disabled",
+			"component", "node",
+		)
+	}
 	// Initialize mempool
 	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
 		MempoolCapacity:    n.config.mempoolCapacity,
@@ -411,8 +462,8 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 	})
-	// Set mempool in ledger state for block forging
-	n.ledgerState.SetMempool(n.mempool)
+	// Set mempool adapter in ledger state for block forging.
+	n.ledgerState.SetMempool(&ledgerMempoolAdapter{source: n.mempool})
 	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()
@@ -544,6 +595,29 @@ func (n *Node) Run(ctx context.Context) error {
 			n.deleteChainsyncIngressEligibility(e.ConnectionId)
 		},
 	)
+	// Forward peer-governance eligibility and priority updates to the chain
+	// selector. Subscription is placed here (node composition layer) so that
+	// chainselection/ has no dependency on peergov/.
+	n.eventBus.SubscribeFunc(
+		peergov.PeerEligibilityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerEligibilityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionEligible(e.ConnectionId, e.Eligible)
+		},
+	)
+	n.eventBus.SubscribeFunc(
+		peergov.PeerPriorityChangedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(peergov.PeerPriorityChangedEvent)
+			if !ok {
+				return
+			}
+			n.chainSelector.SetConnectionPriority(e.ConnectionId, e.Priority)
+		},
+	)
 	// Start the chain selector
 	if err := n.chainSelector.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start chain selector: %w", err)
@@ -567,6 +641,29 @@ func (n *Node) Run(ctx context.Context) error {
 		connmanager.ConnectionRecycleRequestedEventType,
 		n.connManager.HandleConnectionRecycleRequestedEvent,
 	)
+	// Translate ledger-owned recycle events to connmanager recycle events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		ledger.ConnectionRecycleRequestedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ledger.ConnectionRecycleRequestedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				connmanager.ConnectionRecycleRequestedEventType,
+				event.NewEvent(
+					connmanager.ConnectionRecycleRequestedEventType,
+					connmanager.ConnectionRecycleRequestedEvent{
+						ConnectionId: e.ConnectionId,
+						Reason:       e.Reason,
+						// ConnKey is intentionally omitted: HandleConnectionRecycleRequestedEvent
+						// closes the connection by ConnectionId alone and never reads ConnKey.
+					},
+				),
+			)
+		},
+	)
 	n.ouroboros.ConnManager = n.connManager
 	// Subscribe ouroboros to chainsync resync events from the
 	// ledger. This replaces the previous ChainsyncResyncFunc
@@ -580,21 +677,43 @@ func (n *Node) Run(ctx context.Context) error {
 		connmanager.ConnectionClosedEventType,
 		n.ouroboros.HandleConnClosedEvent,
 	)
+	// Translate connmanager connection-closed events to ledger-owned events so
+	// ledger/ does not import connmanager/.
+	n.eventBus.SubscribeFunc(
+		connmanager.ConnectionClosedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(connmanager.ConnectionClosedEvent)
+			if !ok {
+				return
+			}
+			n.eventBus.Publish(
+				ledger.ConnectionClosedEventType,
+				event.NewEvent(
+					ledger.ConnectionClosedEventType,
+					ledger.ConnectionClosedEvent{
+						ConnectionId: e.ConnectionId,
+						Error:        e.Error,
+					},
+				),
+			)
+		},
+	)
 	n.eventBus.SubscribeFunc(
 		connmanager.InboundConnectionEventType,
 		n.ouroboros.HandleInboundConnEvent,
 	)
 	// Configure peer governor before opening listeners so topology-driven
 	// outbound connections start first and do not lose the race to inbounds.
-	// Create ledger peer provider for discovering peers from stake pool relays.
-	ledgerPeerProvider, err := ledger.NewLedgerPeerProvider(
+	// Create ledger relay provider for discovering peers from stake pool relays.
+	ledgerRelayProvider, err := ledger.NewPoolRelayProvider(
 		n.ledgerState,
 		n.db,
 		n.eventBus,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create ledger peer provider: %w", err)
+		return fmt.Errorf("failed to create ledger relay provider: %w", err)
 	}
+	ledgerPeerProvider := ledgerpeers.NewProvider(ledgerRelayProvider)
 
 	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
 	var useLedgerAfterSlot int64 = -1
@@ -639,7 +758,37 @@ func (n *Node) Run(ctx context.Context) error {
 		n.ouroboros.HandleOutboundConnEvent,
 	)
 	if n.config.topologyConfig != nil {
-		n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+		topologyConfig := n.config.topologyConfig
+		usePeerSnapshot := genesisSelectionMode &&
+			topologyConfig.PeerSnapshot != nil &&
+			topologyConfig.PeerSnapshot.HasRelays()
+		if usePeerSnapshot {
+			topologyConfig = topologyConfig.WithoutBootstrapPeers()
+		}
+		n.peerGov.LoadTopologyConfig(topologyConfig)
+		if usePeerSnapshot {
+			added := n.peerGov.LoadPeerSnapshot(
+				n.config.topologyConfig.PeerSnapshot,
+			)
+			if added > 0 {
+				n.config.logger.Info(
+					"using peer snapshot for Genesis bootstrap",
+					"snapshot_slot",
+					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+					"snapshot_peers_added",
+					added,
+					"bootstrap_peers_omitted",
+					len(n.config.topologyConfig.BootstrapPeers),
+				)
+			} else {
+				n.config.logger.Warn(
+					"peer snapshot produced no usable peers; falling back to topology bootstrap peers",
+					"snapshot_slot",
+					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+				)
+				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+			}
+		}
 	}
 	if err := n.peerGov.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("peer governor start failed: %w", err)
@@ -666,7 +815,8 @@ func (n *Node) Run(ctx context.Context) error {
 	)
 	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
 	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
-	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx) //nolint:gosec // G118: cancel func stored in started slice
+	//nolint:gosec // G118: cancel func stored in started slice.
+	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
 	started = append(started, recyclerCancel)
 	go func(interval, grace, cooldown time.Duration) {
 		for {
@@ -839,9 +989,8 @@ func (n *Node) Run(ctx context.Context) error {
 		n.meshAPI, meshErr = mesh.NewServer(
 			mesh.ServerConfig{
 				Logger:              n.config.logger,
-				EventBus:            n.eventBus,
 				LedgerState:         n.ledgerState,
-				Database:            n.db,
+				Database:            mesh.NewMeshDatabase(n.db),
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
 				ListenAddress:       listenAddr,
@@ -872,6 +1021,40 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
+	if n.config.storageMode.IsAPI() {
+		fetcher, err := offchainmetadata.New(
+			offchainmetadata.Config{
+				Logger:                n.config.logger,
+				Store:                 n.db.Metadata(),
+				HTTPClient:            n.config.offchainMetadata.HTTPClient,
+				Interval:              n.config.offchainMetadata.Interval,
+				RequestTimeout:        n.config.offchainMetadata.RequestTimeout,
+				UserAgent:             n.config.offchainMetadata.UserAgent,
+				IPFSGatewayURL:        n.config.offchainMetadata.IPFSGatewayURL,
+				BatchSize:             n.config.offchainMetadata.BatchSize,
+				MaxBytes:              n.config.offchainMetadata.MaxBytes,
+				AllowPrivateAddresses: n.config.offchainMetadata.AllowPrivateAddresses,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("creating off-chain metadata fetcher: %w", err)
+		}
+		n.offchainMetadataFetcher = fetcher
+		if err := n.offchainMetadataFetcher.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting off-chain metadata fetcher: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.offchainMetadataFetcher.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop off-chain metadata fetcher during cleanup",
+					"error",
+					err,
+				)
+			}
+		})
+		started = append(started, n.startDeferredIndexMaintenance())
+	}
+
 	// Initialize block forger if production mode is enabled
 	if n.config.blockProducer {
 		creds, err := n.validateBlockProducerStartup()
@@ -888,6 +1071,11 @@ func (n *Node) Run(ctx context.Context) error {
 		//nolint:contextcheck // n.ctx is the node's lifecycle context, correct parent for forger
 		if err := n.initBlockForger(n.ctx, creds); err != nil {
 			return fmt.Errorf("failed to initialize block forger: %w", err)
+		}
+		// Enable Leios vote emission when a vote signing key is
+		// configured (experimental, leios mode only)
+		if err := n.enableLeiosVoting(creds); err != nil {
+			return fmt.Errorf("failed to enable leios voting: %w", err)
 		}
 		// Wire forger's slot tracker into ledger state for slot
 		// battle detection. The forger is created after the ledger
@@ -917,4 +1105,55 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// startDeferredIndexMaintenance finishes lazy deferred-index rebuilds
+// using the node's already-open database handle. The critical subset is
+// rebuilt before API readiness, so this background repair can restore
+// secondary query indexes and clear the pending marker without opening a
+// second Badger handle during serve startup.
+func (n *Node) startDeferredIndexMaintenance() func() {
+	manager, ok := n.db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
+		return func() {}
+	}
+	pending, err := manager.HasDeferredIndexesPending()
+	if err != nil {
+		n.config.logger.Error(
+			"checking deferred-index maintenance state failed",
+			"error", err,
+		)
+		return func() {}
+	}
+	if !pending {
+		n.config.logger.Info("deferred-index maintenance not needed")
+		return func() {}
+	}
+	done := make(chan struct{})
+	n.deferredIndexMaintenanceDone = done
+	n.config.logger.Info("deferred-index maintenance starting")
+	go func() {
+		defer close(done)
+		if err := manager.BuildDeferredIndexes(); err != nil {
+			n.config.logger.Error(
+				"deferred-index maintenance failed",
+				"error", err,
+			)
+			return
+		}
+		n.config.logger.Info("deferred-index maintenance complete")
+	}()
+	return func() {
+		timeout := n.configuredShutdownTimeout()
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			n.config.logger.Warn(
+				"timed out waiting for deferred-index maintenance; continuing cleanup",
+				"timeout", timeout,
+			)
+		}
+	}
 }

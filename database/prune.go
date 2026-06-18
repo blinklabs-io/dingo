@@ -24,13 +24,11 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
-// PruneBlock tombstones the given block in the blob store after
+// PruneBlock expires the given block's local CBOR in the blob store after
 // materializing any active UTxOs that still reference it. The block's CBOR
-// is replaced with a small tombstone marker; index pointers (bi, bh) and
-// metadata are kept so a wrapping archive proxy (e.g. bark) can still
-// resolve the block by (slot, hash) — without the tombstone the chain
-// iterator would hit ErrBlobKeyNotFound at the bi lookup before ever
-// reaching the proxy's GetBlock.
+// is replaced with a small expired-history marker; index pointers (bi, bh)
+// and metadata are kept so local reads can return ErrHistoryExpired and an
+// optional archive proxy can still resolve the block by (slot, hash).
 //
 // UTxO blob entries are stored as 52-byte CborOffset references that point
 // into a source block's CBOR. Tombstoning a block while live UTxOs still
@@ -38,9 +36,9 @@ import (
 // PruneBlock first finds every UTxO with added_slot equal to the pruned
 // block's slot, decodes its offset, slices the underlying CBOR out of the
 // block, and rewrites the UTxO blob entry as raw CBOR (which the resolver
-// treats as the legacy non-offset format). The block tombstone and all
+// treats as the legacy non-offset format). The block expiry marker and all
 // UTxO rewrites happen in a single blob transaction, so the block is
-// never tombstoned while live UTxOs still depend on it.
+// never expired while live UTxOs still depend on it.
 //
 // In core storage mode only live (deleted_slot = 0) UTxOs at the slot are
 // considered, because spent UTxOs are hard-deleted by the periodic
@@ -49,7 +47,7 @@ import (
 // indefinitely for historical transaction queries; in that mode every
 // UTxO at the slot (including spent rows whose blob entries still hold
 // offset references) is materialized so CBOR resolution survives the
-// block tombstone without requiring a wrapping archive proxy.
+// expired block without requiring a wrapping archive proxy.
 //
 // Returns the number of UTxOs that were materialized.
 func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
@@ -99,7 +97,7 @@ func (d *Database) PruneBlock(slot uint64, hash []byte) (int, error) {
 		}
 		if err := d.blob.TombstoneBlock(txn.Blob(), slot, hash); err != nil {
 			return fmt.Errorf(
-				"prune block (slot=%d): tombstone block: %w",
+				"prune block (slot=%d): expire block: %w",
 				slot,
 				err,
 			)

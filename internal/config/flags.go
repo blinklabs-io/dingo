@@ -49,8 +49,9 @@ var flagSpecs = []flagSpec{
 	stringFlag("DatabasePath", "data-dir", "", "data directory for all storage plugins (overrides CARDANO_DATABASE_PATH)"),
 	stringFlag("BindAddr", "bind-addr", "", "public bind address"),
 	stringFlag("SocketPath", "socket-path", "", "path to UNIX socket file"),
-	transformStringFlag("RunMode", "run-mode", "", "run mode: serve, load, dev, or leios", normalizeRunMode),
-	transformStringFlag("StorageMode", "storage-mode", "", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
+	transformStringFlag("RunMode", "run-mode", "run mode: serve, load, dev, or leios", normalizeRunMode),
+	transformStringFlag("StartEra", "start-era", "experimental start era: dijkstra", normalizeStartEra),
+	transformStringFlag("StorageMode", "storage-mode", `storage mode: "core" (minimal) or "api" (full indexing)`, normalizeStorageMode),
 	stringFlag("CardanoConfig", "cardano-config", "", "path to Cardano config file"),
 	stringFlag("Topology", "topology", "", "path to topology file"),
 	stringFlag("ShutdownTimeout", "shutdown-timeout", "", "graceful shutdown timeout"),
@@ -76,11 +77,23 @@ var flagSpecs = []flagSpec{
 	uintFlag("BlockfrostPort", "blockfrost-port", "Blockfrost-compatible API port"),
 	uintFlag("MeshPort", "mesh-port", "Mesh API port"),
 	stringSliceFlag("CORSAllowedOrigins", "cors-allowed-origins", "CORS allowed origins for API servers"),
+	durationFlag("OffchainMetadata.Interval", "offchain-metadata-interval", "off-chain metadata fetch interval (0 = default)"),
+	durationFlag("OffchainMetadata.RequestTimeout", "offchain-metadata-request-timeout", "off-chain metadata HTTP request timeout (0 = default)"),
+	stringFlag("OffchainMetadata.UserAgent", "offchain-metadata-user-agent", "", "off-chain metadata HTTP user agent (empty = default)"),
+	stringFlag("OffchainMetadata.IPFSGatewayURL", "offchain-metadata-ipfs-gateway-url", "", "IPFS gateway URL for off-chain metadata (empty = default)"),
+	intFlag("OffchainMetadata.BatchSize", "offchain-metadata-batch-size", "off-chain metadata rows to claim per pass (0 = default)"),
+	int64Flag("OffchainMetadata.MaxBytes", "offchain-metadata-max-bytes", "off-chain metadata max response bytes (0 = default)"),
+	boolFlag("OffchainMetadata.AllowPrivateAddresses", "offchain-metadata-allow-private-addresses", "allow off-chain metadata fetches to private, loopback, and link-local addresses"),
+	uintFlag("Midnight.Port", "midnight-port", "Midnight gRPC port (0 disables gRPC server)"),
+	stringFlag("Midnight.Host", "midnight-host", "", "Midnight gRPC listen address"),
 
 	// Bark
-	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive base URL"),
+	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
-	durationFlag("BarkPrunerFrequency", "bark-pruner-frequency", "Bark pruner run frequency"),
+
+	// History expiry
+	boolFlag("HistoryExpiry.Enabled", "history-expiry-enabled", "enable local immutable block history expiry"),
+	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
 
 	// Mempool
 	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),
@@ -124,6 +137,10 @@ var flagSpecs = []flagSpec{
 	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
 
+	// Logging
+	transformStringFlag("Logging.Format", "logging-format", "log output format: text (default) or json", normalizeLoggingValue),
+	transformStringFlag("Logging.Level", "logging-level", "log level: debug, info (default), warn, or error", normalizeLoggingValue),
+
 	// Database workers and API backfill
 	intFlag("DatabaseWorkers", "db-workers", "database worker pool worker count"),
 	intFlag("DatabaseQueueSize", "db-queue-size", "database worker pool task queue size"),
@@ -139,9 +156,14 @@ var flagSpecs = []flagSpec{
 	uint64Flag("ForgeSyncToleranceSlots", "forge-sync-tolerance-slots", "max slots behind tip before skipping block forging"),
 	uint64Flag("ForgeStaleGapThresholdSlots", "forge-stale-gap-threshold-slots", "slot gap threshold for stale slot clock alerts"),
 
+	// Leios voting (experimental)
+	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
+	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
+
 	// Mithril
 	boolFlag("Mithril.Enabled", "mithril-enabled", "enable Mithril integration"),
 	stringFlag("Mithril.AggregatorURL", "mithril-aggregator-url", "", "Mithril aggregator URL override"),
+	stringFlag("Mithril.Backend", "mithril-backend", "", "Mithril artifact backend: v1 (legacy snapshots) or v2 (incremental database)"),
 	stringFlag("Mithril.DownloadDir", "mithril-download-dir", "", "Mithril snapshot download directory"),
 	stringFlag("Mithril.DownloadIdleTimeout", "mithril-download-idle-timeout", "", "Mithril snapshot download idle timeout"),
 	intFlag("Mithril.DownloadMaxIdleRetries", "mithril-download-max-idle-retries", "Mithril snapshot download idle retries without progress"),
@@ -162,10 +184,19 @@ func RegisterFlags(cmd *cobra.Command) {
 // not pass are ignored so YAML and env-var values survive.
 func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	flags := cmd.Root().PersistentFlags()
+	previousNetwork := cfg.Network
 	for _, spec := range flagSpecs {
 		if err := spec.apply(flags, cfg); err != nil {
 			return err
 		}
+	}
+	if cfg.Network != previousNetwork {
+		clearMidnightNetworkDefaults(cfg, previousNetwork)
+	}
+	applyMidnightNetworkDefaults(cfg)
+	globalConfig = cfg
+	if _, err := LoadTopologyConfig(); err != nil {
+		return fmt.Errorf("loading topology after flags: %w", err)
 	}
 	return nil
 }
@@ -234,6 +265,29 @@ func stringSliceFlag(field, name, help string) flagSpec {
 	}
 }
 
+func stringToStringFlag(field, name, help string) flagSpec {
+	return flagSpec{
+		field: field,
+		name:  name,
+		register: func(f *pflag.FlagSet) {
+			def, _ := defaultValue(field).
+				Interface().(map[string]string)
+			f.StringToString(name, def, help)
+		},
+		apply: func(f *pflag.FlagSet, cfg *Config) error {
+			if !f.Changed(name) {
+				return nil
+			}
+			v, err := f.GetStringToString(name)
+			if err != nil {
+				return err
+			}
+			targetValue(cfg, field).Set(reflect.ValueOf(v))
+			return nil
+		},
+	}
+}
+
 // validatedStringFlag rejects invalid values but stores them verbatim.
 func validatedStringFlag(
 	field, name, shorthand, help string,
@@ -260,10 +314,10 @@ func validatedStringFlag(
 // transformStringFlag normalizes the parsed value (e.g. lowercasing)
 // and may reject it; the transformed value is stored.
 func transformStringFlag(
-	field, name, shorthand, help string,
+	field, name, help string,
 	transform func(string) (string, error),
 ) flagSpec {
-	s := stringFlag(field, name, shorthand, help)
+	s := stringFlag(field, name, "", help)
 	s.apply = func(f *pflag.FlagSet, cfg *Config) error {
 		if !f.Changed(name) {
 			return nil
@@ -494,6 +548,17 @@ func normalizeRunMode(v string) (string, error) {
 	return string(mode), nil
 }
 
+func normalizeStartEra(v string) (string, error) {
+	era := StartEra(strings.ToLower(v))
+	if !era.Valid() {
+		return "", fmt.Errorf(
+			"invalid start era %q: must be empty or 'dijkstra'",
+			v,
+		)
+	}
+	return string(era), nil
+}
+
 func normalizeStorageMode(v string) (string, error) {
 	m := strings.ToLower(v)
 	switch m {
@@ -505,4 +570,12 @@ func normalizeStorageMode(v string) (string, error) {
 			v, storageModeCore, storageModeAPI,
 		)
 	}
+}
+
+// normalizeLoggingValue lower-cases a logging format/level flag so values are
+// accepted case-insensitively (e.g. --logging-format=JSON). It does not
+// validate: unknown values are handled by the logger's warn-and-fallback path,
+// keeping flag, env, and YAML behavior identical.
+func normalizeLoggingValue(v string) (string, error) {
+	return strings.ToLower(strings.TrimSpace(v)), nil
 }

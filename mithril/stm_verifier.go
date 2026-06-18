@@ -227,7 +227,8 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 	// from a malformed totalSigs value.
 	remaining := len(raw) - offset
 	const minSigSize = 8
-	maxSigs := uint64(remaining / minSigSize) //nolint:gosec // remaining is non-negative (checked len >= 8 above)
+	//nolint:gosec // remaining is non-negative.
+	maxSigs := uint64(remaining / minSigSize)
 	if totalSigs > maxSigs {
 		return nil, fmt.Errorf(
 			"totalSigs %d exceeds maximum possible given payload size (%d bytes remaining)",
@@ -249,10 +250,13 @@ func parseSTMAggregateSignatureBytes(raw []byte) (*stmAggregateSignature, error)
 			return nil, err
 		}
 		offset += 8
-		if sizeSigReg > uint64(len(raw)-offset) { //nolint:gosec // offset <= len(raw) guaranteed by bounds check above
+		//nolint:gosec // offset <= len(raw).
+		available := uint64(len(raw) - offset)
+		if sizeSigReg > available {
 			return nil, errors.New("signature-with-party bytes overflow")
 		}
-		sigRegEnd := offset + int(sizeSigReg) //nolint:gosec // sizeSigReg <= len(raw)-offset, fits in int
+		//nolint:gosec // bounded by available.
+		sigRegEnd := offset + int(sizeSigReg)
 		sigReg, err := parseSTMSignatureWithRegisteredPartyBytes(raw[offset:sigRegEnd])
 		if err != nil {
 			return nil, err
@@ -282,10 +286,13 @@ func parseSTMSignatureWithRegisteredPartyBytes(
 		return nil, err
 	}
 	regPartyStart := 8
-	if regPartySize > uint64(len(raw)-regPartyStart) { //nolint:gosec // regPartyStart <= len(raw) guaranteed above
+	//nolint:gosec // regPartyStart <= len(raw).
+	available := uint64(len(raw) - regPartyStart)
+	if regPartySize > available {
 		return nil, errors.New("registered party bytes overflow")
 	}
-	regPartyEnd := regPartyStart + int(regPartySize) //nolint:gosec // regPartySize <= len(raw)-regPartyStart, fits in int
+	//nolint:gosec // bounded by available.
+	regPartyEnd := regPartyStart + int(regPartySize)
 	regParty, err := parseSTMClosedRegistrationEntryBytes(raw[regPartyStart:regPartyEnd])
 	if err != nil {
 		return nil, err
@@ -302,10 +309,13 @@ func parseSTMSignatureWithRegisteredPartyBytes(
 		return nil, err
 	}
 	sigStart := sigLenOffset + 8
-	if sigSize > uint64(len(raw)-sigStart) { //nolint:gosec // sigStart <= len(raw) guaranteed above
+	//nolint:gosec // sigStart <= len(raw).
+	available = uint64(len(raw) - sigStart)
+	if sigSize > available {
 		return nil, errors.New("single signature bytes overflow")
 	}
-	sigEnd := sigStart + int(sigSize) //nolint:gosec // sigSize <= len(raw)-sigStart, fits in int
+	//nolint:gosec // bounded by available.
+	sigEnd := sigStart + int(sigSize)
 	sig, err := parseSTMSingleSignatureBytes(raw[sigStart:sigEnd])
 	if err != nil {
 		return nil, err
@@ -344,7 +354,8 @@ func parseSTMSingleSignatureBytes(raw []byte) (*stmSingleSignature, error) {
 		return nil, err
 	}
 	// Each index is 8 bytes; cap pre-allocation against remaining payload.
-	remaining := uint64(len(raw) - 8) //nolint:gosec // non-negative: checked len >= 8 above
+	//nolint:gosec // non-negative: checked len >= 8.
+	remaining := uint64(len(raw) - 8)
 	if nrIndexes > remaining/8 {
 		return nil, fmt.Errorf(
 			"nrIndexes %d exceeds maximum possible given payload size (%d bytes remaining)",
@@ -391,7 +402,8 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 	}
 	// Each value is 32 bytes and each index is 8 bytes; validate that the
 	// claimed counts are consistent with the remaining payload length.
-	remaining := uint64(len(raw) - 16) //nolint:gosec // non-negative: checked len >= 16 above
+	//nolint:gosec // non-negative: checked len >= 16.
+	remaining := uint64(len(raw) - 16)
 	if lenValues > remaining/32 {
 		return nil, fmt.Errorf(
 			"lenValues %d exceeds maximum possible given payload size (%d bytes remaining)",
@@ -426,7 +438,9 @@ func parseSTMMerkleBatchPathBytes(raw []byte) (*stmMerkleBatchPath, error) {
 			return nil, err
 		}
 		offset += 8
-		ret.Indices = append(ret.Indices, int(index)) //nolint:gosec // index validated against payload bounds
+		//nolint:gosec // index validated against payload bounds.
+		indexInt := int(index)
+		ret.Indices = append(ret.Indices, indexInt)
 	}
 	return ret, nil
 }

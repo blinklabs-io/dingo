@@ -80,18 +80,26 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_PORT`
   - TCP port for the Bark block archive API (default: `0`, disabled)
 - `DINGO_BARK_BASE_URL`
-  - Base URL of a remote Bark archive node used for archive-backed local pruning
+  - Base URL of a remote Bark archive node used for archive fallback
     (default: empty, disabled)
-- `DINGO_BARK_PRUNER_FREQUENCY`
-  - How often an archive-backed pruning node scans for old local blocks to
-    prune (default: `1h`)
+- `DINGO_HISTORY_EXPIRY_ENABLED`
+  - Enable local expiry of immutable block CBOR older than the ledger stability
+    window (default: `false`)
+- `DINGO_HISTORY_EXPIRY_FREQUENCY`
+  - How often a history-expiry node scans for old local blocks (default: `1h`)
 - `DINGO_STORAGE_MODE`
   - Storage mode: `core` (default) or `api`
   - `core` stores only consensus data (UTxOs, certs, pools, protocol params)
   - `api` additionally stores witnesses, scripts, datums, redeemers, and tx metadata
   - API servers (Blockfrost, UTxO RPC, Mesh) require `api` mode
 - `DINGO_RUN_MODE`
-  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios protocol support)
+  - Run mode: `serve` (full node, default), `load` (batch import), `dev` (development mode), or `leios` (experimental Leios/Dijkstra protocol support)
+- `DINGO_START_ERA`
+  - Experimental startup era override. Set to `dijkstra` only for Dijkstra/Leios test networks; leave empty to follow genesis protocol version.
+- `DINGO_LOGGING_FORMAT`
+  - Log output format: `text` (default, human-readable) or `json` (machine-parseable, for ELK/Loki ingestion)
+- `DINGO_LOGGING_LEVEL`
+  - Minimum log level: `debug`, `info` (default), `warn`, or `error` (the `--debug` flag overrides this to `debug`)
 - `TLS_CERT_FILE_PATH` - SSL certificate to use, requires `TLS_KEY_FILE_PATH`
     (default: empty)
 - `TLS_KEY_FILE_PATH` - SSL certificate key to use (default: empty)
@@ -198,12 +206,14 @@ blockfrostPort: 3100
 utxorpcPort: 9090
 ```
 
-### Archive And Pruning Nodes
+### Archive And History Expiry Nodes
 
-Dingo can be deployed as an archive node that keeps immutable block CBOR in
-cloud-native object storage, and paired pruning nodes can then remove old block
-CBOR from their own local blob stores while still serving historical block
-requests through the archive.
+Dingo can expire immutable block CBOR from a local blob store once blocks are
+older than the ledger-derived stability window. This History Expiry mode is a
+valid standalone operational mode: without an archive fallback, reads for
+expired blocks return a clear history-expired error. When paired with Bark,
+expired or missing historical block reads can be transparently served from a
+remote archive node.
 
 An archive node uses a signed-URL-capable blob plugin (`s3` or `gcs`) and
 enables Bark with `barkPort`. Bark answers Dingo-to-Dingo archive requests by
@@ -223,24 +233,30 @@ database:
 barkPort: 9091
 ```
 
-A pruning node keeps its normal local blob store, sets `barkBaseUrl` to the
-archive node, and optionally tunes `barkPrunerFrequency`. Dingo wraps the local
-blob store with the Bark archive adapter, starts a background pruner, and prunes
-blocks older than the ledger-derived stability window. Pruned blocks keep their
-local indexes and a tombstone marker, so block fetches and block iterators can
-transparently retrieve the CBOR from the archive when needed.
+A history-expiry node keeps its normal local blob store and enables
+`historyExpiry`. Dingo expires blocks older than the ledger-derived stability
+window while keeping local indexes and metadata, so reads fail explicitly as
+expired history unless an archive wrapper can serve them.
 
 ```yaml
 storageMode: "core"
 database:
   blob:
     plugin: "badger"
+historyExpiry:
+  enabled: true
+  frequency: 1h
+```
+
+Add `barkBaseUrl` when expired historical reads should fall back to a Bark
+archive:
+
+```yaml
 barkBaseUrl: "http://archive.example.internal:9091"
-barkPrunerFrequency: 1h
 ```
 
 The runnable demonstration in `internal/test/archive-demo/` brings up an S3
-compatible Minio archive node, a local Badger pruning node, and an end-to-end
+compatible Minio archive node, a local Badger history-expiry node, and an end-to-end
 BlockFetch check through Bark.
 
 ### Deployment Patterns
@@ -260,8 +276,9 @@ DINGO_STORAGE_MODE=api DINGO_BLOCKFROST_PORT=3100 ./dingo
 DINGO_DATABASE_BLOB_PLUGIN=s3 DINGO_BARK_PORT=9091 ./dingo
 ```
 
-**Pruning node** (local storage plus a remote Bark archive):
+**History-expiry node** (local storage plus a remote Bark archive):
 ```bash
+DINGO_HISTORY_EXPIRY_ENABLED=true \
 DINGO_BARK_BASE_URL=http://archive.example.internal:9091 ./dingo
 ```
 
@@ -297,11 +314,17 @@ Or use the subcommand form for more control:
 ./dingo -n preview mithril list
 
 # Show snapshot details
-./dingo -n preview mithril show <digest>
+./dingo -n preview mithril show <hash>
 
 # Download and import
 ./dingo -n preview mithril sync
 ```
+
+Two Mithril artifact backends are supported via `mithril.backend` (or
+`--mithril-backend`): `v2` (default) restores from incremental per-immutable-file
+archives verified against the certified merkle root, while `v1` uses the legacy
+full snapshot tarballs, which upstream Mithril is phasing out. The `mithril list`
+and `mithril show` subcommands follow the configured backend.
 
 This imports:
 - All blocks from genesis (stored in blob store for serving peers)

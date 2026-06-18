@@ -79,6 +79,59 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	}
 }
 
+func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
+	db, sqliteStore := setupTestDB(t)
+	gormDB := sqliteStore.DB()
+
+	for _, e := range []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	} {
+		require.NoError(t, gormDB.Create(&e).Error)
+	}
+
+	poolHash := []byte("poolM_12345678901234567890EF")
+	seedPoolAndDelegations(t, sqliteStore, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  []byte("aliceEF_staking_key_1234567890"),
+			utxoAmounts: []types.Uint64{50000000},
+		},
+	}, 64800000)
+
+	for _, epoch := range []uint64{148, 149, 150} {
+		require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+			&models.PoolStakeSnapshot{
+				Epoch:          epoch,
+				SnapshotType:   "mark",
+				PoolKeyHash:    poolHash,
+				TotalStake:     types.Uint64(50000000),
+				DelegatorCount: 1,
+				CapturedSlot:   64800000,
+			},
+			nil,
+		))
+	}
+
+	eventBus := event.NewEventBus(nil, nil)
+	mgr := NewManager(db, eventBus, nil)
+
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		0,
+		"mark",
+		poolHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Nil(t, snapshot, "existing post-Mithril window should skip epoch-0 reseed")
+}
+
 // TestCaptureGenesisSnapshot_PostMithrilAutoVoteFlagOnlyOnCurrentEpoch
 // asserts the CIP-1694 reward-account auto-vote resolution gate on
 // the post-Mithril seeding loop: live Pool/Account state at bootstrap

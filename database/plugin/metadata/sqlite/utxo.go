@@ -384,6 +384,28 @@ func (d *MetadataStoreSqlite) GetControlledAmountByStakingKey(
 	return total, nil
 }
 
+// GetScriptLockedSupply returns the sum of lovelace held in live UTxOs
+// whose payment credential is a script.
+func (d *MetadataStoreSqlite) GetScriptLockedSupply(
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, fmt.Errorf(
+			"resolve read DB for script-locked supply: %w",
+			err,
+		)
+	}
+	var total uint64
+	if err := db.Model(&models.Utxo{}).
+		Where("payment_script = ? AND deleted_slot = 0", true).
+		Select("COALESCE(SUM(amount), 0)").
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("get script-locked supply: %w", err)
+	}
+	return total, nil
+}
+
 // GetUtxosByAddressWithOrdering returns UTxOs matching q (OR of addresses, optional asset).
 func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 	q *models.UtxoWithOrderingQuery,

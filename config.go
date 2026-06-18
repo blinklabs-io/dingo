@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"net/http"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,8 +29,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -74,6 +78,44 @@ func (m StorageMode) IsAPI() bool {
 	return m == StorageModeAPI
 }
 
+// HistoryExpiryConfig controls local expiry of immutable block history.
+type HistoryExpiryConfig struct {
+	Enabled   bool
+	Frequency time.Duration
+}
+
+// OffchainMetadataConfig controls API-mode off-chain metadata fetching.
+// Zero values use the internal fetcher defaults.
+type OffchainMetadataConfig struct {
+	HTTPClient            *http.Client
+	Interval              time.Duration
+	RequestTimeout        time.Duration
+	UserAgent             string
+	IPFSGatewayURL        string
+	BatchSize             int
+	MaxBytes              int64
+	AllowPrivateAddresses bool
+}
+
+// MidnightConfig controls the Midnight indexer and optional gRPC listener.
+// Indexing is only active in API storage mode. Port 0 disables the gRPC
+// listener while leaving indexing eligible to run.
+type MidnightConfig struct {
+	Port uint
+	Host string
+
+	CNightPolicyID              string
+	CNightAssetName             string
+	MappingValidatorAddress     string
+	AuthTokenAssetName          string
+	CommitteeCandidateAddress   string
+	TechnicalCommitteeAddress   string
+	TechnicalCommitteePolicyID  string
+	CouncilAddress              string
+	CouncilPolicyID             string
+	PermissionedCandidatePolicy string
+}
+
 type Config struct {
 	promRegistry             prometheus.Registerer
 	topologyConfig           *topology.TopologyConfig
@@ -95,7 +137,7 @@ type Config struct {
 	utxorpcPort              uint
 	barkBaseUrl              string
 	barkPort                 uint
-	barkPrunerFrequency      time.Duration
+	historyExpiry            HistoryExpiryConfig
 	corsAllowedOrigins       []string
 	networkMagic             uint32
 	intersectTip             bool
@@ -104,6 +146,7 @@ type Config struct {
 	tracing                  bool
 	tracingStdout            bool
 	runMode                  string
+	startEra                 internalconfig.StartEra
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
 	// Peer targets (0 = use default, -1 = unlimited)
@@ -142,8 +185,18 @@ type Config struct {
 	// Forging tolerances (0 = use defaults)
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+	// Leios voting configuration (experimental)
+	leiosVoteSigningKeyFile string
+	leiosVoterPublicKeys    map[string]string
+	// Leios pipeline timing override (experimental, provisional). Nil
+	// uses leios.DefaultPipelineTiming.
+	leiosPipelineTiming *leios.PipelineTiming
 	// Blockfrost API port (0 = disabled)
 	blockfrostPort uint
+	// Off-chain metadata fetcher configuration
+	offchainMetadata OffchainMetadataConfig
+	// Midnight indexer and gRPC API configuration
+	midnight MidnightConfig
 	// Chainsync multi-client configuration
 	chainsyncMaxClients   int
 	chainsyncStallTimeout time.Duration
@@ -315,6 +368,10 @@ func (c *Config) isDevMode() bool {
 	return c.runMode == runModeDev
 }
 
+func (c *Config) experimentalDijkstraEnabled() bool {
+	return c.runMode == runModeLeios || c.startEra.IsDijkstra()
+}
+
 func (n *Node) configValidate() error {
 	// Default storageMode to "core" when unset, and validate.
 	if n.config.storageMode == "" {
@@ -326,6 +383,13 @@ func (n *Node) configValidate() error {
 			n.config.storageMode,
 			StorageModeCore,
 			StorageModeAPI,
+		)
+	}
+	if !n.config.startEra.Valid() {
+		return fmt.Errorf(
+			"invalid start era %q: must be empty or %q",
+			n.config.startEra,
+			internalconfig.StartEraDijkstra,
 		)
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
@@ -377,6 +441,13 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		// We do this so we don't have to add guards around every log operation
 		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		genesisBootstrap: true,
+		historyExpiry: HistoryExpiryConfig{
+			Frequency: time.Hour,
+		},
+		midnight: MidnightConfig{
+			Port: 50051,
+			Host: "0.0.0.0",
+		},
 		corsAllowedOrigins: []string{
 			"*",
 		},
@@ -582,6 +653,14 @@ func WithRunMode(mode string) ConfigOptionFunc {
 	}
 }
 
+// WithStartEra sets the experimental direct startup era. Empty uses the
+// genesis protocol version; "dijkstra" starts directly in the Dijkstra era.
+func WithStartEra(startEra string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.startEra = internalconfig.StartEra(startEra)
+	}
+}
+
 // WithValidateHistorical specifies whether to validate all historical blocks during ledger processing
 func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -777,6 +856,40 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	}
 }
 
+// WithLeiosVoteSigningKeyFile specifies the path to a hex-encoded BLS12-381
+// Leios vote signing key (DINGO_LEIOS_VOTE_SIGNING_KEY_FILE). When set on a
+// block producer whose pool is a Leios committee member, the node emits
+// votes for endorser blocks. Experimental, leios runMode only.
+func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.leiosVoteSigningKeyFile = path
+	}
+}
+
+// WithLeiosVoterPublicKeys specifies the static Leios voter public key
+// registry (DINGO_LEIOS_VOTER_PUBLIC_KEYS): hex pool key hash to
+// hex-encoded BLS12-381 public key. Stands in for CIP-0164 key
+// registration, which is not yet specified. Experimental, leios runMode
+// only.
+func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
+	return func(c *Config) {
+		// Copy so later caller mutations cannot change live config
+		c.leiosVoterPublicKeys = maps.Clone(keys)
+	}
+}
+
+// WithLeiosPipelineTiming overrides the provisional Leios pipeline stage
+// timing windows. CIP-0164 has not finalized these parameters, so they are
+// kept off-chain and overridable here rather than as protocol parameters.
+// When unset, leios.DefaultPipelineTiming applies. Experimental, leios
+// runMode only.
+func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
+	return func(c *Config) {
+		t := timing
+		c.leiosPipelineTiming = &t
+	}
+}
+
 // WithForgeSyncToleranceSlots sets the slot gap tolerated before forging is skipped.
 // Use 0 to fall back to the built-in default.
 func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
@@ -815,12 +928,10 @@ func WithBarkPort(port uint) ConfigOptionFunc {
 	}
 }
 
-// WithBarkPrunerFrequency specifies how often the Bark pruner runs
-// (deleting blob entries older than the ledger stability window).
-// Default is 1 hour. Values <= 0 fall back to the default.
-func WithBarkPrunerFrequency(freq time.Duration) ConfigOptionFunc {
+// WithHistoryExpiry configures local immutable block history expiry.
+func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkPrunerFrequency = freq
+		c.historyExpiry = cfg
 	}
 }
 
@@ -830,6 +941,21 @@ func WithBarkPrunerFrequency(freq time.Duration) ConfigOptionFunc {
 func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.corsAllowedOrigins = slices.Clone(origins)
+	}
+}
+
+// WithOffchainMetadataConfig configures the API-mode off-chain metadata
+// fetcher. Zero values use the fetcher's internal defaults.
+func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.offchainMetadata = cfg
+	}
+}
+
+// WithMidnightConfig configures the Midnight indexer and optional gRPC API.
+func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
+	return func(c *Config) {
+		c.midnight = cfg
 	}
 }
 

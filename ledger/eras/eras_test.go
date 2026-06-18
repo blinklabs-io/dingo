@@ -72,13 +72,14 @@ func TestGetEraById(t *testing.T) {
 			wantNil:  false,
 		},
 		{
-			name:    "Invalid era ID (does not exist)",
-			eraId:   999,
-			wantNil: true,
+			name:     "Dijkstra era (ID=7)",
+			eraId:    7,
+			expected: &eras.DijkstraEraDesc,
+			wantNil:  false,
 		},
 		{
-			name:    "Gap era ID (ID=7, non-existent era)",
-			eraId:   7,
+			name:    "Invalid era ID (does not exist)",
+			eraId:   999,
 			wantNil: true,
 		},
 		{
@@ -138,10 +139,10 @@ func TestGetEraById(t *testing.T) {
 }
 
 // TestGetEraById_HandlesGapsInEraIds tests that the function properly handles
-// the gaps in era IDs (like missing 5, 6, 8) without panicking
+// unknown era IDs without panicking.
 func TestGetEraById_HandlesGapsInEraIds(t *testing.T) {
 	// These era IDs don't exist and should return nil
-	gapIds := []uint{7, 8, 9, 10, 100, 1000}
+	gapIds := []uint{8, 9, 10, 100, 1000}
 
 	for _, eraId := range gapIds {
 		t.Run(t.Name(), func(t *testing.T) {
@@ -158,10 +159,10 @@ func TestGetEraById_HandlesGapsInEraIds(t *testing.T) {
 	}
 }
 
-// TestGetEraById_AllKnownEras verifies that all eras in the Eras array
+// TestGetEraById_AllKnownEras verifies that all compiled era descriptors
 // can be retrieved by their actual ID (not array index)
 func TestGetEraById_AllKnownEras(t *testing.T) {
-	for i, era := range eras.Eras {
+	for i, era := range eras.ErasWithDijkstra {
 		t.Run(era.Name, func(t *testing.T) {
 			result := eras.GetEraById(era.Id)
 
@@ -193,7 +194,7 @@ func TestGetEraById_AllKnownEras(t *testing.T) {
 			}
 
 			// Verify it's pointing to the same era descriptor
-			if result != &eras.Eras[i] {
+			if result != &eras.ErasWithDijkstra[i] {
 				t.Errorf(
 					"GetEraById(%d) returned different era descriptor than expected",
 					era.Id,
@@ -201,6 +202,27 @@ func TestGetEraById_AllKnownEras(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestActiveEras_DijkstraGate(t *testing.T) {
+	defaultEras := eras.ActiveEras(false)
+	assert.Equal(t, eras.Eras, defaultEras)
+	assert.Nil(t, eras.GetEraByIdIn(defaultEras, eras.DijkstraEraDesc.Id))
+
+	dijkstraEras := eras.ActiveEras(true)
+	assert.Equal(t, eras.ErasWithDijkstra, dijkstraEras)
+	result := eras.GetEraByIdIn(dijkstraEras, eras.DijkstraEraDesc.Id)
+	assert.NotNil(t, result)
+	assert.Equal(t, eras.DijkstraEraDesc.Name, result.Name)
+}
+
+func TestEraForVersionIn_DijkstraGate(t *testing.T) {
+	_, found := eras.EraForVersionIn(eras.ActiveEras(false), 12)
+	assert.False(t, found)
+
+	result, found := eras.EraForVersionIn(eras.ActiveEras(true), 12)
+	assert.True(t, found)
+	assert.Equal(t, eras.DijkstraEraDesc.Id, result.Id)
 }
 
 func TestIsCompatibleEra(t *testing.T) {

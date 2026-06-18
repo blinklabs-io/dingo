@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Operator-facing guided demo of the archive-node + pruning-node + bark
-# proxy story. Stands the stack up, narrates chain growth and pruner
+# Operator-facing guided demo of the archive-node + history-expiry-node + bark
+# proxy story. Stands the stack up, narrates chain growth and expiry
 # activity, then shows a live BlockFetch from outside the stack against
-# a block that has already been pruned locally.
+# a block whose local history has already expired.
 #
 # Usage:
 #   ./demo.sh             # full guided demo
@@ -27,9 +27,9 @@
 #   1. Stack comes up (Minio + cardano-producer + dingo-archive + dingo-pruning).
 #   2. Chain advances; both Dingo nodes track it.
 #   3. Minio bucket fills with block CBOR objects as the archive node writes.
-#   4. Pruner kicks in once tip is past the stability window (3k/f = 300
+#   4. History Expiry kicks in once tip is past the stability window (3k/f = 300
 #      slots for testnet.yaml); local Badger blob count drops.
-#   5. demo-fetch BlockFetches a block at slot ~50 from the pruning node
+#   5. demo-fetch BlockFetches a block at slot ~50 from the expiry node
 #      and prints "OK: fetched X bytes from dingo-pruning in Yms" once the
 #      bark proxy returns the block from the archive.
 
@@ -160,34 +160,34 @@ badger_blob_size() {
     | awk '{print $1}' || echo "?"
 }
 
-pruner_rounds() {
-  docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'completed round of pruning' || true
+expiry_rounds() {
+  docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'history expiry: completed round' || true
 }
 
-pruner_skipped() {
-  docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'skipped because current slot is not high enough' || true
+expiry_skipped() {
+  docker logs archivedemo-dingo-pruning 2>&1 | grep -c 'history expiry: skipped because current slot is not high enough' || true
 }
 
 # ---------------------------------------------------------------------------
 # Watch the system grow: print a stats line every 10s until tip clears the
-# security window and the pruner has had time to act on slot ~50.
+# security window and History Expiry has had time to act on slot ~50.
 # ---------------------------------------------------------------------------
-say "Watching chain grow and pruner act..."
-note "Stability window: 300 slots (3k/f from testnet.yaml). Target: tip >= 400 (pruner will have removed slots 0..99)."
+say "Watching chain grow and History Expiry act..."
+note "Stability window: 300 slots (3k/f from testnet.yaml). Target: tip >= 400 (History Expiry will have expired slots 0..99)."
 TARGET_TIP=400
 deadline=$(( $(date +%s) + 600 ))
-prev_pruner=0
+prev_expiry=0
 while true; do
   tip="$(last_tip_slot 2>/dev/null || true)"
   tip="${tip:-0}"
   obj_total=$(minio_object_count)
   obj_bp=$(minio_block_objects)
   badger=$(badger_blob_size)
-  rounds=$(pruner_rounds)
-  delta=$(( rounds - prev_pruner ))
-  prev_pruner=${rounds}
+  rounds=$(expiry_rounds)
+  delta=$(( rounds - prev_expiry ))
+  prev_expiry=${rounds}
 
-  printf '   tip=%-4s  minio_objects=%-5s  minio_block_cbor=%-4s  pruning_node_blob=%-7s  pruner_rounds=%s (+%d)\n' \
+  printf '   tip=%-4s  minio_objects=%-5s  minio_block_cbor=%-4s  expiry_node_blob=%-7s  expiry_rounds=%s (+%d)\n' \
     "${tip}" "${obj_total}" "${obj_bp}" "${badger}" "${rounds}" "${delta}"
 
   if [[ ${tip} -ge ${TARGET_TIP} ]]; then
@@ -199,14 +199,14 @@ while true; do
   sleep 10
 done
 
-note "Tip is past the security window. Pruner has run $(pruner_rounds) rounds."
+note "Tip is past the security window. History Expiry has run $(expiry_rounds) rounds."
 
 # ---------------------------------------------------------------------------
 # BlockFetch a block well behind the security window. Show timing.
 # ---------------------------------------------------------------------------
 say "BlockFetch test: requesting a block at slot ~50 from dingo-pruning"
 note "  slot 50 is ~350 slots behind the current tip (well past the 300-slot window)"
-note "  it has been deleted from dingo-pruning's local Badger"
+note "  it has expired from dingo-pruning's local Badger"
 note "  if the bark proxy is wired correctly, dingo-pruning fetches it from the archive"
 note ""
 note "Running demo-fetch (timeout 60s)..."

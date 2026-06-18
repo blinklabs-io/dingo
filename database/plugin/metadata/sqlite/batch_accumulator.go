@@ -17,12 +17,10 @@ package sqlite
 import (
 	"fmt"
 	"maps"
-	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -306,22 +304,22 @@ func (d *MetadataStoreSqlite) FlushBatch(
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
 		}
 
-		if err := batchCreate(db, batch.KeyWitnesses); err != nil {
+		if err := insertKeyWitnesses(db, batch.KeyWitnesses); err != nil {
 			return fmt.Errorf("flush batch: create key witnesses: %w", err)
 		}
-		if err := batchCreate(db, batch.WitnessScripts); err != nil {
+		if err := insertWitnessScripts(db, batch.WitnessScripts); err != nil {
 			return fmt.Errorf("flush batch: create witness scripts: %w", err)
 		}
-		if err := batchCreateScripts(db, batch.Scripts); err != nil {
+		if err := insertScripts(db, batch.Scripts); err != nil {
 			return fmt.Errorf("flush batch: create scripts: %w", err)
 		}
-		if err := batchCreate(db, batch.PlutusData); err != nil {
+		if err := insertPlutusData(db, batch.PlutusData); err != nil {
 			return fmt.Errorf("flush batch: create plutus data: %w", err)
 		}
-		if err := batchCreate(db, batch.Redeemers); err != nil {
+		if err := insertRedeemers(db, batch.Redeemers); err != nil {
 			return fmt.Errorf("flush batch: create redeemers: %w", err)
 		}
-		if err := batchCreate(db, batch.AddressTxs); err != nil {
+		if err := insertAddressTxs(db, batch.AddressTxs); err != nil {
 			return fmt.Errorf("flush batch: create address txs: %w", err)
 		}
 		return nil
@@ -338,34 +336,11 @@ func (d *MetadataStoreSqlite) FlushBatch(
 	return nil
 }
 
-func batchCreate[T any](db *gorm.DB, items []T) error {
-	if len(items) == 0 {
-		return nil
-	}
-	if result := db.CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
-}
-
 func batchCreateUtxos(db *gorm.DB, items []models.Utxo) error {
 	if len(items) == 0 {
 		return nil
 	}
 	return importUtxosWithDB(db, items)
-}
-
-func batchCreateScripts(db *gorm.DB, items []models.Script) error {
-	if len(items) == 0 {
-		return nil
-	}
-	if result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "hash"}},
-		DoNothing: true,
-	}).CreateInBatches(items, batchChunkRows); result.Error != nil {
-		return result.Error
-	}
-	return nil
 }
 
 func batchDeleteByTxIDs(db *gorm.DB, table string, ids []uint) error {
@@ -387,60 +362,20 @@ func batchSpendUtxos(db *gorm.DB, spends []utxoSpend) error {
 	if len(spends) == 0 {
 		return nil
 	}
-	for i := 0; i < len(spends); i += batchChunkRows {
-		end := min(i+batchChunkRows, len(spends))
-		chunk := spends[i:end]
-		var deletedSlotCases []string
-		var spentAtCases []string
-		var whereConditions []string
-		var deletedSlotArgs []any
-		var spentAtArgs []any
-		var whereArgs []any
-		for _, spend := range chunk {
-			deletedSlotCases = append(
-				deletedSlotCases,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			deletedSlotArgs = append(
-				deletedSlotArgs,
-				spend.TxId,
-				spend.OutputIdx,
-				spend.Slot,
-			)
-
-			spentAtCases = append(
-				spentAtCases,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
-			)
-			spentAtArgs = append(
-				spentAtArgs,
-				spend.TxId,
-				spend.OutputIdx,
-				spend.SpentByTxHash,
-			)
-
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, spend.TxId, spend.OutputIdx)
-		}
-
-		args := make([]any, 0, len(deletedSlotArgs)+len(spentAtArgs)+len(whereArgs))
-		args = append(args, deletedSlotArgs...)
-		args = append(args, spentAtArgs...)
-		args = append(args, whereArgs...)
-		sql := fmt.Sprintf(
-			"UPDATE "+utxoRefIndexedTable()+
-				" SET deleted_slot = CASE %s ELSE deleted_slot END, "+
-				"spent_at_tx_id = CASE %s ELSE spent_at_tx_id END "+
-				"WHERE deleted_slot = 0 AND (%s)",
-			strings.Join(deletedSlotCases, " "),
-			strings.Join(spentAtCases, " "),
-			strings.Join(whereConditions, " OR "),
-		)
-		if result := db.Exec(sql, args...); result.Error != nil {
-			return result.Error
+	// Stable per-row UPDATE reused for every spend (one prepared statement),
+	// replacing the prior dynamic CASE whose shape changed per chunk and so
+	// could not be reused. The deleted_slot = 0 guard keeps re-application
+	// idempotent: an already-spent row is skipped, which resumed backfill and
+	// the #2459 create-before-spend flush ordering rely on.
+	query := "UPDATE " + utxoRefIndexedTable() +
+		" SET deleted_slot = ?, spent_at_tx_id = ?" +
+		" WHERE deleted_slot = 0 AND tx_id = ? AND output_idx = ?"
+	for i := range spends {
+		s := &spends[i]
+		if _, err := execRawOnConn(db, query, []any{
+			s.Slot, s.SpentByTxHash, s.TxId, s.OutputIdx,
+		}); err != nil {
+			return err
 		}
 	}
 	return nil

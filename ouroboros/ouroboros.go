@@ -37,6 +37,7 @@ import (
 	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
+	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	olocalstatequery "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 	olocaltxmonitor "github.com/blinklabs-io/gouroboros/protocol/localtxmonitor"
 	olocaltxsubmission "github.com/blinklabs-io/gouroboros/protocol/localtxsubmission"
@@ -51,6 +52,16 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+func blockfetchConfig(
+	opts ...oblockfetch.BlockFetchOptionFunc,
+) oblockfetch.Config {
+	cfg, err := oblockfetch.NewConfig(opts...)
+	if err != nil {
+		panic(fmt.Sprintf("invalid blockfetch config: %v", err))
+	}
+	return cfg
+}
+
 type Ouroboros struct {
 	ConnManager              *connmanager.ConnectionManager
 	PeerGov                  *peergov.PeerGovernor
@@ -58,6 +69,8 @@ type Ouroboros struct {
 	EventBus                 *event.EventBus
 	Mempool                  *mempool.Mempool
 	LedgerState              *ledger.LedgerState
+	LeiosVotes               LeiosVoteHandler
+	LeiosPipeline            LeiosPipelineHandler
 	config                   OuroborosConfig
 	blockfetchMetrics        *blockfetchMetrics
 	protocolMetrics          *protocolMetrics
@@ -76,6 +89,9 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+
+	// Locally-forged EB broadcast log (cursors are owned by the log).
+	leiosEBLog *leiosForgedEBLog
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -142,6 +158,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosEBLog:               newLeiosForgedEBLog(),
 	}
 	// Initialize per-peer TxSubmission rate limiter
 	txRate := cfg.MaxTxSubmissionsPerSecond
@@ -258,7 +275,7 @@ func (o *Ouroboros) ConfigureListeners(
 					),
 				),
 				ouroboros.WithBlockFetchConfig(
-					oblockfetch.NewConfig(
+					blockfetchConfig(
 						slices.Concat(
 							o.blockfetchClientConnOpts(),
 							o.blockfetchServerConnOpts(),
@@ -282,6 +299,14 @@ func (o *Ouroboros) ConfigureListeners(
 							slices.Concat(
 								o.leiosnotifyClientConnOpts(),
 								o.leiosnotifyServerConnOpts(),
+							)...,
+						),
+					),
+					ouroboros.WithLeiosVotesConfig(
+						oleiosvotes.NewConfig(
+							slices.Concat(
+								o.leiosvotesClientConnOpts(),
+								o.leiosvotesServerConnOpts(),
 							)...,
 						),
 					),
@@ -323,7 +348,7 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 			),
 		),
 		ouroboros.WithBlockFetchConfig(
-			oblockfetch.NewConfig(
+			blockfetchConfig(
 				slices.Concat(
 					o.blockfetchClientConnOpts(),
 					o.blockfetchServerConnOpts(),
@@ -347,6 +372,14 @@ func (o *Ouroboros) OutboundConnOpts() []ouroboros.ConnectionOptionFunc {
 					slices.Concat(
 						o.leiosnotifyClientConnOpts(),
 						o.leiosnotifyServerConnOpts(),
+					)...,
+				),
+			),
+			ouroboros.WithLeiosVotesConfig(
+				oleiosvotes.NewConfig(
+					slices.Concat(
+						o.leiosvotesClientConnOpts(),
+						o.leiosvotesServerConnOpts(),
 					)...,
 				),
 			),
@@ -398,6 +431,13 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	if o.txSubmissionRateLimiter != nil {
 		o.txSubmissionRateLimiter.RemovePeer(connId)
 	}
+	// Clean up Leios vote serving state
+	if o.LeiosVotes != nil {
+		o.LeiosVotes.RemoveConnection(leiosConnectionIdString(connId))
+	}
+	// Release the EB log cursor for this connection; frees any log
+	// entries that were only being held for this connection.
+	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {
@@ -492,6 +532,15 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		if err := o.leiosnotifyClientStart(connId); err != nil {
 			o.config.Logger.Error(
 				"failed to start leiosnotify client",
+				"error",
+				err,
+			)
+			return
+		}
+		// Start leiosvotes client
+		if err := o.leiosvotesClientStart(connId); err != nil {
+			o.config.Logger.Error(
+				"failed to start leiosvotes client",
 				"error",
 				err,
 			)
@@ -607,6 +656,32 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 		} else {
 			o.config.Logger.Debug(
 				"started txsubmission client on inbound connection",
+				"connection_id", connId.String(),
+			)
+		}
+	}
+	if o.config.EnableLeios {
+		if err := o.leiosnotifyClientStart(connId); err != nil {
+			o.config.Logger.Warn(
+				"leiosnotify client failed on inbound connection",
+				"error", err,
+				"connection_id", connId.String(),
+			)
+		} else {
+			o.config.Logger.Debug(
+				"started leiosnotify client on inbound connection",
+				"connection_id", connId.String(),
+			)
+		}
+		if err := o.leiosvotesClientStart(connId); err != nil {
+			o.config.Logger.Warn(
+				"leiosvotes client failed on inbound connection",
+				"error", err,
+				"connection_id", connId.String(),
+			)
+		} else {
+			o.config.Logger.Debug(
+				"started leiosvotes client on inbound connection",
 				"connection_id", connId.String(),
 			)
 		}

@@ -27,6 +27,7 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -548,6 +549,14 @@ func extractGovActionInfo(
 ) (actionType uint8, parentTxHash []byte, parentActionIdx *uint32, policyHash []byte, err error) {
 	switch a := action.(type) {
 	case *conway.ConwayParameterChangeGovAction:
+		actionType = uint8(lcommon.GovActionTypeParameterChange)
+		if a.ActionId != nil {
+			parentTxHash = a.ActionId.TransactionId[:]
+			idx := a.ActionId.GovActionIdx
+			parentActionIdx = &idx
+		}
+		policyHash = a.PolicyHash
+	case *gdijkstra.DijkstraParameterChangeGovAction:
 		actionType = uint8(lcommon.GovActionTypeParameterChange)
 		if a.ActionId != nil {
 			parentTxHash = a.ActionId.TransactionId[:]

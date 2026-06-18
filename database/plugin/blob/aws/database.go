@@ -328,7 +328,7 @@ func (d *BlobStoreS3) GetBlock(
 	}
 	if types.IsBlockTombstone(cborData) {
 		return nil, types.BlockMetadata{},
-			&types.BlockTombstonedError{Slot: slot, Hash: hash}
+			&types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	metadataKey := types.BlockBlobMetadataKey(key)
 	metadataBytes, err := d.getInternal(ctx, string(metadataKey))
@@ -392,10 +392,9 @@ func (d *BlobStoreS3) DeleteBlock(
 	return nil
 }
 
-// TombstoneBlock replaces a block's CBOR with a tombstone marker so a
-// wrapping archive proxy can resolve the block via GetBlock(slot, hash):
+// TombstoneBlock replaces a block's CBOR with an expired-history marker.
 // GetBlock reads the bp object, sees the marker, and returns
-// types.ErrBlockTombstoned for the proxy to intercept.
+// types.ErrHistoryExpired so an archive proxy can intercept it.
 //
 // What stays:
 //   - bi<id>: required by BlockByIndex (the chain iterator translates
@@ -405,9 +404,9 @@ func (d *BlobStoreS3) DeleteBlock(
 //     must survive tombstoning to keep the block reachable by hash.
 //
 // What goes:
-//   - bp_metadata: GetBlock short-circuits on the tombstone before reading
-//     metadata, and no other caller asks for metadata of a tombstoned
-//     block — bark's archive response carries its own.
+//   - bp_metadata: GetBlock short-circuits on the expiry marker before
+//     reading metadata, and no other caller asks for local metadata of an
+//     expired block — bark's archive response carries its own.
 func (d *BlobStoreS3) TombstoneBlock(
 	txn types.Txn,
 	slot uint64,
@@ -689,10 +688,11 @@ func (i *s3Item) ValueCopy(dst []byte) ([]byte, error) {
 		slot, hash, parseErr := types.ParseBlockBlobKey([]byte(i.key))
 		if parseErr != nil {
 			return nil, fmt.Errorf(
-				"tombstone at unexpected key shape: %w", parseErr,
+				"history expiry marker at unexpected key shape: %w",
+				parseErr,
 			)
 		}
-		return nil, &types.BlockTombstonedError{Slot: slot, Hash: hash}
+		return nil, &types.HistoryExpiredError{Slot: slot, Hash: hash}
 	}
 	if dst != nil {
 		return append(dst[:0], data...), nil

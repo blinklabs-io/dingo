@@ -135,37 +135,87 @@ func RunPlannerStats(db *database.Database, logger *slog.Logger) error {
 	return nil
 }
 
+// DeferredIndexRebuilder owns the drop/rebuild pairing for a single
+// bulk-load run. The critical subset can be rebuilt before API
+// readiness; the full rebuild finishes the lazy maintenance work
+// and clears the pending marker.
+type DeferredIndexRebuilder struct {
+	manager metadata.DeferredIndexManager
+}
+
+func (r *DeferredIndexRebuilder) BuildCritical() error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	if err := r.manager.BuildCriticalDeferredIndexes(); err != nil {
+		return fmt.Errorf("rebuilding critical deferred indexes: %w", err)
+	}
+	return nil
+}
+
+func (r *DeferredIndexRebuilder) BuildAll() error {
+	if r == nil || r.manager == nil {
+		return nil
+	}
+	if err := r.manager.BuildDeferredIndexes(); err != nil {
+		return fmt.Errorf("rebuilding deferred indexes: %w", err)
+	}
+	return nil
+}
+
 // WithDeferredIndexes drops the deferred-index manifest before bulk
-// load and rebuilds it on the returned cleanup. Stores that do not
-// implement metadata.DeferredIndexManager are silently skipped — the
-// orchestrator behaves as if every index stayed in place.
+// load and returns a rebuilder for the critical and full rebuild
+// phases. Stores that do not implement metadata.DeferredIndexManager
+// are silently skipped — the orchestrator behaves as if every index
+// stayed in place.
 //
-// The cleanup must be called before the database is marked ready
-// (i.e. before sync_status is cleared). The orchestrator is the
-// authority on that ordering; this helper just owns the
-// drop/rebuild pairing.
+// BuildCritical must be called before the database is marked ready
+// (i.e. before sync_status is cleared). BuildAll may run later as
+// maintenance; it clears the pending marker once the full manifest
+// exists.
 func WithDeferredIndexes(
 	db *database.Database,
 	logger *slog.Logger,
-) func() error {
+) *DeferredIndexRebuilder {
 	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
 	if !ok {
-		return func() error { return nil }
+		return &DeferredIndexRebuilder{}
 	}
 	if err := manager.DropDeferredIndexes(); err != nil {
 		logger.Warn(
 			"failed to drop deferred metadata indexes; "+
-				"continuing with full schema",
+				"continuing and repairing during rebuild phases",
 			"error", err,
 		)
-		return func() error { return nil }
+		return &DeferredIndexRebuilder{manager: manager}
 	}
-	return func() error {
-		if err := manager.BuildDeferredIndexes(); err != nil {
-			return fmt.Errorf("rebuilding deferred indexes: %w", err)
-		}
+	return &DeferredIndexRebuilder{manager: manager}
+}
+
+// RepairCriticalDeferredIndexes rebuilds the API/rollback-critical
+// subset if a prior run left deferred indexes pending. It leaves the
+// pending marker in place so RepairDeferredIndexes can finish the
+// lazy remainder later.
+func RepairCriticalDeferredIndexes(
+	db *database.Database,
+	logger *slog.Logger,
+) error {
+	manager, ok := db.Metadata().(metadata.DeferredIndexManager)
+	if !ok {
 		return nil
 	}
+	pending, err := manager.HasDeferredIndexesPending()
+	if err != nil {
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	logger.Warn(
+		"critical deferred metadata indexes pending from a prior run; " +
+			"rebuilding before serving API traffic",
+	)
+	return manager.BuildCriticalDeferredIndexes()
 }
 
 // RepairDeferredIndexes rebuilds any deferred indexes that were
@@ -985,7 +1035,7 @@ func extractInvalidTxIndices(blockCbor []byte) (map[int]struct{}, error) {
 	if blockLen < 5 {
 		return nil, nil
 	}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		if _, _, err := decoder.Skip(); err != nil {
 			return nil, err
 		}
