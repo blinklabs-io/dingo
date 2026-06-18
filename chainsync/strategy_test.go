@@ -15,11 +15,13 @@
 package chainsync_test
 
 import (
+	"net"
 	"testing"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chainsync"
-	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -249,7 +251,11 @@ func TestShouldPublishHeader_DivergenceKeepsForkHandling(t *testing.T) {
 	require.True(t, isNew)
 	require.True(t, s.ShouldPublishHeader(connB, pointB, isNew))
 
-	testutilRequireForkEvent(t, forkCh)
+	evt := testutil.RequireReceive(
+		t, forkCh, 2*time.Second, "expected a fork-detected event",
+	)
+	_, ok := evt.Data.(chainsync.ForkDetectedEvent)
+	require.True(t, ok, "expected ForkDetectedEvent")
 }
 
 // --- Failover does not strand ingestion ---
@@ -313,13 +319,56 @@ func TestShouldPublishHeader_RoundRobinDriverRemovalDoesNotStrand(
 	)
 }
 
-func testutilRequireForkEvent(t *testing.T, ch <-chan event.Event) {
-	t.Helper()
-	select {
-	case evt := <-ch:
-		_, ok := evt.Data.(chainsync.ForkDetectedEvent)
-		require.True(t, ok, "expected ForkDetectedEvent")
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a fork-detected event")
+// A stalled peer must be excluded from the round-robin rotation so it cannot be
+// selected as the ingress driver and suppress a healthy peer's headers.
+func TestShouldPublishHeader_RoundRobinSkipsStalledDriver(t *testing.T) {
+	bus := newTestEventBus(t)
+	cfg := chainsync.DefaultConfig()
+	cfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyRoundRobin
+	cfg.StallTimeout = 50 * time.Millisecond
+	s := newTestState(t, bus, cfg)
+
+	connA := newTestConnId(1)
+	connB := newTestConnId(2)
+	require.True(t, s.AddClientConnId(connA))
+	require.True(t, s.AddClientConnId(connB))
+
+	pointA := ocommon.NewPoint(100, []byte("hash-a"))
+	tipA := ochainsync.Tip{Point: pointA}
+
+	// Keep connA active while connB goes quiet, so only connB stalls.
+	require.Eventually(t, func() bool {
+		s.UpdateClientTip(connA, pointA, tipA)
+		s.CheckStalledClients()
+		tc := s.GetTrackedClient(connB)
+		return tc != nil && tc.Status == chainsync.ClientStatusStalled
+	}, 2*time.Second, 10*time.Millisecond, "connB should become stalled")
+
+	// connA (healthy) is the sole eligible driver; the stalled connB is not.
+	require.True(t, s.ShouldPublishHeader(connA, pointA, true))
+	require.False(
+		t,
+		s.ShouldPublishHeader(connB, ocommon.NewPoint(101, []byte("hb")), true),
+		"stalled peer must not be selected as the round-robin driver",
+	)
+}
+
+// The primary-strategy active-peer equality check must not panic on a
+// partial-nil connection id (one of LocalAddr/RemoteAddr unset).
+func TestShouldPublishHeader_PartialNilConnIdDoesNotPanic(t *testing.T) {
+	bus := newTestEventBus(t)
+	s := newTestState(t, bus, chainsync.DefaultConfig()) // primary
+
+	partial := ouroboros.ConnectionId{
+		RemoteAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001},
 	}
+	require.True(t, s.AddClientConnId(partial))
+	s.SetClientConnId(partial)
+
+	point := ocommon.NewPoint(100, []byte("hash-1"))
+	require.NotPanics(t, func() {
+		// Duplicate path exercises the active-peer equality comparison.
+		s.ShouldPublishHeader(partial, point, false)
+		s.ShouldPublishHeader(partial, point, true)
+	})
 }

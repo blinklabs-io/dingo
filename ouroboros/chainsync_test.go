@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -729,7 +730,9 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 		header,
 		tip,
 	))
-	evt1 := <-ch
+	evt1 := testutil.RequireReceive(
+		t, ch, time.Second, "expected first reporter to publish the header",
+	)
 	data1, ok := evt1.Data.(ledger.ChainsyncEvent)
 	require.True(t, ok)
 	require.Equal(t, connB, data1.ConnectionId)
@@ -742,14 +745,12 @@ func TestChainsyncClientRollForward_ParallelMultiPeerNoDoubleIngress(
 		header,
 		tip,
 	))
-	select {
-	case evt2 := <-ch:
-		t.Fatalf(
-			"expected duplicate from second peer to be suppressed, got: %#v",
-			evt2,
-		)
-	case <-time.After(200 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t,
+		ch,
+		200*time.Millisecond,
+		"expected duplicate from second peer to be suppressed",
+	)
 }
 
 // Under the parallel strategy, multiple eligible peers can supply different
@@ -816,21 +817,20 @@ func TestChainsyncClientRollForward_ParallelMultiPeerOrdering(t *testing.T) {
 		{102, connA},
 	}
 	for i, w := range want {
-		select {
-		case evt := <-ch:
-			data, ok := evt.Data.(ledger.ChainsyncEvent)
-			require.True(t, ok)
-			require.Equal(t, w.slot, data.Point.Slot, "event %d slot", i)
-			require.Equal(t, w.conn, data.ConnectionId, "event %d conn", i)
-		case <-time.After(time.Second):
-			t.Fatalf("missing expected ingress event %d (slot %d)", i, w.slot)
-		}
+		evt := testutil.RequireReceive(
+			t,
+			ch,
+			time.Second,
+			fmt.Sprintf("missing expected ingress event %d (slot %d)", i, w.slot),
+		)
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, w.slot, data.Point.Slot, "event %d slot", i)
+		require.Equal(t, w.conn, data.ConnectionId, "event %d conn", i)
 	}
-	select {
-	case evt := <-ch:
-		t.Fatalf("unexpected extra ingress event: %#v", evt.Data)
-	case <-time.After(200 * time.Millisecond):
-	}
+	testutil.RequireNoReceive(
+		t, ch, 200*time.Millisecond, "expected no extra ingress event",
+	)
 }
 
 func TestChainsyncClientRollForward_IneligiblePeerDoesNotPoisonDedup(

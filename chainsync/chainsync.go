@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"sync"
 	"time"
@@ -956,11 +957,18 @@ func trackedConnIdsEqual(
 	a,
 	b ouroboros.ConnectionId,
 ) bool {
-	if a.LocalAddr == nil && a.RemoteAddr == nil {
-		return b.LocalAddr == nil && b.RemoteAddr == nil
-	}
-	if b.LocalAddr == nil && b.RemoteAddr == nil {
-		return false
+	// Compare each address individually rather than via ConnectionId.String():
+	// that method dereferences LocalAddr/RemoteAddr unconditionally and panics
+	// when either is nil (e.g. a partial-nil tracked connection id).
+	return sameTrackedNetAddr(a.LocalAddr, b.LocalAddr) &&
+		sameTrackedNetAddr(a.RemoteAddr, b.RemoteAddr)
+}
+
+// sameTrackedNetAddr compares two addresses by string form, treating nil as
+// equal only to nil.
+func sameTrackedNetAddr(a, b net.Addr) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
 	}
 	return a.String() == b.String()
 }

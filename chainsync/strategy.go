@@ -167,12 +167,16 @@ func (s *State) roundRobinDriverLocked() (ouroboros.ConnectionId, bool) {
 }
 
 // sortedEligibleConnIdsLocked returns the connection ids of all eligible
-// (tracked, non-observability, non-failed) clients sorted by id string. Caller
-// must hold clientConnIdMutex.
+// (tracked, non-observability, non-failed, non-stalled) clients sorted by id
+// string. Stalled peers are excluded so the round-robin rotation does not
+// select a peer that has stopped delivering headers and strand ingestion until
+// the next rotation advance. Caller must hold clientConnIdMutex.
 func (s *State) sortedEligibleConnIdsLocked() []ouroboros.ConnectionId {
 	eligible := make([]ouroboros.ConnectionId, 0, len(s.trackedClients))
 	for id, tc := range s.trackedClients {
-		if tc.ObservabilityOnly || tc.Status == ClientStatusFailed {
+		if tc.ObservabilityOnly ||
+			tc.Status == ClientStatusFailed ||
+			tc.Status == ClientStatusStalled {
 			continue
 		}
 		eligible = append(eligible, id)
