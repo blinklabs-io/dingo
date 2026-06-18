@@ -48,10 +48,12 @@ var (
 // RegisterBlockByHashMetrics exposes the block-hash index hit/miss counters
 // on the given Prometheus registry. The underlying counters are process-wide
 // atomics, so every registry observes the same totals; registering the same
-// registry more than once is a no-op.
-func RegisterBlockByHashMetrics(reg prometheus.Registerer) {
+// registry more than once is a no-op. reg.Register is used instead of
+// promauto so a registration conflict never panics during Database.New; an
+// AlreadyRegisteredError is ignored and any other error is returned.
+func RegisterBlockByHashMetrics(reg prometheus.Registerer) error {
 	if reg == nil {
-		return
+		return nil
 	}
 	collectors := []prometheus.Collector{
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
@@ -72,14 +74,16 @@ func RegisterBlockByHashMetrics(reg prometheus.Registerer) {
 		if err == nil {
 			continue
 		}
-		// A reused registry already exposes these counters. The existing
-		// collectors read the same process-wide atomics, so the duplicate
-		// registration is safe to drop; any other collision is treated the
-		// same way the database size gauges treat registration errors.
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); ok {
-			continue
+		// A reused registry already exposes these counters. Both the existing
+		// and the new collector read the same process-wide atomics, so the
+		// registry still observes the correct totals and the duplicate is
+		// safe to ignore.
+		var alreadyRegistered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &alreadyRegistered) {
+			return err
 		}
 	}
+	return nil
 }
 
 // BlockByHashStats returns the cumulative hit/miss counts for the

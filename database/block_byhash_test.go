@@ -113,8 +113,9 @@ func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		reg := prometheus.NewRegistry()
-		RegisterBlockByHashMetrics(reg)
-		RegisterBlockByHashMetrics(reg) // reuse must not panic or duplicate
+		require.NoError(t, RegisterBlockByHashMetrics(reg))
+		// reuse must not error or duplicate
+		require.NoError(t, RegisterBlockByHashMetrics(reg))
 
 		families, err := reg.Gather()
 		require.NoError(t, err)
