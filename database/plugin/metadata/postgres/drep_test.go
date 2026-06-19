@@ -15,6 +15,7 @@
 package postgres
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -136,4 +137,114 @@ func TestPostgresGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *test
 	singlePower, err := pgStore.GetDRepVotingPower(0, drepCred, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), singlePower)
+}
+
+// TestPostgresGetDRepVotingPowerCrossTagIsolation verifies that key-hash and
+// script-hash DReps sharing the same 28-byte credential hash are treated as
+// independent identities. GetDRepVotingPower and GetDRepVotingPowerBatch must
+// only aggregate stake delegated to the exact (tag, hash) pair requested.
+func TestPostgresGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
+	pgStore := newTestPostgresStore(t)
+	defer pgStore.Close() //nolint:errcheck
+	cleanupDRepVotingPowerTestData(t, pgStore)
+
+	sharedHash := bytes.Repeat([]byte{0x02}, 28)
+
+	require.NoError(t, pgStore.SetDrep(0, sharedHash, 1000, "", nil, true, nil))
+	require.NoError(t, pgStore.SetDrep(1, sharedHash, 1000, "", nil, true, nil))
+
+	keyStake := bytes.Repeat([]byte{0xA1}, 28)
+	require.NoError(t, pgStore.DB().Create(&models.Account{
+		StakingKey:    keyStake,
+		CredentialTag: 0,
+		Drep:          sharedHash,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Reward:        types.Uint64(100),
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+
+	scriptStake := bytes.Repeat([]byte{0xA2}, 28)
+	require.NoError(t, pgStore.DB().Create(&models.Account{
+		StakingKey:    scriptStake,
+		CredentialTag: 1,
+		Drep:          sharedHash,
+		DrepType:      models.DrepTypeScriptHash,
+		Reward:        types.Uint64(200),
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+
+	keyPower, err := pgStore.GetDRepVotingPower(0, sharedHash, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), keyPower, "key-hash DRep power should be 100")
+
+	scriptPower, err := pgStore.GetDRepVotingPower(1, sharedHash, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(200), scriptPower, "script-hash DRep power should be 200")
+
+	powers, err := pgStore.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: sharedHash},
+			{Tag: 1, Key: sharedHash},
+		},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(100), powers[models.StakeCredentialRef{Tag: 0, Key: sharedHash}.MapKey()],
+		"batch: key-hash DRep power should be 100")
+	assert.Equal(t, uint64(200), powers[models.StakeCredentialRef{Tag: 1, Key: sharedHash}.MapKey()],
+		"batch: script-hash DRep power should be 200")
+}
+
+// TestPostgresRollbackRewardDeltaIsCredentialTagAware verifies that
+// DeleteAccountRewardsAfterSlot matches AccountRewardDelta rows to accounts
+// by the composite (credential_tag, staking_key) key. A credit delta for
+// tag=1 must adjust only the script-hash account, not the key-hash account
+// that shares the same 28-byte hash.
+func TestPostgresRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
+	pgStore := newTestPostgresStore(t)
+	defer pgStore.Close() //nolint:errcheck
+
+	stakeKey := bytes.Repeat([]byte{0xD1}, 28)
+	const baseReward = types.Uint64(1_000_000)
+	const creditAmount = uint64(500_000)
+	const slot = uint64(200)
+
+	keyAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        baseReward,
+	}
+	scriptAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        baseReward,
+	}
+	require.NoError(t, pgStore.DB().Create(keyAccount).Error)
+	require.NoError(t, pgStore.DB().Create(scriptAccount).Error)
+
+	require.NoError(t, pgStore.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+
+	keyBefore, err := pgStore.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, baseReward, keyBefore.Reward, "key-hash account must not be affected by script-hash credit")
+
+	scriptBefore, err := pgStore.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, baseReward+types.Uint64(creditAmount), scriptBefore.Reward, "script-hash account must have received credit")
+
+	require.NoError(t, pgStore.DeleteAccountRewardsAfterSlot(slot-1, nil))
+
+	keyAfter, err := pgStore.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, baseReward, keyAfter.Reward, "key-hash account reward must be unchanged after rollback")
+
+	scriptAfter, err := pgStore.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, baseReward, scriptAfter.Reward, "script-hash account reward must be restored to base after rollback")
 }

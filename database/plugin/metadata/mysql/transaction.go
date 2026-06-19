@@ -4131,7 +4131,10 @@ func (d *MetadataStoreMysql) SetGenesisStaking(
 		}
 
 		account := &models.Account{
-			StakingKey:    stakerBytes,
+			StakingKey: stakerBytes,
+			// Shelley genesis staking section encodes stake credentials as
+			// raw 28-byte hashes with no type metadata. All Shelley-era
+			// genesis stake credentials are key-hash by protocol design.
 			CredentialTag: 0,
 			Pool:          poolBytes,
 			Active:        true,
