@@ -116,7 +116,7 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(t *testing.T) 
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccount(cred, false, nil)
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
@@ -154,7 +154,7 @@ func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(t *testing.T) 
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccount(cred, false, nil)
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
@@ -257,7 +257,7 @@ func TestApplyMIRCerts_OutsideEpochRange(t *testing.T) {
 	// epoch range: [100, 1000)
 	runApplyMIRCerts(t, ls, db, 100, 1_000)
 
-	account, err := db.GetAccount(cred, false, nil)
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -293,7 +293,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
 
-	account, err := db.GetAccount(cred, false, nil)
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	require.Equal(t, mirAmount, uint64(account.Reward), "MIR reward applied")
 	state, err := db.Metadata().GetNetworkState(nil)
@@ -305,7 +305,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 	require.NoError(t, db.DeleteAccountRewardsAfterSlot(preBoundary, nil))
 	require.NoError(t, db.DeleteNetworkStateAfterSlot(preBoundary, nil))
 
-	account, err = db.GetAccount(cred, false, nil)
+	account, err = db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
 		"reward credit reverted on rollback")
@@ -316,7 +316,7 @@ func TestApplyMIRCerts_Rollback(t *testing.T) {
 
 	// Re-apply must be deterministic.
 	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
-	account, err = db.GetAccount(cred, false, nil)
+	account, err = db.GetAccountByCredential(0, cred, false, nil)
 	require.NoError(t, err)
 	assert.Equal(t, mirAmount, uint64(account.Reward),
 		"re-applied MIR reward is deterministic")

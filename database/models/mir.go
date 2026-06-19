@@ -42,8 +42,9 @@ type MIREffect struct {
 
 // MIRReward is a single credential→amount entry from a distribution MIR cert.
 type MIRReward struct {
-	Credential []byte
-	Amount     uint64
+	Credential    []byte
+	CredentialTag uint8
+	Amount        uint64
 }
 
 func (MoveInstantaneousRewards) TableName() string {
