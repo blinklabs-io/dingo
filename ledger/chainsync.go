@@ -3287,12 +3287,15 @@ func (ls *LedgerState) processEpochRollover(
 	//      deposits of pools whose retirement epoch is the new epoch. Runs
 	//      before enactment so any deposit landing in the treasury is visible
 	//      to the treasury withdrawals checked in step 3.
-	//   3. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   3. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      Move Instantaneous Rewards certificates accumulated during the
+	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
+	//   4. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   4. SetPParams                    — persist the enacted pparams.
-	//   5. IsHardForkTransition check    — detect inter-era boundary from
+	//   5. SetPParams                    — persist the enacted pparams.
+	//   6. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   6. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   7. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
 	//
 	// Steps 5 and 6 must observe the post-enactment major version. Step 6
@@ -3326,6 +3329,17 @@ func (ls *LedgerState) processEpochRollover(
 		txn, currentEpoch.EpochId+1, epochStartSlot,
 	); err != nil {
 		return nil, fmt.Errorf("apply pool retirements: %w", err)
+	}
+
+	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
+	// accumulated during the ended epoch to registered reward accounts, and
+	// apply pot-to-pot transfers between treasury and reserves. This is a
+	// no-op for Conway+ epochs because MIR certs are not valid there and no
+	// DB rows exist for those slots.
+	if err := ls.applyMIRCerts(
+		txn, currentEpoch.StartSlot, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
 	// Run the CIP-1694 governance tick: enact proposals ratified in the

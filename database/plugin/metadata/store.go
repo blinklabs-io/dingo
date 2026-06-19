@@ -264,6 +264,14 @@ type MetadataStore interface {
 		txn types.Txn,
 	) ([]models.PoolRetirementRefund, error)
 
+	// GetMIRCertsInSlotRange returns the processed effects of all MIR
+	// certificates whose added_slot is >= startSlot and < endSlot. Used to
+	// apply the Shelley-era INSTANT rule at each epoch boundary.
+	GetMIRCertsInSlotRange(
+		startSlot, endSlot uint64,
+		txn types.Txn,
+	) ([]models.MIREffect, error)
+
 	// GetStakeByPool returns the total delegated stake and delegator count for a pool.
 	// This aggregates all accounts delegated to the pool and sums their UTxO values.
 	GetStakeByPool(

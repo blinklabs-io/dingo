@@ -203,7 +203,7 @@ erDiagram
 | `stake_vote_registration_delegation` | `id`, `staking_key`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined registration, pool delegation, and DRep delegation. |
 | `vote_delegation` | `id`, `staking_key`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `staking_key`, `drep`, `certificate_id`, `added_slot` | DRep-only vote delegation. |
 | `vote_registration_delegation` | `id`, `staking_key`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `drep`, `certificate_id`, `added_slot` | Combined registration and DRep delegation. |
-| `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. |
+| `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot`, `other_pot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. `pot`: 0 = Reserves, 1 = Treasury. `other_pot` is non-zero for pot-to-pot transfer certs (no child rows); zero for credential distribution certs (child rows in `move_instantaneous_rewards_reward`). Applied at each epoch boundary by the Shelley INSTANT rule. |
 | `move_instantaneous_rewards_reward` | `id`, `mir_id`, `credential`, `amount` | PK `id`; index `mir_id` | MIR reward rows. Join `mir_id -> move_instantaneous_rewards.id`. |
 
 ### Pools
@@ -754,6 +754,20 @@ to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
 `account_reward_delta` journal and the boundary `network_state` row), so a
 rollback past the boundary reverts them and re-application is deterministic.
+
+### `GetMIRCertsInSlotRange`
+
+MIR certificates for the epoch range `[startSlot, endSlot)`, applied at the epoch boundary as the Shelley INSTANT rule. Distribution certs (`other_pot = 0`) credit registered reward accounts and debit the source pot in `network_state`; pot-to-pot transfer certs (`other_pot > 0`) move that amount between treasury and reserves directly.
+
+```sql
+SELECT mir.id, mir.pot, mir.other_pot, mir.added_slot,
+       mirr.credential, mirr.amount
+FROM move_instantaneous_rewards mir
+LEFT JOIN move_instantaneous_rewards_reward mirr ON mirr.mir_id = mir.id
+WHERE mir.added_slot >= $startSlot
+  AND mir.added_slot < $endSlot
+ORDER BY mir.added_slot ASC, mir.id ASC;
+```
 
 ### `GetGovernanceProposal` and `GetGovernanceVotes`
 

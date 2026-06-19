@@ -2160,6 +2160,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					tmpMIR := models.MoveInstantaneousRewards{
 						Pot:           c.Reward.Source,
+						OtherPot:      types.Uint64(c.Reward.OtherPot),
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -3486,6 +3487,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					tmpMIR := models.MoveInstantaneousRewards{
 						Pot:           c.Reward.Source,
+						OtherPot:      types.Uint64(c.Reward.OtherPot),
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
