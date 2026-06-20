@@ -187,6 +187,18 @@ erDiagram
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
 
+### Midnight Indexer
+
+| Table | Columns | Keys / indexes | Relationships and notes |
+|---|---|---|---|
+| `midnight_asset_creates` | `id`, `address`, `quantity`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | cNIGHT UTxO creations. Pagination should order/filter by block number and transaction index. |
+| `midnight_asset_spends` | `id`, `address`, `quantity`, `spending_tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | cNIGHT UTxO spends. `spending_tx_hash` identifies the consuming transaction; `utxo_tx_hash` and `utxo_index` identify the consumed output. |
+| `midnight_registrations` | `id`, `full_datum`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | Mapping validator registration events. `full_datum` stores the raw datum blob. |
+| `midnight_deregistrations` | `id`, `full_datum`, `tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | Mapping validator deregistration events. `full_datum` stores the raw datum blob. |
+| `midnight_governance_datums` | `id`, `datum_type`, `datum`, `block_number` | PK `id`; composite index `(datum_type, block_number DESC)` | Latest Technical Committee and Council datum snapshots. `datum_type` values are `technical_committee` and `council`; use the composite index for latest-at-or-before queries. |
+| `midnight_ariadne_params` | `id`, `epoch`, `datum` | PK `id`; unique `epoch` | Ariadne parameters per epoch when changed. |
+| `midnight_epoch_candidates` | `id`, `epoch`, `candidates_cbor` | PK `id`; unique `epoch` | Candidate snapshots captured at epoch boundaries. |
+
 ### Stake Accounts and Certificate Tables
 
 | Table | Columns | Keys / indexes | Relationships and notes |
