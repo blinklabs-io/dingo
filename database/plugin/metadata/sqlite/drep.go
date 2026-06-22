@@ -658,6 +658,7 @@ func (d *MetadataStoreSqlite) GetDRepVotingPowerBatch(
 					  WHERE ax.credential_tag = utxo.credential_tag
 					    AND ax.staking_key = utxo.staking_key
 					    AND ax.active = 1 AND ax.drep IN ?
+					    AND ax.drep_type = a.drep_type
 				  )
 				GROUP BY credential_tag, staking_key
 			) u ON u.credential_tag = a.credential_tag
