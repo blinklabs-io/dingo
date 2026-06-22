@@ -817,6 +817,12 @@ Tier 1: Hot Cache (in-memory)
 Tier 2: Block LRU Cache
   - Recently accessed blocks with pre-computed indexes
   - Fast extraction without blob store access
+  - Lock-striped: blocks are routed by hash to one of N independent
+    shards, each with its own mutex and LRU list, so concurrent lookups
+    for different blocks rarely contend. Shard count is derived from the
+    configured capacity (small caches use a single shard, preserving exact
+    global-LRU behavior). Eviction is per-shard; total occupancy never
+    exceeds the configured entry limit.
        | miss
        v
 Tier 3: Cold Extraction
