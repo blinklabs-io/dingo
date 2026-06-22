@@ -15,8 +15,10 @@
 package peergov
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -59,6 +61,47 @@ func TestPeerGovernor_GossipChurn_SkipsLastEligibleUpstream(t *testing.T) {
 		pg.peers[0].Connection,
 		"last eligible upstream connection must stay open",
 	)
+}
+
+// When the node is reduced to a single eligible upstream, gossip churn
+// skips demoting it on every interval. The skip itself is correct, but the
+// condition persists, so the INFO line must be emitted only on entry into
+// that state, not on every churn cycle, otherwise it spams the log
+// indefinitely (observed once every GossipChurnInterval).
+func TestPeerGovernor_GossipChurn_LastEligibleUpstreamSkipLogThrottled(
+	t *testing.T,
+) {
+	var logBuf bytes.Buffer
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:             slog.New(slog.NewJSONHandler(&logBuf, nil)),
+		EventBus:           newMockEventBus(),
+		GossipChurnPercent: 1.0,
+		MinScoreThreshold:  0.3,
+	})
+	pg.peers = []*Peer{
+		{
+			Address:          "gossip1:3001",
+			Source:           PeerSourceP2PGossip,
+			State:            PeerStateHot,
+			PerformanceScore: 0.5,
+			Connection:       &PeerConnection{IsClient: true},
+		},
+	}
+
+	const skipMsg = "skipping demotion of last eligible upstream peer"
+	for range 5 {
+		pg.gossipChurn()
+	}
+
+	if got := strings.Count(logBuf.String(), skipMsg); got != 1 {
+		t.Fatalf(
+			"skip log emitted %d times across 5 churn cycles, want 1 (on entry only)",
+			got,
+		)
+	}
+	// Behavior must be unchanged: the last upstream is still protected.
+	assert.Equal(t, PeerStateHot, pg.peers[0].State)
+	assert.NotNil(t, pg.peers[0].Connection)
 }
 
 func TestPeerGovernor_GossipChurn_KeepsOneUpstreamWhenChurningAll(t *testing.T) {

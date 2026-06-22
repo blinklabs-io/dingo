@@ -114,7 +114,13 @@ type PeerGovernor struct {
 	bootstrapExited       bool                // Whether bootstrap peers have been exited
 	lastBootstrapExit     time.Time           // Timestamp of most recent bootstrap exit
 	inboundPruned         int                 // cumulative inbound prunes since start
-	mu                    sync.Mutex
+	// lastEligibleUpstreamSkipLogged edge-triggers the gossip-churn log
+	// that fires when the node is down to its last eligible upstream. The
+	// condition persists across churn intervals, so the INFO line is
+	// emitted only on entry (rising edge) to avoid indefinite log spam.
+	// Guarded by mu.
+	lastEligibleUpstreamSkipLogged bool
+	mu                             sync.Mutex
 }
 
 type PeerGovernorConfig struct {
