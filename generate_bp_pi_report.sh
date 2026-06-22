@@ -17,16 +17,19 @@ DEFAULT_DB_DIR="${DEFAULT_DB_DIR:-}"
 DEFAULT_LOG_FILE="${DEFAULT_LOG_FILE:-}"
 DB_DIR_BASE="${DB_DIR_BASE:-/tmp}"
 TMP_BENCH_FILE="$(mktemp)"
+TMP_BENCH_WITH_LOAD_FILE="$(mktemp)"
+TMP_LOAD_CHANGE_FILE="$(mktemp)"
 TIME_FORMAT_STYLE=""
 TIME_CMD=()
 AUTO_DEFAULT_DB_DIR=0
 AUTO_DEFAULT_LOG_FILE=0
 DINGO_CACHE_ARGS=()
+BENCHMARK_REPORT_TITLE="Four-Thread Block Producer Sizing Benchmark Results (Non-Pi Host)"
 
 cleanup() {
   local exit_status=$?
 
-  rm -f "$TMP_BENCH_FILE"
+  rm -f "$TMP_BENCH_FILE" "$TMP_BENCH_WITH_LOAD_FILE" "$TMP_LOAD_CHANGE_FILE"
   if [[ "$exit_status" -ne 0 ]]; then
     if [[ "$AUTO_DEFAULT_LOG_FILE" -eq 1 ]]; then
       printf 'preserving profile log for debugging: %s\n' \
@@ -242,6 +245,128 @@ parse_metric() {
   }'
 }
 
+extract_load_footprint() {
+  local report_file="$1"
+
+  awk -F'|' '
+    function trim(v) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", v)
+      return v
+    }
+    $0 == "## Load Footprint" {
+      in_load = 1
+      next
+    }
+    in_load && /^## / {
+      exit
+    }
+    in_load && /^\| `[^`]+` \|/ {
+      profile = trim($2)
+      elapsed = trim($3)
+      rss_mb = trim($4)
+      gsub(/`/, "", profile)
+      gsub(/`/, "", elapsed)
+      gsub(/`/, "", rss_mb)
+      sub(/s$/, "", elapsed)
+      sub(/[[:space:]]*MB$/, "", rss_mb)
+      printf "%s|%s|%s\n", profile, elapsed, rss_mb
+      exit
+    }
+  ' "$report_file"
+}
+
+prepare_previous_benchmark_report() {
+  local report_file="$1"
+
+  if [[ ! -f "$report_file" ]]; then
+    return 0
+  fi
+
+  awk -v title="# ${BENCHMARK_REPORT_TITLE}" '
+    found || $0 == title {
+      found = 1
+      print
+    }
+  ' "$report_file" > "$TMP_BENCH_FILE"
+}
+
+format_delta() {
+  local current="$1"
+  local previous="$2"
+  local unit="$3"
+
+  awk -v current="$current" -v previous="$previous" -v unit="$unit" '
+    BEGIN {
+      delta = current - previous
+      pct = previous == 0 ? 0 : (delta / previous) * 100
+      sign = delta > 0 ? "+" : ""
+      if (unit == "s") {
+        printf "%s%.2f%s (%s%.1f%%)", sign, delta, unit, sign, pct
+      } else {
+        printf "%s%.1f%s (%s%.1f%%)", sign, delta, unit, sign, pct
+      }
+    }
+  '
+}
+
+write_load_change_section() {
+  local previous_profile="$1"
+  local previous_elapsed="$2"
+  local previous_rss_mb="$3"
+  local current_profile="$4"
+  local current_elapsed="$5"
+  local current_rss_mb="$6"
+  local elapsed_delta
+  local rss_delta
+
+  elapsed_delta="$(format_delta "$current_elapsed" "$previous_elapsed" "s")"
+  rss_delta="$(format_delta "$current_rss_mb" "$previous_rss_mb" " MB")"
+
+  {
+    echo "### Load Footprint"
+    echo
+    echo "| Metric | Previous | Current | Change |"
+    echo "|--------|----------|---------|--------|"
+    printf -- "| Profile | \`%s\` | \`%s\` | - |\n" "$previous_profile" "$current_profile"
+    printf -- "| Elapsed | \`%ss\` | \`%ss\` | \`%s\` |\n" "$previous_elapsed" "$current_elapsed" "$elapsed_delta"
+    printf -- "| Peak RSS | \`%s MB\` | \`%s MB\` | \`%s\` |\n" "$previous_rss_mb" "$current_rss_mb" "$rss_delta"
+  } > "$TMP_LOAD_CHANGE_FILE"
+}
+
+insert_load_change_section() {
+  local previous_date="$1"
+
+  if [[ ! -s "$TMP_LOAD_CHANGE_FILE" ]]; then
+    return 0
+  fi
+
+  awk -v section_file="$TMP_LOAD_CHANGE_FILE" -v previous_date="$previous_date" '
+    function print_section(line) {
+      while ((getline line < section_file) > 0) {
+        print line
+      }
+      close(section_file)
+    }
+    /^Changes since \*\*/ && !inserted {
+      print
+      print ""
+      print_section()
+      inserted = 1
+      next
+    }
+    $0 == "No previous results found. This is the first benchmark run." && previous_date != "" && !inserted {
+      printf "Changes since **%s**:\n\n", previous_date
+      print_section()
+      inserted = 1
+      next
+    }
+    {
+      print
+    }
+  ' "$TMP_BENCH_FILE" > "$TMP_BENCH_WITH_LOAD_FILE"
+  mv "$TMP_BENCH_WITH_LOAD_FILE" "$TMP_BENCH_FILE"
+}
+
 configure_time_cmd
 
 if [[ -n "$BLOCK_CACHE_SIZE_VALUE" ]]; then
@@ -268,6 +393,15 @@ fi
 
 pushd "$ROOT_DIR" >/dev/null
 
+previous_load_line=""
+previous_load_date=""
+
+if [[ -f "$OUTPUT_FILE" ]]; then
+  previous_load_line="$(extract_load_footprint "$OUTPUT_FILE")"
+  previous_load_date="$(grep "\*\*Date\*\*:" "$OUTPUT_FILE" | head -1 | sed 's/.*\*\*Date\*\*: //' || echo "")"
+  prepare_previous_benchmark_report "$OUTPUT_FILE"
+fi
+
 env \
   GOCACHE="$CACHE_DIR" \
   GOMAXPROCS="$GOMAXPROCS_VALUE" \
@@ -277,7 +411,7 @@ env \
   --packages ./ledger \
   --bench 'Benchmark(BlockfetchNearTipThroughput|BlockfetchNearTipThroughputPredecoded|BlockfetchNearTipQueuedHeaderPredecoded|BlockfetchNearTipFlushOnlyPredecoded|VerifyBlockHeader)$' \
   --benchtime "$BENCH_TIME" \
-  --title "Four-Thread Block Producer Sizing Benchmark Results (Non-Pi Host)" \
+  --title "$BENCHMARK_REPORT_TITLE" \
   --scope "Four-thread block producer path (GOMAXPROCS=${GOMAXPROCS_VALUE}) in core mode on a non-Pi host" \
   --data-source "database/immutable/testdata plus local immutable load runs"
 
@@ -303,10 +437,25 @@ fi
 
 default_rss_mb="$(awk "BEGIN { printf \"%.1f\", ${default_rss_kb} / 1024 }")"
 rss_limit_kb=$((RSS_LIMIT_MB * 1024))
+load_profile="core-default"
+load_notes="Current default \`serve/core\` cache profile"
+
+if [[ -n "$BLOCK_CACHE_SIZE_VALUE" || -n "$INDEX_CACHE_SIZE_VALUE" || -n "$MEMTABLE_SIZE_VALUE" || -n "$GOMEMLIMIT_VALUE" ]]; then
+  load_profile="core-constrained"
+  load_notes="Explicit test-only memory/cache overrides"
+fi
 
 if (( default_rss_kb > rss_limit_kb )); then
   echo "error: peak RSS ${default_rss_mb} MB exceeds limit ${RSS_LIMIT_MB} MB" >&2
   exit 1
+fi
+
+if [[ -n "$previous_load_line" ]]; then
+  previous_profile="$(echo "$previous_load_line" | cut -d'|' -f1)"
+  previous_elapsed="$(echo "$previous_load_line" | cut -d'|' -f2)"
+  previous_rss_mb="$(echo "$previous_load_line" | cut -d'|' -f3)"
+  write_load_change_section "$previous_profile" "$previous_elapsed" "$previous_rss_mb" "$load_profile" "$default_elapsed" "$default_rss_mb"
+  insert_load_change_section "$previous_load_date"
 fi
 
 {
@@ -340,11 +489,7 @@ fi
   echo
   echo "| Profile | Elapsed | Peak RSS | Notes |"
   echo "| --- | --- | --- | --- |"
-  if [[ -n "$BLOCK_CACHE_SIZE_VALUE" || -n "$INDEX_CACHE_SIZE_VALUE" || -n "$MEMTABLE_SIZE_VALUE" || -n "$GOMEMLIMIT_VALUE" ]]; then
-    printf -- "| \`core-constrained\` | \`%ss\` | \`%s MB\` | Explicit test-only memory/cache overrides |\n" "$default_elapsed" "$default_rss_mb"
-  else
-    printf -- "| \`core-default\` | \`%ss\` | \`%s MB\` | Current default \`serve/core\` cache profile |\n" "$default_elapsed" "$default_rss_mb"
-  fi
+  printf -- "| \`%s\` | \`%ss\` | \`%s MB\` | %s |\n" "$load_profile" "$default_elapsed" "$default_rss_mb" "$load_notes"
   echo
   echo "## Recommendation"
   echo
