@@ -23,22 +23,74 @@ import (
 	"slices"
 	"strings"
 	"sync/atomic"
-	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 const (
 	BlockInitialIndex uint64 = 1
 )
 
+// blockByHashIndexHits and blockByHashIndexMisses track how often
+// BlockByHashTxn resolves via the O(1) hash index versus returning a
+// hard miss. A non-trivial miss rate on a healthy node is the load-only
+// signal that operators can use to justify a hash-index back-fill for
+// pre-#1915 blocks (see #2105).
 var (
-	blockByHashScanDeadline               = 100 * time.Millisecond
-	blockByHashScanDeadlineExceededWarned atomic.Bool
+	blockByHashIndexHits   atomic.Uint64
+	blockByHashIndexMisses atomic.Uint64
 )
+
+// RegisterBlockByHashMetrics exposes the block-hash index hit/miss counters
+// on the given Prometheus registry. The underlying counters are process-wide
+// atomics, so every registry observes the same totals; registering the same
+// registry more than once is a no-op. reg.Register is used instead of
+// promauto so a registration conflict never panics during Database.New; an
+// AlreadyRegisteredError is ignored and any other error is returned.
+func RegisterBlockByHashMetrics(reg prometheus.Registerer) error {
+	if reg == nil {
+		return nil
+	}
+	collectors := []prometheus.Collector{
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "dingo_database_block_hash_index_hits_total",
+			Help: "Total block-hash index lookups resolved via the O(1) fast path",
+		}, func() float64 {
+			return float64(blockByHashIndexHits.Load())
+		}),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Name: "dingo_database_block_hash_index_misses_total",
+			Help: "Total block-hash index lookups that were a hard miss (ErrBlockNotFound)",
+		}, func() float64 {
+			return float64(blockByHashIndexMisses.Load())
+		}),
+	}
+	for _, c := range collectors {
+		err := reg.Register(c)
+		if err == nil {
+			continue
+		}
+		// A reused registry already exposes these counters. Both the existing
+		// and the new collector read the same process-wide atomics, so the
+		// registry still observes the correct totals and the duplicate is
+		// safe to ignore.
+		var alreadyRegistered prometheus.AlreadyRegisteredError
+		if !errors.As(err, &alreadyRegistered) {
+			return err
+		}
+	}
+	return nil
+}
+
+// BlockByHashStats returns the cumulative hit/miss counts for the
+// hash-index fast path used by BlockByHashTxn.
+func BlockByHashStats() (hits, misses uint64) {
+	return blockByHashIndexHits.Load(), blockByHashIndexMisses.Load()
+}
 
 func (d *Database) BlockCreate(block models.Block, txn *Txn) error {
 	owned := false
@@ -321,70 +373,40 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	if blob == nil {
 		return models.Block{}, types.ErrBlobStoreUnavailable
 	}
-	// Try O(1) hash index lookup first
+	// O(1) hash-index lookup. The index has been written for every block
+	// since #1915, so a miss on a healthy DB means either (a) the hash is
+	// genuinely unknown (the common fork-resolution case, peer probes an
+	// ancestor we have not seen) or (b) the block pre-dates the index and
+	// needs a back-fill. Treating both as ErrBlockNotFound keeps the path
+	// allocation-free; the previous iterator fallback ran a full block-
+	// blob prefix scan per probe and was the second largest CPU consumer
+	// during catch-up (issue #2105).
 	hashIndexKey := types.BlockHashIndexKey(hash)
 	blockKey, err := blob.Get(blobTxn, hashIndexKey)
 	if err == nil && len(blockKey) > 0 {
-		return blockByKey(txn, blockKey)
+		block, err := blockByKey(txn, blockKey)
+		if err != nil {
+			return models.Block{}, err
+		}
+		blockByHashIndexHits.Add(1)
+		return block, nil
 	}
-	// Fallback to sequential scan for blocks written before the index
-	// existed. Time-bounded: a Mithril-bootstrapped node carries
-	// millions of blob entries and chainsync intersect-point lookups
-	// (buildDefaultChainsyncIntersectPoints → RecentChainPoints →
-	// BlockByHash) call this per peer connection. An unbounded scan
-	// can pin one CPU per ongoing inbound chainsync handshake; with
-	// peer-sharing or a busy listener the node wedges and stops both
-	// chain extension and block production. Treating the hash as not
-	// found after the deadline lets fork recovery and intersect-point
-	// callers fall back to alternative paths (PeerHeaderLookupFunc,
-	// chainsync resync), which is fast. The narrow correctness loss
-	// is for blocks present in the blob store but missing a hash
-	// index entry — those should be backfilled offline rather than
-	// served via per-lookup scan.
-	scanDeadline := time.Now().Add(blockByHashScanDeadline)
-	iterOpts := types.BlobIteratorOptions{
-		Prefix: []byte(types.BlockBlobKeyPrefix),
+	if err == nil && len(blockKey) == 0 {
+		// Empty value at a present hash-index entry is local DB corruption,
+		// not a soft miss. Surface a descriptive error so the operator sees
+		// the problem rather than retrying on another peer.
+		return models.Block{}, fmt.Errorf("empty block hash index entry for %s", hex.EncodeToString(hash))
 	}
-	it := blob.NewIterator(blobTxn, iterOpts)
-	if it == nil {
-		return models.Block{}, errors.New("blob iterator is nil")
-	}
-	defer it.Close()
-	for it.Seek([]byte(types.BlockBlobKeyPrefix)); it.ValidForPrefix([]byte(types.BlockBlobKeyPrefix)); it.Next() {
-		if time.Now().After(scanDeadline) {
-			if blockByHashScanDeadlineExceededWarned.CompareAndSwap(false, true) {
-				txn.DB().logger.Warn(
-					"block hash fallback scan deadline exceeded; returning not found",
-					"deadline", blockByHashScanDeadline.String(),
-					"hash", hex.EncodeToString(hash),
-				)
-			}
-			return models.Block{}, models.ErrBlockNotFound
-		}
-		item := it.Item()
-		if item == nil {
-			continue
-		}
-		key := item.Key()
-		if key == nil {
-			continue
-		}
-		// Skip the metadata key
-		if strings.HasSuffix(string(key), types.BlockBlobMetadataKeySuffix) {
-			continue
-		}
-		// Validate key length and hash segment before comparing.
-		if len(key) < 10+len(hash) {
-			continue
-		}
-		if !bytes.Equal(key[10:10+len(hash)], hash) {
-			continue
-		}
-		return blockByKey(txn, key)
-	}
-	if err := it.Err(); err != nil {
+	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+		// Surface real backend errors (I/O, closed DB) instead of folding
+		// them into ErrBlockNotFound.
 		return models.Block{}, err
 	}
+	blockByHashIndexMisses.Add(1)
+	// Index miss is a hard miss (#2105). Per-peer chainsync /
+	// intersect-point callers should fall back to PeerHeaderLookupFunc
+	// rather than scan the bp prefix on every miss; legacy blocks
+	// predating the hash index need an offline backfill.
 	return models.Block{}, models.ErrBlockNotFound
 }
 

@@ -344,6 +344,19 @@ older than the ledger stability window:
   with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
   preserving local block indexes and iteration semantics.
 
+### Block Hash Index Contract
+
+`BlockByHash` resolves exclusively through the `bh` + hash entry. A missing
+entry is a hard miss: the lookup returns `models.ErrBlockNotFound` without
+scanning the `bp` keyspace. Every block written through `BlockCreate` has
+its `bh` entry since #1915, but databases created before that carry old
+blocks without one, and those blocks are not reachable by hash until the
+index is backfilled (iterate the `bp` keys once offline and write the
+matching `bh` entry for each block). The
+`dingo_database_block_hash_index_hits_total` and
+`dingo_database_block_hash_index_misses_total` counters expose the hit and
+miss rates so operators can tell whether a backfill is needed.
+
 ## SQL Examples Mirroring the Go API
 
 The examples below mirror common `metadata.MetadataStore` methods. Postgres examples use `decode($1, 'hex')`; MySQL equivalents use `UNHEX(?)`, `HEX(col)`, and `` `transaction` `` instead of `"transaction"`.

@@ -317,6 +317,12 @@ func New(
 	// Register cache metrics if prometheus registry is available
 	if configCopy.PromRegistry != nil {
 		db.cborCache.Metrics().Register(configCopy.PromRegistry)
+		if err := RegisterBlockByHashMetrics(configCopy.PromRegistry); err != nil {
+			configCopy.Logger.Warn(
+				"failed to register block-hash index metrics",
+				"error", err,
+			)
+		}
 	}
 	// Register database size metrics
 	if configCopy.PromRegistry != nil {
