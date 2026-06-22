@@ -186,12 +186,10 @@ func (d *MetadataStorePostgres) ApplyAccountRewardWithdrawal(
 			return err
 		}
 		current := uint64(account.Reward)
-		if current < amount {
-			return fmt.Errorf(
-				"account reward withdrawal underflow for stake key %x",
-				stakeKey,
-			)
-		}
+		// Transaction validation proves the on-chain withdrawal amount is
+		// spendable. The metadata reward column is a projected balance and can
+		// lag reward sources that are not materialized here, so clear the local
+		// balance without treating amount > current as fatal.
 		if result := tx.Model(&models.Account{}).
 			Where("id = ?", account.ID).
 			Update("reward", types.Uint64(0)); result.Error != nil {
