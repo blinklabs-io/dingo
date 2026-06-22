@@ -13,7 +13,7 @@ Hi folks! Here’s what we shipped in v0.55.0.
 ### ✨ What's New
 
 * Added **build Conway transactions through cardano-cli against Dingo:** `cardano-cli conway transaction build` can now complete the local state queries it needs against Dingo, which improves direct build compatibility. ([#2547](https://github.com/blinklabs-io/dingo/pull/2547))
-* Introduced **select chainsync header ingress strategies by configuration:** Operators can now choose primary, parallel, or round robin header ingress behavior for chainsync, which gives more control over how peer headers are admitted. ([#2577](https://github.com/blinklabs-io/dingo/pull/2577))
+* Introduced **select chainsync header ingress strategies by configuration:** Operators can now choose primary, parallel, or round robin header ingress behavior for chainsync, which gives them more control over how peer headers are admitted. ([#2577](https://github.com/blinklabs-io/dingo/pull/2577))
 * Expanded **configure Midnight services with a dedicated config section:** Midnight settings now live under their own config section, which makes service wiring and deployment choices easier to manage. ([#2568](https://github.com/blinklabs-io/dingo/pull/2568))
 * Delivered **store Midnight indexer data in dedicated metadata tables:** Midnight indexer deployments can now persist asset, governance, registration, and epoch candidate data in dedicated tables for easier querying. (`1dd5ba0`)
 
@@ -23,13 +23,13 @@ Hi folks! Here’s what we shipped in v0.55.0.
 * Refined **align the Sundae preview example with newer Node type definitions:** The Sundae preview example now tracks newer Node development types, which helps local example builds stay current. (`1e5e9f6`)
 * Updated **align the Blockfrost explorer example with newer Node type definitions:** The Blockfrost explorer example now tracks newer Node development types, which helps local example builds stay current. (`db5fc0e`)
 * Enhanced **keep Google API support current across the project:** Google API backed integrations now stay aligned with a newer client release for steadier compatibility. (`2168972`)
-* Modernized **keep the governance lens example aligned with newer Postgres client support:** The governance lens example now tracks a newer Postgres driver release, which supports smoother example maintenance. (`121ec85`)
+* Modernized **keep the governance lens example aligned with newer Postgres client support:** The governance lens example now tracks a newer Postgres client release, which supports smoother example maintenance. (`121ec85`)
 * Strengthened **keep Ouroboros protocol support aligned with newer upstream behavior:** Core protocol handling now tracks a newer upstream release, which supports ongoing compatibility work. (`b309afa`)
 * Advanced **expand dependency update coverage across maintained examples:** Example projects now receive routine dependency update coverage alongside the main project paths. (`ebe80ad`)
 * Polished **refresh published benchmark reports with current performance baselines:** Benchmark documentation now reflects newer throughput and load measurements, which makes performance review easier to follow. (`e36b260`)
 * Refreshed **keep Google cloud storage support current:** Google cloud storage integrations now track a newer client patch release for steadier maintenance. (`7b5326c`)
 * Streamlined **update build automation to the latest checkout workflow generation:** Project automation now uses the newer checkout action generation across CI and publish workflows. (`474ca48`)
-* Sharpened **keep AWS configuration support aligned with current upstream releases:** AWS configuration handling now tracks a newer SDK release for smoother compatibility. (`9bfc1b5`)
+* Sharpened **keep AWS configuration support aligned with newer upstream releases:** AWS configuration handling now tracks a newer SDK release for smoother compatibility. (`9bfc1b5`)
 * Simplified **keep AWS credential handling current:** AWS credential support now tracks the latest SDK patch level for steadier authenticated integrations. (`c9b1afd`)
 * Stabilized **tighten nil safety checks around fetch and account history paths:** Several runtime paths now handle missing values more defensively, which helps validation and metadata fetch behavior fail more safely. (`d89d00e`)
 * Clarified **separate connection recycling signals from validation checks:** Connection recycle requests now move through clearer event boundaries, which reduces coupling between validation and connection management. (`553ee4c`)
@@ -59,8 +59,8 @@ Hi folks! Here’s what we shipped in v0.55.0.
 
 ### 📋 What You Need to Know
 
-* Clarified **expect cardano-cli Conway build support to rely on broader chain state coverage:** `cardano-cli conway transaction build` now depends on the expanded chain state coverage in this release, and that path should work against Dingo.
-* Highlighted **choose chainsync header ingress strategy explicitly when the default is not enough:** Chainsync now supports configurable header ingress strategies, and the default remains the primary strategy unless operators switch to parallel or round robin.
+* Clarified **expect cardano-cli Conway build support to rely on broader chain state coverage:** `cardano-cli conway transaction build` now depends on the expanded chain state coverage in this release, and that path now works against Dingo.
+* Highlighted **choose chainsync header ingress strategy explicitly when the default is not enough:** Chainsync now supports configurable header ingress strategies, and the default remains the primary strategy unless operators choose parallel or round robin.
 * Emphasized **configure Midnight through its dedicated section and note the API storage dependency:** Midnight now uses its own config section, it depends on API storage mode, and setting the Midnight port to `0` turns off the Midnight gRPC listener.
 * Summarized **expect materially tighter ledger accounting around rewards, refunds, and identities:** Treasury donations, POOLREAP refunds, orphaned governance refunds, MIR effects, credential tag aware identities, and reward withdrawals now stay aligned more closely with ledger behavior.
 * Reviewed **expect Blockfrost transaction details to return more complete resolved data:** Blockfrost transaction detail responses now align more closely with the published schema, and clients should expect real resolved redeemer metadata instead of placeholder values.
