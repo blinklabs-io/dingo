@@ -15,16 +15,16 @@ Hi folks! Here’s what we shipped in v0.55.0.
 * Added **build Conway transactions through cardano-cli against Dingo:** `cardano-cli conway transaction build` can now complete the local state queries it needs against Dingo, which improves direct build compatibility. ([#2547](https://github.com/blinklabs-io/dingo/pull/2547))
 * Introduced **select chainsync header ingress strategies by configuration:** Operators can now choose primary, parallel, or round robin header ingress behavior for chainsync, which gives more control over how peer headers are admitted. ([#2577](https://github.com/blinklabs-io/dingo/pull/2577))
 * Expanded **configure Midnight services with a dedicated config section:** Midnight settings now live under their own config section, which makes service wiring and deployment choices easier to manage. ([#2568](https://github.com/blinklabs-io/dingo/pull/2568))
-* Delivered **store Midnight indexer data in dedicated metadata tables:** Midnight indexer deployments can now persist asset, governance, registration, and epoch candidate data in dedicated database models for easier querying. (`1dd5ba0`)
+* Delivered **store Midnight indexer data in dedicated metadata tables:** Midnight indexer deployments can now persist asset, governance, registration, and epoch candidate data in dedicated tables for easier querying. (`1dd5ba0`)
 
 ### 💪 Improvements
 
-* Improved **scale block caching with sharded LRU concurrency:** Block cache reads and writes now spread across shards, which helps busy nodes serve concurrent work more smoothly. ([#2590](https://github.com/blinklabs-io/dingo/pull/2590))
+* Improved **scale block caching for heavier concurrent workloads:** Block cache reads and writes now spread across shards, which helps busy nodes serve concurrent work more smoothly. ([#2590](https://github.com/blinklabs-io/dingo/pull/2590))
 * Refined **align the Sundae preview example with newer Node type definitions:** The Sundae preview example now tracks newer Node development types, which helps local example builds stay current. (`1e5e9f6`)
 * Updated **align the Blockfrost explorer example with newer Node type definitions:** The Blockfrost explorer example now tracks newer Node development types, which helps local example builds stay current. (`db5fc0e`)
 * Enhanced **keep Google API support current across the project:** Google API backed integrations now stay aligned with a newer client release for steadier compatibility. (`2168972`)
 * Modernized **keep the governance lens example aligned with newer Postgres client support:** The governance lens example now tracks a newer Postgres driver release, which supports smoother example maintenance. (`121ec85`)
-* Strengthened **keep Ouroboros protocol support aligned with newer upstream behavior:** Core protocol handling now tracks a newer `gouroboros` release, which supports ongoing compatibility work. (`b309afa`)
+* Strengthened **keep Ouroboros protocol support aligned with newer upstream behavior:** Core protocol handling now tracks a newer upstream release, which supports ongoing compatibility work. (`b309afa`)
 * Advanced **expand dependency update coverage across maintained examples:** Example projects now receive routine dependency update coverage alongside the main project paths. (`ebe80ad`)
 * Polished **refresh published benchmark reports with current performance baselines:** Benchmark documentation now reflects newer throughput and load measurements, which makes performance review easier to follow. (`e36b260`)
 * Refreshed **keep Google cloud storage support current:** Google cloud storage integrations now track a newer client patch release for steadier maintenance. (`7b5326c`)
@@ -32,16 +32,16 @@ Hi folks! Here’s what we shipped in v0.55.0.
 * Sharpened **keep AWS configuration support aligned with current upstream releases:** AWS configuration handling now tracks a newer SDK release for smoother compatibility. (`9bfc1b5`)
 * Simplified **keep AWS credential handling current:** AWS credential support now tracks the latest SDK patch level for steadier authenticated integrations. (`c9b1afd`)
 * Stabilized **tighten nil safety checks around fetch and account history paths:** Several runtime paths now handle missing values more defensively, which helps validation and metadata fetch behavior fail more safely. (`d89d00e`)
-* Clarified **separate connection recycling events from ledger validation logic:** Connection recycle requests now flow through clearer ledger owned events, which reduces coupling between validation and connection management. (`553ee4c`)
-* Realigned **extract Praos selection logic into dedicated primitives:** Praos chain selection logic now lives in focused comparison and view helpers, which makes selection behavior easier to reuse and verify. (`fcadf48`)
-* Reworked **decouple chainsync state from direct ledger iteration ownership:** Chainsync now depends on a narrower chain provider interface, which keeps client state handling more modular. (`dd9a1d3`)
+* Clarified **separate connection recycling signals from validation checks:** Connection recycle requests now move through clearer event boundaries, which reduces coupling between validation and connection management. (`553ee4c`)
+* Realigned **extract Praos selection logic into dedicated helpers:** Praos chain selection logic now lives in focused comparison helpers, which makes selection behavior easier to reuse and verify. (`fcadf48`)
+* Reworked **decouple chainsync state from direct ledger iteration ownership:** Chainsync now uses a narrower chain access contract, which keeps client state handling more modular. (`dd9a1d3`)
 * Organized **move peer relay adaptation to the node boundary:** Stake pool relay discovery now passes through a dedicated node layer adapter, which keeps peer governance wiring cleaner. (`f8e68c5`)
-* Restructured **decouple chain selection from peer governance events:** Chain selection now receives eligibility and priority updates through explicit setters, which keeps selection logic less tightly bound to peer governance internals. (`a3038d0`)
-* Streamlined **narrow API adapters to the concrete capabilities each server needs:** Mesh and UTxO RPC now depend on smaller adapter interfaces, which makes API wiring more focused and easier to validate. (`a3e715c`)
+* Restructured **decouple chain selection from peer governance events:** Chain selection now receives eligibility and priority updates through direct setters, which keeps selection logic less tightly bound to peer governance internals. (`a3038d0`)
+* Streamlined **narrow API adapters to the capabilities each server needs:** Mesh and UTxO RPC now depend on smaller adapter contracts, which makes API wiring more focused and easier to validate. (`a3e715c`)
 * Harmonized **keep crypto and core Go support libraries current:** Core cryptography and supporting Go libraries now track newer upstream releases for steadier compatibility. (`2ef6168`)
 * Tuned **keep the Midnight example build tooling current:** The Midnight preview example now uses a newer Vite release for smoother local builds. (`ec55789`)
 * Tightened **keep the Blockfrost explorer example build tooling current:** The Blockfrost explorer example now uses a newer Vite release for smoother local builds. (`067d47d`)
-* Revised **align endorser block support with newer post Conway protocol layouts:** Post Conway protocol support now follows updated upstream era organization without changing endorser block behavior. (`9a377d7`)
+* Revised **align endorser block support with newer protocol layouts after Conway:** Endorser block support now follows updated upstream era organization without changing endorser block behavior. (`9a377d7`)
 
 ### 🔧 Fixes
 
@@ -59,9 +59,9 @@ Hi folks! Here’s what we shipped in v0.55.0.
 
 ### 📋 What You Need to Know
 
-* Clarified **expect cardano-cli Conway build support to depend on broader local state query coverage:** `cardano-cli conway transaction build` now relies on the expanded local state query support in this release, and that path should work against Dingo.
+* Clarified **expect cardano-cli Conway build support to rely on broader chain state coverage:** `cardano-cli conway transaction build` now depends on the expanded chain state coverage in this release, and that path should work against Dingo.
 * Highlighted **choose chainsync header ingress strategy explicitly when the default is not enough:** Chainsync now supports configurable header ingress strategies, and the default remains the primary strategy unless operators switch to parallel or round robin.
-* Emphasized **configure Midnight through its dedicated section and note the API storage dependency:** Midnight now uses its own config section, it depends on API storage mode, and setting the Midnight port to `0` disables the Midnight gRPC listener.
+* Emphasized **configure Midnight through its dedicated section and note the API storage dependency:** Midnight now uses its own config section, it depends on API storage mode, and setting the Midnight port to `0` turns off the Midnight gRPC listener.
 * Summarized **expect materially tighter ledger accounting around rewards, refunds, and identities:** Treasury donations, POOLREAP refunds, orphaned governance refunds, MIR effects, credential tag aware identities, and reward withdrawals now stay aligned more closely with ledger behavior.
 * Reviewed **expect Blockfrost transaction details to return more complete resolved data:** Blockfrost transaction detail responses now align more closely with the published schema, and clients should expect real resolved redeemer metadata instead of placeholder values.
 * Noted **plan for sharper block by hash misses and possible historical hash index backfill:** Hash index misses now return hard misses without scanning the store, and older databases that lack historical hash index entries may need a one time backfill.
