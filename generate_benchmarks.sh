@@ -265,6 +265,7 @@ done
 PREVIOUS_RESULTS_FILE=$(mktemp "${TMPDIR:-/tmp}/dingo_bench_XXXXXX")
 trap 'rm -f "$CURRENT_RESULTS_FILE" "$PREVIOUS_RESULTS_FILE"' EXIT
 previous_date=""
+previous_results_format=""
 MAJOR_CHANGES=false
 
 if [[ -f "$OUTPUT_FILE" && "$WRITE_TO_FILE" == "true" ]]; then
@@ -280,8 +281,13 @@ if [[ -f "$OUTPUT_FILE" && "$WRITE_TO_FILE" == "true" ]]; then
         if [[ "$line" == "## Performance Changes" || "$line" == "## Historical Results" ]]; then
             break
         fi
-        if [[ "$line" == "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" ||
-              "$line" == "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" ]]; then
+        if [[ "$line" == "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" ]]; then
+            previous_results_format="legacy_ops"
+            in_table=true
+            continue
+        fi
+        if [[ "$line" == "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" ]]; then
+            previous_results_format="current"
             in_table=true
             continue
         fi
@@ -559,8 +565,13 @@ EOF
             echo "" >> "$OUTPUT_FILE.tmp"
             echo "### $previous_date" >> "$OUTPUT_FILE.tmp"
             echo "" >> "$OUTPUT_FILE.tmp"
-            echo "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" >> "$OUTPUT_FILE.tmp"
-            echo "|-----------|------------|---------|---------------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
+            if [[ "$previous_results_format" == "legacy_ops" ]]; then
+                echo "| Benchmark | Operations/sec | Time/op | Memory/op | Allocs/op |" >> "$OUTPUT_FILE.tmp"
+                echo "|-----------|----------------|---------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
+            else
+                echo "| Benchmark | Iterations | Time/op | Extra Metrics | Memory/op | Allocs/op |" >> "$OUTPUT_FILE.tmp"
+                echo "|-----------|------------|---------|---------------|-----------|-----------|" >> "$OUTPUT_FILE.tmp"
+            fi
 
             # Add previous results
             while IFS= read -r benchmark; do
@@ -570,7 +581,12 @@ EOF
                 extra_metrics=$(echo "$data" | cut -d'|' -f3)
                 mem_op=$(echo "$data" | cut -d'|' -f4)
                 allocs_op=$(echo "$data" | cut -d'|' -f5)
-                echo "| $benchmark | $iterations | $time_op | $extra_metrics | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
+                if [[ "$previous_results_format" == "legacy_ops" ]]; then
+                    operations_sec="$extra_metrics"
+                    echo "| $benchmark | $operations_sec | $time_op | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
+                else
+                    echo "| $benchmark | $iterations | $time_op | $extra_metrics | $mem_op | $allocs_op |" >> "$OUTPUT_FILE.tmp"
+                fi
             done < <(list_previous_benchmarks)
         fi
 
