@@ -837,7 +837,7 @@ func parsePoolParams(
 	// Reward account (index 5)
 	rewardAccount, rewardAccountTag, ok := parseRewardAccount(params[5])
 	if !ok {
-		return nil, errors.New("decoding reward account")
+		return nil, fmt.Errorf("decoding reward account for pool %x", poolKeyHash)
 	}
 	pool.RewardAccount = rewardAccount
 	pool.RewardAccountCredentialTag = rewardAccountTag
