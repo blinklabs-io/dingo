@@ -19,13 +19,14 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse pins the
-// includeInactive=false branch of GetAccount: a row with active=false must
-// not be returned. This is the semantic the
+// includeInactive=false branch of GetAccountByCredential: a row with
+// active=false must not be returned. This is the semantic the
 // queryShelleyFilteredDelegationAndRewardAccounts handler relies on when
 // it passes includeInactive=false; testing it here keeps the assertion
 // next to the SQL clause it actually tests, without forcing the ledger
@@ -55,14 +56,202 @@ func TestGetAccount_ExcludesInactiveWhenIncludeInactiveFalse(t *testing.T) {
 		Where("staking_key = ?", stakeKey).
 		Update("active", false).Error)
 
-	got, err := store.GetAccount(stakeKey, false /* includeInactive */, nil)
+	got, err := store.GetAccountByCredential(0, stakeKey, false /* includeInactive */, nil)
 	require.NoError(t, err)
 	assert.Nil(t, got, "inactive account must not be returned when includeInactive=false")
 
-	got, err = store.GetAccount(stakeKey, true /* includeInactive */, nil)
+	got, err = store.GetAccountByCredential(0, stakeKey, true /* includeInactive */, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got, "inactive account must be returned when includeInactive=true")
 	assert.False(t, got.Active, "returned account should have Active=false")
+}
+
+// TestAccountHistoryQueriesAreCredentialTagAware verifies that account
+// registration/delegation history queries do not merge key and script
+// credential rows that share the same 28-byte hash.
+func TestAccountHistoryQueriesAreCredentialTagAware(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xA1
+	}
+	keyPool := make([]byte, 28)
+	for i := range keyPool {
+		keyPool[i] = 0xB1
+	}
+	scriptPool := make([]byte, 28)
+	for i := range scriptPool {
+		scriptPool[i] = 0xC1
+	}
+
+	require.NoError(t, db.Create(&models.Transaction{
+		ID:         100,
+		Hash:       []byte("tx_key_history_hash_123456789012"),
+		Slot:       10,
+		BlockIndex: 0,
+	}).Error)
+	require.NoError(t, db.Create(&models.Transaction{
+		ID:         101,
+		Hash:       []byte("tx_script_history_hash_123456789"),
+		Slot:       20,
+		BlockIndex: 0,
+	}).Error)
+	require.NoError(t, db.Create(&models.Certificate{
+		ID:            1000,
+		TransactionID: 100,
+		CertIndex:     0,
+		Slot:          10,
+		CertType:      11, // StakeRegistrationDelegation
+	}).Error)
+	require.NoError(t, db.Create(&models.Certificate{
+		ID:            1001,
+		TransactionID: 101,
+		CertIndex:     0,
+		Slot:          20,
+		CertType:      11, // StakeRegistrationDelegation
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistrationDelegation{
+		ID:            1000,
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   keyPool,
+		CertificateID: 1000,
+		AddedSlot:     10,
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistrationDelegation{
+		ID:            1001,
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		PoolKeyHash:   scriptPool,
+		CertificateID: 1001,
+		AddedSlot:     20,
+	}).Error)
+
+	keyDelegations, err := store.GetAccountDelegationHistoryByCredential(
+		0,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, keyDelegations, 1)
+	assert.Equal(t, keyPool, keyDelegations[0].PoolKeyHash)
+
+	scriptDelegations, err := store.GetAccountDelegationHistoryByCredential(
+		1,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, scriptDelegations, 1)
+	assert.Equal(t, scriptPool, scriptDelegations[0].PoolKeyHash)
+
+	keyDelegationCount, err := store.CountAccountDelegationHistoryByCredential(
+		0,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, keyDelegationCount)
+	scriptDelegationCount, err := store.CountAccountDelegationHistoryByCredential(
+		1,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, scriptDelegationCount)
+
+	keyRegistrations, err := store.GetAccountRegistrationHistoryByCredential(
+		0,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, keyRegistrations, 1)
+	assert.Equal(t, uint64(10), keyRegistrations[0].AddedSlot)
+
+	scriptRegistrations, err := store.GetAccountRegistrationHistoryByCredential(
+		1,
+		stakeKey,
+		10,
+		0,
+		"asc",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, scriptRegistrations, 1)
+	assert.Equal(t, uint64(20), scriptRegistrations[0].AddedSlot)
+
+	keyRegistrationCount, err := store.CountAccountRegistrationHistoryByCredential(
+		0,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, keyRegistrationCount)
+	scriptRegistrationCount, err := store.CountAccountRegistrationHistoryByCredential(
+		1,
+		stakeKey,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, 1, scriptRegistrationCount)
+}
+
+// TestGetStakeRegistrationsByCredentialIsTagAware verifies that certificate
+// reconstruction keeps key and script stake registrations with the same hash
+// separate and restores the correct on-chain credential type.
+func TestGetStakeRegistrationsByCredentialIsTagAware(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xD1
+	}
+
+	require.NoError(t, db.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		CertificateID: 2000,
+		AddedSlot:     10,
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		CertificateID: 2001,
+		AddedSlot:     20,
+	}).Error)
+
+	keyCerts, err := store.GetStakeRegistrationsByCredential(0, stakeKey, nil)
+	require.NoError(t, err)
+	require.Len(t, keyCerts, 1)
+	assert.Equal(
+		t,
+		uint(lcommon.CredentialTypeAddrKeyHash),
+		keyCerts[0].StakeCredential.CredType,
+	)
+	assert.Equal(t, stakeKey, keyCerts[0].StakeCredential.Credential.Bytes())
+
+	scriptCerts, err := store.GetStakeRegistrationsByCredential(1, stakeKey, nil)
+	require.NoError(t, err)
+	require.Len(t, scriptCerts, 1)
+	assert.Equal(
+		t,
+		uint(lcommon.CredentialTypeScriptHash),
+		scriptCerts[0].StakeCredential.CredType,
+	)
+	assert.Equal(t, stakeKey, scriptCerts[0].StakeCredential.Credential.Bytes())
 }
 
 // TestBatchFetchCerts_SameSlotTiebreakByBlockIndex pins the cert ordering
@@ -141,10 +330,10 @@ func TestBatchFetchCerts_SameSlotTiebreakByBlockIndex(t *testing.T) {
 		AddedSlot:     slot,
 	}).Error)
 
-	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
+	cache, err := batchFetchCerts(db, []models.StakeCredentialRef{{Tag: 0, Key: stakeKey}}, slot)
 	require.NoError(t, err)
 
-	rec, ok := cache.poolDelegation[string(stakeKey)]
+	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]
 	require.True(t, ok, "expected pool delegation for staking key")
 	assert.Equal(
 		t,
@@ -236,10 +425,10 @@ func TestBatchFetchCerts_CrossTableTiebreakByBlockIndex(t *testing.T) {
 		AddedSlot:     slot,
 	}).Error)
 
-	cache, err := batchFetchCerts(db, [][]byte{stakeKey}, slot)
+	cache, err := batchFetchCerts(db, []models.StakeCredentialRef{{Tag: 0, Key: stakeKey}}, slot)
 	require.NoError(t, err)
 
-	rec, ok := cache.poolDelegation[string(stakeKey)]
+	rec, ok := cache.poolDelegation[accountCertCacheKey(0, stakeKey)]
 	require.True(t, ok, "expected pool delegation for staking key")
 	assert.Equal(
 		t,

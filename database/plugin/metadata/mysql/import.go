@@ -169,7 +169,10 @@ func (d *MetadataStoreMysql) ImportAccount(
 		)
 	}
 	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "staking_key"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"pool", "drep", "drep_type", "active", "reward"},
 		),
@@ -198,7 +201,7 @@ func (d *MetadataStoreMysql) ImportPool(
 		Columns: []clause.Column{{Name: "pool_key_hash"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"vrf_key_hash", "pledge", "cost",
-			"margin", "reward_account",
+			"margin", "reward_account", "reward_account_credential_tag",
 		}),
 	}).Create(pool)
 	if result.Error != nil {
@@ -342,7 +345,10 @@ func (d *MetadataStoreMysql) ImportDrep(
 
 	// Upsert the DRep record
 	result := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "credential"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "credential"},
+		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"anchor_url", "anchor_hash", "active",
 		}),
@@ -355,7 +361,9 @@ func (d *MetadataStoreMysql) ImportDrep(
 	if drep.ID == 0 {
 		var existing models.Drep
 		if err := db.Where(
-			"credential = ?", drep.Credential,
+			"credential_tag = ? AND credential = ?",
+			drep.CredentialTag,
+			drep.Credential,
 		).First(&existing).Error; err != nil {
 			return fmt.Errorf(
 				"fetching drep ID after upsert: %w", err,
@@ -367,6 +375,7 @@ func (d *MetadataStoreMysql) ImportDrep(
 	// Create registration record (ignore duplicates on retry).
 	if result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
+			{Name: "credential_tag"},
 			{Name: "drep_credential"},
 			{Name: "added_slot"},
 		},

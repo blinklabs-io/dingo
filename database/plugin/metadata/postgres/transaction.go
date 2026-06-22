@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -207,7 +208,7 @@ func (d *MetadataStorePostgres) GetTransactionsByBlockHash(
 }
 
 // It builds AddressTransaction rows for a single transaction.
-// deduplication by (payment_key, staking_key) within the tx.
+// deduplication by (payment_key, credential_tag, staking_key) within the tx.
 func collectAddressTransactions(
 	transactionID uint,
 	slot uint64,
@@ -220,13 +221,19 @@ func collectAddressTransactions(
 		if len(utxo.PaymentKey) == 0 && len(utxo.StakingKey) == 0 {
 			continue
 		}
-		key := fmt.Sprintf("%x|%x", utxo.PaymentKey, utxo.StakingKey)
+		key := fmt.Sprintf(
+			"%x|%d|%x",
+			utxo.PaymentKey,
+			utxo.CredentialTag,
+			utxo.StakingKey,
+		)
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		ret = append(ret, models.AddressTransaction{
 			PaymentKey:    append([]byte(nil), utxo.PaymentKey...),
+			CredentialTag: utxo.CredentialTag,
 			StakingKey:    append([]byte(nil), utxo.StakingKey...),
 			TransactionID: transactionID,
 			Slot:          slot,
@@ -240,6 +247,7 @@ func collectAddressTransactions(
 // the given payment/staking key with pagination support.
 func (d *MetadataStorePostgres) GetTransactionsByAddress(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -260,8 +268,9 @@ func (d *MetadataStorePostgres) GetTransactionsByAddress(
 	switch {
 	case len(paymentKey) > 0 && len(stakingKey) > 0:
 		addrQuery = addrQuery.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			paymentKey,
+			credentialTag,
 			stakingKey,
 		)
 	case len(paymentKey) > 0:
@@ -270,7 +279,11 @@ func (d *MetadataStorePostgres) GetTransactionsByAddress(
 			paymentKey,
 		)
 	default:
-		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+		addrQuery = addrQuery.Where(
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
+			stakingKey,
+		)
 	}
 
 	subQuery := addrQuery.Select("DISTINCT transaction_id")
@@ -308,6 +321,7 @@ func (d *MetadataStorePostgres) GetTransactionsByAddress(
 // payment/staking key.
 func (d *MetadataStorePostgres) CountTransactionsByAddress(
 	paymentKey []byte,
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -324,8 +338,9 @@ func (d *MetadataStorePostgres) CountTransactionsByAddress(
 	switch {
 	case len(paymentKey) > 0 && len(stakingKey) > 0:
 		addrQuery = addrQuery.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_key = ? AND credential_tag = ? AND staking_key = ?",
 			paymentKey,
+			credentialTag,
 			stakingKey,
 		)
 	case len(paymentKey) > 0:
@@ -334,7 +349,11 @@ func (d *MetadataStorePostgres) CountTransactionsByAddress(
 			paymentKey,
 		)
 	default:
-		addrQuery = addrQuery.Where("staking_key = ?", stakingKey)
+		addrQuery = addrQuery.Where(
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
+			stakingKey,
+		)
 	}
 
 	var count int64
@@ -348,8 +367,9 @@ func (d *MetadataStorePostgres) CountTransactionsByAddress(
 	return int(count), nil
 }
 
-// GetAddressesByStakingKey returns distinct addresses mapped to a staking key.
-func (d *MetadataStorePostgres) GetAddressesByStakingKey(
+// GetAddressesByCredential returns distinct addresses mapped to a stake credential.
+func (d *MetadataStorePostgres) GetAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -365,9 +385,13 @@ func (d *MetadataStorePostgres) GetAddressesByStakingKey(
 		return nil, err
 	}
 	query := db.Model(&models.AddressTransaction{}).
-		Select("MIN(id) AS id, payment_key, staking_key").
-		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
-		Group("payment_key, staking_key").
+		Select("MIN(id) AS id, payment_key, credential_tag, staking_key").
+		Where(
+			"credential_tag = ? AND staking_key = ? AND length(payment_key) > 0",
+			credentialTag,
+			stakingKey,
+		).
+		Group("payment_key, credential_tag, staking_key").
 		Order(addressOrderClause(order))
 	if limit > 0 {
 		query = query.Limit(limit)
@@ -376,13 +400,14 @@ func (d *MetadataStorePostgres) GetAddressesByStakingKey(
 		query = query.Offset(offset)
 	}
 	if result := query.Find(&ret); result.Error != nil {
-		return nil, fmt.Errorf("get addresses by staking key: %w", result.Error)
+		return nil, fmt.Errorf("get addresses by stake credential: %w", result.Error)
 	}
 	return ret, nil
 }
 
-// CountAddressesByStakingKey returns the total number of distinct addresses mapped to a staking key.
-func (d *MetadataStorePostgres) CountAddressesByStakingKey(
+// CountAddressesByCredential returns the total number of distinct addresses mapped to a stake credential.
+func (d *MetadataStorePostgres) CountAddressesByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -392,16 +417,20 @@ func (d *MetadataStorePostgres) CountAddressesByStakingKey(
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"resolve DB for count addresses by staking key: %w",
+			"resolve DB for count addresses by stake credential: %w",
 			err,
 		)
 	}
 	var count int64
 	if err := db.Model(&models.AddressTransaction{}).
-		Where("staking_key = ? AND length(payment_key) > 0", stakingKey).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND length(payment_key) > 0",
+			credentialTag,
+			stakingKey,
+		).
 		Distinct("payment_key").
 		Count(&count).Error; err != nil {
-		return 0, fmt.Errorf("count addresses by staking key: %w", err)
+		return 0, fmt.Errorf("count addresses by stake credential: %w", err)
 	}
 	return int(count), nil
 }
@@ -413,8 +442,8 @@ func addressOrderClause(order string) string {
 	return "payment_key ASC"
 }
 
-// GetAccountDelegationHistory returns delegation history rows for a staking key.
-func (d *MetadataStorePostgres) GetAccountDelegationHistory(
+func (d *MetadataStorePostgres) GetAccountDelegationHistoryByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -428,8 +457,9 @@ func (d *MetadataStorePostgres) GetAccountDelegationHistory(
 			err,
 		)
 	}
-	rows, err := accounthistory.QueryDelegationHistory(
+	rows, err := accounthistory.QueryDelegationHistoryByCredential(
 		db,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -444,9 +474,8 @@ func (d *MetadataStorePostgres) GetAccountDelegationHistory(
 	return rows, nil
 }
 
-// CountAccountDelegationHistory returns the total number of
-// delegation history rows for a staking key.
-func (d *MetadataStorePostgres) CountAccountDelegationHistory(
+func (d *MetadataStorePostgres) CountAccountDelegationHistoryByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -457,7 +486,11 @@ func (d *MetadataStorePostgres) CountAccountDelegationHistory(
 			err,
 		)
 	}
-	count, err := accounthistory.CountDelegationHistory(db, stakingKey)
+	count, err := accounthistory.CountDelegationHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account delegation history: %w",
@@ -467,8 +500,8 @@ func (d *MetadataStorePostgres) CountAccountDelegationHistory(
 	return count, nil
 }
 
-// GetAccountRegistrationHistory returns registration history rows for a staking key.
-func (d *MetadataStorePostgres) GetAccountRegistrationHistory(
+func (d *MetadataStorePostgres) GetAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -482,8 +515,9 @@ func (d *MetadataStorePostgres) GetAccountRegistrationHistory(
 			err,
 		)
 	}
-	rows, err := accounthistory.QueryRegistrationHistory(
+	rows, err := accounthistory.QueryRegistrationHistoryByCredential(
 		db,
+		credentialTag,
 		stakingKey,
 		limit,
 		offset,
@@ -498,9 +532,8 @@ func (d *MetadataStorePostgres) GetAccountRegistrationHistory(
 	return rows, nil
 }
 
-// CountAccountRegistrationHistory returns the total number of
-// registration history rows for a staking key.
-func (d *MetadataStorePostgres) CountAccountRegistrationHistory(
+func (d *MetadataStorePostgres) CountAccountRegistrationHistoryByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (int, error) {
@@ -511,7 +544,11 @@ func (d *MetadataStorePostgres) CountAccountRegistrationHistory(
 			err,
 		)
 	}
-	count, err := accounthistory.CountRegistrationHistory(db, stakingKey)
+	count, err := accounthistory.CountRegistrationHistoryByCredential(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if err != nil {
 		return 0, fmt.Errorf(
 			"count account registration history: %w",
@@ -647,11 +684,12 @@ func certRequiresDeposit(cert lcommon.Certificate) bool {
 
 // getOrCreateAccount retrieves an existing account or creates a new one
 func (d *MetadataStorePostgres) getOrCreateAccount(
+	credentialTag uint8,
 	stakeKey []byte,
 	txn types.Txn,
 ) (*models.Account, error) {
 	// Include inactive accounts to allow reactivation on registration.
-	tmpAccount, err := d.GetAccount(stakeKey, true, txn)
+	tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			return nil, err
@@ -659,7 +697,8 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 	}
 	if tmpAccount == nil {
 		tmpAccount = &models.Account{
-			StakingKey: stakeKey,
+			StakingKey:    stakeKey,
+			CredentialTag: credentialTag,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
@@ -668,12 +707,15 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 }
 
 // saveAccount persists the account to the database. It creates a new
-// record when `account.ID == 0` (with an upsert on `staking_key`) or saves
+// record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
 func saveAccount(account *models.Account, db *gorm.DB) error {
 	if account.ID == 0 {
 		result := db.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "staking_key"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "staking_key"},
+			},
 			DoUpdates: clause.AssignmentColumns(
 				[]string{
 					"added_slot",
@@ -1497,19 +1539,25 @@ func (d *MetadataStorePostgres) SetTransaction(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					tmpPool.RewardAccount = c.RewardAccount[:]
+					rewardAcctTag, rewardAcctHash, err := certutil.PoolRewardAccount(c)
+					if err != nil {
+						return fmt.Errorf("pool reward account: %w", err)
+					}
+					tmpPool.RewardAccount = rewardAcctHash
+					tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
 					// Create registration record
 					tmpReg := models.PoolRegistration{
-						PoolKeyHash:   c.Operator[:],
-						VrfKeyHash:    c.VrfKeyHash[:],
-						Pledge:        types.Uint64(c.Pledge),
-						Cost:          types.Uint64(c.Cost),
-						Margin:        &types.Rat{Rat: c.Margin.Rat},
-						RewardAccount: c.RewardAccount[:],
-						AddedSlot:     point.Slot,
-						DepositAmount: types.Uint64(deposit),
-						CertificateID: certIDMap[i],
+						PoolKeyHash:                c.Operator[:],
+						VrfKeyHash:                 c.VrfKeyHash[:],
+						Pledge:                     types.Uint64(c.Pledge),
+						Cost:                       types.Uint64(c.Cost),
+						Margin:                     &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount:              rewardAcctHash,
+						RewardAccountCredentialTag: rewardAcctTag,
+						AddedSlot:                  point.Slot,
+						DepositAmount:              types.Uint64(deposit),
+						CertificateID:              certIDMap[i],
 					}
 					if c.PoolMetadata != nil {
 						tmpReg.MetadataUrl = c.PoolMetadata.Url
@@ -1562,7 +1610,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						},
 						DoUpdates: clause.AssignmentColumns([]string{
 							"vrf_key_hash", "pledge", "cost", "margin",
-							"reward_account", "certificate_id",
+							"reward_account", "reward_account_credential_tag", "certificate_id",
 							"metadata_url", "metadata_hash",
 						}),
 					}, clause.Returning{Columns: []clause.Column{{Name: "id"}}}).Omit("Owners", "Relays").Create(&tmpReg)
@@ -1624,13 +1672,18 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					tmpReg := models.StakeRegistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1684,17 +1737,25 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 					if tmpAccount == nil {
 						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
 						tmpAccount = &models.Account{
-							StakingKey: stakeKey,
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if result.Error != nil {
@@ -1707,6 +1768,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -1723,17 +1785,25 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 					if tmpAccount == nil {
 						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
 						tmpAccount = &models.Account{
-							StakingKey: stakeKey,
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
 						}
 						result := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if result.Error != nil {
@@ -1746,6 +1816,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
@@ -1763,7 +1834,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1773,6 +1848,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -1790,7 +1866,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1800,6 +1880,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
@@ -1818,7 +1899,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1839,6 +1924,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -1858,13 +1944,18 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					tmpReg := models.Registration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -1886,10 +1977,15 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					// Registration (re)creates/activates the DRep regardless of prior state.
 
 					tmpReg := models.RegistrationDrep{
+						CredentialTag:  drepCredTag,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -1901,7 +1997,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					}
 
 					// Persist DRep anchor and active state
-					if err := d.SetDrep(drepCredential, point.Slot, tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1910,6 +2006,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					// the registration fields instead of failing on the unique index.
 					result := db.Clauses(clause.OnConflict{
 						Columns: []clause.Column{
+							{Name: "credential_tag"},
 							{Name: "drep_credential"},
 							{Name: "added_slot"},
 						},
@@ -1926,8 +2023,8 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if tmpReg.ID == 0 {
 						var existing models.RegistrationDrep
 						if err := db.Where(
-							"drep_credential = ? AND added_slot = ?",
-							tmpReg.DrepCredential, tmpReg.AddedSlot,
+							"credential_tag = ? AND drep_credential = ? AND added_slot = ?",
+							drepCredTag, tmpReg.DrepCredential, tmpReg.AddedSlot,
 						).First(&existing).Error; err != nil {
 							return fmt.Errorf(
 								"fetching drep registration ID after upsert: %w",
@@ -1941,8 +2038,13 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.DeregistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					tmpDereg := models.DeregistrationDrep{
+						CredentialTag:  drepCredTag,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -1951,7 +2053,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					// Mark DRep inactive
 					// Ensure we don't create a new DRep during deregistration. Check existence first.
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag, drepCredential, true, txn)
 					if err != nil {
 						if !errors.Is(err, models.ErrDrepNotFound) {
 							return fmt.Errorf("process certificate: %w", err)
@@ -1960,7 +2062,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if existingDrep == nil {
 						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
 					}
-					if err := d.SetDrep(drepCredential, point.Slot, "", nil, false, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, "", nil, false, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1972,8 +2074,13 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
 				case *lcommon.UpdateDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
 
 					tmpUpdate := models.UpdateDrep{
+						CredentialTag: drepCredTag,
 						Credential:    drepCredential,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -1985,7 +2092,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					// Update DRep anchor and mark active
 					// Require that the DRep already exists for updates.
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag, drepCredential, true, txn)
 					if err != nil {
 						if !errors.Is(err, models.ErrDrepNotFound) {
 							return fmt.Errorf("process certificate: %w", err)
@@ -1994,7 +2101,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if existingDrep == nil {
 						return fmt.Errorf("process certificate: %w", models.ErrDrepNotFound)
 					}
-					if err := d.SetDrep(drepCredential, point.Slot, tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn); err != nil {
+					if err := d.SetDrep(drepCredTag, drepCredential, point.Slot, tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2006,7 +2113,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2023,9 +2134,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					tmpAccount.Pool = c.PoolKeyHash[:]
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -2046,7 +2159,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2062,9 +2179,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -2084,7 +2203,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2100,9 +2223,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					tmpAccount.Drep = drepCredential
 					tmpAccount.DrepType = drepType
+					tmpAccount.AddedSlot = point.Slot
 
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -2174,10 +2299,15 @@ func (d *MetadataStorePostgres) SetTransaction(
 
 					// Save individual rewards
 					for credential, amount := range c.Reward.Rewards {
+						credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+						if err != nil {
+							return fmt.Errorf("process certificate: %w", err)
+						}
 						tmpReward := models.MoveInstantaneousRewardsReward{
-							Credential: credential.Credential[:],
-							Amount:     types.Uint64(amount),
-							MIRID:      tmpMIR.ID,
+							Credential:    credential.Credential[:],
+							CredentialTag: credentialTag,
+							Amount:        types.Uint64(amount),
+							MIRID:         tmpMIR.ID,
 						}
 						result := db.Create(&tmpReward)
 						if result.Error != nil {
@@ -2252,7 +2382,12 @@ func (d *MetadataStorePostgres) applyTransactionRewardWithdrawals(
 		if stakeKeyHash == zeroHash {
 			return errors.New("reward withdrawal missing stake credential")
 		}
+		credentialTag, ok := models.StakeCredentialTagFromAddress(*addr)
+		if !ok {
+			return errors.New("derive reward withdrawal credential tag")
+		}
 		if err := d.ApplyAccountRewardWithdrawal(
+			credentialTag,
 			stakeKeyHash.Bytes(),
 			amount.Uint64(),
 			slot,
@@ -2918,17 +3053,23 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpPool.Pledge = types.Uint64(c.Pledge)
 					tmpPool.Cost = types.Uint64(c.Cost)
 					tmpPool.Margin = &types.Rat{Rat: c.Margin.Rat}
-					tmpPool.RewardAccount = c.RewardAccount[:]
+					rewardAcctTag2, rewardAcctHash2, err := certutil.PoolRewardAccount(c)
+					if err != nil {
+						return fmt.Errorf("pool reward account: %w", err)
+					}
+					tmpPool.RewardAccount = rewardAcctHash2
+					tmpPool.RewardAccountCredentialTag = rewardAcctTag2
 					tmpReg := models.PoolRegistration{
-						PoolKeyHash:   c.Operator[:],
-						VrfKeyHash:    c.VrfKeyHash[:],
-						Pledge:        types.Uint64(c.Pledge),
-						Cost:          types.Uint64(c.Cost),
-						Margin:        &types.Rat{Rat: c.Margin.Rat},
-						RewardAccount: c.RewardAccount[:],
-						AddedSlot:     point.Slot,
-						DepositAmount: types.Uint64(deposit),
-						CertificateID: certIDMap[i],
+						PoolKeyHash:                c.Operator[:],
+						VrfKeyHash:                 c.VrfKeyHash[:],
+						Pledge:                     types.Uint64(c.Pledge),
+						Cost:                       types.Uint64(c.Cost),
+						Margin:                     &types.Rat{Rat: c.Margin.Rat},
+						RewardAccount:              rewardAcctHash2,
+						RewardAccountCredentialTag: rewardAcctTag2,
+						AddedSlot:                  point.Slot,
+						DepositAmount:              types.Uint64(deposit),
+						CertificateID:              certIDMap[i],
 					}
 					if c.PoolMetadata != nil {
 						tmpReg.MetadataUrl = c.PoolMetadata.Url
@@ -2984,7 +3125,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						},
 						DoUpdates: clause.AssignmentColumns([]string{
 							"vrf_key_hash", "pledge", "cost", "margin",
-							"reward_account", "certificate_id",
+							"reward_account", "reward_account_credential_tag", "certificate_id",
 							"metadata_url", "metadata_hash", "deposit_amount",
 						}),
 					}).Omit("Owners", "Relays").Create(&tmpReg)
@@ -3050,12 +3191,17 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeRegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					tmpReg := models.StakeRegistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -3103,14 +3249,24 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					if tmpAccount == nil {
-						tmpAccount = &models.Account{StakingKey: stakeKey}
+						tmpAccount = &models.Account{
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
+						}
 						r := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if r.Error != nil {
@@ -3121,6 +3277,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeDeregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
@@ -3133,14 +3290,24 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.DeregistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.GetAccount(stakeKey, false, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					if tmpAccount == nil {
-						tmpAccount = &models.Account{StakingKey: stakeKey}
+						tmpAccount = &models.Account{
+							StakingKey:    stakeKey,
+							CredentialTag: credentialTag,
+						}
 						r := db.Clauses(clause.OnConflict{
-							Columns:   []clause.Column{{Name: "staking_key"}},
+							Columns: []clause.Column{
+								{Name: "credential_tag"},
+								{Name: "staking_key"},
+							},
 							UpdateAll: true,
 						}).Create(tmpAccount)
 						if r.Error != nil {
@@ -3151,6 +3318,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.Deregistration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
@@ -3164,7 +3332,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3172,6 +3344,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -3185,7 +3358,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.StakeRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3193,6 +3370,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.StakeRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
@@ -3207,7 +3385,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.StakeVoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3226,6 +3408,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.StakeVoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -3241,12 +3424,17 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.RegistrationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					tmpReg := models.Registration{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						AddedSlot:     point.Slot,
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
@@ -3264,7 +3452,12 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.RegistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpReg := models.RegistrationDrep{
+						CredentialTag:  drepCredTag2,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
@@ -3275,13 +3468,14 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpReg.AnchorHash = c.Anchor.DataHash[:]
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot,
+						drepCredTag2, drepCredential, point.Slot,
 						tmpReg.AnchorURL, tmpReg.AnchorHash, true, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					r2 := db.Clauses(clause.OnConflict{
 						Columns: []clause.Column{
+							{Name: "credential_tag"},
 							{Name: "drep_credential"},
 							{Name: "added_slot"},
 						},
@@ -3295,8 +3489,8 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if tmpReg.ID == 0 {
 						var existing models.RegistrationDrep
 						if err := db.Where(
-							"drep_credential = ? AND added_slot = ?",
-							tmpReg.DrepCredential, tmpReg.AddedSlot,
+							"credential_tag = ? AND drep_credential = ? AND added_slot = ?",
+							drepCredTag2, tmpReg.DrepCredential, tmpReg.AddedSlot,
 						).First(&existing).Error; err != nil {
 							return fmt.Errorf(
 								"fetching drep registration ID after upsert (batched): %w",
@@ -3308,13 +3502,18 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.DeregistrationDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpDereg := models.DeregistrationDrep{
+						CredentialTag:  drepCredTag2,
 						DrepCredential: drepCredential,
 						AddedSlot:      point.Slot,
 						DepositAmount:  types.Uint64(deposit),
 						CertificateID:  certIDMap[i],
 					}
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag2, drepCredential, true, txn)
 					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3325,7 +3524,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						)
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot, "", nil, false, txn,
+						drepCredTag2, drepCredential, point.Slot, "", nil, false, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3335,7 +3534,12 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
 				case *lcommon.UpdateDrepCertificate:
 					drepCredential := c.DrepCredential.Credential[:]
+					drepCredTag2, err := models.CredentialTagFromUint(c.DrepCredential.CredType)
+					if err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
 					tmpUpdate := models.UpdateDrep{
+						CredentialTag: drepCredTag2,
 						Credential:    drepCredential,
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
@@ -3344,7 +3548,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpUpdate.AnchorURL = c.Anchor.Url
 						tmpUpdate.AnchorHash = c.Anchor.DataHash[:]
 					}
-					existingDrep, err := d.GetDrep(drepCredential, true, txn)
+					existingDrep, err := d.GetDrepByCredential(drepCredTag2, drepCredential, true, txn)
 					if err != nil && !errors.Is(err, models.ErrDrepNotFound) {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3355,7 +3559,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						)
 					}
 					if err := d.SetDrep(
-						drepCredential, point.Slot,
+						drepCredTag2, drepCredential, point.Slot,
 						tmpUpdate.AnchorURL, tmpUpdate.AnchorHash, true, txn,
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
@@ -3366,7 +3570,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
 				case *lcommon.StakeVoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3385,6 +3593,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.StakeVoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						PoolKeyHash:   c.PoolKeyHash[:],
 						Drep:          drepCredential,
 						DrepType:      drepType,
@@ -3401,7 +3610,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteRegistrationDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3419,6 +3632,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpReg := models.VoteRegistrationDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -3434,7 +3648,11 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
 				case *lcommon.VoteDelegationCertificate:
 					stakeKey := c.StakeCredential.Credential[:]
-					tmpAccount, err := d.getOrCreateAccount(stakeKey, txn)
+					credentialTag, err := models.CredentialTagFromUint(c.StakeCredential.CredType)
+					if err != nil {
+						return err
+					}
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3452,6 +3670,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					tmpAccount.AddedSlot = point.Slot
 					tmpItem := models.VoteDelegation{
 						StakingKey:    stakeKey,
+						CredentialTag: credentialTag,
 						Drep:          drepCredential,
 						DrepType:      drepType,
 						AddedSlot:     point.Slot,
@@ -3504,10 +3723,15 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					}
 					certIDUpdates[certIDMap[i]] = tmpMIR.ID
 					for credential, amount := range c.Reward.Rewards {
+						credentialTag, err := models.CredentialTagFromUint(credential.CredType)
+						if err != nil {
+							return fmt.Errorf("process certificate: %w", err)
+						}
 						tmpReward := models.MoveInstantaneousRewardsReward{
-							Credential: credential.Credential[:],
-							Amount:     types.Uint64(amount),
-							MIRID:      tmpMIR.ID,
+							Credential:    credential.Credential[:],
+							CredentialTag: credentialTag,
+							Amount:        types.Uint64(amount),
+							MIRID:         tmpMIR.ID,
 						}
 						if r := db.Create(&tmpReward); r.Error != nil {
 							return fmt.Errorf("process certificate (batched): %w", r.Error)
@@ -3821,16 +4045,22 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 		tmpPool.Pledge = types.Uint64(cert.Pledge)
 		tmpPool.Cost = types.Uint64(cert.Cost)
 		tmpPool.Margin = &types.Rat{Rat: cert.Margin.Rat}
-		tmpPool.RewardAccount = cert.RewardAccount[:]
+		rewardAcctTag, rewardAcctHash, err := certutil.PoolRewardAccount(&cert)
+		if err != nil {
+			return fmt.Errorf("pool reward account: %w", err)
+		}
+		tmpPool.RewardAccount = rewardAcctHash
+		tmpPool.RewardAccountCredentialTag = rewardAcctTag
 
 		tmpReg := models.PoolRegistration{
-			PoolKeyHash:   cert.Operator[:],
-			VrfKeyHash:    cert.VrfKeyHash[:],
-			Pledge:        types.Uint64(cert.Pledge),
-			Cost:          types.Uint64(cert.Cost),
-			Margin:        &types.Rat{Rat: cert.Margin.Rat},
-			RewardAccount: cert.RewardAccount[:],
-			AddedSlot:     0,
+			PoolKeyHash:                cert.Operator[:],
+			VrfKeyHash:                 cert.VrfKeyHash[:],
+			Pledge:                     types.Uint64(cert.Pledge),
+			Cost:                       types.Uint64(cert.Cost),
+			Margin:                     &types.Rat{Rat: cert.Margin.Rat},
+			RewardAccount:              rewardAcctHash,
+			RewardAccountCredentialTag: rewardAcctTag,
+			AddedSlot:                  0,
 		}
 		if cert.PoolMetadata != nil {
 			tmpReg.MetadataUrl = cert.PoolMetadata.Url
@@ -3913,9 +4143,13 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 
 		account := &models.Account{
 			StakingKey: stakerBytes,
-			Pool:       poolBytes,
-			Active:     true,
-			AddedSlot:  0,
+			// Shelley genesis staking section encodes stake credentials as
+			// raw 28-byte hashes with no type metadata. All Shelley-era
+			// genesis stake credentials are key-hash by protocol design.
+			CredentialTag: 0,
+			Pool:          poolBytes,
+			Active:        true,
+			AddedSlot:     0,
 		}
 		// DoUpdates intentionally omits added_slot: RestoreAccountStateAtSlot
 		// selects rows by `added_slot > rollback_slot`, so resetting a
@@ -3923,7 +4157,10 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 		// Mithril after partial sync) would make that row invisible to
 		// every future rollback.
 		result := db.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "staking_key"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "staking_key"},
+			},
 			DoUpdates: clause.AssignmentColumns([]string{"pool", "active"}),
 		}).Create(account)
 		if result.Error != nil {
@@ -3956,19 +4193,27 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		if cred == nil {
 			continue
 		}
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return fmt.Errorf("genesis drep credential type: %w", err)
+		}
 		drepCred := cred.Credential[:]
 		drep := &models.Drep{
-			Credential:  drepCred,
-			AddedSlot:   0,
-			ExpiryEpoch: state.Expiry,
-			Active:      true,
+			CredentialTag: credentialTag,
+			Credential:    drepCred,
+			AddedSlot:     0,
+			ExpiryEpoch:   state.Expiry,
+			Active:        true,
 		}
 		if state.Anchor != nil {
 			drep.AnchorURL = state.Anchor.Url
 			drep.AnchorHash = state.Anchor.DataHash[:]
 		}
 		if result := db.Clauses(clause.OnConflict{
-			Columns: []clause.Column{{Name: "credential"}},
+			Columns: []clause.Column{
+				{Name: "credential_tag"},
+				{Name: "credential"},
+			},
 			DoUpdates: clause.AssignmentColumns([]string{
 				"added_slot",
 				"anchor_url",
@@ -3984,6 +4229,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 
 		reg := &models.RegistrationDrep{
+			CredentialTag:  credentialTag,
 			DrepCredential: drepCred,
 			AddedSlot:      0,
 			DepositAmount:  types.Uint64(state.Deposit),
@@ -3994,6 +4240,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 		if result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
+				{Name: "credential_tag"},
 				{Name: "drep_credential"},
 				{Name: "added_slot"},
 			},
@@ -4011,6 +4258,10 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			continue
 		}
 		stakeKey := cred.Credential[:]
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return err
+		}
 
 		drepType, err := models.DrepTypeFromInt(delegatee.DRep.Type)
 		if err != nil && delegatee.Type != conway.ConwayGenesisDelegateeTypeStake {
@@ -4023,7 +4274,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			drepCredential = delegatee.DRep.Credential
 		}
 
-		account, err := d.getOrCreateAccount(stakeKey, txn)
+		account, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 		if err != nil {
 			return fmt.Errorf(
 				"get or create genesis delegatee account: %w",
@@ -4041,11 +4292,12 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		// would delete a genesis-rooted account.
 		var existingReg models.Registration
 		regResult := db.Where(
-			"staking_key = ? AND added_slot = ?",
-			stakeKey, uint64(0),
+			"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+			credentialTag, stakeKey, uint64(0),
 		).Attrs(models.Registration{
-			StakingKey: stakeKey,
-			AddedSlot:  0,
+			StakingKey:    stakeKey,
+			CredentialTag: credentialTag,
+			AddedSlot:     0,
 		}).FirstOrCreate(&existingReg)
 		if regResult.Error != nil {
 			return fmt.Errorf(
@@ -4054,10 +4306,10 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		}
 
 		// Delegation history tables have no unique constraint that covers
-		// (staking_key, added_slot), so we use FirstOrCreate to keep the
-		// slot-0 row idempotent across retries (e.g., resumed Mithril
-		// bootstrap). Each staking key contributes at most one genesis
-		// delegation row of a given type, so matching on staking_key +
+		// (credential_tag, staking_key, added_slot), so we use FirstOrCreate
+		// to keep the slot-0 row idempotent across retries (e.g., resumed
+		// Mithril bootstrap). Each stake credential contributes at most one
+		// genesis delegation row of a given type, so matching on tag + key +
 		// added_slot is sufficient.
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
@@ -4069,12 +4321,13 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.StakeDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.StakeDelegation{
-				StakingKey:  stakeKey,
-				PoolKeyHash: delegatee.PoolId[:],
-				AddedSlot:   0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				PoolKeyHash:   delegatee.PoolId[:],
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -4091,13 +4344,14 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.VoteDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.VoteDelegation{
-				StakingKey: stakeKey,
-				Drep:       drepCredential,
-				DrepType:   drepType,
-				AddedSlot:  0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				Drep:          drepCredential,
+				DrepType:      drepType,
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -4115,14 +4369,15 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			}
 			var existing models.StakeVoteDelegation
 			result := db.Where(
-				"staking_key = ? AND added_slot = ?",
-				stakeKey, uint64(0),
+				"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+				credentialTag, stakeKey, uint64(0),
 			).Attrs(models.StakeVoteDelegation{
-				StakingKey:  stakeKey,
-				PoolKeyHash: delegatee.PoolId[:],
-				Drep:        drepCredential,
-				DrepType:    drepType,
-				AddedSlot:   0,
+				StakingKey:    stakeKey,
+				CredentialTag: credentialTag,
+				PoolKeyHash:   delegatee.PoolId[:],
+				Drep:          drepCredential,
+				DrepType:      drepType,
+				AddedSlot:     0,
 			}).FirstOrCreate(&existing)
 			if result.Error != nil {
 				return fmt.Errorf(

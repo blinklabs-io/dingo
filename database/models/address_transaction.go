@@ -19,7 +19,8 @@ package models
 type AddressTransaction struct {
 	ID            uint   `gorm:"primaryKey"`
 	PaymentKey    []byte `gorm:"index:idx_addr_tx_payment;size:28"`
-	StakingKey    []byte `gorm:"index:idx_addr_tx_staking;size:28"`
+	StakingKey    []byte `gorm:"index:idx_addr_tx_staking,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"not null;default:0;index:idx_addr_tx_staking,priority:1"`
 	TransactionID uint   `gorm:"index"`
 	Slot          uint64 `gorm:"index"`
 	TxIndex       uint32

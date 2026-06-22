@@ -253,7 +253,7 @@ func applyTreasuryWithdrawal(
 		if err != nil {
 			return fmt.Errorf("encode treasury withdrawal reward address: %w", err)
 		}
-		stakeCredential, err := rewardAccountStakeCredential(
+		credentialTag, stakeCredential, err := rewardAccountStakeCredential(
 			rewardAddrBytes,
 		)
 		if err != nil {
@@ -262,6 +262,7 @@ func applyTreasuryWithdrawal(
 		credited, err := CreditRegisteredRewardAccount(
 			ctx.DB,
 			ctx.Txn,
+			credentialTag,
 			stakeCredential,
 			amount,
 			ctx.Slot,
@@ -293,11 +294,18 @@ func applyTreasuryWithdrawal(
 func CreditRegisteredRewardAccount(
 	db *database.Database,
 	txn *database.Txn,
+	credentialTag uint8,
 	stakeCredential []byte,
 	amount uint64,
 	slot uint64,
 ) (bool, error) {
-	err := db.AddAccountReward(stakeCredential, amount, slot, txn)
+	err := db.AddAccountRewardByCredential(
+		credentialTag,
+		stakeCredential,
+		amount,
+		slot,
+		txn,
+	)
 	if err == nil {
 		return true, nil
 	}

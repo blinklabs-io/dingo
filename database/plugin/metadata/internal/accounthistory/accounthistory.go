@@ -24,8 +24,9 @@ import (
 	"gorm.io/gorm"
 )
 
-func QueryDelegationHistory(
+func QueryDelegationHistoryByCredential(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -36,7 +37,11 @@ func QueryDelegationHistory(
 		return ret, nil
 	}
 
-	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	query, args := delegationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if strings.EqualFold(order, "asc") {
 		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC"
 	} else {
@@ -56,14 +61,19 @@ func QueryDelegationHistory(
 	return ret, nil
 }
 
-func CountDelegationHistory(
+func CountDelegationHistoryByCredential(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (int, error) {
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	query, args := delegationHistoryUnionQuery(db, stakingKey)
+	query, args := delegationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	var count int64
 	if err := db.Raw(
 		"SELECT COUNT(*) AS count FROM ("+query+") AS delegation_history",
@@ -76,6 +86,7 @@ func CountDelegationHistory(
 
 func delegationHistoryUnionQuery(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (string, []any) {
 	tables := []string{
@@ -102,21 +113,24 @@ func delegationHistoryUnionQuery(
 				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
-			WHERE %[1]s.staking_key = ?`,
+				WHERE %[1]s.credential_tag = ?
+					AND %[1]s.staking_key = ?`,
 			table,
 			transactionJoinClause(db),
 		))
 		args = append(
 			args,
 			certType,
+			credentialTag,
 			stakingKey,
 		)
 	}
 	return strings.Join(parts, " UNION ALL "), args
 }
 
-func QueryRegistrationHistory(
+func QueryRegistrationHistoryByCredential(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 	limit int,
 	offset int,
@@ -127,7 +141,11 @@ func QueryRegistrationHistory(
 		return ret, nil
 	}
 
-	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	query, args := registrationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	if strings.EqualFold(order, "asc") {
 		query += " ORDER BY added_slot ASC, block_index ASC, cert_index ASC, tx_hash ASC, action ASC"
 	} else {
@@ -174,14 +192,19 @@ func DelegationTableCertType(table string) (uint, bool) {
 	}
 }
 
-func CountRegistrationHistory(
+func CountRegistrationHistoryByCredential(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (int, error) {
 	if len(stakingKey) == 0 {
 		return 0, nil
 	}
-	query, args := registrationHistoryUnionQuery(db, stakingKey)
+	query, args := registrationHistoryUnionQuery(
+		db,
+		credentialTag,
+		stakingKey,
+	)
 	var count int64
 	if err := db.Raw(
 		"SELECT COUNT(*) AS count FROM ("+query+") AS registration_history",
@@ -199,6 +222,7 @@ type registrationHistorySource struct {
 
 func registrationHistoryUnionQuery(
 	db *gorm.DB,
+	credentialTag uint8,
 	stakingKey []byte,
 ) (string, []any) {
 	sources := registrationHistorySources()
@@ -220,7 +244,8 @@ func registrationHistoryUnionQuery(
 				ON certs.id = %[1]s.certificate_id
 				AND certs.cert_type = ?
 			%[2]s
-			WHERE %[1]s.staking_key = ?`,
+				WHERE %[1]s.credential_tag = ?
+					AND %[1]s.staking_key = ?`,
 			source.table,
 			transactionJoinClause(db),
 		))
@@ -228,6 +253,7 @@ func registrationHistoryUnionQuery(
 			args,
 			source.action,
 			certType,
+			credentialTag,
 			stakingKey,
 		)
 	}

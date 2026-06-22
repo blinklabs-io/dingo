@@ -36,6 +36,9 @@ const (
 
 	// DRep credentials are Blake2b-224 hashes: 224 bits = 28 bytes.
 	drepCredentialHashLen = 28
+	// CIP-129 DRep identifiers include a one-byte voter header followed
+	// by the 28-byte credential hash.
+	drepCIP129PayloadLen = drepCredentialHashLen + 1
 	// Hex encodes each byte as two characters, so a 28-byte credential
 	// hash is represented by 56 hex characters.
 	drepCredentialHexLen = drepCredentialHashLen * 2
@@ -1533,17 +1536,55 @@ func parseDRepIdentifier(
 		return DRepCredential{}, fmt.Errorf("decode DRep payload: %w", err)
 	}
 
-	if len(payload) != drepCredentialHashLen {
+	switch len(payload) {
+	case drepCredentialHashLen:
+		return DRepCredential{
+			ID:        id,
+			Hash:      payload,
+			HasScript: false,
+		}, nil
+	case drepCIP129PayloadLen:
+		hasScript, err := parseCIP129DRepScriptFlag(payload[0])
+		if err != nil {
+			return DRepCredential{}, err
+		}
+		return DRepCredential{
+			ID:                 id,
+			Hash:               payload[1:],
+			HasScript:          hasScript,
+			CredentialTagKnown: true,
+		}, nil
+	default:
 		return DRepCredential{}, fmt.Errorf(
 			"invalid DRep credential length %d",
 			len(payload),
 		)
 	}
-	return DRepCredential{
-		ID:        id,
-		Hash:      payload,
-		HasScript: false,
-	}, nil
+}
+
+func parseCIP129DRepScriptFlag(header byte) (bool, error) {
+	voterType := header >> 4
+	credentialNibble := header & 0x0f
+	switch voterType {
+	case 2:
+		if credentialNibble != 0x2 {
+			return false, fmt.Errorf(
+				"invalid DRep key credential nibble 0x%x",
+				credentialNibble,
+			)
+		}
+		return false, nil
+	case 3:
+		if credentialNibble != 0x3 {
+			return false, fmt.Errorf(
+				"invalid DRep script credential nibble 0x%x",
+				credentialNibble,
+			)
+		}
+		return true, nil
+	default:
+		return false, fmt.Errorf("invalid DRep voter type %d", voterType)
+	}
 }
 
 func writeNodeQueryError(

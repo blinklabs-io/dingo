@@ -117,8 +117,9 @@ func (d *Database) RestoreAccountStateAtSlot(
 	return nil
 }
 
-// GetAccount returns an account by staking key
-func (d *Database) GetAccount(
+// GetAccountByCredential returns an account by staking credential tag and key.
+func (d *Database) GetAccountByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	includeInactive bool,
 	txn *Txn,
@@ -127,7 +128,8 @@ func (d *Database) GetAccount(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	account, err := d.metadata.GetAccount(
+	account, err := d.metadata.GetAccountByCredential(
+		credentialTag,
 		stakeKey,
 		includeInactive,
 		txn.Metadata(),
@@ -141,12 +143,10 @@ func (d *Database) GetAccount(
 	return account, nil
 }
 
-// GetAccounts returns accounts for the given staking keys in a single
-// query, keyed by string(StakingKey). Stake keys with no matching row
-// are omitted (callers detect "not found" by absence). An empty input
-// returns an empty (non-nil) map and no error.
-func (d *Database) GetAccounts(
-	stakeKeys [][]byte,
+// GetAccountsByCredential returns accounts for the given staking credentials in
+// a single query, keyed by StakeCredentialRef.MapKey().
+func (d *Database) GetAccountsByCredential(
+	refs []models.StakeCredentialRef,
 	includeInactive bool,
 	txn *Txn,
 ) (map[string]*models.Account, error) {
@@ -154,11 +154,17 @@ func (d *Database) GetAccounts(
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	return d.metadata.GetAccounts(stakeKeys, includeInactive, txn.Metadata())
+	return d.metadata.GetAccountsByCredential(
+		refs,
+		includeInactive,
+		txn.Metadata(),
+	)
 }
 
-// AddAccountReward credits the reward balance for a registered account.
-func (d *Database) AddAccountReward(
+// AddAccountRewardByCredential credits the reward balance for a registered
+// account identified by stake credential tag and key.
+func (d *Database) AddAccountRewardByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
@@ -177,7 +183,8 @@ func (d *Database) AddAccountReward(
 			}
 		}()
 	}
-	if err := d.metadata.AddAccountReward(
+	if err := d.metadata.AddAccountRewardByCredential(
+		credentialTag,
 		stakeKey,
 		amount,
 		slot,

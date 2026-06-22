@@ -64,6 +64,7 @@ type mockNode struct {
 	pools                         []PoolExtendedInfo
 	asset                         AssetInfo
 	drep                          DRepInfo
+	drepCredential                DRepCredential
 	addressUTXOs                  []AddressUTXOInfo
 	addressTransactions           []AddressTransactionInfo
 	metadataJSON                  []MetadataTransactionJSONInfo
@@ -203,8 +204,9 @@ func (m *mockNode) Asset(
 }
 
 func (m *mockNode) DRep(
-	_ DRepCredential,
+	credential DRepCredential,
 ) (DRepInfo, error) {
+	m.drepCredential = credential
 	return m.drep, m.drepErr
 }
 
@@ -742,6 +744,81 @@ func TestHandleDRep(t *testing.T) {
 	assert.Equal(t, mock.drep.Active, resp.Active)
 	assert.Equal(t, mock.drep.ActiveEpoch, resp.ActiveEpoch)
 	assert.Equal(t, mock.drep.LiveStake, resp.LiveStake)
+}
+
+// TestHandleDRepCIP129ScriptIdentifier verifies script DRep IDs keep their
+// credential type when the HTTP handler passes them to the node adapter.
+func TestHandleDRepCIP129ScriptIdentifier(t *testing.T) {
+	const drepID = "drep1xvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhknfj5"
+	const drepHex = "00000000000000000000000000000000000000000000000000000000"
+
+	mock := &mockNode{
+		drep: DRepInfo{
+			DRepID:    drepID,
+			Hex:       drepHex,
+			HasScript: true,
+		},
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/governance/dreps/"+drepID,
+		nil,
+	)
+	req.SetPathValue("drep_id", drepID)
+	w := httptest.NewRecorder()
+	b.handleDRep(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.True(t, mock.drepCredential.HasScript)
+	assert.True(t, mock.drepCredential.CredentialTagKnown)
+	assert.Equal(t, make([]byte, drepCredentialHashLen), mock.drepCredential.Hash)
+}
+
+// TestParseDRepIdentifierCIP129CredentialType verifies CIP-129 DRep IDs
+// decode the credential type from the bech32 payload header.
+func TestParseDRepIdentifierCIP129CredentialType(t *testing.T) {
+	cases := []struct {
+		name          string
+		id            string
+		wantHasScript bool
+	}{
+		{
+			name:          "key",
+			id:            "drep1ygqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq7vlc9n",
+			wantHasScript: false,
+		},
+		{
+			name:          "script",
+			id:            "drep1xvqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqhknfj5",
+			wantHasScript: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			credential, err := parseDRepIdentifier(tc.id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.id, credential.ID)
+			assert.Equal(t, make([]byte, drepCredentialHashLen), credential.Hash)
+			assert.Equal(t, tc.wantHasScript, credential.HasScript)
+			assert.True(t, credential.CredentialTagKnown)
+		})
+	}
+}
+
+// TestParseDRepIdentifierHexIsAmbiguous verifies raw hash identifiers remain
+// untyped so lookup can deliberately fall back across key/script tags.
+func TestParseDRepIdentifierHexIsAmbiguous(t *testing.T) {
+	const drepHex = "00000000000000000000000000000000000000000000000000000000"
+
+	credential, err := parseDRepIdentifier(drepHex)
+	require.NoError(t, err)
+	assert.Equal(t, drepHex, credential.ID)
+	assert.Equal(t, make([]byte, drepCredentialHashLen), credential.Hash)
+	assert.False(t, credential.HasScript)
+	assert.False(t, credential.CredentialTagKnown)
 }
 
 func TestHandleDRepInvalidIdentifier(t *testing.T) {

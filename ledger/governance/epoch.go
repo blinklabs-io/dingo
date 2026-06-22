@@ -531,7 +531,7 @@ func refundProposalDeposit(
 	if db == nil {
 		return errors.New("nil database")
 	}
-	stakeCredential, err := rewardAccountStakeCredential(
+	credentialTag, stakeCredential, err := rewardAccountStakeCredential(
 		proposal.ReturnAddress,
 	)
 	if err != nil {
@@ -540,6 +540,7 @@ func refundProposalDeposit(
 	credited, err := CreditRegisteredRewardAccount(
 		db,
 		txn,
+		credentialTag,
 		stakeCredential,
 		proposal.Deposit,
 		slot,
@@ -635,21 +636,25 @@ func removeOrphanedProposals(
 	return count, nil
 }
 
-func rewardAccountStakeCredential(returnAddress []byte) ([]byte, error) {
+func rewardAccountStakeCredential(returnAddress []byte) (uint8, []byte, error) {
 	addr, err := lcommon.NewAddressFromBytes(returnAddress)
 	if err != nil {
-		return nil, fmt.Errorf("decode return reward account: %w", err)
+		return 0, nil, fmt.Errorf("decode return reward account: %w", err)
 	}
+	var credentialTag uint8
 	switch addr.Type() {
-	case lcommon.AddressTypeNoneKey, lcommon.AddressTypeNoneScript:
+	case lcommon.AddressTypeNoneKey:
+		credentialTag = uint8(lcommon.CredentialTypeAddrKeyHash)
+	case lcommon.AddressTypeNoneScript:
+		credentialTag = uint8(lcommon.CredentialTypeScriptHash)
 	default:
-		return nil, fmt.Errorf(
+		return 0, nil, fmt.Errorf(
 			"return address is not a reward account: address type %d",
 			addr.Type(),
 		)
 	}
 	stakeHash := addr.StakeKeyHash()
-	return append([]byte(nil), stakeHash[:]...), nil
+	return credentialTag, append([]byte(nil), stakeHash[:]...), nil
 }
 
 // shortHash returns a hex-encoded prefix of a tx hash for logging.

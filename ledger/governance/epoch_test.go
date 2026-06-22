@@ -50,7 +50,7 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	}, 123)
 	require.NoError(t, err)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
@@ -108,7 +108,7 @@ func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	require.NoError(t, txn.Commit())
 
 	assert.Equal(t, 1, out.ExpiredCount)
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(12), uint64(account.Reward))
@@ -170,10 +170,10 @@ func TestProcessEpochReturnsMissingRewardAccountRefundToTreasury(
 	require.NoError(t, txn.Commit())
 	assert.Equal(t, 1, out.ExpiredCount)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "refund must not create a reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	assert.Nil(t, account)
 	state, err := store.GetNetworkState(nil)
@@ -329,10 +329,10 @@ func TestRefundProposalDepositReturnsInactiveRewardAccountToTreasury(
 	}, 123)
 	require.NoError(t, err)
 
-	active, err := store.GetAccount(stakeCred, false, nil)
+	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, active, "refund must not reactivate the reward account")
-	account, err := store.GetAccount(stakeCred, true, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, true, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.False(t, account.Active)
@@ -369,7 +369,7 @@ func TestRewardCreditsRollbackBySlot(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, db.DeleteAccountRewardsAfterSlot(122, nil))
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(5), uint64(account.Reward))
@@ -524,7 +524,7 @@ func TestProcessEpochOrphanedChildRemovedAndRefunded(t *testing.T) {
 	assert.Equal(t, uint64(500), *child.ExpiredSlot)
 
 	// Enacted parent's deposit (30) + orphaned child's deposit (15) = 45.
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(45), uint64(account.Reward))
@@ -589,7 +589,7 @@ func TestProcessEpochOrphanedChildMissingReturnAccountGoesToTreasury(
 	require.NoError(t, err)
 	require.NotNil(t, child.ExpiredEpoch)
 
-	missing, err := store.GetAccount(missingStakeCred, false, nil)
+	missing, err := store.GetAccountByCredential(0, missingStakeCred, false, nil)
 	require.NoError(t, err)
 	assert.Nil(t, missing, "orphan refund must not create a reward account")
 
@@ -664,7 +664,7 @@ func TestProcessEpochTransitiveOrphanRemoval(t *testing.T) {
 	}
 
 	// Enacted parent's deposit (10) + orphaned child (20) + grandchild (30) = 60.
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(60), uint64(account.Reward))
@@ -784,7 +784,7 @@ func TestProcessEpochOrphanedChildRestoredOnRollback(t *testing.T) {
 	assert.Nil(t, child.ExpiredEpoch, "orphaned status must be reversed by rollback")
 	assert.Nil(t, child.ExpiredSlot)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(0), uint64(account.Reward),
@@ -845,7 +845,7 @@ func TestProcessEpochOrphanAfterExpiry(t *testing.T) {
 	require.NotNil(t, child.ExpiredEpoch)
 	assert.Equal(t, uint64(5), *child.ExpiredEpoch)
 
-	account, err := store.GetAccount(stakeCred, false, nil)
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, account)
 	assert.Equal(t, uint64(30), uint64(account.Reward))

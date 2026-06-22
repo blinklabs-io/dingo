@@ -126,14 +126,39 @@ func (lv *LedgerView) StakeRegistration(
 	stakingKey []byte,
 ) ([]lcommon.StakeRegistrationCertificate, error) {
 	// stakingKey = lcommon.NewBlake2b224(stakingKey)
-	return lv.ls.db.GetStakeRegistrations(stakingKey, lv.txn)
+	return lv.ls.db.GetStakeRegistrationsByCredential(0, stakingKey, lv.txn)
+}
+
+// StakeRegistrationByCredential returns stake registration certificates for the
+// full stake credential identity, preserving key/script credential separation.
+func (lv *LedgerView) StakeRegistrationByCredential(
+	cred lcommon.Credential,
+) ([]lcommon.StakeRegistrationCertificate, error) {
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return nil, err
+	}
+	return lv.ls.db.GetStakeRegistrationsByCredential(
+		credentialTag,
+		cred.Credential[:],
+		lv.txn,
+	)
 }
 
 // IsStakeCredentialRegistered checks if a stake credential is currently registered
 func (lv *LedgerView) IsStakeCredentialRegistered(
 	cred lcommon.Credential,
 ) bool {
-	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return false
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			lv.ls.config.Logger.Error(
@@ -324,7 +349,16 @@ func (lv *LedgerView) UpdateAdaPots(adaPots lcommon.AdaPots) error {
 func (lv *LedgerView) IsRewardAccountRegistered(
 	cred lcommon.Credential,
 ) bool {
-	account, err := lv.ls.db.GetAccount(cred.Credential[:], false, lv.txn)
+	credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+	if err != nil {
+		return false
+	}
+	account, err := lv.ls.db.GetAccountByCredential(
+		credentialTag,
+		cred.Credential[:],
+		false,
+		lv.txn,
+	)
 	if err != nil {
 		if !errors.Is(err, models.ErrAccountNotFound) {
 			lv.ls.config.Logger.Error(
@@ -739,9 +773,10 @@ func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 // for accurate voting power. The current implementation approximates
 // voting power using current live balances.
 func (lv *LedgerView) GetDRepVotingPower(
+	credentialTag uint8,
 	drepCredential []byte,
 ) (uint64, error) {
-	power, err := lv.ls.db.GetDRepVotingPower(drepCredential, lv.txn)
+	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, lv.txn)
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}

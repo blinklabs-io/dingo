@@ -477,6 +477,34 @@ func (d *MetadataStoreSqlite) Start() error {
 			"block_nonce unique index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateAccountCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"account credential tag index migration failed: %w", err,
+		)
+	}
+	if err := models.MigrateDrepCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"drep credential tag index migration failed: %w", err,
+		)
+	}
+	if err := models.MigrateGovernanceVoteCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"governance vote credential tag index migration failed: %w", err,
+		)
+	}
+	if err := models.MigrateAccountRewardDeltaCredentialTagIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"account reward delta credential tag index migration failed: %w", err,
+		)
+	}
 	// Create table schemas (uses write connection)
 	d.logger.Debug(
 		"creating table",

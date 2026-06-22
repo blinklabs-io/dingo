@@ -746,15 +746,16 @@ func TestGetTransactionsByAddressIndex(t *testing.T) {
 	payment2 := bytes.Repeat([]byte{0x12}, 28)
 	stake1 := bytes.Repeat([]byte{0x22}, 28)
 	rows := []models.AddressTransaction{
-		{PaymentKey: payment1, StakingKey: stake1, TransactionID: 1, Slot: 100, TxIndex: 0},
-		{PaymentKey: payment1, StakingKey: stake1, TransactionID: 2, Slot: 200, TxIndex: 0},
-		{PaymentKey: payment2, StakingKey: stake1, TransactionID: 3, Slot: 300, TxIndex: 0},
+		{PaymentKey: payment1, CredentialTag: 0, StakingKey: stake1, TransactionID: 1, Slot: 100, TxIndex: 0},
+		{PaymentKey: payment1, CredentialTag: 0, StakingKey: stake1, TransactionID: 2, Slot: 200, TxIndex: 0},
+		{PaymentKey: payment2, CredentialTag: 0, StakingKey: stake1, TransactionID: 3, Slot: 300, TxIndex: 0},
+		{PaymentKey: payment1, CredentialTag: 1, StakingKey: stake1, TransactionID: 3, Slot: 300, TxIndex: 0},
 	}
 	if err := store.DB().Create(&rows).Error; err != nil {
 		t.Fatalf("failed to create address_tx rows: %v", err)
 	}
 
-	desc, err := store.GetTransactionsByAddress(payment1, stake1, 10, 0, "desc", nil)
+	desc, err := store.GetTransactionsByAddress(payment1, 0, stake1, 10, 0, "desc", nil)
 	if err != nil {
 		t.Fatalf("GetTransactionsByAddress desc failed: %v", err)
 	}
@@ -762,7 +763,7 @@ func TestGetTransactionsByAddressIndex(t *testing.T) {
 		t.Fatalf("unexpected desc order: %+v", desc)
 	}
 
-	asc, err := store.GetTransactionsByAddress(payment1, stake1, 10, 0, "asc", nil)
+	asc, err := store.GetTransactionsByAddress(payment1, 0, stake1, 10, 0, "asc", nil)
 	if err != nil {
 		t.Fatalf("GetTransactionsByAddress asc failed: %v", err)
 	}
@@ -770,7 +771,7 @@ func TestGetTransactionsByAddressIndex(t *testing.T) {
 		t.Fatalf("unexpected asc order: %+v", asc)
 	}
 
-	page, err := store.GetTransactionsByAddress(payment1, stake1, 1, 1, "desc", nil)
+	page, err := store.GetTransactionsByAddress(payment1, 0, stake1, 1, 1, "desc", nil)
 	if err != nil {
 		t.Fatalf("GetTransactionsByAddress pagination failed: %v", err)
 	}
@@ -786,29 +787,101 @@ func TestGetAddressesByStakingKey(t *testing.T) {
 	stake := bytes.Repeat([]byte{0x55}, 28)
 	paymentA := bytes.Repeat([]byte{0x66}, 28)
 	paymentB := bytes.Repeat([]byte{0x77}, 28)
+	paymentScript := bytes.Repeat([]byte{0x88}, 28)
 	rows := []models.AddressTransaction{
-		{PaymentKey: paymentA, StakingKey: stake, TransactionID: 1, Slot: 100, TxIndex: 0},
-		{PaymentKey: paymentA, StakingKey: stake, TransactionID: 2, Slot: 200, TxIndex: 0},
-		{PaymentKey: paymentB, StakingKey: stake, TransactionID: 3, Slot: 300, TxIndex: 0},
+		{PaymentKey: paymentA, CredentialTag: 0, StakingKey: stake, TransactionID: 1, Slot: 100, TxIndex: 0},
+		{PaymentKey: paymentA, CredentialTag: 0, StakingKey: stake, TransactionID: 2, Slot: 200, TxIndex: 0},
+		{PaymentKey: paymentB, CredentialTag: 0, StakingKey: stake, TransactionID: 3, Slot: 300, TxIndex: 0},
+		{PaymentKey: paymentScript, CredentialTag: 1, StakingKey: stake, TransactionID: 4, Slot: 400, TxIndex: 0},
 	}
 	if err := store.DB().Create(&rows).Error; err != nil {
 		t.Fatalf("failed to create address_tx rows: %v", err)
 	}
 
-	addrs, err := store.GetAddressesByStakingKey(stake, 10, 0, "asc", nil)
+	addrs, err := store.GetAddressesByCredential(0, stake, 10, 0, "asc", nil)
 	if err != nil {
-		t.Fatalf("GetAddressesByStakingKey failed: %v", err)
+		t.Fatalf("GetAddressesByCredential failed: %v", err)
 	}
 	if len(addrs) != 2 {
-		t.Fatalf("expected 2 distinct addresses, got %d", len(addrs))
+		t.Fatalf("expected 2 key credential addresses, got %d", len(addrs))
+	}
+	for _, addr := range addrs {
+		if addr.CredentialTag != 0 {
+			t.Fatalf("expected only key credential addresses, got tag %d", addr.CredentialTag)
+		}
 	}
 
-	page, err := store.GetAddressesByStakingKey(stake, 1, 1, "asc", nil)
+	scriptAddrs, err := store.GetAddressesByCredential(1, stake, 10, 0, "asc", nil)
 	if err != nil {
-		t.Fatalf("GetAddressesByStakingKey pagination failed: %v", err)
+		t.Fatalf("GetAddressesByCredential script lookup failed: %v", err)
+	}
+	if len(scriptAddrs) != 1 || scriptAddrs[0].CredentialTag != 1 {
+		t.Fatalf("expected 1 script credential address, got %+v", scriptAddrs)
+	}
+
+	count, err := store.CountAddressesByCredential(0, stake, nil)
+	if err != nil {
+		t.Fatalf("CountAddressesByCredential failed: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 key credential addresses, got %d", count)
+	}
+
+	page, err := store.GetAddressesByCredential(0, stake, 1, 1, "asc", nil)
+	if err != nil {
+		t.Fatalf("GetAddressesByCredential pagination failed: %v", err)
 	}
 	if len(page) != 1 {
 		t.Fatalf("expected 1 address in page, got %d", len(page))
+	}
+}
+
+func TestGetControlledAmountByCredential(t *testing.T) {
+	store := setupTestDB(t)
+
+	stake := bytes.Repeat([]byte{0x55}, 28)
+	rows := []models.Utxo{
+		{
+			TxId:          bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx:     0,
+			CredentialTag: 0,
+			StakingKey:    stake,
+			Amount:        types.Uint64(100),
+		},
+		{
+			TxId:          bytes.Repeat([]byte{0x02}, 32),
+			OutputIdx:     0,
+			CredentialTag: 1,
+			StakingKey:    stake,
+			Amount:        types.Uint64(250),
+		},
+		{
+			TxId:          bytes.Repeat([]byte{0x03}, 32),
+			OutputIdx:     0,
+			CredentialTag: 1,
+			StakingKey:    stake,
+			DeletedSlot:   10,
+			Amount:        types.Uint64(400),
+		},
+	}
+	if err := store.DB().Create(&rows).Error; err != nil {
+		t.Fatalf("failed to create utxo rows: %v", err)
+	}
+
+	keyAmount, err := store.GetControlledAmountByCredential(0, stake, nil)
+	if err != nil {
+		t.Fatalf("GetControlledAmountByCredential key lookup failed: %v", err)
+	}
+	if keyAmount != 100 {
+		t.Fatalf("expected key controlled amount 100, got %d", keyAmount)
+	}
+
+	scriptAmount, err := store.GetControlledAmountByCredential(1, stake, nil)
+	if err != nil {
+		t.Fatalf("GetControlledAmountByCredential script lookup failed: %v", err)
+	}
+	if scriptAmount != 250 {
+		t.Fatalf("expected script controlled amount 250, got %d", scriptAmount)
 	}
 }
 
@@ -1074,6 +1147,127 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 			"auth committee hot CertificateID %d does not match unified cert ID %d",
 			authHot.CertificateID,
 			authUnified.ID,
+		)
+	}
+}
+
+// TestStakeRegistrationCertificateProcessingIsCredentialTagAware verifies that
+// cert processing persists the on-chain credential tag instead of merging key
+// and script stake credentials that carry the same 28-byte hash.
+func TestStakeRegistrationCertificateProcessingIsCredentialTagAware(t *testing.T) {
+	sqliteStore := setupTestDB(t)
+	stakeKey := bytes.Repeat([]byte{0xA7}, 28)
+
+	mockTx := &mockTransaction{
+		hash:    lcommon.NewBlake2b256(bytes.Repeat([]byte{0xB8}, 32)),
+		isValid: true,
+		certificates: []lcommon.Certificate{
+			&lcommon.StakeRegistrationCertificate{
+				CertType: uint(lcommon.CertificateTypeStakeRegistration),
+				StakeCredential: lcommon.Credential{
+					CredType: lcommon.CredentialTypeAddrKeyHash,
+					Credential: lcommon.CredentialHash(
+						bytes.Clone(stakeKey),
+					),
+				},
+			},
+			&lcommon.StakeRegistrationCertificate{
+				CertType: uint(lcommon.CertificateTypeStakeRegistration),
+				StakeCredential: lcommon.Credential{
+					CredType: lcommon.CredentialTypeScriptHash,
+					Credential: lcommon.CredentialHash(
+						bytes.Clone(stakeKey),
+					),
+				},
+			},
+		},
+	}
+
+	point := ocommon.Point{
+		Hash: bytes.Repeat([]byte{0xC9}, 32),
+		Slot: 1000000,
+	}
+	certDeposits := map[int]uint64{
+		0: 2000000,
+		1: 2000000,
+	}
+	if err := sqliteStore.SetTransaction(
+		mockTx,
+		point,
+		0,
+		certDeposits,
+		nil,
+	); err != nil {
+		t.Fatalf("failed to set transaction: %v", err)
+	}
+
+	var accounts []models.Account
+	if result := sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Order("credential_tag ASC").
+		Find(&accounts); result.Error != nil {
+		t.Fatalf("failed to query accounts: %v", result.Error)
+	}
+	if len(accounts) != 2 {
+		t.Fatalf("expected 2 accounts, got %d", len(accounts))
+	}
+	if accounts[0].CredentialTag != 0 {
+		t.Fatalf("expected key account tag 0, got %d", accounts[0].CredentialTag)
+	}
+	if accounts[1].CredentialTag != 1 {
+		t.Fatalf(
+			"expected script account tag 1, got %d",
+			accounts[1].CredentialTag,
+		)
+	}
+
+	keyAccount, err := sqliteStore.GetAccountByCredential(0, stakeKey, false, nil)
+	if err != nil {
+		t.Fatalf("failed to query key credential account: %v", err)
+	}
+	if keyAccount == nil {
+		t.Fatal("expected key credential account")
+	}
+	scriptAccount, err := sqliteStore.GetAccountByCredential(1, stakeKey, false, nil)
+	if err != nil {
+		t.Fatalf("failed to query script credential account: %v", err)
+	}
+	if scriptAccount == nil {
+		t.Fatal("expected script credential account")
+	}
+	if keyAccount.CredentialTag != 0 {
+		t.Fatalf("expected key account tag 0, got %d", keyAccount.CredentialTag)
+	}
+	if scriptAccount.CredentialTag != 1 {
+		t.Fatalf(
+			"expected script account tag 1, got %d",
+			scriptAccount.CredentialTag,
+		)
+	}
+	if keyAccount.ID == scriptAccount.ID {
+		t.Fatal("expected distinct accounts for key and script credentials")
+	}
+
+	var registrations []models.StakeRegistration
+	if result := sqliteStore.DB().
+		Where("staking_key = ?", stakeKey).
+		Order("credential_tag ASC").
+		Find(&registrations); result.Error != nil {
+		t.Fatalf("failed to query stake registrations: %v", result.Error)
+	}
+	if len(registrations) != 2 {
+		t.Fatalf("expected 2 stake registrations, got %d", len(registrations))
+	}
+	if registrations[0].CredentialTag != 0 {
+		t.Fatalf(
+			"expected key registration tag 0, got %d",
+			registrations[0].CredentialTag,
+		)
+	}
+	if registrations[1].CredentialTag != 1 {
+		t.Fatalf(
+			"expected script registration tag 1, got %d",
+			registrations[1].CredentialTag,
 		)
 	}
 }

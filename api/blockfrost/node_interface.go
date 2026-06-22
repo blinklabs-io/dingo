@@ -562,9 +562,10 @@ type AssetInfo struct {
 
 // DRepCredential holds a parsed governance DRep identifier.
 type DRepCredential struct {
-	ID        string
-	Hash      []byte
-	HasScript bool
+	ID                 string
+	Hash               []byte
+	HasScript          bool
+	CredentialTagKnown bool
 }
 
 // DRepInfo holds DRep data needed by the governance API.

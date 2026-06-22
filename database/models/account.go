@@ -17,9 +17,11 @@ package models
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/btcsuite/btcd/btcutil/bech32"
+	"gorm.io/gorm"
 )
 
 var ErrAccountNotFound = errors.New("account not found")
@@ -46,6 +48,21 @@ func DrepTypeFromInt(drepType int) (uint64, error) {
 	}
 }
 
+func CredentialTagFromUint(tag uint) (uint8, error) {
+	return CredentialTagFromUint64(uint64(tag))
+}
+
+func CredentialTagFromUint64(tag uint64) (uint8, error) {
+	switch tag {
+	case 0:
+		return 0, nil
+	case 1:
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("unsupported stake credential tag: %d", tag)
+	}
+}
+
 // ValidatePredefinedDrepTypes rejects credential-backed DRep delegation
 // types. GetDRepVotingPowerByType is only for predefined, credentialless
 // DRep options.
@@ -67,7 +84,8 @@ func ValidatePredefinedDrepTypes(drepTypes []uint64) error {
 }
 
 type Account struct {
-	StakingKey    []byte `gorm:"uniqueIndex;size:28;index:idx_account_drep_active_staking_key,priority:3;index:idx_account_drep_type_active_staking_key,priority:3;index:idx_account_active_pool_staking_key,priority:3"`
+	StakingKey    []byte `gorm:"uniqueIndex:idx_account_credential,priority:2;size:28;index:idx_account_drep_active_staking_key,priority:4;index:idx_account_drep_type_active_staking_key,priority:4;index:idx_account_active_pool_staking_key,priority:4"`
+	CredentialTag uint8  `gorm:"uniqueIndex:idx_account_credential,priority:1;not null;default:0;index:idx_account_drep_active_staking_key,priority:3;index:idx_account_drep_type_active_staking_key,priority:3;index:idx_account_active_pool_staking_key,priority:3"`
 	Pool          []byte `gorm:"index;size:28;index:idx_account_active_pool_staking_key,priority:2"`
 	Drep          []byte `gorm:"index;size:28;index:idx_account_drep_active_staking_key,priority:1"`
 	ID            uint   `gorm:"primarykey"`
@@ -88,12 +106,84 @@ func (a *Account) TableName() string {
 	return "account"
 }
 
+// MigrateAccountCredentialTagIndex drops the legacy hash-only account
+// uniqueness so AutoMigrate can create the tag-aware composite unique index.
+func MigrateAccountCredentialTagIndex(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&Account{}) {
+		return nil
+	}
+	if !db.Migrator().HasIndex(&Account{}, "idx_account_staking_key") {
+		return nil
+	}
+	logger.Info(
+		"dropping legacy account staking_key unique index before tag-aware migration",
+	)
+	if err := db.Migrator().DropIndex(
+		&Account{},
+		"idx_account_staking_key",
+	); err != nil {
+		return fmt.Errorf("drop account staking_key index: %w", err)
+	}
+	return nil
+}
+
+// MigrateAccountRewardDeltaCredentialTagIndex drops the legacy unique index on
+// account_reward_delta before AutoMigrate adds credential_tag to it. The old
+// index covers (withdrawal, tx_hash, staking_key); the new one adds
+// credential_tag so key and script reward accounts with the same hash are
+// tracked independently.
+func MigrateAccountRewardDeltaCredentialTagIndex(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&AccountRewardDelta{}) {
+		return nil
+	}
+	// If credential_tag is already present the index has already been migrated.
+	if db.Migrator().HasColumn(&AccountRewardDelta{}, "credential_tag") {
+		return nil
+	}
+	if !db.Migrator().HasIndex(&AccountRewardDelta{}, "idx_account_reward_delta_w_tx_s") {
+		return nil
+	}
+	logger.Info(
+		"dropping legacy account_reward_delta unique index before tag-aware migration",
+	)
+	if err := db.Migrator().DropIndex(
+		&AccountRewardDelta{},
+		"idx_account_reward_delta_w_tx_s",
+	); err != nil {
+		return fmt.Errorf("drop account_reward_delta unique index: %w", err)
+	}
+	return nil
+}
+
+type StakeCredentialRef struct {
+	Tag uint8
+	Key []byte
+}
+
+func NewStakeCredentialRef(tag uint8, key []byte) StakeCredentialRef {
+	return StakeCredentialRef{
+		Tag: tag,
+		Key: key,
+	}
+}
+
+func (r StakeCredentialRef) MapKey() string {
+	return string([]byte{r.Tag}) + string(r.Key)
+}
+
 // AccountRewardDelta records reward-account balance changes that are not
 // otherwise represented by a rollback-aware certificate row. Credits store the
 // credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
 // TxHash so rollback can restore the cleared reward balance.
 type AccountRewardDelta struct {
-	StakingKey     []byte       `gorm:"index;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:3"`
+	StakingKey     []byte       `gorm:"index:idx_account_reward_delta_credential,priority:2;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:4"`
+	CredentialTag  uint8        `gorm:"index:idx_account_reward_delta_credential,priority:1;not null;default:0;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:3"`
 	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:2"`
 	Amount         types.Uint64 `gorm:"not null"`
 	PreviousReward types.Uint64
@@ -126,7 +216,8 @@ func (a *Account) String() (string, error) {
 }
 
 type Deregistration struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_deregistration_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_deregistration_credential,priority:1;not null;default:0"`
 	ID            uint   `gorm:"primarykey"`
 	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -138,7 +229,8 @@ func (Deregistration) TableName() string {
 }
 
 type Registration struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_registration_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_registration_credential,priority:1;not null;default:0"`
 	ID            uint   `gorm:"primarykey"`
 	CertificateID uint   `gorm:"index"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -150,7 +242,8 @@ func (Registration) TableName() string {
 }
 
 type StakeDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_delegation_credential,priority:1;not null;default:0"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
@@ -162,7 +255,8 @@ func (StakeDelegation) TableName() string {
 }
 
 type StakeDeregistration struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_deregistration_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_deregistration_credential,priority:1;not null;default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -173,7 +267,8 @@ func (StakeDeregistration) TableName() string {
 }
 
 type StakeRegistration struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_registration_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_registration_credential,priority:1;not null;default:0"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
@@ -185,7 +280,8 @@ func (StakeRegistration) TableName() string {
 }
 
 type StakeRegistrationDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_registration_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_registration_delegation_credential,priority:1;not null;default:0"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	CertificateID uint   `gorm:"index"`
 	ID            uint   `gorm:"primarykey"`
@@ -198,7 +294,8 @@ func (StakeRegistrationDelegation) TableName() string {
 }
 
 type StakeVoteDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_vote_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_vote_delegation_credential,priority:1;not null;default:0"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
 	DrepType      uint64 `gorm:"default:0"`
@@ -212,7 +309,8 @@ func (StakeVoteDelegation) TableName() string {
 }
 
 type StakeVoteRegistrationDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_stake_vote_registration_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_stake_vote_registration_delegation_credential,priority:1;not null;default:0"`
 	PoolKeyHash   []byte `gorm:"index;size:28"`
 	Drep          []byte `gorm:"index;size:28"`
 	DrepType      uint64 `gorm:"default:0"`
@@ -227,7 +325,8 @@ func (StakeVoteRegistrationDelegation) TableName() string {
 }
 
 type VoteDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_vote_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_vote_delegation_credential,priority:1;not null;default:0"`
 	Drep          []byte `gorm:"index;size:28"`
 	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`
@@ -240,7 +339,8 @@ func (VoteDelegation) TableName() string {
 }
 
 type VoteRegistrationDelegation struct {
-	StakingKey    []byte `gorm:"index;size:28"`
+	StakingKey    []byte `gorm:"index:idx_vote_registration_delegation_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_vote_registration_delegation_credential,priority:1;not null;default:0"`
 	Drep          []byte `gorm:"index;size:28"`
 	DrepType      uint64 `gorm:"default:0"`
 	CertificateID uint   `gorm:"index"`

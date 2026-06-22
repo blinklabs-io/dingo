@@ -561,7 +561,7 @@ func TestRollbackAccountState(t *testing.T) {
 	require.NoError(t, err, "RestoreAccountStateAtSlot should succeed")
 
 	// Verify account was restored to pool1
-	restored, err := store.GetAccount(stakeKey, false, nil)
+	restored, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, restored, "account should still exist after rollback")
 	require.True(
@@ -593,7 +593,7 @@ func TestRollbackDeletesAccountRegisteredAfterSlot(t *testing.T) {
 	require.NoError(t, err)
 
 	// Account should be deleted since it was registered after rollback slot
-	restored, err := store.GetAccount(stakeKey, true, nil)
+	restored, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)
 	require.Nil(
 		t,
@@ -1112,7 +1112,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	})
 
 	// Capture pre-rollback state at slot 200
-	preRollback, err := store.GetAccount(stakeKey, false, nil)
+	preRollback, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.True(
 		t,
@@ -1130,7 +1130,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify rollback state
-	midRollback, err := store.GetAccount(stakeKey, false, nil)
+	midRollback, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(
 		t,
@@ -1168,7 +1168,7 @@ func TestRollbackAndReplay(t *testing.T) {
 	})
 
 	// Verify final state matches pre-rollback state
-	postReplay, err := store.GetAccount(stakeKey, false, nil)
+	postReplay, err := store.GetAccountByCredential(0, stakeKey, false, nil)
 	require.NoError(t, err)
 	require.NotNil(t, postReplay, "account should exist after replay")
 	require.True(
@@ -1176,6 +1176,105 @@ func TestRollbackAndReplay(t *testing.T) {
 		bytes.Equal(postReplay.Pool, poolKey2),
 		"after replay, pool should be poolKey2 again",
 	)
+}
+
+// TestRollbackRestoreAccountStateIsCredentialTagAware verifies that rollback
+// restore keeps key and script cert history separate when both credentials use
+// the same 28-byte staking hash.
+func TestRollbackRestoreAccountStateIsCredentialTagAware(t *testing.T) {
+	store := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0xE1}, 28)
+	keyPool := bytes.Repeat([]byte{0xA0}, 28)
+	scriptPool := bytes.Repeat([]byte{0xA1}, 28)
+	currentPool := bytes.Repeat([]byte{0xFF}, 28)
+
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Pool:          currentPool,
+		AddedSlot:     200,
+		Active:        true,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Pool:          currentPool,
+		AddedSlot:     200,
+		Active:        true,
+	}).Error)
+
+	require.NoError(t, createTestTransaction(store.DB(), 51, 100))
+
+	keyRegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     0,
+		CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&keyRegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     100,
+		CertificateID: keyRegCert.ID,
+	}).Error)
+
+	scriptRegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     1,
+		CertType:      uint(lcommon.CertificateTypeStakeRegistration),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&scriptRegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		AddedSlot:     100,
+		CertificateID: scriptRegCert.ID,
+	}).Error)
+
+	keyDelegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     2,
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&keyDelegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   keyPool,
+		AddedSlot:     100,
+		CertificateID: keyDelegCert.ID,
+	}).Error)
+
+	scriptDelegCert := models.Certificate{
+		TransactionID: 51,
+		CertIndex:     3,
+		CertType:      uint(lcommon.CertificateTypeStakeDelegation),
+		Slot:          100,
+	}
+	require.NoError(t, store.DB().Create(&scriptDelegCert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		PoolKeyHash:   scriptPool,
+		AddedSlot:     100,
+		CertificateID: scriptDelegCert.ID,
+	}).Error)
+
+	require.NoError(t, store.RestoreAccountStateAtSlot(150, nil))
+
+	keyAccount, err := store.GetAccountByCredential(0, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, keyAccount)
+	require.Equal(t, keyPool, keyAccount.Pool)
+
+	scriptAccount, err := store.GetAccountByCredential(1, stakeKey, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, scriptAccount)
+	require.Equal(t, scriptPool, scriptAccount.Pool)
 }
 
 // TestRollbackPParamsDeletion tests that protocol parameters added
@@ -1378,4 +1477,62 @@ func TestRollbackConcurrentUtxoSpend(t *testing.T) {
 		bytes.Equal(finalCheck.SpentAtTxId, tx2Hash.Bytes()),
 		"UTxO should be spent by tx2",
 	)
+}
+
+// TestRollbackRewardDeltaIsCredentialTagAware verifies that
+// DeleteAccountRewardsAfterSlot matches AccountRewardDelta rows to accounts
+// by the composite (credential_tag, staking_key) key. A credit delta for
+// tag=1 must adjust only the script-hash account, not the key-hash account
+// that shares the same 28-byte hash.
+func TestRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0xD1}, 28)
+	const baseReward = uint64(1_000_000)
+	const creditAmount = uint64(500_000)
+	const slot = uint64(200)
+
+	// Two accounts sharing the same hash, differing only in credential_tag.
+	keyAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        types.Uint64(baseReward),
+	}
+	scriptAccount := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Active:        true,
+		AddedSlot:     10,
+		Reward:        types.Uint64(baseReward),
+	}
+	require.NoError(t, store.DB().Create(keyAccount).Error)
+	require.NoError(t, store.DB().Create(scriptAccount).Error)
+
+	// Record a reward credit only for the script-hash account at slot 200.
+	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+
+	// Verify only the script-hash account received the credit.
+	keyBefore, err := store.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), keyBefore.Reward, "key-hash account must not be affected by script-hash credit")
+
+	scriptBefore, err := store.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward+creditAmount), scriptBefore.Reward, "script-hash account must have received credit")
+
+	// Roll back past the credit slot.
+	require.NoError(t, store.DeleteAccountRewardsAfterSlot(slot-1, nil))
+
+	// Key-hash account reward must be unchanged.
+	keyAfter, err := store.GetAccountByCredential(0, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), keyAfter.Reward, "key-hash account reward must be unchanged after rollback")
+
+	// Script-hash account reward must be restored to base.
+	scriptAfter, err := store.GetAccountByCredential(1, stakeKey, true, nil)
+	require.NoError(t, err)
+	require.Equal(t, types.Uint64(baseReward), scriptAfter.Reward, "script-hash account reward must be restored to base after rollback")
 }

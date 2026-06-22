@@ -219,26 +219,31 @@ func tallyDRepVotes(
 	if len(dreps) > 0 {
 		// Batch-fetch voting power for all active DReps in one query to
 		// avoid the N+1 round-trip that the per-DRep lookup produced.
-		creds := make([][]byte, len(dreps))
+		creds := make([]models.StakeCredentialRef, len(dreps))
 		for i, drep := range dreps {
-			creds[i] = drep.Credential
+			creds[i] = models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
 		}
 		powers, err := ctx.DB.GetDRepVotingPowerBatch(creds, ctx.Txn)
 		if err != nil {
 			return fmt.Errorf("batch drep voting power: %w", err)
 		}
 
-		// Index votes by DRep credential for O(1) lookup.
+		// Index votes by full DRep credential identity for O(1) lookup.
 		voteByCred := make(map[string]uint8, len(votes))
 		for _, v := range votes {
-			voteByCred[string(v.VoterCredential)] = v.Vote
+			ref := models.StakeCredentialRef{
+				Tag: v.VoterCredentialTag,
+				Key: v.VoterCredential,
+			}
+			voteByCred[ref.MapKey()] = v.Vote
 		}
 
 		for _, drep := range dreps {
-			power := powers[string(drep.Credential)]
+			ref := models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
+			power := powers[ref.MapKey()]
 			tally.DRepTotalStake += power
 
-			vote, voted := voteByCred[string(drep.Credential)]
+			vote, voted := voteByCred[ref.MapKey()]
 			if !voted {
 				continue
 			}

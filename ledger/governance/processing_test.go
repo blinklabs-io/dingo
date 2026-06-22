@@ -351,6 +351,7 @@ func TestProcessVotesRepairsMissingDRepRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, votes, 1)
 	assert.Equal(t, uint8(models.VoterTypeDRep), votes[0].VoterType)
+	assert.Equal(t, uint8(0), votes[0].VoterCredentialTag)
 	assert.Equal(t, drepCred, votes[0].VoterCredential)
 	assert.Equal(t, uint8(models.VoteYes), votes[0].Vote)
 	assert.Equal(t, point.Slot, votes[0].AddedSlot)

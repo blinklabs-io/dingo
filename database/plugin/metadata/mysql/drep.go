@@ -24,7 +24,7 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// GetDrep gets a drep
+// GetDrep gets a drep by hash only (no tag filter).
 func (d *MetadataStoreMysql) GetDrep(
 	cred []byte,
 	includeInactive bool,
@@ -39,6 +39,34 @@ func (d *MetadataStoreMysql) GetDrep(
 		db = db.Where("active = ?", true)
 	}
 	if result := db.First(&drep, "credential = ?", cred); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &drep, nil
+}
+
+// GetDrepByCredential gets a drep by the full credential identity (tag + hash).
+func (d *MetadataStoreMysql) GetDrepByCredential(
+	credentialTag uint8,
+	cred []byte,
+	includeInactive bool,
+	txn types.Txn,
+) (*models.Drep, error) {
+	var drep models.Drep
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if !includeInactive {
+		db = db.Where("active = ?", true)
+	}
+	if result := db.First(
+		&drep,
+		"credential_tag = ? AND credential = ?",
+		credentialTag, cred,
+	); result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -64,6 +92,7 @@ func (d *MetadataStoreMysql) GetActiveDreps(
 
 // SetDrep saves a drep
 func (d *MetadataStoreMysql) SetDrep(
+	credentialTag uint8,
 	cred []byte,
 	slot uint64,
 	url string,
@@ -72,14 +101,18 @@ func (d *MetadataStoreMysql) SetDrep(
 	txn types.Txn,
 ) error {
 	tmpItem := models.Drep{
-		Credential: cred,
-		AddedSlot:  slot,
-		AnchorURL:  url,
-		AnchorHash: hash,
-		Active:     active,
+		CredentialTag: credentialTag,
+		Credential:    cred,
+		AddedSlot:     slot,
+		AnchorURL:     url,
+		AnchorHash:    hash,
+		Active:        active,
 	}
 	onConflict := clause.OnConflict{
-		Columns: []clause.Column{{Name: "credential"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "credential"},
+		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"added_slot",
 			"anchor_url",
@@ -101,6 +134,7 @@ func (d *MetadataStoreMysql) SetDrep(
 // the given credential. Existing rows are left untouched so the repair
 // path cannot clobber real registration metadata.
 func (d *MetadataStoreMysql) InsertDrepIfAbsent(
+	credentialTag uint8,
 	cred []byte,
 	slot uint64,
 	url string,
@@ -109,11 +143,12 @@ func (d *MetadataStoreMysql) InsertDrepIfAbsent(
 	txn types.Txn,
 ) error {
 	tmpItem := models.Drep{
-		Credential: cred,
-		AddedSlot:  slot,
-		AnchorURL:  url,
-		AnchorHash: hash,
-		Active:     active,
+		CredentialTag: credentialTag,
+		Credential:    cred,
+		AddedSlot:     slot,
+		AnchorURL:     url,
+		AnchorHash:    hash,
+		Active:        active,
 	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -135,6 +170,7 @@ func (d *MetadataStoreMysql) InsertDrepIfAbsent(
 // parameter and use epoch-based stake snapshots for accurate
 // voting power at a specific point in time.
 func (d *MetadataStoreMysql) GetDRepVotingPower(
+	credentialTag uint8,
 	drepCredential []byte,
 	txn types.Txn,
 ) (uint64, error) {
@@ -150,18 +186,21 @@ func (d *MetadataStoreMysql) GetDRepVotingPower(
 			   ), 0)
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
+			SELECT credential_tag, staking_key,
 				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
 			FROM utxo
 			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE drep = ? AND active = 1
+			  AND EXISTS (
+				  SELECT 1 FROM account ax
+				  WHERE ax.credential_tag = utxo.credential_tag
+				    AND ax.staking_key = utxo.staking_key
+				    AND ax.drep = ? AND ax.drep_type = ? AND ax.active = 1
 			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
-		WHERE a.drep = ? AND a.active = 1
-	`, drepCredential, drepCredential).Scan(&totalStake).Error; err != nil {
+			GROUP BY credential_tag, staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
+		WHERE a.drep = ? AND a.drep_type = ? AND a.active = 1
+	`, drepCredential, credentialTag, drepCredential, credentialTag).Scan(&totalStake).Error; err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}
 	return totalStake, nil
@@ -170,7 +209,7 @@ func (d *MetadataStoreMysql) GetDRepVotingPower(
 // GetDRepVotingPowerBatch returns voting power for each DRep credential
 // in a single query. See sqlite/drep.go for the documented contract.
 func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
-	drepCredentials [][]byte,
+	drepCredentials []models.StakeCredentialRef,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	out := make(map[string]uint64, len(drepCredentials))
@@ -182,40 +221,53 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
 		return nil, err
 	}
 	type row struct {
-		Drep  []byte
-		Stake uint64
+		Drep          []byte
+		CredentialTag uint64
+		Stake         uint64
+	}
+	hashes := make([][]byte, len(drepCredentials))
+	requested := make(map[string]struct{}, len(drepCredentials))
+	for i, ref := range drepCredentials {
+		hashes[i] = ref.Key
+		requested[ref.MapKey()] = struct{}{}
 	}
 	var rows []row
-	// Aggregate UTxO amounts per staking_key in a subquery before
-	// adding account.reward, otherwise the LEFT JOIN would multiply
-	// the per-account reward by the number of live UTxOs and inflate
-	// the totals. Each account contributes (utxo_sum + reward) once
-	// to its DRep bucket.
 	if err := db.Raw(`
-		SELECT a.drep AS drep,
+		SELECT a.drep AS drep, a.drep_type AS credential_tag,
 			   COALESCE(SUM(
 				   COALESCE(u.utxo_sum, 0)
 				   + COALESCE(CAST(a.reward AS UNSIGNED), 0)
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
-				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE active = 1 AND drep IN ?
-			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
+			SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
+				   COALESCE(SUM(CAST(utxo.amount AS UNSIGNED)), 0) AS utxo_sum
+			FROM account ax
+			JOIN utxo ON utxo.credential_tag = ax.credential_tag
+			         AND utxo.staking_key = ax.staking_key
+			         AND utxo.deleted_slot = 0
+			WHERE ax.active = 1 AND ax.drep IN ?
+			GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
+			AND u.drep_type = a.drep_type
 		WHERE a.active = 1 AND a.drep IN ?
-		GROUP BY a.drep
-	`, drepCredentials, drepCredentials).Scan(&rows).Error; err != nil {
+		GROUP BY a.drep, a.drep_type
+	`, hashes, hashes).Scan(&rows).Error; err != nil {
 		return nil, fmt.Errorf("get drep voting power batch: %w", err)
 	}
 	for _, r := range rows {
-		out[string(r.Drep)] = r.Stake
+		// account.drep_type 0=key and 1=script align with credential_tag values
+		// by protocol spec; types ≥2 (ALWAYS_ABSTAIN, ALWAYS_NO_CONFIDENCE)
+		// carry no credential hash and are never in the requested map.
+		if r.CredentialTag > 1 {
+			continue
+		}
+		ref := models.StakeCredentialRef{Tag: uint8(r.CredentialTag), Key: r.Drep}
+		if _, ok := requested[ref.MapKey()]; !ok {
+			continue
+		}
+		out[ref.MapKey()] = r.Stake
 	}
 	return out, nil
 }
@@ -255,16 +307,19 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerByType(
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT staking_key,
+			SELECT credential_tag, staking_key,
 				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
 			FROM utxo
 			WHERE deleted_slot = 0
-			  AND staking_key IN (
-				  SELECT staking_key FROM account
-				  WHERE active = 1 AND drep_type IN ?
+			  AND EXISTS (
+				  SELECT 1 FROM account ax
+				  WHERE ax.credential_tag = utxo.credential_tag
+				    AND ax.staking_key = utxo.staking_key
+				    AND ax.active = 1 AND ax.drep_type IN ?
 			  )
-			GROUP BY staking_key
-		) u ON u.staking_key = a.staking_key
+			GROUP BY credential_tag, staking_key
+		) u ON u.credential_tag = a.credential_tag
+			AND u.staking_key = a.staking_key
 		WHERE a.active = 1 AND a.drep_type IN ?
 		GROUP BY a.drep_type
 	`, drepTypes, drepTypes).Scan(&rows).Error; err != nil {
@@ -287,6 +342,7 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerByType(
 // that checks the current values differ, then fall back to an
 // existence check when RowsAffected is 0.
 func (d *MetadataStoreMysql) UpdateDRepActivity(
+	credentialTag uint8,
 	drepCredential []byte,
 	activityEpoch uint64,
 	inactivityPeriod uint64,
@@ -299,7 +355,8 @@ func (d *MetadataStoreMysql) UpdateDRepActivity(
 	expiryEpoch := activityEpoch + inactivityPeriod
 	result := db.Model(&models.Drep{}).
 		Where(
-			"credential = ? AND (last_activity_epoch != ? OR expiry_epoch != ?)",
+			"credential_tag = ? AND credential = ? AND (last_activity_epoch != ? OR expiry_epoch != ?)",
+			credentialTag,
 			drepCredential,
 			activityEpoch,
 			expiryEpoch,
@@ -316,7 +373,7 @@ func (d *MetadataStoreMysql) UpdateDRepActivity(
 		// Check existence to distinguish the two cases.
 		var count int64
 		if err := db.Model(&models.Drep{}).
-			Where("credential = ?", drepCredential).
+			Where("credential_tag = ? AND credential = ?", credentialTag, drepCredential).
 			Count(&count).Error; err != nil {
 			return fmt.Errorf(
 				"check drep existence: %w",
@@ -420,26 +477,57 @@ type drepCertCache struct {
 	hasUpdate      map[string]bool
 }
 
-// batchFetchDrepCerts fetches all relevant certificates for the given DRep credentials
+// drepCertCacheKey returns a composite cache key combining credential_tag and
+// credential so key-hash and script-hash DReps with the same hash are tracked
+// independently.
+func drepCertCacheKey(credentialTag uint8, credential []byte) string {
+	return string([]byte{credentialTag}) + string(credential)
+}
+
+// batchFetchDrepCerts fetches all relevant certificates for the given DRep credential refs
 // at or before the given slot.
+//
+// The SQL IN clause filters on credential hash only (not credential_tag) for
+// simplicity; the cache is post-filtered to entries whose composite (tag, hash)
+// key matches one of the input refs, so credentials sharing a 28-byte hash but
+// differing in tag are kept isolated.
 func batchFetchDrepCerts(
 	db *gorm.DB,
-	credentials [][]byte,
+	refs []models.StakeCredentialRef,
 	slot uint64,
 ) (*drepCertCache, error) {
 	cache := &drepCertCache{
-		registration:   make(map[string]drepCertRecord, len(credentials)),
-		hasReg:         make(map[string]bool, len(credentials)),
-		deregistration: make(map[string]drepCertRecord, len(credentials)),
-		hasDereg:       make(map[string]bool, len(credentials)),
-		update:         make(map[string]drepCertRecord, len(credentials)),
-		hasUpdate:      make(map[string]bool, len(credentials)),
+		registration:   make(map[string]drepCertRecord, len(refs)),
+		hasReg:         make(map[string]bool, len(refs)),
+		deregistration: make(map[string]drepCertRecord, len(refs)),
+		hasDereg:       make(map[string]bool, len(refs)),
+		update:         make(map[string]drepCertRecord, len(refs)),
+		hasUpdate:      make(map[string]bool, len(refs)),
+	}
+
+	// Build unique credential list for the SQL IN clause and a requested
+	// set (by composite cache key) for post-filtering.
+	requested := make(map[string]struct{}, len(refs))
+	seenHash := make(map[string]struct{}, len(refs))
+	var credentials [][]byte
+	for _, ref := range refs {
+		requested[drepCertCacheKey(ref.Tag, ref.Key)] = struct{}{}
+		h := string(ref.Key)
+		if _, ok := seenHash[h]; !ok {
+			seenHash[h] = struct{}{}
+			credentials = append(credentials, ref.Key)
+		}
+	}
+
+	if len(credentials) == 0 {
+		return cache, nil
 	}
 
 	// Fetch registrations
 	{
 		type result struct {
 			DrepCredential []byte
+			CredentialTag  uint8
 			AnchorURL      string `gorm:"column:anchor_url"`
 			AnchorHash     []byte
 			AddedSlot      uint64
@@ -448,22 +536,22 @@ func batchFetchDrepCerts(
 		var records []result
 		query := `
 			WITH ranked AS (
-				SELECT t.drep_credential, t.anchor_url, t.anchor_hash, t.added_slot, c.cert_index,
+				SELECT t.credential_tag, t.drep_credential, t.anchor_url, t.anchor_hash, t.added_slot, c.cert_index,
 					ROW_NUMBER() OVER (
-						PARTITION BY t.drep_credential
+						PARTITION BY t.credential_tag, t.drep_credential
 						ORDER BY t.added_slot DESC, c.cert_index DESC
 					) as rn
 				FROM registration_drep t
 				INNER JOIN certs c ON c.id = t.certificate_id
 				WHERE t.drep_credential IN ? AND t.added_slot <= ?
 			)
-			SELECT drep_credential, anchor_url, anchor_hash, added_slot, cert_index
+			SELECT credential_tag, drep_credential, anchor_url, anchor_hash, added_slot, cert_index
 			FROM ranked WHERE rn = 1`
 		if err := db.Raw(query, credentials, slot).Scan(&records).Error; err != nil {
 			return nil, err
 		}
 		for _, r := range records {
-			key := string(r.DrepCredential)
+			key := drepCertCacheKey(r.CredentialTag, r.DrepCredential)
 			cache.registration[key] = drepCertRecord{
 				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
@@ -478,28 +566,29 @@ func batchFetchDrepCerts(
 	{
 		type result struct {
 			DrepCredential []byte
+			CredentialTag  uint8
 			AddedSlot      uint64
 			CertIndex      uint32
 		}
 		var records []result
 		query := `
 			WITH ranked AS (
-				SELECT t.drep_credential, t.added_slot, c.cert_index,
+				SELECT t.credential_tag, t.drep_credential, t.added_slot, c.cert_index,
 					ROW_NUMBER() OVER (
-						PARTITION BY t.drep_credential
+						PARTITION BY t.credential_tag, t.drep_credential
 						ORDER BY t.added_slot DESC, c.cert_index DESC
 					) as rn
 				FROM deregistration_drep t
 				INNER JOIN certs c ON c.id = t.certificate_id
 				WHERE t.drep_credential IN ? AND t.added_slot <= ?
 			)
-			SELECT drep_credential, added_slot, cert_index
+			SELECT credential_tag, drep_credential, added_slot, cert_index
 			FROM ranked WHERE rn = 1`
 		if err := db.Raw(query, credentials, slot).Scan(&records).Error; err != nil {
 			return nil, err
 		}
 		for _, r := range records {
-			key := string(r.DrepCredential)
+			key := drepCertCacheKey(r.CredentialTag, r.DrepCredential)
 			cache.deregistration[key] = drepCertRecord{
 				addedSlot: r.AddedSlot,
 				certIndex: r.CertIndex,
@@ -511,31 +600,32 @@ func batchFetchDrepCerts(
 	// Fetch updates
 	{
 		type result struct {
-			Credential []byte
-			AnchorURL  string `gorm:"column:anchor_url"`
-			AnchorHash []byte
-			AddedSlot  uint64
-			CertIndex  uint32
+			Credential    []byte
+			CredentialTag uint8
+			AnchorURL     string `gorm:"column:anchor_url"`
+			AnchorHash    []byte
+			AddedSlot     uint64
+			CertIndex     uint32
 		}
 		var records []result
 		query := `
 			WITH ranked AS (
-				SELECT t.credential, t.anchor_url, t.anchor_hash, t.added_slot, c.cert_index,
+				SELECT t.credential_tag, t.credential, t.anchor_url, t.anchor_hash, t.added_slot, c.cert_index,
 					ROW_NUMBER() OVER (
-						PARTITION BY t.credential
+						PARTITION BY t.credential_tag, t.credential
 						ORDER BY t.added_slot DESC, c.cert_index DESC
 					) as rn
 				FROM update_drep t
 				INNER JOIN certs c ON c.id = t.certificate_id
 				WHERE t.credential IN ? AND t.added_slot <= ?
 			)
-			SELECT credential, anchor_url, anchor_hash, added_slot, cert_index
+			SELECT credential_tag, credential, anchor_url, anchor_hash, added_slot, cert_index
 			FROM ranked WHERE rn = 1`
 		if err := db.Raw(query, credentials, slot).Scan(&records).Error; err != nil {
 			return nil, err
 		}
 		for _, r := range records {
-			key := string(r.Credential)
+			key := drepCertCacheKey(r.CredentialTag, r.Credential)
 			cache.update[key] = drepCertRecord{
 				anchorURL:  r.AnchorURL,
 				anchorHash: r.AnchorHash,
@@ -543,6 +633,26 @@ func batchFetchDrepCerts(
 				certIndex:  r.CertIndex,
 			}
 			cache.hasUpdate[key] = true
+		}
+	}
+
+	// Remove entries for DRep credential variants not present in the input refs.
+	for key := range cache.registration {
+		if _, ok := requested[key]; !ok {
+			delete(cache.registration, key)
+			delete(cache.hasReg, key)
+		}
+	}
+	for key := range cache.deregistration {
+		if _, ok := requested[key]; !ok {
+			delete(cache.deregistration, key)
+			delete(cache.hasDereg, key)
+		}
+	}
+	for key := range cache.update {
+		if _, ok := requested[key]; !ok {
+			delete(cache.update, key)
+			delete(cache.hasUpdate, key)
 		}
 	}
 
@@ -580,7 +690,7 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 			"NOT EXISTS (?)",
 			db.Model(&models.RegistrationDrep{}).
 				Select("1").
-				Where("registration_drep.drep_credential = drep.credential AND registration_drep.added_slot <= ?", slot),
+				Where("registration_drep.credential_tag = drep.credential_tag AND registration_drep.drep_credential = drep.credential AND registration_drep.added_slot <= ?", slot),
 		)
 	if result := drepsWithNoValidRegsSubquery.Pluck("id", &drepIDsToDelete); result.Error != nil {
 		return result.Error
@@ -603,21 +713,21 @@ func (d *MetadataStoreMysql) RestoreDrepStateAtSlot(
 		return nil
 	}
 
-	// Extract credentials for batch fetching
-	credentials := make([][]byte, len(drepsToRestore))
+	// Extract credential refs for batch fetching
+	drepRefs := make([]models.StakeCredentialRef, len(drepsToRestore))
 	for i, drep := range drepsToRestore {
-		credentials[i] = drep.Credential
+		drepRefs[i] = models.NewStakeCredentialRef(drep.CredentialTag, drep.Credential)
 	}
 
 	// Batch-fetch all certificates for all affected DReps
-	cache, err := batchFetchDrepCerts(db, credentials, slot)
+	cache, err := batchFetchDrepCerts(db, drepRefs, slot)
 	if err != nil {
 		return err
 	}
 
 	// Process each DRep using the cached certificate data
 	for _, drep := range drepsToRestore {
-		key := string(drep.Credential)
+		key := drepCertCacheKey(drep.CredentialTag, drep.Credential)
 
 		// Get registration from cache (must exist due to Phase 1 deletion)
 		lastReg, hasRegAtSlot := cache.registration[key], cache.hasReg[key]

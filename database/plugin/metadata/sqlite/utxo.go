@@ -35,10 +35,11 @@ type UtxoRef struct {
 
 // UtxoAddressKeys is the skinny UTxO projection needed for address indexing.
 type UtxoAddressKeys struct {
-	TxId       []byte `gorm:"column:tx_id"`
-	PaymentKey []byte `gorm:"column:payment_key"`
-	StakingKey []byte `gorm:"column:staking_key"`
-	OutputIdx  uint32 `gorm:"column:output_idx"`
+	TxId          []byte `gorm:"column:tx_id"`
+	PaymentKey    []byte `gorm:"column:payment_key"`
+	StakingKey    []byte `gorm:"column:staking_key"`
+	CredentialTag uint8  `gorm:"column:credential_tag"`
+	OutputIdx     uint32 `gorm:"column:output_idx"`
 }
 
 // GetUtxo returns a Utxo by reference
@@ -180,7 +181,7 @@ func (d *MetadataStoreSqlite) GetUtxoAddressKeysBatch(
 
 		var rows []UtxoAddressKeys
 		query := db.Table(utxoRefIndexedTable()).
-			Select("tx_id", "output_idx", "payment_key", "staking_key").
+			Select("tx_id", "output_idx", "payment_key", "credential_tag", "staking_key").
 			Where("deleted_slot = 0").
 			Where("("+strings.Join(conditions, " OR ")+")", args...)
 		if queryResult := query.Find(&rows); queryResult.Error != nil {
@@ -303,30 +304,43 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 func addressWhereClause(
 	db *gorm.DB,
 	addr lcommon.Address,
-) *gorm.DB {
+) (*gorm.DB, error) {
 	zeroHash := lcommon.NewBlake2b224(nil)
 	hasPayment := addr.PaymentKeyHash() != zeroHash
 	hasStake := addr.StakeKeyHash() != zeroHash
+	paymentScript := models.PaymentScriptFromAddress(addr)
 
 	switch {
 	case hasPayment && hasStake:
+		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, errors.New("derive stake credential tag from address")
+		}
 		return db.Where(
-			"payment_key = ? AND staking_key = ?",
+			"payment_script = ? AND payment_key = ? AND credential_tag = ? AND staking_key = ?",
+			paymentScript,
 			addr.PaymentKeyHash().Bytes(),
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
-		)
+		), nil
 	case hasPayment:
 		return db.Where(
-			"payment_key = ?",
+			"payment_script = ? AND payment_key = ?",
+			paymentScript,
 			addr.PaymentKeyHash().Bytes(),
-		)
+		), nil
 	case hasStake:
+		credentialTag, ok := models.StakeCredentialTagFromAddress(addr)
+		if !ok {
+			return nil, errors.New("derive stake credential tag from address")
+		}
 		return db.Where(
-			"staking_key = ?",
+			"credential_tag = ? AND staking_key = ?",
+			credentialTag,
 			addr.StakeKeyHash().Bytes(),
-		)
+		), nil
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -340,7 +354,10 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
 	if addrQuery == nil {
 		return ret, nil
 	}
@@ -355,9 +372,10 @@ func (d *MetadataStoreSqlite) GetUtxosByAddress(
 	return ret, nil
 }
 
-// GetControlledAmountByStakingKey returns the sum of live UTxO amounts
-// controlled by the given staking key.
-func (d *MetadataStoreSqlite) GetControlledAmountByStakingKey(
+// GetControlledAmountByCredential returns the sum of live UTxO amounts
+// controlled by the given stake credential.
+func (d *MetadataStoreSqlite) GetControlledAmountByCredential(
+	credentialTag uint8,
 	stakingKey []byte,
 	txn types.Txn,
 ) (uint64, error) {
@@ -367,17 +385,21 @@ func (d *MetadataStoreSqlite) GetControlledAmountByStakingKey(
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return 0, fmt.Errorf(
-			"resolve read DB for controlled amount by staking key: %w",
+			"resolve read DB for controlled amount by stake credential: %w",
 			err,
 		)
 	}
 	var total uint64
 	if err := db.Model(&models.Utxo{}).
-		Where("staking_key = ? AND deleted_slot = 0", stakingKey).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND deleted_slot = 0",
+			credentialTag,
+			stakingKey,
+		).
 		Select("COALESCE(SUM(amount), 0)").
 		Scan(&total).Error; err != nil {
 		return 0, fmt.Errorf(
-			"get controlled amount by staking key: %w",
+			"get controlled amount by stake credential: %w",
 			err,
 		)
 	}
@@ -441,7 +463,12 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressWithOrdering(
 		var ors []string
 		var args []any
 		for i := range addrs {
-			models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i])
+			if err := models.AppendUtxoAddressOrBranch(&ors, &args, addrs[i]); err != nil {
+				return nil, fmt.Errorf(
+					"GetUtxosByAddressWithOrdering: %w",
+					err,
+				)
+			}
 		}
 		if len(ors) == 0 {
 			base = base.Where("1 = 0")
@@ -553,7 +580,10 @@ func (d *MetadataStoreSqlite) GetUtxosByAddressAtSlot(
 	if err != nil {
 		return nil, err
 	}
-	addrQuery := addressWhereClause(db, addr)
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
 	if addrQuery == nil {
 		return ret, nil
 	}

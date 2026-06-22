@@ -422,6 +422,7 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_AfterWithdrawal(t *test
 		Active:     true,
 	}))
 	require.NoError(t, db.Metadata().ApplyAccountRewardWithdrawal(
+		0,
 		stakeKey,
 		1_000_000,
 		42,
@@ -521,6 +522,52 @@ func TestQueryShelleyFilteredDelegationAndRewardAccounts_Mixed(t *testing.T) {
 
 	assert.Len(t, dels, 1, "exactly one delegation expected")
 	assert.Len(t, rwds, 2, "exactly two reward entries expected")
+}
+
+// TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware verifies that
+// filtered account lookup treats key and script credentials with the same hash
+// as distinct reward accounts.
+func TestQueryShelleyFilteredDelegationAndRewardAccounts_TagAware(t *testing.T) {
+	db := newTestDB(t)
+	stakeKey := stakeCred28(0x44)
+	keyPool := stakeCred28(0x45)
+	scriptPool := stakeCred28(0x46)
+
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Pool:          keyPool,
+		Reward:        types.Uint64(100),
+		Active:        true,
+	}))
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Pool:          scriptPool,
+		Reward:        types.Uint64(200),
+		Active:        true,
+	}))
+
+	ls := &LedgerState{db: db}
+	keyCred := olocalstatequery.StakeCredential{
+		Tag:   0,
+		Bytes: toBlake2b224(stakeKey),
+	}
+	scriptCred := olocalstatequery.StakeCredential{
+		Tag:   1,
+		Bytes: toBlake2b224(stakeKey),
+	}
+
+	result, err := ls.queryShelleyFilteredDelegationAndRewardAccounts(
+		[]olocalstatequery.StakeCredential{keyCred, scriptCred},
+	)
+	require.NoError(t, err)
+	dels, rwds := unwrapFilteredDelegationResult(t, result)
+
+	assert.Equal(t, toBlake2b224(keyPool), dels[keyCred])
+	assert.Equal(t, uint64(100), rwds[keyCred])
+	assert.Equal(t, toBlake2b224(scriptPool), dels[scriptCred])
+	assert.Equal(t, uint64(200), rwds[scriptCred])
 }
 
 func TestEpochPicoseconds(t *testing.T) {

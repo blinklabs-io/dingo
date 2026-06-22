@@ -17,6 +17,7 @@ package sqlite
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -83,6 +84,10 @@ func newAccountCertCache(capacity int) *accountCertCache {
 	}
 }
 
+func accountCertCacheKey(credentialTag uint8, stakingKey []byte) string {
+	return models.StakeCredentialRef{Tag: credentialTag, Key: stakingKey}.MapKey()
+}
+
 // updateReg updates the registration if this one is more recent.
 func (c *accountCertCache) updateReg(key string, rec certRecord) {
 	if !c.hasReg[key] || rec.isMoreRecent(c.latestReg[key]) {
@@ -115,21 +120,41 @@ func (c *accountCertCache) updateDrepDelegation(key string, rec certRecord) {
 	}
 }
 
-// batchFetchCerts fetches all relevant certificates for the given staking keys
+// batchFetchCerts fetches all relevant certificates for the given credential refs
 // at or before the given slot. Uses one query per certificate table. Chunks
 // queries to avoid exceeding SQLite bind variable limits.
+//
+// The SQL IN clause filters on staking_key hash only (not credential_tag) for
+// simplicity; the cache is post-filtered to entries whose composite (tag, hash)
+// key matches one of the input refs, so credentials sharing a 28-byte hash but
+// differing in tag are kept isolated.
 func batchFetchCerts(
 	db *gorm.DB,
-	stakingKeys [][]byte,
+	refs []models.StakeCredentialRef,
 	slot uint64,
 ) (*accountCertCache, error) {
-	cache := newAccountCertCache(len(stakingKeys))
+	cache := newAccountCertCache(len(refs))
+
+	// Build unique staking-key list for the SQL IN clause and a requested
+	// set (by composite cache key) for post-filtering.
+	requested := make(map[string]struct{}, len(refs))
+	seenHash := make(map[string]struct{}, len(refs))
+	var stakingKeys [][]byte
+	for _, ref := range refs {
+		requested[accountCertCacheKey(ref.Tag, ref.Key)] = struct{}{}
+		h := string(ref.Key)
+		if _, ok := seenHash[h]; !ok {
+			seenHash[h] = struct{}{}
+			stakingKeys = append(stakingKeys, ref.Key)
+		}
+	}
+
+	if len(stakingKeys) == 0 {
+		return cache, nil
+	}
 
 	// Process staking keys in chunks to avoid SQLite bind variable limits
-	for start := 0; start < len(stakingKeys); start += sqliteBindVarLimit {
-		end := min(start+sqliteBindVarLimit, len(stakingKeys))
-		keyChunk := stakingKeys[start:end]
-
+	for keyChunk := range slices.Chunk(stakingKeys, sqliteBindVarLimit) {
 		// Registration certificates (5 types)
 		if err := batchFetchStakeRegistration(db, keyChunk, slot, cache); err != nil {
 			return nil, err
@@ -170,6 +195,30 @@ func batchFetchCerts(
 		}
 	}
 
+	// Remove entries for credential variants not present in the input refs.
+	for key := range cache.latestReg {
+		if _, ok := requested[key]; !ok {
+			delete(cache.latestReg, key)
+			delete(cache.hasReg, key)
+		}
+	}
+	for key := range cache.latestDereg {
+		if _, ok := requested[key]; !ok {
+			delete(cache.latestDereg, key)
+			delete(cache.hasDereg, key)
+		}
+	}
+	for key := range cache.poolDelegation {
+		if _, ok := requested[key]; !ok {
+			delete(cache.poolDelegation, key)
+		}
+	}
+	for key := range cache.drepDelegation {
+		if _, ok := requested[key]; !ok {
+			delete(cache.drepDelegation, key)
+		}
+	}
+
 	return cache, nil
 }
 
@@ -180,18 +229,19 @@ func batchFetchStakeRegistration(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_registration t
@@ -199,14 +249,14 @@ func batchFetchStakeRegistration(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updateReg(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
@@ -220,19 +270,20 @@ func batchFetchStakeRegistrationDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey  []byte
-		PoolKeyHash []byte
-		AddedSlot   uint64
-		BlockIndex  uint64
-		CertIndex   uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		PoolKeyHash   []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.pool_key_hash, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_registration_delegation t
@@ -240,13 +291,13 @@ func batchFetchStakeRegistrationDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, pool_key_hash, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
-		key := string(r.StakingKey)
+		key := accountCertCacheKey(r.CredentialTag, r.StakingKey)
 		rec := certRecord{
 			pool:       r.PoolKeyHash,
 			addedSlot:  r.AddedSlot,
@@ -266,21 +317,22 @@ func batchFetchStakeVoteRegistrationDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey  []byte
-		PoolKeyHash []byte
-		Drep        []byte
-		DrepType    uint64
-		AddedSlot   uint64
-		BlockIndex  uint64
-		CertIndex   uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		PoolKeyHash   []byte
+		Drep          []byte
+		DrepType      uint64
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_vote_registration_delegation t
@@ -288,13 +340,13 @@ func batchFetchStakeVoteRegistrationDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
-		key := string(r.StakingKey)
+		key := accountCertCacheKey(r.CredentialTag, r.StakingKey)
 		rec := certRecord{
 			pool:       r.PoolKeyHash,
 			drep:       r.Drep,
@@ -326,20 +378,21 @@ func batchFetchVoteRegistrationDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		Drep       []byte
-		DrepType   uint64
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		Drep          []byte
+		DrepType      uint64
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.drep, t.drep_type, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM vote_registration_delegation t
@@ -347,13 +400,13 @@ func batchFetchVoteRegistrationDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, drep_type, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
-		key := string(r.StakingKey)
+		key := accountCertCacheKey(r.CredentialTag, r.StakingKey)
 		rec := certRecord{
 			drep:       r.Drep,
 			drepType:   r.DrepType,
@@ -374,10 +427,11 @@ func batchFetchRegistration(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key.
@@ -386,11 +440,11 @@ func batchFetchRegistration(
 	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot,
+			SELECT t.credential_tag, t.staking_key, t.added_slot,
 				COALESCE(tx.block_index, 0) AS block_index,
 				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM registration t
@@ -398,14 +452,14 @@ func batchFetchRegistration(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updateReg(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
@@ -419,18 +473,19 @@ func batchFetchStakeDeregistration(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM stake_deregistration t
@@ -438,14 +493,14 @@ func batchFetchStakeDeregistration(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updateDereg(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
@@ -459,18 +514,19 @@ func batchFetchDeregistration(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
+			SELECT t.credential_tag, t.staking_key, t.added_slot, c.cert_index, COALESCE(tx.block_index, 0) AS block_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, c.cert_index DESC
 				) as rn
 			FROM deregistration t
@@ -478,14 +534,14 @@ func batchFetchDeregistration(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updateDereg(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{addedSlot: r.AddedSlot, blockIndex: r.BlockIndex, certIndex: r.CertIndex},
 		)
 	}
@@ -499,11 +555,12 @@ func batchFetchStakeDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey  []byte
-		PoolKeyHash []byte
-		AddedSlot   uint64
-		BlockIndex  uint64
-		CertIndex   uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		PoolKeyHash   []byte
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key.
@@ -512,11 +569,11 @@ func batchFetchStakeDelegation(
 	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.added_slot,
+			SELECT t.credential_tag, t.staking_key, t.pool_key_hash, t.added_slot,
 				COALESCE(tx.block_index, 0) AS block_index,
 				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_delegation t
@@ -524,14 +581,14 @@ func batchFetchStakeDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, pool_key_hash, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updatePoolDelegation(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{
 				pool:       r.PoolKeyHash,
 				addedSlot:  r.AddedSlot,
@@ -550,12 +607,13 @@ func batchFetchVoteDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey []byte
-		Drep       []byte
-		DrepType   uint64
-		AddedSlot  uint64
-		BlockIndex uint64
-		CertIndex  uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		Drep          []byte
+		DrepType      uint64
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key.
@@ -564,11 +622,11 @@ func batchFetchVoteDelegation(
 	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.drep, t.drep_type, t.added_slot,
+			SELECT t.credential_tag, t.staking_key, t.drep, t.drep_type, t.added_slot,
 				COALESCE(tx.block_index, 0) AS block_index,
 				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM vote_delegation t
@@ -576,14 +634,14 @@ func batchFetchVoteDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, drep, drep_type, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
 		cache.updateDrepDelegation(
-			string(r.StakingKey),
+			accountCertCacheKey(r.CredentialTag, r.StakingKey),
 			certRecord{
 				drep:       r.Drep,
 				drepType:   r.DrepType,
@@ -603,13 +661,14 @@ func batchFetchStakeVoteDelegation(
 	cache *accountCertCache,
 ) error {
 	type result struct {
-		StakingKey  []byte
-		PoolKeyHash []byte
-		Drep        []byte
-		DrepType    uint64
-		AddedSlot   uint64
-		BlockIndex  uint64
-		CertIndex   uint32
+		CredentialTag uint8
+		StakingKey    []byte
+		PoolKeyHash   []byte
+		Drep          []byte
+		DrepType      uint64
+		AddedSlot     uint64
+		BlockIndex    uint64
+		CertIndex     uint32
 	}
 	var records []result
 	// Use ROW_NUMBER to fetch only the latest record per staking key.
@@ -618,11 +677,11 @@ func batchFetchStakeVoteDelegation(
 	// is safe because slot 0 precedes every real cert.
 	query := `
 		WITH ranked AS (
-			SELECT t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot,
+			SELECT t.credential_tag, t.staking_key, t.pool_key_hash, t.drep, t.drep_type, t.added_slot,
 				COALESCE(tx.block_index, 0) AS block_index,
 				COALESCE(c.cert_index, 0) AS cert_index,
 				ROW_NUMBER() OVER (
-					PARTITION BY t.staking_key
+					PARTITION BY t.credential_tag, t.staking_key
 					ORDER BY t.added_slot DESC, COALESCE(tx.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM stake_vote_delegation t
@@ -630,13 +689,13 @@ func batchFetchStakeVoteDelegation(
 			LEFT JOIN "transaction" tx ON tx.id = c.transaction_id
 			WHERE t.staking_key IN ? AND t.added_slot <= ?
 		)
-		SELECT staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
+		SELECT credential_tag, staking_key, pool_key_hash, drep, drep_type, added_slot, cert_index, block_index
 		FROM ranked WHERE rn = 1`
 	if err := db.Raw(query, stakingKeys, slot).Scan(&records).Error; err != nil {
 		return err
 	}
 	for _, r := range records {
-		key := string(r.StakingKey)
+		key := accountCertCacheKey(r.CredentialTag, r.StakingKey)
 		cache.updatePoolDelegation(
 			key,
 			certRecord{
@@ -660,8 +719,9 @@ func batchFetchStakeVoteDelegation(
 	return nil
 }
 
-// GetAccount gets an account
-func (d *MetadataStoreSqlite) GetAccount(
+// GetAccountByCredential gets an account by credential tag and hash.
+func (d *MetadataStoreSqlite) GetAccountByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	includeInactive bool,
 	txn types.Txn,
@@ -675,7 +735,12 @@ func (d *MetadataStoreSqlite) GetAccount(
 	if !includeInactive {
 		query = query.Where("active = ?", true)
 	}
-	result := query.First(ret, "staking_key = ?", stakeKey)
+	result := query.First(
+		ret,
+		"credential_tag = ? AND staking_key = ?",
+		credentialTag,
+		stakeKey,
+	)
 	if result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -685,37 +750,49 @@ func (d *MetadataStoreSqlite) GetAccount(
 	return ret, nil
 }
 
-// GetAccounts fetches multiple accounts in one IN-list query, keyed by
-// string(StakingKey). Stake keys with no matching row are omitted.
-func (d *MetadataStoreSqlite) GetAccounts(
-	stakeKeys [][]byte,
+// GetAccountsByCredential fetches multiple accounts in one query, keyed by
+// StakeCredentialRef.MapKey(). Credentials with no matching row are omitted.
+func (d *MetadataStoreSqlite) GetAccountsByCredential(
+	refs []models.StakeCredentialRef,
 	includeInactive bool,
 	txn types.Txn,
 ) (map[string]*models.Account, error) {
-	ret := make(map[string]*models.Account, len(stakeKeys))
-	if len(stakeKeys) == 0 {
+	ret := make(map[string]*models.Account, len(refs))
+	if len(refs) == 0 {
 		return ret, nil
 	}
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	query := db.Where("staking_key IN ?", stakeKeys)
-	if !includeInactive {
-		query = query.Where("active = ?", true)
+
+	pairs := make([][]any, 0, len(refs))
+	for _, ref := range refs {
+		pairs = append(pairs, []any{ref.Tag, ref.Key})
 	}
-	var rows []*models.Account
-	if result := query.Find(&rows); result.Error != nil {
-		return nil, result.Error
-	}
-	for _, row := range rows {
-		ret[string(row.StakingKey)] = row
+	for chunk := range slices.Chunk(pairs, 400) {
+		query := db.Where("(credential_tag, staking_key) IN ?", chunk)
+		if !includeInactive {
+			query = query.Where("active = ?", true)
+		}
+		var rows []*models.Account
+		if result := query.Find(&rows); result.Error != nil {
+			return nil, result.Error
+		}
+		for _, row := range rows {
+			key := models.StakeCredentialRef{
+				Tag: row.CredentialTag,
+				Key: row.StakingKey,
+			}.MapKey()
+			ret[key] = row
+		}
 	}
 	return ret, nil
 }
 
-// AddAccountReward credits a registered reward account.
-func (d *MetadataStoreSqlite) AddAccountReward(
+// AddAccountRewardByCredential credits a registered reward account.
+func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
+	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
@@ -738,7 +815,8 @@ func (d *MetadataStoreSqlite) AddAccountReward(
 	credit := func(tx *gorm.DB) error {
 		var account models.Account
 		if err := tx.Where(
-			"staking_key = ? AND active = ?",
+			"credential_tag = ? AND staking_key = ? AND active = ?",
+			credentialTag,
 			stakeKey,
 			true,
 		).First(&account).Error; err != nil {
@@ -764,9 +842,10 @@ func (d *MetadataStoreSqlite) AddAccountReward(
 			return models.ErrAccountNotFound
 		}
 		delta := &models.AccountRewardDelta{
-			StakingKey: stakeKey,
-			Amount:     types.Uint64(amount),
-			AddedSlot:  slot,
+			StakingKey:    stakeKey,
+			CredentialTag: credentialTag,
+			Amount:        types.Uint64(amount),
+			AddedSlot:     slot,
 		}
 		return tx.Create(delta).Error
 	}
@@ -781,6 +860,7 @@ func (d *MetadataStoreSqlite) AddAccountReward(
 // rollback. The ledger rule clears the reward account when a withdrawal for
 // the credential appears in a valid transaction.
 func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
+	credentialTag uint8,
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
@@ -795,12 +875,25 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 		return err
 	}
 	withdraw := func(tx *gorm.DB) error {
+		var account models.Account
+		if err := tx.Where(
+			"credential_tag = ? AND staking_key = ? AND active = ?",
+			credentialTag,
+			stakeKey,
+			true,
+		).First(&account).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return models.ErrAccountNotFound
+			}
+			return err
+		}
 		if len(txHash) > 0 {
 			var existing models.AccountRewardDelta
 			result := tx.Where(
-				"withdrawal = ? AND tx_hash = ? AND staking_key = ?",
+				"withdrawal = ? AND tx_hash = ? AND credential_tag = ? AND staking_key = ?",
 				true,
 				txHash,
+				credentialTag,
 				stakeKey,
 			).First(&existing)
 			if result.Error == nil {
@@ -809,17 +902,6 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 			if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 				return result.Error
 			}
-		}
-		var account models.Account
-		if err := tx.Where(
-			"staking_key = ? AND active = ?",
-			stakeKey,
-			true,
-		).First(&account).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return models.ErrAccountNotFound
-			}
-			return err
 		}
 		current := uint64(account.Reward)
 		// Transaction validation proves the on-chain withdrawal amount is
@@ -833,6 +915,7 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 		}
 		delta := &models.AccountRewardDelta{
 			StakingKey:     stakeKey,
+			CredentialTag:  credentialTag,
 			TxHash:         txHash,
 			Amount:         types.Uint64(amount),
 			PreviousReward: types.Uint64(current),
@@ -843,6 +926,7 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 			Columns: []clause.Column{
 				{Name: "withdrawal"},
 				{Name: "tx_hash"},
+				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
 			DoNothing: true,
@@ -876,7 +960,8 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 		for _, delta := range deltas {
 			var account models.Account
 			if result := tx.Where(
-				"staking_key = ?",
+				"credential_tag = ? AND staking_key = ?",
+				delta.CredentialTag,
 				delta.StakingKey,
 			).First(&account); result.Error != nil {
 				if errors.Is(result.Error, gorm.ErrRecordNotFound) {
@@ -923,22 +1008,27 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 	return db.Transaction(rollback)
 }
 
-// SetAccount saves an account
+// SetAccount saves an account by full stake credential identity.
 func (d *MetadataStoreSqlite) SetAccount(
+	credentialTag uint8,
 	stakeKey, pkh, drep []byte,
 	slot uint64,
 	active bool,
 	txn types.Txn,
 ) error {
 	tmpItem := models.Account{
-		StakingKey: stakeKey,
-		AddedSlot:  slot,
-		Pool:       pkh,
-		Drep:       drep,
-		Active:     active,
+		StakingKey:    stakeKey,
+		CredentialTag: credentialTag,
+		AddedSlot:     slot,
+		Pool:          pkh,
+		Drep:          drep,
+		Active:        active,
 	}
 	onConflict := clause.OnConflict{
-		Columns: []clause.Column{{Name: "staking_key"}},
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
 		DoUpdates: clause.AssignmentColumns(
 			[]string{"added_slot", "pool", "drep", "active"},
 		),
@@ -981,21 +1071,21 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 		return nil
 	}
 
-	// Extract staking keys for batch fetching
-	stakingKeys := make([][]byte, len(accountsToRestore))
+	// Extract credential refs for batch fetching
+	refs := make([]models.StakeCredentialRef, len(accountsToRestore))
 	for i, account := range accountsToRestore {
-		stakingKeys[i] = account.StakingKey
+		refs[i] = models.NewStakeCredentialRef(account.CredentialTag, account.StakingKey)
 	}
 
 	// Batch-fetch all certificates for all affected accounts
-	cache, err := batchFetchCerts(db, stakingKeys, slot)
+	cache, err := batchFetchCerts(db, refs, slot)
 	if err != nil {
 		return err
 	}
 
 	// Process each account using the cached certificate data
 	for _, account := range accountsToRestore {
-		key := string(account.StakingKey)
+		key := accountCertCacheKey(account.CredentialTag, account.StakingKey)
 
 		// Check if this account had any registration before the rollback slot
 		latestReg, hasReg := cache.latestReg[key], cache.hasReg[key]
@@ -1079,7 +1169,10 @@ func (d *MetadataStoreSqlite) ClearDanglingDRepDelegations(
 	// surprising semantics around NULL values in the subquery result.
 	liveDrepExists := db.Model(&models.Drep{}).
 		Select("1").
-		Where("drep.credential = account.drep AND drep.active = ?", true)
+		Where(
+			"drep.credential_tag = account.drep_type AND drep.credential = account.drep AND drep.active = ?",
+			true,
+		)
 	result := db.Model(&models.Account{}).
 		Where("drep IS NOT NULL").
 		Where(

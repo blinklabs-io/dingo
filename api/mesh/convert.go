@@ -178,12 +178,15 @@ func txStatus(valid bool) *string {
 
 // utxoAddress reconstructs a bech32 Cardano address from
 // the payment and staking key hashes stored in the
-// metadata DB. The address type depends on which keys
-// are present:
+// metadata DB. The address type is derived from the two
+// credential dimensions stored alongside the UTxO:
 //
-//   - PaymentKey + StakingKey → AddressTypeKeyKey
-//   - PaymentKey only        → AddressTypeKeyNone
-//   - Neither (Byron-era)    → "byron:<txId hex>"
+//   - PaymentScript (bool)   — payment credential is a script hash
+//   - CredentialTag (uint8)  — 0 = key-hash stake, 1 = script-hash stake
+//
+// Combined with staking key presence this gives the eight
+// Cardano Shelley address types (CIP-19).
+// Byron-era outputs (no PaymentKey) return "byron:<txId hex>".
 //
 // The networkID determines the address prefix
 // (addr / addr_test1).
@@ -203,10 +206,23 @@ func utxoAddress(
 	var addrType uint8
 	var stakingKey []byte
 	if len(utxo.StakingKey) > 0 {
-		addrType = lcommon.AddressTypeKeyKey
 		stakingKey = utxo.StakingKey
+		switch {
+		case !utxo.PaymentScript && utxo.CredentialTag == 0:
+			addrType = lcommon.AddressTypeKeyKey
+		case !utxo.PaymentScript && utxo.CredentialTag == 1:
+			addrType = lcommon.AddressTypeKeyScript
+		case utxo.PaymentScript && utxo.CredentialTag == 0:
+			addrType = lcommon.AddressTypeScriptKey
+		default: // PaymentScript && CredentialTag == 1
+			addrType = lcommon.AddressTypeScriptScript
+		}
 	} else {
-		addrType = lcommon.AddressTypeKeyNone
+		if utxo.PaymentScript {
+			addrType = lcommon.AddressTypeScriptNone
+		} else {
+			addrType = lcommon.AddressTypeKeyNone
+		}
 	}
 
 	addr, err := lcommon.NewAddressFromParts(

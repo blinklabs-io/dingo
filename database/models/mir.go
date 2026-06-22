@@ -42,8 +42,9 @@ type MIREffect struct {
 
 // MIRReward is a single credential→amount entry from a distribution MIR cert.
 type MIRReward struct {
-	Credential []byte
-	Amount     uint64
+	Credential    []byte
+	CredentialTag uint8
+	Amount        uint64
 }
 
 func (MoveInstantaneousRewards) TableName() string {
@@ -51,10 +52,11 @@ func (MoveInstantaneousRewards) TableName() string {
 }
 
 type MoveInstantaneousRewardsReward struct {
-	Credential []byte
-	Amount     types.Uint64
-	ID         uint `gorm:"primarykey"`
-	MIRID      uint `gorm:"index"`
+	Credential    []byte `gorm:"index:idx_mir_reward_credential,priority:2;size:28"`
+	CredentialTag uint8  `gorm:"index:idx_mir_reward_credential,priority:1;not null;default:0"`
+	Amount        types.Uint64
+	ID            uint `gorm:"primarykey"`
+	MIRID         uint `gorm:"index"`
 }
 
 func (MoveInstantaneousRewardsReward) TableName() string {

@@ -48,8 +48,9 @@ func (d *MetadataStoreSqlite) GetMIRCertsInSlotRange(
 		effects[i].Rewards = make([]models.MIRReward, len(m.Rewards))
 		for j, r := range m.Rewards {
 			effects[i].Rewards[j] = models.MIRReward{
-				Credential: r.Credential,
-				Amount:     uint64(r.Amount),
+				Credential:    r.Credential,
+				CredentialTag: r.CredentialTag,
+				Amount:        uint64(r.Amount),
 			}
 		}
 	}

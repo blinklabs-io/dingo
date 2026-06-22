@@ -47,7 +47,7 @@ flowchart LR
 - Byte columns store raw bytes, not hex strings. In Postgres use `encode(col, 'hex')` and `decode($1, 'hex')`. In MySQL use `HEX(col)` and `UNHEX(?)`.
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
 - Quote the `transaction` table in SQL examples because it is a keyword-adjacent identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
-- `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `staking_key`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
+- `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `(credential_tag, staking_key)`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
 - Many relations are logical joins rather than explicit foreign keys. Certificate rows have two logical pointers: each specialized certificate table has `certificate_id -> certs.id`, and `certs.certificate_id` is the polymorphic back-pointer to that specialized row chosen by `certs.cert_type`.
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
@@ -94,17 +94,17 @@ erDiagram
     POOL_REGISTRATION ||..|| CERTS : "certificate_id -> certs.id"
     POOL_RETIREMENT ||..|| CERTS : "certificate_id -> certs.id"
 
-    ACCOUNT ||..o{ REGISTRATION : "staking_key"
-    ACCOUNT ||..o{ DEREGISTRATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_REGISTRATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_DEREGISTRATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_REGISTRATION_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_VOTE_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ VOTE_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ VOTE_REGISTRATION_DELEGATION : "staking_key"
-    ACCOUNT ||..o{ ACCOUNT_REWARD_DELTA : "staking_key"
+    ACCOUNT ||..o{ REGISTRATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ DEREGISTRATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_REGISTRATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_DEREGISTRATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_REGISTRATION_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_VOTE_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ VOTE_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ VOTE_REGISTRATION_DELEGATION : "credential_tag + staking_key"
+    ACCOUNT ||..o{ ACCOUNT_REWARD_DELTA : "credential_tag + staking_key"
     POOL ||--o{ POOL_REGISTRATION : "pool_id"
     POOL ||--o{ POOL_RETIREMENT : "pool_id"
     POOL_REGISTRATION ||--o{ POOL_REGISTRATION_OWNER : "pool_registration_id"
@@ -121,13 +121,13 @@ erDiagram
 
 ```mermaid
 erDiagram
-    DREP ||..o{ REGISTRATION_DREP : "credential = drep_credential"
-    DREP ||..o{ DEREGISTRATION_DREP : "credential = drep_credential"
-    DREP ||..o{ UPDATE_DREP : "credential"
-    DREP ||..o{ VOTE_DELEGATION : "credential = drep"
-    DREP ||..o{ VOTE_REGISTRATION_DELEGATION : "credential = drep"
-    DREP ||..o{ STAKE_VOTE_DELEGATION : "credential = drep"
-    DREP ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "credential = drep"
+    DREP ||..o{ REGISTRATION_DREP : "credential_tag + credential"
+    DREP ||..o{ DEREGISTRATION_DREP : "credential_tag + credential"
+    DREP ||..o{ UPDATE_DREP : "credential_tag + credential"
+    DREP ||..o{ VOTE_DELEGATION : "drep_type + drep"
+    DREP ||..o{ VOTE_REGISTRATION_DELEGATION : "drep_type + drep"
+    DREP ||..o{ STAKE_VOTE_DELEGATION : "drep_type + drep"
+    DREP ||..o{ STAKE_VOTE_REGISTRATION_DELEGATION : "drep_type + drep"
     REGISTRATION_DREP ||..|| CERTS : "certificate_id -> certs.id"
     DEREGISTRATION_DREP ||..|| CERTS : "certificate_id -> certs.id"
     UPDATE_DREP ||..|| CERTS : "certificate_id -> certs.id"
@@ -175,9 +175,9 @@ erDiagram
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
 | `transaction` | `id`, `hash`, `block_hash`, `slot`, `block_index`, `type`, `fee`, `ttl`, `valid`, `metadata` | PK `id`; unique `hash`; indexes `block_hash`, `slot` | One row per transaction. `block_hash` and `slot` point to the blob block. `metadata` is populated only in API mode. |
-| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, staking_key, amount)` and `(deleted_slot, payment_script, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
+| `utxo` | `id`, `transaction_id`, `collateral_return_for_tx_id`, `tx_id`, `output_idx`, `payment_key`, `credential_tag`, `staking_key`, `datum_hash`, `spent_at_tx_id`, `referenced_by_tx_id`, `collateral_by_tx_id`, `added_slot`, `deleted_slot`, `amount`, `payment_script` | PK `id`; unique `(tx_id, output_idx)`; unique `collateral_return_for_tx_id`; indexes address keys, spend/reference/collateral tx hashes, `added_slot`, `deleted_slot`, `amount`; composite `(deleted_slot, credential_tag, staking_key, amount)` and `(deleted_slot, payment_script, amount)` | Produced outputs use `transaction_id -> transaction.id`. Collateral returns use `collateral_return_for_tx_id -> transaction.id`. Inputs/reference/collateral joins are logical: `spent_at_tx_id`, `referenced_by_tx_id`, and `collateral_by_tx_id` store transaction hashes. `credential_tag`: 0 key hash, 1 script hash for stake-bearing outputs. `payment_script` is a bool set at index time from the output address type (true when the payment credential is a script hash); the `(deleted_slot, payment_script, amount)` composite backs the network script-locked supply sum (blockfrost `/network` `supply.locked`). It is derived only at write time, so a database synced before this column existed reports script-locked supply only for UTxOs created after the upgrade until it is rebuilt from chain data. |
 | `asset` | `id`, `utxo_id`, `policy_id`, `name`, `name_hex`, `fingerprint`, `amount` | PK `id`; unique `(name, policy_id, utxo_id)`; named index `idx_asset_policy_id` on `policy_id`; indexes `name_hex`, `fingerprint`, `amount` | Multi-asset quantities attached to `utxo.id`. The unique key backs ledger-state import `ON CONFLICT`; the policy-id query index can be deferred during bulk load. Use `utxo.deleted_slot = 0` for live balances. |
-| `address_transaction` | `id`, `payment_key`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `staking_key`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. |
+| `address_transaction` | `id`, `payment_key`, `credential_tag`, `staking_key`, `transaction_id`, `slot`, `tx_index` | PK `id`; indexes `payment_key`, `(credential_tag, staking_key)`, `transaction_id`, `slot` | API-mode address-to-transaction index. Join to `transaction.id`. `credential_tag`: 0 key hash, 1 script hash for stake-bearing addresses. |
 | `transaction_metadata_label` | `id`, `transaction_id`, `label`, `slot`, `cbor_value`, `json_value` | PK `id`; unique `(transaction_id, label)`; indexes `label`, `slot` | API-mode per-label metadata index. Join to `transaction.id`. |
 | `key_witness` | `id`, `transaction_id`, `type`, `vkey`, `signature`, `public_key`, `chain_code`, `attributes` | PK `id`; indexes `transaction_id`, `type` | API-mode vkey/bootstrap witnesses. Join to `transaction.id`. |
 | `witness_scripts` | `id`, `transaction_id`, `script_hash`, `type` | PK `id`; indexes `transaction_id`, `script_hash`, `type` | API-mode witness-script references. Join `script_hash = script.hash`. |
@@ -203,18 +203,19 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `account` | `id`, `staking_key`, `pool`, `drep`, `added_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique `staking_key`; indexes pool/DRep/active lookup combinations | Current stake account state. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. |
-| `account_reward_delta` | `id`, `staking_key`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes `staking_key`, `tx_hash`, `added_slot`, `withdrawal`; unique `(withdrawal, tx_hash, staking_key)` | Rollback-aware reward-account change journal. Credit rows add `amount`; withdrawal rows clear `account.reward`, store `previous_reward`, and use `tx_hash` to keep transaction re-ingest idempotent. For withdrawal rows, `amount` is the ledger-valid withdrawal amount and may exceed the projected `account.reward`; rollback restores `previous_reward`. Logical join to `account.staking_key`. |
-| `registration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
-| `deregistration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
-| `stake_registration` | `id`, `staking_key`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Shelley-era stake registration certificate. |
-| `stake_deregistration` | `id`, `staking_key`, `certificate_id`, `added_slot` | PK `id`; indexes `staking_key`, `certificate_id`, `added_slot` | Shelley-era stake deregistration certificate. |
-| `stake_delegation` | `id`, `staking_key`, `pool_key_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `staking_key`, `pool_key_hash`, `certificate_id`, `added_slot` | Stake delegation to pool. Logical joins to `account.staking_key` and `pool.pool_key_hash`. |
-| `stake_registration_delegation` | `id`, `staking_key`, `pool_key_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `pool_key_hash`, `certificate_id`, `added_slot` | Combined registration and pool delegation. |
-| `stake_vote_delegation` | `id`, `staking_key`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `staking_key`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined pool and DRep delegation. |
-| `stake_vote_registration_delegation` | `id`, `staking_key`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined registration, pool delegation, and DRep delegation. |
-| `vote_delegation` | `id`, `staking_key`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `staking_key`, `drep`, `certificate_id`, `added_slot` | DRep-only vote delegation. |
-| `vote_registration_delegation` | `id`, `staking_key`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `staking_key`, `drep`, `certificate_id`, `added_slot` | Combined registration and DRep delegation. |
+| `account` | `id`, `staking_key`, `credential_tag`, `pool`, `drep`, `added_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique `(credential_tag, staking_key)`; indexes pool/DRep/active lookup combinations | Current stake account state. `credential_tag`: 0 key hash, 1 script hash. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. |
+| `account_reward_delta` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes `(credential_tag, staking_key)`, `tx_hash`, `added_slot`, `withdrawal`; unique `(withdrawal, tx_hash, credential_tag, staking_key)` | Rollback-aware reward-account change journal. Credit rows add `amount`; withdrawal rows clear `account.reward`, store `previous_reward`, and use `tx_hash` plus the full stake credential identity to keep transaction re-ingest idempotent. Logical join to `account.(credential_tag, staking_key)`. |
+| `registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
+| `deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
+| `stake_registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Shelley-era stake registration certificate. |
+| `stake_deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Shelley-era stake deregistration certificate. |
+| `stake_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `certificate_id`, `added_slot` | Stake delegation to pool. Logical joins to `account.(credential_tag, staking_key)` and `pool.pool_key_hash`. |
+| `stake_registration_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `certificate_id`, `added_slot` | Combined registration and pool delegation. |
+| `stake_vote_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined pool and DRep delegation. |
+| `stake_vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `pool_key_hash`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `pool_key_hash`, `drep`, `certificate_id`, `added_slot` | Combined registration, pool delegation, and DRep delegation. |
+| `vote_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | DRep-only vote delegation. |
+| `vote_registration_delegation` | `id`, `staking_key`, `credential_tag`, `drep`, `drep_type`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `drep`, `certificate_id`, `added_slot` | Combined registration and DRep delegation. |
+
 | `move_instantaneous_rewards` | `id`, `pot`, `certificate_id`, `added_slot`, `other_pot` | PK `id`; indexes `pot`, `certificate_id`, `added_slot` | MIR certificate header. `pot`: 0 = Reserves, 1 = Treasury. `other_pot` is non-zero for pot-to-pot transfer certs (no child rows); zero for credential distribution certs (child rows in `move_instantaneous_rewards_reward`). Applied at each epoch boundary by the Shelley INSTANT rule. |
 | `move_instantaneous_rewards_reward` | `id`, `mir_id`, `credential`, `amount` | PK `id`; index `mir_id` | MIR reward rows. Join `mir_id -> move_instantaneous_rewards.id`. |
 
@@ -222,8 +223,8 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. |
-| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. |
+| `pool` | `id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `latest_op_cert_sequence`, `pledge`, `cost`, `margin` | PK `id`; unique `pool_key_hash` | Current pool state. Historical registrations and retirements are separate rows. `reward_account_credential_tag`: 0 key hash, 1 script hash for the pool reward account. |
+| `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
 | `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. |
@@ -233,12 +234,12 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `credential`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch` | Current DRep state. |
-| `registration_drep` | `id`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. |
-| `deregistration_drep` | `id`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `drep_credential`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
-| `update_drep` | `id`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `credential`, `certificate_id`, `added_slot` | DRep update certificate. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. |
+| `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
+| `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
+| `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
 | `governance_proposal` | `id`, `tx_hash`, `action_index`, `action_type`, `proposed_epoch`, `expires_epoch`, `parent_tx_hash`, `parent_action_idx`, `enacted_epoch`, `enacted_slot`, `ratified_epoch`, `ratified_slot`, `policy_hash`, `anchor_url`, `anchor_hash`, `deposit`, `return_address`, `gov_action_cbor`, `expired_epoch`, `expired_slot`, `added_slot`, `deleted_slot` | PK `id`; unique `(tx_hash, action_index)`; composite `(parent_tx_hash, parent_action_idx)` (`idx_gov_proposal_parent`); indexes action type, epochs, lifecycle slots, `added_slot`, `deleted_slot` | Governance action lifecycle. Votes join by `governance_vote.proposal_id`. `gov_action_cbor` stores the era-specific GovAction CBOR used for enactment; replay may rewrite ratified parameter-change actions at an era boundary, such as Conway to Dijkstra, so old databases should be rebuilt from chain data when this encoding changes. |
-| `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `vote`: 0 No, 1 Yes, 2 Abstain. |
+| `governance_vote` | `id`, `proposal_id`, `voter_type`, `voter_credential_tag`, `voter_credential`, `vote`, `anchor_url`, `anchor_hash`, `added_slot`, `vote_updated_slot`, `deleted_slot` | PK `id`; unique `(proposal_id, voter_type, voter_credential_tag, voter_credential)`; indexes proposal/voter/lifecycle slots | Vote on a governance proposal. `voter_type`: 0 committee, 1 DRep, 2 SPO. `voter_credential_tag`: 0 key hash, 1 script hash for committee/DRep voters; 0 for SPO key hashes. `vote`: 0 No, 1 Yes, 2 Abstain. |
 | `constitution` | `id`, `anchor_url`, `anchor_hash`, `policy_hash`, `added_slot`, `deleted_slot` | PK `id`; unique `added_slot`; index `deleted_slot` | Current or historical constitution references. |
 | `committee_member` | `id`, `cold_cred_hash`, `expires_epoch`, `added_slot`, `deleted_slot` | PK `id`; unique `cold_cred_hash`; indexes `added_slot`, `deleted_slot` | Snapshot-imported committee state. |
 | `committee_quorum` | `id`, `quorum`, `added_slot` | PK `id`; unique `added_slot` | Enacted committee quorum threshold. `quorum` is stored through `types.Rat`. |
@@ -469,7 +470,8 @@ SELECT t.slot, t.block_index, encode(t.hash, 'hex') AS tx_hash
 FROM address_transaction atx
 JOIN "transaction" t ON t.id = atx.transaction_id
 WHERE atx.payment_key = decode($1, 'hex')
-  AND atx.staking_key = decode($2, 'hex')
+  AND atx.credential_tag = $2
+  AND atx.staking_key = decode($3, 'hex')
 ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 50;
 ```
@@ -480,7 +482,8 @@ Count the same address index:
 SELECT COUNT(DISTINCT atx.transaction_id) AS tx_count
 FROM address_transaction atx
 WHERE atx.payment_key = decode($1, 'hex')
-  AND atx.staking_key = decode($2, 'hex');
+  AND atx.credential_tag = $2
+  AND atx.staking_key = decode($3, 'hex');
 ```
 
 Payment-only Byron-style or enterprise-style lookups use the same condition Dingo uses:
@@ -490,19 +493,20 @@ WHERE atx.payment_key = decode($1, 'hex')
   AND (atx.staking_key IS NULL OR length(atx.staking_key) = 0)
 ```
 
-### `GetAddressesByStakingKey`
+### `GetAddressesByCredential`
 
 ```sql
-SELECT MIN(id) AS id, payment_key, staking_key
+SELECT MIN(id) AS id, payment_key, credential_tag, staking_key
 FROM address_transaction
-WHERE staking_key = decode($1, 'hex')
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
   AND length(payment_key) > 0
-GROUP BY payment_key, staking_key
+GROUP BY payment_key, credential_tag, staking_key
 ORDER BY payment_key ASC
 LIMIT 100;
 ```
 
-### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByStakingKey`
+### `GetUtxosByAddress`, `GetUtxosByAddressAtSlot`, and `GetControlledAmountByCredential`
 
 Live UTxOs for a payment key with assets:
 
@@ -519,6 +523,7 @@ FROM utxo u
 LEFT JOIN asset a ON a.utxo_id = u.id
 WHERE u.deleted_slot = 0
   AND u.payment_key = decode($1, 'hex')
+  AND u.payment_script = $2
 ORDER BY u.added_slot DESC, u.output_idx DESC;
 ```
 
@@ -527,17 +532,19 @@ Historical UTxOs at a slot:
 ```sql
 SELECT u.*
 FROM utxo u
-WHERE u.added_slot <= $2
-  AND (u.deleted_slot = 0 OR u.deleted_slot > $2)
-  AND u.payment_key = decode($1, 'hex');
+WHERE u.added_slot <= $3
+  AND (u.deleted_slot = 0 OR u.deleted_slot > $3)
+  AND u.payment_key = decode($1, 'hex')
+  AND u.payment_script = $2;
 ```
 
-Controlled amount by staking key:
+Controlled amount by stake credential:
 
 ```sql
 SELECT COALESCE(SUM(amount), 0) AS controlled_amount
 FROM utxo
-WHERE staking_key = decode($1, 'hex')
+WHERE credential_tag = $1
+  AND staking_key = decode($2, 'hex')
   AND deleted_slot = 0;
 ```
 
@@ -599,6 +606,7 @@ Latest delegation state for an account:
 ```sql
 -- Postgres
 SELECT
+  a.credential_tag,
   encode(a.staking_key, 'hex') AS staking_key,
   encode(a.pool, 'hex') AS pool_key_hash,
   encode(a.drep, 'hex') AS drep,
@@ -606,7 +614,8 @@ SELECT
   a.reward,
   a.active
 FROM account a
-WHERE a.staking_key = decode($1, 'hex');
+WHERE a.credential_tag = $1
+  AND a.staking_key = decode($2, 'hex');
 ```
 
 To match `includeInactive = false`, add:
@@ -626,31 +635,53 @@ FROM (
   FROM stake_delegation sd
   JOIN certs c ON c.id = sd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE sd.staking_key = decode($1, 'hex')
+  WHERE sd.credential_tag = $1
+    AND sd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT srd.added_slot, tx.block_index, c.cert_index, tx.hash, srd.pool_key_hash
   FROM stake_registration_delegation srd
   JOIN certs c ON c.id = srd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE srd.staking_key = decode($1, 'hex')
+  WHERE srd.credential_tag = $1
+    AND srd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT svd.added_slot, tx.block_index, c.cert_index, tx.hash, svd.pool_key_hash
   FROM stake_vote_delegation svd
   JOIN certs c ON c.id = svd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE svd.staking_key = decode($1, 'hex')
+  WHERE svd.credential_tag = $1
+    AND svd.staking_key = decode($2, 'hex')
 
   UNION ALL
   SELECT svrd.added_slot, tx.block_index, c.cert_index, tx.hash, svrd.pool_key_hash
   FROM stake_vote_registration_delegation svrd
   JOIN certs c ON c.id = svrd.certificate_id
   JOIN "transaction" tx ON tx.id = c.transaction_id
-  WHERE svrd.staking_key = decode($1, 'hex')
+  WHERE svrd.credential_tag = $1
+    AND svrd.staking_key = decode($2, 'hex')
 ) h
 ORDER BY added_slot DESC, block_index DESC, cert_index DESC, tx_hash DESC
 LIMIT 50;
+```
+
+### `GetStakeRegistrationsByCredential`
+
+Stake registration certificate reconstruction uses the full stake credential
+identity. `credential_tag` is restored into the returned certificate's
+`StakeCredential.CredType`.
+
+```sql
+-- Postgres
+SELECT
+  sr.credential_tag,
+  encode(sr.staking_key, 'hex') AS staking_key,
+  sr.added_slot
+FROM stake_registration sr
+WHERE sr.credential_tag = $1
+  AND sr.staking_key = decode($2, 'hex')
+ORDER BY sr.id DESC;
 ```
 
 ### `GetPool`, `GetPoolRegistrationsAtSlot`, and Pool History
@@ -735,7 +766,8 @@ quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (
-  SELECT pr.pool_id, pr.added_slot, pr.reward_account, pr.deposit_amount,
+  SELECT pr.pool_id, pr.added_slot, pr.reward_account,
+    pr.reward_account_credential_tag, pr.deposit_amount,
     COALESCE(t.block_index, 0) AS blk_idx,
     COALESCE(c.cert_index, 0)  AS cert_idx,
     ROW_NUMBER() OVER (
@@ -760,7 +792,8 @@ latest_ret AS (
   LEFT JOIN "transaction" t ON t.id = c.transaction_id
   WHERE rt.added_slot < $boundarySlot
 )
-SELECT p.pool_key_hash, lr.reward_account, lr.deposit_amount
+SELECT p.pool_key_hash, lr.reward_account, lr.reward_account_credential_tag,
+  lr.deposit_amount
 FROM pool p
 INNER JOIN latest_reg lr  ON lr.pool_id = p.id  AND lr.rn = 1
 INNER JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
@@ -773,7 +806,8 @@ WHERE lrt.epoch = $epoch
 ```
 
 The `reward_account` is the 28-byte stake credential stored on the registration,
-used directly to look up the reward account (see `AddAccountReward`). Deposit
+and `reward_account_credential_tag` distinguishes key-hash vs script-hash reward
+credentials when looking up the reward account. Deposit
 refunds are applied in `applyPoolRetirements` (ledger): the deposit is credited
 to the registered, active reward account, or added to `network_state.treasury`
 when that account is missing or inactive. Both writes are slot-keyed (the
@@ -805,6 +839,7 @@ SELECT
   gp.action_index,
   gp.action_type,
   gv.voter_type,
+  gv.voter_credential_tag,
   encode(gv.voter_credential, 'hex') AS voter,
   gv.vote
 FROM governance_proposal gp
@@ -908,6 +943,7 @@ SELECT HEX(t.hash) AS tx_hash, t.slot, t.block_index
 FROM address_transaction atx
 JOIN `transaction` t ON t.id = atx.transaction_id
 WHERE atx.payment_key = UNHEX(?)
+  AND atx.credential_tag = ?
   AND atx.staking_key = UNHEX(?)
 ORDER BY t.slot DESC, t.block_index DESC, t.id DESC
 LIMIT 50;
