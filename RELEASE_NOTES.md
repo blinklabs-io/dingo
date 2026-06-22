@@ -43,6 +43,43 @@ Hi folks! Here’s what we shipped in v0.55.0.
 * Tightened **keep the Blockfrost explorer example build tooling current:** The Blockfrost explorer example now uses a newer Vite release for smoother local builds. (`067d47d`)
 * Revised **align endorser block support with newer post Conway protocol layouts:** Post Conway protocol support now follows updated upstream era organization without changing endorser block behavior. (`9a377d7`)
 
+### 🔧 Fixes
+
+* Fixed **recognize stake and DRep identities with the correct credential tags:** Stake and DRep lookups now respect credential tag differences, which keeps identity handling aligned across key and script credentials. ([#2520](https://github.com/blinklabs-io/dingo/pull/2520))
+* Corrected **return hard misses immediately for block by hash lookups:** Block by hash requests now return a direct miss when the hash index has no entry, which avoids unnecessary full store scans. ([#2167](https://github.com/blinklabs-io/dingo/pull/2167))
+* Strengthened **clear reward balances safely when withdrawals exceed projected metadata rewards:** Reward withdrawals now clear the local reward balance without failing when projected metadata totals trail ledger valid withdrawals, and rollback restores the prior balance correctly. (`a4d10df`)
+* Stabilized **handle empty Mithril snapshots without disrupting restore flows:** Mithril restore logic now handles empty snapshot responses more cleanly, which keeps restore automation moving through this edge case. ([#2551](https://github.com/blinklabs-io/dingo/pull/2551))
+* Hardened **avoid lock order stalls during live chain reconciliation:** Chain reconciliation now acquires primary chain state in a safer order, which reduces the chance of deadlock during live recovery work. (`9cdcf67`)
+* Repaired **credit Conway donations to treasury accounting:** Treasury donation handling now keeps Conway donation effects aligned with treasury balances. ([#2565](https://github.com/blinklabs-io/dingo/pull/2565))
+* Resolved **restore POOLREAP refunds at epoch boundaries:** POOLREAP processing now returns the expected refunds at epoch boundaries, which keeps stake account balances aligned. ([#2571](https://github.com/blinklabs-io/dingo/pull/2571))
+* Balanced **return orphaned governance refunds and remove expired actions correctly:** Expired governance actions now refund deposits and clear the orphaned records they leave behind, which keeps governance accounting cleaner. ([#2574](https://github.com/blinklabs-io/dingo/pull/2574))
+* Secured **apply MIR rewards and pot changes to the right ledger state:** MIR processing now updates reward and Ada pot state more accurately, which keeps reward accounting aligned. ([#2576](https://github.com/blinklabs-io/dingo/pull/2576))
+* Refined **apply transaction reward withdrawals to persisted account balances:** Reward withdrawals from valid transactions now update stored reward balances directly, which keeps reward account queries more accurate. (`bd50123`)
+* Updated **align Blockfrost transaction details with the published schema:** Blockfrost transaction detail responses now match the published OpenAPI shape more closely, including resolved redeemer information instead of placeholders. ([#2554](https://github.com/blinklabs-io/dingo/pull/2554))
+
+### 📋 What You Need to Know
+
+* Clarified **expect cardano-cli Conway build support to depend on broader local state query coverage:** `cardano-cli conway transaction build` now relies on the expanded local state query support in this release, and that path should work against Dingo.
+* Highlighted **choose chainsync header ingress strategy explicitly when the default is not enough:** Chainsync now supports configurable header ingress strategies, and the default remains the primary strategy unless operators switch to parallel or round robin.
+* Emphasized **configure Midnight through its dedicated section and note the API storage dependency:** Midnight now uses its own config section, it depends on API storage mode, and setting the Midnight port to `0` disables the Midnight gRPC listener.
+* Summarized **expect materially tighter ledger accounting around rewards, refunds, and identities:** Treasury donations, POOLREAP refunds, orphaned governance refunds, MIR effects, credential tag aware identities, and reward withdrawals now stay aligned more closely with ledger behavior.
+* Reviewed **expect Blockfrost transaction details to return more complete resolved data:** Blockfrost transaction detail responses now align more closely with the published schema, and clients should expect real resolved redeemer metadata instead of placeholder values.
+* Noted **plan for sharper block by hash misses and possible historical hash index backfill:** Hash index misses now return hard misses without scanning the store, and older databases that lack historical hash index entries may need a one time backfill.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.54.0 (June 12, 2026)
 
 **Title:** Experimental Leios EB forging, Mithril v2 database restore, and off-chain metadata caching
