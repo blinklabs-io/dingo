@@ -240,20 +240,17 @@ func (d *MetadataStoreMysql) GetDRepVotingPowerBatch(
 			   ), 0) AS stake
 		FROM account a
 		LEFT JOIN (
-			SELECT credential_tag, staking_key,
-				   COALESCE(SUM(CAST(amount AS UNSIGNED)), 0) AS utxo_sum
-			FROM utxo
-			WHERE deleted_slot = 0
-			  AND EXISTS (
-				  SELECT 1 FROM account ax
-				  WHERE ax.credential_tag = utxo.credential_tag
-				    AND ax.staking_key = utxo.staking_key
-				    AND ax.active = 1 AND ax.drep IN ?
-				    AND ax.drep_type = a.drep_type
-			  )
-			GROUP BY credential_tag, staking_key
+			SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
+				   COALESCE(SUM(CAST(utxo.amount AS UNSIGNED)), 0) AS utxo_sum
+			FROM account ax
+			JOIN utxo ON utxo.credential_tag = ax.credential_tag
+			         AND utxo.staking_key = ax.staking_key
+			         AND utxo.deleted_slot = 0
+			WHERE ax.active = 1 AND ax.drep IN ?
+			GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
 		) u ON u.credential_tag = a.credential_tag
 			AND u.staking_key = a.staking_key
+			AND u.drep_type = a.drep_type
 		WHERE a.active = 1 AND a.drep IN ?
 		GROUP BY a.drep, a.drep_type
 	`, hashes, hashes).Scan(&rows).Error; err != nil {
