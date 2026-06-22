@@ -320,6 +320,23 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
+Leios endorser-block transactions are stored the same way, even though an
+endorser block is not part of the ranking-block chain. When a Dijkstra ranking
+block's referenced endorser block is applied (`ledger/leios_apply.go`), the
+endorser transactions' CBOR is written as a standalone blob under a `bp` +
+`(endorser-block slot, endorser-block hash)` key via `SetGenesisCbor` — which,
+like the genesis UTxO blob, writes only the `bp` and `bp..._metadata` keys and
+deliberately omits the `bi`/`bh` index keys, so the chain iterator never treats
+it as a chain block. Each endorser transaction's `t` entry and its outputs' `u`
+entries store ordinary `DOFF` references whose `block_slot`/`block_hash` point at
+that endorser-block blob, so cold-extract resolution is identical to chain-block
+transactions. The transactions' metadata rows, however, are recorded under the
+referencing ranking block's point, so a rollback of the ranking block removes
+them (the orphaned endorser-block blob is harmless and re-created on reprocess).
+Decode/build failures are ignored before storage is touched; once the blob or
+transaction rows start writing, the caller aborts the enclosing block
+transaction rather than committing a partial endorser-block application.
+
 ### Archive And History Expiry Contract
 
 Archive nodes and history-expiry nodes use the same logical blob keys. The

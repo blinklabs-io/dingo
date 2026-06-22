@@ -4630,12 +4630,18 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 		return fmt.Errorf("query transaction hashes: %w", result.Error)
 	}
 
-	// NULL out UTXO references to transactions being deleted
-	// These fields reference transaction hashes, not IDs, so CASCADE doesn't handle them
-	if len(txHashes) > 0 {
+	// NULL out UTXO references to transactions being deleted.
+	// These fields reference transaction hashes, not IDs, so CASCADE doesn't
+	// handle them. The hash list is chunked because a deep (e.g. over-K)
+	// rollback can produce far more hashes than SQLite's bind-variable limit
+	// (SQLITE_MAX_VARIABLE_NUMBER) allows in a single IN (...) clause.
+	for i := 0; i < len(txHashes); i += batchChunkSize {
+		end := min(i+batchChunkSize, len(txHashes))
+		chunk := txHashes[i:end]
+
 		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
 		if result := db.Model(&models.Utxo{}).
-			Where("spent_at_tx_id IN ?", txHashes).
+			Where("spent_at_tx_id IN ?", chunk).
 			Updates(map[string]any{
 				"spent_at_tx_id": nil,
 				"deleted_slot":   0,
@@ -4647,7 +4653,7 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 		}
 
 		if result := db.Model(&models.Utxo{}).
-			Where("collateral_by_tx_id IN ?", txHashes).
+			Where("collateral_by_tx_id IN ?", chunk).
 			Update("collateral_by_tx_id", nil); result.Error != nil {
 			return fmt.Errorf(
 				"clear collateral_by_tx_id references: %w",
@@ -4656,7 +4662,7 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 		}
 
 		if result := db.Model(&models.Utxo{}).
-			Where("referenced_by_tx_id IN ?", txHashes).
+			Where("referenced_by_tx_id IN ?", chunk).
 			Update("referenced_by_tx_id", nil); result.Error != nil {
 			return fmt.Errorf(
 				"clear referenced_by_tx_id references: %w",

@@ -127,6 +127,25 @@ type OuroborosConfig struct {
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
+	// (protocol 20) toward peers. This is a dingo extension that is ahead
+	// of the IOG Leios prototype: the prototype Haskell node does not run a
+	// leios-votes responder, so sending on protocol 20 makes its muxer tear
+	// down the whole bearer (observed as "connection reset by peer"). On the
+	// prototype network, votes are instead pushed inline over leios-notify
+	// (MsgVotes, tag 4). Keep this disabled when talking to the prototype;
+	// enable it only for peers known to support the standalone protocol.
+	EnableLeiosVotes bool
+	// EnableLeiosTxFetch requests endorser-block transaction bodies over
+	// leios-fetch in response to the peer's transactions offer
+	// (MsgBlockTxsOffer) — the relay's signal that the EB's transactions are
+	// ready. It is enabled on the Leios network (wired from
+	// enableLeiosNetworking in node.go). Fetching before that offer (e.g. right
+	// after the EB manifest) makes the IOG prototype relay reset the
+	// connection, so the fetch is gated on the txs offer rather than disabled
+	// outright. Best-effort: a fetch failure never tears down the shared
+	// connection.
+	EnableLeiosTxFetch bool
 }
 
 type blockfetchMetrics struct {
@@ -475,6 +494,33 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 		o.PeerGov.UpdatePeerConnectionStability(connId, 1.0)
 	}
 
+	// Log the negotiated node-to-node protocol version and diffusion mode for
+	// this connection. This is the key diagnostic for Leios mini-protocol
+	// interop: it tells us which NtN version the peer agreed to, which
+	// determines whether the peer runs responders for the Leios protocol IDs.
+	if conn := o.ConnManager.GetConnectionById(connId); conn != nil {
+		ver, verData := conn.ProtocolVersion()
+		fullDuplex := false
+		peerSharing := false
+		if verData != nil {
+			// DiffusionMode() returns the raw wire bool, where true means
+			// initiator-only (half duplex) and false means
+			// initiator-and-responder (full duplex). Compare against the
+			// constant so the log reports the negotiated mode correctly.
+			fullDuplex = verData.DiffusionMode() == oprotocol.DiffusionModeInitiatorAndResponder
+			peerSharing = verData.PeerSharing()
+		}
+		o.config.Logger.Debug(
+			"outbound connection handshake negotiated",
+			"component", "network",
+			"connection_id", connId.String(),
+			"ntn_version", ver,
+			"full_duplex", fullDuplex,
+			"peer_sharing", peerSharing,
+			"enable_leios", o.config.EnableLeios,
+		)
+	}
+
 	// Start chainsync client for this connection if not already tracking it.
 	// If chainsync negotiation fails, we return early and do NOT start
 	// txsubmission -- the connection is unusable if chainsync fails because
@@ -537,14 +583,19 @@ func (o *Ouroboros) HandleOutboundConnEvent(evt event.Event) {
 			)
 			return
 		}
-		// Start leiosvotes client
-		if err := o.leiosvotesClientStart(connId); err != nil {
-			o.config.Logger.Error(
-				"failed to start leiosvotes client",
-				"error",
-				err,
-			)
-			return
+		// Start leiosvotes client only when the standalone leios-votes
+		// protocol is enabled. The Leios prototype relays do not run a
+		// protocol-20 responder, so initiating it resets the connection;
+		// there, votes arrive inline over leios-notify instead.
+		if o.config.EnableLeiosVotes {
+			if err := o.leiosvotesClientStart(connId); err != nil {
+				o.config.Logger.Error(
+					"failed to start leiosvotes client",
+					"error",
+					err,
+				)
+				return
+			}
 		}
 	}
 }
@@ -673,17 +724,19 @@ func (o *Ouroboros) HandleInboundConnEvent(evt event.Event) {
 				"connection_id", connId.String(),
 			)
 		}
-		if err := o.leiosvotesClientStart(connId); err != nil {
-			o.config.Logger.Warn(
-				"leiosvotes client failed on inbound connection",
-				"error", err,
-				"connection_id", connId.String(),
-			)
-		} else {
-			o.config.Logger.Debug(
-				"started leiosvotes client on inbound connection",
-				"connection_id", connId.String(),
-			)
+		if o.config.EnableLeiosVotes {
+			if err := o.leiosvotesClientStart(connId); err != nil {
+				o.config.Logger.Warn(
+					"leiosvotes client failed on inbound connection",
+					"error", err,
+					"connection_id", connId.String(),
+				)
+			} else {
+				o.config.Logger.Debug(
+					"started leiosvotes client on inbound connection",
+					"connection_id", connId.String(),
+				)
+			}
 		}
 	}
 }

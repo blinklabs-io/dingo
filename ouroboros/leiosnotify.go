@@ -15,11 +15,10 @@
 package ouroboros
 
 import (
-	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -283,6 +282,11 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				resp,
 			)
 		}
+		// Store the manifest. The transactions arrive as a separate notify
+		// offer (MsgBlockTxsOffer): the prototype diffuses an endorser block's
+		// manifest and its transactions as two distinct offers, and fetching
+		// the transactions before the txs-offer arrives makes the relay reset
+		// the connection. So tx-body fetch is driven from the txs-offer below.
 		if err := o.storeLeiosEndorserBlock(
 			m.Point,
 			respBlock.BlockRaw,
@@ -290,13 +294,17 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		); err != nil {
 			return err
 		}
+		txCount := 0
+		if data, ok := o.lookupLeiosEndorserBlock(m.Point.Hash); ok {
+			txCount = data.txCount
+		}
 		o.config.Logger.Info(
 			fmt.Sprintf(
-				"fetched EB %d.%x with size %d and %d txs",
+				"fetched EB manifest %d.%x size %d txs %d",
 				m.Point.Slot,
 				m.Point.Hash,
 				len(respBlock.BlockRaw),
-				0,
+				txCount,
 			),
 			"component", "network",
 			"protocol", "leios-fetch",
@@ -304,58 +312,285 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 			"connection_id", connId,
 		)
 	case *oleiosnotify.MsgBlockTxsOffer:
-		txsRaw, err := o.fetchCachedLeiosEndorserBlockTxs(m.Point)
-		if err != nil {
-			level := slog.LevelWarn
-			msg := "failed to fetch Leios EB transactions"
-			if errors.Is(err, errLeiosEndorserBlockNotCached) {
-				level = slog.LevelDebug
-				msg = "skipping Leios EB transactions offer for uncached block"
+		// The peer is offering the transactions for this endorser block. Fetch
+		// them over leios-fetch so the EB becomes complete and its outputs can
+		// be applied to the ledger. Best-effort and gated (EnableLeiosTxFetch):
+		// a failure must not tear down the shared connection.
+		if !o.config.EnableLeiosTxFetch {
+			return nil
+		}
+		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
+			return nil
+		}
+		data, ok := o.lookupLeiosEndorserBlock(m.Point.Hash)
+		if !ok {
+			// Manifest not cached yet (txs offered before/without a block
+			// offer): fetch the manifest first to learn the transaction count.
+			resp, err := conn.LeiosFetch().Client.BlockRequest(m.Point)
+			if err != nil {
+				o.config.Logger.Debug(
+					"leios EB manifest fetch failed on txs offer",
+					"error", err,
+					"connection_id", connId,
+					"slot", m.Point.Slot,
+				)
+				return nil
 			}
-			o.config.Logger.Log(
-				context.Background(),
-				level,
-				msg,
-				"component", "network",
-				"protocol", "leios-fetch",
-				"role", "client",
+			respBlock, ok := resp.(*leiosfetch.MsgBlock)
+			if !ok {
+				return nil
+			}
+			if err := o.storeLeiosEndorserBlock(
+				m.Point,
+				respBlock.BlockRaw,
+				nil,
+			); err != nil {
+				o.config.Logger.Debug(
+					"failed to store leios EB manifest on txs offer",
+					"error", err,
+					"connection_id", connId,
+					"slot", m.Point.Slot,
+				)
+				return nil
+			}
+			if data, ok = o.lookupLeiosEndorserBlock(m.Point.Hash); !ok {
+				return nil
+			}
+		}
+		if data.txCount == 0 {
+			return nil
+		}
+		// Skip the fetch if we already have all transactions cached (e.g. a
+		// repeated txs offer for the same EB). Compare against the cached
+		// metadata length rather than cloning every tx body just to count them.
+		if data.completeTxCache() {
+			return nil
+		}
+		txs, err := o.fetchLeiosEbTxsBatched(
+			conn.LeiosFetch().Client,
+			m.Point,
+			data.txCount,
+		)
+		if err != nil {
+			o.config.Logger.Debug(
+				"leios EB transaction fetch failed",
+				"error", err,
 				"connection_id", connId,
 				"slot", m.Point.Slot,
 				"hash", hex.EncodeToString(m.Point.Hash),
-				"error", err,
+				"fetched", len(txs),
+				"tx_count", data.txCount,
 			)
 			return nil
 		}
-		o.config.Logger.Debug(
-			"fetched Leios EB transactions",
+		if err := o.storeLeiosEndorserBlock(
+			m.Point,
+			data.blockRaw,
+			txs,
+		); err != nil {
+			o.config.Logger.Debug(
+				"failed to store leios EB transactions",
+				"error", err,
+				"connection_id", connId,
+				"slot", m.Point.Slot,
+			)
+			return nil
+		}
+		o.config.Logger.Info(
+			fmt.Sprintf(
+				"fetched EB txs %d.%x %d/%d",
+				m.Point.Slot,
+				m.Point.Hash,
+				len(txs),
+				data.txCount,
+			),
 			"component", "network",
 			"protocol", "leios-fetch",
 			"role", "client",
 			"connection_id", connId,
-			"slot", m.Point.Slot,
-			"hash", hex.EncodeToString(m.Point.Hash),
-			"tx_count", len(txsRaw),
 		)
+	case *oleiosnotify.MsgVotesOffer:
+		// The Leios prototype diffuses full votes inline over leios-notify
+		// (rather than the standalone leios-votes protocol). Feed them to the
+		// vote manager, which validates each vote (structure, window, committee
+		// membership, dedup, BLS) and builds an endorser-block certificate on
+		// quorum. (m.Votes carries vote IDs offered by non-prototype peers and
+		// is fetched separately; only pushed FullVotes are handled here.)
+		if o.LeiosVotes == nil {
+			return nil
+		}
+		for _, vote := range m.FullVotes {
+			if err := o.LeiosVotes.HandleVote(connId, vote); err != nil {
+				o.config.Logger.Debug(
+					"failed to handle pushed leios vote",
+					"component", "network",
+					"protocol", "leios-notify",
+					"connection_id", connId,
+					"slot", vote.SlotNo,
+					"voter_id", vote.VoterId,
+					"error", err,
+				)
+			}
+		}
 	}
 	return nil
 }
 
-func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
+// leiosBlockTxsRequester is the subset of the leios-fetch client used to fetch
+// endorser-block transactions. It is an interface so the re-request logic below
+// can be unit-tested without a live connection.
+type leiosBlockTxsRequester interface {
+	BlockTxsRequest(
+		point ocommon.Point,
+		bitmaps map[uint16]uint64,
+	) (protocol.Message, error)
+}
+
+const (
+	leiosTxFetchWindowSize = 64
+	leiosTxFetchMaxWindows = 1 << 16
+)
+
+// leiosTxFetchMaxRoundsPerWindow bounds how many BlockTxsRequest rounds are
+// spent completing a single window, so a relay that never serves a particular
+// transaction cannot loop forever. A response that serves no new transaction
+// already aborts the window (the progress==0 guard below), so this cap only
+// bounds slow-but-steady progress: a relay that dribbles a single new
+// transaction per round needs one round per transaction, so the cap is the
+// window size. A lower cap would abort fetches that were still making valid
+// partial progress and leave the endorser block permanently incomplete.
+const leiosTxFetchMaxRoundsPerWindow = leiosTxFetchWindowSize
+
+// fetchLeiosEbTxsBatched fetches all txCount transactions of an endorser block
+// over leios-fetch, one 64-transaction window at a time. The prototype relay
+// resets the connection if asked for all transactions at once, and serves a
+// window only partially when the response would exceed its per-message size cap
+// — so each window's still-missing transactions are re-requested until the
+// window is complete. Which transactions a response carried is taken from the
+// response's own bitmaps, falling back to "the relay served a prefix of the
+// requested indices in ascending order" when the response omits them.
+// Transactions are placed at their absolute index, so the result is in index
+// order; on an error or a no-progress request it returns the contiguous prefix
+// fetched so far, letting callers treat the fetch as best-effort.
+func (o *Ouroboros) fetchLeiosEbTxsBatched(
+	client leiosBlockTxsRequester,
 	point ocommon.Point,
+	txCount int,
 ) ([]cbor.RawMessage, error) {
-	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
-	if !ok {
+	if client == nil {
+		return nil, errors.New("leios-fetch client unavailable")
+	}
+	if txCount <= 0 {
+		return nil, nil
+	}
+	numWindows := (txCount-1)/leiosTxFetchWindowSize + 1
+	if numWindows > leiosTxFetchMaxWindows {
 		return nil, fmt.Errorf(
-			"%w: %d.%x",
-			errLeiosEndorserBlockNotCached,
-			point.Slot,
-			point.Hash,
+			"leios-fetch tx count %d requires %d bitmap windows, max %d",
+			txCount,
+			numWindows,
+			leiosTxFetchMaxWindows,
 		)
 	}
-	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
-	// The current Dijkstra CDDL has no transaction-reference list, so there
-	// is no extra BlockTxsRequest to make here.
-	return cloneRawMessages(data.txsRaw), nil
+	result := make([]cbor.RawMessage, txCount)
+	for w := 0; w < numWindows; w++ {
+		for round := 0; ; round++ {
+			needed := leiosWindowNeededMask(result, w, txCount)
+			if needed == 0 {
+				break
+			}
+			if round >= leiosTxFetchMaxRoundsPerWindow {
+				return leiosCollectTxs(result), fmt.Errorf(
+					"leios-fetch could not complete window %d after %d rounds",
+					w, round,
+				)
+			}
+			resp, err := client.BlockTxsRequest(
+				point,
+				map[uint16]uint64{uint16(w): needed}, // #nosec G115 -- w<1<<16
+			)
+			if err != nil {
+				return leiosCollectTxs(result), err
+			}
+			respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
+			if !ok {
+				return leiosCollectTxs(result), fmt.Errorf(
+					"unexpected leios-fetch BlockTxs response type %T", resp,
+				)
+			}
+			served := leiosBitmapTxIndices(respTxs.Bitmaps)
+			if len(served) != len(respTxs.TxsRaw) {
+				served = leiosBitmapTxIndices(
+					map[uint16]uint64{uint16(w): needed}, // #nosec G115 -- w<1<<16
+				)
+			}
+			progress := 0
+			for k, raw := range respTxs.TxsRaw {
+				if k >= len(served) {
+					break
+				}
+				idx := served[k]
+				if idx >= 0 && idx < txCount && result[idx] == nil {
+					result[idx] = slices.Clone(raw)
+					progress++
+				}
+			}
+			if progress == 0 {
+				return leiosCollectTxs(result), fmt.Errorf(
+					"leios-fetch served no new transactions for window %d", w,
+				)
+			}
+		}
+	}
+	return leiosCollectTxs(result), nil
+}
+
+// leiosWindowNeededMask returns the bitmap of transaction indices in 64-tx
+// window w that are within txCount and not yet present in result.
+func leiosWindowNeededMask(result []cbor.RawMessage, w, txCount int) uint64 {
+	var mask uint64
+	base := w * 64
+	for bit := 0; bit < 64 && base+bit < txCount; bit++ {
+		if result[base+bit] == nil {
+			mask |= 1 << uint(bit)
+		}
+	}
+	return mask
+}
+
+// leiosBitmapTxIndices returns the transaction indices (window*64 + bit) of all
+// set bits across the bitmap windows, in ascending index order.
+func leiosBitmapTxIndices(bitmaps map[uint16]uint64) []int {
+	windows := make([]uint16, 0, len(bitmaps))
+	for w := range bitmaps {
+		windows = append(windows, w)
+	}
+	slices.Sort(windows)
+	var idx []int
+	for _, w := range windows {
+		mask := bitmaps[w]
+		for bit := range 64 {
+			if mask&(1<<uint(bit)) != 0 {
+				idx = append(idx, int(w)*64+bit)
+			}
+		}
+	}
+	return idx
+}
+
+// leiosCollectTxs returns the contiguous run of fetched transactions from the
+// start. A gap (a still-missing transaction) ends the run: endorser blocks are
+// only usable when complete and their transactions are positional, so a prefix
+// keeps the indices aligned.
+func leiosCollectTxs(result []cbor.RawMessage) []cbor.RawMessage {
+	out := make([]cbor.RawMessage, 0, len(result))
+	for _, r := range result {
+		if r == nil {
+			break
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func (o *Ouroboros) leiosnotifyServerRequestNext(

@@ -36,8 +36,6 @@ const (
 	leiosEndorserBlockCacheTTL        = 10 * time.Minute
 )
 
-var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")
-
 type leiosEndorserBlockData struct {
 	point      ocommon.Point
 	blockRaw   []byte
@@ -260,12 +258,80 @@ func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 	return nil
 }
 
+// EndorserBlockTxsByHash returns the slot and the complete set of standalone
+// transaction CBORs of the cached endorser block with the given hash, for the
+// ledger to apply when the referencing Dijkstra ranking block is processed. ok
+// is false when the endorser block is not cached or its transactions are
+// incomplete. It satisfies ledger.EndorserBlockProviderFunc.
+func (o *Ouroboros) EndorserBlockTxsByHash(
+	ebHash []byte,
+) (uint64, []cbor.RawMessage, bool) {
+	data, ok := o.lookupLeiosEndorserBlock(ebHash)
+	if !ok || !data.completeTxCache() {
+		return 0, nil, false
+	}
+	return data.point.Slot, cloneRawMessages(data.txsRaw), true
+}
+
+// leiosEndorserTxCountForRankingBlock resolves the endorser block referenced
+// by a Dijkstra ranking block and returns its cached transaction count. The
+// ranking block references its endorser block through the Leios header
+// extension ([eb_hash, eb_size]) — NOT the block-level leios_cert, which is an
+// empty placeholder in the current Dijkstra CDDL. ok is true only when the
+// endorser block has been fetched and its full transaction set is cached.
+func (o *Ouroboros) leiosEndorserTxCountForRankingBlock(
+	blockCbor []byte,
+) (lcommon.Blake2b256, int, bool) {
+	var top []cbor.RawMessage
+	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
+		return lcommon.Blake2b256{}, 0, false
+	}
+	var header gdijkstra.DijkstraBlockHeader
+	if _, err := cbor.Decode(top[0], &header); err != nil {
+		return lcommon.Blake2b256{}, 0, false
+	}
+	ebHash, _, ok := header.LeiosEndorserBlockRef()
+	if !ok {
+		return lcommon.Blake2b256{}, 0, false
+	}
+	data, found := o.lookupLeiosEndorserBlock(ebHash.Bytes())
+	if !found || !data.completeTxCache() {
+		return ebHash, 0, false
+	}
+	return ebHash, len(data.txsRaw), true
+}
+
+// The error return is always nil today but is part of this seam's contract for
+// future NtC representation work, and the caller already handles it.
+//
+//nolint:unparam // error reserved for future NtC representation work
 func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	blockCbor []byte,
 ) ([]byte, bool, error) {
-	// Dijkstra carries nullable Leios/Peras certificate slots, but the current
-	// Leios certificate placeholder is an empty list and does not contain an
-	// endorser-block hash to drive the old merge path.
+	// A Dijkstra ranking block references its endorser block via the Leios
+	// header extension ([eb_hash, eb_size]); the block-level leios_cert is an
+	// empty placeholder in the current Dijkstra CDDL and carries no reference.
+	// When the referenced endorser block (and its transactions) has been
+	// fetched, its transactions are the endorser-resident transactions whose
+	// outputs the ranking-block transactions spend.
+	//
+	// Applying those transactions to the ledger cannot be done by splicing them
+	// into the ranking-block CBOR: the header's block_body_hash covers only the
+	// ranking block's own body, so a spliced block would fail body-hash
+	// verification. Endorser-block transactions are applied by ledgerProcessBlock
+	// as a ledger-internal side delta when the referencing ranking block is
+	// processed. This NtC path therefore serves the original ranking-block CBOR
+	// and only logs whether a complete cached endorser block is available.
+	if ebHash, txCount, ok := o.leiosEndorserTxCountForRankingBlock(
+		blockCbor,
+	); ok {
+		o.config.Logger.Debug(
+			"ranking block has a fetched endorser block available for application",
+			"component", "network",
+			"endorser_block_hash", ebHash.String(),
+			"endorser_tx_count", txCount,
+		)
+	}
 	return blockCbor, false, nil
 }
 

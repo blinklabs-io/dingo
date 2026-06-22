@@ -111,6 +111,26 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			// `dingo -n leios` sets the network name but leaves run
+			// mode at its default; the Leios testnet still requires the
+			// Dijkstra era table to follow the chain.
+			name:     "leios network by name",
+			cfg:      Config{network: "leios"},
+			expected: true,
+		},
+		{
+			// Same network selected via its magic (e.g. --network-magic
+			// 164) with no network name.
+			name:     "leios network by magic",
+			cfg:      Config{networkMagic: 164},
+			expected: true,
+		},
+		{
+			name:     "non-leios network stays disabled",
+			cfg:      Config{network: "preview", networkMagic: 2},
+			expected: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,6 +138,64 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 				t,
 				tt.expected,
 				tt.cfg.experimentalDijkstraEnabled(),
+			)
+		})
+	}
+}
+
+// TestExperimentalLeiosNetworkingEnabled locks the decoupling between the
+// Dijkstra ledger era and the Leios node-to-node mini-protocols: the leios
+// network enables the Dijkstra era so the chain can be followed, and now also
+// opens leios-notify / leios-fetch. The standalone leios-votes protocol stays
+// gated off for prototype interop.
+func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
+	tests := []struct {
+		name              string
+		cfg               Config
+		expectNetworking  bool
+		expectDijkstraEra bool
+	}{
+		{name: "default", cfg: Config{}, expectNetworking: false, expectDijkstraEra: false},
+		{
+			name:              "leios run mode enables both",
+			cfg:               Config{runMode: runModeLeios},
+			expectNetworking:  true,
+			expectDijkstraEra: true,
+		},
+		{
+			name:              "dijkstra start era enables both",
+			cfg:               Config{startEra: internalconfig.StartEraDijkstra},
+			expectNetworking:  true,
+			expectDijkstraEra: true,
+		},
+		{
+			// `dingo -n leios`: the Leios testnet enables both the Dijkstra
+			// era and the Leios mini-protocols (leios-notify / leios-fetch).
+			name:              "leios network enables both",
+			cfg:               Config{network: "leios"},
+			expectNetworking:  true,
+			expectDijkstraEra: true,
+		},
+		{
+			name:              "leios network by magic enables both",
+			cfg:               Config{networkMagic: 164},
+			expectNetworking:  true,
+			expectDijkstraEra: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(
+				t,
+				tt.expectNetworking,
+				tt.cfg.experimentalLeiosNetworkingEnabled(),
+				"leios networking",
+			)
+			assert.Equal(
+				t,
+				tt.expectDijkstraEra,
+				tt.cfg.experimentalDijkstraEnabled(),
+				"dijkstra era",
 			)
 		})
 	}

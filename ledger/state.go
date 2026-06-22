@@ -387,6 +387,7 @@ type LedgerStateConfig struct {
 	FatalErrorFunc              FatalErrorFunc
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
+	EndorserBlockProvider       EndorserBlockProviderFunc
 	ValidateHistorical          bool
 	EnableDijkstra              bool
 	StartInDijkstra             bool
@@ -395,6 +396,13 @@ type LedgerStateConfig struct {
 	ForgeBlocks                 bool
 	DatabaseWorkerPoolConfig    DatabaseWorkerPoolConfig
 }
+
+// EndorserBlockProviderFunc returns the slot and the complete set of standalone
+// transaction CBORs of the Leios endorser block identified by ebHash, when it
+// has been fetched and fully cached; ok is false otherwise. It is used to apply
+// an endorser block's transactions to the ledger when the referencing Dijkstra
+// ranking block is processed.
+type EndorserBlockProviderFunc func(ebHash []byte) (ebSlot uint64, txs []cbor.RawMessage, ok bool)
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
 // a range of blocks
@@ -3512,6 +3520,63 @@ func (ls *LedgerState) ledgerProcessBlock(
 			return nil, err
 		}
 	}
+	// Apply the referenced Leios endorser block's transactions before the
+	// ranking block's own, so the endorser-resident outputs the ranking block
+	// spends are present in the UTxO set. The endorser block is identified by
+	// the Dijkstra Leios header extension; its fetched transactions are
+	// supplied by the EndorserBlockProvider. Decode/build failures remain
+	// best-effort: they leave the interim validation skip in place rather than
+	// aborting the block. Storage-phase failures abort the DB transaction so a
+	// partial endorser-block application cannot be committed.
+	endorserBlockApplied := false
+	if currentEra.Id == dijkstra.EraIdDijkstra &&
+		ls.config.EndorserBlockProvider != nil {
+		if ref, ok := block.Header().(leiosEndorserBlockReferencer); ok {
+			if ebHash, _, ok := ref.LeiosEndorserBlockRef(); ok {
+				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+					ebHash.Bytes(),
+				); ok {
+					applied, err := ls.applyEndorserBlock(
+						txn,
+						point,
+						block.BlockNumber(),
+						ebSlot,
+						ebHash.Bytes(),
+						ebTxs,
+					)
+					var storageErr *leiosEndorserBlockStorageError
+					switch {
+					case errors.As(err, &storageErr):
+						ls.config.Logger.Warn(
+							"failed to apply Leios endorser block after storage mutation",
+							"component", "ledger",
+							"slot", point.Slot,
+							"eb_slot", ebSlot,
+							"error", err,
+						)
+						return nil, err
+					case err != nil:
+						ls.config.Logger.Warn(
+							"failed to apply Leios endorser block transactions",
+							"component", "ledger",
+							"slot", point.Slot,
+							"eb_slot", ebSlot,
+							"error", err,
+						)
+					default:
+						endorserBlockApplied = true
+						ls.config.Logger.Info(
+							"applied Leios endorser block transactions",
+							"component", "ledger",
+							"slot", point.Slot,
+							"eb_slot", ebSlot,
+							"eb_txs", applied,
+						)
+					}
+				}
+			}
+		}
+	}
 	// Process transactions
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
@@ -3542,7 +3607,24 @@ func (ls *LedgerState) ledgerProcessBlock(
 				delta.Release()
 				return nil, err
 			}
-			if validationEra.ValidateTxFunc != nil {
+			// Dijkstra/Leios: per-tx UTxO validation is run only when the
+			// ranking block's endorser block was applied above, so the
+			// endorser-resident inputs these txs spend are now present in the
+			// UTxO set and the rules can resolve them. When the endorser block
+			// was not applied — e.g. it has not been fetched, or the prototype
+			// does not diffuse it (historical endorser blocks) — validation is
+			// skipped: the rules could only fail (BadInputsUtxo /
+			// ValueNotConserved), the network already admitted the block via
+			// its Leios certificate, and running the full rule set per tx on
+			// dense near-tip blocks otherwise holds throughput down to the
+			// block-production rate and prevents convergence. A validation
+			// disagreement on an endorser-applied block is trusted (logged)
+			// below rather than rewinding, since the prototype's
+			// endorser-block availability and certificate surface are still
+			// evolving.
+			skipDijkstraValidation := validationEra.Id == dijkstra.EraIdDijkstra &&
+				!endorserBlockApplied
+			if validationEra.ValidateTxFunc != nil && !skipDijkstraValidation {
 				// Use the previous era's protocol
 				// parameters when validating an era-1
 				// transaction.
@@ -3579,6 +3661,26 @@ func (ls *LedgerState) ledgerProcessBlock(
 						"redeemer_tag", plutusErr.Tag,
 						"redeemer_index", plutusErr.Index,
 						"eval_error", plutusErr.Err.Error(),
+					)
+					err = nil
+				}
+				// Dijkstra/Leios: the block was admitted to the chain via its
+				// Leios certificate. An endorser block may be only partially
+				// resolvable (e.g. an endorser-resident input from an endorser
+				// block the prototype did not diffuse), and the prototype's
+				// certificate/validation surface is still evolving, so a
+				// remaining validation disagreement is logged and trusted
+				// rather than rewinding the certified chain. Tracked by #2587:
+				// tighten to enforce once endorser-block availability and
+				// Leios certificate validation are complete.
+				if err != nil &&
+					validationEra.Id == dijkstra.EraIdDijkstra {
+					ls.config.Logger.Warn(
+						"Dijkstra tx validation disagreement (trusting Leios-certified block)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"error", err.Error(),
 					)
 					err = nil
 				}

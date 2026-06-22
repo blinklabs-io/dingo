@@ -40,7 +40,7 @@ func TestBlockByHashTxn_UnknownHashRecordsMissAndNotFound(t *testing.T) {
 	resetBlockByHashStats()
 
 	const seeded = 16
-	for i := 0; i < seeded; i++ {
+	for i := range seeded {
 		insertTestBlock(t, db, uint64(i+1), randomHash(t), []byte("cbor"))
 	}
 
@@ -111,7 +111,7 @@ func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
 	resetBlockByHashStats()
 	blockByHashIndexMisses.Add(3)
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		reg := prometheus.NewRegistry()
 		require.NoError(t, RegisterBlockByHashMetrics(reg))
 		// reuse must not error or duplicate
@@ -142,7 +142,7 @@ func TestRegisterBlockByHashMetrics_PerRegistry(t *testing.T) {
 func BenchmarkBlockByHashTxn_UnknownHash(b *testing.B) {
 	db := newBenchDB(b)
 	const seeded = 1024
-	for i := 0; i < seeded; i++ {
+	for i := range seeded {
 		hash := make([]byte, 32)
 		hash[0] = byte(i)
 		hash[1] = byte(i >> 8)

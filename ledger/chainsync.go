@@ -727,6 +727,11 @@ func (ls *LedgerState) findPeerForkPath(
 	}
 	for depth := 0; depth < maxPeerHeaderHistoryPerConn &&
 		len(prevHash) > 0; depth++ {
+		// Resolve the ancestor by O(1) hash index only: database.BlockByHash
+		// no longer falls back to a sequential blob scan on a miss, so this
+		// lock-held walk over mostly-unpersisted peer-header hashes stays cheap
+		// for current stores. Blocks persisted before the hash index was added
+		// may still miss until the operator backfills the index.
 		ancestorBlock, err := ls.blockByHash(prevHash)
 		if err == nil {
 			point := ocommon.NewPoint(
