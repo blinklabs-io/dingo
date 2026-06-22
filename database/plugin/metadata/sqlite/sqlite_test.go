@@ -323,7 +323,9 @@ func TestSetTransactionIdempotentlyStoresCollateralReturn(t *testing.T) {
 }
 
 // TestSetTransactionWithdrawalsClearRewardBalance verifies transaction reward
-// withdrawals clear persisted rewards and rollback restores the prior balance.
+// withdrawals clear persisted rewards even when the local metadata balance is
+// lower than the ledger-valid withdrawal amount, and rollback restores the
+// prior metadata balance.
 func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 	t.Parallel()
 	sqliteStore := setupTestDB(t)
@@ -355,7 +357,7 @@ func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 		hash:    txHash,
 		isValid: true,
 		withdrawals: map[*lcommon.Address]*big.Int{
-			&withdrawalAddr: big.NewInt(1_000),
+			&withdrawalAddr: big.NewInt(2_000),
 		},
 	}
 	point := ocommon.NewPoint(1556771, bytes.Repeat([]byte{0xf9}, 32))
@@ -380,6 +382,20 @@ func TestSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 		Count(&deltaCount).Error)
 	if deltaCount != 1 {
 		t.Fatalf("expected one withdrawal delta, got %d", deltaCount)
+	}
+	var delta models.AccountRewardDelta
+	requireNoError(sqliteStore.DB().
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Take(&delta).Error)
+	if delta.Amount != types.Uint64(2_000) {
+		t.Fatalf("expected withdrawal delta amount 2000, got %d", uint64(delta.Amount))
+	}
+	if delta.PreviousReward != account.Reward {
+		t.Fatalf(
+			"expected previous reward %d, got %d",
+			uint64(account.Reward),
+			uint64(delta.PreviousReward),
+		)
 	}
 
 	requireNoError(sqliteStore.DeleteAccountRewardsAfterSlot(point.Slot-1, nil))

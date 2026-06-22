@@ -503,7 +503,7 @@ func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 		hash:    txHash,
 		isValid: true,
 		withdrawals: map[*lcommon.Address]*big.Int{
-			&withdrawalAddr: big.NewInt(1_000),
+			&withdrawalAddr: big.NewInt(2_000),
 		},
 	}
 	point := ocommon.NewPoint(1556771, bytes.Repeat([]byte{0xf9}, 32))
@@ -536,6 +536,22 @@ func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 	}
 	if deltaCount != 1 {
 		t.Fatalf("expected one withdrawal delta, got %d", deltaCount)
+	}
+	var delta models.AccountRewardDelta
+	if result := store.DB().
+		Where("withdrawal = ? AND tx_hash = ?", true, txHash.Bytes()).
+		Take(&delta); result.Error != nil {
+		t.Fatalf("get withdrawal delta: %v", result.Error)
+	}
+	if delta.Amount != types.Uint64(2_000) {
+		t.Fatalf("expected withdrawal delta amount 2000, got %d", uint64(delta.Amount))
+	}
+	if delta.PreviousReward != account.Reward {
+		t.Fatalf(
+			"expected previous reward %d, got %d",
+			uint64(account.Reward),
+			uint64(delta.PreviousReward),
+		)
 	}
 	if err := store.DeleteAccountRewardsAfterSlot(point.Slot-1, nil); err != nil {
 		t.Fatalf("rollback account rewards: %v", err)
