@@ -1,5 +1,48 @@
 # Dingo Releases
 
+## v0.55.0 (June 22, 2026)
+
+**Title:** cardano-cli build compatibility, ledger accounting correctness, and configurable chainsync
+
+**Date:** June 22, 2026
+
+**Version:** v0.55.0
+
+Hi folks! Here’s what we shipped in v0.55.0.
+
+### ✨ What's New
+
+* Added **build Conway transactions through cardano-cli against Dingo:** `cardano-cli conway transaction build` can now complete the local state queries it needs against Dingo, which improves direct build compatibility. ([#2547](https://github.com/blinklabs-io/dingo/pull/2547))
+* Introduced **select chainsync header ingress strategies by configuration:** Operators can now choose primary, parallel, or round robin header ingress behavior for chainsync, which gives more control over how peer headers are admitted. ([#2577](https://github.com/blinklabs-io/dingo/pull/2577))
+* Expanded **configure Midnight services with a dedicated config section:** Midnight settings now live under their own config section, which makes service wiring and deployment choices easier to manage. ([#2568](https://github.com/blinklabs-io/dingo/pull/2568))
+* Delivered **store Midnight indexer data in dedicated metadata tables:** Midnight indexer deployments can now persist asset, governance, registration, and epoch candidate data in dedicated database models for easier querying. (`1dd5ba0`)
+
+### 💪 Improvements
+
+* Improved **scale block caching with sharded LRU concurrency:** Block cache reads and writes now spread across shards, which helps busy nodes serve concurrent work more smoothly. ([#2590](https://github.com/blinklabs-io/dingo/pull/2590))
+* Refined **align the Sundae preview example with newer Node type definitions:** The Sundae preview example now tracks newer Node development types, which helps local example builds stay current. (`1e5e9f6`)
+* Updated **align the Blockfrost explorer example with newer Node type definitions:** The Blockfrost explorer example now tracks newer Node development types, which helps local example builds stay current. (`db5fc0e`)
+* Enhanced **keep Google API support current across the project:** Google API backed integrations now stay aligned with a newer client release for steadier compatibility. (`2168972`)
+* Modernized **keep the governance lens example aligned with newer Postgres client support:** The governance lens example now tracks a newer Postgres driver release, which supports smoother example maintenance. (`121ec85`)
+* Strengthened **keep Ouroboros protocol support aligned with newer upstream behavior:** Core protocol handling now tracks a newer `gouroboros` release, which supports ongoing compatibility work. (`b309afa`)
+* Advanced **expand dependency update coverage across maintained examples:** Example projects now receive routine dependency update coverage alongside the main project paths. (`ebe80ad`)
+* Polished **refresh published benchmark reports with current performance baselines:** Benchmark documentation now reflects newer throughput and load measurements, which makes performance review easier to follow. (`e36b260`)
+* Refreshed **keep Google cloud storage support current:** Google cloud storage integrations now track a newer client patch release for steadier maintenance. (`7b5326c`)
+* Streamlined **update build automation to the latest checkout workflow generation:** Project automation now uses the newer checkout action generation across CI and publish workflows. (`474ca48`)
+* Sharpened **keep AWS configuration support aligned with current upstream releases:** AWS configuration handling now tracks a newer SDK release for smoother compatibility. (`9bfc1b5`)
+* Simplified **keep AWS credential handling current:** AWS credential support now tracks the latest SDK patch level for steadier authenticated integrations. (`c9b1afd`)
+* Stabilized **tighten nil safety checks around fetch and account history paths:** Several runtime paths now handle missing values more defensively, which helps validation and metadata fetch behavior fail more safely. (`d89d00e`)
+* Clarified **separate connection recycling events from ledger validation logic:** Connection recycle requests now flow through clearer ledger owned events, which reduces coupling between validation and connection management. (`553ee4c`)
+* Realigned **extract Praos selection logic into dedicated primitives:** Praos chain selection logic now lives in focused comparison and view helpers, which makes selection behavior easier to reuse and verify. (`fcadf48`)
+* Reworked **decouple chainsync state from direct ledger iteration ownership:** Chainsync now depends on a narrower chain provider interface, which keeps client state handling more modular. (`dd9a1d3`)
+* Organized **move peer relay adaptation to the node boundary:** Stake pool relay discovery now passes through a dedicated node layer adapter, which keeps peer governance wiring cleaner. (`f8e68c5`)
+* Restructured **decouple chain selection from peer governance events:** Chain selection now receives eligibility and priority updates through explicit setters, which keeps selection logic less tightly bound to peer governance internals. (`a3038d0`)
+* Streamlined **narrow API adapters to the concrete capabilities each server needs:** Mesh and UTxO RPC now depend on smaller adapter interfaces, which makes API wiring more focused and easier to validate. (`a3e715c`)
+* Harmonized **keep crypto and core Go support libraries current:** Core cryptography and supporting Go libraries now track newer upstream releases for steadier compatibility. (`2ef6168`)
+* Tuned **keep the Midnight example build tooling current:** The Midnight preview example now uses a newer Vite release for smoother local builds. (`ec55789`)
+* Tightened **keep the Blockfrost explorer example build tooling current:** The Blockfrost explorer example now uses a newer Vite release for smoother local builds. (`067d47d`)
+* Revised **align endorser block support with newer post Conway protocol layouts:** Post Conway protocol support now follows updated upstream era organization without changing endorser block behavior. (`9a377d7`)
+
 ## v0.54.0 (June 12, 2026)
 
 **Title:** Experimental Leios EB forging, Mithril v2 database restore, and off-chain metadata caching
