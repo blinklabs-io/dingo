@@ -384,8 +384,12 @@ func BlockByHashTxn(txn *Txn, hash []byte) (models.Block, error) {
 	hashIndexKey := types.BlockHashIndexKey(hash)
 	blockKey, err := blob.Get(blobTxn, hashIndexKey)
 	if err == nil && len(blockKey) > 0 {
+		block, err := blockByKey(txn, blockKey)
+		if err != nil {
+			return models.Block{}, err
+		}
 		blockByHashIndexHits.Add(1)
-		return blockByKey(txn, blockKey)
+		return block, nil
 	}
 	if err == nil && len(blockKey) == 0 {
 		// Empty value at a present hash-index entry is local DB corruption,
