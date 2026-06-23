@@ -29,12 +29,11 @@ import (
 	"sort"
 	"sync"
 
-	fxcbor "github.com/fxamacker/cbor/v2"
-
 	"github.com/blinklabs-io/dingo/database/models"
 	dingoEvent "github.com/blinklabs-io/dingo/event"
 	dingoLedger "github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros/ledger"
+	fxcbor "github.com/fxamacker/cbor/v2"
 )
 
 // Store is the narrow persistence interface required by the indexer.

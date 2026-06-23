@@ -22,11 +22,10 @@ import (
 	"sync"
 	"testing"
 
-	fxcbor "github.com/fxamacker/cbor/v2"
-
 	"github.com/blinklabs-io/dingo/database/models"
 	dingoEvent "github.com/blinklabs-io/dingo/event"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 )
 
