@@ -38,6 +38,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
+	midnightgov "github.com/blinklabs-io/dingo/internal/midnightindexer"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -75,6 +76,7 @@ type Node struct {
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	midnightIndexer                  *midnightindexer.Indexer
+	midnightGovIndexer               *midnightgov.Indexer
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
@@ -496,10 +498,42 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	started = append(started, func() { n.ledgerState.Close() })
-	// Register midnight indexer cleanup after LedgerState so it is torn down
+	// Register cNIGHT indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
 		started = append(started, func() { n.midnightIndexer.Stop() })
+	}
+	// Create and start governance/Ariadne/candidate indexer after LedgerState.
+	if n.config.storageMode.IsAPI() {
+		initialEpoch := uint64(0)
+		if epoch, err := n.ledgerState.SlotToEpoch(n.ledgerState.Tip().Point.Slot); err == nil {
+			initialEpoch = epoch.EpochId
+		} else {
+			n.config.logger.Warn(
+				"failed to resolve Midnight governance indexer initial epoch",
+				"error", err,
+			)
+		}
+		var err error
+		n.midnightGovIndexer, err = midnightgov.New(midnightgov.Config{
+			Logger:                      n.config.logger,
+			Store:                       n.db,
+			EventBus:                    n.eventBus,
+			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
+			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
+			CouncilAddress:              n.config.midnight.CouncilAddress,
+			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
+			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
+			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
+			InitialEpoch:                initialEpoch,
+		})
+		if err != nil {
+			return fmt.Errorf("creating Midnight governance indexer: %w", err)
+		}
+		if err := n.midnightGovIndexer.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting Midnight governance indexer: %w", err)
+		}
+		started = append(started, n.midnightGovIndexer.Stop)
 	}
 	// Initialize and start snapshot manager for stake snapshot capture
 	n.snapshotMgr = snapshot.NewManager(

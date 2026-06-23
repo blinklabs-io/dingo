@@ -15,8 +15,11 @@
 package sqlite
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -196,4 +199,78 @@ func (d *MetadataStoreSqlite) DeleteMidnightDeregistrationsByBlock(
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (d *MetadataStoreSqlite) InsertMidnightGovernanceDatum(
+	datum *models.MidnightGovernanceDatum,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Create(datum).Error
+}
+
+func (d *MetadataStoreSqlite) GetLatestMidnightGovernanceDatum(
+	datumType string,
+	blockNumber uint64,
+	txn types.Txn,
+) (*models.MidnightGovernanceDatum, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var datum models.MidnightGovernanceDatum
+	result := db.Where("datum_type = ? AND block_number <= ?", datumType, blockNumber).
+		Order("block_number DESC, id DESC").First(&datum)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &datum, result.Error
+}
+
+func (d *MetadataStoreSqlite) GetLatestMidnightAriadneParams(
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	if result := db.Order("epoch DESC").First(&params); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
+func (d *MetadataStoreSqlite) UpsertMidnightAriadneParams(
+	params *models.MidnightAriadneParams,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "epoch"}},
+		DoUpdates: clause.AssignmentColumns([]string{"datum"}),
+	}).Create(params).Error
+}
+
+func (d *MetadataStoreSqlite) UpsertMidnightEpochCandidates(
+	ec *models.MidnightEpochCandidates,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "epoch"}},
+		DoUpdates: clause.AssignmentColumns([]string{"candidates_cbor"}),
+	}).Create(ec).Error
 }

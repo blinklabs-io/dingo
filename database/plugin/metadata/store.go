@@ -1413,6 +1413,13 @@ type MetadataStore interface {
 	// DiskSize returns the on-disk size of the metadata store in bytes.
 	// Returns 0 for remote databases where local size is not meaningful.
 	DiskSize() (int64, error)
+
+	// Midnight indexer methods
+	InsertMidnightGovernanceDatum(*models.MidnightGovernanceDatum, types.Txn) error
+	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
+	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
+	UpsertMidnightAriadneParams(*models.MidnightAriadneParams, types.Txn) error
+	UpsertMidnightEpochCandidates(*models.MidnightEpochCandidates, types.Txn) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

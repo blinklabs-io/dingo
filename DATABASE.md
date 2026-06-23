@@ -215,6 +215,19 @@ erDiagram
 | `DeleteMidnightAssetSpendsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_spends` rows for the given block. Used during chain rollback; caller restores the returned UTxOs to the in-memory set. |
 | `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block. Used during chain rollback. |
 | `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
+| `InsertMidnightGovernanceDatum(*MidnightGovernanceDatum, txn)` | Insert a new governance datum row (always inserts; latest is found via `ORDER BY block_number DESC`). |
+| `GetLatestMidnightGovernanceDatum(datumType, blockNumber, txn)` | Returns the newest datum of `datumType` at or before `blockNumber`, or nil when none exist. |
+| `GetLatestMidnightAriadneParams(txn)` | Returns the most recently stored Ariadne parameters row (ordered by `epoch DESC`), or nil. |
+| `UpsertMidnightAriadneParams(*MidnightAriadneParams, txn)` | Insert or update the Ariadne params row for the given epoch. |
+| `UpsertMidnightEpochCandidates(*MidnightEpochCandidates, txn)` | Insert or replace the committee-candidate snapshot for the given epoch. |
+
+Governance datum reads filter by `datum_type` and
+`block_number <= requested_block`, then order by `block_number DESC, id DESC`.
+The `id` tie-break preserves insertion order when multiple matching outputs
+occur in one block. Ariadne rows are written only when the datum differs from
+the latest stored value; a later change in the same epoch replaces that
+epoch's row. Candidate snapshots encode entries ordered by transaction hash
+and output index so identical sets produce identical CBOR.
 
 ### Stake Accounts and Certificate Tables
 

@@ -596,7 +596,8 @@ type Node struct {
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
-    midnightIndexer *midnightindexer.Indexer      // Midnight cNIGHT/registration scanner
+    midnightIndexer    *midnightindexer.Indexer   // Midnight cNIGHT/registration scanner
+    midnightGovIndexer *midnightgov.Indexer       // Midnight governance/Ariadne/candidate indexer
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
@@ -616,10 +617,10 @@ When `Node.Run()` is called, components are initialized in this order:
  5. LedgerState creation (UTXO tracking, validation)
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
- 8. Midnight indexer creation + backfill + EventBus subscription (if API storage mode).
-    Runs synchronously before LedgerState starts so no BlockActionApply events are
-    missed. Backfill iterates stored blocks from the last checkpoint slot onward;
-    inserts are idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
+ 8. Midnight cNIGHT/registration indexer creation + backfill + EventBus subscription
+    (if API storage mode). Runs synchronously before LedgerState starts so no
+    BlockActionApply events are missed. Backfill inserts are idempotent (ON CONFLICT
+    DO NOTHING) so a crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
     `last_epoch_block_nonce` was persisted empty by the pre-fix
@@ -627,23 +628,24 @@ When `Node.Run()` is called, components are initialized in this order:
     real boundary block and recomputing the affected next epoch's nonce in the
     cache so leader-VRF verification matches the network (an empty lab would
     otherwise collapse that epoch's nonce to the NeutralNonce identity).
-10. Snapshot manager start (captures genesis snapshot, or reuses an existing
+10. Midnight governance/Ariadne/candidate indexer start (if API storage mode)
+11. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
-11. Mempool setup and injection into LedgerState/Ouroboros
-12. ChainsyncState (multi-client tracking, stall detection)
-13. ChainSelector (genesis/Praos comparison) start
-14. ConnectionManager creation and event wiring
-15. PeerGovernor creation/start (topology + churn + ledger peers)
-16. ConnectionManager listener start
-17. Stalled client recycler (background goroutine)
-18. UTxO RPC server (if API storage mode and port configured)
-19. Bark C2/archive server (if port configured)
-20. Midnight gRPC server (if API storage mode and midnight port configured)
-21. Blockfrost API (if API storage mode and port configured)
-22. Mesh API (if API storage mode and port configured)
-23. Off-chain metadata fetcher (if API storage mode)
-24. Block forger + leader election (if block producer mode)
-25. Wait for shutdown signal
+12. Mempool setup and injection into LedgerState/Ouroboros
+13. ChainsyncState (multi-client tracking, stall detection)
+14. ChainSelector (genesis/Praos comparison) start
+15. ConnectionManager creation and event wiring
+16. PeerGovernor creation/start (topology + churn + ledger peers)
+17. ConnectionManager listener start
+18. Stalled client recycler (background goroutine)
+19. UTxO RPC server (if API storage mode and port configured)
+20. Bark C2/archive server (if port configured)
+21. Midnight gRPC server (if API storage mode and midnight port configured)
+22. Blockfrost API (if API storage mode and port configured)
+23. Mesh API (if API storage mode and port configured)
+24. Off-chain metadata fetcher (if API storage mode)
+25. Block forger + leader election (if block producer mode)
+26. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -781,6 +783,22 @@ listener synchronously (so bind/cert errors surface immediately) and serves in
 a goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
 a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
 without affecting indexer eligibility.
+
+### Midnight Governance/Ariadne/Candidate Indexing
+
+In `storageMode: api`, `node.go` composes `internal/midnightindexer.Indexer`
+with the database and EventBus. On startup it hydrates its committee-candidate
+set from live UTxOs at the configured candidate address, then consumes
+`ledger.block` apply events. Outputs update Technical Committee and Council
+datum history, value-deduplicated Ariadne parameters, and candidate UTxO
+membership; consuming inputs remove candidate entries. `epoch.transition`
+snapshots the current candidate set as deterministically ordered CBOR in
+`midnight_epoch_candidates`. Rollback handling is intentionally outside this
+component's current contract.
+
+The indexer depends on a narrow storage interface. It does not own database,
+ledger, or EventBus lifecycle; node composition starts and stops it with the
+other API-mode workers.
 
 ### Off-chain Metadata Fetching
 
