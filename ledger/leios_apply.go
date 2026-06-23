@@ -268,6 +268,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	if poll < time.Millisecond {
 		poll = time.Millisecond
 	}
+	// Only wait for blocks near the live head. IsAtTip turns true once chainsync
+	// reaches the head, but the ledger may still be replaying a backlog of older
+	// blocks; their referenced endorser blocks are historical and the relay does
+	// not diffuse them, so waiting per block would stall catch-up at the gate
+	// timeout. wallSlot is the current wall-clock slot (the live head).
+	wallSlot, wallErr := ls.CurrentSlot()
 	for _, blk := range blocks {
 		ref, ok := blk.Header().(leiosEndorserBlockReferencer)
 		if !ok {
@@ -280,6 +286,14 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		if _, _, cached := ls.config.EndorserBlockProvider(
 			ebHash.Bytes(),
 		); cached {
+			continue
+		}
+		// Skip the wait for catch-up backlog blocks (well below the head): the
+		// referenced endorser block is historical and undiffused, so waiting
+		// only stalls catch-up. Gate only blocks within the wait window of the
+		// head, where the endorser block may still be diffusing.
+		if wallErr == nil && wallSlot > blk.SlotNumber() &&
+			wallSlot-blk.SlotNumber() > ls.config.EndorserBlockWaitSlots {
 			continue
 		}
 		ls.waitForEndorserBlock(ctx, blk.SlotNumber(), ebHash, timeout, poll)
