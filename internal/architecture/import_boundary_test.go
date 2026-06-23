@@ -149,32 +149,33 @@ func importBoundaryViolations(
 	var errs []error
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, runtime.GOMAXPROCS(0))
+	jobs := make(chan string)
 
-	for _, file := range files {
-		file := file
+	for range runtime.GOMAXPROCS(0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() {
-				<-sem
-			}()
 
-			fileViolations, err := importBoundaryViolationsForFile(
-				repoRoot,
-				rule,
-				file,
-			)
-			mu.Lock()
-			defer mu.Unlock()
-			if err != nil {
-				errs = append(errs, err)
-				return
+			for file := range jobs {
+				fileViolations, err := importBoundaryViolationsForFile(
+					repoRoot,
+					rule,
+					file,
+				)
+				mu.Lock()
+				if err != nil {
+					errs = append(errs, err)
+				} else {
+					violations = append(violations, fileViolations...)
+				}
+				mu.Unlock()
 			}
-			violations = append(violations, fileViolations...)
 		}()
 	}
+	for _, file := range files {
+		jobs <- file
+	}
+	close(jobs)
 	wg.Wait()
 
 	if len(errs) > 0 {
