@@ -1398,7 +1398,13 @@ func TestReconcileLivePrimaryChainLedgerDivergenceExportedWrapperRecoversSubKFor
 	)
 }
 
-func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyondK(
+// TestReconcilePrimaryChainTipWithLedgerTipCatchesUpWhenAheadBeyondK covers the
+// old-Mithril-snapshot shape: the immutable primary chain is far ahead of the
+// ledger tip (more than k blocks), but the ledger tip is still a valid ancestor
+// on the primary chain. The primary chain must be preserved so ledgerProcessBlocks
+// can replay forward and catch up; it must NOT be rewound (which would delete the
+// very blocks needed to catch up).
+func TestReconcilePrimaryChainTipWithLedgerTipCatchesUpWhenAheadBeyondK(
 	t *testing.T,
 ) {
 	fixture := newChainsyncRollbackFixture(t)
@@ -1424,19 +1430,38 @@ func TestReconcilePrimaryChainTipWithLedgerTipRewindsPrimaryChainWhenAheadBeyond
 		prevHash = hash
 	}
 	require.NoError(t, fixture.ls.chain.AddRawBlocks(blocks))
+	aheadTip := fixture.ls.chain.Tip()
 	require.Equal(
 		t,
 		fixture.currentTip.Point.Slot+3,
-		fixture.ls.chain.Tip().Point.Slot,
+		aheadTip.Point.Slot,
 	)
 
 	require.NoError(t, fixture.ls.reconcilePrimaryChainTipWithLedgerTip())
 
+	// Ledger tip is unchanged: reconcile does not itself advance the ledger,
+	// the forward replay happens later in ledgerProcessBlocks.
 	assert.Equal(t, fixture.currentTip, fixture.ls.currentTip)
-	assert.Equal(t, fixture.currentTip, fixture.ls.chain.Tip())
 	dbTip, err := fixture.ls.db.GetTip(nil)
 	require.NoError(t, err)
 	assert.Equal(t, fixture.currentTip, dbTip)
+
+	// Primary chain is preserved at its original ahead tip, not rewound.
+	assert.Equal(t, aheadTip, fixture.ls.chain.Tip())
+
+	// Every block ahead of the ledger tip still exists so it can be replayed.
+	for _, block := range blocks {
+		_, err := fixture.ls.chain.BlockByPoint(
+			ocommon.NewPoint(block.Slot, block.Hash),
+			nil,
+		)
+		assert.NoError(
+			t,
+			err,
+			"ahead block at slot %d should be preserved for catch-up",
+			block.Slot,
+		)
+	}
 }
 
 func TestIntersectPointsDoesNotUsePrimaryChainWhenLedgerTipMissing(
