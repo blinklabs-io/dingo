@@ -24,8 +24,8 @@ type MidnightAssetCreate struct {
 	ID               uint   `gorm:"primarykey"`
 	Address          []byte `gorm:"not null"`
 	Quantity         uint64 `gorm:"not null"`
-	TxHash           []byte `gorm:"size:32;not null"`
-	OutputIndex      uint32 `gorm:"not null"`
+	TxHash           []byte `gorm:"index:idx_midnight_asset_creates_utxo_lookup,priority:1;size:32;not null"`
+	OutputIndex      uint32 `gorm:"index:idx_midnight_asset_creates_utxo_lookup,priority:2;not null"`
 	BlockNumber      uint64 `gorm:"index:idx_midnight_asset_creates_block_tx,priority:1;not null"`
 	BlockHash        []byte `gorm:"size:32;not null"`
 	TxIndex          uint32 `gorm:"index:idx_midnight_asset_creates_block_tx,priority:2;not null"`
@@ -42,8 +42,8 @@ type MidnightAssetSpend struct {
 	Address          []byte `gorm:"not null"`
 	Quantity         uint64 `gorm:"not null"`
 	SpendingTxHash   []byte `gorm:"size:32;not null"`
-	UtxoTxHash       []byte `gorm:"size:32;not null"`
-	UtxoIndex        uint32 `gorm:"not null"`
+	UtxoTxHash       []byte `gorm:"index:idx_midnight_asset_spends_utxo_ref,priority:1;size:32;not null"`
+	UtxoIndex        uint32 `gorm:"index:idx_midnight_asset_spends_utxo_ref,priority:2;not null"`
 	BlockNumber      uint64 `gorm:"index:idx_midnight_asset_spends_block_tx,priority:1;not null"`
 	BlockHash        []byte `gorm:"size:32;not null"`
 	TxIndex          uint32 `gorm:"index:idx_midnight_asset_spends_block_tx,priority:2;not null"`
@@ -58,8 +58,8 @@ func (MidnightAssetSpend) TableName() string {
 type MidnightRegistration struct {
 	ID               uint   `gorm:"primarykey"`
 	FullDatum        []byte `gorm:"not null"`
-	TxHash           []byte `gorm:"size:32;not null"`
-	OutputIndex      uint32 `gorm:"not null"`
+	TxHash           []byte `gorm:"index:idx_midnight_registrations_utxo_lookup,priority:1;size:32;not null"`
+	OutputIndex      uint32 `gorm:"index:idx_midnight_registrations_utxo_lookup,priority:2;not null"`
 	BlockNumber      uint64 `gorm:"index:idx_midnight_registrations_block_tx,priority:1;not null"`
 	BlockHash        []byte `gorm:"size:32;not null"`
 	TxIndex          uint32 `gorm:"index:idx_midnight_registrations_block_tx,priority:2;not null"`
@@ -75,8 +75,8 @@ type MidnightDeregistration struct {
 	ID               uint   `gorm:"primarykey"`
 	FullDatum        []byte `gorm:"not null"`
 	TxHash           []byte `gorm:"size:32;not null"`
-	UtxoTxHash       []byte `gorm:"size:32;not null"`
-	UtxoIndex        uint32 `gorm:"not null"`
+	UtxoTxHash       []byte `gorm:"index:idx_midnight_deregistrations_utxo_ref,priority:1;size:32;not null"`
+	UtxoIndex        uint32 `gorm:"index:idx_midnight_deregistrations_utxo_ref,priority:2;not null"`
 	BlockNumber      uint64 `gorm:"index:idx_midnight_deregistrations_block_tx,priority:1;not null"`
 	BlockHash        []byte `gorm:"size:32;not null"`
 	TxIndex          uint32 `gorm:"index:idx_midnight_deregistrations_block_tx,priority:2;not null"`

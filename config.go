@@ -108,6 +108,7 @@ type MidnightConfig struct {
 	CNightPolicyID              string
 	CNightAssetName             string
 	MappingValidatorAddress     string
+	AuthTokenPolicyID           string
 	AuthTokenAssetName          string
 	CommitteeCandidateAddress   string
 	TechnicalCommitteeAddress   string

@@ -47,7 +47,10 @@ type Config struct {
 	CNightPolicyID          string
 	CNightAssetName         string
 	MappingValidatorAddress string
-	AuthTokenAssetName      string
+	// AuthTokenPolicyID scopes auth-token matching to a specific policy.
+	// When empty, any policy carrying AuthTokenAssetName is accepted.
+	AuthTokenPolicyID  string
+	AuthTokenAssetName string
 }
 
 // utxoKey identifies a UTxO by tx-hash (hex) and output index.
@@ -79,7 +82,11 @@ type Indexer struct {
 	cnightPolicyID  lcommon.Blake2b224
 	cnightAssetName []byte
 	cnightEnabled   bool
-	// Parsed auth token asset name; valid only when authEnabled is true.
+	// Parsed auth token parameters; valid only when authEnabled is true.
+	// authPolicyID is the zero value (all-zeros) when not configured, in
+	// which case hasAuthToken matches any policy.
+	authPolicyID  lcommon.Blake2b224
+	authPolicySet bool
 	authAssetName []byte
 	authEnabled   bool
 	// Event bus subscription identifier returned by Start.
@@ -118,6 +125,14 @@ func New(cfg Config) (*Indexer, error) {
 		}
 		idx.authAssetName = assetNameBytes
 		idx.authEnabled = true
+		if cfg.AuthTokenPolicyID != "" {
+			policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
+			if err != nil {
+				return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
+			}
+			idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
+			idx.authPolicySet = true
+		}
 	}
 
 	if err := idx.loadTrackedUTxOs(); err != nil {
@@ -398,7 +413,8 @@ func (idx *Indexer) processOutput(
 }
 
 // hasAuthToken returns true if the output assets contain at least one unit of
-// the configured auth token asset name (across any policy).
+// the configured auth token. When AuthTokenPolicyID is set the check is
+// policy-scoped; otherwise any policy carrying the asset name is accepted.
 func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	if !idx.authEnabled {
 		return false
@@ -406,6 +422,10 @@ func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 	assets := out.Assets()
 	if assets == nil {
 		return false
+	}
+	if idx.authPolicySet {
+		qty := assets.Asset(idx.authPolicyID, idx.authAssetName)
+		return qty != nil && qty.Cmp(new(big.Int)) > 0
 	}
 	for _, policyID := range assets.Policies() {
 		for _, name := range assets.Assets(policyID) {

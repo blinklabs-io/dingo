@@ -1157,6 +1157,7 @@ func (n *Node) Run(ctx context.Context) error {
 			CNightPolicyID:          n.config.midnight.CNightPolicyID,
 			CNightAssetName:         n.config.midnight.CNightAssetName,
 			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
+			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
 			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
 		})
 		if err != nil {

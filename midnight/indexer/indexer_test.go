@@ -38,6 +38,9 @@ const testAssetNameHex = "4e49474854"
 // testAuthAssetNameHex is "AUTH" (hex: 41555448).
 const testAuthAssetNameHex = "41555448"
 
+// testAuthPolicyID is the expected auth-token policy (28 bytes, all 0xCC).
+const testAuthPolicyID = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+
 // testMappingAddr is used as the mapping validator address in tests.
 const testMappingAddr = "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a8qzjheng"
 
@@ -65,6 +68,7 @@ func setupTestStore(t *testing.T) *sqlite.MetadataStoreSqlite {
 }
 
 // setupIndexer creates a test Indexer backed by the given store.
+// It uses testAuthPolicyID to enforce policy-scoped auth-token matching.
 func setupIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 	t.Helper()
 	idx, err := New(Config{
@@ -73,6 +77,7 @@ func setupIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 		CNightPolicyID:          testPolicyID,
 		CNightAssetName:         testAssetNameHex,
 		MappingValidatorAddress: testMappingAddr,
+		AuthTokenPolicyID:       testAuthPolicyID,
 		AuthTokenAssetName:      testAuthAssetNameHex,
 	})
 	require.NoError(t, err)
@@ -243,16 +248,16 @@ func TestCNightSpend_HappyPath(t *testing.T) {
 }
 
 // TestRegistration_HappyPath verifies that a transaction output at the mapping
-// validator address with an auth token and inline datum is written to
-// midnight_registrations.
+// validator address with the correct auth policy+name and inline datum is
+// written to midnight_registrations.
 func TestRegistration_HappyPath(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupIndexer(t, store)
 
-	authPolicy := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	datumCbor := simpleDatumCbor(t)
-	regOut := buildAuthOutput(t, authPolicy, testAuthAssetNameHex, datumCbor)
+	// Use the expected auth policy (testAuthPolicyID).
+	regOut := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)
 	dummyIn := buildInput(t, pad32("aaaa1111"), 0)
 	regTxHash := pad32("bbbb1111")
 	regTx := buildTx(t, regTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{regOut})
@@ -269,6 +274,29 @@ func TestRegistration_HappyPath(t *testing.T) {
 	_, ok := idx.regUTxOs[utxoKey{TxHash: regTxHash, Index: 0}]
 	idx.mu.RUnlock()
 	assert.True(t, ok, "registration UTxO must be tracked in-memory")
+}
+
+// TestRegistration_WrongPolicy verifies that a spoofed auth token under a
+// different policy is NOT indexed when AuthTokenPolicyID is configured.
+func TestRegistration_WrongPolicy(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	// Mint the auth asset name under a different (wrong) policy.
+	wrongPolicy := "aaaabbbbccccddddeeeeffffaaaabbbbccccddddeeeeffffaaaabbbb"
+	datumCbor := simpleDatumCbor(t)
+	spoofedOut := buildAuthOutput(t, wrongPolicy, testAuthAssetNameHex, datumCbor)
+	dummyIn := buildInput(t, pad32("aa000001"), 0)
+	spoofedTx := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{dummyIn},
+		[]lcommon.TransactionOutput{spoofedOut})
+
+	idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{spoofedTx}, 1_000)
+
+	var regs []models.MidnightRegistration
+	require.NoError(t, store.DB().Find(&regs).Error)
+	assert.Empty(t, regs, "spoofed auth token under wrong policy must not be indexed")
 }
 
 // TestDeregistration_HappyPath verifies that spending a tracked registration
