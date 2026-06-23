@@ -370,41 +370,41 @@ func (c *Config) isDevMode() bool {
 	return c.runMode == runModeDev
 }
 
-// isLeiosNetwork reports whether the configured network is the experimental
-// Leios testnet, identified either by its network name or its network magic.
-// The Leios testnet hard-forks into the Dijkstra era, so a node syncing it
-// must enable the Dijkstra era table regardless of the configured run mode.
-// This lets `dingo -n leios` follow the chain without also requiring
-// `--run-mode leios`.
-func (c *Config) isLeiosNetwork() bool {
-	return c.network == ouroboros.NetworkCardanoLeios.Name ||
-		c.networkMagic == ouroboros.NetworkCardanoLeios.NetworkMagic
+// isMusashiNetwork reports whether the configured network is the experimental
+// Musashi testnet (the IOG Leios prototype network), identified either by its
+// network name or its network magic. The Musashi testnet hard-forks into the
+// Dijkstra era, so a node syncing it must enable the Dijkstra era table
+// regardless of the configured run mode. This lets `dingo -n musashi` follow
+// the chain without also requiring `--run-mode leios`.
+func (c *Config) isMusashiNetwork() bool {
+	return c.network == ouroboros.NetworkCardanoMusashi.Name ||
+		c.networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
 // experimentalLeiosNetworkingEnabled reports whether the Leios node-to-node
 // mini-protocols (leios-fetch / leios-notify) should be offered on outbound
 // and inbound connections.
 //
-// This is enabled on the Leios testnet (so `dingo -n leios` fetches endorser
-// blocks and follows the Leios overlay) as well as via explicit opt-in (leios
-// run mode or a Dijkstra start era). Earlier prototype relays reset any
-// connection that opened the standalone leios-votes mini-protocol (protocol
-// 20), which the prototype does not run; that protocol is now gated off for
-// the prototype network (see EnableLeiosVotes wiring in node.go), and the
-// leios-notify / leios-fetch codecs decode the prototype's wire dialect, so
-// the Leios protocols can stay active on the Leios testnet.
+// This is enabled on the Musashi testnet (so `dingo -n musashi` fetches
+// endorser blocks and follows the Leios overlay) as well as via explicit
+// opt-in (leios run mode or a Dijkstra start era). Earlier prototype relays
+// reset any connection that opened the standalone leios-votes mini-protocol
+// (protocol 20), which the prototype does not run; that protocol is now gated
+// off for the prototype network (see EnableLeiosVotes wiring in node.go), and
+// the leios-notify / leios-fetch codecs decode the prototype's wire dialect,
+// so the Leios protocols can stay active on the Musashi testnet.
 func (c *Config) experimentalLeiosNetworkingEnabled() bool {
-	return c.isLeiosNetwork() ||
+	return c.isMusashiNetwork() ||
 		c.runMode == runModeLeios ||
 		c.startEra.IsDijkstra()
 }
 
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
-// active. Beyond the explicit opt-ins, the Leios testnet hard-forks into
+// active. Beyond the explicit opt-ins, the Musashi testnet hard-forks into
 // Dijkstra, so syncing it requires the Dijkstra era table even over base
 // protocols.
 func (c *Config) experimentalDijkstraEnabled() bool {
-	return c.experimentalLeiosNetworkingEnabled() || c.isLeiosNetwork()
+	return c.experimentalLeiosNetworkingEnabled() || c.isMusashiNetwork()
 }
 
 func (n *Node) configValidate() error {

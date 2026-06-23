@@ -132,7 +132,7 @@ type PipelineTiming struct {
 }
 
 // DefaultPipelineTiming returns the provisional default timing. The values
-// assume the Leios testnet's 1s slots (config/cardano/leios) and are sized
+// assume the Musashi testnet's 1s slots (config/cardano/musashi) and are sized
 // to be comfortably larger than diffusion and voting latency while keeping
 // the in-memory instance set small.
 func DefaultPipelineTiming() PipelineTiming {
