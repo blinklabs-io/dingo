@@ -45,6 +45,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -72,6 +73,7 @@ type Node struct {
 	meshAPI                          *mesh.Server
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
+	midnightIndexer                  *midnightindexer.Indexer
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
@@ -1144,6 +1146,27 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		})
 		started = append(started, n.startDeferredIndexMaintenance())
+
+		// Midnight indexer: start unconditionally in API mode (gRPC port
+		// may be zero but indexing should always run).
+		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
+			EventBus:                n.eventBus,
+			Metadata:                n.db.Metadata(),
+			SlotTimer:               n.ledgerState,
+			Logger:                  n.config.logger,
+			CNightPolicyID:          n.config.midnight.CNightPolicyID,
+			CNightAssetName:         n.config.midnight.CNightAssetName,
+			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
+			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
+		})
+		if err != nil {
+			return fmt.Errorf("creating midnight indexer: %w", err)
+		}
+		n.midnightIndexer = midnightIdx
+		n.midnightIndexer.Start()
+		started = append(started, func() {
+			n.midnightIndexer.Stop()
+		})
 	}
 
 	// Initialize block forger if production mode is enabled

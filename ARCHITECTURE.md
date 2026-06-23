@@ -596,6 +596,7 @@ type Node struct {
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
+    midnightIndexer *midnightindexer.Indexer      // Midnight cNIGHT/registration scanner
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
@@ -631,8 +632,9 @@ When `Node.Run()` is called, components are initialized in this order:
 20. Blockfrost API (if API storage mode and port configured)
 21. Mesh API (if API storage mode and port configured)
 22. Off-chain metadata fetcher (if API storage mode)
-23. Block forger + leader election (if block producer mode)
-24. Wait for shutdown signal
+23. Midnight indexer (cNIGHT asset + registration scanner, subscribes to BlockEventType, if API storage mode)
+24. Block forger + leader election (if block producer mode)
+25. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -644,7 +646,8 @@ Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
-  Blockfrost API, Mesh API, off-chain metadata fetcher
+  Blockfrost API, Mesh API, off-chain metadata fetcher,
+  midnight indexer
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager
@@ -1348,6 +1351,29 @@ The client side (`bark.BlobStoreBark`) wraps the configured local blob store.
 remote Bark archive and downloading the signed URL. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
+
+### Midnight Indexer (`midnight/indexer/`)
+
+An optional block scanner that indexes Midnight chain events into four
+`midnight_*` metadata tables. It subscribes to `ledger.block`
+(`ledger.BlockEventType`) and for each applied block scans every transaction:
+
+- **cNIGHT create**: an output carrying the configured `cnight_policy_id` +
+  `cnight_asset_name` token writes a `midnight_asset_creates` row and adds
+  the UTxO to an in-memory tracked set.
+- **cNIGHT spend**: an input consuming a tracked cNIGHT UTxO writes a
+  `midnight_asset_spends` row and removes the entry from the tracked set.
+- **Registration**: an output at `mapping_validator_address` carrying a token
+  whose asset name matches `auth_token_asset_name` and containing an inline
+  datum writes a `midnight_registrations` row and adds the UTxO to a second
+  in-memory tracked set.
+- **Deregistration**: an input consuming a tracked registration UTxO writes a
+  `midnight_deregistrations` row and removes the entry from the tracked set.
+
+On startup the indexer calls `FindUnspentMidnightAssetCreates` and
+`FindUnspentMidnightRegistrations` (NOT EXISTS subqueries) to restore both
+in-memory sets so that spends arriving in the first block after a restart are
+matched correctly. The indexer starts only in `storageMode: api`.
 
 ## Architectural Boundaries
 

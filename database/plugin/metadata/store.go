@@ -114,6 +114,28 @@ type MetadataStore interface {
 	// populated model.
 	CreateUtxo(types.Txn, *models.Utxo) error
 
+	// CreateMidnightAssetCreate inserts a cNIGHT UTxO creation row.
+	CreateMidnightAssetCreate(types.Txn, *models.MidnightAssetCreate) error
+
+	// CreateMidnightAssetSpend inserts a cNIGHT UTxO spend row.
+	CreateMidnightAssetSpend(types.Txn, *models.MidnightAssetSpend) error
+
+	// CreateMidnightRegistration inserts a mapping-validator registration row.
+	CreateMidnightRegistration(types.Txn, *models.MidnightRegistration) error
+
+	// CreateMidnightDeregistration inserts a mapping-validator deregistration row.
+	CreateMidnightDeregistration(types.Txn, *models.MidnightDeregistration) error
+
+	// FindUnspentMidnightAssetCreates returns cNIGHT UTxO create rows that
+	// have no matching spend row. Used to restore the in-memory tracked-UTxO
+	// set on startup.
+	FindUnspentMidnightAssetCreates() ([]models.MidnightAssetCreate, error)
+
+	// FindUnspentMidnightRegistrations returns registration rows that have no
+	// matching deregistration row. Used to restore the in-memory tracked-UTxO
+	// set on startup.
+	FindUnspentMidnightRegistrations() ([]models.MidnightRegistration, error)
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.
