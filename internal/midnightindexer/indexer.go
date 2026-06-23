@@ -264,20 +264,22 @@ func (idx *Indexer) Stop() {
 
 	idx.loopWg.Wait()
 
-	idx.markStopped()
+	idx.mu.Lock()
+	idx.stopping = false
+	idx.mu.Unlock()
 
 	idx.logger.Info("midnight indexer stopped")
 }
 
-// markStopped is called by both Stop and the background event loop so direct
-// parent context cancellation cleans up the same lifecycle state as Stop.
+// markStopped is called by the background event loop so direct parent context
+// cancellation cleans up subscriptions and running state. Stop keeps
+// stopping=true until after Wait returns so Start cannot race with shutdown.
 func (idx *Indexer) markStopped() {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
 	idx.unsubscribeLocked()
 	idx.running = false
-	idx.stopping = false
 	idx.cancel = nil
 }
 
