@@ -641,8 +641,20 @@ func downloadImmutables(
 	}
 
 	totalArchives := artifact.Beacon.ImmutableFileNumber + 1
+	// Progress denominator must be the immutable-only uncompressed size,
+	// not TotalDbSizeUncompressed. The latter covers the whole database
+	// (immutable archives plus the ancillary ledger state), but this pool
+	// downloads only the immutable archives — the ancillary archive runs
+	// concurrently and reports its own progress. Using the whole-DB size
+	// here would cap immutable progress below 100%. Fall back to the
+	// whole-DB size only when the per-file average is unavailable.
+	immutableTotalBytes := artifact.Immutables.AverageSizeUncompressed *
+		int64(totalArchives) // #nosec G115 -- archive count, non-negative
+	if immutableTotalBytes <= 0 {
+		immutableTotalBytes = artifact.TotalDbSizeUncompressed
+	}
 	onArchiveDone := newImmutableProgress(
-		cfg, totalArchives, artifact.TotalDbSizeUncompressed,
+		cfg, totalArchives, immutableTotalBytes,
 	)
 	// Per-archive extraction is too chatty for the main log at
 	// mainnet scale (tens of thousands of archives); aggregate
@@ -743,12 +755,30 @@ func newImmutableProgress(
 		defer mu.Unlock()
 		doneArchives++
 		doneBytes += bytesAdded
-		percent := float64(doneArchives) / float64(totalArchives) * 100
+		// Archive-count fraction drives the per-archive log line and its
+		// throttle below. Archives vary in size, so this does NOT equal
+		// the byte fraction reported to OnProgress.
+		archivePercent := float64(doneArchives) / float64(totalArchives) * 100
 		if cfg.OnProgress != nil {
 			var speed float64
 			if elapsed := time.Since(start).Seconds(); elapsed > 0 {
 				speed = float64(doneBytes) / elapsed
 			}
+			// Report a byte-based percent so Percent stays consistent
+			// with the BytesDownloaded/TotalBytes pair it is emitted
+			// alongside. Using the archive-count fraction here produced a
+			// percentage that disagreed with the bytes (e.g. "45.3%
+			// (8.2 GB / 14.2 GB)", where 8.2/14.2 is 57.7%). Fall back to
+			// the archive-count fraction only when the total size is
+			// unknown.
+			percent := pctOf(doneBytes, totalBytes)
+			if totalBytes <= 0 {
+				percent = archivePercent
+			}
+			// The total is estimated from the per-file average, so the
+			// accumulated bytes can marginally overshoot it on the final
+			// archive. Clamp so the reported percent never exceeds 100.
+			percent = min(percent, 100)
 			cfg.OnProgress(DownloadProgress{
 				BytesDownloaded: doneBytes,
 				TotalBytes:      totalBytes,
@@ -759,7 +789,7 @@ func newImmutableProgress(
 		now := time.Now()
 		if !lastLog.IsZero() &&
 			now.Sub(lastLog) < 10*time.Second &&
-			percent-lastLoggedPercent < 5.0 &&
+			archivePercent-lastLoggedPercent < 5.0 &&
 			doneArchives != totalArchives {
 			return
 		}
@@ -768,12 +798,12 @@ func newImmutableProgress(
 				"immutable archives: %d/%d (%.1f%%)",
 				doneArchives,
 				totalArchives,
-				percent,
+				archivePercent,
 			),
 			"component", "mithril",
 		)
 		lastLog = now
-		lastLoggedPercent = percent
+		lastLoggedPercent = archivePercent
 	}
 }
 
