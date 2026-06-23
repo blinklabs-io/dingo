@@ -4555,29 +4555,16 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 		return fmt.Errorf("check ledger tip on primary chain: %w", err)
 	}
 	if containsLedgerTip {
-		if gap, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
-			chainTip,
-			ledgerTip,
-		); unsafe {
-			ls.config.Logger.Warn(
-				"primary chain tip too far ahead of ledger tip at startup, rewinding primary chain",
-				"component", "ledger",
-				"chain_tip_slot", chainTip.Point.Slot,
-				"ledger_tip_slot", ledgerTip.Point.Slot,
-				"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
-				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
-				"block_gap", gap,
-				"security_param", ls.SecurityParam(),
-			)
-			if err := ls.config.ChainManager.RewindPrimaryChainToPoint(
-				ledgerTip.Point,
-			); err != nil {
-				return fmt.Errorf(
-					"rewind primary chain to ledger tip: %w",
-					err,
-				)
-			}
-			return nil
+		// The ledger tip is a valid ancestor on the primary chain, so the
+		// primary chain is simply a forward extension of the ledger. This is
+		// the normal shape when bootstrapping from a Mithril snapshot whose
+		// ledger state lags the immutable block data, and the gap can far
+		// exceed the security parameter. We must always replay forward to
+		// catch up; rewinding the primary chain here would delete the very
+		// blocks ledgerProcessBlocks needs and defeat catch-up.
+		gap := uint64(0)
+		if chainTip.BlockNumber > ledgerTip.BlockNumber {
+			gap = chainTip.BlockNumber - ledgerTip.BlockNumber
 		}
 		ls.config.Logger.Warn(
 			"primary chain tip ahead of ledger tip at startup; ledgerProcessBlocks will catch up via chainsync",
@@ -4586,6 +4573,7 @@ func (ls *LedgerState) reconcilePrimaryChainTipWithLedgerTip() error {
 			"ledger_tip_slot", ledgerTip.Point.Slot,
 			"chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
 			"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+			"block_gap", gap,
 		)
 		return nil
 	}
@@ -4695,24 +4683,6 @@ func (ls *LedgerState) reconcileLivePrimaryChainLedgerDivergence(
 	return true, nil
 }
 
-func (ls *LedgerState) primaryChainAheadBeyondLedgerSafetyWindow(
-	chainTip ochainsync.Tip,
-	ledgerTip ochainsync.Tip,
-) (uint64, bool) {
-	if chainTip.BlockNumber <= ledgerTip.BlockNumber {
-		return 0, false
-	}
-	gap := chainTip.BlockNumber - ledgerTip.BlockNumber
-	if ls.config.CardanoNodeConfig == nil {
-		return gap, false
-	}
-	securityParam := ls.SecurityParam()
-	if securityParam <= 0 {
-		return gap, false
-	}
-	return gap, gap > uint64(securityParam)
-}
-
 func (ls *LedgerState) primaryChainContainsPoint(point ocommon.Point) (bool, error) {
 	if point.Slot == 0 && len(point.Hash) == 0 {
 		return true, nil
@@ -4786,12 +4756,10 @@ func (ls *LedgerState) primaryChainTipAtOrAheadOfLedgerTip() bool {
 	ls.RUnlock()
 	chainTip := ls.chain.Tip()
 	if chainTip.Point.Slot > ledgerTip.Point.Slot {
-		if _, unsafe := ls.primaryChainAheadBeyondLedgerSafetyWindow(
-			chainTip,
-			ledgerTip,
-		); unsafe {
-			return false
-		}
+		// The primary chain leads the ledger tip. As long as the ledger tip
+		// is a valid ancestor on the primary chain, the chain is a forward
+		// extension we can intersect against, regardless of how far it leads
+		// (e.g. an old Mithril snapshot whose ledger lags the block data).
 		containsLedgerTip, err := ls.primaryChainContainsPoint(ledgerTip.Point)
 		if err != nil {
 			ls.config.Logger.Warn(
