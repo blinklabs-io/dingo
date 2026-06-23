@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -416,6 +417,250 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 			)
 		})
 	}
+}
+
+// TestPersistImportedSnapshotMissingPoolsNotResolved verifies that when no
+// pool rows exist in the DB (e.g. the fallback pool import has not yet run),
+// the current-epoch snapshot is NOT falsely marked Resolved=true. This is the
+// main correctness invariant from issue #2440: a missing pool row must not
+// produce an authoritative Resolved=true, AutoVote=None entry.
+func TestPersistImportedSnapshotMissingPoolsNotResolved(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x11
+	// Deliberately do NOT seed any Pool rows — simulating the state
+	// before fallback pool import.
+
+	snapshots := []*models.PoolStakeSnapshot{
+		{
+			Epoch:          102,
+			SnapshotType:   "mark",
+			PoolKeyHash:    poolKeyHash,
+			TotalStake:     100,
+			DelegatorCount: 1,
+			CapturedSlot:   55,
+		},
+	}
+
+	err = persistImportedSnapshot(
+		ImportConfig{
+			Database: db,
+			State: &RawLedgerState{
+				Epoch:      102,
+				EpochNonce: []byte{0x01},
+			},
+		},
+		999,
+		snapshotImportTarget{
+			name:        "mark",
+			targetEpoch: 102,
+		},
+		snapshots,
+	)
+	require.NoError(t, err)
+
+	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.False(t, stored[0].RewardAccountAutoVoteResolved,
+		"pool row absent: must NOT be falsely resolved")
+	require.Equal(t, models.PoolRewardAccountAutoVoteNone, stored[0].RewardAccountAutoVote)
+}
+
+// TestPersistImportedSnapshotHistoricalResolvesFromPoolParams verifies that
+// historical N-1/N-2 imported rows are resolved from the snapshot bundle's
+// own PoolParams when a reward account delegates to AlwaysAbstain or
+// AlwaysNoConfidence, and that rows whose pool key is absent from PoolParams
+// remain Resolved=false.
+func TestPersistImportedSnapshotHistoricalResolvesFromPoolParams(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	poolAbstain := bytes.Repeat([]byte{0x20}, 28)
+	poolNoConf := bytes.Repeat([]byte{0x21}, 28)
+	poolNoAccount := bytes.Repeat([]byte{0x22}, 28)
+	poolAbsent := bytes.Repeat([]byte{0x23}, 28) // not in PoolParams
+
+	rewardAbstain := bytes.Repeat([]byte{0x30}, 28)
+	rewardNoConf := bytes.Repeat([]byte{0x31}, 28)
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires the sqlite metadata backend")
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: rewardAbstain,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  1,
+		Active:     true,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: rewardNoConf,
+		DrepType:   models.DrepTypeAlwaysNoConfidence,
+		AddedSlot:  1,
+		Active:     true,
+	}).Error)
+
+	poolParamsMap := map[string]*ParsedPool{
+		poolHex(poolAbstain): {
+			PoolKeyHash:   poolAbstain,
+			RewardAccount: rewardAbstain,
+		},
+		poolHex(poolNoConf): {
+			PoolKeyHash:   poolNoConf,
+			RewardAccount: rewardNoConf,
+		},
+		poolHex(poolNoAccount): {
+			PoolKeyHash:   poolNoAccount,
+			RewardAccount: nil, // pool has no reward account → resolved as None
+		},
+		// poolAbsent intentionally omitted → left Resolved=false
+	}
+
+	cases := []struct {
+		name         string
+		pool         []byte
+		wantResolved bool
+		wantAutoVote uint8
+	}{
+		{"abstain", poolAbstain, true, models.PoolRewardAccountAutoVoteAbstain},
+		{"noconfidence", poolNoConf, true, models.PoolRewardAccountAutoVoteNoConfidence},
+		{"no_reward_account", poolNoAccount, true, models.PoolRewardAccountAutoVoteNone},
+		{"absent_from_params", poolAbsent, false, models.PoolRewardAccountAutoVoteNone},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			targetEpoch := uint64(101) // N-1
+			snaps := []*models.PoolStakeSnapshot{{
+				Epoch:          targetEpoch,
+				SnapshotType:   "mark",
+				PoolKeyHash:    tc.pool,
+				TotalStake:     100,
+				DelegatorCount: 1,
+				CapturedSlot:   55,
+			}}
+			err := persistImportedSnapshot(
+				ImportConfig{
+					Database: db,
+					State: &RawLedgerState{
+						Epoch:      102,
+						EpochNonce: []byte{0x01},
+					},
+				},
+				999,
+				snapshotImportTarget{
+					name:        "set",
+					targetEpoch: targetEpoch,
+					snap: &ParsedSnapShot{
+						PoolParams: poolParamsMap,
+					},
+				},
+				snaps,
+			)
+			require.NoError(t, err)
+
+			stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+				targetEpoch, "mark", nil,
+			)
+			require.NoError(t, err)
+			// Each sub-test calls persistImportedSnapshot which first
+			// deletes all epoch-101 rows then inserts its own. Query the
+			// freshly-inserted row by matching the pool key hash.
+			var row *models.PoolStakeSnapshot
+			for i := range stored {
+				if bytes.Equal(stored[i].PoolKeyHash, tc.pool) {
+					row = stored[i]
+					break
+				}
+			}
+			require.NotNil(t, row, "snapshot row must be persisted")
+			require.Equal(t, tc.wantResolved, row.RewardAccountAutoVoteResolved,
+				"RewardAccountAutoVoteResolved mismatch for %s", tc.name)
+			require.Equal(t, tc.wantAutoVote, row.RewardAccountAutoVote,
+				"RewardAccountAutoVote mismatch for %s", tc.name)
+		})
+	}
+}
+
+// TestImportSnapShotsFallbackPoolsResolveCurrentEpoch verifies the end-to-end
+// fix from issue #2440: when pools come from the snapshot-pool fallback path
+// (importPools runs before persistImportedSnapshot), the current-epoch snapshot
+// is correctly resolved rather than left with a false Resolved=true, AutoVote=None.
+func TestImportSnapShotsFallbackPoolsResolveCurrentEpoch(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	poolKeyHash := bytes.Repeat([]byte{0x42}, 28)
+	rewardAccount := bytes.Repeat([]byte{0x43}, 28)
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires the sqlite metadata backend")
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: rewardAccount,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  1,
+		Active:     true,
+	}).Error)
+
+	cfg := ImportConfig{
+		Database: db,
+		Logger: slog.New(
+			slog.NewTextHandler(io.Discard, nil),
+		),
+	}
+	// Simulate the fallback pool import that now runs BEFORE snapshot
+	// processing in importSnapShots.
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash:   poolKeyHash,
+			RewardAccount: rewardAccount,
+			VrfKeyHash:    bytes.Repeat([]byte{0x44}, 32),
+			MarginDen:     1,
+		}},
+		999,
+	))
+
+	// Now call persistImportedSnapshot for the current epoch,
+	// which should find the pool row and correctly resolve auto-votes.
+	poolSnapshots := []*models.PoolStakeSnapshot{{
+		Epoch:          102,
+		SnapshotType:   "mark",
+		PoolKeyHash:    poolKeyHash,
+		TotalStake:     5_000_000,
+		DelegatorCount: 1,
+		CapturedSlot:   999,
+	}}
+	require.NoError(t, persistImportedSnapshot(
+		ImportConfig{
+			Database: db,
+			State: &RawLedgerState{
+				Epoch:      102,
+				EpochNonce: []byte{0x01},
+			},
+		},
+		999,
+		snapshotImportTarget{name: "mark", targetEpoch: 102},
+		poolSnapshots,
+	))
+
+	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(102, "mark", nil)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	require.True(t, stored[0].RewardAccountAutoVoteResolved,
+		"current-epoch snapshot must be resolved after pool fallback import")
+	require.Equal(t, models.PoolRewardAccountAutoVoteAbstain, stored[0].RewardAccountAutoVote,
+		"AlwaysAbstain reward account must produce Abstain auto-vote")
+}
+
+// poolHex is a test helper that hex-encodes a pool key hash.
+func poolHex(pkh []byte) string {
+	return fmt.Sprintf("%x", pkh)
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {

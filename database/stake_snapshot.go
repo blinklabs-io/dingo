@@ -56,12 +56,13 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	for _, s := range snapshots {
 		// Reset to ensure callers can re-run resolution without
 		// stale values leaking through from a previous attempt.
-		// Mark the row as resolved up-front: every snapshot passed
-		// to this resolver runs against snapshot-era state by
-		// contract, so the absence of an Always{Abstain,NoConfidence}
-		// delegation is a real "none" answer, not "unknown".
+		// Resolved is intentionally left false here: it is only
+		// set true below, after we confirm the pool row exists in
+		// the database. A missing pool row means the reward-account
+		// delegation cannot be determined, so the row must not be
+		// persisted as authoritative Resolved=true, AutoVote=None.
 		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
-		s.RewardAccountAutoVoteResolved = true
+		s.RewardAccountAutoVoteResolved = false
 		key := string(s.PoolKeyHash)
 		if _, seen := snapshotsByPool[key]; !seen {
 			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
@@ -72,6 +73,19 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	pools, err := d.GetPools(pkhs, txn)
 	if err != nil {
 		return fmt.Errorf("get pools: %w", err)
+	}
+
+	// Mark resolved for every snapshot whose pool row was found.
+	// "Resolved" means the resolver ran to completion with real pool
+	// data; AutoVote=None means the reward account is not delegated to
+	// an Always{Abstain,NoConfidence} DRep (implicit no). Snapshots
+	// whose pool is absent in the DB retain Resolved=false so the tally
+	// can distinguish "confirmed none" from "could not resolve".
+	for i := range pools {
+		poolKey := string(pools[i].PoolKeyHash)
+		for _, s := range snapshotsByPool[poolKey] {
+			s.RewardAccountAutoVoteResolved = true
+		}
 	}
 
 	rewardAcctByPool := make(map[string]models.StakeCredentialRef, len(pools))
