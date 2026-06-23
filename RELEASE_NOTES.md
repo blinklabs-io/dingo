@@ -12,32 +12,32 @@ Hi folks! Here’s what we shipped in v0.56.0.
 
 ### ✨ What's New
 
-* Added **validate the chain against configured checkpoints during block processing:** Nodes can now enforce checkpoint matches while they process blocks, which gives operators a stronger trust anchor and stops misaligned runs earlier.
-* Introduced **apply Musashi endorser blocks earlier and keep batched fetches moving:** Leios style runs now apply endorser blocks ahead of ranking blocks and recover batched endorser block fetches more reliably, which improves interoperability during active testing.
+* Added **validate chain progress against configured checkpoints:** Nodes can now check chain progress against configured checkpoints as they process blocks, which gives operators a stronger trust anchor and stops misaligned runs earlier.
+* Introduced **apply Musashi endorsement data earlier and keep batched fetches moving:** Musashi style runs now apply endorsement data ahead of ranking blocks and recover batched fetches more reliably, which improves interoperability during active testing.
 * Renamed **switch the Leios testnet name to Musashi:** Operators now use `-n musashi` instead of `-n leios`, while network magic `164` remains the relevant identifier for these runs.
 
 ### 💪 Improvements
 
-* Improved **build optional storage plugins with clearer operator guidance:** Optional storage plugins now fit more cleanly into tailored builds, and startup guidance more clearly explains when a required plugin is missing.
-* Refined **keep the Sundae preview example current with TypeScript 6.0.3:** The Sundae preview example now tracks TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
-* Updated **keep the Blockfrost explorer example current with TypeScript 6.0.3:** The Blockfrost explorer example now tracks TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
-* Enhanced **enforce architecture boundaries during validation workflows:** Validation now checks package boundaries more strictly, which helps changes stay aligned with the intended system structure.
-* Modernized **reduce repeated peer-governor skip noise in logs:** Peer-governor logging now emits fewer repeated skip messages, which makes routine logs easier to scan for meaningful events.
+* Improved **build optional storage plugins with clearer operator guidance:** Optional storage plugins now fit more cleanly into tailored builds, and startup guidance now explains more clearly when a required plugin is missing.
+* Refined **keep the Sundae preview example current with TypeScript 6.0.3:** The Sundae preview example now uses TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
+* Updated **keep the Blockfrost explorer example current with TypeScript 6.0.3:** The Blockfrost explorer example now uses TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
+* Enhanced **enforce architecture boundaries during validation workflows:** Validation now checks package boundaries more strictly, which helps development changes stay aligned with the intended system structure.
+* Modernized **reduce repeated peer governor skip noise in logs:** Peer governor logging now emits fewer repeated skip messages, which makes routine logs easier to scan for meaningful events.
 
 ### 🔧 Fixes
 
-* Fixed **preserve newer primary-chain progress during Mithril catch up:** Mithril catch up now keeps ahead-of-snapshot primary-chain blocks instead of rewinding them away, which protects useful sync progress.
-* Corrected **skip waits for stale Musashi endorser blocks during catch up:** Catch up now moves past old endorser blocks without waiting on them, which reduces avoidable stalls during Musashi style runs.
+* Fixed **preserve newer primary chain progress during Mithril catch up:** Mithril catch up now keeps newer primary chain blocks instead of rewinding them away, which protects useful sync progress.
+* Corrected **skip waits for stale Musashi endorsement data during catch up:** Catch up now moves past old endorsement data without waiting on it, which reduces avoidable stalls during Musashi style runs.
 * Strengthened **fail fast when genesis start times disagree:** Startup now stops immediately when Byron and Shelley genesis start times do not match, which prevents a misaligned run from progressing.
 * Stabilized **report Mithril immutable-download progress accurately:** Mithril progress reporting now shows immutable download totals and percentages more accurately, which makes long catch up work easier to follow.
-* Hardened **recover Musashi sync more cleanly across prototype interoperability edge cases:** Musashi style sync now handles prototype interoperability edge cases more reliably, including single relay recovery and SQLite rollback cleanup.
+* Hardened **recover Musashi sync more cleanly across prototype interoperability edge cases:** Musashi style sync now handles prototype interoperability edge cases more reliably, including single relay recovery and local rollback cleanup.
 
 ### 📋 What You Need to Know
 
-* Clarified **expect checkpoints to enforce validation earlier and stop bad configurations fast:** Checkpoints now validate chain progress against configured values during block processing, and mismatched genesis start times now stop startup before a misaligned run continues.
+* Clarified **expect checkpoints to enforce validation earlier and stop bad configurations fast:** Checkpoints now validate chain progress against configured values during block processing, and mismatched genesis start times now stop startup before an incorrect run continues.
 * Highlighted **switch Musashi runs to `-n musashi` and keep network magic `164` in view:** Operators moving from earlier Leios naming should update network selection to `musashi` while continuing to treat `164` as the relevant network magic.
-* Emphasized **trust steadier Mithril catch up progress and rewind behavior:** Mithril catch up now preserves useful ahead-of-snapshot chain progress, skips stale endorser-block waits, and reports immutable download progress more accurately.
-* Summarized **expect Musashi interoperability to behave more smoothly during prototype style runs:** Musashi endorser-block application, batched fetch recovery, single relay recovery, and rollback cleanup now align more cleanly with current prototype expectations.
+* Emphasized **trust steadier Mithril catch up progress and rewind behavior:** Mithril catch up now preserves useful chain progress, skips stale waits, and reports immutable download progress more accurately.
+* Summarized **expect Musashi interoperability to behave more smoothly during prototype style runs:** Musashi endorsement handling, batched fetch recovery, single relay recovery, and rollback cleanup now align more cleanly with current prototype expectations.
 
 ### Recommended Network Compatibility ⚠️
 
