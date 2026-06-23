@@ -30,7 +30,7 @@ VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
 
-.PHONY: all build help mod-tidy clean format golines lint proto test bench test-load test-load-log test-load-profile test-devnet
+.PHONY: all build help mod-tidy clean format golines lint import-boundaries proto test bench test-load test-load-log test-load-profile test-devnet
 
 # Default target
 all: format build ## Format and build (default)
@@ -63,10 +63,13 @@ format: mod-tidy ## Format code and tidy go.mod
 golines: ## Enforce 80-character line limit
 	golines -w --ignore-generated --chain-split-dots --max-len=80 --reformat-tags .
 
-lint: ## Run linters (golangci-lint + nilaway + modernize)
+lint: import-boundaries ## Run linters (golangci-lint + nilaway + modernize)
 	golangci-lint run ./...
 	nilaway ./...
 	modernize ./...
+
+import-boundaries: ## Check reviewed package import boundaries
+	go test ./internal/architecture
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
