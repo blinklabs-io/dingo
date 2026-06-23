@@ -237,8 +237,8 @@ func New(
 		configCopy.BlobPlugin,
 	)
 	if blobPlugin == nil {
-		return nil, fmt.Errorf(
-			"blob plugin %q not found",
+		return nil, plugin.MissingPluginError(
+			plugin.PluginTypeBlob,
 			configCopy.BlobPlugin,
 		)
 	}
@@ -272,8 +272,8 @@ func New(
 	if metadataPlugin == nil {
 		closeErr := blobDb.Close()
 		return nil, errors.Join(
-			fmt.Errorf(
-				"metadata plugin %q not found",
+			plugin.MissingPluginError(
+				plugin.PluginTypeMetadata,
 				configCopy.MetadataPlugin,
 			),
 			closeErr,

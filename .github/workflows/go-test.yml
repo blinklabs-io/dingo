@@ -93,9 +93,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-${{ matrix.go-version }}-
       - name: go-build
+        run: go build -tags dingo_extra_plugins ./cmd/dingo
+      - name: go-build-minimal
         run: go build ./cmd/dingo
       - name: go-test
-        run: go test -ldflags="-s -w" -race ./...
+        run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race ./...
 
   # macOS and Windows jobs without Postgres service
   go-test-other:

@@ -733,10 +733,16 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
     |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3                   |  - PostgreSQL     |
-    |  - Google Cloud Storage     |  - MySQL          |
+    |  - AWS S3 (optional)        |  - PostgreSQL (optional)|
+    |  - Google Cloud Storage (optional)|  - MySQL (optional)|
     -------------------------------------------------
 ```
+
+Badger and SQLite are always compiled into Dingo. The non-default storage
+plugins (`s3`, `gcs`, `postgres`, and `mysql`) are compiled only when the
+`dingo_extra_plugins` build tag is enabled; project builds, CI, and release
+binaries opt into that tag, while a plain `go build ./cmd/dingo` produces a
+minimal binary.
 
 ### Storage Modes
 

@@ -29,6 +29,8 @@ PROTOC_SHA256=$(PROTOC_SHA256_$(PROTOC_OS)_$(PROTOC_ARCH))
 VERSION ?= $(shell git describe --tags --exact-match 2>/dev/null)
 COMMIT_HASH ?= $(shell git rev-parse --short HEAD)
 GO_LDFLAGS=-ldflags "-s -w -X '$(GOMODULE)/internal/version.Version=$(VERSION)' -X '$(GOMODULE)/internal/version.CommitHash=$(COMMIT_HASH)'"
+BUILD_TAGS ?= dingo_extra_plugins
+GO_TAG_FLAGS=$(if $(strip $(BUILD_TAGS)),-tags "$(BUILD_TAGS)",)
 
 .PHONY: all build help mod-tidy clean format golines lint proto test bench test-load test-load-log test-load-profile test-devnet
 
@@ -65,8 +67,8 @@ golines: ## Enforce 80-character line limit
 
 lint: ## Run linters (golangci-lint + nilaway + modernize)
 	golangci-lint run ./...
-	nilaway ./...
-	modernize ./...
+	nilaway $(GO_TAG_FLAGS) ./...
+	modernize $(GO_TAG_FLAGS) ./...
 
 proto: $(PROTOC) ## Generate Go code from protobuf definitions
 	go build -o $(TOOLS_BIN)/protoc-gen-go google.golang.org/protobuf/cmd/protoc-gen-go
@@ -93,10 +95,10 @@ $(PROTOC):
 	unzip -q -o $(PROTOC_ZIP) -d $(PROTOC_DIR)
 
 test: mod-tidy ## Run tests with race detection
-	go test -v -race ./...
+	go test $(GO_TAG_FLAGS) -v -race ./...
 
 bench: mod-tidy ## Run benchmarks
-	go test -run=^$$ -bench=. -benchmem ./...
+	go test $(GO_TAG_FLAGS) -run=^$$ -bench=. -benchmem ./...
 
 test-load: build ## Load test data into a fresh database
 	rm -rf .dingo
@@ -119,6 +121,7 @@ test-devnet: ## Run devnet integration tests
 $(BINARIES): mod-tidy $(GO_FILES)
 	CGO_ENABLED=0 \
 	go build \
+		$(GO_TAG_FLAGS) \
 		$(GO_LDFLAGS) \
 		-o $(@)$(if $(filter windows,$(GOOS)),.exe,)  \
 		./cmd/$(@)

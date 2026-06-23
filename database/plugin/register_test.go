@@ -15,6 +15,7 @@
 package plugin
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -134,5 +135,38 @@ func TestGetPlugin(t *testing.T) {
 			"Expected nil for non-existent plugin, got %v",
 			nonExistentPlugin,
 		)
+	}
+}
+
+// Known optional plugins should explain that the running binary lacks support.
+func TestMissingPluginErrorOptionalPlugin(t *testing.T) {
+	err := MissingPluginError(PluginTypeBlob, "s3")
+	if err == nil {
+		t.Fatal("expected error for missing optional plugin")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		`blob plugin "s3" is not included in this build`,
+		"rebuild with optional plugins enabled (-tags dingo_extra_plugins)",
+		"use an official release binary",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected error %q to contain %q", msg, want)
+		}
+	}
+}
+
+// Unknown plugins should keep the ordinary not-found error.
+func TestMissingPluginErrorUnknownPlugin(t *testing.T) {
+	err := MissingPluginError(PluginTypeMetadata, "oracle")
+	if err == nil {
+		t.Fatal("expected error for unknown plugin")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `metadata plugin "oracle" not found`) {
+		t.Fatalf("expected unknown-plugin error, got %q", msg)
+	}
+	if strings.Contains(msg, "not included in this build") {
+		t.Fatalf("unknown plugin should not be reported as optional: %q", msg)
 	}
 }

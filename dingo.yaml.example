@@ -23,6 +23,8 @@ database:
   # Blob storage plugin configuration
   blob:
     # Plugin to use for blob storage (badger, gcs, s3)
+    # badger is always built; gcs and s3 require a build with
+    # -tags dingo_extra_plugins or an official release binary.
     plugin: "badger"
     # Configuration options for each plugin
     badger:
@@ -71,6 +73,8 @@ database:
   # Metadata storage plugin configuration
   metadata:
     # Plugin to use for metadata storage (sqlite, postgres, mysql)
+    # sqlite is always built; postgres and mysql require a build with
+    # -tags dingo_extra_plugins or an official release binary.
     plugin: "sqlite"
     # Configuration options for each plugin
     sqlite:
