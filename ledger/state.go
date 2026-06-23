@@ -488,6 +488,7 @@ type LedgerState struct {
 	currentTipBlockNonce               []byte
 	epochCache                         []models.Epoch
 	epochNonceHexCache                 map[uint64]string
+	checkpoints                        map[uint64]string // configured chain checkpoints keyed by block number (height)
 	slotsPerKESPeriod                  atomic.Uint64
 	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
@@ -624,6 +625,12 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 		chain:              cfg.ChainManager.PrimaryChain(),
 		epochNonceHexCache: make(map[uint64]string),
 		validationEnabled:  cfg.ValidateHistorical,
+	}
+	// Cache configured chain checkpoints (keyed by block height) so the
+	// hot block-processing path does an O(1) lookup. Nil when the network
+	// config supplies no CheckpointsFile.
+	if cfg.CardanoNodeConfig != nil {
+		ls.checkpoints = cfg.CardanoNodeConfig.Checkpoints()
 	}
 	// Initialize metrics here so any constructed LedgerState is safe to
 	// use without requiring Start() to have been called. Benchmarks and
@@ -3526,6 +3533,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 				expectedPrevHash,
 			)
 		}
+	}
+	// Enforce configured chain checkpoints regardless of validation mode.
+	// A block at a checkpointed height whose hash differs sits on a chain
+	// that diverges from the known-good chain, so reject it before doing
+	// any further work. Honest chains always agree with the checkpoints.
+	if err := ls.validateBlockCheckpoint(block); err != nil {
+		return nil, err
 	}
 	// Reject blocks whose header protocol major version runs more than
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra

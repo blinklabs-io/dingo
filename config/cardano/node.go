@@ -42,6 +42,7 @@ type CardanoNodeConfig struct {
 	conwayGenesis                              *conway.ConwayGenesis
 	dijkstraGenesis                            *dijkstra.DijkstraGenesis
 	shelleyGenesis                             *shelley.ShelleyGenesis
+	checkpoints                                map[uint64]string
 	path                                       string
 	AlonzoGenesisFile                          string `yaml:"AlonzoGenesisFile"`
 	AlonzoGenesisHash                          string `yaml:"AlonzoGenesisHash"`
@@ -57,6 +58,8 @@ type CardanoNodeConfig struct {
 	MithrilGenesisAncillaryVerificationKeyFile string `yaml:"MithrilGenesisAncillaryVerificationKeyFile"`
 	ShelleyGenesisFile                         string `yaml:"ShelleyGenesisFile"`
 	ShelleyGenesisHash                         string `yaml:"ShelleyGenesisHash"`
+	CheckpointsFile                            string `yaml:"CheckpointsFile"`
+	CheckpointsFileHash                        string `yaml:"CheckpointsFileHash"`
 
 	// Hard fork epoch configuration. Pointer types distinguish
 	// "not set" (nil) from "set to 0" (*0), which is critical
@@ -297,6 +300,9 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 		return err
 	}
 	if err := c.validateGenesisConsistency(); err != nil {
+		return err
+	}
+	if err := c.loadCheckpoints(); err != nil {
 		return err
 	}
 	return nil
@@ -612,6 +618,9 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 		c.MithrilGenesisAncillaryVerificationKey = string(keyBytes)
 	}
 	if err := c.validateGenesisConsistency(); err != nil {
+		return err
+	}
+	if err := c.loadCheckpointsFromEmbed(); err != nil {
 		return err
 	}
 
