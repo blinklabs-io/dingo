@@ -50,6 +50,8 @@ var expectedCardanoNodeConfig = &CardanoNodeConfig{
 	MithrilGenesisAncillaryVerificationKeyFile: "ancillary.vkey",
 	ShelleyGenesisFile:                         "shelley-genesis.json",
 	ShelleyGenesisHash:                         "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	CheckpointsFile:                            "checkpoints.json",
+	CheckpointsFileHash:                        "bb5056ff1ced9d68dd99720695789664f6bf6f0cb02a4010df09b813e225ac51",
 	ExperimentalHardForksEnabled:               new(false),
 	TestShelleyHardForkAtEpoch:                 ptrUint64(0),
 	TestAllegraHardForkAtEpoch:                 ptrUint64(0),
@@ -72,6 +74,7 @@ func TestCardanoNodeConfig(t *testing.T) {
 	tmpCfg.shelleyGenesis = nil
 	tmpCfg.alonzoGenesis = nil
 	tmpCfg.conwayGenesis = nil
+	tmpCfg.checkpoints = nil
 	if !reflect.DeepEqual(&tmpCfg, expectedCardanoNodeConfig) {
 		t.Fatalf(
 			"did not get expected object\n     got: %#v\n  wanted: %#v\n",
