@@ -227,7 +227,10 @@ func (idx *Indexer) Start(ctx context.Context) error {
 	idx.running = true
 
 	var blockCh, epochCh <-chan dingoEvent.Event
-	idx.blockSubId, blockCh = idx.config.EventBus.Subscribe(dingoLedger.BlockEventType)
+	idx.blockSubId, blockCh = idx.config.EventBus.SubscribeWithBuffer(
+		dingoLedger.BlockEventType,
+		dingoEvent.EventQueueSize,
+	)
 	idx.epochSubId, epochCh = idx.config.EventBus.Subscribe(dingoEvent.EpochTransitionEventType)
 
 	idx.loopWg.Go(func() { idx.blockLoop(childCtx, blockCh) })
