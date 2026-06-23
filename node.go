@@ -227,6 +227,23 @@ func (n *Node) Run(ctx context.Context) error {
 	enableDijkstra := n.config.experimentalDijkstraEnabled()
 	enableLeiosNetworking := n.config.experimentalLeiosNetworkingEnabled()
 	// Initialize Ouroboros
+	// The endorser-block tx fetch keeps re-requesting an EB's still-diffusing
+	// tail for up to the Leios diffusion window before giving up (the relay
+	// diffuses an EB's transactions over several seconds, so the last partial
+	// window lags). Derived from the pipeline timing (DiffuseWindowSlots) and
+	// the Shelley slot length; zero disables the retry (e.g. networking off or
+	// unknown slot length).
+	var leiosTxFetchTailBudget time.Duration
+	if enableLeiosNetworking && n.config.cardanoNodeConfig != nil {
+		if sg := n.config.cardanoNodeConfig.ShelleyGenesis(); sg != nil {
+			if secs, _ := sg.SlotLength.Float64(); secs > 0 {
+				leiosTxFetchTailBudget = time.Duration(
+					float64(n.leiosPipelineTiming().DiffuseWindowSlots) *
+						secs * float64(time.Second),
+				)
+			}
+		}
+	}
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
@@ -253,6 +270,7 @@ func (n *Node) Run(ctx context.Context) error {
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
 		EnableLeiosTxFetch:       enableLeiosNetworking,
+		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
 	// Load state
@@ -271,7 +289,18 @@ func (n *Node) Run(ctx context.Context) error {
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
-			EndorserBlockProvider:      n.ouroboros.EndorserBlockTxsByHash,
+			EndorserBlockProvider: n.ouroboros.EndorserBlockTxsByHash,
+			// Wait, at the tip, for a ranking block's referenced endorser block
+			// to arrive before applying it. Sourced from the pipeline timing
+			// (CIP-0164-tracking, override-able via WithLeiosPipelineTiming)
+			// rather than a hardcoded duration. We use CertifyByDeadlineSlots,
+			// not DiffuseWindowSlots: by the time a ranking block references an
+			// EB, that EB has already been certified, and measurement shows the
+			// prototype relay's tx-offer delay (~3s) plus the fetch (~3s, incl.
+			// the still-diffusing tail) exceeds the diffusion window — so the
+			// certify deadline is the bound that matches when the EB is actually
+			// available to fetch.
+			EndorserBlockWaitSlots:     n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

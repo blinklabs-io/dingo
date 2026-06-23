@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -271,144 +272,183 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
 			return errors.New("leios-fetch client unavailable")
 		}
-		resp, err := conn.LeiosFetch().Client.BlockRequest(m.Point)
-		if err != nil {
-			return err
-		}
-		respBlock, ok := resp.(*leiosfetch.MsgBlock)
-		if !ok {
-			return fmt.Errorf(
-				"unexpected leios-fetch Block response type %T",
-				resp,
+		client := conn.LeiosFetch().Client
+		point := m.Point
+		// Fetch the manifest off the handler so a slow fetch cannot head-of-line
+		// block later offers on this connection. The transactions arrive as a
+		// separate notify offer (MsgBlockTxsOffer): the prototype diffuses an
+		// endorser block's manifest and its transactions as two distinct offers,
+		// and fetching the transactions before the txs-offer arrives makes the
+		// relay reset the connection, so tx-body fetch is driven from the
+		// txs-offer below. Failures are best-effort: a transient manifest fetch
+		// error must not tear down the shared connection.
+		o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+			resp, err := client.BlockRequest(point)
+			if err != nil {
+				o.config.Logger.Debug(
+					"leios EB manifest fetch failed",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			respBlock, ok := resp.(*leiosfetch.MsgBlock)
+			if !ok {
+				o.config.Logger.Debug(
+					"unexpected leios-fetch Block response type",
+					"type", fmt.Sprintf("%T", resp),
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			if err := o.storeLeiosEndorserBlock(
+				point,
+				respBlock.BlockRaw,
+				nil,
+			); err != nil {
+				o.config.Logger.Debug(
+					"failed to store leios EB manifest",
+					"error", err,
+					"connection_id", connId,
+					"slot", point.Slot,
+				)
+				return
+			}
+			txCount := 0
+			if data, ok := o.lookupLeiosEndorserBlock(point.Hash); ok {
+				txCount = data.txCount
+			}
+			o.config.Logger.Info(
+				fmt.Sprintf(
+					"fetched EB manifest %d.%x size %d txs %d",
+					point.Slot,
+					point.Hash,
+					len(respBlock.BlockRaw),
+					txCount,
+				),
+				"component", "network",
+				"protocol", "leios-fetch",
+				"role", "client",
+				"connection_id", connId,
 			)
-		}
-		// Store the manifest. The transactions arrive as a separate notify
-		// offer (MsgBlockTxsOffer): the prototype diffuses an endorser block's
-		// manifest and its transactions as two distinct offers, and fetching
-		// the transactions before the txs-offer arrives makes the relay reset
-		// the connection. So tx-body fetch is driven from the txs-offer below.
-		if err := o.storeLeiosEndorserBlock(
-			m.Point,
-			respBlock.BlockRaw,
-			nil,
-		); err != nil {
-			return err
-		}
-		txCount := 0
-		if data, ok := o.lookupLeiosEndorserBlock(m.Point.Hash); ok {
-			txCount = data.txCount
-		}
-		o.config.Logger.Info(
-			fmt.Sprintf(
-				"fetched EB manifest %d.%x size %d txs %d",
-				m.Point.Slot,
-				m.Point.Hash,
-				len(respBlock.BlockRaw),
-				txCount,
-			),
-			"component", "network",
-			"protocol", "leios-fetch",
-			"role", "client",
-			"connection_id", connId,
-		)
+		})
 	case *oleiosnotify.MsgBlockTxsOffer:
 		// The peer is offering the transactions for this endorser block. Fetch
-		// them over leios-fetch so the EB becomes complete and its outputs can
-		// be applied to the ledger. Best-effort and gated (EnableLeiosTxFetch):
-		// a failure must not tear down the shared connection.
+		// them over leios-fetch (off the handler, serialized per connection, and
+		// deduped across connections) so the EB becomes complete and its outputs
+		// can be applied to the ledger. Best-effort and gated
+		// (EnableLeiosTxFetch): a failure must not tear down the shared
+		// connection.
 		if !o.config.EnableLeiosTxFetch {
 			return nil
 		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
 			return nil
 		}
-		data, ok := o.lookupLeiosEndorserBlock(m.Point.Hash)
-		if !ok {
-			// Manifest not cached yet (txs offered before/without a block
-			// offer): fetch the manifest first to learn the transaction count.
-			resp, err := conn.LeiosFetch().Client.BlockRequest(m.Point)
+		client := conn.LeiosFetch().Client
+		point := m.Point
+		// Common case: a repeated offer for an EB already fully fetched (or
+		// empty). Skip without spawning a fetch.
+		if data, ok := o.lookupLeiosEndorserBlock(point.Hash); ok &&
+			(data.txCount == 0 || data.completeTxCache()) {
+			return nil
+		}
+		// The relay offers each EB on every connection; claim it so it is
+		// fetched once. The claim is released when the fetch finishes (or below
+		// if the per-connection bound is reached).
+		hashKey := string(point.Hash)
+		if _, loaded := o.leiosFetchInProgress.LoadOrStore(
+			hashKey,
+			struct{}{},
+		); loaded {
+			return nil
+		}
+		if !o.dispatchLeiosFetch(ctx.ConnectionId, func() {
+			defer o.leiosFetchInProgress.Delete(hashKey)
+			data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+			if !ok {
+				// Manifest not cached yet (txs offered before/without a block
+				// offer): fetch the manifest first to learn the tx count.
+				resp, err := client.BlockRequest(point)
+				if err != nil {
+					o.config.Logger.Debug(
+						"leios EB manifest fetch failed on txs offer",
+						"error", err,
+						"connection_id", connId,
+						"slot", point.Slot,
+					)
+					return
+				}
+				respBlock, ok := resp.(*leiosfetch.MsgBlock)
+				if !ok {
+					return
+				}
+				if err := o.storeLeiosEndorserBlock(
+					point,
+					respBlock.BlockRaw,
+					nil,
+				); err != nil {
+					o.config.Logger.Debug(
+						"failed to store leios EB manifest on txs offer",
+						"error", err,
+						"connection_id", connId,
+						"slot", point.Slot,
+					)
+					return
+				}
+				if data, ok = o.lookupLeiosEndorserBlock(point.Hash); !ok {
+					return
+				}
+			}
+			if data.txCount == 0 || data.completeTxCache() {
+				return
+			}
+			txs, err := o.fetchLeiosEbTxsBatched(client, point, data.txCount)
 			if err != nil {
 				o.config.Logger.Debug(
-					"leios EB manifest fetch failed on txs offer",
+					"leios EB transaction fetch failed",
 					"error", err,
 					"connection_id", connId,
-					"slot", m.Point.Slot,
+					"slot", point.Slot,
+					"hash", hex.EncodeToString(point.Hash),
+					"fetched", len(txs),
+					"tx_count", data.txCount,
 				)
-				return nil
-			}
-			respBlock, ok := resp.(*leiosfetch.MsgBlock)
-			if !ok {
-				return nil
+				return
 			}
 			if err := o.storeLeiosEndorserBlock(
-				m.Point,
-				respBlock.BlockRaw,
-				nil,
+				point,
+				data.blockRaw,
+				txs,
 			); err != nil {
 				o.config.Logger.Debug(
-					"failed to store leios EB manifest on txs offer",
+					"failed to store leios EB transactions",
 					"error", err,
 					"connection_id", connId,
-					"slot", m.Point.Slot,
+					"slot", point.Slot,
 				)
-				return nil
+				return
 			}
-			if data, ok = o.lookupLeiosEndorserBlock(m.Point.Hash); !ok {
-				return nil
-			}
-		}
-		if data.txCount == 0 {
-			return nil
-		}
-		// Skip the fetch if we already have all transactions cached (e.g. a
-		// repeated txs offer for the same EB). Compare against the cached
-		// metadata length rather than cloning every tx body just to count them.
-		if data.completeTxCache() {
-			return nil
-		}
-		txs, err := o.fetchLeiosEbTxsBatched(
-			conn.LeiosFetch().Client,
-			m.Point,
-			data.txCount,
-		)
-		if err != nil {
-			o.config.Logger.Debug(
-				"leios EB transaction fetch failed",
-				"error", err,
+			o.config.Logger.Info(
+				fmt.Sprintf(
+					"fetched EB txs %d.%x %d/%d",
+					point.Slot,
+					point.Hash,
+					len(txs),
+					data.txCount,
+				),
+				"component", "network",
+				"protocol", "leios-fetch",
+				"role", "client",
 				"connection_id", connId,
-				"slot", m.Point.Slot,
-				"hash", hex.EncodeToString(m.Point.Hash),
-				"fetched", len(txs),
-				"tx_count", data.txCount,
 			)
-			return nil
+		}) {
+			// Per-connection bound reached: release the claim so a later offer
+			// (on this or another connection) can retry.
+			o.leiosFetchInProgress.Delete(hashKey)
 		}
-		if err := o.storeLeiosEndorserBlock(
-			m.Point,
-			data.blockRaw,
-			txs,
-		); err != nil {
-			o.config.Logger.Debug(
-				"failed to store leios EB transactions",
-				"error", err,
-				"connection_id", connId,
-				"slot", m.Point.Slot,
-			)
-			return nil
-		}
-		o.config.Logger.Info(
-			fmt.Sprintf(
-				"fetched EB txs %d.%x %d/%d",
-				m.Point.Slot,
-				m.Point.Hash,
-				len(txs),
-				data.txCount,
-			),
-			"component", "network",
-			"protocol", "leios-fetch",
-			"role", "client",
-			"connection_id", connId,
-		)
 	case *oleiosnotify.MsgVotesOffer:
 		// The Leios prototype diffuses full votes inline over leios-notify
 		// (rather than the standalone leios-votes protocol). Feed them to the
@@ -449,7 +489,68 @@ type leiosBlockTxsRequester interface {
 const (
 	leiosTxFetchWindowSize = 64
 	leiosTxFetchMaxWindows = 1 << 16
+	// leiosTxFetchWindowsPerRequest bounds how many 64-tx windows of
+	// still-missing transactions are requested in a single BlockTxsRequest.
+	// The leios-fetch state machine is strict request/response (no protocol
+	// pipelining), so overlapping round-trips means asking for more per
+	// request: the request bitmap carries several windows at once and the
+	// relay serves up to its per-message cap, cutting the round-trips a large
+	// endorser block needs from O(txCount/64) toward O(txCount/cap). It stays
+	// bounded rather than requesting the whole block, because the prototype
+	// relay resets the connection when asked for everything at once.
+	leiosTxFetchWindowsPerRequest = 8
 )
+
+// leiosTxFetchTailPoll is how often the fetch re-requests an endorser block's
+// still-missing tail while stalled, within OuroborosConfig.LeiosTxFetchTailBudget.
+// It is a re-check cadence, not a protocol parameter.
+const leiosTxFetchTailPoll = 300 * time.Millisecond
+
+// leiosFetchMaxInflightPerConn bounds how many leios-fetch operations may be
+// queued or running on a single connection. The per-connection mutex
+// serializes them (the client is strict request/response), so this caps the
+// goroutines a burst of offers can spawn; excess offers are dropped (the relay
+// re-offers, and the same EB is fetched on whichever connection is free).
+const leiosFetchMaxInflightPerConn = 4
+
+// leiosFetchGuard serializes leios-fetch client operations on one connection
+// and bounds how many are outstanding.
+type leiosFetchGuard struct {
+	mu       sync.Mutex
+	inflight atomic.Int32
+}
+
+func (o *Ouroboros) leiosFetchGuardFor(
+	connId ouroboros.ConnectionId,
+) *leiosFetchGuard {
+	g, _ := o.leiosFetchGuards.LoadOrStore(connId, &leiosFetchGuard{})
+	return g.(*leiosFetchGuard)
+}
+
+// dispatchLeiosFetch runs fn (a leios-fetch client operation) asynchronously,
+// serialized against other fetches on the same connection so the strict
+// request/response client is never used concurrently, and bounded per
+// connection. It returns immediately so the leios-notify handler is never
+// blocked on a multi-second fetch (which otherwise head-of-line blocks every
+// later offer on the connection). Returns false if the per-connection bound is
+// reached and the work was dropped.
+func (o *Ouroboros) dispatchLeiosFetch(
+	connId ouroboros.ConnectionId,
+	fn func(),
+) bool {
+	g := o.leiosFetchGuardFor(connId)
+	if g.inflight.Load() >= leiosFetchMaxInflightPerConn {
+		return false
+	}
+	g.inflight.Add(1)
+	go func() {
+		defer g.inflight.Add(-1)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		fn()
+	}()
+	return true
+}
 
 // leiosTxFetchMaxRoundsPerWindow bounds how many BlockTxsRequest rounds are
 // spent completing a single window, so a relay that never serves a particular
@@ -462,16 +563,21 @@ const (
 const leiosTxFetchMaxRoundsPerWindow = leiosTxFetchWindowSize
 
 // fetchLeiosEbTxsBatched fetches all txCount transactions of an endorser block
-// over leios-fetch, one 64-transaction window at a time. The prototype relay
-// resets the connection if asked for all transactions at once, and serves a
-// window only partially when the response would exceed its per-message size cap
-// — so each window's still-missing transactions are re-requested until the
-// window is complete. Which transactions a response carried is taken from the
-// response's own bitmaps, falling back to "the relay served a prefix of the
-// requested indices in ascending order" when the response omits them.
-// Transactions are placed at their absolute index, so the result is in index
-// order; on an error or a no-progress request it returns the contiguous prefix
-// fetched so far, letting callers treat the fetch as best-effort.
+// over leios-fetch, requesting up to leiosTxFetchWindowsPerRequest 64-tx
+// windows of still-missing transactions per BlockTxsRequest. Batching several
+// windows per request overlaps the relay's per-response work and cuts the
+// round-trips a large endorser block needs (a sequential one-window-per-request
+// fetch took 5-17s for 1000+ tx blocks, far past the Leios diffusion window).
+// The batch stays bounded — not the whole block — because the prototype relay
+// resets the connection if asked for all transactions at once, and the relay
+// serves a request only partially when the response would exceed its
+// per-message size cap, so still-missing transactions are re-requested until
+// complete. Which transactions a response carried is taken from the response's
+// own bitmaps, falling back to "the relay served a prefix of the requested
+// indices in ascending order" when the response omits them. Transactions are
+// placed at their absolute index, so the result is in index order; on an error
+// or a no-progress request it returns the contiguous prefix fetched so far,
+// letting callers treat the fetch as best-effort.
 func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
@@ -493,56 +599,100 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 		)
 	}
 	result := make([]cbor.RawMessage, txCount)
-	for w := 0; w < numWindows; w++ {
-		for round := 0; ; round++ {
-			needed := leiosWindowNeededMask(result, w, txCount)
-			if needed == 0 {
+	// The no-progress guard below guarantees termination (each non-final round
+	// places at least one new transaction, and there are txCount of them); this
+	// is an absolute backstop against a relay that dribbles already-held txs.
+	maxRounds := numWindows * leiosTxFetchMaxRoundsPerWindow
+	// tailStall marks when the fetch first stalled (a round served no new
+	// transactions). The relay diffuses an endorser block's transactions over
+	// several seconds, so the last (partial) window may not be served yet;
+	// rather than abort on the first miss, re-request it until the tail-retry
+	// budget elapses. Reset on any progress.
+	var tailStall time.Time
+	for round := 0; ; round++ {
+		needed := leiosNeededBitmap(
+			result,
+			txCount,
+			leiosTxFetchWindowsPerRequest,
+		)
+		if len(needed) == 0 {
+			break // every transaction fetched
+		}
+		if round >= maxRounds {
+			return leiosCollectTxs(result), fmt.Errorf(
+				"leios-fetch could not complete %d transactions after %d rounds",
+				txCount, round,
+			)
+		}
+		resp, err := client.BlockTxsRequest(point, needed)
+		if err != nil {
+			return leiosCollectTxs(result), err
+		}
+		respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
+		if !ok {
+			return leiosCollectTxs(result), fmt.Errorf(
+				"unexpected leios-fetch BlockTxs response type %T", resp,
+			)
+		}
+		served := leiosBitmapTxIndices(respTxs.Bitmaps)
+		if len(served) != len(respTxs.TxsRaw) {
+			// Response omitted bitmaps: assume the relay served a prefix of the
+			// requested indices in ascending order.
+			served = leiosBitmapTxIndices(needed)
+		}
+		progress := 0
+		for k, raw := range respTxs.TxsRaw {
+			if k >= len(served) {
 				break
 			}
-			if round >= leiosTxFetchMaxRoundsPerWindow {
-				return leiosCollectTxs(result), fmt.Errorf(
-					"leios-fetch could not complete window %d after %d rounds",
-					w, round,
-				)
-			}
-			resp, err := client.BlockTxsRequest(
-				point,
-				map[uint16]uint64{uint16(w): needed}, // #nosec G115 -- w<1<<16
-			)
-			if err != nil {
-				return leiosCollectTxs(result), err
-			}
-			respTxs, ok := resp.(*leiosfetch.MsgBlockTxs)
-			if !ok {
-				return leiosCollectTxs(result), fmt.Errorf(
-					"unexpected leios-fetch BlockTxs response type %T", resp,
-				)
-			}
-			served := leiosBitmapTxIndices(respTxs.Bitmaps)
-			if len(served) != len(respTxs.TxsRaw) {
-				served = leiosBitmapTxIndices(
-					map[uint16]uint64{uint16(w): needed}, // #nosec G115 -- w<1<<16
-				)
-			}
-			progress := 0
-			for k, raw := range respTxs.TxsRaw {
-				if k >= len(served) {
-					break
-				}
-				idx := served[k]
-				if idx >= 0 && idx < txCount && result[idx] == nil {
-					result[idx] = slices.Clone(raw)
-					progress++
-				}
-			}
-			if progress == 0 {
-				return leiosCollectTxs(result), fmt.Errorf(
-					"leios-fetch served no new transactions for window %d", w,
-				)
+			idx := served[k]
+			if idx >= 0 && idx < txCount && result[idx] == nil {
+				result[idx] = slices.Clone(raw)
+				progress++
 			}
 		}
+		if progress == 0 {
+			// No new transactions this round. With no tail-retry budget (e.g.
+			// unit tests) abort immediately, preserving prior behavior.
+			// Otherwise keep re-requesting the still-diffusing tail until the
+			// budget elapses.
+			if o.config.LeiosTxFetchTailBudget <= 0 {
+				return leiosCollectTxs(result), errors.New(
+					"leios-fetch served no new transactions",
+				)
+			}
+			if tailStall.IsZero() {
+				tailStall = time.Now()
+			} else if time.Since(tailStall) >= o.config.LeiosTxFetchTailBudget {
+				return leiosCollectTxs(result), errors.New(
+					"leios-fetch served no new transactions within tail budget",
+				)
+			}
+			time.Sleep(leiosTxFetchTailPoll)
+			continue
+		}
+		tailStall = time.Time{}
 	}
 	return leiosCollectTxs(result), nil
+}
+
+// leiosNeededBitmap returns the still-missing transaction indices grouped into
+// up to maxWindows lowest-indexed 64-tx windows, as a leios-fetch request
+// bitmap. Selecting the lowest windows first keeps the fetched prefix
+// contiguous (so leiosCollectTxs yields the longest usable run as the fetch
+// progresses).
+func leiosNeededBitmap(
+	result []cbor.RawMessage,
+	txCount, maxWindows int,
+) map[uint16]uint64 {
+	numWindows := (txCount-1)/leiosTxFetchWindowSize + 1
+	bitmap := make(map[uint16]uint64)
+	for w := 0; w < numWindows && len(bitmap) < maxWindows; w++ {
+		if mask := leiosWindowNeededMask(result, w, txCount); mask != 0 {
+			bitmap[uint16(w)] = mask // #nosec G115 -- w < numWindows <= 1<<16
+		}
+	}
+	return bitmap
 }
 
 // leiosWindowNeededMask returns the bitmap of transaction indices in 64-tx

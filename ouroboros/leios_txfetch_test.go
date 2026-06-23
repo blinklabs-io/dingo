@@ -171,3 +171,71 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 	// window 1: only indices 64..69 exist (6 bits), all needed.
 	require.Equal(t, uint64(0b111111), leiosWindowNeededMask(result, 1, 70))
 }
+
+func TestLeiosNeededBitmap(t *testing.T) {
+	// 600 txs spans 10 windows (0..9); none fetched yet.
+	result := make([]cbor.RawMessage, 600)
+	// A batch is capped at maxWindows lowest-indexed windows.
+	bm := leiosNeededBitmap(result, 600, leiosTxFetchWindowsPerRequest)
+	require.Len(t, bm, leiosTxFetchWindowsPerRequest)
+	for w := range uint16(leiosTxFetchWindowsPerRequest) {
+		require.Contains(t, bm, w, "lowest windows selected first")
+	}
+	require.NotContains(t, bm, uint16(8))
+	// Mark window 0 fully present; the batch then starts at window 1 and still
+	// reaches one window past the previous cap.
+	for i := range leiosTxFetchWindowSize {
+		result[i] = cbor.RawMessage{0x00}
+	}
+	bm = leiosNeededBitmap(result, 600, leiosTxFetchWindowsPerRequest)
+	require.NotContains(t, bm, uint16(0), "fully fetched window is skipped")
+	require.Contains(t, bm, uint16(8))
+	// Fewer remaining windows than the cap returns just those windows.
+	require.Len(t, leiosNeededBitmap(result, 600, 100), 9)
+}
+
+// servingBlockTxsRequester serves every requested transaction in a single
+// response (no per-message cap), echoing the served bitmap. It records the
+// largest number of windows asked for in one request so a test can assert the
+// fetch batches windows rather than requesting them one at a time.
+type servingBlockTxsRequester struct {
+	calls          int
+	maxWindowsSeen int
+}
+
+func (r *servingBlockTxsRequester) BlockTxsRequest(
+	point ocommon.Point,
+	bitmaps map[uint16]uint64,
+) (protocol.Message, error) {
+	r.calls++
+	if len(bitmaps) > r.maxWindowsSeen {
+		r.maxWindowsSeen = len(bitmaps)
+	}
+	requested := leiosBitmapTxIndices(bitmaps)
+	slices.Sort(requested)
+	served := map[uint16]uint64{}
+	txs := make([]cbor.RawMessage, 0, len(requested))
+	for _, idx := range requested {
+		served[uint16(idx/64)] |= 1 << uint(idx%64)
+		enc, err := cbor.Encode(idx)
+		if err != nil {
+			return nil, err
+		}
+		txs = append(txs, cbor.RawMessage(enc))
+	}
+	return leiosfetch.NewMsgBlockTxsFull(point, served, txs), nil
+}
+
+func TestFetchLeiosEbTxsBatchedBatchesWindowsPerRequest(t *testing.T) {
+	o := &Ouroboros{}
+	point := ocommon.Point{Slot: 100, Hash: []byte{0x01}}
+	// 600 txs = 10 windows. With up-to-8-windows-per-request and a relay that
+	// serves the whole request, this completes in 2 rounds (8 + 2 windows),
+	// not 10 — proving requests batch multiple windows.
+	requester := &servingBlockTxsRequester{}
+	txs, err := o.fetchLeiosEbTxsBatched(requester, point, 600)
+	require.NoError(t, err)
+	requireTxsInIndexOrder(t, txs, 600)
+	require.Equal(t, 2, requester.calls)
+	require.Equal(t, leiosTxFetchWindowsPerRequest, requester.maxWindowsSeen)
+}
