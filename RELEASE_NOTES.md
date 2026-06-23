@@ -32,6 +32,27 @@ Hi folks! Here’s what we shipped in v0.56.0.
 * Stabilized **report Mithril immutable-download progress accurately:** Mithril progress reporting now shows immutable download totals and percentages more accurately, which makes long catch up work easier to follow.
 * Hardened **recover Musashi sync more cleanly across prototype interoperability edge cases:** Musashi style sync now handles prototype interoperability edge cases more reliably, including single relay recovery and SQLite rollback cleanup.
 
+### 📋 What You Need to Know
+
+* Clarified **expect checkpoints to enforce validation earlier and stop bad configurations fast:** Checkpoints now validate chain progress against configured values during block processing, and mismatched genesis start times now stop startup before a misaligned run continues.
+* Highlighted **switch Musashi runs to `-n musashi` and keep network magic `164` in view:** Operators moving from earlier Leios naming should update network selection to `musashi` while continuing to treat `164` as the relevant network magic.
+* Emphasized **trust steadier Mithril catch up progress and rewind behavior:** Mithril catch up now preserves useful ahead-of-snapshot chain progress, skips stale endorser-block waits, and reports immutable download progress more accurately.
+* Summarized **expect Musashi interoperability to behave more smoothly during prototype style runs:** Musashi endorser-block application, batched fetch recovery, single relay recovery, and rollback cleanup now align more cleanly with current prototype expectations.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.55.0 (June 22, 2026)
 
 **Title:** cardano-cli build compatibility, ledger accounting correctness, and configurable chainsync
