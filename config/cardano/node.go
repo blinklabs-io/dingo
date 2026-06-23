@@ -296,6 +296,9 @@ func (c *CardanoNodeConfig) loadGenesisConfigs() error {
 	if err := c.loadMithrilVerificationKeysFromDisk(); err != nil {
 		return err
 	}
+	if err := c.validateGenesisConsistency(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -607,6 +610,9 @@ func (c *CardanoNodeConfig) loadGenesisConfigsFromEmbed() error {
 			return err
 		}
 		c.MithrilGenesisAncillaryVerificationKey = string(keyBytes)
+	}
+	if err := c.validateGenesisConsistency(); err != nil {
+		return err
 	}
 
 	return nil
