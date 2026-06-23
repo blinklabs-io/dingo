@@ -2,8 +2,8 @@
 
 Dingo stores chain state in two sibling stores:
 
-- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. The supported plugins are `sqlite`, `postgres`, and `mysql`.
-- The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The supported plugins are `badger`, `gcs`, and `s3`.
+- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. The always-built plugin is `sqlite`; `postgres` and `mysql` are optional and are built only with the `dingo_extra_plugins` build tag.
+- The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3` are optional and are built only with the `dingo_extra_plugins` build tag.
 
 The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin.
 

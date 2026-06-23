@@ -1,5 +1,7 @@
 version: "2"
 run:
+  build-tags:
+    - dingo_extra_plugins
   issues-exit-code: 1
   tests: false
 linters:

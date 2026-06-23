@@ -39,16 +39,42 @@ func NewErrorPlugin(err error) Plugin {
 	return &ErrorPlugin{Err: err}
 }
 
+var knownOptionalPlugins = map[PluginType]map[string]struct{}{
+	PluginTypeBlob: {
+		"gcs": {},
+		"s3":  {},
+	},
+	PluginTypeMetadata: {
+		"mysql":    {},
+		"postgres": {},
+	},
+}
+
+// MissingPluginError returns the operator-facing error for a configured plugin
+// that is absent from the registry.
+func MissingPluginError(pluginType PluginType, pluginName string) error {
+	if optionalPlugins, ok := knownOptionalPlugins[pluginType]; ok {
+		if _, ok := optionalPlugins[pluginName]; ok {
+			return fmt.Errorf(
+				"%s plugin %q is not included in this build; rebuild with optional plugins enabled (-tags dingo_extra_plugins), or use an official release binary",
+				PluginTypeName(pluginType),
+				pluginName,
+			)
+		}
+	}
+	return fmt.Errorf(
+		"%s plugin %q not found",
+		PluginTypeName(pluginType),
+		pluginName,
+	)
+}
+
 // StartPlugin gets a plugin from the registry and starts it
 func StartPlugin(pluginType PluginType, pluginName string) (Plugin, error) {
 	// Get the plugin from the registry
 	p := GetPlugin(pluginType, pluginName)
 	if p == nil {
-		return nil, fmt.Errorf(
-			"%s plugin '%s' not found",
-			PluginTypeName(pluginType),
-			pluginName,
-		)
+		return nil, MissingPluginError(pluginType, pluginName)
 	}
 
 	// Start the plugin
@@ -232,9 +258,5 @@ func SetPluginOption(
 		// implementations (for example `data-dir` may not be relevant).
 		return nil
 	}
-	return fmt.Errorf(
-		"plugin %s of type %s not found",
-		pluginName,
-		PluginTypeName(pluginType),
-	)
+	return MissingPluginError(pluginType, pluginName)
 }
