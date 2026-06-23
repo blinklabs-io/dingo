@@ -90,6 +90,17 @@ type Ouroboros struct {
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
 
+	// Per-connection serialization and bound for asynchronous leios-fetch
+	// client operations (manifest and EB-tx fetches). The leios-fetch client
+	// is strict request/response, so operations on one connection are
+	// serialized; running them off the leios-notify handler keeps a
+	// multi-second EB fetch from head-of-line blocking every later offer on
+	// the connection.
+	leiosFetchGuards sync.Map // ouroboros.ConnectionId → *leiosFetchGuard
+	// EB hashes with a fetch already in progress, so a given endorser block is
+	// fetched once across all connections (it is offered on every connection).
+	leiosFetchInProgress sync.Map // string(eb hash) → struct{}
+
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
 }
@@ -146,6 +157,13 @@ type OuroborosConfig struct {
 	// outright. Best-effort: a fetch failure never tears down the shared
 	// connection.
 	EnableLeiosTxFetch bool
+	// LeiosTxFetchTailBudget bounds how long an endorser-block tx fetch keeps
+	// re-requesting the still-diffusing tail (the relay diffuses an EB's
+	// transactions over several seconds, so the last partial window may lag)
+	// before giving up, instead of aborting on the first no-progress round.
+	// Zero disables tail-retry (fetch aborts on the first miss). Sourced from
+	// the Leios diffusion window in node.go.
+	LeiosTxFetchTailBudget time.Duration
 }
 
 type blockfetchMetrics struct {
@@ -457,6 +475,9 @@ func (o *Ouroboros) HandleConnClosedEvent(evt event.Event) {
 	// Release the EB log cursor for this connection; frees any log
 	// entries that were only being held for this connection.
 	o.leiosEBLog.removeConn(leiosConnectionIdString(connId))
+	// Drop the per-connection leios-fetch guard. In-flight fetch goroutines
+	// hold their own reference, so they finish safely after this.
+	o.leiosFetchGuards.Delete(connId)
 }
 
 func (o *Ouroboros) HandlePeerEligibilityChangedEvent(evt event.Event) {

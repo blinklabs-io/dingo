@@ -126,19 +126,41 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	}, nil
 }
 
-// nearNowSlot estimates the current slot from the Shelley genesis slot length,
-// used as a fallback when the epoch cache is empty and the caller asks about
-// a time within 5s of now.
-func nearNowSlot(sg *shelley.ShelleyGenesis) uint64 {
+// shelleySlotLengthMs returns the Shelley genesis slot length in milliseconds,
+// or 0 if the genesis is missing or malformed. Shelley genesis stores slot
+// length as seconds per slot.
+func shelleySlotLengthMs(sg *shelley.ShelleyGenesis) uint64 {
 	if sg == nil || sg.SlotLength.Rat == nil ||
 		sg.SlotLength.Num().Sign() <= 0 {
 		return 0
 	}
-	// Shelley genesis stores slot length as seconds per slot; compute ms.
-	slotLenMs := new(big.Int).Div(
+	return new(big.Int).Div(
 		new(big.Int).Mul(big.NewInt(1000), sg.SlotLength.Num()),
 		sg.SlotLength.Denom(),
 	).Uint64()
+}
+
+// shelleySlotLength returns the Shelley-era slot length as a duration, or 0 if
+// the genesis is unavailable. The Shelley slot length governs every
+// post-Shelley era (including Dijkstra), so it is the unit for converting the
+// slot-denominated Leios pipeline windows (CIP-0164) to wall-clock waits.
+func (ls *LedgerState) shelleySlotLength() time.Duration {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
+	slotLenMs := shelleySlotLengthMs(
+		ls.config.CardanoNodeConfig.ShelleyGenesis(),
+	)
+	// slotLenMs is a small, protocol-bounded slot length in milliseconds.
+	// #nosec G115
+	return time.Duration(slotLenMs) * time.Millisecond
+}
+
+// nearNowSlot estimates the current slot from the Shelley genesis slot length,
+// used as a fallback when the epoch cache is empty and the caller asks about
+// a time within 5s of now.
+func nearNowSlot(sg *shelley.ShelleyGenesis) uint64 {
+	slotLenMs := shelleySlotLengthMs(sg)
 	if slotLenMs == 0 {
 		return 0
 	}

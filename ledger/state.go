@@ -388,13 +388,23 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
-	ValidateHistorical          bool
-	EnableDijkstra              bool
-	StartInDijkstra             bool
-	TrustedReplay               bool
-	ManualBlockProcessing       bool
-	ForgeBlocks                 bool
-	DatabaseWorkerPoolConfig    DatabaseWorkerPoolConfig
+	// EndorserBlockWaitSlots is the number of slots that block processing
+	// waits at the chain tip for a Dijkstra ranking block's referenced
+	// endorser block to finish fetching before applying it. It is sourced from
+	// the Leios pipeline timing (CertifyByDeadlineSlots, not the shorter
+	// DiffuseWindowSlots: by the time a ranking block references an endorser
+	// block that block has already been certified, so the certify-by deadline
+	// is the bound for when it is actually available to fetch) rather than a
+	// hardcoded duration; the ledger converts it to wall-clock using the
+	// Shelley slot length. Zero disables the wait.
+	EndorserBlockWaitSlots   uint64
+	ValidateHistorical       bool
+	EnableDijkstra           bool
+	StartInDijkstra          bool
+	TrustedReplay            bool
+	ManualBlockProcessing    bool
+	ForgeBlocks              bool
+	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
@@ -3107,6 +3117,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				i+batchSize,
 			)
 
+			// Leios: gate delivery of this chunk on the availability of the
+			// endorser blocks its Dijkstra ranking blocks reference, so the
+			// endorser transactions are applied ahead of the ranking blocks
+			// that endorse them. Runs outside the DB transaction opened below
+			// and is a no-op except at the chain tip.
+			ls.ensureReferencedEndorserBlocks(ctx, nextBatch[i:end])
+
 			// Capture snapshots of state needed during transaction.
 			// Acquire read lock to prevent race with RecoverCommitTimestampConflict
 			// which can trigger rollback() and loadTip() that mutate these fields.
@@ -3532,7 +3549,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if currentEra.Id == dijkstra.EraIdDijkstra &&
 		ls.config.EndorserBlockProvider != nil {
 		if ref, ok := block.Header().(leiosEndorserBlockReferencer); ok {
-			if ebHash, _, ok := ref.LeiosEndorserBlockRef(); ok {
+			if ebHash, ebSize, ok := ref.LeiosEndorserBlockRef(); ok {
 				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
 				); ok {
@@ -3573,8 +3590,28 @@ func (ls *LedgerState) ledgerProcessBlock(
 							"eb_txs", applied,
 						)
 					}
+				} else {
+					ls.config.Logger.Debug(
+						"ranking block references an endorser block not yet cached",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_hash", ebHash.String(),
+						"eb_size", ebSize,
+					)
 				}
+			} else {
+				ls.config.Logger.Debug(
+					"dijkstra block has no Leios endorser-block reference",
+					"component", "ledger",
+					"slot", point.Slot,
+				)
 			}
+		} else {
+			ls.config.Logger.Debug(
+				"dijkstra block header is not a Leios endorser-block referencer",
+				"component", "ledger",
+				"slot", point.Slot,
+			)
 		}
 	}
 	// Process transactions

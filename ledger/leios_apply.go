@@ -16,9 +16,11 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -105,11 +107,12 @@ func (ls *LedgerState) applyEndorserBlock(
 				len(elems),
 			)
 		}
-		txType, err := ledger.DetermineTransactionType(txCbor)
-		if err != nil {
-			return 0, fmt.Errorf("determine endorser tx %d type: %w", i, err)
-		}
-		tx, err := ledger.NewTransactionFromCbor(txType, txCbor)
+		// An endorser block referenced by a Dijkstra ranking block is
+		// Dijkstra-era, so decode its transactions as Dijkstra directly.
+		// DetermineTransactionType is heuristic and cannot reliably identify a
+		// bare standalone transaction without block/era context (it returns
+		// "unknown transaction type" for these), so it must not be used here.
+		tx, err := ledger.NewTransactionFromCbor(ledger.TxTypeDijkstra, txCbor)
 		if err != nil {
 			return 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
 		}
@@ -221,4 +224,99 @@ func buildEndorserBlockBlob(
 		}
 	}
 	return buf.Bytes(), result, nil
+}
+
+// ensureReferencedEndorserBlocks gates delivery of a batch of blocks to
+// ledgerProcessBlock on the availability of the Leios endorser blocks they
+// reference. The prototype produces an endorser block and the ranking block
+// that endorses it in the same slot and diffuses them together, so the ranking
+// block routinely reaches the ledger a few milliseconds ahead of its endorser
+// block; without this gate applyEndorserBlock always misses the cache and the
+// endorser-resident outputs are never added before the ranking block spends
+// them.
+//
+// The wait window is EndorserBlockWaitSlots (the pipeline timing's
+// CertifyByDeadlineSlots, the bound for when a referenced endorser block is
+// actually available to fetch) converted to wall-clock via the Shelley slot
+// length, not a hardcoded duration. Callers invoke this before
+// opening the block-processing DB transaction, so the wait never holds a
+// transaction open. It is a no-op except at the chain tip: during historical
+// catch-up the prototype never diffuses the referenced endorser blocks, so
+// IsAtTip gating avoids stalling sync waiting for blocks that will never
+// arrive.
+func (ls *LedgerState) ensureReferencedEndorserBlocks(
+	ctx context.Context,
+	blocks []ledger.Block,
+) {
+	if ls.config.EndorserBlockProvider == nil ||
+		ls.config.EndorserBlockWaitSlots == 0 ||
+		!ls.IsAtTip() {
+		return
+	}
+	slotLen := ls.shelleySlotLength()
+	if slotLen <= 0 {
+		// Without a known slot length the slot-denominated diffusion window
+		// cannot be converted to wall-clock; skip the wait rather than guess.
+		return
+	}
+	//nolint:gosec // EndorserBlockWaitSlots is a small protocol window
+	timeout := time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
+	// Cache re-check cadence (polling granularity, not a protocol parameter):
+	// a fraction of a slot so arrival is noticed promptly, floored at 1ms so
+	// the ticker interval is always positive.
+	poll := slotLen / 10
+	if poll < time.Millisecond {
+		poll = time.Millisecond
+	}
+	for _, blk := range blocks {
+		ref, ok := blk.Header().(leiosEndorserBlockReferencer)
+		if !ok {
+			continue
+		}
+		ebHash, _, ok := ref.LeiosEndorserBlockRef()
+		if !ok {
+			continue
+		}
+		if _, _, cached := ls.config.EndorserBlockProvider(
+			ebHash.Bytes(),
+		); cached {
+			continue
+		}
+		ls.waitForEndorserBlock(ctx, blk.SlotNumber(), ebHash, timeout, poll)
+	}
+}
+
+// waitForEndorserBlock polls the EndorserBlockProvider until the endorser block
+// identified by ebHash is fetched and cached complete, ctx is cancelled, or the
+// diffusion-window timeout elapses. The concurrent leios-notify/leios-fetch
+// handlers keep making progress while this blocks, so the in-flight fetch
+// completes during the wait.
+func (ls *LedgerState) waitForEndorserBlock(
+	ctx context.Context,
+	rbSlot uint64,
+	ebHash lcommon.Blake2b256,
+	timeout, poll time.Duration,
+) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		if _, _, ok := ls.config.EndorserBlockProvider(
+			ebHash.Bytes(),
+		); ok {
+			return
+		}
+		select {
+		case <-waitCtx.Done():
+			ls.config.Logger.Info(
+				"endorser block not fetched within diffusion window; proceeding without it",
+				"component", "ledger",
+				"slot", rbSlot,
+				"eb_hash", ebHash.String(),
+			)
+			return
+		case <-ticker.C:
+		}
+	}
 }
