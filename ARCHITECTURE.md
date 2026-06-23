@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-06-04
+Last reviewed: 2026-06-23
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -128,8 +128,7 @@ graph TB
 
 Internal import relationships between production dingo packages. External
 dependencies and tests are omitted. This graph was refreshed from `go list` on
-2026-05-22; it intentionally calls out a few boundary-debt edges that are also
-not yet part of the desired package layering.
+2026-06-23.
 
 ```mermaid
 graph LR
@@ -185,8 +184,8 @@ graph LR
     cmd --> ledger_governance & mithril
 
     chain --> db & db_models & ev
-    chainsync --> chain & ev & ledger
-    chainsel --> ev & peergov
+    chainsync --> chain & ev
+    chainsel --> ev
     connmgr --> ev
     peergov --> connmgr & ev & topology
     intnode_ledgerpeers --> ledger & peergov
@@ -194,7 +193,7 @@ graph LR
     ouroboros --> chain & chainsel & chainsync & connmgr
     ouroboros --> ev & ledger & mempool & peergov
 
-    ledger --> chain & chainsel & cardano_cfg & connmgr
+    ledger --> chain & chainsel & cardano_cfg
     ledger --> db & db_models & db_meta & db_types & ev
     ledger --> ledger_eras & ledger_forging & ledger_governance & ledger_hardfork
     ledger_eras --> cardano_cfg & ledger_hardfork
@@ -1347,6 +1346,22 @@ Package isolation is enforced by direction, ownership, and composition:
 - API packages (`api/blockfrost/`, `api/mesh/`, `api/utxorpc/`) should expose server logic
   through local interfaces. Concrete adapters to `ledger`, `database`, and
   `mempool` are integration boundaries and should remain narrow.
+
+### Import Boundary Check
+
+Reviewed critical package boundaries are enforced by
+`internal/architecture/import_boundary_test.go`. Run the focused check with:
+
+```shell
+make import-boundaries
+```
+
+`make lint` also runs the boundary check before the standard linters, so local
+pre-commit and CI quality paths catch forbidden local imports automatically.
+When an architecture review approves a new dependency, update the rule list in
+`internal/architecture/import_boundary_test.go` and this document in the same
+change. Keep each rule's `reason` field explicit so future failures explain the
+ownership boundary being protected.
 
 ## Design Patterns
 

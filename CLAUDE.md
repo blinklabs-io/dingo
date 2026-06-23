@@ -26,6 +26,7 @@ Go Cardano node (Ouroboros). Derivable info (build targets, flags, package layou
 golangci-lint run ./...
 nilaway ./...
 modernize ./...   # --fix to auto-apply
+make import-boundaries
 ```
 
 ## Non-obvious invariants
