@@ -217,34 +217,61 @@ func (n *Node) Run(ctx context.Context) error {
 	n.chainsyncIngressEligibilityCache = make(
 		map[ouroboros.ConnectionId]bool,
 	)
+	// The Dijkstra ledger era and the Leios node-to-node mini-protocols are
+	// both enabled on the Leios testnet (and via explicit opt-in). The Leios
+	// protocols dingo offers beyond what the prototype relays serve — the
+	// standalone leios-votes protocol and leios-fetch BlockTxsRequest — are
+	// gated off for the prototype network below, since initiating them resets
+	// the connection. See Config.experimentalDijkstraEnabled /
+	// experimentalLeiosNetworkingEnabled.
 	enableDijkstra := n.config.experimentalDijkstraEnabled()
+	enableLeiosNetworking := n.config.experimentalLeiosNetworkingEnabled()
 	// Initialize Ouroboros
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
-		Logger:                   n.config.logger,
-		EventBus:                 n.eventBus,
-		ConnManager:              n.connManager,
-		NetworkMagic:             n.config.networkMagic,
-		PeerSharing:              n.config.peerSharing,
-		IntersectTip:             n.config.intersectTip,
-		IntersectPoints:          n.config.intersectPoints,
-		PromRegistry:             n.config.promRegistry,
-		ChainsyncBlockTimeout:    n.config.chainsyncStallTimeout,
-		EnableLeios:              enableDijkstra,
+		Logger:                n.config.logger,
+		EventBus:              n.eventBus,
+		ConnManager:           n.connManager,
+		NetworkMagic:          n.config.networkMagic,
+		PeerSharing:           n.config.peerSharing,
+		IntersectTip:          n.config.intersectTip,
+		IntersectPoints:       n.config.intersectPoints,
+		PromRegistry:          n.config.promRegistry,
+		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
+		EnableLeios:           enableLeiosNetworking,
+		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
+		// extension ahead of the IOG Leios prototype. The prototype relays do
+		// not run a protocol-20 responder and reset the connection if we
+		// initiate it, so disable it on the Leios prototype network; there
+		// votes are diffused inline over leios-notify. Keep it available for
+		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
+		EnableLeiosVotes: enableLeiosNetworking && !n.config.isLeiosNetwork(),
+		// Request endorser-block transaction bodies over leios-fetch, driven by
+		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
+		// that the EB's transactions are ready. Fetching before that offer
+		// (e.g. right after the manifest) makes the prototype relay reset the
+		// connection, so the fetch is gated on the txs offer, not the block
+		// offer. Best-effort: a fetch failure never tears down the shared
+		// connection.
+		EnableLeiosTxFetch:       enableLeiosNetworking,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			ChainManager:               n.chainManager,
-			Database:                   n.db,
-			EventBus:                   n.eventBus,
-			Logger:                     n.config.logger,
-			CardanoNodeConfig:          n.config.cardanoNodeConfig,
-			PromRegistry:               n.config.promRegistry,
-			ForgeBlocks:                n.config.isDevMode(),
-			ValidateHistorical:         n.config.validateHistorical,
-			EnableDijkstra:             enableDijkstra,
-			StartInDijkstra:            n.config.startEra.IsDijkstra(),
+			ChainManager:       n.chainManager,
+			Database:           n.db,
+			EventBus:           n.eventBus,
+			Logger:             n.config.logger,
+			CardanoNodeConfig:  n.config.cardanoNodeConfig,
+			PromRegistry:       n.config.promRegistry,
+			ForgeBlocks:        n.config.isDevMode(),
+			ValidateHistorical: n.config.validateHistorical,
+			EnableDijkstra:     enableDijkstra,
+			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			// Supplies fetched Leios endorser-block transactions so the ledger
+			// can apply them when their referencing Dijkstra ranking block is
+			// processed (completing the UTxO set for endorser-resident outputs).
+			EndorserBlockProvider:      n.ouroboros.EndorserBlockTxsByHash,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

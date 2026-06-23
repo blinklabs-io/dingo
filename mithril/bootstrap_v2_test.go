@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -136,9 +137,7 @@ func newV2Fixture(t *testing.T, opts v2FixtureOptions) *v2Fixture {
 			)
 		}
 		badFiles := map[string][]byte{}
-		for name, content := range files {
-			badFiles[name] = content
-		}
+		maps.Copy(badFiles, files)
 		badFiles[fmt.Sprintf("immutable/%05d.chunk", num)] = []byte(
 			"corrupted content",
 		)

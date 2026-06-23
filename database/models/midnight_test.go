@@ -93,11 +93,11 @@ func TestMigrateModelsIncludesMidnightModels(t *testing.T) {
 		models[reflect.TypeOf(model)] = true
 	}
 
-	require.True(t, models[reflect.TypeOf(&MidnightAssetCreate{})])
-	require.True(t, models[reflect.TypeOf(&MidnightAssetSpend{})])
-	require.True(t, models[reflect.TypeOf(&MidnightRegistration{})])
-	require.True(t, models[reflect.TypeOf(&MidnightDeregistration{})])
-	require.True(t, models[reflect.TypeOf(&MidnightGovernanceDatum{})])
-	require.True(t, models[reflect.TypeOf(&MidnightAriadneParams{})])
-	require.True(t, models[reflect.TypeOf(&MidnightEpochCandidates{})])
+	require.True(t, models[reflect.TypeFor[*MidnightAssetCreate]()])
+	require.True(t, models[reflect.TypeFor[*MidnightAssetSpend]()])
+	require.True(t, models[reflect.TypeFor[*MidnightRegistration]()])
+	require.True(t, models[reflect.TypeFor[*MidnightDeregistration]()])
+	require.True(t, models[reflect.TypeFor[*MidnightGovernanceDatum]()])
+	require.True(t, models[reflect.TypeFor[*MidnightAriadneParams]()])
+	require.True(t, models[reflect.TypeFor[*MidnightEpochCandidates]()])
 }

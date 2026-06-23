@@ -112,16 +112,14 @@ func TestFetchBatchConcurrentCallersClaimRowOnce(t *testing.T) {
 	results := make(chan fetchBatchResult, callers)
 	var wg sync.WaitGroup
 	for range callers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			batch, err := FetchBatch(context.Background(), db, 1, now)
 			results <- fetchBatchResult{
 				batch: batch,
 				err:   err,
 			}
-		}()
+		})
 	}
 
 	close(start)

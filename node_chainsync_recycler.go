@@ -184,69 +184,73 @@ func (n *Node) processChainsyncRecyclerTick(
 					effectiveCooldown,
 					effectivePlateau,
 				) {
-					// Never disconnect the only eligible peer over
-					// a plateau. Plateau is a local-progress signal,
-					// not a peer-health signal: closing the only
-					// upstream forces a reconnect to the same remote
-					// on a fresh source port, which cannot recover a
-					// locally-pinned tip and amplifies disruption
-					// when the remote RSTs the reconnect. Mirrors the
-					// stalled-recycle guard below.
-					if eligibleCount <= 1 {
-						n.config.logger.Warn(
-							"local tip plateau detected but no spare eligible peer, skipping resync",
-							"connection_id", connKey,
-							"local_tip_slot", localTipSlot,
-							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-							"plateau_duration", now.Sub(*lastProgressAt),
-							"eligible_peer_count", eligibleCount,
+					// First, always attempt the LOCAL ledger reconcile.
+					// It repairs a silent primary-chain / ledger
+					// divergence (chain.Tip() advanced, or the ledger
+					// tip fell off the primary chain, while the ledger
+					// pipeline stayed pinned on an abandoned fork so
+					// fetched blocks "do not fit on current chain tip")
+					// by rolling the ledger back to the latest common
+					// ancestor. The two call sites in
+					// ledger/chainsync.go only fire on
+					// ErrRollbackExceedsSecurityParam; sub-K fork
+					// resolutions leave no error to trigger reconcile.
+					// This is a purely local repair -- it does not touch
+					// the peer connection -- so it is safe, and the only
+					// available recovery, even with a single eligible
+					// upstream (e.g. a one-relay devnet/leios topology),
+					// which would otherwise wedge here permanently.
+					reconciledByLedger := false
+					if n.ledgerState != nil {
+						reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
+							"local tip plateau",
+							*targetConn,
 						)
-						// Throttle the warning to plateau cadence
-						// instead of every tick.
-						*lastProgressAt = now
-					} else {
-						// Before recycling the upstream peer, give the
-						// live reconciler a chance to repair a silent
-						// primary-chain / ledger divergence. The two
-						// existing call sites in ledger/chainsync.go
-						// only fire on ErrRollbackExceedsSecurityParam;
-						// sub-K same-slot fork resolutions can advance
-						// chain.Tip() while leaving the ledger pipeline
-						// pinned on the abandoned hash with no error to
-						// trigger reconcile. The plateau is the symptom
-						// — recycle the connection and the new peer
-						// will hand back the same canonical headers
-						// the ledger already refused to follow.
-						reconciledByLedger := false
-						if n.ledgerState != nil {
-							reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
-								"local tip plateau",
-								*targetConn,
+						if err != nil {
+							n.config.logger.Warn(
+								"plateau reconcile failed",
+								"connection_id", connKey,
+								"error", err.Error(),
 							)
-							if err != nil {
-								n.config.logger.Warn(
-									"plateau reconcile failed, falling through to peer recycle",
-									"connection_id", connKey,
-									"error", err.Error(),
-								)
-							} else if reconciled {
-								n.config.logger.Warn(
-									"local tip plateau resolved via ledger reconcile, skipping peer recycle",
-									"connection_id", connKey,
-									"local_tip_slot", localTipSlot,
-									"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-									"plateau_duration", now.Sub(*lastProgressAt),
-								)
-								// Reset the plateau clock so we don't
-								// immediately re-trigger on the next
-								// tick before forward application has
-								// had a chance to advance the ledger.
-								*lastProgressAt = now
-								lastRecycled[connKey] = now
-								reconciledByLedger = true
-							}
+						} else if reconciled {
+							n.config.logger.Warn(
+								"local tip plateau resolved via ledger reconcile",
+								"connection_id", connKey,
+								"local_tip_slot", localTipSlot,
+								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+								"plateau_duration", now.Sub(*lastProgressAt),
+							)
+							// Reset the plateau clock so we don't
+							// immediately re-trigger on the next tick
+							// before forward application has had a chance
+							// to advance the ledger.
+							*lastProgressAt = now
+							lastRecycled[connKey] = now
+							reconciledByLedger = true
 						}
-						if !reconciledByLedger {
+					}
+					if !reconciledByLedger {
+						// The local reconcile found nothing to repair (or
+						// failed). Recycling the upstream peer only helps
+						// when there is a spare eligible peer to fail over
+						// to: closing the only upstream forces a reconnect
+						// to the same remote on a fresh source port, which
+						// cannot recover a locally-pinned tip and amplifies
+						// disruption when the remote RSTs the reconnect.
+						// Mirrors the stalled-recycle guard below.
+						if eligibleCount <= 1 {
+							n.config.logger.Warn(
+								"local tip plateau detected but no spare eligible peer, skipping peer recycle",
+								"connection_id", connKey,
+								"local_tip_slot", localTipSlot,
+								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+								"plateau_duration", now.Sub(*lastProgressAt),
+								"eligible_peer_count", eligibleCount,
+							)
+							// Throttle the warning to plateau cadence
+							// instead of every tick.
+							*lastProgressAt = now
+						} else {
 							n.config.logger.Warn(
 								"local tip plateau detected, resyncing chainsync client",
 								"connection_id", connKey,

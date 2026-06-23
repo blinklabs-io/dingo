@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -201,6 +202,26 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+}
+
+var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")
+
+func (o *Ouroboros) fetchCachedLeiosEndorserBlockTxs(
+	point ocommon.Point,
+) ([]cbor.RawMessage, error) {
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	if !ok {
+		return nil, fmt.Errorf(
+			"%w: %d.%x",
+			errLeiosEndorserBlockNotCached,
+			point.Slot,
+			point.Hash,
+		)
+	}
+	// In gouroboros v0.180.0 the Leios aliases decode as Dijkstra blocks.
+	// The current Dijkstra CDDL has no transaction-reference list, so there
+	// is no extra BlockTxsRequest to make here.
+	return cloneRawMessages(data.txsRaw), nil
 }
 
 func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(

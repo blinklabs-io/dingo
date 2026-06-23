@@ -2111,6 +2111,122 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 	}
 }
 
+// TestDeleteTransactionsAfterSlotChunksManyHashes exercises the chunked
+// clearing of UTXO references when a rollback deletes more transactions than
+// SQLite's bind-variable limit allows in a single IN (...) clause. A deep
+// (over-K) rollback can produce thousands of hashes; without chunking this
+// fails with "too many SQL variables".
+func TestDeleteTransactionsAfterSlotChunksManyHashes(t *testing.T) {
+	t.Parallel()
+	sqliteStore, err := New("", nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if err := sqliteStore.Start(); err != nil {
+		t.Fatalf("unexpected error starting store: %s", err)
+	}
+	defer sqliteStore.Close() //nolint:errcheck
+	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
+		t.Fatalf("failed to auto-migrate: %v", err)
+	}
+
+	// More than batchChunkSize (499) so the IN (...) clauses must be chunked.
+	const n = batchChunkSize*2 + 37
+	mkHash := func(prefix byte, i int) []byte {
+		h := make([]byte, 32)
+		h[0] = prefix
+		h[1] = byte(i >> 8)
+		h[2] = byte(i)
+		return h
+	}
+	for i := range n {
+		txHash := mkHash(0xAA, i)
+		tx := models.Transaction{
+			Hash:       txHash,
+			BlockHash:  mkHash(0xBB, i),
+			Slot:       2000,
+			BlockIndex: uint32(i), //nolint:gosec // test index within range
+		}
+		if result := sqliteStore.DB().Create(&tx); result.Error != nil {
+			t.Fatalf("failed to create tx %d: %v", i, result.Error)
+		}
+		// A spent UTXO whose spender is the to-be-deleted transaction.
+		utxo := models.Utxo{
+			TxId:        mkHash(0xCC, i),
+			OutputIdx:   0,
+			SpentAtTxId: txHash,
+			DeletedSlot: 2000,
+		}
+		if result := sqliteStore.DB().Create(&utxo); result.Error != nil {
+			t.Fatalf("failed to create utxo %d: %v", i, result.Error)
+		}
+		// A UTXO consumed as collateral by the to-be-deleted transaction.
+		collatUtxo := models.Utxo{
+			TxId:             mkHash(0xDD, i),
+			OutputIdx:        0,
+			CollateralByTxId: txHash,
+		}
+		if result := sqliteStore.DB().Create(&collatUtxo); result.Error != nil {
+			t.Fatalf("failed to create collateral utxo %d: %v", i, result.Error)
+		}
+		// A UTXO used as a reference input by the to-be-deleted transaction.
+		refUtxo := models.Utxo{
+			TxId:             mkHash(0xEE, i),
+			OutputIdx:        0,
+			ReferencedByTxId: txHash,
+		}
+		if result := sqliteStore.DB().Create(&refUtxo); result.Error != nil {
+			t.Fatalf("failed to create referenced utxo %d: %v", i, result.Error)
+		}
+	}
+
+	// Rollback to slot 1500: all slot-2000 transactions and their references go.
+	if err := sqliteStore.DeleteTransactionsAfterSlot(1500, nil); err != nil {
+		t.Fatalf("DeleteTransactionsAfterSlot failed: %v", err)
+	}
+
+	var remainingTxs int64
+	sqliteStore.DB().Model(&models.Transaction{}).
+		Where("slot > ?", 1500).
+		Count(&remainingTxs)
+	if remainingTxs != 0 {
+		t.Errorf("expected 0 transactions after slot 1500, got %d", remainingTxs)
+	}
+
+	// Every UTXO's spender link must be cleared and the row reactivated.
+	var notCleared int64
+	sqliteStore.DB().Model(&models.Utxo{}).
+		Where("spent_at_tx_id IS NOT NULL OR deleted_slot != 0").
+		Count(&notCleared)
+	if notCleared != 0 {
+		t.Errorf("expected all %d UTXO refs cleared, %d still set", n, notCleared)
+	}
+
+	// The collateral links to the deleted transactions must also be cleared.
+	var collatNotCleared int64
+	sqliteStore.DB().Model(&models.Utxo{}).
+		Where("collateral_by_tx_id IS NOT NULL").
+		Count(&collatNotCleared)
+	if collatNotCleared != 0 {
+		t.Errorf(
+			"expected all %d collateral_by_tx_id refs cleared, %d still set",
+			n, collatNotCleared,
+		)
+	}
+
+	// The reference-input links to the deleted transactions must also be cleared.
+	var refNotCleared int64
+	sqliteStore.DB().Model(&models.Utxo{}).
+		Where("referenced_by_tx_id IS NOT NULL").
+		Count(&refNotCleared)
+	if refNotCleared != 0 {
+		t.Errorf(
+			"expected all %d referenced_by_tx_id refs cleared, %d still set",
+			n, refNotCleared,
+		)
+	}
+}
+
 // TestRestorePoolStateAtSlot tests that pool state is correctly restored during rollback
 func TestRestorePoolStateAtSlot(t *testing.T) {
 	t.Parallel()
