@@ -1,5 +1,21 @@
 # Dingo Releases
 
+## v0.56.0 (June 23, 2026)
+
+**Title:** Checkpoint validation, Musashi Leios interoperability, and Mithril catch-up correctness
+
+**Date:** June 23, 2026
+
+**Version:** v0.56.0
+
+Hi folks! Here’s what we shipped in v0.56.0.
+
+### ✨ What's New
+
+* Added **validate the chain against configured checkpoints during block processing:** Nodes can now enforce checkpoint matches while they process blocks, which gives operators a stronger trust anchor and stops misaligned runs earlier.
+* Introduced **apply Musashi endorser blocks earlier and keep batched fetches moving:** Leios style runs now apply endorser blocks ahead of ranking blocks and recover batched endorser block fetches more reliably, which improves interoperability during active testing.
+* Renamed **switch the Leios testnet name to Musashi:** Operators now use `-n musashi` instead of `-n leios`, while network magic `164` remains the relevant identifier for these runs.
+
 ## v0.55.0 (June 22, 2026)
 
 **Title:** cardano-cli build compatibility, ledger accounting correctness, and configurable chainsync
