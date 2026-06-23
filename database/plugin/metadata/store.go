@@ -833,6 +833,10 @@ type MetadataStore interface {
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
+	// GetMidnightCandidates retrieves live committee-candidate UTxOs with
+	// inline datum bytes from metadata rows, without materializing block CBOR.
+	GetMidnightCandidates(ledger.Address, types.Txn) ([]models.Utxo, error)
+
 	// GetScriptLockedSupply returns the sum of lovelace held in live
 	// UTxOs whose payment credential is a script. This is the network's
 	// script-locked supply (blockfrost /network supply.locked).

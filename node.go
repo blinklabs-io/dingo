@@ -505,16 +505,16 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	// Create and start governance/Ariadne/candidate indexer after LedgerState.
 	if n.config.storageMode.IsAPI() {
-		initialEpoch := uint64(0)
-		if epoch, err := n.ledgerState.SlotToEpoch(n.ledgerState.Tip().Point.Slot); err == nil {
-			initialEpoch = epoch.EpochId
-		} else {
-			n.config.logger.Warn(
-				"failed to resolve Midnight governance indexer initial epoch",
-				"error", err,
+		tipSlot := n.ledgerState.Tip().Point.Slot
+		epoch, err := n.ledgerState.SlotToEpoch(tipSlot)
+		if err != nil {
+			return fmt.Errorf(
+				"resolve Midnight governance indexer initial epoch from tip slot %d: %w",
+				tipSlot,
+				err,
 			)
 		}
-		var err error
+		initialEpoch := epoch.EpochId
 		n.midnightGovIndexer, err = midnightgov.New(midnightgov.Config{
 			Logger:                      n.config.logger,
 			Store:                       n.db,

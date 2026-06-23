@@ -19,6 +19,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -199,6 +200,46 @@ func (d *MetadataStoreSqlite) DeleteMidnightDeregistrationsByBlock(
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (d *MetadataStoreSqlite) GetMidnightCandidates(
+	addr ledger.Address,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
+	if addrQuery == nil {
+		return nil, nil
+	}
+	type candidateRow struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		Datum     []byte `gorm:"column:datum"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	var rows []candidateRow
+	if err := db.Table("utxo").
+		Select("utxo.tx_id, utxo.output_idx, datum.raw_datum AS datum").
+		Joins("LEFT JOIN datum ON datum.hash = utxo.datum_hash").
+		Where("utxo.deleted_slot = 0").
+		Where(addrQuery).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, len(rows))
+	for i, row := range rows {
+		ret[i] = models.Utxo{
+			TxId:      row.TxId,
+			OutputIdx: row.OutputIdx,
+			Datum:     row.Datum,
+		}
+	}
+	return ret, nil
 }
 
 func (d *MetadataStoreSqlite) InsertMidnightGovernanceDatum(

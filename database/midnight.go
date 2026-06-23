@@ -28,7 +28,7 @@ func (d *Database) GetMidnightCandidates(address string) ([]models.Utxo, error) 
 	if err != nil {
 		return nil, fmt.Errorf("parse Midnight candidate address: %w", err)
 	}
-	return d.UtxosByAddress(addr, nil)
+	return d.metadata.GetMidnightCandidates(addr, nil)
 }
 
 // InsertMidnightGovernanceDatum inserts a new governance datum row.

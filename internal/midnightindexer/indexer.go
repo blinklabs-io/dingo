@@ -239,7 +239,10 @@ func (idx *Indexer) Start(ctx context.Context) error {
 	)
 	idx.epochSubId, epochCh = idx.config.EventBus.Subscribe(dingoEvent.EpochTransitionEventType)
 
-	idx.loopWg.Go(func() { idx.eventLoop(childCtx, blockCh, epochCh) })
+	idx.loopWg.Go(func() {
+		defer idx.markStopped()
+		idx.eventLoop(childCtx, blockCh, epochCh)
+	})
 
 	idx.logger.Info("midnight indexer started")
 	return nil
@@ -256,6 +259,30 @@ func (idx *Indexer) Stop() {
 	if idx.cancel != nil {
 		idx.cancel()
 	}
+	idx.unsubscribeLocked()
+	idx.mu.Unlock()
+
+	idx.loopWg.Wait()
+
+	idx.markStopped()
+
+	idx.logger.Info("midnight indexer stopped")
+}
+
+// markStopped is called by both Stop and the background event loop so direct
+// parent context cancellation cleans up the same lifecycle state as Stop.
+func (idx *Indexer) markStopped() {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+
+	idx.unsubscribeLocked()
+	idx.running = false
+	idx.stopping = false
+	idx.cancel = nil
+}
+
+// unsubscribeLocked removes EventBus subscriptions. idx.mu must be held.
+func (idx *Indexer) unsubscribeLocked() {
 	if idx.blockSubId != 0 {
 		idx.config.EventBus.Unsubscribe(dingoLedger.BlockEventType, idx.blockSubId)
 		idx.blockSubId = 0
@@ -264,16 +291,6 @@ func (idx *Indexer) Stop() {
 		idx.config.EventBus.Unsubscribe(dingoEvent.EpochTransitionEventType, idx.epochSubId)
 		idx.epochSubId = 0
 	}
-	idx.mu.Unlock()
-
-	idx.loopWg.Wait()
-
-	idx.mu.Lock()
-	idx.running = false
-	idx.stopping = false
-	idx.mu.Unlock()
-
-	idx.logger.Info("midnight indexer stopped")
 }
 
 // eventLoop drains block and epoch-transition channels from one goroutine so
@@ -456,7 +473,7 @@ func (idx *Indexer) processOutput(
 		var key candidateKey
 		copy(key.TxHash[:], txHash)
 		key.OutputIndex = outputIndex
-		idx.candidates[key] = datumCbor
+		idx.candidates[key] = bytes.Clone(datumCbor)
 	}
 }
 
@@ -512,7 +529,9 @@ func (idx *Indexer) advanceEpochLocked(epoch uint64) {
 	if epoch <= idx.currentEpoch {
 		return
 	}
-	idx.snapshotEpochLocked(idx.currentEpoch)
+	for e := idx.currentEpoch; e < epoch; e++ {
+		idx.snapshotEpochLocked(e)
+	}
 	idx.currentEpoch = epoch
 }
 

@@ -413,6 +413,23 @@ func TestBlockEpochAdvanceSnapshotsBeforeNewEpochWork(t *testing.T) {
 	require.Len(t, store.epochCandidates, 1)
 }
 
+func TestBlockEpochAdvanceSnapshotsIntermediateEpochs(t *testing.T) {
+	t.Parallel()
+
+	idx, store := newTestIndexer(t, Config{
+		InitialEpoch: 5,
+	})
+
+	idx.mu.Lock()
+	idx.advanceEpochLocked(8)
+	idx.mu.Unlock()
+
+	require.Len(t, store.epochCandidates, 3)
+	require.Equal(t, uint64(5), store.epochCandidates[0].Epoch)
+	require.Equal(t, uint64(6), store.epochCandidates[1].Epoch)
+	require.Equal(t, uint64(7), store.epochCandidates[2].Epoch)
+}
+
 func TestCandidateSetHydratedOnStart(t *testing.T) {
 	t.Parallel()
 

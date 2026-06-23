@@ -788,16 +788,16 @@ without affecting indexer eligibility.
 
 In `storageMode: api`, `node.go` composes `internal/midnightindexer.Indexer`
 with the database and EventBus. On startup it hydrates its committee-candidate
-set from live UTxOs at the configured candidate address, then consumes
-`ledger.block` apply events. Outputs update Technical Committee and Council
-datum history, value-deduplicated Ariadne parameters, and candidate UTxO
-membership; consuming inputs remove candidate entries. The indexer resolves
-block slots to epochs and snapshots the previous candidate set before scanning
-the first block of a new epoch, while late or duplicate `epoch.transition`
-events only close epochs that have not already been snapshotted. Candidate
-snapshots are stored as deterministically ordered CBOR in
-`midnight_epoch_candidates`. Rollback handling is intentionally outside this
-component's current contract.
+set from live UTxO metadata at the configured candidate address, including
+inline datum bytes from the datum index, then consumes `ledger.block` apply
+events. Outputs update Technical Committee and Council datum history,
+value-deduplicated Ariadne parameters, and candidate UTxO membership;
+consuming inputs remove candidate entries. The indexer resolves block slots to
+epochs and snapshots the previous candidate set before scanning the first block
+of a new epoch, while late or duplicate `epoch.transition` events only close
+epochs that have not already been snapshotted. Candidate snapshots are stored
+as deterministically ordered CBOR in `midnight_epoch_candidates`. Rollback
+handling is intentionally outside this component's current contract.
 
 The indexer depends on a narrow storage interface. It does not own database,
 ledger, or EventBus lifecycle; node composition starts and stops it with the

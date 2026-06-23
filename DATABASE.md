@@ -228,6 +228,9 @@ occur in one block. Ariadne rows are written only when the datum differs from
 the latest stored value; a later change in the same epoch replaces that
 epoch's row. Candidate snapshots encode entries ordered by transaction hash
 and output index so identical sets produce identical CBOR.
+On startup, committee-candidate restoration reads live `utxo` rows and joins
+`utxo.datum_hash` to `datum.raw_datum`; it does not require block CBOR blobs
+to still be available.
 
 ### Stake Accounts and Certificate Tables
 
