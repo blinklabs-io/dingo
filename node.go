@@ -244,7 +244,7 @@ func (n *Node) Run(ctx context.Context) error {
 		// initiate it, so disable it on the Leios prototype network; there
 		// votes are diffused inline over leios-notify. Keep it available for
 		// non-prototype Leios peers (e.g. dingo-to-dingo) that support it.
-		EnableLeiosVotes: enableLeiosNetworking && !n.config.isLeiosNetwork(),
+		EnableLeiosVotes: enableLeiosNetworking && !n.config.isMusashiNetwork(),
 		// Request endorser-block transaction bodies over leios-fetch, driven by
 		// the peer's transactions offer (MsgBlockTxsOffer) — the relay's signal
 		// that the EB's transactions are ready. Fetching before that offer

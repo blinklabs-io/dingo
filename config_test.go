@@ -112,22 +112,22 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			expected: true,
 		},
 		{
-			// `dingo -n leios` sets the network name but leaves run
-			// mode at its default; the Leios testnet still requires the
+			// `dingo -n musashi` sets the network name but leaves run
+			// mode at its default; the Musashi testnet still requires the
 			// Dijkstra era table to follow the chain.
-			name:     "leios network by name",
-			cfg:      Config{network: "leios"},
+			name:     "musashi network by name",
+			cfg:      Config{network: "musashi"},
 			expected: true,
 		},
 		{
 			// Same network selected via its magic (e.g. --network-magic
 			// 164) with no network name.
-			name:     "leios network by magic",
+			name:     "musashi network by magic",
 			cfg:      Config{networkMagic: 164},
 			expected: true,
 		},
 		{
-			name:     "non-leios network stays disabled",
+			name:     "non-musashi network stays disabled",
 			cfg:      Config{network: "preview", networkMagic: 2},
 			expected: false,
 		},
@@ -144,7 +144,7 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 }
 
 // TestExperimentalLeiosNetworkingEnabled locks the decoupling between the
-// Dijkstra ledger era and the Leios node-to-node mini-protocols: the leios
+// Dijkstra ledger era and the Leios node-to-node mini-protocols: the musashi
 // network enables the Dijkstra era so the chain can be followed, and now also
 // opens leios-notify / leios-fetch. The standalone leios-votes protocol stays
 // gated off for prototype interop.
@@ -169,15 +169,16 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			expectDijkstraEra: true,
 		},
 		{
-			// `dingo -n leios`: the Leios testnet enables both the Dijkstra
-			// era and the Leios mini-protocols (leios-notify / leios-fetch).
-			name:              "leios network enables both",
-			cfg:               Config{network: "leios"},
+			// `dingo -n musashi`: the Musashi testnet enables both the
+			// Dijkstra era and the Leios mini-protocols (leios-notify /
+			// leios-fetch).
+			name:              "musashi network enables both",
+			cfg:               Config{network: "musashi"},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 		{
-			name:              "leios network by magic enables both",
+			name:              "musashi network by magic enables both",
 			cfg:               Config{networkMagic: 164},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
