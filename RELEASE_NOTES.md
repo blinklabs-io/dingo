@@ -16,6 +16,22 @@ Hi folks! Here’s what we shipped in v0.56.0.
 * Introduced **apply Musashi endorser blocks earlier and keep batched fetches moving:** Leios style runs now apply endorser blocks ahead of ranking blocks and recover batched endorser block fetches more reliably, which improves interoperability during active testing.
 * Renamed **switch the Leios testnet name to Musashi:** Operators now use `-n musashi` instead of `-n leios`, while network magic `164` remains the relevant identifier for these runs.
 
+### 💪 Improvements
+
+* Improved **build optional storage plugins with clearer operator guidance:** Optional storage plugins now fit more cleanly into tailored builds, and startup guidance more clearly explains when a required plugin is missing.
+* Refined **keep the Sundae preview example current with TypeScript 6.0.3:** The Sundae preview example now tracks TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
+* Updated **keep the Blockfrost explorer example current with TypeScript 6.0.3:** The Blockfrost explorer example now tracks TypeScript 6.0.3, which helps local example work stay aligned with current tooling.
+* Enhanced **enforce architecture boundaries during validation workflows:** Validation now checks package boundaries more strictly, which helps changes stay aligned with the intended system structure.
+* Modernized **reduce repeated peer-governor skip noise in logs:** Peer-governor logging now emits fewer repeated skip messages, which makes routine logs easier to scan for meaningful events.
+
+### 🔧 Fixes
+
+* Fixed **preserve newer primary-chain progress during Mithril catch up:** Mithril catch up now keeps ahead-of-snapshot primary-chain blocks instead of rewinding them away, which protects useful sync progress.
+* Corrected **skip waits for stale Musashi endorser blocks during catch up:** Catch up now moves past old endorser blocks without waiting on them, which reduces avoidable stalls during Musashi style runs.
+* Strengthened **fail fast when genesis start times disagree:** Startup now stops immediately when Byron and Shelley genesis start times do not match, which prevents a misaligned run from progressing.
+* Stabilized **report Mithril immutable-download progress accurately:** Mithril progress reporting now shows immutable download totals and percentages more accurately, which makes long catch up work easier to follow.
+* Hardened **recover Musashi sync more cleanly across prototype interoperability edge cases:** Musashi style sync now handles prototype interoperability edge cases more reliably, including single relay recovery and SQLite rollback cleanup.
+
 ## v0.55.0 (June 22, 2026)
 
 **Title:** cardano-cli build compatibility, ledger accounting correctness, and configurable chainsync
