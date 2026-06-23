@@ -334,6 +334,85 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	require.NotNil(t, store.epochCandidates[0].CandidatesCbor)
 }
 
+// TestBlockEpochAdvanceSnapshotsBeforeNewEpochWork verifies that the indexer
+// snapshots the previous epoch before processing new-epoch outputs.
+// It also ensures a late epoch transition event cannot overwrite an
+// already-correct candidate snapshot.
+func TestBlockEpochAdvanceSnapshotsBeforeNewEpochWork(t *testing.T) {
+	t.Parallel()
+
+	policyHex := testPolicyHex(0xDD)
+	idx, store := newTestIndexer(t, Config{
+		CommitteeCandidateAddress:   testAddress,
+		PermissionedCandidatePolicy: policyHex,
+		InitialEpoch:                5,
+	})
+
+	policy, _ := hex.DecodeString(policyHex)
+	oldTxHash := make([]byte, 32)
+	oldTxHash[0] = 0x05
+	newTxHash := make([]byte, 32)
+	newTxHash[0] = 0x06
+	oldDatum := []byte{0x01}
+	newDatum := []byte{0x02}
+
+	buildOutput := func(datum []byte, assets ...mockledger.Asset) *mockledger.MockTransactionOutput {
+		builder := mockledger.NewTransactionOutputBuilder().
+			WithAddress(testAddress).
+			WithLovelace(2_000_000).
+			WithDatum(datum)
+		if len(assets) > 0 {
+			builder = builder.WithAssets(assets...)
+		}
+		out, err := builder.Build()
+		require.NoError(t, err)
+		return out.(*mockledger.MockTransactionOutput)
+	}
+
+	idx.mu.Lock()
+	idx.processOutput(10, oldTxHash, 0, buildOutput(oldDatum))
+
+	// This is what handleBlockEvent does before scanning the first block in
+	// epoch 6: snapshot epoch 5, then use epoch 6 for new output scans.
+	idx.advanceEpochLocked(6)
+	idx.processOutput(
+		11,
+		newTxHash,
+		0,
+		buildOutput(newDatum, mockledger.Asset{
+			PolicyId:  policy,
+			AssetName: []byte("p"),
+			Amount:    1,
+		}),
+	)
+	idx.mu.Unlock()
+
+	require.Len(t, store.epochCandidates, 1)
+	require.Equal(t, uint64(5), store.epochCandidates[0].Epoch)
+	var entries []candidateEntry
+	require.NoError(t, fxcbor.Unmarshal(
+		store.epochCandidates[0].CandidatesCbor,
+		&entries,
+	))
+	require.Equal(t, []candidateEntry{{
+		TxHash:      oldTxHash,
+		OutputIndex: 0,
+		Datum:       oldDatum,
+	}}, entries)
+	require.Len(t, store.ariadneParams, 1)
+	require.Equal(t, uint64(6), store.ariadneParams[0].Epoch)
+
+	// A late epoch event for the same boundary must not overwrite epoch 5 with
+	// the candidate set after the epoch 6 block was processed.
+	idx.handleEpochTransition(dingoEvent.Event{
+		Data: dingoEvent.EpochTransitionEvent{
+			PreviousEpoch: 5,
+			NewEpoch:      6,
+		},
+	})
+	require.Len(t, store.epochCandidates, 1)
+}
+
 func TestCandidateSetHydratedOnStart(t *testing.T) {
 	t.Parallel()
 

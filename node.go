@@ -526,6 +526,13 @@ func (n *Node) Run(ctx context.Context) error {
 			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
 			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
 			InitialEpoch:                initialEpoch,
+			SlotToEpoch: func(slot uint64) (uint64, error) {
+				epoch, err := n.ledgerState.SlotToEpoch(slot)
+				if err != nil {
+					return 0, err
+				}
+				return epoch.EpochId, nil
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("creating Midnight governance indexer: %w", err)

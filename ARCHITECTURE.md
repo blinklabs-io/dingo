@@ -791,8 +791,11 @@ with the database and EventBus. On startup it hydrates its committee-candidate
 set from live UTxOs at the configured candidate address, then consumes
 `ledger.block` apply events. Outputs update Technical Committee and Council
 datum history, value-deduplicated Ariadne parameters, and candidate UTxO
-membership; consuming inputs remove candidate entries. `epoch.transition`
-snapshots the current candidate set as deterministically ordered CBOR in
+membership; consuming inputs remove candidate entries. The indexer resolves
+block slots to epochs and snapshots the previous candidate set before scanning
+the first block of a new epoch, while late or duplicate `epoch.transition`
+events only close epochs that have not already been snapshotted. Candidate
+snapshots are stored as deterministically ordered CBOR in
 `midnight_epoch_candidates`. Rollback handling is intentionally outside this
 component's current contract.
 

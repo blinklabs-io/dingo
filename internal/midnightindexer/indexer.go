@@ -62,6 +62,10 @@ type Config struct {
 
 	// InitialEpoch seeds currentEpoch before the first EpochTransitionEvent.
 	InitialEpoch uint64
+	// SlotToEpoch resolves a block slot to its ledger epoch. When present, the
+	// indexer advances epoch context before scanning the first block of a new
+	// epoch, avoiding ordering races with independently delivered epoch events.
+	SlotToEpoch func(uint64) (uint64, error)
 }
 
 // candidateKey uniquely identifies a UTxO at the committee-candidate address.
@@ -95,6 +99,8 @@ type Indexer struct {
 	candidates       map[candidateKey][]byte // key → inline datum CBOR
 	lastAriadneDatum []byte
 	currentEpoch     uint64
+	snapshotEpoch    uint64
+	hasSnapshotEpoch bool
 
 	running    bool
 	stopping   bool
@@ -233,8 +239,7 @@ func (idx *Indexer) Start(ctx context.Context) error {
 	)
 	idx.epochSubId, epochCh = idx.config.EventBus.Subscribe(dingoEvent.EpochTransitionEventType)
 
-	idx.loopWg.Go(func() { idx.blockLoop(childCtx, blockCh) })
-	idx.loopWg.Go(func() { idx.epochLoop(childCtx, epochCh) })
+	idx.loopWg.Go(func() { idx.eventLoop(childCtx, blockCh, epochCh) })
 
 	idx.logger.Info("midnight indexer started")
 	return nil
@@ -271,30 +276,27 @@ func (idx *Indexer) Stop() {
 	idx.logger.Info("midnight indexer stopped")
 }
 
-// blockLoop drains the block-event channel until ctx is cancelled.
-func (idx *Indexer) blockLoop(ctx context.Context, ch <-chan dingoEvent.Event) {
-	for {
+// eventLoop drains block and epoch-transition channels from one goroutine so
+// all Midnight state changes are serialized through the same logical path.
+func (idx *Indexer) eventLoop(
+	ctx context.Context,
+	blockCh <-chan dingoEvent.Event,
+	epochCh <-chan dingoEvent.Event,
+) {
+	for blockCh != nil || epochCh != nil {
 		select {
 		case <-ctx.Done():
 			return
-		case evt, ok := <-ch:
+		case evt, ok := <-blockCh:
 			if !ok {
-				return
+				blockCh = nil
+				continue
 			}
 			idx.handleBlockEvent(evt)
-		}
-	}
-}
-
-// epochLoop drains the epoch-transition channel until ctx is cancelled.
-func (idx *Indexer) epochLoop(ctx context.Context, ch <-chan dingoEvent.Event) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok := <-ch:
+		case evt, ok := <-epochCh:
 			if !ok {
-				return
+				epochCh = nil
+				continue
 			}
 			idx.handleEpochTransition(evt)
 		}
@@ -322,8 +324,30 @@ func (idx *Indexer) handleBlockEvent(evt dingoEvent.Event) {
 		return
 	}
 
+	var (
+		blockEpoch uint64
+		hasEpoch   bool
+	)
+	if idx.config.SlotToEpoch != nil {
+		epoch, err := idx.config.SlotToEpoch(blockEvt.Block.Slot)
+		if err != nil {
+			idx.logger.Error(
+				"midnight indexer: resolve block epoch",
+				"slot", blockEvt.Block.Slot,
+				"error", err,
+			)
+		} else {
+			blockEpoch = epoch
+			hasEpoch = true
+		}
+	}
+
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
+	if hasEpoch {
+		idx.advanceEpochLocked(blockEpoch)
+	}
 
 	for txIdx, tx := range blk.Transactions() {
 		_ = txIdx
@@ -466,7 +490,9 @@ func (idx *Indexer) outputHasPolicy(
 }
 
 // handleEpochTransition snapshots the in-memory candidate set to the database
-// and advances the tracked epoch.
+// and advances the tracked epoch. A block handler may already have closed the
+// previous epoch first; duplicate or late epoch events are ignored by
+// snapshotEpochLocked.
 func (idx *Indexer) handleEpochTransition(evt dingoEvent.Event) {
 	epochEvt, ok := evt.Data.(dingoEvent.EpochTransitionEvent)
 	if !ok {
@@ -476,7 +502,27 @@ func (idx *Indexer) handleEpochTransition(evt dingoEvent.Event) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	// Snapshot the current candidate set for the epoch that just ended.
+	idx.snapshotEpochLocked(epochEvt.PreviousEpoch)
+	if epochEvt.NewEpoch > idx.currentEpoch {
+		idx.currentEpoch = epochEvt.NewEpoch
+	}
+}
+
+func (idx *Indexer) advanceEpochLocked(epoch uint64) {
+	if epoch <= idx.currentEpoch {
+		return
+	}
+	idx.snapshotEpochLocked(idx.currentEpoch)
+	idx.currentEpoch = epoch
+}
+
+// snapshotEpochLocked snapshots the current candidate set for epoch once.
+// idx.mu must be held by the caller.
+func (idx *Indexer) snapshotEpochLocked(epoch uint64) {
+	if idx.hasSnapshotEpoch && epoch <= idx.snapshotEpoch {
+		return
+	}
+
 	entries := make([]candidateEntry, 0, len(idx.candidates))
 	for k, datum := range idx.candidates {
 		hashCopy := make([]byte, 32)
@@ -497,23 +543,24 @@ func (idx *Indexer) handleEpochTransition(evt dingoEvent.Event) {
 	if err != nil {
 		idx.logger.Error(
 			"midnight indexer: encode candidate snapshot",
-			"epoch", epochEvt.PreviousEpoch,
+			"epoch", epoch,
 			"error", err,
 		)
 	} else {
 		if err := idx.config.Store.UpsertMidnightEpochCandidates(
 			&models.MidnightEpochCandidates{
-				Epoch:          epochEvt.PreviousEpoch,
+				Epoch:          epoch,
 				CandidatesCbor: snapshotCbor,
 			},
 		); err != nil {
 			idx.logger.Error(
 				"midnight indexer: upsert epoch candidates",
-				"epoch", epochEvt.PreviousEpoch,
+				"epoch", epoch,
 				"error", err,
 			)
+		} else {
+			idx.snapshotEpoch = epoch
+			idx.hasSnapshotEpoch = true
 		}
 	}
-
-	idx.currentEpoch = epochEvt.NewEpoch
 }
