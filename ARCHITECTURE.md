@@ -1380,11 +1380,14 @@ a synchronous backfill pass (via the `BlockIterator` callback) that iterates
 all blocks stored in the database from the last checkpoint slot onward and
 processes them through the same scan logic. The checkpoint (phase `"midnight"`)
 is stored in the `backfill_checkpoint` table via `SetBackfillCheckpoint` and is
-updated after each block — both during backfill and for each live event — so
-that the next restart only replays blocks added after the crash. All four
-`Create*` methods use `ON CONFLICT DO NOTHING` against the unique indexes on the
-UTxO natural keys (`tx_hash + output_index` / `utxo_tx_hash + utxo_index`), so
-replaying an already-indexed block is safe and produces no duplicate rows.
+updated after each block — both during backfill and for each live event. Because
+the checkpoint write and the block's `Create*` writes are separate (not
+transactional), a crash between the two causes at most one block to be
+re-processed on the next restart: the block whose rows were written but whose
+checkpoint update did not commit. All four `Create*` methods use
+`ON CONFLICT DO NOTHING` against the unique indexes on the UTxO natural keys
+(`tx_hash + output_index` / `utxo_tx_hash + utxo_index`), so re-processing an
+already-indexed block is safe and produces no duplicate rows.
 
 On startup the indexer also calls `FindUnspentMidnightAssetCreates` and
 `FindUnspentMidnightRegistrations` (NOT EXISTS subqueries) to restore both
