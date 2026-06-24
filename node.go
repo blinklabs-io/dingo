@@ -45,6 +45,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -69,6 +70,7 @@ type Node struct {
 	historyExpiry                    *historyexpiry.Pruner
 	blockfrostAPI                    *blockfrost.Blockfrost
 	meshAPI                          *mesh.Server
+	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
@@ -980,6 +982,38 @@ func (n *Node) Run(ctx context.Context) error {
 		started = append(started, func() { //nolint:contextcheck
 			if err := n.bark.Stop(context.Background()); err != nil {
 				n.config.logger.Error("failed to stop bark during cleanup", "error", err)
+			}
+		})
+	}
+
+	// Configure the Midnight gRPC server (only in API mode with a non-zero
+	// port). Port 0 disables the server while leaving the indexer eligible to
+	// run.
+	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+		var err error
+		n.midnightServer, err = midnightserver.New(
+			midnightserver.Config{
+				Logger:          n.config.logger,
+				Host:            n.config.midnight.Host,
+				Port:            n.config.midnight.Port,
+				TLSCertFilePath: n.config.tlsCertFilePath,
+				TLSKeyFilePath:  n.config.tlsKeyFilePath,
+				ShutdownTimeout: n.config.shutdownTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to create midnight gRPC server: %w", err)
+		}
+		if err := n.midnightServer.Start(n.ctx); err != nil { //nolint:contextcheck
+			return fmt.Errorf("starting midnight gRPC server: %w", err)
+		}
+		started = append(started, func() { //nolint:contextcheck
+			if err := n.midnightServer.Stop(context.Background()); err != nil {
+				n.config.logger.Error(
+					"failed to stop midnight gRPC server during cleanup",
+					"error",
+					err,
+				)
 			}
 		})
 	}
