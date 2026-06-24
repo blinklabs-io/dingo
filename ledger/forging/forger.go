@@ -587,19 +587,19 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	// that is ultimately dropped.
 	if f.blockValidator != nil {
 		validateStart := time.Now()
+		blockHashStr := ""
+		if block != nil {
+			blockHashStr = hex.EncodeToString(block.Hash().Bytes())
+		}
 		if err := f.blockValidator.ValidateForgedBlock(block, blockCbor); err != nil {
 			f.incCouldNotForge()
 			if f.metrics != nil {
 				f.metrics.forgeValidationFailed.Inc()
 			}
-			hashStr := ""
-			if block != nil {
-				hashStr = hex.EncodeToString(block.Hash().Bytes())
-			}
 			f.logger.Error(
 				"forged block failed self-validation, dropping block",
 				"slot", currentSlot,
-				"hash", hashStr,
+				"hash", blockHashStr,
 				"error", err,
 			)
 			return fmt.Errorf("forged block self-validation failed: %w", err)
@@ -613,7 +613,7 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		f.logger.Info(
 			"forged block passed self-validation",
 			"slot", currentSlot,
-			"hash", hex.EncodeToString(block.Hash().Bytes()),
+			"hash", blockHashStr,
 			"validation_duration", validationDuration,
 		)
 	}
