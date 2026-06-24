@@ -592,10 +592,14 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			if f.metrics != nil {
 				f.metrics.forgeValidationFailed.Inc()
 			}
+			hashStr := ""
+			if block != nil {
+				hashStr = hex.EncodeToString(block.Hash().Bytes())
+			}
 			f.logger.Error(
 				"forged block failed self-validation, dropping block",
 				"slot", currentSlot,
-				"hash", hex.EncodeToString(block.Hash().Bytes()),
+				"hash", hashStr,
 				"error", err,
 			)
 			return fmt.Errorf("forged block self-validation failed: %w", err)
