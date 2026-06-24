@@ -415,6 +415,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithForgeStaleGapThresholdSlots(
 				cfg.ForgeStaleGapThresholdSlots,
 			),
+			dingo.WithValidateForgedBlock(cfg.ValidateForgedBlock),
 			// Leios voting (experimental)
 			dingo.WithLeiosVoteSigningKeyFile(
 				cfg.LeiosVoteSigningKeyFile,

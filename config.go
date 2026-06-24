@@ -186,6 +186,10 @@ type Config struct {
 	// Forging tolerances (0 = use defaults)
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
+	// validateForgedBlock enables self-validation of locally-forged blocks
+	// (VRF/KES header crypto, body-hash, per-tx ledger rules) before the
+	// block is adopted onto the chain and diffused to peers.
+	validateForgedBlock bool
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
@@ -938,6 +942,17 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.forgeStaleGapThresholdSlots = slots
+	}
+}
+
+// WithValidateForgedBlock enables self-validation of locally-forged blocks
+// before they are adopted onto the chain and diffused to peers. When enabled,
+// the forger runs VRF/KES header crypto, body-hash consistency, and per-tx
+// ledger validation on each forged block. A failing block is dropped without
+// being adopted or diffused. Disabled by default.
+func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.validateForgedBlock = enabled
 	}
 }
 

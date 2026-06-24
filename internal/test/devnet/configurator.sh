@@ -144,9 +144,8 @@ uv run python3 genesis-cli.py testnet.yaml -o /tmp/testnet -c generate
 # # Remove dynamic topology.json
 find /tmp/testnet -type f -name 'topology.json' -exec rm -f '{}' ';'
 
-mkdir -p /configs
+mkdir -p /configs /configs/utxo-keys
 cp -r /tmp/testnet/pools/* /configs
-cp -r /tmp/testnet/utxos/* /configs
 
 echo "removing /configs/keys"; rm -rf /configs/keys
 
@@ -169,6 +168,10 @@ for pool in $pools; do
   set_start_time "$pool"
   config_config_json "$pool"
 done
+
+# Expose the Shelley genesis (updated system start) to txpump so it can
+# discover the initial UTxOs from initialFunds and know the genesis start time.
+cp /configs/1/configs/shelley-genesis.json /configs/utxo-keys/
 
 # Test-only credentials: make config + genesis files world-readable so any
 # consuming container's user can read them.

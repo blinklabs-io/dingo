@@ -92,6 +92,9 @@ type BlockForger struct {
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
 
+	// Optional self-validation before adoption (nil = disabled)
+	blockValidator BlockValidator
+
 	// State
 	mu      sync.RWMutex
 	running bool
@@ -127,6 +130,14 @@ type BlockForgedObserver func(
 	cbor []byte,
 	latency time.Duration,
 )
+
+// BlockValidator validates a locally-forged block before it is adopted
+// onto the local chain and diffused to peers. If ValidateForgedBlock
+// returns a non-nil error the block is dropped and neither adopted nor
+// diffused.
+type BlockValidator interface {
+	ValidateForgedBlock(block ledger.Block, blockCbor []byte) error
+}
 
 // LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
 // It reports whether the slot leader may produce an endorser block for
@@ -187,6 +198,12 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// BlockValidator, when non-nil, validates the forged block (VRF/KES
+	// header crypto, body-hash consistency, per-tx ledger rules) before
+	// AddBlock is called. A validation failure drops the block without
+	// adopting or diffusing it. Nil disables self-validation (default).
+	BlockValidator BlockValidator
+
 	// Prometheus metrics registry (optional)
 	PromRegistry prometheus.Registerer
 }
@@ -215,6 +232,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosChecker:     cfg.LeiosProduceChecker,
 		leiosEBCaster:    cfg.LeiosEBBroadcaster,
 		leiosMempool:     cfg.LeiosMempool,
+		blockValidator:   cfg.BlockValidator,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -586,6 +604,40 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			}()
 			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
 		}()
+	}
+
+	// Optionally self-validate before adoption and diffusion.
+	// This runs VRF/KES header crypto, body-hash consistency, and
+	// per-tx ledger rules against the current chain state. A failure
+	// means the locally-built block is invalid; drop it without
+	// adopting or diffusing so we never serve a bad block to peers.
+	if f.blockValidator != nil {
+		validateStart := time.Now()
+		if err := f.blockValidator.ValidateForgedBlock(block, blockCbor); err != nil {
+			f.incCouldNotForge()
+			if f.metrics != nil {
+				f.metrics.forgeValidationFailed.Inc()
+			}
+			f.logger.Error(
+				"forged block failed self-validation, dropping block",
+				"slot", currentSlot,
+				"hash", hex.EncodeToString(block.Hash().Bytes()),
+				"error", err,
+			)
+			return fmt.Errorf("forged block self-validation failed: %w", err)
+		}
+		validationDuration := time.Since(validateStart)
+		if f.metrics != nil {
+			f.metrics.forgeValidationDuration.Observe(
+				validationDuration.Seconds(),
+			)
+		}
+		f.logger.Info(
+			"forged block passed self-validation",
+			"slot", currentSlot,
+			"hash", hex.EncodeToString(block.Hash().Bytes()),
+			"validation_duration", validationDuration,
+		)
 	}
 
 	// Add block to chain and broadcast
