@@ -534,6 +534,7 @@ func TestCompatNetworkResponse(t *testing.T) {
 func TestCompatAccountResponse(t *testing.T) {
 	activeEpoch := int64(42)
 	poolID := "pool1xyz"
+	drepID := "drep1y2v8nygzdll2krgvw5dzqpkncvj3y"
 	ours := AccountResponse{
 		StakeAddress:       "stake_test1upugeuz3jdy0a7hncusutadavzcetdzylgxcldz39hp9n0s0xy0n5",
 		Active:             true,
@@ -545,6 +546,8 @@ func TestCompatAccountResponse(t *testing.T) {
 		TreasurySum:        "7",
 		WithdrawableAmount: "89",
 		PoolID:             &poolID,
+		DrepID:             &drepID,
+		Registered:         true,
 	}
 
 	data, err := json.Marshal(ours)
@@ -572,6 +575,9 @@ func TestCompatAccountResponse(t *testing.T) {
 	)
 	require.NotNil(t, theirs.PoolID)
 	assert.Equal(t, poolID, *theirs.PoolID)
+	require.NotNil(t, theirs.DrepID)
+	assert.Equal(t, drepID, *theirs.DrepID)
+	assert.Equal(t, ours.Registered, theirs.Registered)
 }
 
 // TestCompatAccountAssociatedAddressesResponse verifies
@@ -605,6 +611,9 @@ func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
 			TxHash:      "abc123",
 			Amount:      "1000000",
 			PoolID:      "pool1xyz",
+			TxSlot:      123456,
+			BlockTime:   1700000000,
+			BlockHeight: 9876,
 		},
 	}
 
@@ -622,6 +631,9 @@ func TestCompatAccountDelegationHistoryResponse(t *testing.T) {
 	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
 	assert.Equal(t, ours[0].Amount, theirs[0].Amount)
 	assert.Equal(t, ours[0].PoolID, theirs[0].PoolID)
+	assert.Equal(t, int(ours[0].TxSlot), theirs[0].TxSlot)
+	assert.Equal(t, int(ours[0].BlockTime), theirs[0].BlockTime)
+	assert.Equal(t, int(ours[0].BlockHeight), theirs[0].BlockHeight)
 }
 
 // TestCompatAccountRegistrationHistoryResponse verifies
@@ -633,12 +645,20 @@ func TestCompatAccountRegistrationHistoryResponse(
 ) {
 	ours := []AccountRegistrationHistoryResponse{
 		{
-			TxHash: "abc123",
-			Action: "registered",
+			TxHash:      "abc123",
+			Action:      "registered",
+			Deposit:     "2000000",
+			TxSlot:      123456,
+			BlockTime:   1700000000,
+			BlockHeight: 9876,
 		},
 		{
-			TxHash: "def456",
-			Action: "deregistered",
+			TxHash:      "def456",
+			Action:      "deregistered",
+			Deposit:     "2000000",
+			TxSlot:      223456,
+			BlockTime:   1700000100,
+			BlockHeight: 9999,
 		},
 	}
 
@@ -652,6 +672,9 @@ func TestCompatAccountRegistrationHistoryResponse(
 	require.Len(t, theirs, 2)
 	assert.Equal(t, ours[0].TxHash, theirs[0].TXHash)
 	assert.Equal(t, ours[0].Action, theirs[0].Action)
+	assert.Equal(t, int(ours[0].TxSlot), theirs[0].TxSlot)
+	assert.Equal(t, int(ours[0].BlockTime), theirs[0].BlockTime)
+	assert.Equal(t, int(ours[0].BlockHeight), theirs[0].BlockHeight)
 	assert.Equal(t, ours[1].TxHash, theirs[1].TXHash)
 	assert.Equal(t, ours[1].Action, theirs[1].Action)
 }

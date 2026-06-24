@@ -208,6 +208,138 @@ func TestAccountHistoryQueriesAreCredentialTagAware(t *testing.T) {
 	assert.Equal(t, 1, scriptRegistrationCount)
 }
 
+// TestAccountHistoryExposesTxSlotBlockHashAndDeposit pins the
+// OpenAPI-0.1.88 enrichment of the delegation and registration history
+// queries: each row must carry the transaction slot, the containing block's
+// hash (the adapter resolves the height from the block store), and (for
+// registrations) the deposit recorded on the certificate.
+func TestAccountHistoryExposesTxSlotBlockHashAndDeposit(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xA2
+	}
+	pool := make([]byte, 28)
+	for i := range pool {
+		pool[i] = 0xB2
+	}
+	blockHash := []byte("block_hash_for_account_history12")
+
+	require.NoError(t, db.Create(&models.Transaction{
+		ID:         100,
+		Hash:       []byte("tx_enriched_history_hash_1234567"),
+		BlockHash:  blockHash,
+		Slot:       10,
+		BlockIndex: 0,
+	}).Error)
+	require.NoError(t, db.Create(&models.Certificate{
+		ID:            1000,
+		TransactionID: 100,
+		CertIndex:     0,
+		Slot:          10,
+		CertType:      11, // StakeRegistrationDelegation
+	}).Error)
+	require.NoError(t, db.Create(&models.StakeRegistrationDelegation{
+		ID:            1000,
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   pool,
+		CertificateID: 1000,
+		AddedSlot:     10,
+		DepositAmount: 2_000_000,
+	}).Error)
+
+	delegations, err := store.GetAccountDelegationHistoryByCredential(
+		0, stakeKey, 10, 0, "asc", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, delegations, 1)
+	assert.Equal(t, uint64(10), delegations[0].TxSlot)
+	assert.Equal(t, blockHash, delegations[0].BlockHash)
+
+	registrations, err := store.GetAccountRegistrationHistoryByCredential(
+		0, stakeKey, 10, 0, "asc", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, registrations, 1)
+	assert.Equal(t, "registered", registrations[0].Action)
+	assert.Equal(t, uint64(2_000_000), registrations[0].Deposit)
+	assert.Equal(t, uint64(10), registrations[0].TxSlot)
+	assert.Equal(t, blockHash, registrations[0].BlockHash)
+}
+
+// TestGetAccountSumsByCredential verifies the account-sum aggregation that
+// backs the Blockfrost account withdrawals_sum/reserves_sum/treasury_sum
+// fields: withdrawals come from rollback-aware reward deltas, while the
+// reserves and treasury totals come from MIR distributions split by source
+// pot. Credits (non-withdrawal deltas) and the other credential tag must be
+// excluded.
+func TestGetAccountSumsByCredential(t *testing.T) {
+	store := setupTestStore(t)
+	db := store.DB()
+
+	stakeKey := make([]byte, 28)
+	for i := range stakeKey {
+		stakeKey[i] = 0xA3
+	}
+	otherKey := make([]byte, 28)
+	for i := range otherKey {
+		otherKey[i] = 0xF3
+	}
+
+	// Two withdrawals (summed) plus a credit (ignored) for the credential.
+	require.NoError(t, db.Create(&models.AccountRewardDelta{
+		StakingKey: stakeKey, CredentialTag: 0,
+		TxHash: []byte("withdrawal_tx_hash_aaaaaaaaaaaa1"),
+		Amount: 30, Withdrawal: true, AddedSlot: 10,
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountRewardDelta{
+		StakingKey: stakeKey, CredentialTag: 0,
+		TxHash: []byte("withdrawal_tx_hash_aaaaaaaaaaaa2"),
+		Amount: 15, Withdrawal: true, AddedSlot: 20,
+	}).Error)
+	require.NoError(t, db.Create(&models.AccountRewardDelta{
+		StakingKey: stakeKey, CredentialTag: 0,
+		TxHash: []byte("credit_tx_hash_bbbbbbbbbbbbbbbb1"),
+		Amount: 99, Withdrawal: false, AddedSlot: 30,
+	}).Error)
+	// A withdrawal for a different credential must not leak in.
+	require.NoError(t, db.Create(&models.AccountRewardDelta{
+		StakingKey: otherKey, CredentialTag: 0,
+		TxHash: []byte("withdrawal_tx_hash_ccccccccccc01"),
+		Amount: 100, Withdrawal: true, AddedSlot: 40,
+	}).Error)
+
+	// MIR distributions: pot 0 = reserves, pot 1 = treasury.
+	reservesMIR := &models.MoveInstantaneousRewards{ID: 1, Pot: 0, AddedSlot: 10}
+	require.NoError(t, db.Create(reservesMIR).Error)
+	treasuryMIR := &models.MoveInstantaneousRewards{ID: 2, Pot: 1, AddedSlot: 10}
+	require.NoError(t, db.Create(treasuryMIR).Error)
+	require.NoError(t, db.Create(&models.MoveInstantaneousRewardsReward{
+		MIRID: 1, Credential: stakeKey, CredentialTag: 0, Amount: 6,
+	}).Error)
+	require.NoError(t, db.Create(&models.MoveInstantaneousRewardsReward{
+		MIRID: 2, Credential: stakeKey, CredentialTag: 0, Amount: 7,
+	}).Error)
+	// Treasury MIR for a different credential must not leak in.
+	require.NoError(t, db.Create(&models.MoveInstantaneousRewardsReward{
+		MIRID: 2, Credential: otherKey, CredentialTag: 0, Amount: 50,
+	}).Error)
+
+	sums, err := store.GetAccountSumsByCredential(0, stakeKey, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(45), sums.WithdrawalsSum)
+	assert.Equal(t, uint64(6), sums.ReservesSum)
+	assert.Equal(t, uint64(7), sums.TreasurySum)
+
+	// An unknown credential returns zeroed sums, not an error.
+	empty, err := store.GetAccountSumsByCredential(1, stakeKey, nil)
+	require.NoError(t, err)
+	assert.Equal(t, models.AccountSums{}, empty)
+}
+
 // TestGetStakeRegistrationsByCredentialIsTagAware verifies that certificate
 // reconstruction keeps key and script stake registrations with the same hash
 // separate and restores the correct on-chain credential type.

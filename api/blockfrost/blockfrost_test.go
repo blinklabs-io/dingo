@@ -1869,16 +1869,19 @@ func TestHandleEpochParamsNotFound(t *testing.T) {
 }
 
 func TestHandleAccount(t *testing.T) {
+	drepID := "drep1xyz"
 	mock := &mockNode{
 		account: AccountInfo{
 			StakeAddress:       "stake_test1",
 			Active:             true,
 			ControlledAmount:   "123",
 			RewardsSum:         "10",
-			WithdrawalsSum:     "0",
-			ReservesSum:        "0",
-			TreasurySum:        "0",
+			WithdrawalsSum:     "45",
+			ReservesSum:        "6",
+			TreasurySum:        "7",
 			WithdrawableAmount: "10",
+			DrepID:             &drepID,
+			Registered:         true,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -1901,7 +1904,46 @@ func TestHandleAccount(t *testing.T) {
 	assert.True(t, resp.Active)
 	assert.Equal(t, "123", resp.ControlledAmount)
 	assert.Equal(t, "10", resp.RewardsSum)
+	assert.Equal(t, "45", resp.WithdrawalsSum)
+	assert.Equal(t, "6", resp.ReservesSum)
+	assert.Equal(t, "7", resp.TreasurySum)
 	assert.Equal(t, "10", resp.WithdrawableAmount)
+	require.NotNil(t, resp.DrepID)
+	assert.Equal(t, "drep1xyz", *resp.DrepID)
+	assert.True(t, resp.Registered)
+
+	// The OpenAPI 0.1.88 account_content schema requires these field
+	// names; assert the marshaled key set exposes them.
+	assertJSONKeys(t, resp, []string{
+		"stake_address",
+		"active",
+		"active_epoch",
+		"controlled_amount",
+		"rewards_sum",
+		"withdrawals_sum",
+		"reserves_sum",
+		"treasury_sum",
+		"withdrawable_amount",
+		"pool_id",
+		"drep_id",
+		"registered",
+	})
+}
+
+// assertJSONKeys marshals v and asserts that the resulting JSON object's keys
+// exactly match want. It is used to pin Blockfrost response structs to the
+// field set defined by the Blockfrost OpenAPI schema.
+func assertJSONKeys(t *testing.T, v any, want []string) {
+	t.Helper()
+	data, err := json.Marshal(v)
+	require.NoError(t, err)
+	var obj map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &obj))
+	got := make([]string, 0, len(obj))
+	for k := range obj {
+		got = append(got, k)
+	}
+	assert.ElementsMatch(t, want, got)
 }
 
 func TestHandleAccountInvalidStakeAddress(t *testing.T) {
@@ -1983,12 +2025,18 @@ func TestHandleAccountDelegationHistory(t *testing.T) {
 				TxHash:      "tx1",
 				Amount:      "0",
 				PoolID:      "pool1",
+				TxSlot:      100,
+				BlockTime:   1000,
+				BlockHeight: 10,
 			},
 			{
 				ActiveEpoch: 2,
 				TxHash:      "tx2",
 				Amount:      "0",
 				PoolID:      "pool2",
+				TxSlot:      200,
+				BlockTime:   2000,
+				BlockHeight: 20,
 			},
 		},
 	}
@@ -2012,13 +2060,41 @@ func TestHandleAccountDelegationHistory(t *testing.T) {
 	assert.Equal(t, int32(2), resp[0].ActiveEpoch)
 	assert.Equal(t, "tx2", resp[0].TxHash)
 	assert.Equal(t, "pool2", resp[0].PoolID)
+	assert.Equal(t, int64(200), resp[0].TxSlot)
+	assert.Equal(t, int64(2000), resp[0].BlockTime)
+	assert.Equal(t, int64(20), resp[0].BlockHeight)
+
+	// OpenAPI 0.1.88 account_delegation_content required field names.
+	assertJSONKeys(t, resp[0], []string{
+		"active_epoch",
+		"tx_hash",
+		"amount",
+		"pool_id",
+		"tx_slot",
+		"block_time",
+		"block_height",
+	})
 }
 
 func TestHandleAccountRegistrationHistory(t *testing.T) {
 	mock := &mockNode{
 		regs: []AccountRegistrationHistoryInfo{
-			{TxHash: "tx1", Action: "registered"},
-			{TxHash: "tx2", Action: "deregistered"},
+			{
+				TxHash:      "tx1",
+				Action:      "registered",
+				Deposit:     "2000000",
+				TxSlot:      100,
+				BlockTime:   1000,
+				BlockHeight: 10,
+			},
+			{
+				TxHash:      "tx2",
+				Action:      "deregistered",
+				Deposit:     "2000000",
+				TxSlot:      200,
+				BlockTime:   2000,
+				BlockHeight: 20,
+			},
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -2040,6 +2116,20 @@ func TestHandleAccountRegistrationHistory(t *testing.T) {
 	require.Len(t, resp, 2)
 	assert.Equal(t, "registered", resp[0].Action)
 	assert.Equal(t, "deregistered", resp[1].Action)
+	assert.Equal(t, "2000000", resp[0].Deposit)
+	assert.Equal(t, int64(100), resp[0].TxSlot)
+	assert.Equal(t, int64(1000), resp[0].BlockTime)
+	assert.Equal(t, int64(10), resp[0].BlockHeight)
+
+	// OpenAPI 0.1.88 account_registration_content required field names.
+	assertJSONKeys(t, resp[0], []string{
+		"tx_hash",
+		"action",
+		"deposit",
+		"tx_slot",
+		"block_time",
+		"block_height",
+	})
 }
 
 func TestHandleAccountRewardHistory(t *testing.T) {

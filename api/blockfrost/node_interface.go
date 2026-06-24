@@ -593,6 +593,8 @@ type AccountInfo struct {
 	TreasurySum        string
 	WithdrawableAmount string
 	PoolID             *string
+	DrepID             *string
+	Registered         bool
 }
 
 // AccountAssociatedAddressInfo holds a payment address
@@ -608,13 +610,20 @@ type AccountDelegationHistoryInfo struct {
 	TxHash      string
 	Amount      string
 	PoolID      string
+	TxSlot      int64
+	BlockTime   int64
+	BlockHeight int64
 }
 
 // AccountRegistrationHistoryInfo holds a stake-account
 // registration history row.
 type AccountRegistrationHistoryInfo struct {
-	TxHash string
-	Action string
+	TxHash      string
+	Action      string
+	Deposit     string
+	TxSlot      int64
+	BlockTime   int64
+	BlockHeight int64
 }
 
 // AccountRewardHistoryInfo holds a stake-account reward
