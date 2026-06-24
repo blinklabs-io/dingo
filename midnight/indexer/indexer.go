@@ -109,6 +109,12 @@ func New(cfg Config) (*Indexer, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid cnight_policy_id: %w", err)
 		}
+		if len(policyBytes) != 28 {
+			return nil, fmt.Errorf(
+				"invalid cnight_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
+				len(policyBytes),
+			)
+		}
 		assetNameBytes, err := hex.DecodeString(cfg.CNightAssetName)
 		if err != nil {
 			return nil, fmt.Errorf("invalid cnight_asset_name: %w", err)
@@ -129,6 +135,12 @@ func New(cfg Config) (*Indexer, error) {
 			policyBytes, err := hex.DecodeString(cfg.AuthTokenPolicyID)
 			if err != nil {
 				return nil, fmt.Errorf("invalid auth_token_policy_id: %w", err)
+			}
+			if len(policyBytes) != 28 {
+				return nil, fmt.Errorf(
+					"invalid auth_token_policy_id: must be 56 hex characters (28 bytes), got %d bytes",
+					len(policyBytes),
+				)
 			}
 			idx.authPolicyID = lcommon.NewBlake2b224(policyBytes)
 			idx.authPolicySet = true
@@ -192,35 +204,113 @@ func (idx *Indexer) Stop() {
 }
 
 // handleBlockEvent is the SubscribeFunc callback; it decodes the block and
-// delegates to processBlock.
+// delegates to processBlock or rollbackBlock depending on the action.
 func (idx *Indexer) handleBlockEvent(evt event.Event) {
 	blockEvt, ok := evt.Data.(ledger.BlockEvent)
 	if !ok {
 		return
 	}
-	// Rollbacks are out of scope for this indexer.
-	if blockEvt.Action != ledger.BlockActionApply {
-		return
+	switch blockEvt.Action {
+	case ledger.BlockActionUndo:
+		idx.rollbackBlock(blockEvt.Block)
+	case ledger.BlockActionApply:
+		block := blockEvt.Block
+		decoded, err := block.Decode()
+		if err != nil {
+			if idx.config.Logger != nil {
+				idx.config.Logger.Error(
+					"midnight indexer: failed to decode block",
+					"error", err,
+					"slot", block.Slot,
+				)
+			}
+			return
+		}
+		var timestampMs uint64
+		if idx.config.SlotTimer != nil {
+			if t, err := idx.config.SlotTimer.SlotToTime(block.Slot); err == nil {
+				timestampMs = uint64(t.UnixMilli()) //nolint:gosec
+			}
+		}
+		idx.processBlock(block, decoded.Transactions(), timestampMs)
 	}
-	block := blockEvt.Block
-	decoded, err := block.Decode()
-	if err != nil {
-		if idx.config.Logger != nil {
+}
+
+// rollbackBlock undoes all midnight_* rows written for the given block and
+// restores the in-memory UTxO tracking sets to their pre-block state.
+// Order: undo spends/deregistrations first (restore UTxOs), then undo
+// creates/registrations (remove UTxOs), so a UTxO created and spent within
+// the same block ends up correctly absent from memory after the rollback.
+func (idx *Indexer) rollbackBlock(block models.Block) {
+	if idx.cnightEnabled {
+		spends, err := idx.config.Metadata.DeleteMidnightAssetSpendsByBlock(nil, block.Number)
+		if err != nil && idx.config.Logger != nil {
 			idx.config.Logger.Error(
-				"midnight indexer: failed to decode block",
+				"midnight indexer: rollback asset spends",
 				"error", err,
-				"slot", block.Slot,
+				"block", block.Number,
 			)
 		}
-		return
-	}
-	var timestampMs uint64
-	if idx.config.SlotTimer != nil {
-		if t, err := idx.config.SlotTimer.SlotToTime(block.Slot); err == nil {
-			timestampMs = uint64(t.UnixMilli()) //nolint:gosec
+		if len(spends) > 0 {
+			idx.mu.Lock()
+			for _, s := range spends {
+				key := utxoKey{TxHash: hex.EncodeToString(s.UtxoTxHash), Index: s.UtxoIndex}
+				idx.cNightUTxOs[key] = cNightUTxO{Address: s.Address, Quantity: s.Quantity}
+			}
+			idx.mu.Unlock()
+		}
+
+		creates, err := idx.config.Metadata.DeleteMidnightAssetCreatesByBlock(nil, block.Number)
+		if err != nil && idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: rollback asset creates",
+				"error", err,
+				"block", block.Number,
+			)
+		}
+		if len(creates) > 0 {
+			idx.mu.Lock()
+			for _, c := range creates {
+				delete(idx.cNightUTxOs, utxoKey{TxHash: hex.EncodeToString(c.TxHash), Index: c.OutputIndex})
+			}
+			idx.mu.Unlock()
 		}
 	}
-	idx.processBlock(block, decoded.Transactions(), timestampMs)
+
+	if idx.config.MappingValidatorAddress != "" {
+		deregs, err := idx.config.Metadata.DeleteMidnightDeregistrationsByBlock(nil, block.Number)
+		if err != nil && idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: rollback deregistrations",
+				"error", err,
+				"block", block.Number,
+			)
+		}
+		if len(deregs) > 0 {
+			idx.mu.Lock()
+			for _, d := range deregs {
+				key := utxoKey{TxHash: hex.EncodeToString(d.UtxoTxHash), Index: d.UtxoIndex}
+				idx.regUTxOs[key] = registrationUTxO{FullDatum: d.FullDatum}
+			}
+			idx.mu.Unlock()
+		}
+
+		regs, err := idx.config.Metadata.DeleteMidnightRegistrationsByBlock(nil, block.Number)
+		if err != nil && idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: rollback registrations",
+				"error", err,
+				"block", block.Number,
+			)
+		}
+		if len(regs) > 0 {
+			idx.mu.Lock()
+			for _, r := range regs {
+				delete(idx.regUTxOs, utxoKey{TxHash: hex.EncodeToString(r.TxHash), Index: r.OutputIndex})
+			}
+			idx.mu.Unlock()
+		}
+	}
 }
 
 // processBlock iterates the transactions in a block and calls processTx for
@@ -245,21 +335,18 @@ func (idx *Indexer) processTx(
 	txHashBytes := tx.Id().Bytes()
 
 	// Scan inputs for spends of tracked UTxOs.
+	// We peek with a read-lock, write the DB row, then remove from memory
+	// only on success so that a transient write failure leaves the in-memory
+	// state intact and the UTxO reloadable from the DB on restart.
 	for _, inp := range tx.Inputs() {
 		inpHashHex := hex.EncodeToString(inp.Id().Bytes())
 		inpIndex := inp.Index()
 		key := utxoKey{TxHash: inpHashHex, Index: inpIndex}
 
-		idx.mu.Lock()
+		idx.mu.RLock()
 		utxo, isCNight := idx.cNightUTxOs[key]
-		if isCNight {
-			delete(idx.cNightUTxOs, key)
-		}
 		reg, isReg := idx.regUTxOs[key]
-		if isReg {
-			delete(idx.regUTxOs, key)
-		}
-		idx.mu.Unlock()
+		idx.mu.RUnlock()
 
 		if isCNight {
 			row := &models.MidnightAssetSpend{
@@ -273,12 +360,18 @@ func (idx *Indexer) processTx(
 				TxIndex:          txIdx,
 				BlockTimestampMs: timestampMs,
 			}
-			if err := idx.config.Metadata.CreateMidnightAssetSpend(nil, row); err != nil && idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: write asset spend",
-					"error", err,
-					"tx", hex.EncodeToString(txHashBytes),
-				)
+			if err := idx.config.Metadata.CreateMidnightAssetSpend(nil, row); err != nil {
+				if idx.config.Logger != nil {
+					idx.config.Logger.Error(
+						"midnight indexer: write asset spend",
+						"error", err,
+						"tx", hex.EncodeToString(txHashBytes),
+					)
+				}
+			} else {
+				idx.mu.Lock()
+				delete(idx.cNightUTxOs, key)
+				idx.mu.Unlock()
 			}
 		}
 
@@ -293,12 +386,18 @@ func (idx *Indexer) processTx(
 				TxIndex:          txIdx,
 				BlockTimestampMs: timestampMs,
 			}
-			if err := idx.config.Metadata.CreateMidnightDeregistration(nil, row); err != nil && idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: write deregistration",
-					"error", err,
-					"tx", hex.EncodeToString(txHashBytes),
-				)
+			if err := idx.config.Metadata.CreateMidnightDeregistration(nil, row); err != nil {
+				if idx.config.Logger != nil {
+					idx.config.Logger.Error(
+						"midnight indexer: write deregistration",
+						"error", err,
+						"tx", hex.EncodeToString(txHashBytes),
+					)
+				}
+			} else {
+				idx.mu.Lock()
+				delete(idx.regUTxOs, key)
+				idx.mu.Unlock()
 			}
 		}
 	}

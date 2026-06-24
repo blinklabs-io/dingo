@@ -100,3 +100,87 @@ func (d *MetadataStorePostgres) FindUnspentMidnightRegistrations() (
 		Find(&rows).Error
 	return rows, err
 }
+
+// DeleteMidnightAssetCreatesByBlock deletes all cNIGHT create rows for the
+// given block number and returns them for in-memory state reconciliation.
+func (d *MetadataStorePostgres) DeleteMidnightAssetCreatesByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightAssetCreate, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightAssetCreate
+	if err := db.Where("block_number = ?", blockNumber).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows, db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightAssetCreate{}).Error
+}
+
+// DeleteMidnightAssetSpendsByBlock deletes all cNIGHT spend rows for the
+// given block number and returns them for in-memory state reconciliation.
+func (d *MetadataStorePostgres) DeleteMidnightAssetSpendsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightAssetSpend, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightAssetSpend
+	if err := db.Where("block_number = ?", blockNumber).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows, db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightAssetSpend{}).Error
+}
+
+// DeleteMidnightRegistrationsByBlock deletes all registration rows for the
+// given block number and returns them for in-memory state reconciliation.
+func (d *MetadataStorePostgres) DeleteMidnightRegistrationsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightRegistration, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightRegistration
+	if err := db.Where("block_number = ?", blockNumber).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows, db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightRegistration{}).Error
+}
+
+// DeleteMidnightDeregistrationsByBlock deletes all deregistration rows for the
+// given block number and returns them for in-memory state reconciliation.
+func (d *MetadataStorePostgres) DeleteMidnightDeregistrationsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightDeregistration, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightDeregistration
+	if err := db.Where("block_number = ?", blockNumber).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+	return rows, db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightDeregistration{}).Error
+}

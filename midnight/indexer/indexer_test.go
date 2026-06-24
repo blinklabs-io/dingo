@@ -390,6 +390,187 @@ func TestMixedBlock_RelevantAndNonRelevant(t *testing.T) {
 	assert.Empty(t, regs)
 }
 
+// TestCNightCreate_Rollback verifies that rolling back a block deletes its
+// cNIGHT create rows and removes the UTxO from the in-memory tracked set.
+func TestCNightCreate_Rollback(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	txHash := pad32("dd000001")
+	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 300)
+	dummyIn := buildInput(t, pad32("dd000000"), 0)
+	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
+	block1 := testBlock(7, 700, 0x07)
+	idx.processBlock(block1, []lcommon.Transaction{tx}, 7_000)
+
+	var creates []models.MidnightAssetCreate
+	require.NoError(t, store.DB().Find(&creates).Error)
+	require.Len(t, creates, 1)
+
+	idx.mu.RLock()
+	_, inMem := idx.cNightUTxOs[utxoKey{TxHash: txHash, Index: 0}]
+	idx.mu.RUnlock()
+	require.True(t, inMem)
+
+	idx.rollbackBlock(block1)
+
+	require.NoError(t, store.DB().Find(&creates).Error)
+	assert.Empty(t, creates, "create row must be deleted on rollback")
+
+	idx.mu.RLock()
+	_, inMem = idx.cNightUTxOs[utxoKey{TxHash: txHash, Index: 0}]
+	idx.mu.RUnlock()
+	assert.False(t, inMem, "UTxO must be removed from memory on rollback")
+}
+
+// TestCNightSpend_Rollback verifies that rolling back a block containing a
+// cNIGHT spend deletes the spend row and restores the UTxO to memory.
+func TestCNightSpend_Rollback(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	// Block 1: create.
+	createTxHash := pad32("ee100001")
+	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 150)
+	block1 := testBlock(1, 100, 0x01)
+	idx.processBlock(block1,
+		[]lcommon.Transaction{buildTx(t, createTxHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("ee100000"), 0)},
+			[]lcommon.TransactionOutput{cnightOut})},
+		1_000)
+
+	// Block 2: spend.
+	spendTxHash := pad32("ee200001")
+	block2 := testBlock(2, 200, 0x02)
+	idx.processBlock(block2,
+		[]lcommon.Transaction{buildTx(t, spendTxHash,
+			[]lcommon.TransactionInput{buildInput(t, createTxHash, 0)},
+			[]lcommon.TransactionOutput{anyOutput(t)})},
+		2_000)
+
+	var spends []models.MidnightAssetSpend
+	require.NoError(t, store.DB().Find(&spends).Error)
+	require.Len(t, spends, 1)
+
+	// Rollback block 2.
+	idx.rollbackBlock(block2)
+
+	require.NoError(t, store.DB().Find(&spends).Error)
+	assert.Empty(t, spends, "spend row must be deleted on rollback")
+
+	idx.mu.RLock()
+	utxo, restored := idx.cNightUTxOs[utxoKey{TxHash: createTxHash, Index: 0}]
+	idx.mu.RUnlock()
+	assert.True(t, restored, "UTxO must be restored to memory after spend rollback")
+	assert.Equal(t, uint64(150), utxo.Quantity)
+}
+
+// TestRegistration_Rollback verifies that rolling back a block deletes its
+// registration rows and removes the UTxO from the in-memory tracked set.
+func TestRegistration_Rollback(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	datumCbor := simpleDatumCbor(t)
+	regTxHash := pad32("ff100001")
+	regOut := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)
+	block1 := testBlock(3, 300, 0x03)
+	idx.processBlock(block1,
+		[]lcommon.Transaction{buildTx(t, regTxHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("ff100000"), 0)},
+			[]lcommon.TransactionOutput{regOut})},
+		3_000)
+
+	var regs []models.MidnightRegistration
+	require.NoError(t, store.DB().Find(&regs).Error)
+	require.Len(t, regs, 1)
+
+	idx.rollbackBlock(block1)
+
+	require.NoError(t, store.DB().Find(&regs).Error)
+	assert.Empty(t, regs, "registration row must be deleted on rollback")
+
+	idx.mu.RLock()
+	_, inMem := idx.regUTxOs[utxoKey{TxHash: regTxHash, Index: 0}]
+	idx.mu.RUnlock()
+	assert.False(t, inMem, "registration UTxO must be removed from memory on rollback")
+}
+
+// TestDeregistration_Rollback verifies that rolling back a block containing
+// a deregistration deletes the dereg row and restores the reg UTxO to memory.
+func TestDeregistration_Rollback(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	datumCbor := simpleDatumCbor(t)
+
+	// Block 1: register.
+	regTxHash := pad32("cc100001")
+	block1 := testBlock(1, 100, 0x01)
+	idx.processBlock(block1,
+		[]lcommon.Transaction{buildTx(t, regTxHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("cc100000"), 0)},
+			[]lcommon.TransactionOutput{buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)})},
+		1_000)
+
+	// Block 2: deregister.
+	deregTxHash := pad32("cc200001")
+	block2 := testBlock(2, 200, 0x02)
+	idx.processBlock(block2,
+		[]lcommon.Transaction{buildTx(t, deregTxHash,
+			[]lcommon.TransactionInput{buildInput(t, regTxHash, 0)},
+			[]lcommon.TransactionOutput{anyOutput(t)})},
+		2_000)
+
+	var deregs []models.MidnightDeregistration
+	require.NoError(t, store.DB().Find(&deregs).Error)
+	require.Len(t, deregs, 1)
+
+	// Rollback block 2.
+	idx.rollbackBlock(block2)
+
+	require.NoError(t, store.DB().Find(&deregs).Error)
+	assert.Empty(t, deregs, "deregistration row must be deleted on rollback")
+
+	idx.mu.RLock()
+	reg, restored := idx.regUTxOs[utxoKey{TxHash: regTxHash, Index: 0}]
+	idx.mu.RUnlock()
+	assert.True(t, restored, "registration UTxO must be restored to memory after dereg rollback")
+	assert.NotEmpty(t, reg.FullDatum)
+}
+
+// TestNew_PolicyIDLengthValidation verifies that New rejects policy IDs that
+// are not exactly 28 bytes (56 hex characters).
+func TestNew_PolicyIDLengthValidation(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	// Short cNIGHT policy (27 bytes = 54 hex chars).
+	_, err := New(Config{
+		Metadata:       store,
+		Logger:         logger,
+		CNightPolicyID: "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1",
+		CNightAssetName: testAssetNameHex,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cnight_policy_id")
+
+	// Short auth token policy (27 bytes).
+	_, err = New(Config{
+		Metadata:          store,
+		Logger:            logger,
+		AuthTokenPolicyID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		AuthTokenAssetName: testAuthAssetNameHex,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth_token_policy_id")
+}
+
 // TestLoadTrackedUTxOs_RestoredOnStartup verifies that the indexer restores
 // the in-memory tracked UTxO sets from the database on startup so that a
 // spend arriving after restart is matched correctly.

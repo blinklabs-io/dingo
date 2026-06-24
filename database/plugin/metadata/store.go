@@ -136,6 +136,26 @@ type MetadataStore interface {
 	// set on startup.
 	FindUnspentMidnightRegistrations() ([]models.MidnightRegistration, error)
 
+	// DeleteMidnightAssetCreatesByBlock removes all cNIGHT create rows for
+	// the given block number and returns them so the caller can update the
+	// in-memory tracked-UTxO set. Used during chain rollback.
+	DeleteMidnightAssetCreatesByBlock(types.Txn, uint64) ([]models.MidnightAssetCreate, error)
+
+	// DeleteMidnightAssetSpendsByBlock removes all cNIGHT spend rows for the
+	// given block number and returns them so the caller can restore the
+	// in-memory tracked-UTxO set. Used during chain rollback.
+	DeleteMidnightAssetSpendsByBlock(types.Txn, uint64) ([]models.MidnightAssetSpend, error)
+
+	// DeleteMidnightRegistrationsByBlock removes all registration rows for
+	// the given block number and returns them so the caller can update the
+	// in-memory tracked-UTxO set. Used during chain rollback.
+	DeleteMidnightRegistrationsByBlock(types.Txn, uint64) ([]models.MidnightRegistration, error)
+
+	// DeleteMidnightDeregistrationsByBlock removes all deregistration rows
+	// for the given block number and returns them so the caller can restore
+	// the in-memory tracked-UTxO set. Used during chain rollback.
+	DeleteMidnightDeregistrationsByBlock(types.Txn, uint64) ([]models.MidnightDeregistration, error)
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.

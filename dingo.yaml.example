@@ -429,6 +429,9 @@ midnight:
   cnightPolicyId: ""
   cnightAssetName: ""
   mappingValidatorAddress: ""
+  # Auth token policy ID (28-byte / 56 hex char). When set, only tokens minted
+  # under this exact policy are accepted as registration auth tokens.
+  authTokenPolicyId: ""
   authTokenAssetName: ""
   committeeCandidateAddress: ""
   technicalCommitteeAddress: ""
