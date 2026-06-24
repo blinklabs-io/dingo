@@ -1247,41 +1247,31 @@ func persistImportedSnapshot(
 	}
 
 	if len(poolSnapshots) > 0 {
-		// CIP-1694 reward-account auto-vote resolution strategy:
+		// CIP-1694 reward-account auto-vote resolution.
 		//
-		// Current-epoch (N): live Pool/Account rows in the DB were
-		// imported from the snapshot's own cert-state and exactly match
-		// the N-epoch boundary, so we query them directly.
+		// Current-epoch (N): live Pool/Account rows in the DB match the
+		// N-epoch boundary (imported from the snapshot's own cert-state,
+		// or from the snapshot-pool fallback which runs before this loop),
+		// so we resolve directly against them.
 		//
-		// Historical N-1/N-2: pool rows were imported with the current
-		// snapshot slot, not with their original historical registration
-		// slot. GetPoolRegistrationsAtSlot would find nothing at the
-		// historical boundary slot. Instead we use the reward-account
-		// data embedded in the snapshot bundle's PoolParams, which is
-		// historically accurate for each target epoch. Account DRep
-		// delegation is resolved against live state (best-effort; more
-		// accurate than leaving rows permanently unresolved / implicit no).
+		// Historical N-1/N-2 (stored as "mark" rows for older target
+		// epochs): faithful resolution needs the reward account's DRep
+		// delegation AS OF the historical boundary. That state is not
+		// available after a Mithril restore — cert history tables are
+		// empty for pre-snapshot epochs and #1902's persisted reward
+		// state does not capture reward-account DRep delegation. Resolving
+		// against live DRep delegation and marking the row authoritative
+		// would freeze a possibly-changed value onto a historical boundary.
+		// We therefore leave these rows RewardAccountAutoVoteResolved=false
+		// so the tally treats them as PoolRewardAccountAutoVoteNone
+		// (implicit no), matching pre-CIP-1694 behaviour, until per-boundary
+		// DRep-delegation state is persisted (follow-up to #1902).
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
 				poolSnapshots, txn,
 			); err != nil {
 				return fmt.Errorf(
 					"resolving reward-account auto-votes for "+
-						"%s snapshot epoch %d: %w",
-					st.name,
-					st.targetEpoch,
-					err,
-				)
-			}
-		} else if st.snap != nil && len(st.snap.PoolParams) > 0 {
-			if err := resolveAutoVotesFromSnapshotPoolParams(
-				cfg.Database,
-				poolSnapshots,
-				st.snap.PoolParams,
-				txn,
-			); err != nil {
-				return fmt.Errorf(
-					"resolving historical reward-account auto-votes for "+
 						"%s snapshot epoch %d: %w",
 					st.name,
 					st.targetEpoch,
@@ -1440,7 +1430,15 @@ func collectPoolsFromSnapshots(
 				continue
 			}
 			hexKey := hex.EncodeToString(pool.PoolKeyHash)
-			seen[hexKey] = *pool
+			// First-seen wins: Mark is iterated first, so Mark-era pool
+			// params (including the reward account) take precedence over
+			// older Set/Go params when a pool appears in multiple
+			// snapshots. The fallback import feeds the current-epoch
+			// auto-vote resolver, which must read the current (Mark)
+			// reward account, not a historical one.
+			if _, ok := seen[hexKey]; !ok {
+				seen[hexKey] = *pool
+			}
 		}
 	}
 	ret := make([]ParsedPool, 0, len(seen))
@@ -1453,123 +1451,6 @@ func collectPoolsFromSnapshots(
 		ret = append(ret, seen[hexKey])
 	}
 	return ret
-}
-
-// resolveAutoVotesFromSnapshotPoolParams resolves reward-account
-// auto-votes for historical imported snapshot rows (N-1, N-2) using
-// the pool reward-account data that is embedded in the snapshot bundle's
-// own PoolParams map. This avoids a dependency on historically-correct
-// pool_registration.added_slot values: imported pool rows carry the
-// import-time slot, so GetPoolRegistrationsAtSlot would find nothing
-// at a historical boundary slot.
-//
-// Resolution is "best-effort": pool reward accounts are taken from the
-// snapshot data (accurate for the snapshot era), while account DRep
-// delegation is resolved against live state (since per-slot DRep history
-// is not yet tracked). The result is more accurate than leaving rows
-// permanently unresolved (implicit no), but may be wrong when a reward
-// account changed its DRep delegation after the historical boundary.
-//
-// Rows whose pool key is absent from poolParams are left Resolved=false
-// (cannot determine). Rows whose pool is present are always marked
-// Resolved=true — even when the reward account is empty or unregistered,
-// both of which produce AutoVote=None (implicit no) per CIP-1694.
-func resolveAutoVotesFromSnapshotPoolParams(
-	db *database.Database,
-	poolSnapshots []*models.PoolStakeSnapshot,
-	poolParams map[string]*ParsedPool,
-	txn *database.Txn,
-) error {
-	if len(poolSnapshots) == 0 || len(poolParams) == 0 {
-		return nil
-	}
-
-	type entry struct {
-		snapshots     []*models.PoolStakeSnapshot
-		rewardAcct    []byte
-		credentialTag uint8
-		hasPool       bool // true if pool key appeared in PoolParams
-	}
-
-	byPool := make(map[string]*entry, len(poolSnapshots))
-	for _, s := range poolSnapshots {
-		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
-		s.RewardAccountAutoVoteResolved = false
-		poolHex := hex.EncodeToString(s.PoolKeyHash)
-		e := byPool[poolHex]
-		if e == nil {
-			e = &entry{}
-			byPool[poolHex] = e
-		}
-		e.snapshots = append(e.snapshots, s)
-	}
-
-	seenRefs := make(map[string]struct{})
-	var rewardAccountRefs []models.StakeCredentialRef
-
-	for poolHex, e := range byPool {
-		pool := poolParams[poolHex]
-		if pool == nil {
-			continue
-		}
-		e.hasPool = true
-		if len(pool.RewardAccount) == 0 {
-			// Pool has no reward account → confirmed None
-			for _, s := range e.snapshots {
-				s.RewardAccountAutoVoteResolved = true
-			}
-			continue
-		}
-		e.rewardAcct = pool.RewardAccount
-		e.credentialTag = pool.RewardAccountCredentialTag
-		ref := models.StakeCredentialRef{
-			Tag: pool.RewardAccountCredentialTag,
-			Key: pool.RewardAccount,
-		}
-		mk := ref.MapKey()
-		if _, seen := seenRefs[mk]; !seen {
-			seenRefs[mk] = struct{}{}
-			rewardAccountRefs = append(rewardAccountRefs, ref)
-		}
-	}
-
-	if len(rewardAccountRefs) == 0 {
-		return nil
-	}
-
-	// includeInactive=false: deregistered reward accounts don't auto-vote.
-	accounts, err := db.GetAccountsByCredential(rewardAccountRefs, false, txn)
-	if err != nil {
-		return fmt.Errorf(
-			"get reward accounts for historical snapshot resolution: %w",
-			err,
-		)
-	}
-
-	for _, e := range byPool {
-		if !e.hasPool || e.rewardAcct == nil {
-			continue
-		}
-		ref := models.StakeCredentialRef{
-			Tag: e.credentialTag,
-			Key: e.rewardAcct,
-		}
-		var autoVote uint8
-		if acct, ok := accounts[ref.MapKey()]; ok {
-			switch acct.DrepType {
-			case models.DrepTypeAlwaysAbstain:
-				autoVote = models.PoolRewardAccountAutoVoteAbstain
-			case models.DrepTypeAlwaysNoConfidence:
-				autoVote = models.PoolRewardAccountAutoVoteNoConfidence
-			}
-		}
-		for _, s := range e.snapshots {
-			s.RewardAccountAutoVoteResolved = true
-			s.RewardAccountAutoVote = autoVote
-		}
-	}
-
-	return nil
 }
 
 // importTip sets the chain tip to the snapshot's tip and generates
