@@ -540,6 +540,10 @@ dingo/
 │   ├── bark.go          # Bark server lifecycle and transport setup
 │   ├── archive.go       # Archive service interface
 │   └── blob.go          # Remote archive blob adapter
+├── midnight/            # Midnight MidnightState gRPC compatibility surface
+│   ├── midnight_state*.pb.go # Generated google.golang.org/grpc service stubs
+│   └── server/          # Native gRPC server lifecycle (reflection, health, TLS)
+│       └── server.go    # Serves a stub MidnightState (Unimplemented) scaffold
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -590,6 +594,7 @@ type Node struct {
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
     blockfrostAPI  *blockfrost.Blockfrost         // Blockfrost REST API
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
+    midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
@@ -622,11 +627,12 @@ When `Node.Run()` is called, components are initialized in this order:
 16. Stalled client recycler (background goroutine)
 17. UTxO RPC server (if API storage mode and port configured)
 18. Bark C2/archive server (if port configured)
-19. Blockfrost API (if API storage mode and port configured)
-20. Mesh API (if API storage mode and port configured)
-21. Off-chain metadata fetcher (if API storage mode)
-22. Block forger + leader election (if block producer mode)
-23. Wait for shutdown signal
+19. Midnight gRPC server (if API storage mode and midnight port configured)
+20. Blockfrost API (if API storage mode and port configured)
+21. Mesh API (if API storage mode and port configured)
+22. Off-chain metadata fetcher (if API storage mode)
+23. Block forger + leader election (if block producer mode)
+24. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -637,8 +643,8 @@ Graceful shutdown proceeds in phases:
 Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
-  Bark C2/archive server, Blockfrost API, Mesh API,
-  off-chain metadata fetcher
+  Bark C2/archive server, Midnight gRPC server,
+  Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager
@@ -749,6 +755,20 @@ Dingo supports two storage modes, configured via `storageMode`:
 
 - `core` (default): Minimal storage for chain following and block production.
 - `api`: Extended storage with transaction indexes, address lookups, and asset tracking. Required when any client-facing API server (Blockfrost, Mesh, UTxO RPC) is enabled. Bark is a separate Dingo-to-Dingo protocol and is not part of that API surface.
+
+### Midnight gRPC Server
+
+In `storageMode: api` with `midnight.port > 0`, `node.go` starts
+`midnight/server.Server`, a native `google.golang.org/grpc` server (not
+ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
+on its own `midnight.host:midnight.port` listener. It registers a stub
+`MidnightState` service whose RPCs return `Unimplemented`, plus gRPC reflection
+and a `grpc_health_v1` health service reporting `SERVING`. TLS is enabled when
+the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the
+listener synchronously (so bind/cert errors surface immediately) and serves in
+a goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
+a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
+without affecting indexer eligibility.
 
 ### Off-chain Metadata Fetching
 

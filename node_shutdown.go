@@ -143,6 +143,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.midnightServer != nil {
+		if stopErr := n.midnightServer.Stop(ctx); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("midnight gRPC server shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.historyExpiry != nil {
 		if stopErr := n.historyExpiry.Stop(ctx); stopErr != nil {
 			err = errors.Join(
