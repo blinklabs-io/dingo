@@ -21,12 +21,19 @@ import (
 	"log/slog"
 	"math/big"
 	"sort"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 )
+
+// slowGovernanceTallyThreshold bounds how long the per-epoch governance
+// tally is expected to take. Beyond it, ProcessEpoch logs a warning so
+// an unexpectedly slow (or pathological) tally surfaces in operator logs
+// instead of presenting as a silent stalled epoch rollover.
+const slowGovernanceTallyThreshold = 30 * time.Second
 
 // EpochInput collects the inputs needed at an epoch boundary
 // to drive the governance state machine.
@@ -276,6 +283,35 @@ func ProcessEpoch(
 		rootsByPurpose[purposeCommittee],
 	)
 
+	// Precompute the proposal-independent DRep and SPO voting
+	// denominators once per epoch tick and reuse them across every
+	// proposal's tally. DRep voting power and the pool stake snapshot do
+	// not change while the RATIFY loop runs, so loading them per proposal
+	// (as the lazy path inside the tally functions does) just repeats the
+	// heavy account/utxo voting-power query for every active proposal.
+	// On a freshly Mithril-restored database at an epoch boundary with
+	// many active proposals, that repetition stalled the epoch rollover —
+	// and the entire ledger pipeline behind it — for hours.
+	//
+	// Skip the loads entirely when there are no active proposals: the
+	// RATIFY loop below never calls TallyProposal, so this heavy read
+	// would be pure overhead (and a needless failure surface) on a no-op
+	// epoch boundary.
+	var drepState *DRepVotingState
+	var spoState *SPOVotingState
+	if len(stillActive) > 0 {
+		drepState, err = LoadDRepVotingState(in.DB, in.Txn, in.NewEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("load drep voting state: %w", err)
+		}
+		tallyCtx.DRepState = drepState
+		spoState, err = LoadSPOVotingState(in.DB, in.Txn, tallyCtx.StakeEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("load spo voting state: %w", err)
+		}
+		tallyCtx.SPOState = spoState
+	}
+
 	// Per the Conway spec, RATIFY operates on post-ENACT state. If the
 	// enactment loop mutated pparams (e.g., ParameterChange or
 	// HardForkInitiation), refresh the Conway pparams view so major
@@ -305,6 +341,22 @@ func ProcessEpoch(
 		return govActionPriority(stillActive[i]) <
 			govActionPriority(stillActive[j])
 	})
+
+	// Log the tally scale before the loop so an unexpectedly slow or
+	// stalled tally is visible in operator logs (a hang shows a
+	// "starting" line with no matching completion) rather than
+	// presenting as a silent stalled epoch rollover.
+	tallyStart := time.Now()
+	if in.Logger != nil && len(stillActive) > 0 {
+		in.Logger.Info(
+			"governance epoch tally starting",
+			"component", "governance",
+			"epoch", in.NewEpoch,
+			"active_proposals", len(stillActive),
+			"active_dreps", len(drepState.Dreps),
+			"pool_snapshot_rows", len(spoState.Dist),
+		)
+	}
 
 	for _, proposal := range stillActive {
 		actionType := lcommon.GovActionType(proposal.ActionType)
@@ -429,6 +481,28 @@ func ProcessEpoch(
 		out.RatifiedCount++
 		if isDelayingActionPurpose(purpose) {
 			break
+		}
+	}
+
+	if in.Logger != nil && len(stillActive) > 0 {
+		elapsed := time.Since(tallyStart)
+		if elapsed >= slowGovernanceTallyThreshold {
+			in.Logger.Warn(
+				"governance epoch tally slow",
+				"component", "governance",
+				"epoch", in.NewEpoch,
+				"active_proposals", len(stillActive),
+				"active_dreps", len(drepState.Dreps),
+				"duration", elapsed.String(),
+			)
+		} else {
+			in.Logger.Debug(
+				"governance epoch tally complete",
+				"component", "governance",
+				"epoch", in.NewEpoch,
+				"active_proposals", len(stillActive),
+				"duration", elapsed.String(),
+			)
 		}
 	}
 

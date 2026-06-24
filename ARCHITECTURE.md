@@ -1548,7 +1548,18 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
    the retirement certificate rows remain for rollback safety.
 3. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
-   proposal-deposit returns, which observe the post-POOLREAP treasury.
+   proposal-deposit returns, which observe the post-POOLREAP treasury. The
+   proposal-independent voting denominators — DRep voting power
+   (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
+   stake snapshot (`LoadSPOVotingState`), and committee state
+   (`LoadCommitteeVotingState`) — are computed once per epoch tick and reused
+   across every proposal's `TallyProposal`, since they do not change while the
+   RATIFY loop runs. (Recomputing DRep voting power per proposal ran the heavy
+   query once for every active proposal; on a freshly Mithril-restored database
+   at an epoch boundary with many active proposals it stalled the rollover, and
+   thus the whole ledger pipeline, for hours.) A `slowGovernanceTallyThreshold`
+   warning surfaces an unexpectedly slow tally rather than letting it present as
+   a silent stalled rollover.
 4. Treasury donations (`applyEpochDonations`), added after withdrawals.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
