@@ -137,9 +137,16 @@ type LeiosProduceChecker interface {
 }
 
 // EndorserBlockBroadcaster stores a locally-forged endorser block and
-// notifies connected peers via the LeiosNotify protocol.
+// notifies connected peers via the LeiosNotify protocol. txBodies are the
+// referenced transactions' raw CBOR, in manifest order, so the endorser block
+// can also be served over leios-fetch.
 type EndorserBlockBroadcaster interface {
-	BroadcastEndorserBlock(slot uint64, hash []byte, cbor []byte) error
+	BroadcastEndorserBlock(
+		slot uint64,
+		hash []byte,
+		cbor []byte,
+		txBodies [][]byte,
+	) error
 }
 
 // SlotClockProvider provides current slot information from the slot clock.
@@ -734,7 +741,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 		return nil
 	}
 
-	ebCbor, ebHash, txRefCount, err := buildLeiosEB(txs)
+	ebCbor, ebHash, bodies, err := buildLeiosEB(txs)
 	if err != nil {
 		if errors.Is(err, errNoValidTxRefs) {
 			f.logger.Debug("leios EB skipped: no valid tx refs", "slot", slot)
@@ -746,7 +753,15 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 		return fmt.Errorf("build leios EB: %w", err)
 	}
 
-	if err := f.leiosEBCaster.BroadcastEndorserBlock(slot, ebHash, ebCbor); err != nil {
+	// Pass the transaction bodies alongside the manifest so the endorser
+	// block can be served to peers over leios-fetch (they request the bodies
+	// after fetching the manifest).
+	if err := f.leiosEBCaster.BroadcastEndorserBlock(
+		slot,
+		ebHash,
+		ebCbor,
+		bodies,
+	); err != nil {
 		return fmt.Errorf("broadcast leios EB: %w", err)
 	}
 
@@ -754,7 +769,7 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 		"leios endorser block produced",
 		"slot", slot,
 		"hash", hex.EncodeToString(ebHash),
-		"tx_refs", txRefCount,
+		"tx_refs", len(bodies),
 	)
 	if f.metrics != nil {
 		f.metrics.leiosEbForged.Inc()
@@ -768,8 +783,13 @@ func (f *BlockForger) checkAndForgeLeiosEB(slot uint64) error {
 // when no valid references remain after filtering.
 func buildLeiosEB(
 	txs []MempoolTransaction,
-) (cbor []byte, hash []byte, txRefCount int, err error) {
+) (cbor []byte, hash []byte, bodies [][]byte, err error) {
 	refs := make([]lcommon.LeiosTransactionReference, 0, len(txs))
+	// bodies holds each referenced transaction's raw CBOR, in the same order
+	// as refs, so the endorser block can serve them over leios-fetch. A
+	// transaction dropped from refs (bad hash or size) is dropped here too,
+	// keeping body i aligned with reference i.
+	bodies = make([][]byte, 0, len(txs))
 	for _, tx := range txs {
 		raw, hexErr := hex.DecodeString(tx.Hash)
 		if hexErr != nil || len(raw) != 32 {
@@ -783,17 +803,18 @@ func buildLeiosEB(
 			TransactionHash: lcommon.NewBlake2b256(raw),
 			TransactionSize: uint16(sz), // #nosec G115 -- bounded above
 		})
+		bodies = append(bodies, tx.Cbor)
 	}
 	if len(refs) == 0 {
-		return nil, nil, 0, errNoValidTxRefs
+		return nil, nil, nil, errNoValidTxRefs
 	}
 	eb := lcommon.LeiosEndorserBlock{TransactionReferences: refs}
 	ebCbor, marshalErr := eb.MarshalCBOR()
 	if marshalErr != nil {
-		return nil, nil, 0, fmt.Errorf("marshal leios EB: %w", marshalErr)
+		return nil, nil, nil, fmt.Errorf("marshal leios EB: %w", marshalErr)
 	}
 	h := lcommon.Blake2b256Hash(ebCbor)
-	return ebCbor, h.Bytes(), len(refs), nil
+	return ebCbor, h.Bytes(), bodies, nil
 }
 
 // modeString returns a string representation of the forging mode.
