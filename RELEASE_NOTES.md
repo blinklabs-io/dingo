@@ -1,5 +1,58 @@
 # Dingo Releases
 
+## v0.56.0 (June 23, 2026)
+
+**Title:** Checkpoint validation, Musashi Leios interoperability, and Mithril catch-up correctness
+
+**Date:** June 23, 2026
+
+**Version:** v0.56.0
+
+Hi folks! Here’s what we shipped in v0.56.0.
+
+### ✨ What's New
+
+* Added **validate chain progress against configured checkpoints:** Nodes can now check chain progress against configured checkpoints as they process blocks, which gives operators a stronger trust anchor and stops misaligned runs earlier. ([#2613](https://github.com/blinklabs-io/dingo/pull/2613))
+* Introduced **apply Musashi endorsement data earlier and keep batched fetches moving:** Musashi style runs now apply endorsement data ahead of ranking blocks and recover batched fetches more reliably, which improves interoperability during active testing. ([#2617](https://github.com/blinklabs-io/dingo/pull/2617))
+* Renamed **switch the Leios testnet name to Musashi:** Operators now use `-n musashi` instead of `-n leios`, while network magic `164` remains the relevant identifier for these runs. ([#2615](https://github.com/blinklabs-io/dingo/pull/2615))
+
+### 💪 Improvements
+
+* Improved **build optional storage plugins with clearer operator guidance:** Optional storage plugins now fit more cleanly into tailored builds, and startup guidance now explains more clearly when a required plugin is missing. ([#2616](https://github.com/blinklabs-io/dingo/pull/2616))
+* Refined **keep the Sundae preview example current with TypeScript 6.0.3:** The Sundae preview example now uses TypeScript 6.0.3, which helps local example work stay aligned with current tooling. ([#2598](https://github.com/blinklabs-io/dingo/pull/2598))
+* Updated **keep the Blockfrost explorer example current with TypeScript 6.0.3:** The Blockfrost explorer example now uses TypeScript 6.0.3, which helps local example work stay aligned with current tooling. ([#2596](https://github.com/blinklabs-io/dingo/pull/2596))
+* Enhanced **enforce architecture boundaries during validation workflows:** Validation now checks package boundaries more strictly, which helps development changes stay aligned with the intended system structure. ([#2605](https://github.com/blinklabs-io/dingo/pull/2605))
+* Modernized **reduce repeated peer governor skip noise in logs:** Peer governor logging now emits fewer repeated skip messages, which makes routine logs easier to scan for meaningful events. ([#2592](https://github.com/blinklabs-io/dingo/pull/2592))
+
+### 🔧 Fixes
+
+* Fixed **preserve newer primary chain progress during Mithril catch up:** Mithril catch up now keeps newer primary chain blocks instead of rewinding them away, which protects useful sync progress. ([#2618](https://github.com/blinklabs-io/dingo/pull/2618))
+* Corrected **skip waits for stale Musashi endorsement data during catch up:** Catch up now moves past old endorsement data without waiting on it, which reduces avoidable stalls during Musashi style runs. ([#2620](https://github.com/blinklabs-io/dingo/pull/2620))
+* Strengthened **fail fast when genesis start times disagree:** Startup now stops immediately when Byron and Shelley genesis start times do not match, which prevents a misaligned run from progressing. ([#2614](https://github.com/blinklabs-io/dingo/pull/2614))
+* Stabilized **report Mithril immutable-download progress accurately:** Mithril progress reporting now shows immutable download totals and percentages more accurately, which makes long catch up work easier to follow. ([#2602](https://github.com/blinklabs-io/dingo/pull/2602))
+* Hardened **recover Musashi sync more cleanly across prototype interoperability edge cases:** Musashi style sync now handles prototype interoperability edge cases more reliably, including single relay recovery and local rollback cleanup. ([#2600](https://github.com/blinklabs-io/dingo/pull/2600))
+
+### 📋 What You Need to Know
+
+* Clarified **expect checkpoints to enforce validation earlier and stop bad configurations fast:** Checkpoints now validate chain progress against configured values during block processing, and mismatched genesis start times now stop startup before an incorrect run continues. ([#2613](https://github.com/blinklabs-io/dingo/pull/2613), [#2614](https://github.com/blinklabs-io/dingo/pull/2614))
+* Highlighted **switch Musashi runs to `-n musashi` and keep network magic `164` in view:** Operators moving from earlier Leios naming should update network selection to `musashi` while continuing to treat `164` as the relevant network magic. ([#2615](https://github.com/blinklabs-io/dingo/pull/2615))
+* Emphasized **trust steadier Mithril catch up progress and rewind behavior:** Mithril catch up now preserves useful chain progress, skips stale waits, and reports immutable download progress more accurately. ([#2618](https://github.com/blinklabs-io/dingo/pull/2618), [#2620](https://github.com/blinklabs-io/dingo/pull/2620), [#2602](https://github.com/blinklabs-io/dingo/pull/2602))
+* Summarized **expect Musashi interoperability to behave more smoothly during prototype style runs:** Musashi endorsement handling, batched fetch recovery, single relay recovery, and rollback cleanup now align more cleanly with current prototype expectations. ([#2617](https://github.com/blinklabs-io/dingo/pull/2617), [#2600](https://github.com/blinklabs-io/dingo/pull/2600))
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.55.0 (June 22, 2026)
 
 **Title:** cardano-cli build compatibility, ledger accounting correctness, and configurable chainsync
