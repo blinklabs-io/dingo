@@ -17,9 +17,11 @@ package postgres
 import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm/clause"
 )
 
 // CreateMidnightAssetCreate inserts a cNIGHT UTxO creation row.
+// Uses ON CONFLICT DO NOTHING so that backfill replays are idempotent.
 func (d *MetadataStorePostgres) CreateMidnightAssetCreate(
 	txn types.Txn,
 	row *models.MidnightAssetCreate,
@@ -28,10 +30,11 @@ func (d *MetadataStorePostgres) CreateMidnightAssetCreate(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightAssetSpend inserts a cNIGHT UTxO spend row.
+// Uses ON CONFLICT DO NOTHING so that backfill replays are idempotent.
 func (d *MetadataStorePostgres) CreateMidnightAssetSpend(
 	txn types.Txn,
 	row *models.MidnightAssetSpend,
@@ -40,10 +43,11 @@ func (d *MetadataStorePostgres) CreateMidnightAssetSpend(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightRegistration inserts a mapping-validator registration row.
+// Uses ON CONFLICT DO NOTHING so that backfill replays are idempotent.
 func (d *MetadataStorePostgres) CreateMidnightRegistration(
 	txn types.Txn,
 	row *models.MidnightRegistration,
@@ -52,10 +56,11 @@ func (d *MetadataStorePostgres) CreateMidnightRegistration(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightDeregistration inserts a mapping-validator deregistration row.
+// Uses ON CONFLICT DO NOTHING so that backfill replays are idempotent.
 func (d *MetadataStorePostgres) CreateMidnightDeregistration(
 	txn types.Txn,
 	row *models.MidnightDeregistration,
@@ -64,7 +69,7 @@ func (d *MetadataStorePostgres) CreateMidnightDeregistration(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // FindUnspentMidnightAssetCreates returns cNIGHT create rows that have no

@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
+
+const midnightCheckpointPhase = "midnight"
 
 // SlotTimer converts a slot number to a wall-clock time.
 type SlotTimer interface {
@@ -51,6 +54,11 @@ type Config struct {
 	// When empty, any policy carrying AuthTokenAssetName is accepted.
 	AuthTokenPolicyID  string
 	AuthTokenAssetName string
+	// BlockIterator iterates stored blocks in [startSlot, endSlot).
+	// When non-nil, Start() runs a backfill pass before subscribing to live
+	// events, processing any blocks whose slot is >= the last checkpoint slot.
+	// Node.go provides this via database.ForEachBlockInRangeDB.
+	BlockIterator func(startSlot, endSlot uint64, fn func(models.Block) error) error
 }
 
 // utxoKey identifies a UTxO by tx-hash (hex) and output index.
@@ -89,6 +97,9 @@ type Indexer struct {
 	authPolicySet bool
 	authAssetName []byte
 	authEnabled   bool
+	// checkpointSlot is the slot of the last block fully processed by
+	// backfill or by a live event handler. Persisted via BackfillCheckpoint.
+	checkpointSlot uint64
 	// Event bus subscription identifier returned by Start.
 	subID event.EventSubscriberId
 }
@@ -185,17 +196,88 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 			idx.regUTxOs[key] = registrationUTxO{FullDatum: r.FullDatum}
 		}
 	}
+
+	cp, err := idx.config.Metadata.GetBackfillCheckpoint(midnightCheckpointPhase, nil)
+	if err != nil {
+		return fmt.Errorf("loading midnight checkpoint: %w", err)
+	}
+	if cp != nil {
+		idx.checkpointSlot = cp.LastSlot
+	}
 	return nil
 }
 
-// Start subscribes to ledger block events. The indexer begins processing
-// blocks immediately after Start returns.
+// Start runs a catch-up backfill (if BlockIterator is configured) and then
+// subscribes to live ledger block events. The backfill completes synchronously
+// before any live events are processed, so the caller must not start
+// LedgerState until Start returns.
 func (idx *Indexer) Start() {
+	if idx.config.BlockIterator != nil {
+		if err := idx.backfill(); err != nil && idx.config.Logger != nil {
+			idx.config.Logger.Warn(
+				"midnight indexer: backfill incomplete; missed blocks will be recovered on next restart",
+				"error", err,
+			)
+		}
+	}
 	idx.subID = idx.config.EventBus.SubscribeFuncWithBuffer(
 		ledger.BlockEventType,
 		event.EventQueueSize,
 		idx.handleBlockEvent,
 	)
+}
+
+// backfill iterates all blocks stored in the database starting from the last
+// checkpoint slot and processes each one through the midnight indexer.
+// Because Start calls backfill before subscribing to live events, and
+// LedgerState has not yet started at this point, there is no overlap between
+// backfill and live events, so no duplicate rows can arise.
+func (idx *Indexer) backfill() error {
+	return idx.config.BlockIterator(
+		idx.checkpointSlot,
+		math.MaxUint64,
+		func(block models.Block) error {
+			decoded, err := block.Decode()
+			if err != nil {
+				if idx.config.Logger != nil {
+					idx.config.Logger.Warn(
+						"midnight indexer: backfill: skipping undecodable block",
+						"slot", block.Slot,
+						"error", err,
+					)
+				}
+				return nil
+			}
+			var timestampMs uint64
+			if idx.config.SlotTimer != nil {
+				if t, tErr := idx.config.SlotTimer.SlotToTime(block.Slot); tErr == nil {
+					timestampMs = uint64(t.UnixMilli()) //nolint:gosec
+				}
+			}
+			idx.processBlock(block, decoded.Transactions(), timestampMs)
+			if err := idx.updateCheckpoint(block.Slot); err != nil && idx.config.Logger != nil {
+				idx.config.Logger.Warn(
+					"midnight indexer: backfill: failed to persist checkpoint",
+					"slot", block.Slot,
+					"error", err,
+				)
+			}
+			return nil
+		},
+	)
+}
+
+// updateCheckpoint persists the last-processed slot to the metadata store.
+func (idx *Indexer) updateCheckpoint(slot uint64) error {
+	cp := &models.BackfillCheckpoint{
+		Phase:    midnightCheckpointPhase,
+		LastSlot: slot,
+	}
+	if err := idx.config.Metadata.SetBackfillCheckpoint(cp, nil); err != nil {
+		return err
+	}
+	idx.checkpointSlot = slot
+	return nil
 }
 
 // Stop unsubscribes from block events.
@@ -233,6 +315,17 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 			}
 		}
 		idx.processBlock(block, decoded.Transactions(), timestampMs)
+		// Persist checkpoint so backfill on the next restart only replays
+		// blocks that were not yet processed.
+		if idx.config.BlockIterator != nil {
+			if err := idx.updateCheckpoint(block.Slot); err != nil && idx.config.Logger != nil {
+				idx.config.Logger.Warn(
+					"midnight indexer: failed to persist checkpoint",
+					"slot", block.Slot,
+					"error", err,
+				)
+			}
+		}
 	}
 }
 

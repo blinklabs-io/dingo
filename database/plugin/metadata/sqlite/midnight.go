@@ -17,9 +17,11 @@ package sqlite
 import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm/clause"
 )
 
 // CreateMidnightAssetCreate inserts a cNIGHT UTxO creation row.
+// Uses OR IGNORE so that backfill replays are idempotent.
 func (d *MetadataStoreSqlite) CreateMidnightAssetCreate(
 	txn types.Txn,
 	row *models.MidnightAssetCreate,
@@ -28,10 +30,11 @@ func (d *MetadataStoreSqlite) CreateMidnightAssetCreate(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightAssetSpend inserts a cNIGHT UTxO spend row.
+// Uses OR IGNORE so that backfill replays are idempotent.
 func (d *MetadataStoreSqlite) CreateMidnightAssetSpend(
 	txn types.Txn,
 	row *models.MidnightAssetSpend,
@@ -40,10 +43,11 @@ func (d *MetadataStoreSqlite) CreateMidnightAssetSpend(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightRegistration inserts a mapping-validator registration row.
+// Uses OR IGNORE so that backfill replays are idempotent.
 func (d *MetadataStoreSqlite) CreateMidnightRegistration(
 	txn types.Txn,
 	row *models.MidnightRegistration,
@@ -52,10 +56,11 @@ func (d *MetadataStoreSqlite) CreateMidnightRegistration(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // CreateMidnightDeregistration inserts a mapping-validator deregistration row.
+// Uses OR IGNORE so that backfill replays are idempotent.
 func (d *MetadataStoreSqlite) CreateMidnightDeregistration(
 	txn types.Txn,
 	row *models.MidnightDeregistration,
@@ -64,7 +69,7 @@ func (d *MetadataStoreSqlite) CreateMidnightDeregistration(
 	if err != nil {
 		return err
 	}
-	return db.Create(row).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
 }
 
 // FindUnspentMidnightAssetCreates returns cNIGHT create rows that have no
