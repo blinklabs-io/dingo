@@ -169,15 +169,33 @@ func (l *leiosForgedEBLog) pruneLocked() {
 }
 
 // BroadcastEndorserBlock stores a locally-forged EB and notifies waiting
-// LeiosNotify server goroutines so they can announce it to peers.
-// It satisfies forging.EndorserBlockBroadcaster.
+// LeiosNotify server goroutines so they can announce it to peers. txBodies are
+// the referenced transactions' raw CBOR in manifest order; they are stored in
+// the endorser block's tx cache so the EB can be served to peers over
+// leios-fetch (completeTxCache() then holds and leiosfetchServerBlockTxsRequest
+// can answer). It satisfies forging.EndorserBlockBroadcaster.
 func (o *Ouroboros) BroadcastEndorserBlock(
 	slot uint64,
 	hash []byte,
 	data []byte,
+	txBodies [][]byte,
 ) error {
 	point := ocommon.Point{Slot: slot, Hash: hash}
-	if err := o.storeLeiosEndorserBlock(point, data, nil); err != nil {
+	// Match the on-the-wire form fetched EB transactions are stored in: each
+	// transaction is a CBOR byte string wrapping its CBOR (LeiosTx =
+	// encodeBytes(txCbor)), so served forged-EB bodies decode identically.
+	var txsRaw []cbor.RawMessage
+	if len(txBodies) > 0 {
+		txsRaw = make([]cbor.RawMessage, 0, len(txBodies))
+		for i, body := range txBodies {
+			wrapped, err := cbor.Encode(body)
+			if err != nil {
+				return fmt.Errorf("encode forged EB tx %d: %w", i, err)
+			}
+			txsRaw = append(txsRaw, cbor.RawMessage(wrapped))
+		}
+	}
+	if err := o.storeLeiosEndorserBlock(point, data, txsRaw); err != nil {
 		return fmt.Errorf("store forged endorser block: %w", err)
 	}
 	o.leiosEBLog.append(leiosForgedEBEntry{point: point})
