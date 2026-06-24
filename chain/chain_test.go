@@ -24,13 +24,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/common"
-	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
-	"golang.org/x/crypto/blake2b"
+	"github.com/blinklabs-io/ouroboros-mock/fixtures"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
@@ -1348,16 +1345,10 @@ func newTestDB(t *testing.T) *database.Database {
 	return db
 }
 
-// generateTestChain builds `count` Conway blocks that chain together via
-// PrevHash and survive a CBOR round-trip — that is, after re-decoding
-// each block's stored Cbor() via ledger.NewBlockFromCbor (the path used
-// by models.Block.Decode in chain.reconcile), the decoded block's
-// Hash() and PrevHash() match what the generator originally produced.
-//
-// The first block's PrevHash is set to prevHash. Each block's slot is
-// startSlot + i*slotIncrement; block numbers run startBlockNumber..+count-1.
-// All blocks have empty transactions/witnesses/auxiliary/invalid sets,
-// so they share the same block body hash.
+// generateTestChain builds count Conway blocks that chain together via
+// PrevHash with CBOR-stable encodings, delegating to the shared ouroboros-mock
+// fixture generator. It fails the test on error so call sites keep their
+// existing positional form.
 func generateTestChain(
 	t testing.TB,
 	startBlockNumber uint64,
@@ -1366,135 +1357,13 @@ func generateTestChain(
 	count int,
 ) []ledger.Block {
 	t.Helper()
-	if count <= 0 {
-		return []ledger.Block{}
-	}
-	// All generated blocks have identical empty bodies, so the four
-	// component CBORs and the resulting block body hash are constant.
-	emptyTxsCbor, err := cbor.Encode([]ledger.ConwayTransactionBody{})
-	if err != nil {
-		t.Fatalf("encode empty tx bodies: %s", err)
-	}
-	emptyWitsCbor, err := cbor.Encode([]ledger.ConwayTransactionWitnessSet{})
-	if err != nil {
-		t.Fatalf("encode empty witnesses: %s", err)
-	}
-	emptyAuxCbor, err := cbor.Encode(common.TransactionMetadataSet{})
-	if err != nil {
-		t.Fatalf("encode empty metadata set: %s", err)
-	}
-	emptyInvalidCbor, err := cbor.Encode([]uint{})
-	if err != nil {
-		t.Fatalf("encode empty invalid txs: %s", err)
-	}
-	bodyHash := computeBlockBodyHash(
-		emptyTxsCbor, emptyWitsCbor, emptyAuxCbor, emptyInvalidCbor,
+	blocks, err := fixtures.GenerateConwayChain(
+		startBlockNumber, prevHash, startSlot, slotIncrement, count,
 	)
-	blocks := make([]ledger.Block, 0, count)
-	currentPrev := prevHash
-	for i := range count {
-		body := babbage.BabbageBlockHeaderBody{
-			BlockNumber: startBlockNumber + uint64(i),
-			Slot:        startSlot + uint64(i)*slotIncrement,
-			PrevHash:    currentPrev,
-			IssuerVkey:  common.IssuerVkey{},
-			VrfKey:      make([]byte, 32),
-			VrfResult: common.VrfResult{
-				Output: make([]byte, 64),
-				Proof:  make([]byte, 80),
-			},
-			BlockBodySize: 0,
-			BlockBodyHash: bodyHash,
-			OpCert: babbage.BabbageOpCert{
-				HotVkey:   make([]byte, 32),
-				Signature: make([]byte, 64),
-			},
-			ProtoVersion: babbage.BabbageProtoVersion{Major: 9, Minor: 0},
-		}
-		block := &ledger.ConwayBlock{
-			BlockHeader: &ledger.ConwayBlockHeader{
-				BabbageBlockHeader: ledger.BabbageBlockHeader{
-					Body:      body,
-					Signature: make([]byte, 64),
-				},
-			},
-		}
-		blockCbor, err := cbor.Encode(block)
-		if err != nil {
-			t.Fatalf("encode block %d: %s", i, err)
-		}
-		// Re-decode so the returned block carries the canonical Cbor()
-		// the reconcile path will observe, and so Hash() reads from the
-		// post-round-trip header bytes.
-		decoded, err := conway.NewConwayBlockFromCbor(blockCbor)
-		if err != nil {
-			t.Fatalf("decode generated block %d: %s", i, err)
-		}
-		if !bytes.Equal(decoded.Cbor(), blockCbor) {
-			t.Fatalf("block %d Cbor mismatch after round-trip", i)
-		}
-		blocks = append(blocks, decoded)
-		currentPrev = decoded.Hash()
+	if err != nil {
+		t.Fatalf("generate test chain: %s", err)
 	}
 	return blocks
-}
-
-// computeBlockBodyHash returns blake2b256(blake2b256(p[0]) || ...) which
-// matches common.ValidateBlockBodyHash's expected derivation.
-func computeBlockBodyHash(parts ...[]byte) common.Blake2b256 {
-	var combined []byte
-	for _, p := range parts {
-		h := blake2b.Sum256(p)
-		combined = append(combined, h[:]...)
-	}
-	h := blake2b.Sum256(combined)
-	return common.NewBlake2b256(h[:])
-}
-
-func TestGenerateTestChainRoundTrip(t *testing.T) {
-	var origin common.Blake2b256
-	gen := generateTestChain(t, 1, origin, 0, 20, 5)
-	if len(gen) != 5 {
-		t.Fatalf("expected 5 blocks, got %d", len(gen))
-	}
-	for i, b := range gen {
-		decoded, err := ledger.NewBlockFromCbor(uint(b.Type()), b.Cbor())
-		if err != nil {
-			t.Fatalf("block %d decode failed: %s", i, err)
-		}
-		if decoded.Hash() != b.Hash() {
-			t.Fatalf(
-				"block %d hash changed after round-trip: %s -> %s",
-				i, b.Hash(), decoded.Hash(),
-			)
-		}
-		if decoded.PrevHash() != b.PrevHash() {
-			t.Fatalf(
-				"block %d prev hash changed after round-trip: %s -> %s",
-				i, b.PrevHash(), decoded.PrevHash(),
-			)
-		}
-		if decoded.BlockNumber() != uint64(i+1) {
-			t.Fatalf(
-				"block %d unexpected block number %d",
-				i, decoded.BlockNumber(),
-			)
-		}
-		if decoded.SlotNumber() != uint64(i)*20 {
-			t.Fatalf(
-				"block %d unexpected slot %d",
-				i, decoded.SlotNumber(),
-			)
-		}
-	}
-	for i := 1; i < len(gen); i++ {
-		if gen[i].PrevHash() != gen[i-1].Hash() {
-			t.Fatalf(
-				"chain link mismatch at index %d: prev=%s, want=%s",
-				i, gen[i].PrevHash(), gen[i-1].Hash(),
-			)
-		}
-	}
 }
 
 func TestChainRollbackExceedsSecurityParam(t *testing.T) {
