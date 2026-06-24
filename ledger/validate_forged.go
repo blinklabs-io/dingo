@@ -126,9 +126,6 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 		}
 
 		// Advance the overlay with this transaction's effects.
-		// Use Produced() instead of Outputs() to handle failed TXs correctly:
-		// for an invalid TX the collateral return is at index len(Outputs())
-		// and is the only output that should be visible to later TXs.
 		for _, utxo := range tx.Produced() {
 			key := fmt.Sprintf(
 				"%s:%d",
@@ -137,7 +134,11 @@ func (ls *LedgerState) validateForgedTxs(block ledger.Block) error {
 			)
 			createdUtxos[key] = utxo
 		}
-		for _, input := range tx.Inputs() {
+		// Use Consumed() instead of Inputs(): for a phase-2 failed Plutus tx
+		// the regular inputs are NOT spent; only the collateral inputs are.
+		// Inputs() would falsely mark regular inputs as consumed and reject
+		// a later tx in the same block that spends those still-valid UTxOs.
+		for _, input := range tx.Consumed() {
 			key := fmt.Sprintf(
 				"%s:%d",
 				input.Id().String(),

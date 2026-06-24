@@ -581,36 +581,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 		return fmt.Errorf("failed to build block: %w", err)
 	}
 
-	// Block forged successfully
-	if f.metrics != nil {
-		f.metrics.forgeForged.Inc()
-		f.metrics.blockSizeBytes.Observe(
-			float64(len(blockCbor)),
-		)
-		f.metrics.blockTxCount.Observe(
-			float64(len(block.Transactions())),
-		)
-	}
-	if f.blockForged != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					f.logger.Error(
-						"blockForged observer panic",
-						"panic", r,
-						"stack", string(debug.Stack()),
-					)
-				}
-			}()
-			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
-		}()
-	}
-
 	// Optionally self-validate before adoption and diffusion.
-	// This runs VRF/KES header crypto, body-hash consistency, and
-	// per-tx ledger rules against the current chain state. A failure
-	// means the locally-built block is invalid; drop it without
-	// adopting or diffusing so we never serve a bad block to peers.
+	// Runs here — before success metrics and the blockForged observer — so
+	// that forgeForged and RecordForgedBlock are never triggered for a block
+	// that is ultimately dropped.
 	if f.blockValidator != nil {
 		validateStart := time.Now()
 		if err := f.blockValidator.ValidateForgedBlock(block, blockCbor); err != nil {
@@ -638,6 +612,31 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 			"hash", hex.EncodeToString(block.Hash().Bytes()),
 			"validation_duration", validationDuration,
 		)
+	}
+
+	// Block forged successfully
+	if f.metrics != nil {
+		f.metrics.forgeForged.Inc()
+		f.metrics.blockSizeBytes.Observe(
+			float64(len(blockCbor)),
+		)
+		f.metrics.blockTxCount.Observe(
+			float64(len(block.Transactions())),
+		)
+	}
+	if f.blockForged != nil {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					f.logger.Error(
+						"blockForged observer panic",
+						"panic", r,
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
+			f.blockForged(block, blockCbor, time.Since(forgeStartTime))
+		}()
 	}
 
 	// Add block to chain and broadcast
