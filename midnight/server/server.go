@@ -193,8 +193,13 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) Stop(ctx context.Context) error {
 	timeout := s.config.ShutdownTimeout
 	if deadline, ok := ctx.Deadline(); ok {
+		// An already-elapsed deadline means the node's shutdown budget is
+		// spent, so escalate straight to a hard stop rather than waiting out
+		// the default grace window.
 		if remaining := time.Until(deadline); remaining > 0 {
 			timeout = remaining
+		} else {
+			timeout = 0
 		}
 	}
 	s.gracefulStop(timeout)

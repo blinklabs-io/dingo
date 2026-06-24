@@ -627,11 +627,12 @@ When `Node.Run()` is called, components are initialized in this order:
 16. Stalled client recycler (background goroutine)
 17. UTxO RPC server (if API storage mode and port configured)
 18. Bark C2/archive server (if port configured)
-19. Blockfrost API (if API storage mode and port configured)
-20. Mesh API (if API storage mode and port configured)
-21. Off-chain metadata fetcher (if API storage mode)
-22. Block forger + leader election (if block producer mode)
-23. Wait for shutdown signal
+19. Midnight gRPC server (if API storage mode and midnight port configured)
+20. Blockfrost API (if API storage mode and port configured)
+21. Mesh API (if API storage mode and port configured)
+22. Off-chain metadata fetcher (if API storage mode)
+23. Block forger + leader election (if block producer mode)
+24. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -642,8 +643,8 @@ Graceful shutdown proceeds in phases:
 Phase 1: Stop accepting new work
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
-  Bark C2/archive server, Blockfrost API, Mesh API,
-  off-chain metadata fetcher
+  Bark C2/archive server, Midnight gRPC server,
+  Blockfrost API, Mesh API, off-chain metadata fetcher
 
 Phase 2: Drain and close connections
   Mempool, ConnectionManager

@@ -160,7 +160,9 @@ func TestShutdownOnContextCancel(t *testing.T) {
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	require.NoError(t, srv.Start(ctx))
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
 	addr := net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
 
 	// While running, the stub answers Unimplemented.
