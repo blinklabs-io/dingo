@@ -1124,6 +1124,34 @@ func importSnapShots(
 
 	epoch := cfg.State.Epoch
 
+	if allowPoolFallback {
+		// Fallback pool import path runs BEFORE snapshot processing so
+		// that pool rows exist in the DB when ResolvePoolRewardAccountAutoVotes
+		// runs for the current-epoch snapshot. Importing pools after
+		// snapshot processing would leave the current-epoch snapshot rows
+		// resolved against an empty pool table, producing false
+		// Resolved=true, AutoVote=None entries.
+		snapshotPools := collectPoolsFromSnapshots(snapshots)
+		if len(snapshotPools) > 0 {
+			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+				return fmt.Errorf(
+					"importing pools from snapshots: %w",
+					err,
+				)
+			}
+			progress(ImportProgress{
+				Stage:   "pools",
+				Current: len(snapshotPools),
+				Total:   len(snapshotPools),
+				Percent: 100,
+				Description: fmt.Sprintf(
+					"%d pools imported from snapshots",
+					len(snapshotPools),
+				),
+			})
+		}
+	}
+
 	// Mithril exports the current epoch's Mark/Set/Go bundle, but
 	// Dingo persists only Mark snapshots and resolves Set/Go via
 	// epoch offsets:
@@ -1191,31 +1219,6 @@ func importSnapShots(
 		})
 	}
 
-	if allowPoolFallback {
-		// Fallback pool import path:
-		// Snapshot data includes pool parameters and remains reliable when
-		// cert-state pool data is unavailable.
-		snapshotPools := collectPoolsFromSnapshots(snapshots)
-		if len(snapshotPools) > 0 {
-			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
-				return fmt.Errorf(
-					"importing pools from snapshots: %w",
-					err,
-				)
-			}
-			progress(ImportProgress{
-				Stage:   "pools",
-				Current: len(snapshotPools),
-				Total:   len(snapshotPools),
-				Percent: 100,
-				Description: fmt.Sprintf(
-					"%d pools imported from snapshots",
-					len(snapshotPools),
-				),
-			})
-		}
-	}
-
 	return nil
 }
 
@@ -1244,20 +1247,25 @@ func persistImportedSnapshot(
 	}
 
 	if len(poolSnapshots) > 0 {
-		// CIP-1694 reward-account auto-vote can only be faithfully
-		// resolved when live Pool/Account state matches the row's
-		// target boundary. All three import targets are persisted as
-		// "mark" rows (only the target epoch differs: N, N-1, N-2),
-		// so gating on the source rotation name would be fragile —
-		// every row's SnapshotType is "mark" by the time it reaches
-		// this function. The correct semantic check is "is the
-		// target epoch equal to the current import-time epoch?"
-		// Only that one row's boundary matches the live state we'd
-		// read; the other two represent older boundaries and must be
-		// left RewardAccountAutoVoteResolved=false so the tally
-		// treats them as PoolRewardAccountAutoVoteNone (implicit no)
-		// instead of freezing today's delegation map onto an older
-		// boundary.
+		// CIP-1694 reward-account auto-vote resolution.
+		//
+		// Current-epoch (N): live Pool/Account rows in the DB match the
+		// N-epoch boundary (imported from the snapshot's own cert-state,
+		// or from the snapshot-pool fallback which runs before this loop),
+		// so we resolve directly against them.
+		//
+		// Historical N-1/N-2 (stored as "mark" rows for older target
+		// epochs): faithful resolution needs the reward account's DRep
+		// delegation AS OF the historical boundary. That state is not
+		// available after a Mithril restore — cert history tables are
+		// empty for pre-snapshot epochs and #1902's persisted reward
+		// state does not capture reward-account DRep delegation. Resolving
+		// against live DRep delegation and marking the row authoritative
+		// would freeze a possibly-changed value onto a historical boundary.
+		// We therefore leave these rows RewardAccountAutoVoteResolved=false
+		// so the tally treats them as PoolRewardAccountAutoVoteNone
+		// (implicit no), matching pre-CIP-1694 behaviour, until per-boundary
+		// DRep-delegation state is persisted (follow-up to #1902).
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
 				poolSnapshots, txn,
@@ -1422,7 +1430,15 @@ func collectPoolsFromSnapshots(
 				continue
 			}
 			hexKey := hex.EncodeToString(pool.PoolKeyHash)
-			seen[hexKey] = *pool
+			// First-seen wins: Mark is iterated first, so Mark-era pool
+			// params (including the reward account) take precedence over
+			// older Set/Go params when a pool appears in multiple
+			// snapshots. The fallback import feeds the current-epoch
+			// auto-vote resolver, which must read the current (Mark)
+			// reward account, not a historical one.
+			if _, ok := seen[hexKey]; !ok {
+				seen[hexKey] = *pool
+			}
 		}
 	}
 	ret := make([]ParsedPool, 0, len(seen))
