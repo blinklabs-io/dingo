@@ -62,6 +62,14 @@ type TallyContext struct {
 	StakeEpoch     uint64
 	CurrentEpoch   uint64
 	CommitteeState *CommitteeVotingState
+	// DRepState and SPOState carry the proposal-independent voting
+	// denominators (DRep voting power, pool stake snapshot) so they are
+	// computed once per epoch tick and reused across every proposal's
+	// tally. When nil, the tally functions lazily load them, preserving
+	// standalone behavior. ProcessEpoch precomputes both before the
+	// proposal loop, mirroring CommitteeState.
+	DRepState *DRepVotingState
+	SPOState  *SPOVotingState
 }
 
 // CommitteeVotingState is the ratification view of the seated CC:
@@ -190,17 +198,43 @@ func TallyProposal(
 	return tally, nil
 }
 
-// tallyDRepVotes sums voting power for regular DReps and the predefined
-// AlwaysAbstain / AlwaysNoConfidence DRep options. Non-voting regular
-// DReps are not counted toward any bucket.
-func tallyDRepVotes(
-	ctx *TallyContext,
-	votes []*models.GovernanceVote,
-	tally *ProposalTally,
-) error {
-	allDreps, err := ctx.DB.GetActiveDreps(ctx.Txn)
+// DRepVotingState is the proposal-independent DRep voting view for an
+// epoch tick: the active DReps, their stake-weighted voting power, and
+// the predefined AlwaysAbstain / AlwaysNoConfidence powers. DRep voting
+// power is a function of the stake snapshot, not of any individual
+// proposal, so this is computed once per epoch and reused across every
+// proposal's tally. Recomputing it per proposal ran the heavy
+// account/utxo voting-power aggregation once for every active proposal;
+// on a freshly Mithril-restored database at an epoch boundary with many
+// active proposals that stalled the epoch rollover (and therefore the
+// whole ledger) for hours.
+type DRepVotingState struct {
+	// Dreps are the active-at-epoch regular DReps (active flag set and
+	// not expired by inactivity).
+	Dreps []*models.Drep
+	// Powers maps StakeCredentialRef.MapKey() to stake-weighted voting
+	// power for every entry in Dreps.
+	Powers map[string]uint64
+	// AbstainPower / NoConfidencePower are the predefined DRep option
+	// powers (AlwaysAbstain / AlwaysNoConfidence).
+	AbstainPower      uint64
+	NoConfidencePower uint64
+}
+
+// LoadDRepVotingState computes the DRep voting denominators for the
+// given epoch. It is the single heavy query (active DReps + batched
+// voting power) hoisted out of the per-proposal tally path.
+func LoadDRepVotingState(
+	db *database.Database,
+	txn *database.Txn,
+	currentEpoch uint64,
+) (*DRepVotingState, error) {
+	if db == nil {
+		return nil, errors.New("nil database")
+	}
+	allDreps, err := db.GetActiveDreps(txn)
 	if err != nil {
-		return fmt.Errorf("get active dreps: %w", err)
+		return nil, fmt.Errorf("get active dreps: %w", err)
 	}
 
 	// GetActiveDreps filters by the `active` flag (cleared only on
@@ -210,12 +244,13 @@ func tallyDRepVotes(
 	// never had activity recorded and is treated as unexpired.
 	dreps := make([]*models.Drep, 0, len(allDreps))
 	for _, drep := range allDreps {
-		if !drepActiveAtEpoch(drep, ctx.CurrentEpoch) {
+		if !drepActiveAtEpoch(drep, currentEpoch) {
 			continue
 		}
 		dreps = append(dreps, drep)
 	}
 
+	powers := make(map[string]uint64)
 	if len(dreps) > 0 {
 		// Batch-fetch voting power for all active DReps in one query to
 		// avoid the N+1 round-trip that the per-DRep lookup produced.
@@ -223,11 +258,50 @@ func tallyDRepVotes(
 		for i, drep := range dreps {
 			creds[i] = models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
 		}
-		powers, err := ctx.DB.GetDRepVotingPowerBatch(creds, ctx.Txn)
+		powers, err = db.GetDRepVotingPowerBatch(creds, txn)
 		if err != nil {
-			return fmt.Errorf("batch drep voting power: %w", err)
+			return nil, fmt.Errorf("batch drep voting power: %w", err)
 		}
+	}
 
+	virtualPowers, err := db.GetDRepVotingPowerByType(
+		[]uint64{
+			models.DrepTypeAlwaysAbstain,
+			models.DrepTypeAlwaysNoConfidence,
+		},
+		txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("predefined drep voting power: %w", err)
+	}
+	return &DRepVotingState{
+		Dreps:             dreps,
+		Powers:            powers,
+		AbstainPower:      virtualPowers[models.DrepTypeAlwaysAbstain],
+		NoConfidencePower: virtualPowers[models.DrepTypeAlwaysNoConfidence],
+	}, nil
+}
+
+// tallyDRepVotes sums voting power for regular DReps and the predefined
+// AlwaysAbstain / AlwaysNoConfidence DRep options. Non-voting regular
+// DReps are not counted toward any bucket. The proposal-independent
+// voting power is taken from ctx.DRepState when present (precomputed
+// once per epoch by ProcessEpoch); otherwise it is loaded lazily.
+func tallyDRepVotes(
+	ctx *TallyContext,
+	votes []*models.GovernanceVote,
+	tally *ProposalTally,
+) error {
+	state := ctx.DRepState
+	if state == nil {
+		var err error
+		state, err = LoadDRepVotingState(ctx.DB, ctx.Txn, ctx.CurrentEpoch)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(state.Dreps) > 0 {
 		// Index votes by full DRep credential identity for O(1) lookup.
 		voteByCred := make(map[string]uint8, len(votes))
 		for _, v := range votes {
@@ -238,9 +312,9 @@ func tallyDRepVotes(
 			voteByCred[ref.MapKey()] = v.Vote
 		}
 
-		for _, drep := range dreps {
+		for _, drep := range state.Dreps {
 			ref := models.StakeCredentialRef{Tag: drep.CredentialTag, Key: drep.Credential}
-			power := powers[ref.MapKey()]
+			power := state.Powers[ref.MapKey()]
 			tally.DRepTotalStake += power
 
 			vote, voted := voteByCred[ref.MapKey()]
@@ -258,18 +332,8 @@ func tallyDRepVotes(
 		}
 	}
 
-	virtualPowers, err := ctx.DB.GetDRepVotingPowerByType(
-		[]uint64{
-			models.DrepTypeAlwaysAbstain,
-			models.DrepTypeAlwaysNoConfidence,
-		},
-		ctx.Txn,
-	)
-	if err != nil {
-		return fmt.Errorf("predefined drep voting power: %w", err)
-	}
-	abstainPower := virtualPowers[models.DrepTypeAlwaysAbstain]
-	noConfidencePower := virtualPowers[models.DrepTypeAlwaysNoConfidence]
+	abstainPower := state.AbstainPower
+	noConfidencePower := state.NoConfidencePower
 	tally.DRepTotalStake += abstainPower + noConfidencePower
 	tally.DRepAbstainStake += abstainPower
 	if noConfidencePower > 0 {
@@ -306,29 +370,63 @@ func tallyDRepVotes(
 // changes its reward account between StakeEpoch and the ratification
 // epoch does not retroactively shift the tally, matching
 // cardano-ledger's ssDelegations/ssDReps semantics.
+// SPOVotingState is the proposal-independent SPO voting view for an
+// epoch tick: the pool stake distribution snapshot ("mark" at
+// StakeEpoch) and its total stake. Like DRepVotingState it is computed
+// once per epoch and reused across every proposal's tally.
+type SPOVotingState struct {
+	// Dist is the pool stake snapshot rows, each carrying the pool's
+	// stake and its pre-resolved reward-account auto-vote.
+	Dist []*models.PoolStakeSnapshot
+	// TotalStake is the sum of every snapshot row's stake.
+	TotalStake uint64
+}
+
+// LoadSPOVotingState reads the "mark" pool stake snapshot for stakeEpoch
+// and sums its total stake.
+func LoadSPOVotingState(
+	db *database.Database,
+	txn *database.Txn,
+	stakeEpoch uint64,
+) (*SPOVotingState, error) {
+	if db == nil {
+		return nil, errors.New("nil database")
+	}
+	var metaTxn types.Txn
+	if txn != nil {
+		metaTxn = txn.Metadata()
+	}
+	dist, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		stakeEpoch,
+		"mark",
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get pool stake snapshot: %w", err)
+	}
+	var total uint64
+	for _, s := range dist {
+		total += uint64(s.TotalStake)
+	}
+	return &SPOVotingState{Dist: dist, TotalStake: total}, nil
+}
+
 func tallySPOVotes(
 	ctx *TallyContext,
 	votes []*models.GovernanceVote,
 	tally *ProposalTally,
 ) error {
-	var metaTxn types.Txn
-	if ctx.Txn != nil {
-		metaTxn = ctx.Txn.Metadata()
-	}
-	dist, err := ctx.DB.Metadata().GetPoolStakeSnapshotsByEpoch(
-		ctx.StakeEpoch,
-		"mark",
-		metaTxn,
-	)
-	if err != nil {
-		return fmt.Errorf("get pool stake snapshot: %w", err)
+	state := ctx.SPOState
+	if state == nil {
+		var err error
+		state, err = LoadSPOVotingState(ctx.DB, ctx.Txn, ctx.StakeEpoch)
+		if err != nil {
+			return err
+		}
 	}
 
-	var total uint64
-	for _, s := range dist {
-		total += uint64(s.TotalStake)
-	}
-	tally.SPOTotalStake = total
+	dist := state.Dist
+	tally.SPOTotalStake = state.TotalStake
 	if len(dist) == 0 {
 		return nil
 	}
