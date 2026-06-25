@@ -81,8 +81,8 @@ type Utxo struct {
 	CollateralReturnForTxID *uint        `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
 	TxId                    []byte       `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
 	PaymentKey              []byte       `gorm:"index;size:28"`
-	StakingKey              []byte       `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3"`
-	CredentialTag           uint8        `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2"`
+	StakingKey              []byte       `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_staking_deleted_amount,priority:2"`
+	CredentialTag           uint8        `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2;index:idx_utxo_staking_deleted_amount,priority:1"`
 	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
 	Cbor                    []byte       `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
 	DatumHash               []byte       `gorm:"size:32"` // Optional datum hash (32 bytes)
@@ -93,8 +93,8 @@ type Utxo struct {
 	CollateralByTxId        []byte       `gorm:"index;size:32"`
 	ID                      uint         `gorm:"primarykey"`
 	AddedSlot               uint64       `gorm:"index"`
-	DeletedSlot             uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_deleted_payment_script,priority:1"`
-	Amount                  types.Uint64 `gorm:"index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:3"`
+	DeletedSlot             uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_staking_deleted_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:1"`
+	Amount                  types.Uint64 `gorm:"index:idx_utxo_deleted_staking_amount,priority:4;index:idx_utxo_staking_deleted_amount,priority:4;index:idx_utxo_deleted_payment_script,priority:3"`
 	OutputIdx               uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
 	// PaymentScript is true when the output's payment credential is a
 	// script hash (as opposed to a key hash). It is derived from the

@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -154,6 +155,85 @@ func TestSqliteGetDRepVotingPowerBatchDoesNotMultiplyRewardAcrossUTxOs(t *testin
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1200), powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()])
+}
+
+func TestSqliteGetDRepVotingPowerBatchUsesStakeCredentialUtxoIndex(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	drepCred := []byte("drep_index_plan_123456789012345678901234")
+	otherDrepCred := []byte("drep_index_plan_other_123456789012345678")
+	stakeKey := []byte("stake_index_plan_12345678901234567890123")
+
+	require.NoError(t, store.SetDrep(0, drepCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.SetDrep(1, otherDrepCred, 1000, "", nil, true, nil))
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Drep:          drepCred,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Reward:        700,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Drep:          otherDrepCred,
+		DrepType:      models.DrepTypeScriptHash,
+		Reward:        1100,
+		Active:        true,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_drep_index_plan_12345678901234567890"),
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Amount:        300,
+		OutputIdx:     0,
+		AddedSlot:     1000,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId:          []byte("tx_drep_index_plan_other_1234567890123"),
+		StakingKey:    stakeKey,
+		CredentialTag: 1,
+		Amount:        900,
+		OutputIdx:     1,
+		AddedSlot:     1000,
+	}).Error)
+
+	powers, err := store.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{{Tag: 0, Key: drepCred}},
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		uint64(1000),
+		powers[models.StakeCredentialRef{Tag: 0, Key: drepCred}.MapKey()],
+	)
+	require.Contains(t, getDRepVotingPowerBatchSQL, "INDEXED BY "+utxoStakingLiveAmountIndex)
+
+	planRows, err := store.DB().
+		Raw(
+			"EXPLAIN QUERY PLAN "+getDRepVotingPowerBatchSQL,
+			[][]byte{drepCred},
+			[][]byte{drepCred},
+		).Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.Contains(t, plan, utxoStakingLiveAmountIndex)
+	assert.NotContains(t, plan, "idx_utxo_deleted_staking_amount")
 }
 
 // Voting power must aggregate UTxOs by the full stake credential identity.

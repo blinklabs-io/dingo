@@ -196,6 +196,11 @@ var Manifest = []Index{
 		Critical: true,
 	},
 	{
+		Model: &models.Utxo{}, Name: "idx_utxo_staking_deleted_amount", Table: "utxo",
+		Notes:    "DRep voting-power live UTxO SUM; live query path",
+		Critical: true,
+	},
+	{
 		Model: &models.Utxo{}, Name: "idx_utxo_deleted_payment_script", Table: "utxo",
 		Notes:    "Script-locked supply SUM (blockfrost /network); live query path",
 		Critical: true,
