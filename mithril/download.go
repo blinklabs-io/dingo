@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -277,7 +278,11 @@ func isTransientDownloadError(err error) bool {
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	return strings.Contains(err.Error(), "connection reset by peer")
+	// Connection reset by peer — check via the syscall errno so that
+	// wrapped errors (url.Error → net.OpError → os.SyscallError → errno)
+	// are still detected without relying on string matching.
+	var errno syscall.Errno
+	return errors.As(err, &errno) && errno == syscall.ECONNRESET
 }
 
 // transientRetryDelay returns the backoff duration for the given
@@ -446,13 +451,16 @@ func DownloadSnapshot(
 		currentSize := downloadFileSize(destPath)
 		madeProgress := currentSize > startSize ||
 			currentSize > lastObservedSize
+		// Progress resets both retry counters symmetrically: partial
+		// forward progress proves we are not permanently stuck, so the
+		// budget for each failure class is restored from scratch.
 		if madeProgress {
 			lastObservedSize = currentSize
+			consecutiveIdleRetries = 0
+			transientRetries = 0
 		}
 		if errors.Is(err, errDownloadIdleTimeout) {
-			if madeProgress {
-				consecutiveIdleRetries = 0
-			} else {
+			if !madeProgress {
 				consecutiveIdleRetries++
 			}
 			if consecutiveIdleRetries > maxIdleRetries {
@@ -470,7 +478,9 @@ func DownloadSnapshot(
 				"error", err,
 			)
 		} else if isTransientDownloadError(err) {
-			transientRetries++
+			if !madeProgress {
+				transientRetries++
+			}
 			if transientRetries > maxTransientRetries {
 				return "", err
 			}

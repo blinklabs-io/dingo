@@ -819,12 +819,17 @@ func fetchImmutableArchive(
 	archiveDir string,
 	extractDir string,
 ) error {
+	// Use the main logger (not the per-archive quiet logger) for download
+	// retries so that transient-error warnings include immutable_file_number
+	// and reach the operator. extractLogger (discarded) is still used for
+	// the extraction step to suppress per-file INFO noise.
+	dlLogger := cfg.Logger.With("immutable_file_number", num)
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
 			URL:                 location.ImmutableArchiveURI(num),
 			DestDir:             archiveDir,
 			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
-			Logger:              extractLogger,
+			Logger:              dlLogger,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,

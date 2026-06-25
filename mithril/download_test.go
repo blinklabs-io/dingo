@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -452,7 +453,7 @@ func TestIsTransientDownloadError(t *testing.T) {
 		},
 		{
 			name:      "connection reset",
-			err:       fmt.Errorf("downloading snapshot: connection reset by peer"),
+			err:       fmt.Errorf("downloading snapshot: %w", syscall.ECONNRESET),
 			transient: true,
 		},
 		{
