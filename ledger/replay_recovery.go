@@ -248,7 +248,7 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 	}
 	ls.chainsyncMutex.Lock()
 	ls.resetChainsyncResyncState()
-	ls.chainsyncState = SyncingChainsyncState
+	ls.setChainsyncState(SyncingChainsyncState)
 	ls.chainsyncMutex.Unlock()
 	if ls.config.EventBus != nil {
 		var activeConnId ouroboros.ConnectionId

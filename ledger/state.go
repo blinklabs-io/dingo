@@ -1735,7 +1735,7 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 		// the trust anchor — we never rewind below it — so the
 		// authoritative deletion slot is the rollback target or the
 		// Mithril boundary, whichever is later.
-		deleteSlot := max(ls.mithrilLedgerSlot, point.Slot)
+		deleteSlot := max(mithrilLedgerSlot, point.Slot)
 		err := ls.db.UtxosDeleteRolledback(deleteSlot, txn)
 		if err != nil {
 			return fmt.Errorf("remove rolled-back UTxOs: %w", err)

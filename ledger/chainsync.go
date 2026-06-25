@@ -172,7 +172,7 @@ func (ls *LedgerState) handleEventChainsync(evt event.Event) {
 				// can negotiate a fresh intersection rather than
 				// continuing to send the same rollback point.
 				ls.resetChainsyncResyncState()
-				ls.chainsyncState = SyncingChainsyncState
+				ls.setChainsyncState(SyncingChainsyncState)
 				if ls.config.EventBus != nil {
 					ls.config.EventBus.Publish(
 						event.ChainsyncResyncEventType,
@@ -246,6 +246,41 @@ func (ls *LedgerState) isConnectionLive(
 		return true
 	}
 	return ls.config.ConnectionLiveFunc(connId)
+}
+
+func (ls *LedgerState) setChainsyncState(
+	state ChainsyncState,
+) ChainsyncState {
+	ls.Lock()
+	previous := ls.chainsyncState
+	ls.chainsyncState = state
+	ls.Unlock()
+	return previous
+}
+
+func (ls *LedgerState) setChainsyncStateIf(
+	current ChainsyncState,
+	next ChainsyncState,
+) bool {
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.chainsyncState != current {
+		return false
+	}
+	ls.chainsyncState = next
+	return true
+}
+
+func (ls *LedgerState) validationStateSnapshot() (bool, uint64) {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.validationEnabled, ls.mithrilLedgerSlot
+}
+
+func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.mithrilLedgerSlot
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
@@ -1197,7 +1232,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			"connection_id", e.ConnectionId.String(),
 		)
 		ls.resetChainsyncResyncState()
-		ls.chainsyncState = SyncingChainsyncState
+		ls.setChainsyncState(SyncingChainsyncState)
 		if ls.config.EventBus != nil {
 			ls.config.EventBus.Publish(
 				event.ChainsyncResyncEventType,
@@ -1213,7 +1248,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		return nil
 	}
 
-	if ls.chainsyncState == SyncingChainsyncState {
+	if ls.setChainsyncStateIf(
+		SyncingChainsyncState,
+		RollbackChainsyncState,
+	) {
 		ls.config.Logger.Info(
 			fmt.Sprintf(
 				"ledger: rolling back to %d.%s",
@@ -1221,7 +1259,6 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				hex.EncodeToString(e.Point.Hash),
 			),
 		)
-		ls.chainsyncState = RollbackChainsyncState
 	}
 	if err := ls.rollbackChainAndState(e.Point); err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -1235,7 +1272,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"connection_id", e.ConnectionId.String(),
 			)
 			ls.resetChainsyncResyncState()
-			ls.chainsyncState = SyncingChainsyncState
+			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
 				ls.config.EventBus.Publish(
 					event.ChainsyncResyncEventType,
@@ -1263,7 +1300,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			}
 			if reconciled {
 				ls.resetChainsyncResyncState()
-				ls.chainsyncState = SyncingChainsyncState
+				ls.setChainsyncState(SyncingChainsyncState)
 				return nil
 			}
 			// The peer's chain has diverged beyond K blocks from
@@ -1285,7 +1322,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			// we are still syncing. Leaving RollbackChainsyncState
 			// would cause a spurious "switched to fork" log and
 			// fork metric increment on the next block header.
-			ls.chainsyncState = SyncingChainsyncState
+			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
 				ls.config.EventBus.Publish(
 					event.ChainsyncResyncEventType,
@@ -1319,9 +1356,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 			//     the trust anchor.
 			// A zero tip means the peer's tip is unknown; treat it as
 			// divergent to fail safe.
+			mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
 			reason := event.ChainsyncResyncReasonRollbackExceedsMithril
 			peerTipSlot := e.Tip.Point.Slot
-			if peerTipSlot > 0 && peerTipSlot < ls.mithrilLedgerSlot {
+			if peerTipSlot > 0 && peerTipSlot < mithrilLedgerSlot {
 				reason = event.ChainsyncResyncReasonPeerTipBehindMithril
 				ls.config.Logger.Warn(
 					"chainsync peer tip behind Mithril trust boundary, treating peer chain as stale",
@@ -1329,7 +1367,7 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					"slot", e.Point.Slot,
 					"hash", hex.EncodeToString(e.Point.Hash),
 					"peer_tip_slot", peerTipSlot,
-					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"mithril_ledger_slot", mithrilLedgerSlot,
 					"connection_id", e.ConnectionId.String(),
 				)
 			} else {
@@ -1339,12 +1377,12 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					"slot", e.Point.Slot,
 					"hash", hex.EncodeToString(e.Point.Hash),
 					"peer_tip_slot", peerTipSlot,
-					"mithril_ledger_slot", ls.mithrilLedgerSlot,
+					"mithril_ledger_slot", mithrilLedgerSlot,
 					"connection_id", e.ConnectionId.String(),
 				)
 			}
 			ls.resetChainsyncResyncState()
-			ls.chainsyncState = SyncingChainsyncState
+			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
 				ls.config.EventBus.Publish(
 					event.ChainsyncResyncEventType,
@@ -1717,7 +1755,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		}
 	}
 
-	if ls.chainsyncState == RollbackChainsyncState {
+	if ls.setChainsyncState(SyncingChainsyncState) == RollbackChainsyncState {
 		ls.config.Logger.Info(
 			fmt.Sprintf(
 				"ledger: switched to fork at %d.%s",
@@ -1727,7 +1765,6 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		)
 		ls.metrics.forks.Add(1)
 	}
-	ls.chainsyncState = SyncingChainsyncState
 	ls.recordPeerHeaderHistory(e)
 	if ls.shouldBufferHeaderEvent(e) {
 		return nil
@@ -1956,10 +1993,11 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 }
 
 func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
-	if !ls.validationEnabled {
+	validationEnabled, mithrilLedgerSlot := ls.validationStateSnapshot()
+	if !validationEnabled {
 		return false
 	}
-	return ls.mithrilLedgerSlot == 0 || slot > ls.mithrilLedgerSlot
+	return mithrilLedgerSlot == 0 || slot > mithrilLedgerSlot
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -2108,7 +2146,7 @@ func (ls *LedgerState) tryResolveFork(
 			}
 			if reconciled {
 				ls.resetChainsyncResyncState()
-				ls.chainsyncState = SyncingChainsyncState
+				ls.setChainsyncState(SyncingChainsyncState)
 				return true, nil
 			}
 			// Fork exceeds security parameter K. We must not
@@ -2159,7 +2197,7 @@ func (ls *LedgerState) tryResolveFork(
 
 	// Mark state as rollback so the next block header event logs
 	// "switched to fork" and increments the fork metric.
-	ls.chainsyncState = RollbackChainsyncState
+	ls.setChainsyncState(RollbackChainsyncState)
 
 	// Rollback succeeded — re-add the known peer fork segment from the
 	// common ancestor forward. Re-adding only the latest mismatching header
@@ -2235,7 +2273,8 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// Verify block header cryptographic proofs (VRF, KES).
 	// Skip during historical sync (validationEnabled=false) because
 	// historical blocks were already validated by the network.
-	if ls.validationEnabled {
+	validationEnabled, _ := ls.validationStateSnapshot()
+	if validationEnabled {
 		// Chainsync already verified the queued header before blockfetch started.
 		// When the fetched block matches that first queued header by point, a
 		// second VRF/KES verification is redundant. Chain insertion still checks
