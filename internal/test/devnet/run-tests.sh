@@ -87,8 +87,8 @@ fi
 # Start DevNet
 # --------------------------------------------------------------------------- #
 
-log "Building Dingo Docker image..."
-docker compose -f "${COMPOSE_FILE}" build configurator dingo-producer
+log "Building DevNet Docker images..."
+docker compose -f "${COMPOSE_FILE}" build configurator dingo-producer txpump
 
 log "Starting DevNet containers..."
 docker compose -f "${COMPOSE_FILE}" up -d
@@ -126,6 +126,21 @@ if [[ ${ELAPSED} -ge ${MAX_WAIT} ]]; then
   docker compose -f "${COMPOSE_FILE}" logs --tail=100
   die "Node health check timeout"
 fi
+
+# --------------------------------------------------------------------------- #
+# Verify txpump is running
+# --------------------------------------------------------------------------- #
+
+log "Checking txpump is running..."
+TXPUMP_RUNNING=$(docker compose -f "${COMPOSE_FILE}" ps --status running --quiet txpump 2>/dev/null || true)
+if [[ -z "${TXPUMP_RUNNING}" ]]; then
+  log "txpump container status:"
+  docker compose -f "${COMPOSE_FILE}" ps txpump
+  log "txpump logs:"
+  docker compose -f "${COMPOSE_FILE}" logs txpump
+  die "txpump is not running — mempool traffic will be absent; aborting"
+fi
+log "txpump is running"
 
 # --------------------------------------------------------------------------- #
 # Run tests

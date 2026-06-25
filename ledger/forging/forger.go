@@ -92,6 +92,9 @@ type BlockForger struct {
 	forgeSyncToleranceSlots     uint64
 	forgeStaleGapThresholdSlots uint64
 
+	// Optional self-validation before adoption (nil = disabled)
+	blockValidator BlockValidator
+
 	// State
 	mu      sync.RWMutex
 	running bool
@@ -127,6 +130,14 @@ type BlockForgedObserver func(
 	cbor []byte,
 	latency time.Duration,
 )
+
+// BlockValidator validates a locally-forged block before it is adopted
+// onto the local chain and diffused to peers. If ValidateForgedBlock
+// returns a non-nil error the block is dropped and neither adopted nor
+// diffused.
+type BlockValidator interface {
+	ValidateForgedBlock(block ledger.Block, blockCbor []byte) error
+}
 
 // LeiosProduceChecker is the forge-loop seam into the Leios pipeline.
 // It reports whether the slot leader may produce an endorser block for
@@ -194,6 +205,12 @@ type ForgerConfig struct {
 	// chain tip is far ahead of the slot clock. Zero uses the default.
 	ForgeStaleGapThresholdSlots uint64
 
+	// BlockValidator, when non-nil, validates the forged block (VRF/KES
+	// header crypto, body-hash consistency, per-tx ledger rules) before
+	// AddBlock is called. A validation failure drops the block without
+	// adopting or diffusing it. Nil disables self-validation (default).
+	BlockValidator BlockValidator
+
 	// Prometheus metrics registry (optional)
 	PromRegistry prometheus.Registerer
 }
@@ -222,6 +239,7 @@ func NewBlockForger(cfg ForgerConfig) (*BlockForger, error) {
 		leiosChecker:     cfg.LeiosProduceChecker,
 		leiosEBCaster:    cfg.LeiosEBBroadcaster,
 		leiosMempool:     cfg.LeiosMempool,
+		blockValidator:   cfg.BlockValidator,
 	}
 	if cfg.ForgeSyncToleranceSlots == 0 {
 		cfg.ForgeSyncToleranceSlots = forgeSyncToleranceSlots
@@ -568,6 +586,43 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	if err != nil {
 		f.incCouldNotForge()
 		return fmt.Errorf("failed to build block: %w", err)
+	}
+
+	// Optionally self-validate before adoption and diffusion.
+	// Runs here — before success metrics and the blockForged observer — so
+	// that forgeForged and RecordForgedBlock are never triggered for a block
+	// that is ultimately dropped.
+	if f.blockValidator != nil {
+		validateStart := time.Now()
+		blockHashStr := ""
+		if block != nil {
+			blockHashStr = hex.EncodeToString(block.Hash().Bytes())
+		}
+		validationErr := f.blockValidator.ValidateForgedBlock(block, blockCbor)
+		validationDuration := time.Since(validateStart)
+		if f.metrics != nil {
+			f.metrics.forgeValidationDuration.Observe(validationDuration.Seconds())
+		}
+		if validationErr != nil {
+			f.incCouldNotForge()
+			if f.metrics != nil {
+				f.metrics.forgeValidationFailed.Inc()
+			}
+			f.logger.Error(
+				"forged block failed self-validation, dropping block",
+				"slot", currentSlot,
+				"hash", blockHashStr,
+				"validation_duration", validationDuration,
+				"error", validationErr,
+			)
+			return fmt.Errorf("forged block self-validation failed: %w", validationErr)
+		}
+		f.logger.Info(
+			"forged block passed self-validation",
+			"slot", currentSlot,
+			"hash", blockHashStr,
+			"validation_duration", validationDuration,
+		)
 	}
 
 	// Block forged successfully

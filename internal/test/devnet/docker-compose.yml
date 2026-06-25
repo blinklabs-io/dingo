@@ -63,6 +63,7 @@ services:
       CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
       CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
       CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      DINGO_VALIDATE_FORGED_BLOCK: "true"
     volumes:
       - p1-configs:/configs:ro
       - ./topology/dingo-producer.json:/topology/topology.json:ro
@@ -126,9 +127,13 @@ services:
 
   txpump:
     build:
-      context: ../antithesis
-      dockerfile: Dockerfile.txpump
+      context: ../../..
+      dockerfile: internal/test/antithesis/Dockerfile.txpump
     container_name: devnet-txpump
+    init: true
+    # Named Docker volumes are root-owned on first mount; txpump writes
+    # /logs/txpump.log so the runtime user must be root.
+    user: "0:0"
     depends_on:
       dingo-producer:
         condition: service_healthy

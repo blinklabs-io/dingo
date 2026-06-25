@@ -16,7 +16,6 @@ FROM debian:bookworm-slim
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
-RUN useradd -m txpump
+RUN mkdir -p /logs
 COPY --from=build /code/txpump /bin/txpump
-USER txpump
 ENTRYPOINT ["/bin/txpump"]

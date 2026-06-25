@@ -156,6 +156,7 @@ var flagSpecs = []flagSpec{
 	uint64Flag("MaxKESEvolutions", "max-kes-evolutions", "maximum KES evolutions before certificate rotation"),
 	uint64Flag("ForgeSyncToleranceSlots", "forge-sync-tolerance-slots", "max slots behind tip before skipping block forging"),
 	uint64Flag("ForgeStaleGapThresholdSlots", "forge-stale-gap-threshold-slots", "slot gap threshold for stale slot clock alerts"),
+	boolFlag("ValidateForgedBlock", "validate-forged-block", "validate forged blocks before adoption and diffusion (header crypto, body hash, per-tx ledger rules)"),
 
 	// Leios voting (experimental)
 	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),

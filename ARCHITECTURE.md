@@ -1200,9 +1200,14 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 1. Waits for the next slot boundary using the wall-clock slot timer
 2. Checks leader eligibility via the `Election`
 3. Assembles a block from a neutral pending-transaction provider using `DefaultBlockBuilder`
-4. Broadcasts the forged block through the chain manager
+4. Optionally self-validates the forged block before adoption (see below)
+5. Broadcasts the forged block through the chain manager
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
+
+#### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
+
+When `validateForgedBlock` is enabled in config, the forger invokes `LedgerState.ValidateForgedBlock` between step 3 and step 5. This runs three checks: (a) VRF proof and KES signature verification of the block header, (b) body-hash non-zero guard, and (c) per-transaction ledger rule validation against the current UTxO state with an intra-block overlay so outputs created by earlier transactions in the same block are visible to later ones. A failing block is logged, counted in `dingo_forge_validation_failed_total`, and dropped without being adopted or diffused. Validation wall-clock time is recorded in the `dingo_forge_validation_duration_seconds` histogram. Disabled by default; intended for block producers who want defence-in-depth against builder bugs at the cost of additional forge-to-diffusion latency.
 
 ### Pool Credentials (`ledger/forging/keys.go`, `keystore/`)
 

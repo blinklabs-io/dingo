@@ -46,6 +46,10 @@ type forgingMetrics struct {
 	slotClockErrors  prometheus.Counter
 	tipGapSlots      prometheus.Gauge
 
+	// Self-validation before adoption (optional, nil when disabled)
+	forgeValidationDuration prometheus.Histogram
+	forgeValidationFailed   prometheus.Counter
+
 	// Leios EB forging outcomes
 	leiosEbForged  prometheus.Counter
 	leiosEbSkipped *prometheus.CounterVec
@@ -165,6 +169,21 @@ func initForgingMetrics(
 		prometheus.GaugeOpts{
 			Name: "dingo_forge_tip_gap_slots",
 			Help: "latest observed tip gap in slots",
+		},
+	)
+	m.forgeValidationDuration = factory.NewHistogram(
+		prometheus.HistogramOpts{
+			Name: "dingo_forge_validation_duration_seconds",
+			Help: "wall-clock time spent in forged-block self-validation (header crypto, body hash, per-tx); only recorded when validation is enabled",
+			Buckets: prometheus.ExponentialBuckets(
+				0.001, 2, 12,
+			), // 1ms to ~4s
+		},
+	)
+	m.forgeValidationFailed = factory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_forge_validation_failed_total",
+			Help: "forged blocks dropped because self-validation failed",
 		},
 	)
 	m.leiosEbForged = factory.NewCounter(

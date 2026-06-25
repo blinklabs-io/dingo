@@ -260,6 +260,15 @@ func (n *Node) initBlockForger(
 		leiosMempool = mempoolAdapter
 	}
 
+	// Wire self-validation when the operator opts in. The validator runs
+	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
+	var blockValidator forging.BlockValidator
+	if n.config.validateForgedBlock {
+		blockValidator = &forgedBlockValidatorAdapter{
+			ledgerState: n.ledgerState,
+		}
+	}
+
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
 		Mode:                        forging.ModeProduction,
@@ -272,6 +281,7 @@ func (n *Node) initBlockForger(
 		SlotClock:                   slotClock,
 		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
 		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
+		BlockValidator:              blockValidator,
 		PromRegistry:                n.config.promRegistry,
 		LeiosProduceChecker:         leiosChecker,
 		LeiosEBBroadcaster:          leiosEBCaster,
@@ -570,6 +580,20 @@ func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
 		return false, "", err
 	}
 	return dec.Allowed, dec.Reason, nil
+}
+
+// forgedBlockValidatorAdapter adapts ledger.LedgerState to
+// forging.BlockValidator so the forger can self-validate blocks before
+// adoption without importing the ledger package from within forging.
+type forgedBlockValidatorAdapter struct {
+	ledgerState *ledger.LedgerState
+}
+
+func (a *forgedBlockValidatorAdapter) ValidateForgedBlock(
+	block gledger.Block,
+	blockCbor []byte,
+) error {
+	return a.ledgerState.ValidateForgedBlock(block, blockCbor)
 }
 
 // epochNonceAdapter adapts ledger.LedgerState to forging.EpochNonceProvider.
