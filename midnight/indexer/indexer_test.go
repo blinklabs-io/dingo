@@ -200,7 +200,7 @@ func TestCNightCreate_HappyPath(t *testing.T) {
 	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
 
 	block := testBlock(1, 100, 0xAA)
-	idx.processBlock(block, []lcommon.Transaction{tx}, 1_000_000)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 1_000_000))
 
 	var creates []models.MidnightAssetCreate
 	require.NoError(t, store.DB().Find(&creates).Error)
@@ -227,13 +227,13 @@ func TestCNightSpend_HappyPath(t *testing.T) {
 	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 250)
 	dummyIn := buildInput(t, pad32("dddd0000"), 0)
 	createTx := buildTx(t, createTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
-	idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{createTx}, 1_000)
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{createTx}, 1_000))
 
 	// Block 2: spend the cNIGHT UTxO.
 	spendTxHash := pad32("eeee0000")
 	spendIn := buildInput(t, createTxHash, 0)
 	spendTx := buildTx(t, spendTxHash, []lcommon.TransactionInput{spendIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	idx.processBlock(testBlock(2, 200, 0x02), []lcommon.Transaction{spendTx}, 2_000)
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x02), []lcommon.Transaction{spendTx}, 2_000))
 
 	var spends []models.MidnightAssetSpend
 	require.NoError(t, store.DB().Find(&spends).Error)
@@ -262,7 +262,7 @@ func TestRegistration_HappyPath(t *testing.T) {
 	regTxHash := pad32("bbbb1111")
 	regTx := buildTx(t, regTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{regOut})
 
-	idx.processBlock(testBlock(5, 500, 0x05), []lcommon.Transaction{regTx}, 5_000)
+	require.NoError(t, idx.processBlock(testBlock(5, 500, 0x05), []lcommon.Transaction{regTx}, 5_000))
 
 	var regs []models.MidnightRegistration
 	require.NoError(t, store.DB().Find(&regs).Error)
@@ -292,7 +292,7 @@ func TestRegistration_WrongPolicy(t *testing.T) {
 		[]lcommon.TransactionInput{dummyIn},
 		[]lcommon.TransactionOutput{spoofedOut})
 
-	idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{spoofedTx}, 1_000)
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{spoofedTx}, 1_000))
 
 	var regs []models.MidnightRegistration
 	require.NoError(t, store.DB().Find(&regs).Error)
@@ -314,13 +314,13 @@ func TestDeregistration_HappyPath(t *testing.T) {
 	regOut := buildAuthOutput(t, authPolicy, testAuthAssetNameHex, datumCbor)
 	dummyIn := buildInput(t, pad32("ff000001"), 0)
 	regTx := buildTx(t, regTxHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{regOut})
-	idx.processBlock(testBlock(1, 100, 0x10), []lcommon.Transaction{regTx}, 1_000)
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x10), []lcommon.Transaction{regTx}, 1_000))
 
 	// Block 2: deregister (spend the registration UTxO).
 	deregTxHash := pad32("ee000002")
 	deregIn := buildInput(t, regTxHash, 0)
 	deregTx := buildTx(t, deregTxHash, []lcommon.TransactionInput{deregIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	idx.processBlock(testBlock(2, 200, 0x20), []lcommon.Transaction{deregTx}, 2_000)
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x20), []lcommon.Transaction{deregTx}, 2_000))
 
 	var deregs []models.MidnightDeregistration
 	require.NoError(t, store.DB().Find(&deregs).Error)
@@ -374,7 +374,7 @@ func TestMixedBlock_RelevantAndNonRelevant(t *testing.T) {
 		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 77)})
 
 	block := testBlock(10, 1000, 0xFF)
-	idx.processBlock(block, []lcommon.Transaction{plainTx, wrongTx, cnightTx}, 10_000)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{plainTx, wrongTx, cnightTx}, 10_000))
 
 	var creates []models.MidnightAssetCreate
 	require.NoError(t, store.DB().Find(&creates).Error)
@@ -402,7 +402,7 @@ func TestCNightCreate_Rollback(t *testing.T) {
 	dummyIn := buildInput(t, pad32("dd000000"), 0)
 	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{cnightOut})
 	block1 := testBlock(7, 700, 0x07)
-	idx.processBlock(block1, []lcommon.Transaction{tx}, 7_000)
+	require.NoError(t, idx.processBlock(block1, []lcommon.Transaction{tx}, 7_000))
 
 	var creates []models.MidnightAssetCreate
 	require.NoError(t, store.DB().Find(&creates).Error)
@@ -435,20 +435,20 @@ func TestCNightSpend_Rollback(t *testing.T) {
 	createTxHash := pad32("ee100001")
 	cnightOut := buildCNightOutput(t, testPolicyID, testAssetNameHex, 150)
 	block1 := testBlock(1, 100, 0x01)
-	idx.processBlock(block1,
+	require.NoError(t, idx.processBlock(block1,
 		[]lcommon.Transaction{buildTx(t, createTxHash,
 			[]lcommon.TransactionInput{buildInput(t, pad32("ee100000"), 0)},
 			[]lcommon.TransactionOutput{cnightOut})},
-		1_000)
+		1_000))
 
 	// Block 2: spend.
 	spendTxHash := pad32("ee200001")
 	block2 := testBlock(2, 200, 0x02)
-	idx.processBlock(block2,
+	require.NoError(t, idx.processBlock(block2,
 		[]lcommon.Transaction{buildTx(t, spendTxHash,
 			[]lcommon.TransactionInput{buildInput(t, createTxHash, 0)},
 			[]lcommon.TransactionOutput{anyOutput(t)})},
-		2_000)
+		2_000))
 
 	var spends []models.MidnightAssetSpend
 	require.NoError(t, store.DB().Find(&spends).Error)
@@ -478,11 +478,11 @@ func TestRegistration_Rollback(t *testing.T) {
 	regTxHash := pad32("ff100001")
 	regOut := buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)
 	block1 := testBlock(3, 300, 0x03)
-	idx.processBlock(block1,
+	require.NoError(t, idx.processBlock(block1,
 		[]lcommon.Transaction{buildTx(t, regTxHash,
 			[]lcommon.TransactionInput{buildInput(t, pad32("ff100000"), 0)},
 			[]lcommon.TransactionOutput{regOut})},
-		3_000)
+		3_000))
 
 	var regs []models.MidnightRegistration
 	require.NoError(t, store.DB().Find(&regs).Error)
@@ -511,20 +511,20 @@ func TestDeregistration_Rollback(t *testing.T) {
 	// Block 1: register.
 	regTxHash := pad32("cc100001")
 	block1 := testBlock(1, 100, 0x01)
-	idx.processBlock(block1,
+	require.NoError(t, idx.processBlock(block1,
 		[]lcommon.Transaction{buildTx(t, regTxHash,
 			[]lcommon.TransactionInput{buildInput(t, pad32("cc100000"), 0)},
 			[]lcommon.TransactionOutput{buildAuthOutput(t, testAuthPolicyID, testAuthAssetNameHex, datumCbor)})},
-		1_000)
+		1_000))
 
 	// Block 2: deregister.
 	deregTxHash := pad32("cc200001")
 	block2 := testBlock(2, 200, 0x02)
-	idx.processBlock(block2,
+	require.NoError(t, idx.processBlock(block2,
 		[]lcommon.Transaction{buildTx(t, deregTxHash,
 			[]lcommon.TransactionInput{buildInput(t, regTxHash, 0)},
 			[]lcommon.TransactionOutput{anyOutput(t)})},
-		2_000)
+		2_000))
 
 	var deregs []models.MidnightDeregistration
 	require.NoError(t, store.DB().Find(&deregs).Error)
@@ -613,7 +613,7 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 	spendTx := buildTx(t, pad32("5e0d0001"),
 		[]lcommon.TransactionInput{spendIn},
 		[]lcommon.TransactionOutput{anyOutput(t)})
-	idx.processBlock(testBlock(2, 200, 0xBB), []lcommon.Transaction{spendTx}, 2_000)
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0xBB), []lcommon.Transaction{spendTx}, 2_000))
 
 	var spends []models.MidnightAssetSpend
 	require.NoError(t, store.DB().Find(&spends).Error)

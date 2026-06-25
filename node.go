@@ -469,6 +469,13 @@ func (n *Node) Run(ctx context.Context) error {
 			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
 			},
+			FatalErrorFunc: func(err error) {
+				n.config.logger.Error(
+					"fatal midnight indexer error, initiating shutdown",
+					"error", err,
+				)
+				n.cancel()
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("creating midnight indexer: %w", err)

@@ -59,6 +59,10 @@ type Config struct {
 	// events, processing any blocks whose slot is >= the last checkpoint slot.
 	// Node.go provides this via database.ForEachBlockInRangeDB.
 	BlockIterator func(startSlot, endSlot uint64, fn func(models.Block) error) error
+	// FatalErrorFunc is called when the indexer encounters an error that
+	// cannot be recovered without risking a checkpoint gap. Node wiring
+	// should cancel the node context so the process exits cleanly.
+	FatalErrorFunc func(error)
 }
 
 // utxoKey identifies a UTxO by tx-hash (hex) and output index.
@@ -254,12 +258,16 @@ func (idx *Indexer) backfill() error {
 					timestampMs = uint64(t.UnixMilli()) //nolint:gosec
 				}
 			}
-			idx.processBlock(block, decoded.Transactions(), timestampMs)
-			if err := idx.updateCheckpoint(block.Slot); err != nil && idx.config.Logger != nil {
-				idx.config.Logger.Warn(
-					"midnight indexer: backfill: failed to persist checkpoint",
-					"slot", block.Slot,
-					"error", err,
+			if err := idx.processBlock(block, decoded.Transactions(), timestampMs); err != nil {
+				return fmt.Errorf(
+					"midnight indexer: backfill: process block slot=%d block=%d: %w",
+					block.Slot, block.Number, err,
+				)
+			}
+			if err := idx.updateCheckpoint(block.Slot); err != nil {
+				return fmt.Errorf(
+					"midnight indexer: backfill: checkpoint slot=%d block=%d: %w",
+					block.Slot, block.Number, err,
 				)
 			}
 			return nil
@@ -285,6 +293,17 @@ func (idx *Indexer) Stop() {
 	idx.config.EventBus.Unsubscribe(ledger.BlockEventType, idx.subID)
 }
 
+// fatal logs err and forwards it to FatalErrorFunc (typically node cancel).
+// Called when the indexer cannot continue without risking a checkpoint gap.
+func (idx *Indexer) fatal(err error) {
+	if idx.config.Logger != nil {
+		idx.config.Logger.Error("midnight indexer fatal error", "error", err)
+	}
+	if idx.config.FatalErrorFunc != nil {
+		idx.config.FatalErrorFunc(err)
+	}
+}
+
 // handleBlockEvent is the SubscribeFunc callback; it decodes the block and
 // delegates to processBlock or rollbackBlock depending on the action.
 func (idx *Indexer) handleBlockEvent(evt event.Event) {
@@ -299,13 +318,10 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 		block := blockEvt.Block
 		decoded, err := block.Decode()
 		if err != nil {
-			if idx.config.Logger != nil {
-				idx.config.Logger.Error(
-					"midnight indexer: failed to decode block",
-					"error", err,
-					"slot", block.Slot,
-				)
-			}
+			idx.fatal(fmt.Errorf(
+				"midnight indexer: decode block slot=%d block=%d: %w",
+				block.Slot, block.Number, err,
+			))
 			return
 		}
 		var timestampMs uint64
@@ -314,16 +330,21 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 				timestampMs = uint64(t.UnixMilli()) //nolint:gosec
 			}
 		}
-		idx.processBlock(block, decoded.Transactions(), timestampMs)
-		// Persist checkpoint so backfill on the next restart only replays
-		// blocks that were not yet processed.
+		if err := idx.processBlock(block, decoded.Transactions(), timestampMs); err != nil {
+			idx.fatal(fmt.Errorf(
+				"midnight indexer: process block slot=%d block=%d: %w",
+				block.Slot, block.Number, err,
+			))
+			return
+		}
+		// Persist checkpoint only after all writes for the block succeeded.
 		if idx.config.BlockIterator != nil {
-			if err := idx.updateCheckpoint(block.Slot); err != nil && idx.config.Logger != nil {
-				idx.config.Logger.Warn(
-					"midnight indexer: failed to persist checkpoint",
-					"slot", block.Slot,
-					"error", err,
-				)
+			if err := idx.updateCheckpoint(block.Slot); err != nil {
+				idx.fatal(fmt.Errorf(
+					"midnight indexer: checkpoint slot=%d block=%d: %w",
+					block.Slot, block.Number, err,
+				))
+				return
 			}
 		}
 	}
@@ -412,10 +433,13 @@ func (idx *Indexer) processBlock(
 	block models.Block,
 	txs []lcommon.Transaction,
 	timestampMs uint64,
-) {
+) error {
 	for i, tx := range txs {
-		idx.processTx(block, tx, uint32(i), timestampMs) //nolint:gosec
+		if err := idx.processTx(block, tx, uint32(i), timestampMs); err != nil { //nolint:gosec
+			return err
+		}
 	}
+	return nil
 }
 
 // processTx scans a single transaction's inputs and outputs.
@@ -424,7 +448,7 @@ func (idx *Indexer) processTx(
 	tx lcommon.Transaction,
 	txIdx uint32,
 	timestampMs uint64,
-) {
+) error {
 	txHashBytes := tx.Id().Bytes()
 
 	// Scan inputs for spends of tracked UTxOs.
@@ -454,18 +478,14 @@ func (idx *Indexer) processTx(
 				BlockTimestampMs: timestampMs,
 			}
 			if err := idx.config.Metadata.CreateMidnightAssetSpend(nil, row); err != nil {
-				if idx.config.Logger != nil {
-					idx.config.Logger.Error(
-						"midnight indexer: write asset spend",
-						"error", err,
-						"tx", hex.EncodeToString(txHashBytes),
-					)
-				}
-			} else {
-				idx.mu.Lock()
-				delete(idx.cNightUTxOs, key)
-				idx.mu.Unlock()
+				return fmt.Errorf(
+					"write asset spend tx=%s input=%s#%d: %w",
+					hex.EncodeToString(txHashBytes), inpHashHex, inpIndex, err,
+				)
 			}
+			idx.mu.Lock()
+			delete(idx.cNightUTxOs, key)
+			idx.mu.Unlock()
 		}
 
 		if isReg {
@@ -480,32 +500,31 @@ func (idx *Indexer) processTx(
 				BlockTimestampMs: timestampMs,
 			}
 			if err := idx.config.Metadata.CreateMidnightDeregistration(nil, row); err != nil {
-				if idx.config.Logger != nil {
-					idx.config.Logger.Error(
-						"midnight indexer: write deregistration",
-						"error", err,
-						"tx", hex.EncodeToString(txHashBytes),
-					)
-				}
-			} else {
-				idx.mu.Lock()
-				delete(idx.regUTxOs, key)
-				idx.mu.Unlock()
+				return fmt.Errorf(
+					"write deregistration tx=%s input=%s#%d: %w",
+					hex.EncodeToString(txHashBytes), inpHashHex, inpIndex, err,
+				)
 			}
+			idx.mu.Lock()
+			delete(idx.regUTxOs, key)
+			idx.mu.Unlock()
 		}
 	}
 
 	// Scan outputs for cNIGHT creates and registration outputs.
 	for outIdx, out := range tx.Outputs() {
-		idx.processOutput(
+		if err := idx.processOutput(
 			block,
 			txHashBytes,
 			uint32(outIdx), //nolint:gosec
 			txIdx,
 			timestampMs,
 			out,
-		)
+		); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // processOutput checks a single transaction output for cNIGHT tokens and
@@ -517,7 +536,7 @@ func (idx *Indexer) processOutput(
 	txIdx uint32,
 	timestampMs uint64,
 	out lcommon.TransactionOutput,
-) {
+) error {
 	txHashHex := hex.EncodeToString(txHashBytes)
 	key := utxoKey{TxHash: txHashHex, Index: outIdx}
 
@@ -539,16 +558,10 @@ func (idx *Indexer) processOutput(
 					BlockTimestampMs: timestampMs,
 				}
 				if err := idx.config.Metadata.CreateMidnightAssetCreate(nil, row); err != nil {
-					if idx.config.Logger != nil {
-						idx.config.Logger.Error(
-							"midnight indexer: write asset create",
-							"error", err,
-							"tx", txHashHex,
-						)
-					}
-					// Don't track in-memory if the DB write failed; we'd lose
-					// the spend pairing without the persisted create row.
-					return
+					return fmt.Errorf(
+						"write asset create tx=%s output=%d: %w",
+						txHashHex, outIdx, err,
+					)
 				}
 				idx.mu.Lock()
 				idx.cNightUTxOs[key] = cNightUTxO{
@@ -563,22 +576,22 @@ func (idx *Indexer) processOutput(
 	// Registration scan: output at mapping_validator_address containing
 	// an auth token with the configured asset name.
 	if idx.config.MappingValidatorAddress == "" {
-		return
+		return nil
 	}
 	addrStr := out.Address().String()
 	if addrStr != idx.config.MappingValidatorAddress {
-		return
+		return nil
 	}
 	if !idx.hasAuthToken(out) {
-		return
+		return nil
 	}
 	datum := out.Datum()
 	if datum == nil {
-		return
+		return nil
 	}
 	datumCbor := datum.Cbor()
 	if len(datumCbor) == 0 {
-		return
+		return nil
 	}
 	row := &models.MidnightRegistration{
 		FullDatum:        datumCbor,
@@ -590,18 +603,15 @@ func (idx *Indexer) processOutput(
 		BlockTimestampMs: timestampMs,
 	}
 	if err := idx.config.Metadata.CreateMidnightRegistration(nil, row); err != nil {
-		if idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: write registration",
-				"error", err,
-				"tx", txHashHex,
-			)
-		}
-		return
+		return fmt.Errorf(
+			"write registration tx=%s output=%d: %w",
+			txHashHex, outIdx, err,
+		)
 	}
 	idx.mu.Lock()
 	idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCbor}
 	idx.mu.Unlock()
+	return nil
 }
 
 // hasAuthToken returns true if the output assets contain at least one unit of
