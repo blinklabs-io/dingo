@@ -102,6 +102,7 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 	stakeKey []byte,
 	amount uint64,
 	slot uint64,
+	sourceHash []byte,
 	txn types.Txn,
 ) error {
 	if amount == 0 {
@@ -110,6 +111,12 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
+	}
+	// Normalize the discriminator to a non-NULL empty value when absent so
+	// the unique index and the OnConflict/pre-check guards stay effective
+	// (a NULL is treated as distinct under SQLite semantics).
+	if sourceHash == nil {
+		sourceHash = []byte{}
 	}
 	// Wrap the read-check-write and the journal insert in a single
 	// transaction so the on-disk reward and the AccountRewardDelta
@@ -131,6 +138,32 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 			}
 			return err
 		}
+		// Replay guard: epoch-rollover credits (deposit refunds, MIR,
+		// POOLREAP) commit in a different DB transaction than the one that
+		// advances the persisted ledger tip past the boundary block. A
+		// crash between those commits leaves the credit persisted but the
+		// tip un-advanced, so on restart the boundary block — and this
+		// credit — is replayed. If a delta for this exact credit event
+		// (same source hash, account, and boundary slot) already exists the
+		// reward was already applied; skip without re-crediting so replay is
+		// idempotent. Keying on sourceHash keeps two distinct refunds to the
+		// same account in the same epoch (different source hashes) as their
+		// own rows so neither is lost.
+		var existing models.AccountRewardDelta
+		dup := tx.Where(
+			"withdrawal = ? AND tx_hash = ? AND credential_tag = ? AND staking_key = ? AND added_slot = ?",
+			false,
+			sourceHash,
+			credentialTag,
+			stakeKey,
+			slot,
+		).First(&existing)
+		if dup.Error == nil {
+			return nil
+		}
+		if !errors.Is(dup.Error, gorm.ErrRecordNotFound) {
+			return dup.Error
+		}
 		current := uint64(account.Reward)
 		if current > ^uint64(0)-amount {
 			return fmt.Errorf(
@@ -150,10 +183,23 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 		delta := &models.AccountRewardDelta{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
+			TxHash:        sourceHash,
 			Amount:        types.Uint64(amount),
 			AddedSlot:     slot,
 		}
-		return tx.Create(delta).Error
+		// OnConflict backstops the read-check above against a writer racing
+		// in between the SELECT and INSERT. DoNothing leaves the existing
+		// row intact.
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "withdrawal"},
+				{Name: "tx_hash"},
+				{Name: "credential_tag"},
+				{Name: "staking_key"},
+				{Name: "added_slot"},
+			},
+			DoNothing: true,
+		}).Create(delta).Error
 	}
 	if txn != nil {
 		return credit(db)
@@ -234,6 +280,7 @@ func (d *MetadataStorePostgres) ApplyAccountRewardWithdrawal(
 				{Name: "tx_hash"},
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
+				{Name: "added_slot"},
 			},
 			DoNothing: true,
 		}).Create(delta)

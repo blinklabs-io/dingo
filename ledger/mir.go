@@ -80,6 +80,12 @@ func (ls *LedgerState) applyMIRCerts(
 				reward.Credential,
 				reward.Amount,
 				boundarySlot,
+				// MIR has no per-event hash; the destination credential is
+				// the discriminator. It separates the MIR credit from a
+				// same-slot governance/POOLREAP credit to the same account
+				// and makes re-applying the boundary idempotent. (Shelley-
+				// era only; a no-op for Conway+ epochs.)
+				reward.Credential,
 			)
 			if err != nil {
 				return fmt.Errorf(

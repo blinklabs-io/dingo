@@ -327,11 +327,21 @@ type MetadataStore interface {
 
 	// AddAccountRewardByCredential credits rewards using the full stake credential identity.
 	// The credential tag prevents key and script reward accounts with the same hash from merging.
+	//
+	// sourceHash uniquely identifies the credit event that produced this
+	// reward (the refunded governance proposal's tx hash, the reaped pool's
+	// key hash, or the MIR source credential). It is recorded in the delta
+	// journal's tx_hash column so each distinct credit at an epoch boundary
+	// is its own rollback-aware row, while re-applying the same boundary on a
+	// crash-replay maps onto the existing row and is skipped idempotently
+	// instead of colliding on the unique index. Pass nil for callers without
+	// a natural per-event discriminator.
 	AddAccountRewardByCredential(
 		uint8, // credentialTag
 		[]byte, // stakeKey
 		uint64, // amount
 		uint64, // slot
+		[]byte, // sourceHash
 		types.Txn,
 	) error
 

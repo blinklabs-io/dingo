@@ -161,6 +161,48 @@ func MigrateAccountRewardDeltaCredentialTagIndex(db *gorm.DB, logger *slog.Logge
 	return nil
 }
 
+// MigrateAccountRewardDeltaSlotIndex drops the slot-less unique index on
+// account_reward_delta so AutoMigrate can recreate it with added_slot included.
+//
+// The old index (withdrawal, tx_hash, credential_tag, staking_key) keyed every
+// credit delta (which carries an empty tx_hash) for an account onto a single
+// row, so a second per-epoch credit — a MIR reward, a POOLREAP refund, or a
+// governance deposit refund in a later epoch — collided on a clean first pass,
+// and a crash-replayed epoch-rollover credit collided on restart. The new index
+// idx_account_reward_delta_w_tx_s_slot adds added_slot so per-epoch credits are
+// distinct rows while a replayed same-slot credit still maps to the same row
+// (handled idempotently by the credit/withdrawal writers via OnConflict).
+//
+// AutoMigrate does not alter an existing index in place, so the old index is
+// dropped here by name; AutoMigrate then creates the renamed slot-aware index.
+func MigrateAccountRewardDeltaSlotIndex(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&AccountRewardDelta{}) {
+		return nil
+	}
+	if !db.Migrator().HasIndex(
+		&AccountRewardDelta{},
+		"idx_account_reward_delta_w_tx_s",
+	) {
+		return nil
+	}
+	logger.Info(
+		"dropping slot-less account_reward_delta unique index before slot-aware migration",
+	)
+	if err := db.Migrator().DropIndex(
+		&AccountRewardDelta{},
+		"idx_account_reward_delta_w_tx_s",
+	); err != nil {
+		return fmt.Errorf(
+			"drop slot-less account_reward_delta unique index: %w",
+			err,
+		)
+	}
+	return nil
+}
+
 type StakeCredentialRef struct {
 	Tag uint8
 	Key []byte
@@ -181,15 +223,25 @@ func (r StakeCredentialRef) MapKey() string {
 // otherwise represented by a rollback-aware certificate row. Credits store the
 // credited Amount. Withdrawals store the withdrawal Amount, PreviousReward, and
 // TxHash so rollback can restore the cleared reward balance.
+//
+// The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
+// Withdrawal deltas are keyed by their (non-empty) TxHash, so each is unique
+// regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) carry an
+// empty TxHash, so without AddedSlot every credit to a given account would
+// collapse onto a single row — colliding across epochs even on a clean first
+// pass and breaking per-row rollback accounting in DeleteAccountRewardsAfterSlot.
+// Including AddedSlot makes each per-epoch credit a distinct row while keeping
+// a replayed epoch-rollover credit (same account, same boundary slot) mapped to
+// the same row so it can be skipped idempotently instead of erroring.
 type AccountRewardDelta struct {
-	StakingKey     []byte       `gorm:"index:idx_account_reward_delta_credential,priority:2;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:4"`
-	CredentialTag  uint8        `gorm:"index:idx_account_reward_delta_credential,priority:1;not null;default:0;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:3"`
-	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:2"`
+	StakingKey     []byte       `gorm:"index:idx_account_reward_delta_credential,priority:2;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:4"`
+	CredentialTag  uint8        `gorm:"index:idx_account_reward_delta_credential,priority:1;not null;default:0;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:3"`
+	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:2"`
 	Amount         types.Uint64 `gorm:"not null"`
 	PreviousReward types.Uint64
 	ID             uint   `gorm:"primarykey"`
-	AddedSlot      uint64 `gorm:"index;not null"`
-	Withdrawal     bool   `gorm:"index;not null;default:false;uniqueIndex:idx_account_reward_delta_w_tx_s,priority:1"`
+	AddedSlot      uint64 `gorm:"index;not null;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:5"`
+	Withdrawal     bool   `gorm:"index;not null;default:false;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:1"`
 }
 
 func (AccountRewardDelta) TableName() string {

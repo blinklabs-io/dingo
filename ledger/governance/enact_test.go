@@ -312,7 +312,7 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, nil)
 	require.NoError(t, err)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -351,7 +351,7 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, nil)
 	require.ErrorContains(
 		t,
 		err,
@@ -389,7 +389,7 @@ func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, nil)
 	require.NoError(t, err)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -434,7 +434,7 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, nil)
 	require.NoError(t, err)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -473,7 +473,7 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	first := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 70},
 	}
-	require.NoError(t, applyTreasuryWithdrawal(ctx, first))
+	require.NoError(t, applyTreasuryWithdrawal(ctx, first, testBytes(32, 70)))
 
 	state, err := store.GetNetworkState(nil)
 	require.NoError(t, err)
@@ -484,7 +484,7 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	second := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 40},
 	}
-	err = applyTreasuryWithdrawal(ctx, second)
+	err = applyTreasuryWithdrawal(ctx, second, testBytes(32, 40))
 	require.Error(t, err)
 	assert.Contains(
 		t,

@@ -110,7 +110,7 @@ func EnactProposal(
 		result.PParamsChanged = true
 
 	case *lcommon.TreasuryWithdrawalGovAction:
-		if err := applyTreasuryWithdrawal(ctx, a); err != nil {
+		if err := applyTreasuryWithdrawal(ctx, a, proposal.TxHash); err != nil {
 			return nil, fmt.Errorf("treasury withdrawal: %w", err)
 		}
 
@@ -202,10 +202,13 @@ func decodeGovActionForPParams(
 
 // applyTreasuryWithdrawal debits the treasury by the sum of the
 // per-address amounts, credits registered destination reward accounts,
-// and leaves unclaimed withdrawals in the treasury.
+// and leaves unclaimed withdrawals in the treasury. proposalHash is the tx
+// hash of the enacted withdrawal proposal; it is used as the per-event credit
+// discriminator so the credit journals as a distinct, replay-idempotent row.
 func applyTreasuryWithdrawal(
 	ctx *EnactmentContext,
 	a *lcommon.TreasuryWithdrawalGovAction,
+	proposalHash []byte,
 ) error {
 	if ctx == nil || ctx.DB == nil {
 		return errors.New("nil enactment context")
@@ -266,6 +269,7 @@ func applyTreasuryWithdrawal(
 			stakeCredential,
 			amount,
 			ctx.Slot,
+			proposalHash,
 		)
 		if err != nil {
 			return err
@@ -291,6 +295,12 @@ func applyTreasuryWithdrawal(
 // to route the amount to the treasury instead. Shared by governance deposit
 // refunds and POOLREAP pool-deposit refunds so both follow identical
 // registered-vs-unclaimed accounting.
+//
+// sourceHash uniquely identifies the credit event (the refunded proposal's tx
+// hash or the reaped pool's key hash). It distinguishes two distinct refunds
+// to the same account at the same epoch boundary as separate journal rows and
+// makes a crash-replayed boundary idempotent. Pass nil when no per-event
+// discriminator is available.
 func CreditRegisteredRewardAccount(
 	db *database.Database,
 	txn *database.Txn,
@@ -298,12 +308,14 @@ func CreditRegisteredRewardAccount(
 	stakeCredential []byte,
 	amount uint64,
 	slot uint64,
+	sourceHash []byte,
 ) (bool, error) {
 	err := db.AddAccountRewardByCredential(
 		credentialTag,
 		stakeCredential,
 		amount,
 		slot,
+		sourceHash,
 		txn,
 	)
 	if err == nil {

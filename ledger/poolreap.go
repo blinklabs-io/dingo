@@ -76,6 +76,11 @@ func (ls *LedgerState) applyPoolRetirements(
 			refund.RewardAccount,
 			deposit,
 			boundarySlot,
+			// The reaped pool's key hash is the per-event credit
+			// discriminator: distinct pools refunding the same reward
+			// account in one epoch stay separate rows, and re-applying the
+			// boundary re-derives the same refund idempotently.
+			refund.PoolKeyHash,
 		)
 		if err != nil {
 			return fmt.Errorf(
