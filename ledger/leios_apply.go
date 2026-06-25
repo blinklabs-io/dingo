@@ -19,7 +19,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -238,19 +240,28 @@ func buildEndorserBlockBlob(
 // The wait window is EndorserBlockWaitSlots (the pipeline timing's
 // CertifyByDeadlineSlots, the bound for when a referenced endorser block is
 // actually available to fetch) converted to wall-clock via the Shelley slot
-// length, not a hardcoded duration. Callers invoke this before
-// opening the block-processing DB transaction, so the wait never holds a
-// transaction open. It is a no-op except at the chain tip: during historical
-// catch-up the prototype never diffuses the referenced endorser blocks, so
-// IsAtTip gating avoids stalling sync waiting for blocks that will never
-// arrive.
+// length, not a hardcoded duration. Callers invoke this before opening the
+// block-processing DB transaction, so the wait never holds a transaction open.
+//
+// Referenced endorser blocks that are not cached are handled by where the
+// ranking block sits relative to the live head:
+//
+//   - Near the head (within the wait window): the relay co-produces and
+//     diffuses the endorser block with its ranking block, so it is already
+//     being pushed; wait for the in-flight leios-notify/leios-fetch to cache
+//     it, with an active by-point fetch as a fallback if the window elapses.
+//   - Historical backlog (well below the head, e.g. during a from-scratch
+//     catch-up): the relay does not diffuse these, but it does serve any
+//     endorser block by point on demand, so actively fetch them -- in parallel
+//     across the available relay connections -- and apply the endorser-resident
+//     outputs instead of leaving the UTxO set incomplete and trusting the
+//     chain. This is what lets a from-scratch sync build a full UTxO set.
 func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	ctx context.Context,
 	blocks []ledger.Block,
 ) {
 	if ls.config.EndorserBlockProvider == nil ||
-		ls.config.EndorserBlockWaitSlots == 0 ||
-		!ls.IsAtTip() {
+		ls.config.EndorserBlockWaitSlots == 0 {
 		return
 	}
 	slotLen := ls.shelleySlotLength()
@@ -264,16 +275,12 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	// Cache re-check cadence (polling granularity, not a protocol parameter):
 	// a fraction of a slot so arrival is noticed promptly, floored at 1ms so
 	// the ticker interval is always positive.
-	poll := slotLen / 10
-	if poll < time.Millisecond {
-		poll = time.Millisecond
-	}
-	// Only wait for blocks near the live head. IsAtTip turns true once chainsync
-	// reaches the head, but the ledger may still be replaying a backlog of older
-	// blocks; their referenced endorser blocks are historical and the relay does
-	// not diffuse them, so waiting per block would stall catch-up at the gate
-	// timeout. wallSlot is the current wall-clock slot (the live head).
+	poll := max(slotLen/10, time.Millisecond)
+	// wallSlot is the current wall-clock slot (the live head). A block more than
+	// the wait window below it is historical backlog.
 	wallSlot, wallErr := ls.CurrentSlot()
+	var backfill []leiosEbRef
+	var tipWait []leiosEbRef
 	for _, blk := range blocks {
 		ref, ok := blk.Header().(leiosEndorserBlockReferencer)
 		if !ok {
@@ -288,16 +295,137 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 		); cached {
 			continue
 		}
-		// Skip the wait for catch-up backlog blocks (well below the head): the
-		// referenced endorser block is historical and undiffused, so waiting
-		// only stalls catch-up. Gate only blocks within the wait window of the
-		// head, where the endorser block may still be diffusing.
+		r := leiosEbRef{slot: blk.SlotNumber(), hash: ebHash}
 		if wallErr == nil && wallSlot > blk.SlotNumber() &&
 			wallSlot-blk.SlotNumber() > ls.config.EndorserBlockWaitSlots {
+			backfill = append(backfill, r)
+		} else {
+			tipWait = append(tipWait, r)
+		}
+	}
+	// Historical backlog: ensure a by-point fetch is in flight for each
+	// referenced endorser block (prefetchBatchEndorserBlocks has usually already
+	// started them for the whole read batch), then wait for it to land in the
+	// cache. The fetches run concurrently in the background pool; the waits below
+	// are mostly cache hits, so this does not serialize catch-up on fetch latency
+	// the way a per-chunk barrier did.
+	if len(backfill) > 0 && ls.leiosBackfill != nil {
+		for _, r := range backfill {
+			ls.leiosBackfill.spawn(r)
+		}
+		for _, r := range backfill {
+			if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); ok {
+				continue
+			}
+			ls.leiosBackfill.awaitFetch(ctx, r, poll)
+		}
+	}
+	for _, r := range tipWait {
+		if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); ok {
 			continue
 		}
-		ls.waitForEndorserBlock(ctx, blk.SlotNumber(), ebHash, timeout, poll)
+		ls.waitForEndorserBlock(ctx, r.slot, r.hash, timeout, poll)
+		if ls.config.EndorserBlockFetcher == nil {
+			continue
+		}
+		if _, _, ok := ls.config.EndorserBlockProvider(r.hash.Bytes()); !ok {
+			if err := ls.config.EndorserBlockFetcher(
+				r.slot,
+				r.hash.Bytes(),
+			); err != nil {
+				ls.config.Logger.Debug(
+					"endorser block tip fetch fallback failed",
+					"component", "ledger",
+					"slot", r.slot,
+					"eb_hash", r.hash.String(),
+					"error", err,
+				)
+			}
+		}
 	}
+}
+
+// leiosEbRef pairs a ranking block's slot with the hash of the endorser block
+// it references. The endorser block shares the ranking block's slot.
+type leiosEbRef struct {
+	slot uint64
+	hash lcommon.Blake2b256
+}
+
+// leiosBackfillConcurrency bounds how many historical endorser blocks are
+// fetched at once. The per-connection fetch guard serializes work on any one
+// connection, so effective parallelism is capped by the relay connection count
+// anyway; this is just an upper bound so a busy chunk cannot spawn an unbounded
+// number of fetch goroutines. It is kept modest deliberately: the prototype
+// relay serves endorser blocks reliably when requests are paced (one chunk's
+// worth at a time, with the block-application gap between chunks) but returns
+// empty manifests when hammered, so the backfill must not flood it.
+const leiosBackfillConcurrency = 8
+
+// leiosBackfiller fetches historical Leios endorser blocks by point, paced one
+// block-application chunk at a time, so a from-scratch sync builds a complete
+// UTxO set. It dedups in-flight fetches by endorser-block hash and bounds their
+// concurrency. The prototype relay serves any endorser block by point on
+// demand, so availability is not the constraint; pacing is.
+type leiosBackfiller struct {
+	fetch    EndorserBlockFetcherFunc
+	provider EndorserBlockProviderFunc
+	logger   *slog.Logger
+	sem      chan struct{}
+	inflight sync.Map
+}
+
+// newLeiosBackfiller returns a backfiller, or nil when no endorser-block fetcher
+// is configured (in which case backfill is disabled and the ledger falls back
+// to the interim trust path for unresolved endorser-resident inputs).
+func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
+	if cfg.EndorserBlockFetcher == nil || cfg.EndorserBlockProvider == nil {
+		return nil
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &leiosBackfiller{
+		fetch:    cfg.EndorserBlockFetcher,
+		provider: cfg.EndorserBlockProvider,
+		logger:   logger,
+		sem:      make(chan struct{}, leiosBackfillConcurrency),
+	}
+}
+
+// spawn starts a background by-point fetch of the endorser block referenced by
+// r unless it is already cached or a fetch is already in flight. It returns
+// immediately. Deduping by hash means the read-batch prefetch and the per-chunk
+// gate never fetch the same endorser block twice.
+func (b *leiosBackfiller) spawn(r leiosEbRef) {
+	key := string(r.hash.Bytes())
+	if _, loaded := b.inflight.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	if _, _, ok := b.provider(r.hash.Bytes()); ok {
+		b.inflight.Delete(key)
+		return
+	}
+	go func() {
+		b.sem <- struct{}{}
+		defer func() {
+			<-b.sem
+			b.inflight.Delete(key)
+		}()
+		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+			return
+		}
+		if err := b.fetch(r.slot, r.hash.Bytes()); err != nil {
+			b.logger.Debug(
+				"leios endorser block backfill failed",
+				"component", "ledger",
+				"slot", r.slot,
+				"eb_hash", r.hash.String(),
+				"error", err,
+			)
+		}
+	}()
 }
 
 // waitForEndorserBlock polls the EndorserBlockProvider until the endorser block
@@ -329,6 +457,53 @@ func (ls *LedgerState) waitForEndorserBlock(
 				"slot", rbSlot,
 				"eb_hash", ebHash.String(),
 			)
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// leiosBackfillMaxWait bounds how long block processing waits for a historical
+// endorser block to be backfilled before proceeding without it (leaving the
+// interim trust path to cover the unresolved inputs). The relay serves
+// historical endorser blocks on demand, so this is only a backstop against a
+// genuinely unavailable one; it is far longer than the tip diffusion window
+// because a from-scratch backfill is throughput-bound, not diffusion-bound.
+const leiosBackfillMaxWait = 2 * time.Minute
+
+// awaitFetch waits for the in-flight by-point fetch of the endorser block
+// referenced by r to finish (it has already been spawned). The spawned fetch
+// (FetchEndorserBlockByPoint) tries every connected peer in turn before
+// failing, so by the time it clears its in-flight marker it has tried all
+// peers. If it cached the block, the referencing ranking block can apply it; if
+// it finished without caching (every peer's response was flaky/incomplete, e.g.
+// a single connection that cannot serve a large endorser block's tail), do NOT
+// keep retrying the same peers — skip and let the interim Dijkstra validation
+// trust path cover the unresolved inputs, so catch-up advances. With multiple
+// healthy peers the all-peers attempt assembles the complete block; retrying is
+// only useful when there are other peers to try, which the all-peers loop
+// already exhausted. leiosBackfillMaxWait is a backstop against a fetch that
+// neither caches nor clears (the fetch itself is bounded by the leios-fetch
+// timeout, so this is rarely reached).
+func (b *leiosBackfiller) awaitFetch(
+	ctx context.Context,
+	r leiosEbRef,
+	poll time.Duration,
+) {
+	waitCtx, cancel := context.WithTimeout(ctx, leiosBackfillMaxWait)
+	defer cancel()
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	key := string(r.hash.Bytes())
+	for {
+		if _, _, ok := b.provider(r.hash.Bytes()); ok {
+			return // cached: the referencing block can apply it
+		}
+		if _, inFlight := b.inflight.Load(key); !inFlight {
+			return // the all-peers fetch finished without caching: skip fast
+		}
+		select {
+		case <-waitCtx.Done():
 			return
 		case <-ticker.C:
 		}

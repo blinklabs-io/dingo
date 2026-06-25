@@ -292,6 +292,12 @@ func (n *Node) Run(ctx context.Context) error {
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
 			EndorserBlockProvider: n.ouroboros.EndorserBlockTxsByHash,
+			// Actively fetches a referenced endorser block by point and caches
+			// it. Used during historical catch-up: the prototype relay serves
+			// any endorser block by point on demand, so a from-scratch sync can
+			// backfill older ranking blocks' endorser-resident outputs and build
+			// a complete UTxO set instead of trusting the chain.
+			EndorserBlockFetcher: n.ouroboros.FetchEndorserBlockByPoint,
 			// Wait, at the tip, for a ranking block's referenced endorser block
 			// to arrive before applying it. Sourced from the pipeline timing
 			// (CIP-0164-tracking, override-able via WithLeiosPipelineTiming)

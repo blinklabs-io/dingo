@@ -276,6 +276,28 @@ func (o *Ouroboros) instrumentLeiosnotifyRequestNext(
 	}
 }
 
+// leiosTipPrefetchMaxLagSlots is how far behind the wall-clock head the applied
+// ledger may be before dingo stops prefetching endorser blocks offered over
+// leios-notify. Notify offers describe endorser blocks at the live head; while
+// the ledger is replaying a deep backlog those blocks would expire from the
+// endorser-block cache (10 minute TTL, ~600 slots at 1s slots) long before the
+// ledger reaches them, and prefetching them only starves the chain-driven
+// historical backfill for the relay's few connections. While behind, the ledger
+// fetches the endorser block each ranking block references by point as it
+// applies the chain, matching the prototype's ranking-block-driven fetch.
+const leiosTipPrefetchMaxLagSlots = 600
+
+// leiosTipPrefetchEnabled reports whether the node is caught up enough that
+// prefetching a head endorser block offered over leios-notify is worthwhile (it
+// will be applied before it expires from the cache). It is false during a deep
+// catch-up so all fetch capacity serves the historical backfill.
+func (o *Ouroboros) leiosTipPrefetchEnabled() bool {
+	if o.LedgerState == nil {
+		return true
+	}
+	return o.LedgerState.SlotsBehindHead() <= leiosTipPrefetchMaxLagSlots
+}
+
 func (o *Ouroboros) leiosnotifyClientNotification(
 	ctx oleiosnotify.CallbackContext,
 	msg protocol.Message,
@@ -287,6 +309,13 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 	}
 	switch m := msg.(type) {
 	case *oleiosnotify.MsgBlockOffer:
+		// While the ledger is deeply behind the head, do not prefetch this
+		// head endorser block: it would expire before the ledger reaches it and
+		// would starve the chain-driven historical backfill for connections. The
+		// ledger fetches the endorser blocks it needs by point as it catches up.
+		if !o.leiosTipPrefetchEnabled() {
+			return nil
+		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {
 			return errors.New("leios-fetch client unavailable")
 		}
@@ -360,6 +389,10 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 		// (EnableLeiosTxFetch): a failure must not tear down the shared
 		// connection.
 		if !o.config.EnableLeiosTxFetch {
+			return nil
+		}
+		// See MsgBlockOffer above: skip head-block prefetch while deeply behind.
+		if !o.leiosTipPrefetchEnabled() {
 			return nil
 		}
 		if conn.LeiosFetch() == nil || conn.LeiosFetch().Client == nil {

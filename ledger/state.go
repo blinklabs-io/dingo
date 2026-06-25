@@ -388,6 +388,15 @@ type LedgerStateConfig struct {
 	ForgedBlockChecker          ForgedBlockChecker
 	SlotBattleRecorder          SlotBattleRecorder
 	EndorserBlockProvider       EndorserBlockProviderFunc
+	// EndorserBlockFetcher actively fetches a referenced endorser block (its
+	// manifest and all transaction bodies) by point and caches it, so the
+	// EndorserBlockProvider can then supply it. Unlike the tip path, which waits
+	// for the relay to diffuse an endorser block it is already pushing, this is
+	// used during historical catch-up: the prototype relay serves any endorser
+	// block by point on demand (MsgLeiosBlockRequest), so the node can backfill
+	// the endorser-resident outputs of older ranking blocks instead of trusting
+	// the chain and leaving the UTxO set incomplete. Nil disables backfill.
+	EndorserBlockFetcher EndorserBlockFetcherFunc
 	// EndorserBlockWaitSlots is the number of slots that block processing
 	// waits at the chain tip for a Dijkstra ranking block's referenced
 	// endorser block to finish fetching before applying it. It is sourced from
@@ -413,6 +422,14 @@ type LedgerStateConfig struct {
 // an endorser block's transactions to the ledger when the referencing Dijkstra
 // ranking block is processed.
 type EndorserBlockProviderFunc func(ebHash []byte) (ebSlot uint64, txs []cbor.RawMessage, ok bool)
+
+// EndorserBlockFetcherFunc actively fetches the endorser block identified by
+// (ebSlot, ebHash) over leios-fetch (manifest plus all transaction bodies) and
+// caches it so a subsequent EndorserBlockProviderFunc call returns it. It
+// returns an error when no fetch connection is available or the relay does not
+// serve the block. The endorser block shares the slot of the ranking block that
+// references it (they are co-produced), so ebSlot is the ranking block's slot.
+type EndorserBlockFetcherFunc func(ebSlot uint64, ebHash []byte) error
 
 // BlockfetchRequestRangeFunc describes a callback function used to start a blockfetch request for
 // a range of blocks
@@ -500,6 +517,9 @@ type LedgerState struct {
 	slotClock                          *SlotClock
 	slotTickChan                       <-chan SlotTick
 	ctx                                context.Context
+	// leiosBackfill prefetches historical Leios endorser blocks by point ahead
+	// of the apply cursor (nil when no endorser-block fetcher is configured).
+	leiosBackfill *leiosBackfiller
 	sync.RWMutex
 	chainsyncMutex                sync.Mutex
 	chainsyncBlockfetchMutex      sync.Mutex
@@ -641,6 +661,7 @@ func NewLedgerState(cfg LedgerStateConfig) (*LedgerState, error) {
 	ls.slotsPerKESPeriod.Store(ls.loadSlotsPerKESPeriod())
 	ls.storeForgedBlockChecker(cfg.ForgedBlockChecker)
 	ls.storeSlotBattleRecorder(cfg.SlotBattleRecorder)
+	ls.leiosBackfill = newLeiosBackfiller(cfg)
 	return ls, nil
 }
 
@@ -5147,6 +5168,24 @@ func (ls *LedgerState) Tip() ochainsync.Tip {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.currentTip
+}
+
+// SlotsBehindHead reports how many slots the applied ledger tip is behind the
+// wall-clock head (0 if at or ahead of it, or if the wall slot is unknown).
+// Unlike IsAtTip it distinguishes "chainsync reached the head" from "the ledger
+// has actually applied up to the head", which matters during a from-scratch
+// catch-up where the ledger replays a large backlog while chainsync is already
+// at the head.
+func (ls *LedgerState) SlotsBehindHead() uint64 {
+	wall, err := ls.CurrentSlot()
+	if err != nil {
+		return 0
+	}
+	tipSlot := ls.Tip().Point.Slot
+	if wall <= tipSlot {
+		return 0
+	}
+	return wall - tipSlot
 }
 
 // ChainTipSlot returns the slot number of the current chain tip.
