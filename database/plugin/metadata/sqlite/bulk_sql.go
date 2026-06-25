@@ -74,6 +74,11 @@ const (
 )
 
 func appendUtxoRow(dst []any, u *models.Utxo) []any {
+	// SpentAtTxId/ReferencedByTxId/CollateralByTxId are types.NullableHash,
+	// whose driver.Valuer binds an empty value as SQL NULL (not an empty
+	// blob), so the FK to transaction(hash) is correctly skipped for unspent/
+	// unreferenced UTxOs. database/sql invokes the Valuer on these positional
+	// args, so no normalization is needed here.
 	return append(dst,
 		u.TransactionID, u.CollateralReturnForTxID, u.TxId,
 		u.PaymentKey, u.StakingKey, u.CredentialTag, u.DatumHash,

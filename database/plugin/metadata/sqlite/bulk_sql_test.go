@@ -241,7 +241,7 @@ func TestBatchSpendUtxos_GuardSkipsAlreadySpent(t *testing.T) {
 		Where("tx_id = ? AND output_idx = ?", txid, uint32(0)).
 		First(&got).Error)
 	assert.Equal(t, uint64(100), got.DeletedSlot)
-	assert.Equal(t, spender1, got.SpentAtTxId)
+	assert.Equal(t, spender1, []byte(got.SpentAtTxId))
 }
 
 func newBenchStore(b *testing.B) *MetadataStoreSqlite {

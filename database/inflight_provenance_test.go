@@ -77,7 +77,7 @@ func TestSetTransactionBatched_SameBatchProducerSpentViaInFlight(t *testing.T) {
 		"same-batch produced output must be created at flush",
 	)
 	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), utxo.SpentAtTxId)
+	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(utxo.SpentAtTxId))
 }
 
 // TestSetTransactionBatched_CrossBatchProducerResolvesFromDB flushes the
@@ -149,7 +149,7 @@ func TestSetTransactionBatched_CrossBatchProducerResolvesFromDB(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, post)
 	require.Equal(t, candidate.consumerPoint.Slot, post.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), post.SpentAtTxId)
+	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(post.SpentAtTxId))
 }
 
 // TestSetTransactionBatched_MissingProducerNotFabricated ingests only the
@@ -281,7 +281,7 @@ func TestSetTransactionBatched_InFlightDoesNotSkipExistingRowRepair(
 	require.Equal(
 		t,
 		candidate.consumerTx.Hash().Bytes(),
-		post.SpentAtTxId,
+		[]byte(post.SpentAtTxId),
 		"spender link must be backfilled for a pre-existing same-slot row",
 	)
 }

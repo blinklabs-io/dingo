@@ -125,6 +125,60 @@ func (u *Uint64) Scan(val any) error {
 	}
 }
 
+// NullableHash is a byte slice that serializes to SQL NULL when empty,
+// rather than to an empty blob. It is used for nullable foreign-key columns
+// that reference transaction(hash) (e.g. utxo.spent_at_tx_id) and are unset
+// until the UTxO is spent/referenced.
+//
+// Without a custom driver.Valuer, an empty/nil []byte can be bound by some
+// GORM + SQLite driver versions as an empty blob instead of SQL NULL. SQLite
+// enforces FK constraints against an empty blob (no transaction has an empty
+// hash), so such a row fails with SQLITE_CONSTRAINT_FOREIGNKEY (787).
+// This affects every UTxO not yet spent/referenced, including all genesis
+// UTxOs. Returning a nil driver.Value guarantees SQL NULL on every driver
+// version, so the FK is correctly skipped.
+//
+//nolint:recvcheck
+type NullableHash []byte
+
+// Value implements driver.Valuer. An empty (or nil) slice serializes to SQL
+// NULL; a non-empty slice serializes to its bytes.
+func (h NullableHash) Value() (driver.Value, error) {
+	if len(h) == 0 {
+		return nil, nil
+	}
+	return []byte(h), nil
+}
+
+// Scan implements sql.Scanner.
+func (h *NullableHash) Scan(val any) error {
+	switch v := val.(type) {
+	case nil:
+		*h = nil
+		return nil
+	case []byte:
+		if len(v) == 0 {
+			*h = nil
+			return nil
+		}
+		// Copy so we do not retain the driver's buffer.
+		*h = append(NullableHash(nil), v...)
+		return nil
+	case string:
+		if v == "" {
+			*h = nil
+			return nil
+		}
+		*h = append(NullableHash(nil), v...)
+		return nil
+	default:
+		return fmt.Errorf(
+			"value was not expected type, wanted []byte/string, got %T",
+			val,
+		)
+	}
+}
+
 // Storage mode constants shared by the metadata plugins.
 const (
 	// StorageModeCore stores only consensus and chain state data.

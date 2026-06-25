@@ -116,7 +116,7 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 		require.Equal(
 			t,
 			candidate.consumerTx.Hash().Bytes(),
-			utxo.SpentAtTxId,
+			[]byte(utxo.SpentAtTxId),
 		)
 	}
 
@@ -205,7 +205,7 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 		require.Equal(
 			t,
 			candidate.consumerTx.Hash().Bytes(),
-			utxo.SpentAtTxId,
+			[]byte(utxo.SpentAtTxId),
 		)
 	}
 }
@@ -274,7 +274,7 @@ func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	require.NoError(t, err)
 	require.NotNil(t, utxo)
 	require.Equal(t, candidate.consumerPoint.Slot, utxo.DeletedSlot)
-	require.Equal(t, candidate.consumerTx.Hash().Bytes(), utxo.SpentAtTxId)
+	require.Equal(t, candidate.consumerTx.Hash().Bytes(), []byte(utxo.SpentAtTxId))
 }
 
 func findGapRollbackCandidate(t *testing.T) gapRollbackCandidate {
@@ -949,7 +949,7 @@ func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
 		require.Equal(
 			t,
 			spenderTxHash,
-			utxo.SpentAtTxId,
+			[]byte(utxo.SpentAtTxId),
 			"input %s spent_at_tx_id not set to consumer tx hash",
 			input.String(),
 		)

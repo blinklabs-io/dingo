@@ -92,7 +92,7 @@ func TestSetUtxoDeletedAtSlotBackfillsSameSlotMissingSpender(t *testing.T) {
 		).First(&updated).Error,
 	)
 	require.Equal(t, uint64(200), updated.DeletedSlot)
-	require.Equal(t, spenderTxHash, updated.SpentAtTxId)
+	require.Equal(t, spenderTxHash, []byte(updated.SpentAtTxId))
 }
 
 func TestSetUtxoDeletedAtSlotReturnsNotFoundWhenRowMissing(
