@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm"
 )
 
 func setupStakeSnapshotTestStore(t *testing.T) *MetadataStoreSqlite {
@@ -708,6 +710,53 @@ func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
 		"pool A should have 2 delegators")
 	require.Equal(t, uint64(1), delegators[string(poolB)],
 		"pool B should have 1 delegator")
+}
+
+func TestGetStakeByPoolsUsesStakeCredentialUtxoIndex(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	poolA := []byte("pool_index_plan_123456789012")
+
+	var capturedSQL string
+	var capturedVars []any
+	callbackName := "test:capture_get_stake_by_pools_sql"
+	require.NoError(t, store.ReadDB().Callback().Row().
+		After("gorm:row").
+		Register(callbackName, func(tx *gorm.DB) {
+			sql := tx.Statement.SQL.String()
+			if capturedSQL != "" ||
+				!strings.Contains(sql, "INDEXED BY "+utxoStakingLiveAmountIndex) {
+				return
+			}
+			capturedSQL = sql
+			capturedVars = append([]any(nil), tx.Statement.Vars...)
+		}))
+
+	_, _, err := store.GetStakeByPools([][]byte{poolA}, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, capturedSQL)
+
+	planRows, err := store.DB().
+		Raw(
+			"EXPLAIN QUERY PLAN "+capturedSQL,
+			capturedVars...,
+		).Rows()
+	require.NoError(t, err)
+	defer planRows.Close()
+
+	var details []string
+	for planRows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		require.NoError(t, planRows.Scan(&id, &parent, &notUsed, &detail))
+		details = append(details, detail)
+	}
+	require.NoError(t, planRows.Err())
+	plan := strings.Join(details, "\n")
+	assert.Contains(t, plan, utxoStakingLiveAmountIndex)
+	assert.NotContains(t, plan, "idx_utxo_deleted_staking_amount")
 }
 
 // TestGetStakeByPoolsExcludesInactiveAccounts tests that inactive accounts

@@ -64,8 +64,6 @@ type drepCertCache struct {
 	hasUpdate map[string]bool
 }
 
-const utxoStakingLiveAmountIndex = "idx_utxo_staking_deleted_amount"
-
 const getDRepVotingPowerBatchSQL = `
 	SELECT a.drep AS drep, a.drep_type AS credential_tag,
 		   COALESCE(SUM(

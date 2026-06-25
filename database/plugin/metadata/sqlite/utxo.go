@@ -88,12 +88,15 @@ func (d *MetadataStoreSqlite) GetUtxoIncludingSpent(
 	return ret, nil
 }
 
-// batchChunkSize is the maximum number of UTXO refs to query in a single SQL statement.
-// Each ref uses 2 bind parameters (tx_id and output_idx), so this must be <= 499 to stay
-// under SQLite's default SQLITE_MAX_VARIABLE_NUMBER limit of 999 bind parameters.
-const batchChunkSize = 499
+const (
+	// batchChunkSize is the maximum number of UTXO refs to query in a single SQL statement.
+	// Each ref uses 2 bind parameters (tx_id and output_idx), so this must be <= 499 to stay
+	// under SQLite's default SQLITE_MAX_VARIABLE_NUMBER limit of 999 bind parameters.
+	batchChunkSize = 499
 
-const utxoRefLookupIndex = "tx_id_output_idx"
+	utxoRefLookupIndex         = "tx_id_output_idx"
+	utxoStakingLiveAmountIndex = "idx_utxo_staking_deleted_amount"
+)
 
 func utxoRefIndexedTable() string {
 	return (&models.Utxo{}).TableName() + " INDEXED BY " + utxoRefLookupIndex

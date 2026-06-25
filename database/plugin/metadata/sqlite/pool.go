@@ -1167,7 +1167,7 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 		chunk := poolKeyHashes[start:end]
 
 		var chunkResults []poolStakeResult
-		// INDEXED BY idx_utxo_staking_deleted_amount forces the account-driven
+		// The utxoStakingLiveAmountIndex hint forces the account-driven
 		// join: probe the live-UTxO index per delegating account rather than
 		// scanning the entire live UTxO set (deleted_slot=0) and joining back
 		// to account. Without the hint SQLite's planner drives from the utxo
@@ -1176,7 +1176,7 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 		// calculation for many minutes. Mirrors the DRep voting-power query.
 		if err := db.Table("account").
 			Select("account.pool, COALESCE(SUM(utxo.amount), 0) as total_stake").
-			Joins("INNER JOIN utxo INDEXED BY idx_utxo_staking_deleted_amount ON utxo.credential_tag = account.credential_tag AND utxo.staking_key = account.staking_key").
+			Joins("INNER JOIN utxo INDEXED BY "+utxoStakingLiveAmountIndex+" ON utxo.credential_tag = account.credential_tag AND utxo.staking_key = account.staking_key").
 			Where("account.pool IN ? AND account.active = ? AND utxo.deleted_slot = 0", chunk, true).
 			Group("account.pool").
 			Scan(&chunkResults).Error; err != nil {
