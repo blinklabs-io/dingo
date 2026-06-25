@@ -550,9 +550,10 @@ func downloadDigestsArchive(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
 			),
-			Logger:         cfg.Logger,
-			IdleTimeout:    cfg.DownloadIdleTimeout,
-			MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			Logger:              cfg.Logger,
+			IdleTimeout:         cfg.DownloadIdleTimeout,
+			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 		},
 	)
 	if err != nil {
@@ -820,12 +821,13 @@ func fetchImmutableArchive(
 ) error {
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			URL:            location.ImmutableArchiveURI(num),
-			DestDir:        archiveDir,
-			Filename:       filepath.Base(immutableArchivePath(archiveDir, num)),
-			Logger:         extractLogger,
-			IdleTimeout:    cfg.DownloadIdleTimeout,
-			MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			URL:                 location.ImmutableArchiveURI(num),
+			DestDir:             archiveDir,
+			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
+			Logger:              extractLogger,
+			IdleTimeout:         cfg.DownloadIdleTimeout,
+			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 		},
 	)
 	if err != nil {
@@ -944,13 +946,14 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:            loc.URI,
-				DestDir:        downloadDir,
-				Filename:       ancillaryFilename,
-				Logger:         cfg.Logger,
-				OnProgress:     cfg.OnProgress,
-				IdleTimeout:    cfg.DownloadIdleTimeout,
-				MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+				URL:                 loc.URI,
+				DestDir:             downloadDir,
+				Filename:            ancillaryFilename,
+				Logger:              cfg.Logger,
+				OnProgress:          cfg.OnProgress,
+				IdleTimeout:         cfg.DownloadIdleTimeout,
+				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 			},
 		)
 		if err == nil {

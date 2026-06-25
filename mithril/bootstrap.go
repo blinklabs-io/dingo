@@ -82,6 +82,11 @@ type BootstrapConfig struct {
 	// DownloadMaxIdleRetries is the number of consecutive idle retries
 	// allowed without additional bytes. Zero uses the downloader default.
 	DownloadMaxIdleRetries int
+	// DownloadMaxTransientRetries is the maximum number of retry attempts
+	// for transient network errors (TLS handshake failures, connection
+	// resets, HTTP 429, HTTP 5xx) per download. Zero uses the downloader
+	// default. Negative disables transient retries.
+	DownloadMaxTransientRetries int
 }
 
 // VerificationMode selects the level of Mithril certificate verification.
@@ -381,14 +386,15 @@ func Bootstrap(
 		for i, loc := range snapshot.Locations {
 			archivePath, dlErr = DownloadSnapshot(
 				ctx, DownloadConfig{
-					URL:            loc,
-					DestDir:        downloadDir,
-					Filename:       archiveFilename,
-					ExpectedSize:   snapshot.Size,
-					Logger:         cfg.Logger,
-					OnProgress:     cfg.OnProgress,
-					IdleTimeout:    cfg.DownloadIdleTimeout,
-					MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+					URL:                 loc,
+					DestDir:             downloadDir,
+					Filename:            archiveFilename,
+					ExpectedSize:        snapshot.Size,
+					Logger:              cfg.Logger,
+					OnProgress:          cfg.OnProgress,
+					IdleTimeout:         cfg.DownloadIdleTimeout,
+					MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+					MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 				},
 			)
 			if dlErr == nil {
@@ -567,14 +573,15 @@ func downloadAncillary(
 	for i, loc := range snapshot.AncillaryLocations {
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:            loc,
-				DestDir:        downloadDir,
-				Filename:       ancillaryFilename,
-				ExpectedSize:   snapshot.AncillarySize,
-				Logger:         cfg.Logger,
-				OnProgress:     cfg.OnProgress,
-				IdleTimeout:    cfg.DownloadIdleTimeout,
-				MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+				URL:                 loc,
+				DestDir:             downloadDir,
+				Filename:            ancillaryFilename,
+				ExpectedSize:        snapshot.AncillarySize,
+				Logger:              cfg.Logger,
+				OnProgress:          cfg.OnProgress,
+				IdleTimeout:         cfg.DownloadIdleTimeout,
+				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 			},
 		)
 		if err == nil {

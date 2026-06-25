@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -366,11 +367,110 @@ func TestDownloadSnapshotServerError(t *testing.T) {
 
 	destDir := t.TempDir()
 	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
-		URL:     server.URL + "/snapshot.tar.zst",
-		DestDir: destDir,
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             destDir,
+		MaxTransientRetries: -1, // disable retries so the test stays fast
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "500")
+}
+
+func TestDownloadSnapshotTransientRetrySucceeds(t *testing.T) {
+	content := []byte("ok-after-transient")
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if requestCount.Add(1) == 1 {
+				http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+			_, _ = w.Write(content)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	destDir := t.TempDir()
+	path, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             destDir,
+		Filename:            "transient-retry.tar.zst",
+		MaxTransientRetries: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), requestCount.Load(), "expected one retry after transient 503")
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, content, data)
+}
+
+func TestDownloadSnapshotTransientRetryExhausted(t *testing.T) {
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requestCount.Add(1)
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		}),
+	)
+	t.Cleanup(server.Close)
+
+	destDir := t.TempDir()
+	_, err := DownloadSnapshot(context.Background(), DownloadConfig{
+		URL:                 server.URL + "/snapshot.tar.zst",
+		DestDir:             destDir,
+		MaxTransientRetries: 2,
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "429")
+	// 1 original attempt + 2 retries = 3 total requests
+	require.Equal(t, int32(3), requestCount.Load(), "expected 1 attempt + 2 retries")
+}
+
+func TestIsTransientDownloadError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{
+			name:      "nil",
+			err:       nil,
+			transient: false,
+		},
+		{
+			name:      "errDownloadTransient sentinel",
+			err:       fmt.Errorf("wrapped: %w", errDownloadTransient),
+			transient: true,
+		},
+		{
+			name:      "unexpected EOF",
+			err:       fmt.Errorf("writing snapshot data: %w", io.ErrUnexpectedEOF),
+			transient: true,
+		},
+		{
+			name:      "connection reset",
+			err:       fmt.Errorf("downloading snapshot: connection reset by peer"),
+			transient: true,
+		},
+		{
+			name:      "non-transient error",
+			err:       fmt.Errorf("download size mismatch: got 1, want 2"),
+			transient: false,
+		},
+		{
+			name:      "idle timeout is not transient",
+			err:       fmt.Errorf("stalled: %w", errDownloadIdleTimeout),
+			transient: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.transient, isTransientDownloadError(tc.err))
+		})
+	}
 }
 
 func TestDownloadSnapshotSizeVerification(t *testing.T) {

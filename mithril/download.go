@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"path"
@@ -50,9 +52,19 @@ type ProgressFunc func(DownloadProgress)
 const (
 	defaultDownloadIdleTimeout = 2 * time.Minute
 	defaultDownloadIdleRetries = 12
+
+	defaultTransientRetryMaxAttempts = 10
+	defaultTransientRetryBaseDelay   = 500 * time.Millisecond
+	defaultTransientRetryMaxDelay    = 30 * time.Second
 )
 
-var errDownloadIdleTimeout = errors.New("download idle timeout")
+var (
+	errDownloadIdleTimeout = errors.New("download idle timeout")
+	// errDownloadTransient is wrapped into errors returned by
+	// downloadSnapshotOnce for HTTP 429 and HTTP 5xx responses so that
+	// DownloadSnapshot can identify them as retryable.
+	errDownloadTransient = errors.New("transient download error")
+)
 
 type countingReader struct {
 	reader io.Reader
@@ -91,6 +103,12 @@ type DownloadConfig struct {
 	// after idle timeouts that make no additional download progress.
 	// If zero, a conservative default is used.
 	MaxIdleRetries int
+	// MaxTransientRetries is the maximum number of retry attempts for
+	// transient network errors (TLS handshake failures, connection
+	// resets, unexpected EOF, HTTP 429, HTTP 5xx). If zero, a
+	// conservative default is used. If negative, transient retries
+	// are disabled.
+	MaxTransientRetries int
 }
 
 // Validate checks DownloadConfig values before use.
@@ -230,6 +248,54 @@ func (cfg DownloadConfig) maxIdleRetries() int {
 	return defaultDownloadIdleRetries
 }
 
+func (cfg DownloadConfig) maxTransientRetries() int {
+	if cfg.MaxTransientRetries < 0 {
+		return 0 // disabled
+	}
+	if cfg.MaxTransientRetries > 0 {
+		return cfg.MaxTransientRetries
+	}
+	return defaultTransientRetryMaxAttempts
+}
+
+// isTransientDownloadError reports whether err is a transient network
+// or server error that is safe to retry: net.Error timeouts (which
+// cover TLS handshake timeouts), unexpected EOF during body read,
+// connection reset by peer, and HTTP 429/5xx (wrapped as
+// errDownloadTransient by downloadSnapshotOnce).
+func isTransientDownloadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errDownloadTransient) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return strings.Contains(err.Error(), "connection reset by peer")
+}
+
+// transientRetryDelay returns the backoff duration for the given
+// retry attempt (0-indexed). It uses exponential backoff capped at
+// defaultTransientRetryMaxDelay with ±25% jitter.
+func transientRetryDelay(attempt int) time.Duration {
+	shift := min(attempt, 6) // 2^6 * 500ms = 32s, capped at 30s
+	d := defaultTransientRetryBaseDelay * (1 << shift)
+	if d > defaultTransientRetryMaxDelay {
+		d = defaultTransientRetryMaxDelay
+	}
+	if quarter := d / 4; quarter > 0 {
+		// Jitter in [-quarter, +quarter]
+		d += time.Duration(rand.Int63n(int64(quarter)*2+1)) - quarter //nolint:gosec
+	}
+	return d
+}
+
 func downloadIdleTimeoutCause(timeout time.Duration) error {
 	return fmt.Errorf("%w after %s without data", errDownloadIdleTimeout, timeout)
 }
@@ -363,41 +429,69 @@ func DownloadSnapshot(
 		cfg.Logger = slog.Default()
 	}
 	maxIdleRetries := cfg.maxIdleRetries()
+	maxTransientRetries := cfg.maxTransientRetries()
 	destPath := downloadDestinationPath(cfg)
 	lastObservedSize := downloadFileSize(destPath)
 	consecutiveIdleRetries := 0
+	transientRetries := 0
 	for attempt := 1; ; attempt++ {
 		startSize := downloadFileSize(destPath)
 		path, err := downloadSnapshotOnce(ctx, cfg)
 		if err == nil {
 			return path, nil
 		}
-		if !errors.Is(err, errDownloadIdleTimeout) || ctx.Err() != nil {
+		if ctx.Err() != nil {
 			return "", err
 		}
 		currentSize := downloadFileSize(destPath)
 		madeProgress := currentSize > startSize ||
 			currentSize > lastObservedSize
 		if madeProgress {
-			consecutiveIdleRetries = 0
 			lastObservedSize = currentSize
-		} else {
-			consecutiveIdleRetries++
 		}
-		if consecutiveIdleRetries > maxIdleRetries {
+		if errors.Is(err, errDownloadIdleTimeout) {
+			if madeProgress {
+				consecutiveIdleRetries = 0
+			} else {
+				consecutiveIdleRetries++
+			}
+			if consecutiveIdleRetries > maxIdleRetries {
+				return "", err
+			}
+			cfg.Logger.Warn(
+				"snapshot download stalled, retrying",
+				"component", "mithril",
+				"attempt", attempt,
+				"consecutive_idle_retries", consecutiveIdleRetries,
+				"max_idle_retries", maxIdleRetries,
+				"idle_timeout", cfg.idleTimeout(),
+				"partial_bytes", currentSize,
+				"made_progress", madeProgress,
+				"error", err,
+			)
+		} else if isTransientDownloadError(err) {
+			transientRetries++
+			if transientRetries > maxTransientRetries {
+				return "", err
+			}
+			delay := transientRetryDelay(transientRetries - 1)
+			cfg.Logger.Warn(
+				"transient download error, retrying",
+				"component", "mithril",
+				"attempt", attempt,
+				"transient_retry", transientRetries,
+				"max_transient_retries", maxTransientRetries,
+				"backoff", delay,
+				"error", err,
+			)
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
+		} else {
 			return "", err
 		}
-		cfg.Logger.Warn(
-			"snapshot download stalled, retrying",
-			"component", "mithril",
-			"attempt", attempt,
-			"consecutive_idle_retries", consecutiveIdleRetries,
-			"max_idle_retries", maxIdleRetries,
-			"idle_timeout", cfg.idleTimeout(),
-			"partial_bytes", currentSize,
-			"made_progress", madeProgress,
-			"error", err,
-		)
 	}
 }
 
@@ -669,6 +763,15 @@ func downloadSnapshotOnce(
 		bodyBytes, _ := io.ReadAll(
 			io.LimitReader(resp.Body, 1024),
 		)
+		if resp.StatusCode == http.StatusTooManyRequests ||
+			resp.StatusCode >= http.StatusInternalServerError {
+			return "", fmt.Errorf(
+				"%w: download failed with status %d: %s",
+				errDownloadTransient,
+				resp.StatusCode,
+				string(bodyBytes),
+			)
+		}
 		return "", fmt.Errorf(
 			"download failed with status %d: %s",
 			resp.StatusCode,
