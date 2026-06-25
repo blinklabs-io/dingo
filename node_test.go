@@ -497,21 +497,20 @@ func TestProcessChainsyncRecyclerTickResyncsPlateauOnlyPeer(
 	// so the stalled connection is closed and re-established from the
 	// current local tip. This is the only recovery path when no spare
 	// eligible peer exists, and is what unwedges a single-relay node.
-	select {
-	case evt := <-resyncCh:
-		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
-		require.True(t, ok)
-		assert.Equal(t, connId, resyncEvt.ConnectionId)
-		assert.Equal(
-			t,
-			event.ChainsyncResyncReasonLocalTipPlateau,
-			resyncEvt.Reason,
-		)
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal(
-			"expected plateau resync event for the only eligible peer",
-		)
-	}
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"plateau resync event for the only eligible peer",
+	)
+	resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
 
 	// The plateau clock and recycle cooldown must be updated so the resync
 	// is gated to the cooldown cadence and a healthy single peer is never
@@ -588,11 +587,20 @@ func TestProcessChainsyncRecyclerTickPlateauOnlyPeerRespectsCooldown(
 		&lastProgressSlot, &lastProgressAt,
 		4*time.Minute, time.Second, 2*time.Minute,
 	)
-	select {
-	case <-resyncCh:
-	case <-time.After(200 * time.Millisecond):
-		t.Fatal("expected first plateau resync event")
-	}
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"first plateau resync event",
+	)
+	resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId, resyncEvt.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonLocalTipPlateau,
+		resyncEvt.Reason,
+	)
 
 	// Second tick still within cooldown: even though the plateau clock is
 	// pushed back to look stalled again, the cooldown must suppress a new
