@@ -424,7 +424,15 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 	}
 }
 
-func TestProcessChainsyncRecyclerTickSkipsPlateauOnlyPeer(
+// TestProcessChainsyncRecyclerTickResyncsPlateauOnlyPeer verifies the
+// single-eligible-peer plateau recovery. A flaky/stalled relay that has
+// stopped advancing the local tip (while chain selection still tracks it at
+// a higher tip) must not wedge the node permanently. With no spare peer, a
+// peer RECYCLE (drop + failover) is impossible, but a plateau RESYNC -- which
+// closes the connection so peer governance reconnects to the same remote with
+// fresh intersect points -- is still the right recovery and must be attempted,
+// not skipped.
+func TestProcessChainsyncRecyclerTickResyncsPlateauOnlyPeer(
 	t *testing.T,
 ) {
 	bus := event.NewEventBus(nil, nil)
@@ -485,23 +493,122 @@ func TestProcessChainsyncRecyclerTickSkipsPlateauOnlyPeer(
 		2*time.Minute,
 	)
 
-	// No plateau resync event should be emitted when the only
-	// eligible peer would be the disconnect target. Disconnecting
-	// a single-relay BP's only upstream over a plateau cannot
-	// recover a locally-pinned tip and amplifies disruption.
+	// A plateau resync targeting the only eligible peer must be emitted
+	// so the stalled connection is closed and re-established from the
+	// current local tip. This is the only recovery path when no spare
+	// eligible peer exists, and is what unwedges a single-relay node.
+	select {
+	case evt := <-resyncCh:
+		resyncEvt, ok := evt.Data.(event.ChainsyncResyncEvent)
+		require.True(t, ok)
+		assert.Equal(t, connId, resyncEvt.ConnectionId)
+		assert.Equal(
+			t,
+			event.ChainsyncResyncReasonLocalTipPlateau,
+			resyncEvt.Reason,
+		)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal(
+			"expected plateau resync event for the only eligible peer",
+		)
+	}
+
+	// The plateau clock and recycle cooldown must be updated so the resync
+	// is gated to the cooldown cadence and a healthy single peer is never
+	// churned every tick.
+	assert.True(
+		t,
+		lastProgressAt.After(originalProgress),
+		"lastProgressAt should be reset after plateau resync",
+	)
+	_, recorded := lastRecycled[connId.String()]
+	assert.True(
+		t,
+		recorded,
+		"plateau resync should record a cooldown timestamp",
+	)
+}
+
+// TestProcessChainsyncRecyclerTickPlateauOnlyPeerRespectsCooldown verifies that
+// after a single-peer plateau resync fires, a second tick within the recycle
+// cooldown does NOT fire another resync. This keeps a flaky single peer being
+// retried at the cooldown cadence (forward progress without churn) rather than
+// reconnecting on every stall-check tick.
+func TestProcessChainsyncRecyclerTickPlateauOnlyPeerRespectsCooldown(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(
+		event.ChainsyncResyncEventType,
+	)
+
+	connId := newNodeTestConnId(7)
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Hour,
+		},
+	)
+	require.True(t, state.AddClientConnId(connId))
+	state.SetClientConnId(connId)
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	selector.UpdatePeerTip(connId, ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 120, Hash: []byte("best")},
+		BlockNumber: 60,
+	}, nil)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+		eventBus:       bus,
+	}
+
+	cfg := chainsync.Config{
+		MaxClients:   1,
+		StallTimeout: time.Hour,
+	}
+	lastProgressSlot := uint64(100)
+	recycleAt := make(map[string]time.Time)
+	lastRecycled := make(map[string]time.Time)
+
+	// First tick: plateau detected, resync fires and records cooldown.
+	now := time.Now()
+	lastProgressAt := now.Add(-5 * time.Minute)
+	n.processChainsyncRecyclerTick(
+		now, 100, cfg, recycleAt, lastRecycled,
+		&lastProgressSlot, &lastProgressAt,
+		4*time.Minute, time.Second, 2*time.Minute,
+	)
+	select {
+	case <-resyncCh:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("expected first plateau resync event")
+	}
+
+	// Second tick still within cooldown: even though the plateau clock is
+	// pushed back to look stalled again, the cooldown must suppress a new
+	// resync.
+	now2 := now.Add(30 * time.Second)
+	lastProgressAt = now2.Add(-5 * time.Minute)
+	n.processChainsyncRecyclerTick(
+		now2, 100, cfg, recycleAt, lastRecycled,
+		&lastProgressSlot, &lastProgressAt,
+		4*time.Minute, time.Second, 2*time.Minute,
+	)
 	testutil.RequireNoReceive(
 		t,
 		resyncCh,
 		50*time.Millisecond,
-		"plateau action should be suppressed for only eligible peer",
-	)
-
-	// lastProgressAt should be reset so the suppression warning
-	// is throttled to plateau cadence rather than every tick.
-	assert.True(
-		t,
-		lastProgressAt.After(originalProgress),
-		"lastProgressAt should be reset after suppressed plateau",
+		"plateau resync should be suppressed within recycle cooldown",
 	)
 }
 
