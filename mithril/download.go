@@ -478,9 +478,11 @@ func DownloadSnapshot(
 				"error", err,
 			)
 		} else if isTransientDownloadError(err) {
-			if !madeProgress {
-				transientRetries++
-			}
+			// Always increment: the progress-based reset above already
+			// zeroes the counter on forward progress, so transientRetries
+			// is guaranteed >= 1 here, making transientRetries-1 >= 0 and
+			// safe to pass to transientRetryDelay.
+			transientRetries++
 			if transientRetries > maxTransientRetries {
 				return "", err
 			}
