@@ -2,7 +2,7 @@
 
 ## v0.57.0 (June 24, 2026)
 
-**Title:** Midnight gRPC lifecycle, Leios forged-body serving, and faster governance tallying
+**Title:** Midnight gRPC lifecycle, Leios forged body serving, and faster governance tallying
 
 **Date:** June 24, 2026
 
@@ -29,7 +29,7 @@ Hi folks! Here’s what we shipped in v0.57.0.
 
 * Clarified **run MidnightState only in API storage mode and disable it with `midnight.port=0`:** The MidnightState listener is available only in API storage mode, `midnight.port=0` turns the listener off, and the current service scaffold returns `Unimplemented` until future handlers arrive.
 * Highlighted **fetch locally forged Leios endorser block bodies through `leios-fetch`:** Leios peers can now retrieve transaction bodies for locally forged endorser blocks through `leios-fetch` as soon as those blocks are announced.
-* Emphasized **expect faster governance tallying and clearer slow-tally visibility:** Governance tally processing should run more efficiently at epoch boundaries, and the new logging makes slow tallies visible to operators.
+* Emphasized **expect faster governance tallying and clearer slow tally visibility:** Governance tally processing should run more efficiently at epoch boundaries, and the new logging makes slow tallies visible to operators.
 * Summarized **trust safer Mithril imported governance state during auto-vote recovery:** Mithril imported snapshot state no longer marks SPO reward-account auto-votes as resolved when the required source state is missing.
 
 ### Recommended Network Compatibility ⚠️
