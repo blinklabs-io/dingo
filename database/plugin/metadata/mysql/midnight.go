@@ -123,8 +123,10 @@ func (d *MetadataStoreMysql) DeleteMidnightAssetCreatesByBlock(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return rows, db.Where("block_number = ?", blockNumber).
-		Delete(&models.MidnightAssetCreate{}).Error
+	if err := db.Where("block_number = ?", blockNumber).Delete(&models.MidnightAssetCreate{}).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // DeleteMidnightAssetSpendsByBlock deletes all cNIGHT spend rows for the
@@ -144,8 +146,10 @@ func (d *MetadataStoreMysql) DeleteMidnightAssetSpendsByBlock(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return rows, db.Where("block_number = ?", blockNumber).
-		Delete(&models.MidnightAssetSpend{}).Error
+	if err := db.Where("block_number = ?", blockNumber).Delete(&models.MidnightAssetSpend{}).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // DeleteMidnightRegistrationsByBlock deletes all registration rows for the
@@ -165,8 +169,10 @@ func (d *MetadataStoreMysql) DeleteMidnightRegistrationsByBlock(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return rows, db.Where("block_number = ?", blockNumber).
-		Delete(&models.MidnightRegistration{}).Error
+	if err := db.Where("block_number = ?", blockNumber).Delete(&models.MidnightRegistration{}).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // DeleteMidnightDeregistrationsByBlock deletes all deregistration rows for the
@@ -186,6 +192,8 @@ func (d *MetadataStoreMysql) DeleteMidnightDeregistrationsByBlock(
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	return rows, db.Where("block_number = ?", blockNumber).
-		Delete(&models.MidnightDeregistration{}).Error
+	if err := db.Where("block_number = ?", blockNumber).Delete(&models.MidnightDeregistration{}).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

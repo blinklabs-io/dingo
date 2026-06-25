@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -137,6 +138,11 @@ func (ls *LedgerState) publishBlockEvent(
 		BlockEventType,
 		event.NewEvent(BlockEventType, evt),
 	); err != nil {
+		// ErrEventBusStopped is expected during teardown when the bus shuts
+		// down before LedgerState finishes draining its last events.
+		if errors.Is(err, event.ErrEventBusStopped) {
+			return
+		}
 		publishErr := fmt.Errorf(
 			"publish %s block event at slot %d block %d: %w",
 			action,
