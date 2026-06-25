@@ -231,52 +231,57 @@ func (n *Node) processChainsyncRecyclerTick(
 					}
 					if !reconciledByLedger {
 						// The local reconcile found nothing to repair (or
-						// failed). Recycling the upstream peer only helps
-						// when there is a spare eligible peer to fail over
-						// to: closing the only upstream forces a reconnect
-						// to the same remote on a fresh source port, which
-						// cannot recover a locally-pinned tip and amplifies
-						// disruption when the remote RSTs the reconnect.
-						// Mirrors the stalled-recycle guard below.
-						if eligibleCount <= 1 {
-							n.config.logger.Warn(
-								"local tip plateau detected but no spare eligible peer, skipping peer recycle",
-								"connection_id", connKey,
-								"local_tip_slot", localTipSlot,
-								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-								"plateau_duration", now.Sub(*lastProgressAt),
-								"eligible_peer_count", eligibleCount,
-							)
-							// Throttle the warning to plateau cadence
-							// instead of every tick.
-							*lastProgressAt = now
-						} else {
-							n.config.logger.Warn(
-								"local tip plateau detected, resyncing chainsync client",
-								"connection_id", connKey,
-								"local_tip_slot", localTipSlot,
-								"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
-								"plateau_duration", now.Sub(*lastProgressAt),
-							)
-							n.eventBus.Publish(
+						// failed), so the stall is in the upstream chainsync
+						// stream itself: the active peer's server-side cursor
+						// has stopped advancing (a flaky/stalled relay) while
+						// chain selection still tracks it AT a higher tip.
+						//
+						// A plateau resync is NOT a peer recycle. Recycling
+						// (the stalled path below) drops the peer and fails
+						// over to a SPARE, so it genuinely needs a spare and
+						// is suppressed at eligibleCount <= 1. A plateau
+						// resync instead closes the connection so peer
+						// governance reconnects to the SAME remote and
+						// re-enters FindIntersect with fresh intersect points
+						// anchored at the current local tip (see
+						// chainsyncResyncRequiresFreshConnection). That is
+						// exactly the recovery a single-peer plateau needs:
+						// it restarts header delivery from local-tip+1 on the
+						// only upstream we have. The plateau predicate
+						// (peer ahead AND no local progress for the full
+						// plateau threshold) plus the recycle cooldown gate
+						// this so a healthy single peer is never churned.
+						n.config.logger.Warn(
+							"local tip plateau detected, resyncing chainsync client",
+							"connection_id", connKey,
+							"local_tip_slot", localTipSlot,
+							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+							"plateau_duration", now.Sub(*lastProgressAt),
+							"eligible_peer_count", eligibleCount,
+						)
+						n.eventBus.Publish(
+							event.ChainsyncResyncEventType,
+							event.NewEvent(
 								event.ChainsyncResyncEventType,
-								event.NewEvent(
-									event.ChainsyncResyncEventType,
-									event.ChainsyncResyncEvent{
-										ConnectionId: *targetConn,
-										Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
-									},
-								),
-							)
+								event.ChainsyncResyncEvent{
+									ConnectionId: *targetConn,
+									Reason:       event.ChainsyncResyncReasonLocalTipPlateau,
+								},
+							),
+						)
+						// Realign only matters when there are spare peers
+						// whose cursors raced ahead while the active peer was
+						// stuck; with a single eligible peer it is a no-op.
+						if eligibleCount > 1 {
 							n.realignOtherPeersAfterPlateau(
 								*targetConn,
 								trackedClients,
 								localTipSlot,
 							)
-							delete(recycleAt, connKey)
-							lastRecycled[connKey] = now
-							*lastProgressAt = now
 						}
+						delete(recycleAt, connKey)
+						lastRecycled[connKey] = now
+						*lastProgressAt = now
 					}
 				}
 			}
