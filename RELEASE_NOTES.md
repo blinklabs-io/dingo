@@ -1,5 +1,54 @@
 # Dingo Releases
 
+## v0.58.0 (June 25, 2026)
+
+**Title:** Forged-block self-validation, historical Leios backfill, and governance correctness
+
+**Date:** June 25, 2026
+
+**Version:** v0.58.0
+
+Hi folks! Here’s what we shipped in v0.58.0.
+
+### ✨ What's New
+
+* Added **enable opt in forged block self validation before local adoption and diffusion:** Operators can now enable forged block self validation with `--validate-forged-block` or `DINGO_VALIDATE_FORGED_BLOCK`, which rejects invalid self forged blocks before broadcast and adds new validation metrics for visibility. ([#2633](https://github.com/blinklabs-io/dingo/pull/2633))
+* Introduced **backfill historical Leios endorser blocks during catch up:** From scratch sync and catch up can now recover missing historical endorser blocks, which builds more complete replay state and reduces stalls during historical catch up. ([#2638](https://github.com/blinklabs-io/dingo/pull/2638))
+
+### 💪 Improvements
+
+* Improved **correct Conway DRep vote tallying across full stake credentials:** Governance tallying now counts voting power correctly across full stake credentials, and SQLite backed runs handle that work more efficiently. ([#2637](https://github.com/blinklabs-io/dingo/pull/2637))
+* Refined **use the intended SQLite live UTxO index for pool stake snapshots:** Pool stake snapshot aggregation now follows the intended SQLite live UTxO index, which avoids poor query plans and keeps stake calculations steadier. ([#2641](https://github.com/blinklabs-io/dingo/pull/2641))
+* Updated **keep the published v0.57.0 release history current:** The in repository release history now includes the structured v0.57.0 notes, which improves continuity across recent releases. ([#2635](https://github.com/blinklabs-io/dingo/pull/2635))
+
+### 🔧 Fixes
+
+* Fixed **prevent duplicate reward journal entries during replay and crash recovery:** Governance, MIR, and POOLREAP reward delta handling now stays idempotent during replay and crash recovery, which prevents duplicate reward account journal entries. ([#2640](https://github.com/blinklabs-io/dingo/pull/2640))
+* Corrected **store nullable genesis UTxO references as SQL NULL in SQLite:** SQLite genesis initialization now stores nullable genesis UTxO foreign key references as SQL NULL, which prevents initialization failures and keeps repeated initialization idempotent. ([#2642](https://github.com/blinklabs-io/dingo/pull/2642))
+* Strengthened **recover single peer chainsync after a local tip plateau:** Nodes that rely on a single eligible upstream peer can now reconnect and resync after a plateau instead of remaining stuck. ([#2639](https://github.com/blinklabs-io/dingo/pull/2639))
+
+### 📋 What You Need to Know
+
+* Clarified **treat forged block self validation as an opt in safety path:** Forged block self validation remains optional, rejects invalid self forged blocks before broadcast, and exposes validation metrics for operators.
+* Highlighted **expect more reliable historical Leios catch up backfill:** Historical catch up now backfills missing endorser blocks more reliably, which helps replay state stay more complete.
+* Emphasized **trust more accurate SQLite governance and stake calculations:** SQLite backed governance tallying and stake snapshot work should be more accurate and less likely to degrade because vote tallying and pool snapshot queries now follow the intended paths.
+* Summarized **expect steadier SQLite genesis initialization and single peer recovery:** SQLite genesis initialization should no longer fail on nullable references, and single peer chainsync recovery should reconnect and resync more reliably after a plateau.
+* Reviewed **use the published v0.57.0 notes as the latest prior release context:** The published release history now includes the v0.57.0 entry for smoother recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.57.0 (June 24, 2026)
 
 **Title:** Midnight gRPC lifecycle, Leios forged-body serving, and faster governance tallying
