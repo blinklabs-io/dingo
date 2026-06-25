@@ -1,5 +1,51 @@
 # Dingo Releases
 
+## v0.57.0 (June 24, 2026)
+
+**Title:** Midnight gRPC lifecycle, Leios forged-body serving, and faster governance tallying
+
+**Date:** June 24, 2026
+
+**Version:** v0.57.0
+
+Hi folks! Here’s what we shipped in v0.57.0.
+
+### ✨ What's New
+
+* Added **enable a native MidnightState endpoint in API storage mode:** Operators can now run a MidnightState gRPC listener when API storage mode is enabled, and the service includes reflection, health checks, optional TLS when both certificate and key are configured, and a scaffolded handler set that currently returns `Unimplemented`; setting `midnight.port=0` disables the listener.
+* Introduced **serve locally forged Leios endorser block transaction bodies through `leios-fetch`:** Peers and downstream consumers can now retrieve transaction bodies for locally forged endorser blocks immediately after announcement.
+
+### 💪 Improvements
+
+* Improved **speed governance tally work at epoch boundaries and surface slow tallies in logs:** Per epoch caching now reduces repeated tally denominator work, and tally duration logging makes slow governance tallies easier to spot during operations.
+* Refined **keep Conway validation fixtures consistent with the shared `ouroboros-mock` chain:** Validation now uses the shared Conway chain fixture and the newer `v0.14.0` dependency, which improves test and validation consistency and maintainability.
+* Updated **keep the published v0.56.0 release history current:** The in repository release history now includes the prior v0.56.0 entry, which keeps recent release documentation current.
+
+### 🔧 Fixes
+
+* Fixed **avoid inaccurate SPO reward-account auto-vote resolution after Mithril snapshot restores:** Current epoch auto-votes now resolve only when the required pool and reward-account state is present, and historical rows remain unresolved instead of being stored inaccurately when that state is missing.
+
+### 📋 What You Need to Know
+
+* Clarified **run MidnightState only in API storage mode and disable it with `midnight.port=0`:** The MidnightState listener is available only in API storage mode, `midnight.port=0` turns the listener off, and the current service scaffold returns `Unimplemented` until future handlers arrive.
+* Highlighted **fetch locally forged Leios endorser block bodies through `leios-fetch`:** Leios peers can now retrieve transaction bodies for locally forged endorser blocks through `leios-fetch` as soon as those blocks are announced.
+* Emphasized **expect faster governance tallying and clearer slow-tally visibility:** Governance tally processing should run more efficiently at epoch boundaries, and the new logging makes slow tallies visible to operators.
+* Summarized **trust safer Mithril imported governance state during auto-vote recovery:** Mithril imported snapshot state no longer marks SPO reward-account auto-votes as resolved when the required source state is missing.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.56.0 (June 23, 2026)
 
 **Title:** Checkpoint validation, Musashi Leios interoperability, and Mithril catch-up correctness
