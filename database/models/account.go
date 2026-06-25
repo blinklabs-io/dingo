@@ -15,9 +15,11 @@
 package models
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/btcsuite/btcd/btcutil/bech32"
@@ -142,21 +144,23 @@ func MigrateAccountRewardDeltaCredentialTagIndex(db *gorm.DB, logger *slog.Logge
 	if !db.Migrator().HasTable(&AccountRewardDelta{}) {
 		return nil
 	}
-	// If credential_tag is already present the index has already been migrated.
-	if db.Migrator().HasColumn(&AccountRewardDelta{}, "credential_tag") {
-		return nil
+	if db.Migrator().HasIndex(&AccountRewardDelta{}, "idx_account_reward_delta_w_tx_s") {
+		logger.Info(
+			"dropping legacy account_reward_delta unique index before tag-aware migration",
+		)
+		if err := db.Migrator().DropIndex(
+			&AccountRewardDelta{},
+			"idx_account_reward_delta_w_tx_s",
+		); err != nil {
+			return fmt.Errorf("drop account_reward_delta unique index: %w", err)
+		}
 	}
-	if !db.Migrator().HasIndex(&AccountRewardDelta{}, "idx_account_reward_delta_w_tx_s") {
-		return nil
-	}
-	logger.Info(
-		"dropping legacy account_reward_delta unique index before tag-aware migration",
-	)
-	if err := db.Migrator().DropIndex(
-		&AccountRewardDelta{},
-		"idx_account_reward_delta_w_tx_s",
-	); err != nil {
-		return fmt.Errorf("drop account_reward_delta unique index: %w", err)
+	// If credential_tag is already present the index migration has already run,
+	// but keep the tx_hash normalization in this path so older databases that
+	// only completed the tag-aware step are hardened before AutoMigrate creates
+	// the current unique index.
+	if err := normalizeAccountRewardDeltaTxHash(db, logger); err != nil {
+		return err
 	}
 	return nil
 }
@@ -165,7 +169,7 @@ func MigrateAccountRewardDeltaCredentialTagIndex(db *gorm.DB, logger *slog.Logge
 // account_reward_delta so AutoMigrate can recreate it with added_slot included.
 //
 // The old index (withdrawal, tx_hash, credential_tag, staking_key) keyed every
-// credit delta (which carries an empty tx_hash) for an account onto a single
+// credit delta without a per-event discriminator for an account onto a single
 // row, so a second per-epoch credit — a MIR reward, a POOLREAP refund, or a
 // governance deposit refund in a later epoch — collided on a clean first pass,
 // and a crash-replayed epoch-rollover credit collided on restart. The new index
@@ -182,25 +186,169 @@ func MigrateAccountRewardDeltaSlotIndex(db *gorm.DB, logger *slog.Logger) error 
 	if !db.Migrator().HasTable(&AccountRewardDelta{}) {
 		return nil
 	}
-	if !db.Migrator().HasIndex(
+	if db.Migrator().HasIndex(
 		&AccountRewardDelta{},
 		"idx_account_reward_delta_w_tx_s",
 	) {
+		logger.Info(
+			"dropping slot-less account_reward_delta unique index before slot-aware migration",
+		)
+		if err := db.Migrator().DropIndex(
+			&AccountRewardDelta{},
+			"idx_account_reward_delta_w_tx_s",
+		); err != nil {
+			return fmt.Errorf(
+				"drop slot-less account_reward_delta unique index: %w",
+				err,
+			)
+		}
+	}
+	if err := normalizeAccountRewardDeltaTxHash(db, logger); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeAccountRewardDeltaTxHash(db *gorm.DB, logger *slog.Logger) error {
+	if !db.Migrator().HasColumn(&AccountRewardDelta{}, "tx_hash") {
+		return nil
+	}
+	var nullCount int64
+	if err := db.Model(&AccountRewardDelta{}).
+		Where("tx_hash IS NULL").
+		Count(&nullCount).Error; err != nil {
+		return fmt.Errorf("count account_reward_delta null tx_hash rows: %w", err)
+	}
+	if nullCount > 0 {
+		logger.Info(
+			"backfilling account_reward_delta null tx_hash values before not-null migration",
+			"rows",
+			nullCount,
+		)
+		if err := db.Model(&AccountRewardDelta{}).
+			Where("tx_hash IS NULL").
+			Update("tx_hash", []byte{}).Error; err != nil {
+			return fmt.Errorf("backfill account_reward_delta tx_hash: %w", err)
+		}
+	}
+
+	nullable, ok, err := accountRewardDeltaTxHashNullable(db)
+	if err != nil {
+		return err
+	}
+	if ok && !nullable {
 		return nil
 	}
 	logger.Info(
-		"dropping slot-less account_reward_delta unique index before slot-aware migration",
+		"making account_reward_delta tx_hash non-null",
 	)
-	if err := db.Migrator().DropIndex(
-		&AccountRewardDelta{},
-		"idx_account_reward_delta_w_tx_s",
-	); err != nil {
-		return fmt.Errorf(
-			"drop slot-less account_reward_delta unique index: %w",
+	if db.Dialector.Name() == "sqlite" {
+		return alterSQLiteAccountRewardDeltaTxHashNotNull(db)
+	}
+	if err := db.Migrator().AlterColumn(&AccountRewardDelta{}, "TxHash"); err != nil {
+		return fmt.Errorf("alter account_reward_delta tx_hash not null: %w", err)
+	}
+	return nil
+}
+
+type sqliteColumnInfo struct {
+	DfltValue sql.NullString `gorm:"column:dflt_value"`
+	Name      string
+	Type      string
+	CID       int
+	NotNull   int `gorm:"column:notnull"`
+	PK        int
+}
+
+func alterSQLiteAccountRewardDeltaTxHashNotNull(db *gorm.DB) error {
+	var columns []sqliteColumnInfo
+	if err := db.Raw("PRAGMA table_info(account_reward_delta)").
+		Scan(&columns).Error; err != nil {
+		return fmt.Errorf("inspect account_reward_delta sqlite columns: %w", err)
+	}
+	if len(columns) == 0 {
+		return nil
+	}
+	hasTxHash := false
+	columnDefs := make([]string, 0, len(columns))
+	columnNames := make([]string, 0, len(columns))
+	for _, column := range columns {
+		if column.Name == "tx_hash" {
+			hasTxHash = true
+		}
+		name := quoteSQLiteIdentifier(column.Name)
+		columnNames = append(columnNames, name)
+		def := []string{name}
+		if column.Type != "" {
+			def = append(def, column.Type)
+		}
+		if column.PK > 0 {
+			def = append(def, "PRIMARY KEY")
+		}
+		if column.NotNull != 0 || column.Name == "tx_hash" {
+			def = append(def, "NOT NULL")
+		}
+		if column.DfltValue.Valid {
+			def = append(def, "DEFAULT "+column.DfltValue.String)
+		}
+		columnDefs = append(columnDefs, strings.Join(def, " "))
+	}
+	if !hasTxHash {
+		return nil
+	}
+
+	const tempTable = "account_reward_delta__tx_hash_not_null"
+	tempIdent := quoteSQLiteIdentifier(tempTable)
+	columnsSQL := strings.Join(columnNames, ", ")
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec("DROP TABLE IF EXISTS " + tempIdent).Error; err != nil {
+			return fmt.Errorf("drop account_reward_delta temp table: %w", err)
+		}
+		if err := tx.Exec(
+			"CREATE TABLE " + tempIdent + " (" +
+				strings.Join(columnDefs, ", ") +
+				")",
+		).Error; err != nil {
+			return fmt.Errorf("create account_reward_delta temp table: %w", err)
+		}
+		if err := tx.Exec(
+			"INSERT INTO " + tempIdent + " (" + columnsSQL + ") " +
+				"SELECT " + columnsSQL + " FROM account_reward_delta",
+		).Error; err != nil {
+			return fmt.Errorf("copy account_reward_delta rows: %w", err)
+		}
+		if err := tx.Exec("DROP TABLE account_reward_delta").Error; err != nil {
+			return fmt.Errorf("drop old account_reward_delta table: %w", err)
+		}
+		if err := tx.Exec(
+			"ALTER TABLE " + tempIdent + " RENAME TO account_reward_delta",
+		).Error; err != nil {
+			return fmt.Errorf("rename account_reward_delta temp table: %w", err)
+		}
+		return nil
+	})
+}
+
+func quoteSQLiteIdentifier(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
+}
+
+func accountRewardDeltaTxHashNullable(db *gorm.DB) (bool, bool, error) {
+	columnTypes, err := db.Migrator().ColumnTypes(&AccountRewardDelta{})
+	if err != nil {
+		return false, false, fmt.Errorf(
+			"inspect account_reward_delta columns: %w",
 			err,
 		)
 	}
-	return nil
+	for _, columnType := range columnTypes {
+		if columnType.Name() != "tx_hash" {
+			continue
+		}
+		nullable, ok := columnType.Nullable()
+		return nullable, ok, nil
+	}
+	return false, false, nil
 }
 
 type StakeCredentialRef struct {
@@ -226,17 +374,19 @@ func (r StakeCredentialRef) MapKey() string {
 //
 // The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
 // Withdrawal deltas are keyed by their (non-empty) TxHash, so each is unique
-// regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) carry an
-// empty TxHash, so without AddedSlot every credit to a given account would
-// collapse onto a single row — colliding across epochs even on a clean first
-// pass and breaking per-row rollback accounting in DeleteAccountRewardsAfterSlot.
-// Including AddedSlot makes each per-epoch credit a distinct row while keeping
-// a replayed epoch-rollover credit (same account, same boundary slot) mapped to
-// the same row so it can be skipped idempotently instead of erroring.
+// regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) use an
+// event discriminator in TxHash when one is available and otherwise use the
+// normalized empty value. Without AddedSlot, repeated per-epoch credits to a
+// given account could still collapse onto a single row — colliding across
+// epochs even on a clean first pass and breaking per-row rollback accounting in
+// DeleteAccountRewardsAfterSlot. Including AddedSlot makes each per-epoch
+// credit a distinct row while keeping a replayed epoch-rollover credit (same
+// account, same event discriminator, same boundary slot) mapped to the same row
+// so it can be skipped idempotently instead of erroring.
 type AccountRewardDelta struct {
 	StakingKey     []byte       `gorm:"index:idx_account_reward_delta_credential,priority:2;size:28;not null;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:4"`
 	CredentialTag  uint8        `gorm:"index:idx_account_reward_delta_credential,priority:1;not null;default:0;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:3"`
-	TxHash         []byte       `gorm:"index;size:32;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:2"`
+	TxHash         []byte       `gorm:"index;size:32;not null;uniqueIndex:idx_account_reward_delta_w_tx_s_slot,priority:2"`
 	Amount         types.Uint64 `gorm:"not null"`
 	PreviousReward types.Uint64
 	ID             uint   `gorm:"primarykey"`

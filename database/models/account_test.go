@@ -21,6 +21,8 @@ import (
 	"testing"
 
 	"github.com/btcsuite/btcd/btcutil/bech32"
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestAccount_String(t *testing.T) {
@@ -224,6 +226,109 @@ func TestAccount_String_DifferentKeys(t *testing.T) {
 			"Account.String() produced same address for different keys: %s",
 			addr1,
 		)
+	}
+}
+
+func TestMigrateAccountRewardDeltaTxHashNormalization(t *testing.T) {
+	tests := []struct {
+		name               string
+		createTableSQL     string
+		createIndexSQL     string
+		insertNullRowSQL   string
+		insertNullAfterSQL string
+		migrate            func(*gorm.DB) error
+	}{
+		{
+			name: "credential tag migration",
+			createTableSQL: `
+				CREATE TABLE account_reward_delta (
+					id integer primary key autoincrement,
+					staking_key blob NOT NULL,
+					tx_hash blob,
+					amount text NOT NULL,
+					previous_reward text,
+					added_slot integer NOT NULL,
+					withdrawal numeric NOT NULL DEFAULT false
+				)`,
+			createIndexSQL: `
+				CREATE UNIQUE INDEX idx_account_reward_delta_w_tx_s
+				ON account_reward_delta (withdrawal, tx_hash, staking_key)`,
+			insertNullRowSQL: `
+				INSERT INTO account_reward_delta
+					(staking_key, tx_hash, amount, previous_reward, added_slot, withdrawal)
+				VALUES (x'010203', NULL, '5', '0', 10, false)`,
+			insertNullAfterSQL: `
+				INSERT INTO account_reward_delta
+					(staking_key, tx_hash, amount, previous_reward, added_slot, withdrawal)
+				VALUES (x'040506', NULL, '7', '0', 11, false)`,
+			migrate: func(db *gorm.DB) error {
+				return MigrateAccountRewardDeltaCredentialTagIndex(db, nil)
+			},
+		},
+		{
+			name: "slot migration",
+			createTableSQL: `
+				CREATE TABLE account_reward_delta (
+					id integer primary key autoincrement,
+					staking_key blob NOT NULL,
+					credential_tag integer NOT NULL DEFAULT 0,
+					tx_hash blob,
+					amount text NOT NULL,
+					previous_reward text,
+					added_slot integer NOT NULL,
+					withdrawal numeric NOT NULL DEFAULT false
+				)`,
+			createIndexSQL: `
+				CREATE UNIQUE INDEX idx_account_reward_delta_w_tx_s
+				ON account_reward_delta
+					(withdrawal, tx_hash, credential_tag, staking_key)`,
+			insertNullRowSQL: `
+				INSERT INTO account_reward_delta
+					(staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal)
+				VALUES (x'010203', 0, NULL, '5', '0', 10, false)`,
+			insertNullAfterSQL: `
+				INSERT INTO account_reward_delta
+					(staking_key, credential_tag, tx_hash, amount, previous_reward, added_slot, withdrawal)
+				VALUES (x'040506', 0, NULL, '7', '0', 11, false)`,
+			migrate: func(db *gorm.DB) error {
+				return MigrateAccountRewardDeltaSlotIndex(db, nil)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+			if err != nil {
+				t.Fatalf("open sqlite: %v", err)
+			}
+			if err := db.Exec(tt.createTableSQL).Error; err != nil {
+				t.Fatalf("create legacy table: %v", err)
+			}
+			if err := db.Exec(tt.createIndexSQL).Error; err != nil {
+				t.Fatalf("create legacy index: %v", err)
+			}
+			if err := db.Exec(tt.insertNullRowSQL).Error; err != nil {
+				t.Fatalf("insert legacy null tx_hash row: %v", err)
+			}
+
+			if err := tt.migrate(db); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+
+			var nullCount int64
+			if err := db.Table("account_reward_delta").
+				Where("tx_hash IS NULL").
+				Count(&nullCount).Error; err != nil {
+				t.Fatalf("count null tx_hash rows: %v", err)
+			}
+			if nullCount != 0 {
+				t.Fatalf("null tx_hash rows = %d, want 0", nullCount)
+			}
+			if err := db.Exec(tt.insertNullAfterSQL).Error; err == nil {
+				t.Fatal("expected tx_hash NOT NULL constraint after migration")
+			}
+		})
 	}
 }
 

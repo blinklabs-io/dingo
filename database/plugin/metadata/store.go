@@ -329,7 +329,7 @@ type MetadataStore interface {
 	// The credential tag prevents key and script reward accounts with the same hash from merging.
 	//
 	// sourceHash uniquely identifies the credit event that produced this
-	// reward (the refunded governance proposal's tx hash, the reaped pool's
+	// reward (the refunded governance proposal identity hash, the reaped pool
 	// key hash, or a synthetic MIR event discriminator). It is recorded in the
 	// delta journal's tx_hash column so each distinct credit at an epoch
 	// boundary is its own rollback-aware row, while re-applying the same

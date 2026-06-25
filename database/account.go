@@ -163,11 +163,11 @@ func (d *Database) GetAccountsByCredential(
 
 // AddAccountRewardByCredential credits the reward balance for a registered
 // account identified by stake credential tag and key. sourceHash uniquely
-// identifies the credit event (refunded proposal tx hash, reaped pool key
-// hash, or synthetic MIR event discriminator); it makes each epoch-boundary
-// credit a distinct rollback-aware journal row while letting a crash-replayed
-// boundary map onto the existing row and skip idempotently. Pass nil when no
-// per-event discriminator is available.
+// identifies the credit event (refunded proposal identity hash, reaped pool
+// key hash, or synthetic MIR event discriminator); it makes each
+// epoch-boundary credit a distinct rollback-aware journal row while letting a
+// crash-replayed boundary map onto the existing row and skip idempotently.
+// Pass nil when no per-event discriminator is available.
 func (d *Database) AddAccountRewardByCredential(
 	credentialTag uint8,
 	stakeKey []byte,

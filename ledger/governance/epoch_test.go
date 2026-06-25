@@ -56,6 +56,52 @@ func TestRefundProposalDepositCreditsRewardAccount(t *testing.T) {
 	assert.Equal(t, uint64(12), uint64(account.Reward))
 }
 
+func TestRefundProposalDeposit_DistinguishesSameTxActionIndex(t *testing.T) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x31)
+	rewardAddrBytes := buildRewardAddr(t, stakeCred)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+
+	txHash := testBytes(32, 0x32)
+	first := &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   0,
+		Deposit:       7,
+		ReturnAddress: rewardAddrBytes,
+	}
+	second := &models.GovernanceProposal{
+		TxHash:        txHash,
+		ActionIndex:   1,
+		Deposit:       11,
+		ReturnAddress: rewardAddrBytes,
+	}
+	require.NoError(t, refundProposalDeposit(db, nil, first, 123))
+	require.NoError(t, refundProposalDeposit(db, nil, second, 123))
+
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(18), uint64(account.Reward))
+
+	var deltas []models.AccountRewardDelta
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+		0,
+		stakeCred,
+		uint64(123),
+	).Find(&deltas).Error)
+	require.Len(t, deltas, 2)
+	assert.NotEqual(
+		t,
+		proposalRewardSourceHash(first),
+		proposalRewardSourceHash(second),
+	)
+}
+
 func TestProcessEpochExpiresProposalAndRefundsDeposit(t *testing.T) {
 	db, store := newTallyTestDB(t)
 	stakeCred := testBytes(28, 2)

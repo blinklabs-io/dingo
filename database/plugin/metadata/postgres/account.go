@@ -127,12 +127,13 @@ func (d *MetadataStorePostgres) AddAccountRewardByCredential(
 	// comparisons lexicographic, not numeric, and unsafe as a guard.
 	credit := func(tx *gorm.DB) error {
 		var account models.Account
-		if err := tx.Where(
-			"credential_tag = ? AND staking_key = ? AND active = ?",
-			credentialTag,
-			stakeKey,
-			true,
-		).First(&account).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where(
+				"credential_tag = ? AND staking_key = ? AND active = ?",
+				credentialTag,
+				stakeKey,
+				true,
+			).First(&account).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return models.ErrAccountNotFound
 			}
