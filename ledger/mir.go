@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 
@@ -27,6 +28,8 @@ const (
 	mirPotReserves = uint(0)
 	// mirPotTreasury is the on-chain CBOR encoding of the treasury pot (1).
 	mirPotTreasury = uint(1)
+
+	mirRewardSourcePrefix = "dingo:mir:"
 )
 
 // applyMIRCerts applies all MIR (Move Instantaneous Rewards) certificate
@@ -80,12 +83,12 @@ func (ls *LedgerState) applyMIRCerts(
 				reward.Credential,
 				reward.Amount,
 				boundarySlot,
-				// MIR has no per-event hash; the destination credential is
-				// the discriminator. It separates the MIR credit from a
-				// same-slot governance/POOLREAP credit to the same account
-				// and makes re-applying the boundary idempotent. (Shelley-
-				// era only; a no-op for Conway+ epochs.)
-				reward.Credential,
+				// MIR has no transaction hash in this processed effect, so
+				// the MIR row ID is encoded as a synthetic discriminator.
+				// That keeps two MIR certs crediting the same account in
+				// one epoch as distinct journal rows while still mapping a
+				// crash-replayed boundary to the same row.
+				mirRewardSourceHash(effect.ID),
 			)
 			if err != nil {
 				return fmt.Errorf(
@@ -113,6 +116,16 @@ func (ls *LedgerState) applyMIRCerts(
 		}
 	}
 	return nil
+}
+
+func mirRewardSourceHash(mirID uint) []byte {
+	out := make([]byte, len(mirRewardSourcePrefix)+8)
+	copy(out, mirRewardSourcePrefix)
+	binary.BigEndian.PutUint64(
+		out[len(mirRewardSourcePrefix):],
+		uint64(mirID),
+	)
+	return out
 }
 
 // debitMIRPot decrements the given Ada pot by amount, writing an updated

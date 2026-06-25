@@ -131,6 +131,55 @@ func TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount(t *testing.T) 
 		"treasury untouched for reserves distribution")
 }
 
+// TestApplyMIRCerts_MultipleDistributionsSameAccount verifies that distinct
+// MIR certs crediting the same account at one epoch boundary remain distinct
+// reward journal events.
+func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
+	ls, db, gdb := newMIRTestLedger(t)
+
+	const (
+		epochStartSlot = uint64(0)
+		boundarySlot   = uint64(1_000)
+		firstAmount    = uint64(300)
+		secondAmount   = uint64(450)
+	)
+	cred := mirCred28(0x12)
+	seedMIRDistribution(t, gdb, mirPotReserves, 200, []models.MoveInstantaneousRewardsReward{
+		{Credential: cred, Amount: types.Uint64(firstAmount)},
+	})
+	seedMIRDistribution(t, gdb, mirPotReserves, 400, []models.MoveInstantaneousRewardsReward{
+		{Credential: cred, Amount: types.Uint64(secondAmount)},
+	})
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: cred,
+		Reward:     0,
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, 10_000, 50, nil))
+
+	runApplyMIRCerts(t, ls, db, epochStartSlot, boundarySlot)
+
+	account, err := db.GetAccountByCredential(0, cred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, firstAmount+secondAmount, uint64(account.Reward))
+
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(9_250), uint64(state.Reserves))
+
+	var deltas []models.AccountRewardDelta
+	require.NoError(t, gdb.Where(
+		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+		0,
+		cred,
+		boundarySlot,
+	).Order("id ASC").Find(&deltas).Error)
+	require.Len(t, deltas, 2)
+	assert.NotEqual(t, string(deltas[0].TxHash), string(deltas[1].TxHash))
+}
+
 // TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount verifies a MIR
 // cert from the treasury credits the account and debits the treasury.
 func TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount(t *testing.T) {
