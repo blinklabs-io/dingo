@@ -242,7 +242,7 @@ func normalizeAccountRewardDeltaTxHash(db *gorm.DB, logger *slog.Logger) error {
 	logger.Info(
 		"making account_reward_delta tx_hash non-null",
 	)
-	if db.Dialector.Name() == "sqlite" {
+	if db.Name() == "sqlite" {
 		return alterSQLiteAccountRewardDeltaTxHashNotNull(db)
 	}
 	if err := db.Migrator().AlterColumn(&AccountRewardDelta{}, "TxHash"); err != nil {
