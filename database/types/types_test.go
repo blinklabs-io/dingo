@@ -161,3 +161,90 @@ func TestHistoryExpiredErrorWraps(t *testing.T) {
 		t.Fatalf("extracted = %+v, want slot=42 hash=%x", extracted, hash)
 	}
 }
+
+// TestNullableHashValueEmptyIsNull verifies that an empty (nil or zero-length)
+// NullableHash serializes to SQL NULL, not an empty blob. This is the property
+// that keeps nullable hash FK columns (e.g. utxo.spent_at_tx_id) from failing
+// their FK to transaction(hash) for unspent/unreferenced UTxOs.
+func TestNullableHashValueEmptyIsNull(t *testing.T) {
+	cases := []struct {
+		name string
+		in   types.NullableHash
+	}{
+		{"nil", nil},
+		{"empty", types.NullableHash{}},
+		{"zero-len", types.NullableHash([]byte(""))},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := tc.in.Value()
+			if err != nil {
+				t.Fatalf("Value() error: %v", err)
+			}
+			if v != nil {
+				t.Fatalf("Value() = %#v, want nil (SQL NULL)", v)
+			}
+		})
+	}
+}
+
+// TestNullableHashValueNonEmpty verifies a non-empty NullableHash serializes to
+// its bytes.
+func TestNullableHashValueNonEmpty(t *testing.T) {
+	in := types.NullableHash(bytes.Repeat([]byte{0xAB}, 32))
+	v, err := in.Value()
+	if err != nil {
+		t.Fatalf("Value() error: %v", err)
+	}
+	b, ok := v.([]byte)
+	if !ok {
+		t.Fatalf("Value() type = %T, want []byte", v)
+	}
+	if !bytes.Equal(b, in) {
+		t.Fatalf("Value() = %x, want %x", b, in)
+	}
+}
+
+// TestNullableHashScan round-trips NULL, []byte, and string sources.
+func TestNullableHashScan(t *testing.T) {
+	var h types.NullableHash
+
+	if err := h.Scan(nil); err != nil {
+		t.Fatalf("Scan(nil) error: %v", err)
+	}
+	if h != nil {
+		t.Fatalf("Scan(nil) = %#v, want nil", h)
+	}
+
+	if err := h.Scan([]byte{}); err != nil {
+		t.Fatalf("Scan(empty []byte) error: %v", err)
+	}
+	if h != nil {
+		t.Fatalf("Scan(empty []byte) = %#v, want nil", h)
+	}
+
+	want := bytes.Repeat([]byte{0x01}, 32)
+	if err := h.Scan(want); err != nil {
+		t.Fatalf("Scan([]byte) error: %v", err)
+	}
+	if !bytes.Equal(h, want) {
+		t.Fatalf("Scan([]byte) = %x, want %x", h, want)
+	}
+
+	if err := h.Scan("xyz"); err != nil {
+		t.Fatalf("Scan(string) error: %v", err)
+	}
+	if string(h) != "xyz" {
+		t.Fatalf("Scan(string) = %q, want %q", string(h), "xyz")
+	}
+
+	if err := h.Scan(123); err == nil {
+		t.Fatal("Scan(int) should error")
+	}
+}
+
+// Ensure NullableHash implements the driver interfaces.
+var (
+	_ driver.Valuer = types.NullableHash(nil)
+	_ sql.Scanner   = (*types.NullableHash)(nil)
+)

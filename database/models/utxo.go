@@ -77,25 +77,30 @@ func AppendUtxoAddressOrBranch(
 
 // Utxo represents an unspent transaction output
 type Utxo struct {
-	TransactionID           *uint        `gorm:"index"`
-	CollateralReturnForTxID *uint        `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
-	TxId                    []byte       `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
-	PaymentKey              []byte       `gorm:"index;size:28"`
-	StakingKey              []byte       `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_staking_deleted_amount,priority:2"`
-	CredentialTag           uint8        `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2;index:idx_utxo_staking_deleted_amount,priority:1"`
-	Assets                  []Asset      `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
-	Cbor                    []byte       `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
-	DatumHash               []byte       `gorm:"size:32"` // Optional datum hash (32 bytes)
-	Datum                   []byte       `gorm:"-"`       // Inline datum CBOR, not stored in metadata DB
-	ScriptRef               []byte       `gorm:"-"`       // Reference script bytes, not stored in metadata DB
-	SpentAtTxId             []byte       `gorm:"index;size:32"`
-	ReferencedByTxId        []byte       `gorm:"index;size:32"`
-	CollateralByTxId        []byte       `gorm:"index;size:32"`
-	ID                      uint         `gorm:"primarykey"`
-	AddedSlot               uint64       `gorm:"index"`
-	DeletedSlot             uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_staking_deleted_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:1"`
-	Amount                  types.Uint64 `gorm:"index:idx_utxo_deleted_staking_amount,priority:4;index:idx_utxo_staking_deleted_amount,priority:4;index:idx_utxo_deleted_payment_script,priority:3"`
-	OutputIdx               uint32       `gorm:"uniqueIndex:tx_id_output_idx"`
+	TransactionID           *uint   `gorm:"index"`
+	CollateralReturnForTxID *uint   `gorm:"uniqueIndex"` // Unique: a transaction has at most one collateral return output
+	TxId                    []byte  `gorm:"uniqueIndex:tx_id_output_idx;size:32"`
+	PaymentKey              []byte  `gorm:"index;size:28"`
+	StakingKey              []byte  `gorm:"index;size:28;index:idx_utxo_deleted_staking_amount,priority:3;index:idx_utxo_staking_deleted_amount,priority:2"`
+	CredentialTag           uint8   `gorm:"not null;default:0;index:idx_utxo_deleted_staking_amount,priority:2;index:idx_utxo_staking_deleted_amount,priority:1"`
+	Assets                  []Asset `gorm:"foreignKey:UtxoID;constraint:OnDelete:CASCADE"`
+	Cbor                    []byte  `gorm:"-"`       // This is here for convenience but not represented in the metadata DB
+	DatumHash               []byte  `gorm:"size:32"` // Optional datum hash (32 bytes)
+	Datum                   []byte  `gorm:"-"`       // Inline datum CBOR, not stored in metadata DB
+	ScriptRef               []byte  `gorm:"-"`       // Reference script bytes, not stored in metadata DB
+	// SpentAtTxId, ReferencedByTxId, and CollateralByTxId are nullable FKs to
+	// transaction(hash); they are unset until a UTxO is spent/referenced.
+	// They use types.NullableHash so an empty value serializes to SQL NULL
+	// (not an empty blob), which is required for the FK to be skipped — see
+	// the type docs for the FOREIGN KEY constraint failed (787) issue.
+	SpentAtTxId      types.NullableHash `gorm:"index;size:32"`
+	ReferencedByTxId types.NullableHash `gorm:"index;size:32"`
+	CollateralByTxId types.NullableHash `gorm:"index;size:32"`
+	ID               uint               `gorm:"primarykey"`
+	AddedSlot        uint64             `gorm:"index"`
+	DeletedSlot      uint64             `gorm:"index:idx_utxo_deleted_staking_amount,priority:1;index:idx_utxo_staking_deleted_amount,priority:3;index:idx_utxo_deleted_payment_script,priority:1"`
+	Amount           types.Uint64       `gorm:"index:idx_utxo_deleted_staking_amount,priority:4;index:idx_utxo_staking_deleted_amount,priority:4;index:idx_utxo_deleted_payment_script,priority:3"`
+	OutputIdx        uint32             `gorm:"uniqueIndex:tx_id_output_idx"`
 	// PaymentScript is true when the output's payment credential is a
 	// script hash (as opposed to a key hash). It is derived from the
 	// address type at index time and used to compute the network's

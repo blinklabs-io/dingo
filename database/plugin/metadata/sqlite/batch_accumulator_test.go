@@ -297,7 +297,7 @@ func TestFlushBatch_UtxoOutputsAndSpends(t *testing.T) {
 	assert.Equal(t, uint64(0), outputs[0].DeletedSlot)
 	assert.Empty(t, outputs[0].SpentAtTxId)
 	assert.Equal(t, uint64(120), outputs[1].DeletedSlot)
-	assert.Equal(t, spentBy, outputs[1].SpentAtTxId)
+	assert.Equal(t, spentBy, []byte(outputs[1].SpentAtTxId))
 }
 
 func TestFlushBatch_MultipleSpends(t *testing.T) {
@@ -363,9 +363,9 @@ func TestFlushBatch_MultipleSpends(t *testing.T) {
 
 	// Each UTxO must carry its own slot and spentBy — wrong if args were interleaved.
 	assert.Equal(t, uint64(200), u1.DeletedSlot)
-	assert.Equal(t, spentBy1, u1.SpentAtTxId)
+	assert.Equal(t, spentBy1, []byte(u1.SpentAtTxId))
 	assert.Equal(t, uint64(201), u2.DeletedSlot)
-	assert.Equal(t, spentBy2, u2.SpentAtTxId)
+	assert.Equal(t, spentBy2, []byte(u2.SpentAtTxId))
 }
 
 func TestFlushBatch_Idempotent(t *testing.T) {
