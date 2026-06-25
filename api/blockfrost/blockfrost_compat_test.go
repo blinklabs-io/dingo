@@ -677,6 +677,9 @@ func TestCompatAccountRegistrationHistoryResponse(
 	assert.Equal(t, int(ours[0].BlockHeight), theirs[0].BlockHeight)
 	assert.Equal(t, ours[1].TxHash, theirs[1].TXHash)
 	assert.Equal(t, ours[1].Action, theirs[1].Action)
+	assert.Equal(t, int(ours[1].TxSlot), theirs[1].TxSlot)
+	assert.Equal(t, int(ours[1].BlockTime), theirs[1].BlockTime)
+	assert.Equal(t, int(ours[1].BlockHeight), theirs[1].BlockHeight)
 }
 
 // TestCompatAccountRewardHistoryResponse verifies that
