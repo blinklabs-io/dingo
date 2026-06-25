@@ -43,6 +43,7 @@ func (d *MetadataStorePostgres) GetMIRCertsInSlotRange(
 
 	effects := make([]models.MIREffect, len(mirs))
 	for i, m := range mirs {
+		effects[i].ID = m.ID
 		effects[i].Pot = m.Pot
 		effects[i].OtherPot = uint64(m.OtherPot)
 		effects[i].Rewards = make([]models.MIRReward, len(m.Rewards))

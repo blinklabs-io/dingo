@@ -618,6 +618,11 @@ func refundProposalDeposit(
 		stakeCredential,
 		proposal.Deposit,
 		slot,
+		// The proposal tx hash plus action index is the per-event credit
+		// discriminator: it keeps two refunds to the same return account in
+		// one epoch as distinct journal rows and makes a crash-replayed
+		// boundary refund idempotent.
+		proposalRewardSourceHash(proposal),
 	)
 	if err != nil {
 		return err

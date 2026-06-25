@@ -228,7 +228,7 @@ func TestPostgresRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
 	require.NoError(t, pgStore.DB().Create(keyAccount).Error)
 	require.NoError(t, pgStore.DB().Create(scriptAccount).Error)
 
-	require.NoError(t, pgStore.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+	require.NoError(t, pgStore.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil, nil))
 
 	keyBefore, err := pgStore.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)

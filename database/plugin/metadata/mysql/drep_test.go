@@ -231,7 +231,7 @@ func TestMysqlRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
 	require.NoError(t, store.DB().Create(keyAccount).Error)
 	require.NoError(t, store.DB().Create(scriptAccount).Error)
 
-	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil, nil))
 
 	keyBefore, err := store.GetAccountByCredential(0, stakeKey, true, nil)
 	require.NoError(t, err)

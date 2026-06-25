@@ -312,7 +312,7 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA0)})
 	require.NoError(t, err)
 
 	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -324,6 +324,68 @@ func TestApplyTreasuryWithdrawal_CreditsRewardsAndDebitsTreasury(
 	require.NotNil(t, state)
 	assert.Equal(t, uint64(93), uint64(state.Treasury))
 	assert.Equal(t, uint64(20), uint64(state.Reserves))
+}
+
+func TestApplyTreasuryWithdrawal_DistinguishesSameTxActionIndex(
+	t *testing.T,
+) {
+	db, store := newTallyTestDB(t)
+	stakeCred := testBytes(28, 0x21)
+	rewardAddr, err := lcommon.NewAddressFromParts(
+		lcommon.AddressTypeNoneKey,
+		lcommon.AddressNetworkTestnet,
+		nil,
+		stakeCred,
+	)
+	require.NoError(t, err)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeCred,
+		Reward:     types.Uint64(0),
+		Active:     true,
+	}).Error)
+	require.NoError(t, store.SetNetworkState(100, 20, 1, nil))
+
+	ctx := &EnactmentContext{DB: db, Slot: 123}
+	txHash := testBytes(32, 0x22)
+	first := &models.GovernanceProposal{TxHash: txHash, ActionIndex: 0}
+	second := &models.GovernanceProposal{TxHash: txHash, ActionIndex: 1}
+	require.NoError(t, applyTreasuryWithdrawal(
+		ctx,
+		&lcommon.TreasuryWithdrawalGovAction{
+			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 7},
+		},
+		first,
+	))
+	require.NoError(t, applyTreasuryWithdrawal(
+		ctx,
+		&lcommon.TreasuryWithdrawalGovAction{
+			Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 11},
+		},
+		second,
+	))
+
+	account, err := store.GetAccountByCredential(0, stakeCred, false, nil)
+	require.NoError(t, err)
+	require.NotNil(t, account)
+	assert.Equal(t, uint64(18), uint64(account.Reward))
+	state, err := store.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, uint64(82), uint64(state.Treasury))
+
+	var deltas []models.AccountRewardDelta
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ? AND added_slot = ?",
+		0,
+		stakeCred,
+		uint64(123),
+	).Find(&deltas).Error)
+	require.Len(t, deltas, 2)
+	assert.NotEqual(
+		t,
+		proposalRewardSourceHash(first),
+		proposalRewardSourceHash(second),
+	)
 }
 
 func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
@@ -351,7 +413,7 @@ func TestApplyTreasuryWithdrawal_RejectsOverdrawnTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA1)})
 	require.ErrorContains(
 		t,
 		err,
@@ -389,7 +451,7 @@ func TestApplyTreasuryWithdrawal_LeavesMissingRewardAccountInTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA2)})
 	require.NoError(t, err)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -434,7 +496,7 @@ func TestApplyTreasuryWithdrawal_LeavesInactiveRewardAccountInTreasury(
 	err = applyTreasuryWithdrawal(&EnactmentContext{
 		DB:   db,
 		Slot: 123,
-	}, a)
+	}, a, &models.GovernanceProposal{TxHash: testBytes(32, 0xA3)})
 	require.NoError(t, err)
 
 	active, err := store.GetAccountByCredential(0, stakeCred, false, nil)
@@ -473,7 +535,11 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	first := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 70},
 	}
-	require.NoError(t, applyTreasuryWithdrawal(ctx, first))
+	require.NoError(t, applyTreasuryWithdrawal(
+		ctx,
+		first,
+		&models.GovernanceProposal{TxHash: testBytes(32, 70)},
+	))
 
 	state, err := store.GetNetworkState(nil)
 	require.NoError(t, err)
@@ -484,7 +550,11 @@ func TestApplyTreasuryWithdrawal_UnclaimedStillCountsAgainstCapacity(
 	second := &lcommon.TreasuryWithdrawalGovAction{
 		Withdrawals: map[*lcommon.Address]uint64{&rewardAddr: 40},
 	}
-	err = applyTreasuryWithdrawal(ctx, second)
+	err = applyTreasuryWithdrawal(
+		ctx,
+		second,
+		&models.GovernanceProposal{TxHash: testBytes(32, 40)},
+	)
 	require.Error(t, err)
 	assert.Contains(
 		t,

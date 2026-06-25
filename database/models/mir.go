@@ -32,6 +32,9 @@ type MoveInstantaneousRewards struct {
 // epoch-boundary application logic. One of OtherPot > 0 (pot-to-pot transfer)
 // or len(Rewards) > 0 (credential distribution) will be non-empty.
 type MIREffect struct {
+	// ID is the move_instantaneous_rewards row ID. It is used as the stable
+	// per-MIR reward-credit discriminator when applying epoch-boundary effects.
+	ID uint
 	// Pot is the source Ada pot: 0 = Reserves, 1 = Treasury.
 	Pot uint
 	// OtherPot is the amount for a pot-to-pot transfer (0 when distributing).

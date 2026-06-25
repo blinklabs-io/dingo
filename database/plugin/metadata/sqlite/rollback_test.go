@@ -1512,7 +1512,7 @@ func TestRollbackRewardDeltaIsCredentialTagAware(t *testing.T) {
 	require.NoError(t, store.DB().Create(scriptAccount).Error)
 
 	// Record a reward credit only for the script-hash account at slot 200.
-	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil))
+	require.NoError(t, store.AddAccountRewardByCredential(1, stakeKey, creditAmount, slot, nil, nil))
 
 	// Verify only the script-hash account received the credit.
 	keyBefore, err := store.GetAccountByCredential(0, stakeKey, true, nil)
