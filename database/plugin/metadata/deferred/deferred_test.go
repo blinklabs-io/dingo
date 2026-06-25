@@ -70,7 +70,7 @@ func TestCriticalManifestNotEmpty(t *testing.T) {
 		t.Fatal("CriticalManifest returned empty slice")
 	}
 	// Pin the expected count so accidental de-classification is caught.
-	const wantCritical = 12
+	const wantCritical = 13
 	if len(critical) != wantCritical {
 		t.Errorf("CriticalManifest: got %d entries, want %d — update this constant if the classification changed intentionally", len(critical), wantCritical)
 	}

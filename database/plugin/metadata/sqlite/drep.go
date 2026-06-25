@@ -64,6 +64,32 @@ type drepCertCache struct {
 	hasUpdate map[string]bool
 }
 
+const utxoStakingLiveAmountIndex = "idx_utxo_staking_deleted_amount"
+
+const getDRepVotingPowerBatchSQL = `
+	SELECT a.drep AS drep, a.drep_type AS credential_tag,
+		   COALESCE(SUM(
+			   COALESCE(u.utxo_sum, 0)
+			   + COALESCE(CAST(a.reward AS INTEGER), 0)
+		   ), 0) AS stake
+	FROM account a
+	LEFT JOIN (
+			SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
+				   COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0) AS utxo_sum
+			FROM account ax
+			JOIN utxo INDEXED BY ` + utxoStakingLiveAmountIndex + `
+			         ON utxo.credential_tag = ax.credential_tag
+			         AND utxo.staking_key = ax.staking_key
+			         AND utxo.deleted_slot = 0
+		WHERE ax.active = 1 AND ax.drep IN ?
+		GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
+	) u ON u.credential_tag = a.credential_tag
+		AND u.staking_key = a.staking_key
+		AND u.drep_type = a.drep_type
+	WHERE a.active = 1 AND a.drep IN ?
+	GROUP BY a.drep, a.drep_type
+`
+
 // newDrepCertCache creates an empty DRep certificate cache.
 func newDrepCertCache(capacity int) *drepCertCache {
 	return &drepCertCache{
@@ -641,28 +667,7 @@ func (d *MetadataStoreSqlite) GetDRepVotingPowerBatch(
 		var rows []row
 		// Aggregate UTxO amounts per (staking_key, drep_type) before
 		// adding account.reward to avoid fan-out from the LEFT JOIN.
-		if err := db.Raw(`
-			SELECT a.drep AS drep, a.drep_type AS credential_tag,
-				   COALESCE(SUM(
-					   COALESCE(u.utxo_sum, 0)
-					   + COALESCE(CAST(a.reward AS INTEGER), 0)
-				   ), 0) AS stake
-			FROM account a
-			LEFT JOIN (
-				SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
-					   COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0) AS utxo_sum
-				FROM account ax
-				JOIN utxo ON utxo.credential_tag = ax.credential_tag
-				         AND utxo.staking_key = ax.staking_key
-				         AND utxo.deleted_slot = 0
-				WHERE ax.active = 1 AND ax.drep IN ?
-				GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
-			) u ON u.credential_tag = a.credential_tag
-				AND u.staking_key = a.staking_key
-				AND u.drep_type = a.drep_type
-			WHERE a.active = 1 AND a.drep IN ?
-			GROUP BY a.drep, a.drep_type
-		`, chunk, chunk).Scan(&rows).Error; err != nil {
+		if err := db.Raw(getDRepVotingPowerBatchSQL, chunk, chunk).Scan(&rows).Error; err != nil {
 			return nil, fmt.Errorf("get drep voting power batch: %w", err)
 		}
 		for _, r := range rows {
