@@ -796,6 +796,24 @@ func (c *ConnectionManager) GetConnectionById(
 	return nil // nil indicates connection not found
 }
 
+// LeiosFetchConnectionIds returns the IDs of connections that currently have a
+// live leios-fetch client. It is used to fan an on-demand endorser-block fetch
+// (by point) across the available relay connections during historical backfill.
+func (c *ConnectionManager) LeiosFetchConnectionIds() []ouroboros.ConnectionId {
+	c.connectionsMutex.Lock()
+	defer c.connectionsMutex.Unlock()
+	var ids []ouroboros.ConnectionId
+	for id, info := range c.connections {
+		if info == nil || info.conn == nil {
+			continue
+		}
+		if lf := info.conn.LeiosFetch(); lf != nil && lf.Client != nil {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // IsInboundConnection returns true if the given connection ID is an inbound
 // connection (a remote peer connected to us). Inbound peers are clients
 // pulling data from us and should not be treated as chain truth sources.

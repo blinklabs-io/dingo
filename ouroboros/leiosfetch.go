@@ -41,9 +41,20 @@ func (o *Ouroboros) leiosfetchServerConnOpts() []oleiosfetch.LeiosFetchOptionFun
 	}
 }
 
+// leiosFetchResponseTimeout bounds how long the leios-fetch client waits for a
+// server response (a Block or BlockTxs message). The protocol default is 5s,
+// which is too short during a from-scratch catch-up: the connection's muxer is
+// saturated by blockfetch pulling ranking blocks, so the relay's endorser-block
+// response routinely arrives later than 5s and the 5s timeout would tear the
+// connection down and fail the historical backfill. leios-notify is already set
+// to no timeout for the same reason (it long-polls for offers); leios-fetch
+// gets a generous but finite bound so a genuinely unresponsive request still
+// fails instead of hanging a fetch goroutine forever.
+const leiosFetchResponseTimeout = 60 * time.Second
+
 func (o *Ouroboros) leiosfetchClientConnOpts() []oleiosfetch.LeiosFetchOptionFunc {
 	return []oleiosfetch.LeiosFetchOptionFunc{
-		// NOTE: this is purposely empty
+		oleiosfetch.WithTimeout(leiosFetchResponseTimeout),
 	}
 }
 
