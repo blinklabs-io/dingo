@@ -1165,6 +1165,17 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetDRepDelegators returns the stake credentials currently delegating
+	// their voting power to the given DRep, in canonical (tag, hash) order.
+	// This populates the `delegators` member of the GetDRepState ledger
+	// query result. credentialTag distinguishes key (0) from script (1)
+	// DRep credentials that share the same 28-byte hash.
+	GetDRepDelegators(
+		uint8, // credentialTag
+		[]byte, // drepCredential
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
 	// GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower.
 	// Returns a StakeCredentialRef.MapKey()-to-power map; credentials with
 	// no delegated stake are omitted. Use StakeCredentialRef to carry both

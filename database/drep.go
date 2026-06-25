@@ -188,6 +188,26 @@ func (d *Database) GetDRepVotingPower(
 	)
 }
 
+// GetDRepDelegators returns the stake credentials currently delegating their
+// voting power to the given DRep, in canonical (tag, hash) order. This is the
+// `delegators` member of the GetDRepState ledger query result. credentialTag
+// distinguishes key (0) from script (1) DRep credentials sharing the same hash.
+func (d *Database) GetDRepDelegators(
+	credentialTag uint8,
+	drepCredential []byte,
+	txn *Txn,
+) ([]models.StakeCredentialRef, error) {
+	if txn == nil {
+		txn = d.MetadataTxn(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetDRepDelegators(
+		credentialTag,
+		drepCredential,
+		txn.Metadata(),
+	)
+}
+
 // GetDRepVotingPowerBatch is the batch form of GetDRepVotingPower; see
 // the metadata-store interface for the contract.
 func (d *Database) GetDRepVotingPowerBatch(
