@@ -540,14 +540,19 @@ func (ls *LedgerState) queryShelleyDRepState(
 		if drep == nil {
 			continue
 		}
+		delegators, err := ls.drepDelegators(drep)
+		if err != nil {
+			return nil, err
+		}
 		key := olocalstatequery.StakeCredential{
 			Tag:   uint64(drep.CredentialTag),
 			Bytes: ledger.NewBlake2b224(drep.Credential),
 		}
 		result[key] = olocalstatequery.DRepStateEntry{
-			Expiry:  drep.ExpiryEpoch,
-			Anchor:  drepAnchor(drep),
-			Deposit: deposit,
+			Expiry:     drep.ExpiryEpoch,
+			Anchor:     drepAnchor(drep),
+			Deposit:    deposit,
+			Delegators: delegators,
 		}
 	}
 	// The result map is wrapped in the single-element result array cardano-cli
@@ -590,6 +595,30 @@ func (ls *LedgerState) drepDeposit() uint64 {
 		return cpp.DRepDeposit
 	}
 	return 0
+}
+
+// drepDelegators returns the stake credentials currently delegating their
+// voting power to the given DRep, as the wire type, in canonical (tag, hash)
+// order so the resulting CBOR set (tag 258) is canonical — cardano clients
+// reject an unsorted set with "Canonicity violation".
+func (ls *LedgerState) drepDelegators(
+	drep *models.Drep,
+) ([]olocalstatequery.StakeCredential, error) {
+	refs, err := ls.db.GetDRepDelegators(drep.CredentialTag, drep.Credential, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	out := make([]olocalstatequery.StakeCredential, len(refs))
+	for i, ref := range refs {
+		out[i] = olocalstatequery.StakeCredential{
+			Tag:   uint64(ref.Tag),
+			Bytes: ledger.NewBlake2b224(ref.Key),
+		}
+	}
+	return out, nil
 }
 
 // drepAnchor maps a stored DRep's anchor metadata to the wire type, or nil

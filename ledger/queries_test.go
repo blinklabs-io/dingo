@@ -274,6 +274,51 @@ func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 		"empty GetDRepState result must encode to [ {} ] (matches cardano-node)")
 }
 
+// TestQueryShelleyDRepState_Populated pins the per-DRep value to cardano-node's
+// 4-element shape [ expiry, anchor, deposit, delegators ]: anchor is a
+// StrictMaybe encoded as a list (empty for none, not CBOR null) and delegators
+// is a tag-258 set of the delegating stake credentials. A 3-element value (or a
+// null anchor) makes cardano-cli fail with "Size mismatch when decoding Record
+// RecD. Expected 3, but found 4" while balancing a transaction.
+func TestQueryShelleyDRepState_Populated(t *testing.T) {
+	db := newTestDB(t)
+	drepCred := stakeCred28(0xC1)
+	delegKey := stakeCred28(0xD2)
+	require.NoError(t, db.CreateDrep(nil, &models.Drep{
+		Credential:    drepCred,
+		CredentialTag: 0,
+		ExpiryEpoch:   22,
+		Active:        true,
+		AddedSlot:     10,
+	}))
+	require.NoError(t, db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey:    delegKey,
+		CredentialTag: 0,
+		Drep:          drepCred,
+		DrepType:      models.DrepTypeAddrKeyHash,
+		Active:        true,
+		AddedSlot:     100,
+	}))
+	ls := &LedgerState{db: db}
+
+	result, err := ls.queryShelleyDRepState(nil)
+	require.NoError(t, err)
+
+	encoded, err := cbor.Encode(result)
+	require.NoError(t, err)
+
+	// [ { [0, drepCred] : [22, [], 0, set([ [0, delegKey] ]) ] } ]
+	//   81 a1  8200 581c<drep>  84 16 80 00  d90102 81 8200 581c<deleg>
+	// deposit is 0 here because no pparams are loaded in the bare test ledger.
+	want := "81a1" +
+		"8200581c" + strings.Repeat("c1", 28) +
+		"84" + "16" + "80" + "00" +
+		"d9010281" + "8200581c" + strings.Repeat("d2", 28)
+	assert.Equal(t, want, hex.EncodeToString(encoded),
+		"populated GetDRepState must encode the 4-element value with a "+
+			"StrictMaybe-list anchor and a tag-258 delegators set (matches cardano-node)")
+}
+
 // --- GetAccountState (ShelleyAccountStateQuery) -----------------------------
 
 // TestQueryShelleyAccountState_Empty proves GetAccountState answers with the
