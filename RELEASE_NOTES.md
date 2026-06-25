@@ -18,21 +18,21 @@ Hi folks! Here’s what we shipped in v0.58.0.
 ### 💪 Improvements
 
 * Improved **correct Conway DRep vote tallying across full stake credentials:** Governance tallying now counts voting power correctly across full stake credentials, and SQLite backed runs complete that work more efficiently. ([#2637](https://github.com/blinklabs-io/dingo/pull/2637))
-* Refined **use the intended SQLite data path for pool stake snapshots:** Pool stake snapshot aggregation now follows the intended SQLite data path, which avoids poor query plans and keeps stake calculations steadier. ([#2641](https://github.com/blinklabs-io/dingo/pull/2641))
+* Refined **use the intended SQLite live UTxO index for pool stake snapshots:** Pool stake snapshot aggregation now uses the intended SQLite live UTxO index, which avoids poor query plans and keeps stake calculations steadier. ([#2641](https://github.com/blinklabs-io/dingo/pull/2641))
 * Updated **keep the published v0.57.0 release history current:** The in repository release history now includes the structured v0.57.0 notes, which improves continuity across recent releases. ([#2635](https://github.com/blinklabs-io/dingo/pull/2635))
 
 ### 🔧 Fixes
 
 * Fixed **prevent duplicate reward journal entries during replay and crash recovery:** Governance, MIR, and POOLREAP reward updates now stay consistent during replay and crash recovery, which prevents duplicate reward account journal entries. ([#2640](https://github.com/blinklabs-io/dingo/pull/2640))
-* Corrected **store empty genesis UTxO references cleanly in SQLite:** SQLite genesis initialization now stores empty genesis UTxO foreign key references as true empty values, which prevents initialization failures and keeps repeated initialization reliable. ([#2642](https://github.com/blinklabs-io/dingo/pull/2642))
+* Corrected **store nullable genesis UTxO foreign key references as SQL NULL in SQLite:** SQLite genesis initialization now stores nullable genesis UTxO foreign key references as SQL NULL, which prevents initialization failures and keeps repeated initialization idempotent. ([#2642](https://github.com/blinklabs-io/dingo/pull/2642))
 * Strengthened **recover single peer sync after a local tip plateau:** Nodes that rely on a single eligible upstream peer can now reconnect and resync after a plateau instead of remaining stuck. ([#2639](https://github.com/blinklabs-io/dingo/pull/2639))
 
 ### 📋 What You Need to Know
 
 * Clarified **treat forged block checks as an opt in safety path:** Forged block checks remain optional, reject invalid self forged blocks before broadcast, and expose validation metrics for operators.
 * Highlighted **expect more reliable historical Leios catch up backfill:** Historical catch up now backfills missing endorser blocks more reliably, which helps replay state stay more complete.
-* Emphasized **trust more accurate SQLite governance and stake calculations:** SQLite backed governance tallying and stake snapshot work should be more accurate and less likely to degrade because vote tallying and pool snapshot queries now follow the intended paths.
-* Summarized **expect steadier SQLite genesis initialization and single peer recovery:** SQLite genesis initialization should no longer fail on empty references, and single peer sync recovery should reconnect and resync more reliably after a plateau.
+* Emphasized **trust more accurate SQLite governance and stake calculations:** SQLite backed governance tallying and stake snapshot work should be more accurate and less likely to degrade because vote tallying is corrected and pool stake snapshot aggregation now uses the intended SQLite live UTxO index to avoid poor query plans.
+* Summarized **expect steadier SQLite genesis initialization and single peer recovery:** SQLite genesis initialization now stores nullable genesis UTxO foreign key references as SQL NULL, which prevents initialization failures and preserves idempotency, and single peer sync recovery should reconnect and resync more reliably after a plateau.
 * Reviewed **use the published v0.57.0 notes as the latest prior release context:** The published release history now includes the v0.57.0 entry for smoother recent release review.
 
 ### Recommended Network Compatibility ⚠️
