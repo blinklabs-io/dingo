@@ -626,6 +626,40 @@ func (d *MetadataStoreSqlite) GetDRepVotingPower(
 	return totalStake, nil
 }
 
+// GetDRepDelegators returns the stake credentials currently delegating their
+// voting power to the given DRep, in canonical (tag, hash) order. This is the
+// `delegators` member of the GetDRepState ledger query result. credentialTag
+// distinguishes key (0) from script (1) DRep credentials sharing the same
+// 28-byte hash.
+func (d *MetadataStoreSqlite) GetDRepDelegators(
+	credentialTag uint8,
+	drepCredential []byte,
+	txn types.Txn,
+) ([]models.StakeCredentialRef, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	type row struct {
+		CredentialTag uint8
+		StakingKey    []byte
+	}
+	var rows []row
+	if err := db.Raw(`
+		SELECT credential_tag, staking_key
+		FROM account
+		WHERE drep = ? AND drep_type = ? AND active = 1
+		ORDER BY credential_tag, staking_key
+	`, drepCredential, credentialTag).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get drep delegators: %w", err)
+	}
+	out := make([]models.StakeCredentialRef, len(rows))
+	for i, r := range rows {
+		out[i] = models.StakeCredentialRef{Tag: r.CredentialTag, Key: r.StakingKey}
+	}
+	return out, nil
+}
+
 // GetDRepVotingPowerBatch returns a credential-to-voting-power map for
 // the given DRep credentials in a single query. Credentials with no
 // active delegators are omitted; credentials with active delegators whose

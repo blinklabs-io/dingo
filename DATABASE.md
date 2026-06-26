@@ -641,6 +641,20 @@ To match `includeInactive = false`, add:
 AND a.active = true
 ```
 
+### `GetDRepDelegators`
+
+Stake credentials currently delegating their voting power to a DRep — the `delegators` member of the `GetDRepState` local-state-query result. `drep_type` distinguishes key (0) from script (1) DRep credentials that share the same 28-byte hash. Results are ordered by `(credential_tag, staking_key)` so the resulting CBOR set (tag 258) is canonical; cardano clients reject an unsorted set with a canonicity violation.
+
+```sql
+-- Postgres
+SELECT a.credential_tag, encode(a.staking_key, 'hex') AS staking_key
+FROM account a
+WHERE a.drep = decode($1, 'hex')   -- DRep credential hash
+  AND a.drep_type = $2             -- 0 key hash, 1 script hash
+  AND a.active = true
+ORDER BY a.credential_tag, a.staking_key;
+```
+
 ### `GetAccountDelegationHistory`
 
 Dingo unions all certificate tables that can carry pool delegation and orders with slot, transaction index, and certificate index. Each row also selects `tx.slot` (`tx_slot`) and `tx.block_hash` (`block_hash`); the Blockfrost adapter resolves `block_height` from the block store by hash (block numbers are not in the metadata SQL schema) and derives `block_time` from the slot.
