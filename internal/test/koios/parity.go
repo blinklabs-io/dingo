@@ -43,7 +43,12 @@ type Mismatch struct {
 }
 
 func (m Mismatch) String() string {
-	who := fmt.Sprintf("epoch=%d", m.Epoch)
+	var who string
+	// Epoch 0 is the genesis epoch, which is never checked; a zero value here
+	// means this mismatch is account-scoped rather than epoch-scoped.
+	if m.Epoch > 0 {
+		who = fmt.Sprintf("epoch=%d", m.Epoch)
+	}
 	if m.Pool != "" {
 		who += " pool=" + m.Pool
 	}

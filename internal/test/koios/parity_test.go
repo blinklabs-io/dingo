@@ -77,12 +77,18 @@ func TestKoiosParityCheck(t *testing.T) {
 	maxAccounts := 50
 	if v := os.Getenv("KOIOS_MAX_POOLS"); v != "" {
 		if n, err := fmt.Sscanf(v, "%d", &maxPoolsPerEpoch); n != 1 || err != nil {
-			t.Fatalf("invalid KOIOS_MAX_POOLS %q", v)
+			t.Fatalf("invalid KOIOS_MAX_POOLS %q: %v", v, err)
+		}
+		if maxPoolsPerEpoch < 0 {
+			t.Fatalf("KOIOS_MAX_POOLS must be >= 0, got %d", maxPoolsPerEpoch)
 		}
 	}
 	if v := os.Getenv("KOIOS_MAX_ACCOUNTS"); v != "" {
 		if n, err := fmt.Sscanf(v, "%d", &maxAccounts); n != 1 || err != nil {
-			t.Fatalf("invalid KOIOS_MAX_ACCOUNTS %q", v)
+			t.Fatalf("invalid KOIOS_MAX_ACCOUNTS %q: %v", v, err)
+		}
+		if maxAccounts < 0 {
+			t.Fatalf("KOIOS_MAX_ACCOUNTS must be >= 0, got %d", maxAccounts)
 		}
 	}
 

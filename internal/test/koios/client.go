@@ -164,15 +164,17 @@ func (c *Client) post(ctx context.Context, path string, body any, out any) error
 	return c.do(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf), out)
 }
 
-// do performs the HTTP request with up to 3 retries on 429 Too Many Requests.
+// do performs the HTTP request with up to 3 retries (4 total attempts) on
+// 429 Too Many Requests. No wait is inserted after the final attempt.
 func (c *Client) do(
 	ctx context.Context,
 	method, rawURL string,
 	body io.ReadSeeker,
 	out any,
 ) error {
-	const maxRetries = 3
-	for attempt := range maxRetries {
+	// maxAttempts = 1 initial + 3 retries.
+	const maxAttempts = 4
+	for attempt := range maxAttempts {
 		if attempt > 0 && body != nil {
 			if _, err := body.Seek(0, io.SeekStart); err != nil {
 				return fmt.Errorf("rewind request body: %w", err)
@@ -198,6 +200,10 @@ func (c *Client) do(
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			_ = resp.Body.Close()
+			// Don't wait after the last attempt; fall through to the error.
+			if attempt == maxAttempts-1 {
+				break
+			}
 			wait := time.Duration(attempt+1) * 2 * time.Second
 			if ra := resp.Header.Get("Retry-After"); ra != "" {
 				if secs, parseErr := strconv.Atoi(ra); parseErr == nil {
@@ -225,7 +231,7 @@ func (c *Client) do(
 		}
 		return json.Unmarshal(data, out)
 	}
-	return fmt.Errorf("koios %s %s: exceeded %d retries", method, rawURL, maxRetries)
+	return fmt.Errorf("koios %s %s: exceeded %d attempts", method, rawURL, maxAttempts)
 }
 
 func truncate(b []byte, n int) string {
