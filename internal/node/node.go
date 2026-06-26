@@ -332,6 +332,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				CNightPolicyID:              cfg.Midnight.CNightPolicyID,
 				CNightAssetName:             cfg.Midnight.CNightAssetName,
 				MappingValidatorAddress:     cfg.Midnight.MappingValidatorAddress,
+				AuthTokenPolicyID:           cfg.Midnight.AuthTokenPolicyID,
 				AuthTokenAssetName:          cfg.Midnight.AuthTokenAssetName,
 				CommitteeCandidateAddress:   cfg.Midnight.CommitteeCandidateAddress,
 				TechnicalCommitteeAddress:   cfg.Midnight.TechnicalCommitteeAddress,

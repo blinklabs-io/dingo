@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
@@ -45,6 +46,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/leios"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
+	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
 	midnightserver "github.com/blinklabs-io/dingo/midnight/server"
 	ouroborosPkg "github.com/blinklabs-io/dingo/ouroboros"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -72,6 +74,7 @@ type Node struct {
 	meshAPI                          *mesh.Server
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
+	midnightIndexer                  *midnightindexer.Indexer
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
@@ -453,11 +456,51 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
 	}
+
+	// Create and start the Midnight indexer before LedgerState.Start so that
+	// (a) the EventBus subscription exists before any BlockActionApply events
+	// can be emitted, and (b) the synchronous backfill runs while no new
+	// blocks can arrive, eliminating the startup gap identified in #2114.
+	if n.config.storageMode.IsAPI() {
+		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
+			EventBus:                n.eventBus,
+			Metadata:                n.db.Metadata(),
+			SlotTimer:               n.ledgerState,
+			Logger:                  n.config.logger,
+			CNightPolicyID:          n.config.midnight.CNightPolicyID,
+			CNightAssetName:         n.config.midnight.CNightAssetName,
+			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
+			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
+			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
+			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
+				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
+			},
+			FatalErrorFunc: func(err error) {
+				n.config.logger.Error(
+					"fatal midnight indexer error, initiating shutdown",
+					"error", err,
+				)
+				n.cancel()
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("creating midnight indexer: %w", err)
+		}
+		n.midnightIndexer = midnightIdx
+		// Start runs backfill synchronously then subscribes to live events.
+		n.midnightIndexer.Start()
+	}
+
 	// Start ledger
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	started = append(started, func() { n.ledgerState.Close() })
+	// Register midnight indexer cleanup after LedgerState so it is torn down
+	// first (reverse order): midnight.Stop() → ledgerState.Close().
+	if n.midnightIndexer != nil {
+		started = append(started, func() { n.midnightIndexer.Stop() })
+	}
 	// Initialize and start snapshot manager for stake snapshot capture
 	n.snapshotMgr = snapshot.NewManager(
 		n.db,

@@ -336,6 +336,7 @@ type MidnightConfig struct {
 	CNightPolicyID              string `yaml:"cnightPolicyId"`
 	CNightAssetName             string `yaml:"cnightAssetName"`
 	MappingValidatorAddress     string `yaml:"mappingValidatorAddress"`
+	AuthTokenPolicyID           string `yaml:"authTokenPolicyId"`
 	AuthTokenAssetName          string `yaml:"authTokenAssetName"`
 	CommitteeCandidateAddress   string `yaml:"committeeCandidateAddress"`
 	TechnicalCommitteeAddress   string `yaml:"technicalCommitteeAddress"`

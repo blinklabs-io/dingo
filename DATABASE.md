@@ -191,13 +191,30 @@ erDiagram
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `midnight_asset_creates` | `id`, `address`, `quantity`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | cNIGHT UTxO creations. Pagination should order/filter by block number and transaction index. |
-| `midnight_asset_spends` | `id`, `address`, `quantity`, `spending_tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | cNIGHT UTxO spends. `spending_tx_hash` identifies the consuming transaction; `utxo_tx_hash` and `utxo_index` identify the consumed output. |
-| `midnight_registrations` | `id`, `full_datum`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | Mapping validator registration events. `full_datum` stores the raw datum blob. |
-| `midnight_deregistrations` | `id`, `full_datum`, `tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)` | Mapping validator deregistration events. `full_datum` stores the raw datum blob. |
+| `midnight_asset_creates` | `id`, `address`, `quantity`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_asset_creates_utxo_lookup`) | cNIGHT UTxO creations. The unique index enforces one create row per UTxO and makes `Create*` idempotent (ON CONFLICT DO NOTHING) for safe backfill replay. |
+| `midnight_asset_spends` | `id`, `address`, `quantity`, `spending_tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(utxo_tx_hash, utxo_index)` (`idx_midnight_asset_spends_utxo_ref`) | cNIGHT UTxO spends. The unique index enforces one spend row per UTxO and enables idempotent replays. Accelerates the `NOT EXISTS` subquery in `FindUnspentMidnightAssetCreates`. |
+| `midnight_registrations` | `id`, `full_datum`, `tx_hash`, `output_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(tx_hash, output_index)` (`idx_midnight_registrations_utxo_lookup`) | Mapping validator registration events. The unique index enables idempotent replays and accelerates `FindUnspentMidnightRegistrations`. |
+| `midnight_deregistrations` | `id`, `full_datum`, `tx_hash`, `utxo_tx_hash`, `utxo_index`, `block_number`, `block_hash`, `tx_index`, `block_timestamp_ms` | PK `id`; composite index `(block_number, tx_index)`; **unique** composite index `(utxo_tx_hash, utxo_index)` (`idx_midnight_deregistrations_utxo_ref`) | Mapping validator deregistration events. The unique index enables idempotent replays and accelerates `FindUnspentMidnightRegistrations`. |
 | `midnight_governance_datums` | `id`, `datum_type`, `datum`, `block_number` | PK `id`; composite index `(datum_type, block_number DESC)` | Latest Technical Committee and Council datum snapshots. `datum_type` values are `technical_committee` and `council`; use the composite index for latest-at-or-before queries. |
 | `midnight_ariadne_params` | `id`, `epoch`, `datum` | PK `id`; unique `epoch` | Ariadne parameters per epoch when changed. |
 | `midnight_epoch_candidates` | `id`, `epoch`, `candidates_cbor` | PK `id`; unique `epoch` | Candidate snapshots captured at epoch boundaries. |
+
+#### Midnight MetadataStore API
+
+`metadata.MetadataStore` exposes the following methods for the midnight_* tables:
+
+| Method | Description |
+|---|---|
+| `CreateMidnightAssetCreate(txn, *MidnightAssetCreate)` | Insert a cNIGHT UTxO creation row. Idempotent: silently ignores conflicts on `(tx_hash, output_index)`. |
+| `CreateMidnightAssetSpend(txn, *MidnightAssetSpend)` | Insert a cNIGHT UTxO spend row. Idempotent: silently ignores conflicts on `(utxo_tx_hash, utxo_index)`. |
+| `CreateMidnightRegistration(txn, *MidnightRegistration)` | Insert a mapping-validator registration row. Idempotent: silently ignores conflicts on `(tx_hash, output_index)`. |
+| `CreateMidnightDeregistration(txn, *MidnightDeregistration)` | Insert a mapping-validator deregistration row. Idempotent: silently ignores conflicts on `(utxo_tx_hash, utxo_index)`. |
+| `FindUnspentMidnightAssetCreates()` | Returns `midnight_asset_creates` rows with no matching `midnight_asset_spends` row (`NOT EXISTS` on `(utxo_tx_hash, utxo_index)`). Used on indexer startup to restore the in-memory cNIGHT UTxO set. Accelerated by `idx_midnight_asset_creates_utxo_lookup` and `idx_midnight_asset_spends_utxo_ref`. |
+| `FindUnspentMidnightRegistrations()` | Returns `midnight_registrations` rows with no matching `midnight_deregistrations` row. Used on startup to restore the in-memory registration UTxO set. Accelerated by `idx_midnight_registrations_utxo_lookup` and `idx_midnight_deregistrations_utxo_ref`. |
+| `DeleteMidnightAssetCreatesByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_creates` rows for the given block. Used during chain rollback; caller removes the returned UTxOs from the in-memory set. |
+| `DeleteMidnightAssetSpendsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_spends` rows for the given block. Used during chain rollback; caller restores the returned UTxOs to the in-memory set. |
+| `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block. Used during chain rollback. |
+| `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
 
 ### Stake Accounts and Certificate Tables
 

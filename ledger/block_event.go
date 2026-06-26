@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"slices"
 
@@ -133,8 +134,32 @@ func (ls *LedgerState) publishBlockEvent(
 			Hash: block.Hash,
 		},
 	}
-	ls.config.EventBus.Publish(
+	if err := ls.config.EventBus.PublishBlocking(
 		BlockEventType,
 		event.NewEvent(BlockEventType, evt),
-	)
+	); err != nil {
+		// ErrEventBusStopped is expected during teardown when the bus shuts
+		// down before LedgerState finishes draining its last events.
+		if errors.Is(err, event.ErrEventBusStopped) {
+			return
+		}
+		publishErr := fmt.Errorf(
+			"publish %s block event at slot %d block %d: %w",
+			action,
+			block.Slot,
+			block.Number,
+			err,
+		)
+		ls.config.Logger.Error(
+			"failed to publish ledger block event",
+			"component", "ledger",
+			"error", publishErr,
+			"action", action,
+			"slot", block.Slot,
+			"block_number", block.Number,
+		)
+		if ls.config.FatalErrorFunc != nil {
+			ls.config.FatalErrorFunc(publishErr)
+		}
+	}
 }
