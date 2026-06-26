@@ -710,7 +710,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `connmanager.connection_recycle_requested` | ConnManager | Connection recycling |
 | `mempool.add_tx` | Mempool | Transaction added |
 | `mempool.remove_tx` | Mempool | Transaction removed |
-| `ledger.block` | LedgerState | Block applied or rolled back |
+| `ledger.block` | LedgerState | Block applied or rolled back; delivered with blocking backpressure so persisted index consumers do not silently miss blocks |
 | `ledger.tx` | LedgerState | Transaction processed |
 | `ledger.error` | LedgerState | Ledger error occurred |
 | `ledger.blockfetch` | Ouroboros | Block fetch event received |
