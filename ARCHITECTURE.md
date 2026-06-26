@@ -1013,6 +1013,51 @@ as a fallback ingress source, but peer governance lowers their priority to zero.
 This lets non-bootstrap peers win same-tip transport selection without
 stranding ChainSync when the bootstrap peer is still the only usable upstream.
 
+#### Anti-flap incumbent pin
+
+The active connection (the peer that drives the chainsync+blockfetch pipeline
+via `SetClientConnId`) is selected by Praos rules, but switching it on every
+1-block head difference is harmful: with multiple upstream peers at the same
+tip, the peers micro-fork at the head (peer A one block ahead, then peer B
+leapfrogs to a sibling at the same height, then A again). Each switch hands off
+and resets the pipeline, so during deep catch-up the ledger can apply zero
+blocks (it wedges) and at the live tip it grinds. The reference-implementation
+Praos comparison still governs which chain is canonically best; the anti-flap
+pin only suppresses the active-CONNECTION handoff between peers on the same
+height or sibling head-forks.
+
+The pin (`pinIncumbentDuringCatchUpLocked` in `chainselection/selector.go`)
+engages whenever there is an established, still-selectable incumbent and a
+local tip has been applied at least once (`SetLocalTip` called, applied block
+> 0). It applies in both regimes: deep catch-up (best known peer tip more than
+`catchUpPinBlockThreshold` = 100 blocks ahead of the applied local tip) and
+at/near the live tip. When a switch would otherwise occur to a peer that is
+only a head micro-fork ahead, the pin keeps the incumbent active and does NOT
+emit a `ChainSwitchEvent`.
+
+The pin RELEASES (allows the switch) when any of these hold, which together
+guarantee the node still converges to the genuinely-longest chain and can never
+pin to a dead/minority peer:
+
+- No local tip has ever been applied (applied block == 0) — near-genesis and
+  pre-`SetLocalTip` behavior is unchanged, so the pin is inactive.
+- The incumbent is no longer selectable (disconnected, ineligible, stale, or
+  implausibly behind).
+- Longer-chain escape: the challenger is genuinely taller than the incumbent by
+  more than `catchUpPinHeadMargin` (= 2 blocks) — a real longer chain, not a
+  head micro-fork.
+- Progress-stall escape: the applied local tip has stopped advancing for at
+  least `catchUpPinStallTimeout` (= 20s wall-clock, not 20 slots). `SetLocalTip`
+  records the timestamp of the last FORWARD progress (block number advancing);
+  repeated same-or-lower tip updates (including rollbacks) do NOT reset the
+  stall clock, so a stalled incumbent cannot keep the pin alive by re-reporting
+  an unchanged tip. The clock is fed by an injectable `nowFn` (defaulting to
+  `time.Now`) for deterministic tests.
+
+The existing equal-tip incumbent preservation (when `ComparePraosTips` returns
+`ChainEqual`, and the same-block transport tiebreaker) is preserved and runs
+ahead of the pin.
+
 ## Network and Protocol Handling
 
 ### Ouroboros Protocol Stack
