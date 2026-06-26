@@ -40,6 +40,11 @@ import (
 
 const midnightCheckpointPhase = "midnight"
 
+// candidateRollbackDepth is the Cardano security parameter k: the maximum
+// number of blocks that Ouroboros can roll back. candidateRemovals journal
+// entries older than this depth are pruned after each block to bound memory.
+const candidateRollbackDepth uint64 = 2160
+
 // SlotTimer converts a slot number to a wall-clock time.
 type SlotTimer interface {
 	SlotToTime(slot uint64) (time.Time, error)
@@ -650,6 +655,20 @@ func (idx *Indexer) processBlock(
 		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch); err != nil { //nolint:gosec
 			return err
 		}
+	}
+
+	// Prune candidateRemovals entries that are beyond the rollback window.
+	// Ouroboros cannot roll back more than candidateRollbackDepth blocks, so
+	// journal entries older than that depth will never be needed for rollback.
+	if len(idx.candidateAddrBytes) > 0 && block.Number > candidateRollbackDepth {
+		pruneBelow := block.Number - candidateRollbackDepth
+		idx.mu.Lock()
+		for bn := range idx.candidateRemovals {
+			if bn < pruneBelow {
+				delete(idx.candidateRemovals, bn)
+			}
+		}
+		idx.mu.Unlock()
 	}
 	return nil
 }
