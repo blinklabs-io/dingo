@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"io"
@@ -271,6 +272,41 @@ func TestVerifyBlockHeader_ValidBlock(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{1}, 0, tamperNone)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
 	assert.NoError(t, err, "valid block should pass verification")
+}
+
+// TestVerifyBlockHeader_UsesBodyCBORVRFResult verifies that header crypto
+// verification is driven by the original header-body CBOR, not by stale typed
+// VrfResult fields on the decoded header object.
+func TestVerifyBlockHeader_UsesBodyCBORVRFResult(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{5}, 11, tamperNone)
+	header := tb.block.header
+	require.NotEmpty(t, header.Body.Cbor())
+
+	originalOutput := cloneBytes(header.Body.VrfResult.Output)
+	originalProof := cloneBytes(header.Body.VrfResult.Proof)
+	staleOutput := bytes.Repeat([]byte{0x44}, len(originalOutput))
+	staleProof := bytes.Repeat([]byte{0x55}, len(originalProof))
+	require.False(t, bytes.Equal(originalOutput, staleOutput))
+	require.False(t, bytes.Equal(originalProof, staleProof))
+
+	header.Body.VrfResult.Output = staleOutput
+	header.Body.VrfResult.Proof = staleProof
+
+	normalized, err := normalizeHeaderVrfResultFromBodyCbor(header)
+	require.NoError(t, err)
+	normalizedHeader, ok := normalized.(*babbage.BabbageBlockHeader)
+	require.True(t, ok)
+	assert.Equal(t, originalOutput, normalizedHeader.Body.VrfResult.Output)
+	assert.Equal(t, originalProof, normalizedHeader.Body.VrfResult.Proof)
+
+	err = verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
+	assert.NoError(
+		t,
+		err,
+		"valid header should pass even when decoded VrfResult is stale",
+	)
+	assert.Equal(t, staleOutput, header.Body.VrfResult.Output)
+	assert.Equal(t, staleProof, header.Body.VrfResult.Proof)
 }
 
 // TestVerifyBlockHeader_TamperedKESSignature tests that a block with a
