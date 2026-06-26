@@ -566,6 +566,7 @@ dingo/
 │   ├── test/            # Test utilities
 │   │   ├── conformance/ # Amaru conformance tests
 │   │   ├── devnet/      # DevNet end-to-end tests
+│   │   ├── koios/       # Koios reward parity checker (preview/preprod)
 │   │   └── testutil/    # Shared test helpers
 │   └── version/         # Version information
 ├── node.go              # Node struct definition, Run(), shutdown
