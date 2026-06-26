@@ -550,9 +550,10 @@ func downloadDigestsArchive(
 				"digests-%s.tar.zst",
 				truncateDigest(artifact.Hash),
 			),
-			Logger:         cfg.Logger,
-			IdleTimeout:    cfg.DownloadIdleTimeout,
-			MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			Logger:              cfg.Logger,
+			IdleTimeout:         cfg.DownloadIdleTimeout,
+			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 		},
 	)
 	if err != nil {
@@ -818,14 +819,20 @@ func fetchImmutableArchive(
 	archiveDir string,
 	extractDir string,
 ) error {
+	// Use the main logger (not the per-archive quiet logger) for download
+	// retries so that transient-error warnings include immutable_file_number
+	// and reach the operator. extractLogger (discarded) is still used for
+	// the extraction step to suppress per-file INFO noise.
+	dlLogger := cfg.Logger.With("immutable_file_number", num)
 	archivePath, err := DownloadSnapshot(
 		ctx, DownloadConfig{
-			URL:            location.ImmutableArchiveURI(num),
-			DestDir:        archiveDir,
-			Filename:       filepath.Base(immutableArchivePath(archiveDir, num)),
-			Logger:         extractLogger,
-			IdleTimeout:    cfg.DownloadIdleTimeout,
-			MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+			URL:                 location.ImmutableArchiveURI(num),
+			DestDir:             archiveDir,
+			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
+			Logger:              dlLogger,
+			IdleTimeout:         cfg.DownloadIdleTimeout,
+			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 		},
 	)
 	if err != nil {
@@ -944,13 +951,14 @@ func downloadAncillaryV2(
 		}
 		ancillaryPath, err = DownloadSnapshot(
 			ctx, DownloadConfig{
-				URL:            loc.URI,
-				DestDir:        downloadDir,
-				Filename:       ancillaryFilename,
-				Logger:         cfg.Logger,
-				OnProgress:     cfg.OnProgress,
-				IdleTimeout:    cfg.DownloadIdleTimeout,
-				MaxIdleRetries: cfg.DownloadMaxIdleRetries,
+				URL:                 loc.URI,
+				DestDir:             downloadDir,
+				Filename:            ancillaryFilename,
+				Logger:              cfg.Logger,
+				OnProgress:          cfg.OnProgress,
+				IdleTimeout:         cfg.DownloadIdleTimeout,
+				MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
+				MaxTransientRetries: cfg.DownloadMaxTransientRetries,
 			},
 		)
 		if err == nil {
