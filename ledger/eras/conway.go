@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 	"strings"
@@ -936,6 +937,19 @@ func (c *conwayTxInfoCache) v3() (script.TxInfoV3, error) {
 	return c.txInfoV3, nil
 }
 
+// restrictiveEnormousBudget is used when evaluating Plutus scripts in
+// restrictive (phase-2 ledger validation) mode. Instead of limiting the CEK
+// machine to the declared redeemer budget during execution — which causes
+// intermediate slippage-batch flush failures — we run with a virtually
+// unlimited budget and compare the consumed amount against the declared budget
+// after execution. This mirrors cardano-node's restrictingEnormous semantics:
+// the machine runs unconstrained; at the end, usedBudget (which excludes the
+// final unbudgeted step batch, per SkipFinalSlippageFlush) must fit within the
+// declared redeemer budget.
+//
+// math.MaxInt64/2 avoids overflow in ExBudget arithmetic (consumed = enormous - remaining).
+const restrictiveEnormousBudget = int64(math.MaxInt64 / 2)
+
 func evaluateConwayPlutusScript(
 	plutusScript lcommon.Script,
 	purpose script.ScriptPurpose,
@@ -946,6 +960,20 @@ func evaluateConwayPlutusScript(
 	txInfos *conwayTxInfoCache,
 	skipFinalSlippageFlush bool,
 ) (lcommon.ExUnits, error, error) {
+	// In restrictive mode (skipFinalSlippageFlush=true), pass an enormous
+	// budget to gouroboros/plutigo so intermediate slippage-batch flushes
+	// never exhaust the budget mid-execution. After execution we compare the
+	// consumed amount (final batch already excluded by SkipFinalSlippageFlush)
+	// against the declared redeemer budget. This matches cardano-node's
+	// restrictingEnormous mode. In exact mode the declared budget is used as
+	// the machine limit (unchanged behavior).
+	evalBudget := budget
+	if skipFinalSlippageFlush {
+		evalBudget = lcommon.ExUnits{
+			Steps:  restrictiveEnormousBudget,
+			Memory: restrictiveEnormousBudget,
+		}
+	}
 	switch s := plutusScript.(type) {
 	case lcommon.PlutusV3Script:
 		txInfoV3, err := txInfos.v3()
@@ -967,11 +995,17 @@ func evaluateConwayPlutusScript(
 		evalContext.SkipFinalSlippageFlush = skipFinalSlippageFlush
 		usedBudget, err := s.Evaluate(
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
+		}
+		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV2Script:
@@ -996,11 +1030,17 @@ func evaluateConwayPlutusScript(
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
+		}
+		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
 		}
 		return usedBudget, nil, nil
 	case lcommon.PlutusV1Script:
@@ -1025,11 +1065,17 @@ func evaluateConwayPlutusScript(
 			datum,
 			redeemer.Data,
 			ctx.ToPlutusData(),
-			budget,
+			evalBudget,
 			evalContext,
 		)
 		if err != nil {
 			return lcommon.ExUnits{}, err, nil
+		}
+		if skipFinalSlippageFlush && (usedBudget.Steps > budget.Steps || usedBudget.Memory > budget.Memory) {
+			return usedBudget, fmt.Errorf(
+				"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+				usedBudget.Steps, usedBudget.Memory, budget.Steps, budget.Memory,
+			), nil
 		}
 		return usedBudget, nil, nil
 	default:

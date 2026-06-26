@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"slices"
 
@@ -328,44 +329,22 @@ func ValidateTxBabbage(
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
 			evalContext.SkipFinalSlippageFlush = true
-			_, err = s.Evaluate(
+			usedBudgetV1, err := s.Evaluate(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				redeemer.ExUnits,
+				lcommon.ExUnits{Steps: math.MaxInt64 / 2, Memory: math.MaxInt64 / 2},
 				evalContext,
 			)
 			if err != nil {
-				/*
-					fmt.Printf("TX ID: %s\n", tx.Hash().String())
-					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
-					scriptHash := s.Hash()
-					fmt.Printf("scriptHash = %s\n", scriptHash.String())
-					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
-					var tmpInputs []lcommon.TransactionInput
-					var tmpOutputs []lcommon.TransactionOutput
-					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
-						tmpInputs = append(tmpInputs, input.Id)
-						tmpOutputs = append(tmpOutputs, input.Output)
-					}
-					tmpInputsCbor, err2 := cbor.Encode(tmpInputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
-					tmpOutputsCbor, err2 := cbor.Encode(tmpOutputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
-					scCbor, err2 := data.Encode(sc.ToPlutusData())
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("scCbor = %x\n", scCbor)
-				*/
 				return err
+			}
+			if usedBudgetV1.Steps > redeemer.ExUnits.Steps || usedBudgetV1.Memory > redeemer.ExUnits.Memory {
+				return fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudgetV1.Steps, usedBudgetV1.Memory,
+					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+				)
 			}
 		case lcommon.PlutusV2Script:
 			txInfoV2, err := script.NewTxInfoV2FromTransaction(
@@ -394,44 +373,22 @@ func ValidateTxBabbage(
 				return fmt.Errorf("build evaluation context: %w", err)
 			}
 			evalContext.SkipFinalSlippageFlush = true
-			_, err = s.Evaluate(
+			usedBudgetV2, err := s.Evaluate(
 				datum,
 				redeemer.Data,
 				sc.ToPlutusData(),
-				redeemer.ExUnits,
+				lcommon.ExUnits{Steps: math.MaxInt64 / 2, Memory: math.MaxInt64 / 2},
 				evalContext,
 			)
 			if err != nil {
-				/*
-					fmt.Printf("TX ID: %s\n", tx.Hash().String())
-					fmt.Printf("purpose = %#v, redeemer = %#v\n", purpose, redeemer)
-					scriptHash := s.Hash()
-					fmt.Printf("scriptHash = %s\n", scriptHash.String())
-					fmt.Printf("tx = %x\n", tx.Cbor())
-					// Build inputs/outputs strings that can be plugged into Aiken script_context tests for comparison
-					var tmpInputs []lcommon.TransactionInput
-					var tmpOutputs []lcommon.TransactionOutput
-					for _, input := range slices.Concat(resolvedInputs, resolvedRefInputs) {
-						tmpInputs = append(tmpInputs, input.Id)
-						tmpOutputs = append(tmpOutputs, input.Output)
-					}
-					tmpInputsCbor, err2 := cbor.Encode(tmpInputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpInputs = %x\n", tmpInputsCbor)
-					tmpOutputsCbor, err2 := cbor.Encode(tmpOutputs)
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("tmpOutputs = %x\n", tmpOutputsCbor)
-					scCbor, err2 := data.Encode(sc.ToPlutusData())
-					if err2 != nil {
-						return err2
-					}
-					fmt.Printf("scCbor = %x\n", scCbor)
-				*/
 				return err
+			}
+			if usedBudgetV2.Steps > redeemer.ExUnits.Steps || usedBudgetV2.Memory > redeemer.ExUnits.Memory {
+				return fmt.Errorf(
+					"script exceeded declared budget: used (%d cpu, %d mem), declared (%d cpu, %d mem)",
+					usedBudgetV2.Steps, usedBudgetV2.Memory,
+					redeemer.ExUnits.Steps, redeemer.ExUnits.Memory,
+				)
 			}
 		default:
 			return fmt.Errorf("unimplemented script type: %T", tmpScript)
