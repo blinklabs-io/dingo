@@ -620,7 +620,8 @@ When `Node.Run()` is called, components are initialized in this order:
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
     Technical Committee and Council governance datums, Ariadne permissioned-candidate
     parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
-    EpochTransitionEvent). Runs synchronously before LedgerState starts so no
+    block-event epoch advancement, with EpochTransitionEvent as a secondary path).
+    Runs synchronously before LedgerState starts so no
     BlockActionApply events are missed. Backfill iterates stored blocks from the last
     checkpoint slot onward; inserts are idempotent (ON CONFLICT DO NOTHING) so a
     crash-restart replay is safe.

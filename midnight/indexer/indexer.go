@@ -791,10 +791,7 @@ func (idx *Indexer) processOutput(
 		return nil
 	}
 
-	addrBytes, addrErr := out.Address().Bytes()
-	if addrErr != nil {
-		return nil
-	}
+	addrBytes, _ := out.Address().Bytes()
 
 	datum := out.Datum()
 	var datumCbor []byte
