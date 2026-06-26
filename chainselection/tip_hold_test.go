@@ -286,6 +286,46 @@ func TestPinStallClockResetsOnForwardProgress(t *testing.T) {
 		"forward progress must re-arm the stall clock and keep the pin")
 }
 
+// TestPinStallClockResetsOnPostRollbackProgress asserts that progress tracking
+// compares against the previous applied local tip, not the all-time high-water
+// mark. After 1000 -> 990 rollback, 991 is forward progress and must re-arm the
+// stall clock.
+func TestPinStallClockResetsOnPostRollbackProgress(t *testing.T) {
+	clk := &fakeClock{now: time.Unix(1_700_000_000, 0)}
+	cs := NewChainSelector(ChainSelectorConfig{})
+	installFakeClock(cs, clk)
+
+	incumbent := newTestConnectionId(1)
+	challenger := newTestConnectionId(2)
+
+	cs.SetLocalTip(tip(1000, 1000, "local"))
+	cs.UpdatePeerTip(incumbent, tip(1001, 1001, "inc"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+	cs.UpdatePeerTip(challenger, tip(1002, 1002, "chal"), nil)
+	require.Equal(t, incumbent, *cs.GetBestPeer())
+
+	clk.Advance(catchUpPinStallTimeout - time.Second)
+	cs.SetLocalTip(tip(990, 1003, "local-rollback"))
+	cs.mutex.RLock()
+	rollbackProgressAt := cs.localTipProgressAt
+	cs.mutex.RUnlock()
+	assert.Equal(t, time.Unix(1_700_000_000, 0), rollbackProgressAt,
+		"rollback must not reset the stall clock")
+
+	cs.SetLocalTip(tip(991, 1004, "local-reapply"))
+	cs.mutex.RLock()
+	reapplyProgressAt := cs.localTipProgressAt
+	cs.mutex.RUnlock()
+	assert.Equal(t, clk.now, reapplyProgressAt,
+		"post-rollback forward progress must reset the stall clock")
+
+	clk.Advance(2 * time.Second)
+	cs.UpdatePeerTip(challenger, tip(1002, 1005, "chal-b"), nil)
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, incumbent, *cs.GetBestPeer(),
+		"post-rollback forward progress must keep the pin while moving again")
+}
+
 // TestPinReleasesWhenIncumbentNoLongerSelectable asserts that an ineligible
 // incumbent releases the pin even on a head micro-fork.
 func TestPinReleasesWhenIncumbentNoLongerSelectable(t *testing.T) {

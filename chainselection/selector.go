@@ -133,11 +133,12 @@ type ChainSelector struct {
 
 	// Anti-flap incumbent pin state (guarded by mutex).
 	//
-	// localTipProgressBlock / localTipProgressAt record when the APPLIED
-	// local tip last advanced (moved forward in block number). The stall
-	// clock (catchUpPinStallTimeout) is measured from localTipProgressAt and
-	// is only reset on genuine forward progress, so repeated same-or-lower
-	// SetLocalTip calls never reset it.
+	// localTipProgressBlock records the previously observed APPLIED local tip
+	// block number. localTipProgressAt records when the applied tip last moved
+	// forward relative to that previous tip. The stall clock
+	// (catchUpPinStallTimeout) is measured from localTipProgressAt and is only
+	// reset on genuine forward progress, so repeated same-tip updates and
+	// rollbacks never reset it, while post-rollback advancement does.
 	localTipProgressBlock uint64
 	localTipProgressAt    time.Time
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
@@ -625,16 +626,18 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 // It also records the last time the APPLIED local tip moved FORWARD (its
 // block number advanced). The anti-flap incumbent pin uses this timestamp as
 // a progress-aware escape: if the applied tip stops advancing while the pin
-// is engaged, the pin releases. Same-or-lower tip updates (including
-// rollbacks) deliberately do NOT reset the stall clock, so a stalled
-// incumbent cannot keep the pin alive by re-reporting an unchanged tip.
+// is engaged, the pin releases. Same-tip updates and rollbacks deliberately do
+// NOT reset the stall clock, so a stalled incumbent cannot keep the pin alive
+// by re-reporting an unchanged tip. Forward progress after a rollback does
+// reset the clock because the comparison is against the previous applied tip,
+// not an all-time high-water mark.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	shouldEvaluate := false
 	cs.mutex.Lock()
 	if tip.BlockNumber > cs.localTipProgressBlock {
-		cs.localTipProgressBlock = tip.BlockNumber
 		cs.localTipProgressAt = cs.now()
 	}
+	cs.localTipProgressBlock = tip.BlockNumber
 	cs.localTip = tip
 	shouldEvaluate = cs.advanceSelectionModeLocked()
 	cs.mutex.Unlock()
