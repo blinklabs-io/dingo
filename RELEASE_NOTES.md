@@ -1,5 +1,55 @@
 # Dingo Releases
 
+## v0.59.0 (June 26, 2026)
+
+**Title:** Midnight indexing, steadier synchronization, and broader compatibility
+
+**Date:** June 26, 2026
+
+**Version:** v0.59.0
+
+Hi folks! Here’s what we shipped in v0.59.0.
+
+### ✨ What's New
+
+* Added **index Midnight cNIGHT and registration events during block scanning:** API mode deployments can now persist Midnight cNIGHT and registration event data during live indexing and catch up, which keeps Midnight related data current and available. ([#2606](https://github.com/blinklabs-io/dingo/pull/2606))
+
+### 💪 Improvements
+
+* Improved **keep same tip synchronization pinned to the more stable peer path:** Nodes now avoid unnecessary same tip peer switching during synchronization, which helps sync progress stay steadier during catch up and near the tip. ([#2650](https://github.com/blinklabs-io/dingo/pull/2650))
+* Refined **keep the published v0.58.0 release history current:** The in repository release history now includes the prior v0.58.0 entry, which makes the previous release easier to review in the standard format. ([#2648](https://github.com/blinklabs-io/dingo/pull/2648))
+
+### 🔧 Fixes
+
+* Fixed **accept restrictive Plutus transactions that already pass cardano-node validation:** Restrictive Plutus validation no longer rejects transactions that cardano-node accepts because of CEK slippage accounting differences. ([#2649](https://github.com/blinklabs-io/dingo/pull/2649))
+* Corrected **reduce chainsync race conditions during state changes:** Chainsync state changes now behave more consistently, which improves sync correctness and reduces inconsistent fork and state handling. ([#2646](https://github.com/blinklabs-io/dingo/pull/2646))
+* Strengthened **keep DRep state queries and transaction building compatible with registered DReps:** DRep state queries and related transaction building now work correctly with registered DReps, which restores compatibility for cardano-cli workflows. ([#2647](https://github.com/blinklabs-io/dingo/pull/2647))
+* Stabilized **align Blockfrost stake account responses with the published schema:** Blockfrost stake account responses now match the published OpenAPI 0.1.88 fields and behavior more closely, which improves compatibility for API clients that depend on that schema. ([#2634](https://github.com/blinklabs-io/dingo/pull/2634))
+* Hardened **retry transient Mithril download failures more safely:** Mithril v2 immutable archive and snapshot downloads now recover more reliably from temporary TLS, network, and server failures. ([#2645](https://github.com/blinklabs-io/dingo/pull/2645))
+* Repaired **verify valid headers without stale VRF result mismatches:** Header verification now uses the correct VRF result data so valid headers are not rejected because of stale decoded values. ([#2651](https://github.com/blinklabs-io/dingo/pull/2651))
+
+### 📋 What You Need to Know
+
+* Clarified **run Midnight indexing in API mode for cNIGHT and registration events:** API mode deployments can now persist Midnight cNIGHT and registration event data and keep it current as blocks are indexed.
+* Highlighted **expect steadier synchronization near same tip peer competition:** Same tip peer pinning and chainsync race handling now reduce unnecessary switching and help sync behave more consistently during recovery.
+* Emphasized **trust broader Cardano compatibility across validation and governance paths:** Restrictive Plutus validation, DRep state queries, transaction building, and header verification now align more closely with expected Cardano behavior.
+* Summarized **expect smoother API and bootstrap compatibility paths:** Blockfrost stake account responses now match the published schema more closely, and Mithril downloads should recover more reliably from temporary failures.
+* Reviewed **use the published v0.58.0 notes as the latest prior release context:** The in repository release history now includes the prior v0.58.0 entry for standard release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.58.0 (June 25, 2026)
 
 **Title:** Forged-block self-validation, historical Leios backfill, and governance correctness
