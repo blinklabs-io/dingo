@@ -1,5 +1,33 @@
 # Dingo Releases
 
+* Stabilized **align Blockfrost stake account responses with the published schema:** Blockfrost stake account responses now match the published OpenAPI 0.1.88 fields and behavior more closely, which improves compatibility for API clients that depend on that schema. ([#2634](https://github.com/blinklabs-io/dingo/pull/2634))
+
+* Hardened **retry transient Mithril download failures more safely:** Mithril v2 immutable archive and snapshot downloads now recover more reliably from temporary TLS, network, and server failures. ([#2645](https://github.com/blinklabs-io/dingo/pull/2645))
+
+* Repaired **verify valid headers without stale VRF result mismatches:** Header verification now uses the correct VRF result data so valid headers are not rejected because of stale decoded values. ([#2651](https://github.com/blinklabs-io/dingo/pull/2651))
+
+### 📋 What You Need to Know
+
+* Clarified **run Midnight indexing in API mode for cNIGHT and registration events:** API-mode deployments can now persist Midnight cNIGHT and registration event data and keep it current as blocks are indexed.
+* Highlighted **expect steadier synchronization near same tip peer competition:** Same tip peer pinning and chainsync race handling now reduce unnecessary switching and help synchronization behave more consistently during recovery.
+* Emphasized **trust broader Cardano compatibility across validation and governance paths:** Restrictive Plutus validation, DRep state queries, transaction building, and header verification now align more closely with expected Cardano behavior.
+* Summarized **expect smoother API and bootstrap compatibility paths:** Blockfrost stake account responses now match the published schema more closely, and Mithril downloads should recover more reliably from temporary failures.
+* Reviewed **use the published v0.58.0 notes as the latest prior release context:** The in repository release history now includes the prior v0.58.0 entry for standard release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.58.0 (June 25, 2026)
 
 **Title:** Forged-block self-validation, historical Leios backfill, and governance correctness
