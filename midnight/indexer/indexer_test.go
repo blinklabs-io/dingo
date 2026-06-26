@@ -56,6 +56,9 @@ const testCouncilAddr = testOtherAddr
 // testGovPolicyID is a 28-byte (56 hex-char) policy used for governance / Ariadne tests.
 const testGovPolicyID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+// testCouncilPolicyID is a distinct 28-byte policy used for Council governance tests.
+const testCouncilPolicyID = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+
 // testPermPolicyID is a 28-byte (56 hex-char) policy used for permissioned-candidate tests.
 const testPermPolicyID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -676,7 +679,7 @@ func setupGovIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 		TechnicalCommitteeAddress:   testMappingAddr,
 		TechnicalCommitteePolicyID:  testGovPolicyID,
 		CouncilAddress:              testCouncilAddr,
-		CouncilPolicyID:             testGovPolicyID,
+		CouncilPolicyID:             testCouncilPolicyID,
 		PermissionedCandidatePolicy: testPermPolicyID,
 		CommitteeCandidateAddress:   testMappingAddr,
 		SlotToEpoch: func(slot uint64) (uint64, error) {
@@ -732,7 +735,7 @@ func TestGovernanceCouncilDatum(t *testing.T) {
 
 	datum := simpleDatumCbor(t)
 	// Must carry the Council policy token for the governance scan to trigger.
-	govOut := buildPolicyOutput(t, testCouncilAddr, testGovPolicyID, datum)
+	govOut := buildPolicyOutput(t, testCouncilAddr, testCouncilPolicyID, datum)
 	dummyIn := buildInput(t, pad32("c0000001"), 0)
 	tx := buildTx(t, pad32("c0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
 
@@ -809,14 +812,13 @@ func TestAriadneParamsDeduplicated(t *testing.T) {
 	tx3 := buildTx(t, pad32("a0000006"), []lcommon.TransactionInput{dummyIn3}, []lcommon.TransactionOutput{out3})
 	require.NoError(t, idx.processBlock(testBlock(3, 300, 0x33), []lcommon.Transaction{tx3}, 3_000))
 
-	// The store upserts by epoch — since all blocks share epoch 0 in this
-	// direct-call path (processBlock doesn't advance SlotToEpoch), the changed
-	// datum updates the same row rather than inserting a new one. The invariant
-	// being tested is that lastAriadneDatum tracks the written value and the
-	// store row reflects the latest non-duplicate datum.
-	require.NoError(t, store.DB().Find(&params).Error)
-	require.Len(t, params, 1, "upsert-by-epoch produces one row per epoch in direct-call path")
-	assert.Equal(t, datumB, params[0].Datum, "changed Ariadne datum must update the stored row")
+	// processBlock resolves epochs via SlotToEpoch (slot/100 in tests), so each
+	// block uses its correct epoch key. Block 1 → epoch 1 (datumA), block 2 →
+	// epoch 2 (dup, no write), block 3 → epoch 3 (datumB). Two distinct rows.
+	require.NoError(t, store.DB().Order("epoch asc").Find(&params).Error)
+	require.Len(t, params, 2, "each distinct epoch with a new datum produces its own row")
+	assert.Equal(t, datumA, params[0].Datum, "epoch 1 row must hold datumA")
+	assert.Equal(t, datumB, params[1].Datum, "epoch 3 row must hold datumB")
 
 	// Verify that lastAriadneDatum was updated to datumB so a subsequent
 	// repeat of datumB would be deduplicated.
@@ -824,6 +826,58 @@ func TestAriadneParamsDeduplicated(t *testing.T) {
 	lastDatum := idx.lastAriadneDatum
 	idx.mu.RUnlock()
 	assert.Equal(t, datumB, lastDatum)
+}
+
+// TestAriadneRollbackRestoresPriorEpochState verifies that rollback undoes
+// Ariadne upserts and refreshes the in-memory dedupe datum.
+func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datumA := simpleDatumCbor(t)
+	datumB, err := cbor.Encode(uint64(99))
+	require.NoError(t, err)
+	datumC, err := cbor.Encode(uint64(100))
+	require.NoError(t, err)
+
+	outA := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
+	txA := buildTx(t, pad32("ab000001"), []lcommon.TransactionInput{buildInput(t, pad32("ab000000"), 0)}, []lcommon.TransactionOutput{outA})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xA1), []lcommon.Transaction{txA}, 1_000))
+
+	outB := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumB)
+	txB := buildTx(t, pad32("ab000002"), []lcommon.TransactionInput{buildInput(t, pad32("ab000003"), 0)}, []lcommon.TransactionOutput{outB})
+	block2 := testBlock(2, 150, 0xA2)
+	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{txB}, 1_500))
+
+	params, err := store.GetMidnightAriadneParamsByEpoch(1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, params)
+	assert.Equal(t, datumB, params.Datum)
+
+	idx.rollbackAriadne(block2.Number)
+
+	params, err = store.GetMidnightAriadneParamsByEpoch(1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, params)
+	assert.Equal(t, datumA, params.Datum, "rollback must restore the overwritten epoch row")
+	idx.mu.RLock()
+	assert.Equal(t, datumA, idx.lastAriadneDatum)
+	idx.mu.RUnlock()
+
+	outC := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumC)
+	txC := buildTx(t, pad32("ab000004"), []lcommon.TransactionInput{buildInput(t, pad32("ab000005"), 0)}, []lcommon.TransactionOutput{outC})
+	block3 := testBlock(3, 200, 0xA3)
+	require.NoError(t, idx.processBlock(block3, []lcommon.Transaction{txC}, 2_000))
+
+	idx.rollbackAriadne(block3.Number)
+
+	params, err = store.GetMidnightAriadneParamsByEpoch(2, nil)
+	require.NoError(t, err)
+	assert.Nil(t, params, "rollback must delete an epoch row created by the rolled-back block")
+	idx.mu.RLock()
+	assert.Equal(t, datumA, idx.lastAriadneDatum)
+	idx.mu.RUnlock()
 }
 
 // TestCandidateAddRemove verifies the in-memory candidate set lifecycle:
@@ -854,7 +908,7 @@ func TestCandidateAddRemove(t *testing.T) {
 	// Block 2: spend candidate 1.
 	spendIn := buildInput(t, txHash1, 0)
 	spendTx := buildTx(t, pad32("ca000003"), []lcommon.TransactionInput{spendIn}, []lcommon.TransactionOutput{anyOutput(t)})
-	require.NoError(t, idx.processBlock(testBlock(2, 200, 0xCB), []lcommon.Transaction{spendTx}, 2_000))
+	require.NoError(t, idx.processBlock(testBlock(2, 150, 0xCB), []lcommon.Transaction{spendTx}, 2_000))
 
 	idx.mu.RLock()
 	require.Len(t, idx.candidates, 1, "spent candidate must be removed from the in-memory set")

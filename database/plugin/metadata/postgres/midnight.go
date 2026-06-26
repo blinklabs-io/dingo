@@ -253,6 +253,18 @@ func (d *MetadataStorePostgres) InsertMidnightGovernanceDatum(
 	return db.Create(datum).Error
 }
 
+func (d *MetadataStorePostgres) DeleteMidnightGovernanceDatumsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightGovernanceDatum{}).Error
+}
+
 func (d *MetadataStorePostgres) GetLatestMidnightGovernanceDatum(
 	datumType string,
 	blockNumber uint64,
@@ -268,7 +280,10 @@ func (d *MetadataStorePostgres) GetLatestMidnightGovernanceDatum(
 	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return nil, nil
 	}
-	return &datum, result.Error
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &datum, nil
 }
 
 func (d *MetadataStorePostgres) GetLatestMidnightAriadneParams(
@@ -280,6 +295,24 @@ func (d *MetadataStorePostgres) GetLatestMidnightAriadneParams(
 	}
 	var params models.MidnightAriadneParams
 	if result := db.Order("epoch DESC").First(&params); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
+func (d *MetadataStorePostgres) GetMidnightAriadneParamsByEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	if result := db.Where("epoch = ?", epoch).First(&params); result.Error != nil {
 		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
@@ -300,6 +333,18 @@ func (d *MetadataStorePostgres) UpsertMidnightAriadneParams(
 		Columns:   []clause.Column{{Name: "epoch"}},
 		DoUpdates: clause.AssignmentColumns([]string{"datum"}),
 	}).Create(params).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneParamsByEpoch(
+	txn types.Txn,
+	epoch uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("epoch = ?", epoch).
+		Delete(&models.MidnightAriadneParams{}).Error
 }
 
 func (d *MetadataStorePostgres) UpsertMidnightEpochCandidates(

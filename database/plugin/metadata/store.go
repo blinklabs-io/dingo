@@ -1420,9 +1420,12 @@ type MetadataStore interface {
 
 	// Midnight indexer methods
 	InsertMidnightGovernanceDatum(types.Txn, *models.MidnightGovernanceDatum) error
+	DeleteMidnightGovernanceDatumsByBlock(types.Txn, uint64) error
 	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
 	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
+	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 }
 
