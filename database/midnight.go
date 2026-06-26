@@ -39,7 +39,7 @@ func (d *Database) InsertMidnightGovernanceDatum(
 ) error {
 	txn := d.MetadataTxn(true)
 	defer txn.Release()
-	if err := d.metadata.InsertMidnightGovernanceDatum(datum, txn.Metadata()); err != nil {
+	if err := d.metadata.InsertMidnightGovernanceDatum(txn.Metadata(), datum); err != nil {
 		return fmt.Errorf("insert midnight governance datum: %w", err)
 	}
 	return txn.Commit()
@@ -68,7 +68,7 @@ func (d *Database) UpsertMidnightAriadneParams(
 ) error {
 	txn := d.MetadataTxn(true)
 	defer txn.Release()
-	if err := d.metadata.UpsertMidnightAriadneParams(params, txn.Metadata()); err != nil {
+	if err := d.metadata.UpsertMidnightAriadneParams(txn.Metadata(), params); err != nil {
 		return fmt.Errorf("upsert midnight ariadne params: %w", err)
 	}
 	return txn.Commit()
@@ -81,7 +81,7 @@ func (d *Database) UpsertMidnightEpochCandidates(
 ) error {
 	txn := d.MetadataTxn(true)
 	defer txn.Release()
-	if err := d.metadata.UpsertMidnightEpochCandidates(ec, txn.Metadata()); err != nil {
+	if err := d.metadata.UpsertMidnightEpochCandidates(txn.Metadata(), ec); err != nil {
 		return fmt.Errorf("upsert midnight epoch candidates: %w", err)
 	}
 	return txn.Commit()

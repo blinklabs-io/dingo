@@ -32,7 +32,7 @@ func TestMidnightGovernanceDatumLatestAtOrBefore(t *testing.T) {
 		{DatumType: models.MidnightGovernanceDatumTypeCouncil, Datum: []byte{2}, BlockNumber: 15},
 		{DatumType: models.MidnightGovernanceDatumTypeTechnicalCommittee, Datum: []byte{3}, BlockNumber: 20},
 	} {
-		require.NoError(t, store.InsertMidnightGovernanceDatum(datum, nil))
+		require.NoError(t, store.InsertMidnightGovernanceDatum(nil, datum))
 	}
 
 	got, err := store.GetLatestMidnightGovernanceDatum(

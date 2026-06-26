@@ -1419,11 +1419,11 @@ type MetadataStore interface {
 	DiskSize() (int64, error)
 
 	// Midnight indexer methods
-	InsertMidnightGovernanceDatum(*models.MidnightGovernanceDatum, types.Txn) error
+	InsertMidnightGovernanceDatum(types.Txn, *models.MidnightGovernanceDatum) error
 	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
 	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
-	UpsertMidnightAriadneParams(*models.MidnightAriadneParams, types.Txn) error
-	UpsertMidnightEpochCandidates(*models.MidnightEpochCandidates, types.Txn) error
+	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
+	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

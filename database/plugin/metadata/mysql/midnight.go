@@ -243,8 +243,8 @@ func (d *MetadataStoreMysql) GetMidnightCandidates(
 }
 
 func (d *MetadataStoreMysql) InsertMidnightGovernanceDatum(
-	datum *models.MidnightGovernanceDatum,
 	txn types.Txn,
+	datum *models.MidnightGovernanceDatum,
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -289,8 +289,8 @@ func (d *MetadataStoreMysql) GetLatestMidnightAriadneParams(
 }
 
 func (d *MetadataStoreMysql) UpsertMidnightAriadneParams(
-	params *models.MidnightAriadneParams,
 	txn types.Txn,
+	params *models.MidnightAriadneParams,
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
@@ -303,8 +303,8 @@ func (d *MetadataStoreMysql) UpsertMidnightAriadneParams(
 }
 
 func (d *MetadataStoreMysql) UpsertMidnightEpochCandidates(
-	ec *models.MidnightEpochCandidates,
 	txn types.Txn,
+	ec *models.MidnightEpochCandidates,
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {

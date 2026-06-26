@@ -25,8 +25,8 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
-	fxcbor "github.com/fxamacker/cbor/v2"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -564,9 +564,9 @@ func TestNew_PolicyIDLengthValidation(t *testing.T) {
 
 	// Short cNIGHT policy (27 bytes = 54 hex chars).
 	_, err := New(Config{
-		Metadata:       store,
-		Logger:         logger,
-		CNightPolicyID: "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1",
+		Metadata:        store,
+		Logger:          logger,
+		CNightPolicyID:  "0691b2fecca1ac4f53cb6dfb00b7013e561d1f34403b957cbb5af1",
 		CNightAssetName: testAssetNameHex,
 	})
 	require.Error(t, err)
@@ -574,9 +574,9 @@ func TestNew_PolicyIDLengthValidation(t *testing.T) {
 
 	// Short auth token policy (27 bytes).
 	_, err = New(Config{
-		Metadata:          store,
-		Logger:            logger,
-		AuthTokenPolicyID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		Metadata:           store,
+		Logger:             logger,
+		AuthTokenPolicyID:  "cccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 		AuthTokenAssetName: testAuthAssetNameHex,
 	})
 	require.Error(t, err)
@@ -685,6 +685,16 @@ func setupGovIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
 	})
 	require.NoError(t, err)
 	return idx
+}
+
+func candidateTestKey(t *testing.T, txHash string, outputIndex uint32) candidateKey {
+	t.Helper()
+	txHashBytes, err := hex.DecodeString(txHash)
+	require.NoError(t, err)
+	var key candidateKey
+	copy(key.TxHash[:], txHashBytes)
+	key.OutputIndex = outputIndex
+	return key
 }
 
 // TestGovernanceTechnicalCommitteeDatum verifies that an output at the
@@ -863,6 +873,60 @@ func TestCandidateAddRemove(t *testing.T) {
 	var entries []candidateEntry
 	require.NoError(t, fxcbor.Unmarshal(snapshots[0].CandidatesCbor, &entries))
 	require.Len(t, entries, 1)
+}
+
+// TestCandidateRollbackRestoresSpentAndRemovesCreated verifies candidate
+// rollback safety: undoing a block restores candidates it spent and removes
+// candidate outputs created by the rolled-back block.
+func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+
+	txHash1 := pad32("ca100001")
+	createOut1 := buildGovOutput(t, testMappingAddr, datum)
+	createTx1 := buildTx(
+		t,
+		txHash1,
+		[]lcommon.TransactionInput{buildInput(t, pad32("ca100000"), 0)},
+		[]lcommon.TransactionOutput{createOut1},
+	)
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xC1), []lcommon.Transaction{createTx1}, 1_000))
+
+	txHash2 := pad32("ca100002")
+	spendAndCreateTx := buildTx(
+		t,
+		txHash2,
+		[]lcommon.TransactionInput{buildInput(t, txHash1, 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	block2 := testBlock(2, 200, 0xC2)
+	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{spendAndCreateTx}, 2_000))
+
+	key1 := candidateTestKey(t, txHash1, 0)
+	key2 := candidateTestKey(t, txHash2, 0)
+
+	idx.mu.RLock()
+	_, hasKey1AfterApply := idx.candidates[key1]
+	_, hasKey2AfterApply := idx.candidates[key2]
+	idx.mu.RUnlock()
+	assert.False(t, hasKey1AfterApply, "spent candidate must be absent after applying block 2")
+	assert.True(t, hasKey2AfterApply, "new candidate must be present after applying block 2")
+
+	idx.rollbackCandidates(block2.Number, []lcommon.Transaction{spendAndCreateTx})
+
+	idx.mu.RLock()
+	restoredDatum, hasKey1AfterRollback := idx.candidates[key1]
+	_, hasKey2AfterRollback := idx.candidates[key2]
+	_, hasRemovalLog := idx.candidateRemovals[block2.Number]
+	idx.mu.RUnlock()
+
+	assert.True(t, hasKey1AfterRollback, "spent candidate must be restored after rollback")
+	assert.Equal(t, datum, restoredDatum)
+	assert.False(t, hasKey2AfterRollback, "candidate created by rolled-back block must be removed")
+	assert.False(t, hasRemovalLog, "rollback removal log must be cleared after use")
 }
 
 // TestCandidateEmptySnapshot verifies that an epoch transition with no

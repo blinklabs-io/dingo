@@ -1446,6 +1446,9 @@ An optional block scanner that indexes Midnight chain events into multiple
   address is added to an in-memory set; inputs consuming a tracked candidate
   UTxO remove it from the set. At every epoch boundary the set is serialised as
   deterministically ordered CBOR and upserted into `midnight_epoch_candidates`.
+  During block rollback, candidate removals recorded while applying that block
+  are restored, and candidate outputs created by the rolled-back block are
+  removed before any later epoch snapshot can use stale state.
 
 **Epoch tracking**: The indexer subscribes to `epoch.transition`
 (`event.EpochTransitionEventType`) as well as block events. Before scanning the
