@@ -38,7 +38,6 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/historyexpiry"
-	midnightgov "github.com/blinklabs-io/dingo/internal/midnightindexer"
 	"github.com/blinklabs-io/dingo/internal/node/ledgerpeers"
 	"github.com/blinklabs-io/dingo/internal/offchainmetadata"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -76,7 +75,6 @@ type Node struct {
 	midnightServer                   *midnightserver.Server
 	offchainMetadataFetcher          *offchainmetadata.Fetcher
 	midnightIndexer                  *midnightindexer.Indexer
-	midnightGovIndexer               *midnightgov.Indexer
 	ouroboros                        *ouroborosPkg.Ouroboros
 	blockForger                      *forging.BlockForger
 	leaderElection                   *leader.Election
@@ -474,6 +472,20 @@ func (n *Node) Run(ctx context.Context) error {
 			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
 			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
 			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
+			// Governance / Ariadne / candidate scanning
+			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
+			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
+			CouncilAddress:              n.config.midnight.CouncilAddress,
+			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
+			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
+			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
+			SlotToEpoch: func(slot uint64) (uint64, error) {
+				epoch, err := n.ledgerState.SlotToEpoch(slot)
+				if err != nil {
+					return 0, err
+				}
+				return epoch.EpochId, nil
+			},
 			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
 			},
@@ -489,8 +501,10 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
 		n.midnightIndexer = midnightIdx
+		n.config.logger.Info("midnight indexer created, starting backfill")
 		// Start runs backfill synchronously then subscribes to live events.
 		n.midnightIndexer.Start()
+		n.config.logger.Info("midnight indexer started, subscribed to live block and epoch events")
 	}
 
 	// Start ledger
@@ -498,49 +512,10 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}
 	started = append(started, func() { n.ledgerState.Close() })
-	// Register cNIGHT indexer cleanup after LedgerState so it is torn down
+	// Register midnight indexer cleanup after LedgerState so it is torn down
 	// first (reverse order): midnight.Stop() → ledgerState.Close().
 	if n.midnightIndexer != nil {
 		started = append(started, func() { n.midnightIndexer.Stop() })
-	}
-	// Create and start governance/Ariadne/candidate indexer after LedgerState.
-	if n.config.storageMode.IsAPI() {
-		tipSlot := n.ledgerState.Tip().Point.Slot
-		epoch, err := n.ledgerState.SlotToEpoch(tipSlot)
-		if err != nil {
-			return fmt.Errorf(
-				"resolve Midnight governance indexer initial epoch from tip slot %d: %w",
-				tipSlot,
-				err,
-			)
-		}
-		initialEpoch := epoch.EpochId
-		n.midnightGovIndexer, err = midnightgov.New(midnightgov.Config{
-			Logger:                      n.config.logger,
-			Store:                       n.db,
-			EventBus:                    n.eventBus,
-			TechnicalCommitteeAddress:   n.config.midnight.TechnicalCommitteeAddress,
-			TechnicalCommitteePolicyID:  n.config.midnight.TechnicalCommitteePolicyID,
-			CouncilAddress:              n.config.midnight.CouncilAddress,
-			CouncilPolicyID:             n.config.midnight.CouncilPolicyID,
-			PermissionedCandidatePolicy: n.config.midnight.PermissionedCandidatePolicy,
-			CommitteeCandidateAddress:   n.config.midnight.CommitteeCandidateAddress,
-			InitialEpoch:                initialEpoch,
-			SlotToEpoch: func(slot uint64) (uint64, error) {
-				epoch, err := n.ledgerState.SlotToEpoch(slot)
-				if err != nil {
-					return 0, err
-				}
-				return epoch.EpochId, nil
-			},
-		})
-		if err != nil {
-			return fmt.Errorf("creating Midnight governance indexer: %w", err)
-		}
-		if err := n.midnightGovIndexer.Start(n.ctx); err != nil { //nolint:contextcheck
-			return fmt.Errorf("starting Midnight governance indexer: %w", err)
-		}
-		started = append(started, n.midnightGovIndexer.Stop)
 	}
 	// Initialize and start snapshot manager for stake snapshot capture
 	n.snapshotMgr = snapshot.NewManager(

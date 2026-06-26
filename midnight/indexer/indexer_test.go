@@ -22,8 +22,10 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	fxcbor "github.com/fxamacker/cbor/v2"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +48,16 @@ const testMappingAddr = "addr_test1wplxjzranravtp574s2wz00md7vz9rzpucu252je68u9a
 
 // testOtherAddr is a distinct address used for non-relevant outputs.
 const testOtherAddr = "addr_test1qpe6s9amgfwtu9u6lqj998vke6uncswr4dg88qqft5d7f67kfjf77qy57hqhnefcqyy7hmhsygj9j38rj984hn9r57fswc4wg0"
+
+// testCouncilAddr is a second governance address (Technical Committee uses
+// testMappingAddr; council uses this one so the two can be distinguished).
+const testCouncilAddr = testOtherAddr
+
+// testGovPolicyID is a 28-byte (56 hex-char) policy used for governance / Ariadne tests.
+const testGovPolicyID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// testPermPolicyID is a 28-byte (56 hex-char) policy used for permissioned-candidate tests.
+const testPermPolicyID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 // pad32 returns a 64-char hex string by appending zero bytes after prefix.
 // prefix must be a valid hex string of at most 64 chars.
@@ -619,4 +631,271 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 	require.NoError(t, store.DB().Find(&spends).Error)
 	require.Len(t, spends, 1)
 	assert.Equal(t, uint64(100), spends[0].Quantity)
+}
+
+// -------------------------------------------------------------------------
+// Governance / Ariadne / candidate tests
+// -------------------------------------------------------------------------
+
+// buildGovOutput builds an output at the given address carrying an inline datum.
+// policyHex may be empty to produce a plain ADA output (used to verify the
+// indexer does NOT record datums for unrecognised addresses).
+func buildGovOutput(t *testing.T, addr string, datumCbor []byte) lcommon.TransactionOutput {
+	t.Helper()
+	out, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(addr).
+		WithLovelace(2_000_000).
+		WithDatum(datumCbor).
+		Build()
+	require.NoError(t, err)
+	return out
+}
+
+// buildPolicyOutput builds an output that carries a token under policyHex at addr.
+func buildPolicyOutput(t *testing.T, addr, policyHex string, datumCbor []byte) lcommon.TransactionOutput {
+	t.Helper()
+	policyBytes, err := hex.DecodeString(policyHex)
+	require.NoError(t, err)
+	out, err := mockledger.NewTransactionOutputBuilder().
+		WithAddress(addr).
+		WithLovelace(2_000_000).
+		WithAssets(mockledger.Asset{PolicyId: policyBytes, AssetName: []byte("t"), Amount: 1}).
+		WithDatum(datumCbor).
+		Build()
+	require.NoError(t, err)
+	return out
+}
+
+// setupGovIndexer creates an Indexer wired for governance / Ariadne / candidate
+// scanning, backed by the given SQLite store.
+func setupGovIndexer(t *testing.T, store *sqlite.MetadataStoreSqlite) *Indexer {
+	t.Helper()
+	idx, err := New(Config{
+		Metadata:                    store,
+		Logger:                      slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		TechnicalCommitteeAddress:   testMappingAddr,
+		TechnicalCommitteePolicyID:  testGovPolicyID,
+		CouncilAddress:              testCouncilAddr,
+		CouncilPolicyID:             testGovPolicyID,
+		PermissionedCandidatePolicy: testPermPolicyID,
+		CommitteeCandidateAddress:   testMappingAddr,
+		SlotToEpoch: func(slot uint64) (uint64, error) {
+			return slot / 100, nil
+		},
+	})
+	require.NoError(t, err)
+	return idx
+}
+
+// TestGovernanceTechnicalCommitteeDatum verifies that an output at the
+// Technical Committee address carrying the TC policy token and an inline
+// datum is stored in midnight_governance_datums with datum_type =
+// "technical_committee".
+func TestGovernanceTechnicalCommitteeDatum(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	// Must carry the TC policy token for the governance scan to trigger.
+	govOut := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum)
+	dummyIn := buildInput(t, pad32("f0000001"), 0)
+	tx := buildTx(t, pad32("f0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x01), []lcommon.Transaction{tx}, 1_000))
+
+	var rows []models.MidnightGovernanceDatum
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, models.MidnightGovernanceDatumTypeTechnicalCommittee, rows[0].DatumType)
+	assert.Equal(t, uint64(1), rows[0].BlockNumber)
+	assert.Equal(t, datum, rows[0].Datum)
+}
+
+// TestGovernanceCouncilDatum verifies that an output at the Council address
+// carrying the Council policy token and an inline datum is stored with
+// datum_type = "council".
+func TestGovernanceCouncilDatum(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	// Must carry the Council policy token for the governance scan to trigger.
+	govOut := buildPolicyOutput(t, testCouncilAddr, testGovPolicyID, datum)
+	dummyIn := buildInput(t, pad32("c0000001"), 0)
+	tx := buildTx(t, pad32("c0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x02), []lcommon.Transaction{tx}, 2_000))
+
+	var rows []models.MidnightGovernanceDatum
+	require.NoError(t, store.DB().Where("datum_type = ?", models.MidnightGovernanceDatumTypeCouncil).Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, datum, rows[0].Datum)
+}
+
+// TestGovernanceTwoOutputsProduceTwoRows verifies that two governance outputs
+// in the same block both produce independent DB rows (INSERT, not upsert).
+func TestGovernanceTwoOutputsProduceTwoRows(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum1 := simpleDatumCbor(t)
+	encoded2, err := cbor.Encode(uint64(2))
+	require.NoError(t, err)
+	datum2 := encoded2
+
+	// Both outputs carry the TC policy token so the governance scan triggers.
+	out1 := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum1)
+	out2 := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum2)
+	dummyIn := buildInput(t, pad32("d0000001"), 0)
+	tx := buildTx(t, pad32("d0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{out1, out2})
+
+	require.NoError(t, idx.processBlock(testBlock(3, 300, 0x03), []lcommon.Transaction{tx}, 3_000))
+
+	var rows []models.MidnightGovernanceDatum
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Len(t, rows, 2, "each governance output must produce its own DB row")
+}
+
+// TestAriadneParamsDeduplicated verifies that re-scanning the same Ariadne
+// datum does not trigger a second DB write, but a changed datum does get
+// persisted (updating the existing row for the current epoch via upsert).
+func TestAriadneParamsDeduplicated(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datumA := simpleDatumCbor(t)
+	encoded2, err := cbor.Encode(uint64(99))
+	require.NoError(t, err)
+	datumB := encoded2
+
+	dummyIn := buildInput(t, pad32("a0000001"), 0)
+
+	// Block 1: first Ariadne output with datumA.
+	out1 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
+	tx1 := buildTx(t, pad32("a0000002"), []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{out1})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{tx1}, 1_000))
+
+	var params []models.MidnightAriadneParams
+	require.NoError(t, store.DB().Find(&params).Error)
+	require.Len(t, params, 1, "first Ariadne datum must be stored")
+	assert.Equal(t, datumA, params[0].Datum)
+
+	// Block 2: same datumA again — in-memory dedup must prevent a second write.
+	dummyIn2 := buildInput(t, pad32("a0000003"), 0)
+	out2 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumA)
+	tx2 := buildTx(t, pad32("a0000004"), []lcommon.TransactionInput{dummyIn2}, []lcommon.TransactionOutput{out2})
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx2}, 2_000))
+
+	require.NoError(t, store.DB().Find(&params).Error)
+	require.Len(t, params, 1, "duplicate Ariadne datum must not produce a second row")
+
+	// Block 3: new datumB — changed datum must reach the store (upserts the epoch row).
+	dummyIn3 := buildInput(t, pad32("a0000005"), 0)
+	out3 := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumB)
+	tx3 := buildTx(t, pad32("a0000006"), []lcommon.TransactionInput{dummyIn3}, []lcommon.TransactionOutput{out3})
+	require.NoError(t, idx.processBlock(testBlock(3, 300, 0x33), []lcommon.Transaction{tx3}, 3_000))
+
+	// The store upserts by epoch — since all blocks share epoch 0 in this
+	// direct-call path (processBlock doesn't advance SlotToEpoch), the changed
+	// datum updates the same row rather than inserting a new one. The invariant
+	// being tested is that lastAriadneDatum tracks the written value and the
+	// store row reflects the latest non-duplicate datum.
+	require.NoError(t, store.DB().Find(&params).Error)
+	require.Len(t, params, 1, "upsert-by-epoch produces one row per epoch in direct-call path")
+	assert.Equal(t, datumB, params[0].Datum, "changed Ariadne datum must update the stored row")
+
+	// Verify that lastAriadneDatum was updated to datumB so a subsequent
+	// repeat of datumB would be deduplicated.
+	idx.mu.RLock()
+	lastDatum := idx.lastAriadneDatum
+	idx.mu.RUnlock()
+	assert.Equal(t, datumB, lastDatum)
+}
+
+// TestCandidateAddRemove verifies the in-memory candidate set lifecycle:
+// an output at the candidate address is added, a spend removes it, and
+// an epoch transition snapshots the remaining state.
+func TestCandidateAddRemove(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+
+	// Block 1: add two candidates at testMappingAddr (candidate address).
+	txHash1 := pad32("ca000001")
+	txHash2 := pad32("ca000002")
+	dummyIn1 := buildInput(t, pad32("ca000000"), 0)
+	dummyIn2 := buildInput(t, pad32("ca000009"), 0)
+	out1 := buildGovOutput(t, testMappingAddr, datum)
+	out2 := buildGovOutput(t, testMappingAddr, datum)
+	tx1 := buildTx(t, txHash1, []lcommon.TransactionInput{dummyIn1}, []lcommon.TransactionOutput{out1})
+	tx2 := buildTx(t, txHash2, []lcommon.TransactionInput{dummyIn2}, []lcommon.TransactionOutput{out2})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0xCA), []lcommon.Transaction{tx1, tx2}, 1_000))
+
+	idx.mu.RLock()
+	require.Len(t, idx.candidates, 2, "two candidate UTxOs must be tracked after block 1")
+	idx.mu.RUnlock()
+
+	// Block 2: spend candidate 1.
+	spendIn := buildInput(t, txHash1, 0)
+	spendTx := buildTx(t, pad32("ca000003"), []lcommon.TransactionInput{spendIn}, []lcommon.TransactionOutput{anyOutput(t)})
+	require.NoError(t, idx.processBlock(testBlock(2, 200, 0xCB), []lcommon.Transaction{spendTx}, 2_000))
+
+	idx.mu.RLock()
+	require.Len(t, idx.candidates, 1, "spent candidate must be removed from the in-memory set")
+	idx.mu.RUnlock()
+
+	// Epoch transition: snapshot must contain the one remaining candidate.
+	idx.handleEpochTransition(event.Event{
+		Data: event.EpochTransitionEvent{PreviousEpoch: 1, NewEpoch: 2},
+	})
+
+	var snapshots []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	require.Len(t, snapshots, 1, "epoch transition must write a candidate snapshot")
+	assert.Equal(t, uint64(1), snapshots[0].Epoch)
+
+	var entries []candidateEntry
+	require.NoError(t, fxcbor.Unmarshal(snapshots[0].CandidatesCbor, &entries))
+	require.Len(t, entries, 1)
+}
+
+// TestCandidateEmptySnapshot verifies that an epoch transition with no
+// candidates still writes a snapshot row (empty candidate set).
+func TestCandidateEmptySnapshot(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	idx.handleEpochTransition(event.Event{
+		Data: event.EpochTransitionEvent{PreviousEpoch: 0, NewEpoch: 1},
+	})
+
+	var snapshots []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	require.Len(t, snapshots, 1, "epoch transition must write a snapshot even with no candidates")
+	assert.Equal(t, uint64(0), snapshots[0].Epoch)
+}
+
+// TestEpochTransitionIdempotent verifies that replaying the same epoch
+// transition does not produce duplicate snapshot rows.
+func TestEpochTransitionIdempotent(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	et := event.Event{
+		Data: event.EpochTransitionEvent{PreviousEpoch: 3, NewEpoch: 4},
+	}
+	idx.handleEpochTransition(et)
+	idx.handleEpochTransition(et)
+
+	var snapshots []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	require.Len(t, snapshots, 1, "duplicate epoch transition must not write a second snapshot row")
 }
