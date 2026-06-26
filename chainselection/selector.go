@@ -46,6 +46,28 @@ const (
 	// and CPU cost of chain selection, preventing Sybil-based resource
 	// exhaustion.
 	DefaultMaxTrackedPeers = 200
+
+	// catchUpPinBlockThreshold is the catch-up gap (in blocks, measured as
+	// bestKnownPeerBlock - appliedLocalTipBlock) at or above which the node
+	// is considered to be in deep catch-up. The anti-flap pin's behavior is
+	// identical in catch-up and at the tip; this threshold is only used for
+	// observability/diagnostics and to describe the two regimes.
+	catchUpPinBlockThreshold = 100
+
+	// catchUpPinHeadMargin is the maximum number of blocks a challenger may
+	// lead the incumbent and still be treated as a head micro-fork (a
+	// sibling at, or barely past, the same height) rather than a genuinely
+	// longer chain. A challenger ahead by more than this margin is a real
+	// longer chain and the pin releases so the node converges to it.
+	catchUpPinHeadMargin = 2
+
+	// catchUpPinStallTimeout is the progress-aware wall-clock escape window.
+	// It is deliberately time-based, not slot-based: if the applied local tip
+	// stops advancing for at least this long while the pin is engaged, the pin
+	// releases so the node can switch away from a dead/stalled incumbent. This
+	// is the key safety valve that guarantees the node can never pin to a
+	// non-progressing peer forever.
+	catchUpPinStallTimeout = 20 * time.Second
 )
 
 // safeBlockDiff computes the difference between two block numbers as int64,
@@ -108,6 +130,18 @@ type ChainSelector struct {
 	mutex             sync.RWMutex
 	ctx               context.Context
 	cancel            context.CancelFunc
+
+	// Anti-flap incumbent pin state (guarded by mutex).
+	//
+	// localTipProgressBlock / localTipProgressAt record when the APPLIED
+	// local tip last advanced (moved forward in block number). The stall
+	// clock (catchUpPinStallTimeout) is measured from localTipProgressAt and
+	// is only reset on genuine forward progress, so repeated same-or-lower
+	// SetLocalTip calls never reset it.
+	localTipProgressBlock uint64
+	localTipProgressAt    time.Time
+	// nowFn is injectable for deterministic tests; defaults to time.Now.
+	nowFn func() time.Time
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -135,6 +169,7 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 		eligible:          make(map[ouroboros.ConnectionId]bool),
 		priority:          make(map[ouroboros.ConnectionId]int),
 		evaluationTrigger: make(chan struct{}, 1),
+		nowFn:             time.Now,
 	}
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
@@ -586,15 +621,36 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 }
 
 // SetLocalTip updates the local chain tip for comparison.
+//
+// It also records the last time the APPLIED local tip moved FORWARD (its
+// block number advanced). The anti-flap incumbent pin uses this timestamp as
+// a progress-aware escape: if the applied tip stops advancing while the pin
+// is engaged, the pin releases. Same-or-lower tip updates (including
+// rollbacks) deliberately do NOT reset the stall clock, so a stalled
+// incumbent cannot keep the pin alive by re-reporting an unchanged tip.
 func (cs *ChainSelector) SetLocalTip(tip ochainsync.Tip) {
 	shouldEvaluate := false
 	cs.mutex.Lock()
+	if tip.BlockNumber > cs.localTipProgressBlock {
+		cs.localTipProgressBlock = tip.BlockNumber
+		cs.localTipProgressAt = cs.now()
+	}
 	cs.localTip = tip
 	shouldEvaluate = cs.advanceSelectionModeLocked()
 	cs.mutex.Unlock()
 	if shouldEvaluate {
 		cs.EvaluateAndSwitch()
 	}
+}
+
+// now returns the current time via the injectable clock. Must be called with
+// the mutex held (it reads cs.nowFn). Defaults to time.Now when nowFn is unset
+// (e.g. for selectors constructed without NewChainSelector in tests).
+func (cs *ChainSelector) now() time.Time {
+	if cs.nowFn != nil {
+		return cs.nowFn()
+	}
+	return time.Now()
 }
 
 // SetSecurityParam updates the security parameter (k) dynamically.
@@ -1009,6 +1065,101 @@ func (cs *ChainSelector) publishSelectionEvents(
 	}
 }
 
+// appliedLocalTipBlockLocked returns the block number of the last applied
+// local tip. Zero means SetLocalTip has never been called (near-genesis /
+// no-local-tip), in which case the anti-flap pin is inactive.
+func (cs *ChainSelector) appliedLocalTipBlockLocked() uint64 {
+	return cs.localTip.BlockNumber
+}
+
+// catchingUpLocked reports whether the node is in deep catch-up: the best
+// known peer tip is more than catchUpPinBlockThreshold blocks ahead of the
+// applied local tip. The pin engages in both regimes; this is used only for
+// diagnostics/logging to distinguish catch-up from tip-hold.
+func (cs *ChainSelector) catchingUpLocked() bool {
+	local := cs.appliedLocalTipBlockLocked()
+	if local == 0 {
+		return false
+	}
+	best := cs.bestKnownBlockNumber()
+	if best <= local {
+		return false
+	}
+	return best-local > catchUpPinBlockThreshold
+}
+
+// localTipStalledLocked reports whether the applied local tip has stopped
+// advancing for at least catchUpPinStallTimeout. This is the progress-aware
+// escape: when true, the pin releases so the node can switch away from a
+// dead/stalled incumbent. Returns false until forward progress has been
+// recorded at least once (localTipProgressAt is zero), so a freshly started
+// node never reports a stall before it has had a chance to apply a block.
+func (cs *ChainSelector) localTipStalledLocked() bool {
+	if cs.localTipProgressAt.IsZero() {
+		return false
+	}
+	return cs.now().Sub(cs.localTipProgressAt) >= catchUpPinStallTimeout
+}
+
+// pinIncumbentDuringCatchUpLocked decides whether to KEEP the incumbent active
+// connection (previousBest) instead of switching to challenger (newBest).
+//
+// This is the unified anti-flap incumbent pin. It applies whenever there is an
+// established, still-selectable incumbent and SetLocalTip has been called
+// (applied local tip > 0). It generalizes the "don't flap on a 1-block head
+// micro-fork" behavior to both regimes: deep catch-up and at/near the live
+// tip. The reference-implementation Praos comparison (longer chain, then lower
+// slot, then VRF/opcert) still governs which chain is canonically best; this
+// pin only suppresses the active-CONNECTION handoff between peers that are on
+// the same height / sibling head-forks, which would otherwise reset the
+// chainsync+blockfetch pipeline on nearly every tip update.
+//
+// The pin RELEASES (returns false, allow the switch) when:
+//   - SetLocalTip has never been called (applied local tip == 0) — keeps
+//     near-genesis behavior and existing tests unchanged.
+//   - the incumbent is no longer selectable (gone/disconnected/ineligible/
+//     stale/implausible).
+//   - the applied local tip has stalled past catchUpPinStallTimeout
+//     (progress-aware escape — cannot pin to a dead peer forever).
+//   - the challenger is genuinely ahead of the incumbent by more than
+//     catchUpPinHeadMargin blocks (a real longer chain, not a head micro-fork).
+//
+// Otherwise it PINS (returns true, keep the incumbent).
+//
+// Must be called with cs.mutex held.
+func (cs *ChainSelector) pinIncumbentDuringCatchUpLocked(
+	previousBest ouroboros.ConnectionId,
+	incumbentTip *PeerChainTip,
+	challengerTip *PeerChainTip,
+) bool {
+	// Inactive near genesis / before any local tip has been applied.
+	if cs.appliedLocalTipBlockLocked() == 0 {
+		return false
+	}
+	if incumbentTip == nil || challengerTip == nil {
+		return false
+	}
+	// Release if the incumbent is no longer a viable selection target.
+	if !cs.isPeerSelectableLocked(previousBest, incumbentTip, false) {
+		return false
+	}
+	// Progress-aware escape: never pin to a stalled incumbent forever.
+	if cs.localTipStalledLocked() {
+		return false
+	}
+	// Longer-chain escape: a challenger genuinely taller than the incumbent
+	// by more than the head margin is a real longer chain, not a sibling
+	// head-fork — release so the node converges to it promptly.
+	incumbentBlock := incumbentTip.SelectionTip().BlockNumber
+	challengerBlock := challengerTip.SelectionTip().BlockNumber
+	if challengerBlock > safeAddUint64(incumbentBlock, catchUpPinHeadMargin) {
+		return false
+	}
+	// Otherwise this is a head micro-fork / same-height sibling: pin the
+	// incumbent and do not hand off the pipeline.
+	return true
+}
+
 func (cs *ChainSelector) evaluateBestPeerLocked() (
 	bool,
 	*event.Event,
@@ -1043,17 +1194,40 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 				// or the reference implementation's equal-length Praos
 				// tiebreaker is not armed, keep following the incumbent.
 				newBest = previousBest
-			} else {
+			} else if cs.comparePeerTips(
+				*previousBest,
+				previousPeerTip,
+				*newBest,
+				newPeerTip,
+			) == ChainABetter {
 				// Preserve the incumbent only when it still wins the same
 				// full comparison used during normal best-peer selection.
-				if cs.comparePeerTips(
-					*previousBest,
-					previousPeerTip,
-					*newBest,
-					newPeerTip,
-				) == ChainABetter {
-					newBest = previousBest
-				}
+				newBest = previousBest
+			} else if cs.pinIncumbentDuringCatchUpLocked(
+				*previousBest,
+				previousPeerTip,
+				newPeerTip,
+			) {
+				// Anti-flap incumbent pin: the challenger is canonically
+				// "better" by the Praos rules, but only via a head micro-fork
+				// / same-height sibling (within catchUpPinHeadMargin). Keep the
+				// active connection on the incumbent rather than handing off
+				// the chainsync+blockfetch pipeline on a 1-block head fork.
+				// The longer-chain escape and the progress-stall escape inside
+				// the pin guarantee convergence to a genuinely longer chain and
+				// prevent pinning to a dead/stalled peer.
+				cs.config.Logger.Debug(
+					"pinning incumbent active connection (anti-flap)",
+					"incumbent", previousBest.String(),
+					"challenger", newBest.String(),
+					"incumbent_block",
+					previousPeerTip.SelectionTip().BlockNumber,
+					"challenger_block",
+					newPeerTip.SelectionTip().BlockNumber,
+					"applied_local_block", cs.appliedLocalTipBlockLocked(),
+					"catching_up", cs.catchingUpLocked(),
+				)
+				newBest = previousBest
 			}
 		}
 	}
