@@ -24,6 +24,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -556,6 +557,28 @@ func (d *MetadataStoreMysql) CountAccountRegistrationHistoryByCredential(
 		)
 	}
 	return count, nil
+}
+
+func (d *MetadataStoreMysql) GetAccountSumsByCredential(
+	credentialTag uint8,
+	stakingKey []byte,
+	txn types.Txn,
+) (models.AccountSums, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return models.AccountSums{}, fmt.Errorf(
+			"resolve DB for account sums: %w",
+			err,
+		)
+	}
+	sums, err := accountsums.QueryAccountSums(db, credentialTag, stakingKey)
+	if err != nil {
+		return models.AccountSums{}, fmt.Errorf(
+			"query account sums: %w",
+			err,
+		)
+	}
+	return sums, nil
 }
 
 // GetTransactionsByMetadataLabel returns transactions containing a metadata

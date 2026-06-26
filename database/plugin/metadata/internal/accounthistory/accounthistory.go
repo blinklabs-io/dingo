@@ -107,7 +107,9 @@ func delegationHistoryUnionQuery(
 				tx.block_index AS block_index,
 				certs.cert_index AS cert_index,
 				tx.hash AS tx_hash,
-				%[1]s.pool_key_hash AS pool_key_hash
+				%[1]s.pool_key_hash AS pool_key_hash,
+				tx.slot AS tx_slot,
+				tx.block_hash AS block_hash
 			FROM %[1]s
 			INNER JOIN certs
 				ON certs.id = %[1]s.certificate_id
@@ -218,6 +220,11 @@ func CountRegistrationHistoryByCredential(
 type registrationHistorySource struct {
 	table  string
 	action string
+	// depositColumn is the column on the source table holding the
+	// deposit (registrations) or deposit refund (deregistrations) in
+	// lovelace. Empty when the certificate type records no explicit
+	// deposit, in which case the query reports 0.
+	depositColumn string
 }
 
 func registrationHistoryUnionQuery(
@@ -233,12 +240,25 @@ func registrationHistoryUnionQuery(
 		if !ok {
 			continue
 		}
+		// depositColumn is drawn from the hardcoded source list below,
+		// never from caller input, so it is safe to interpolate.
+		depositExpr := "0"
+		if source.depositColumn != "" {
+			depositExpr = fmt.Sprintf(
+				"%s.%s",
+				source.table,
+				source.depositColumn,
+			)
+		}
 		parts = append(parts, fmt.Sprintf(
 			`SELECT %[1]s.added_slot AS added_slot,
 				tx.block_index AS block_index,
 				certs.cert_index AS cert_index,
 				tx.hash AS tx_hash,
-				? AS action
+				? AS action,
+				COALESCE(%[3]s, 0) AS deposit,
+				tx.slot AS tx_slot,
+				tx.block_hash AS block_hash
 			FROM %[1]s
 			INNER JOIN certs
 				ON certs.id = %[1]s.certificate_id
@@ -248,6 +268,7 @@ func registrationHistoryUnionQuery(
 					AND %[1]s.staking_key = ?`,
 			source.table,
 			transactionJoinClause(db),
+			depositExpr,
 		))
 		args = append(
 			args,
@@ -262,13 +283,13 @@ func registrationHistoryUnionQuery(
 
 func registrationHistorySources() []registrationHistorySource {
 	return []registrationHistorySource{
-		{table: "deregistration", action: "deregistered"},
-		{table: "registration", action: "registered"},
+		{table: "deregistration", action: "deregistered", depositColumn: "amount"},
+		{table: "registration", action: "registered", depositColumn: "deposit_amount"},
 		{table: "stake_deregistration", action: "deregistered"},
-		{table: "stake_registration", action: "registered"},
-		{table: "stake_registration_delegation", action: "registered"},
-		{table: "stake_vote_registration_delegation", action: "registered"},
-		{table: "vote_registration_delegation", action: "registered"},
+		{table: "stake_registration", action: "registered", depositColumn: "deposit_amount"},
+		{table: "stake_registration_delegation", action: "registered", depositColumn: "deposit_amount"},
+		{table: "stake_vote_registration_delegation", action: "registered", depositColumn: "deposit_amount"},
+		{table: "vote_registration_delegation", action: "registered", depositColumn: "deposit_amount"},
 	}
 }
 

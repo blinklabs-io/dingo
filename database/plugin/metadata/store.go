@@ -548,6 +548,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (int, error)
 
+	// GetAccountSumsByCredential retrieves the aggregated withdrawal, reserves,
+	// and treasury lovelace totals for a stake credential tag/hash pair.
+	GetAccountSumsByCredential(
+		uint8, // credentialTag
+		[]byte, // stakingKey
+		types.Txn,
+	) (models.AccountSums, error)
+
 	// GetTransactionsByMetadataLabel retrieves transactions that include
 	// metadata for the given label.
 	GetTransactionsByMetadataLabel(

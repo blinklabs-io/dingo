@@ -471,6 +471,8 @@ type AccountResponse struct {
 	TreasurySum        string  `json:"treasury_sum"`
 	WithdrawableAmount string  `json:"withdrawable_amount"`
 	PoolID             *string `json:"pool_id"`
+	DrepID             *string `json:"drep_id"`
+	Registered         bool    `json:"registered"`
 }
 
 // AccountAssociatedAddressResponse represents a stake
@@ -486,13 +488,20 @@ type AccountDelegationHistoryResponse struct {
 	TxHash      string `json:"tx_hash"`
 	Amount      string `json:"amount"`
 	PoolID      string `json:"pool_id"`
+	TxSlot      int64  `json:"tx_slot"`
+	BlockTime   int64  `json:"block_time"`
+	BlockHeight int64  `json:"block_height"`
 }
 
 // AccountRegistrationHistoryResponse represents a
 // stake-account registration history row.
 type AccountRegistrationHistoryResponse struct {
-	TxHash string `json:"tx_hash"`
-	Action string `json:"action"`
+	TxHash      string `json:"tx_hash"`
+	Action      string `json:"action"`
+	Deposit     string `json:"deposit"`
+	TxSlot      int64  `json:"tx_slot"`
+	BlockTime   int64  `json:"block_time"`
+	BlockHeight int64  `json:"block_height"`
 }
 
 // AccountRewardHistoryResponse represents a stake-account

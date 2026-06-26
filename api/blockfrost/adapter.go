@@ -136,6 +136,51 @@ func delegationActivationEpoch(
 	)
 }
 
+// accountHistoryBlockInfo resolves the tx_slot, block_time (Unix seconds), and
+// block_height fields shared by the account delegation and registration
+// history endpoints. The block height comes from the block store (keyed by
+// block hash, since the metadata SQL schema does not hold block numbers);
+// blockNumbers caches lookups across the rows of a single response.
+func (a *NodeAdapter) accountHistoryBlockInfo(
+	txSlot uint64,
+	blockHash []byte,
+	blockNumbers map[string]uint64,
+) (slot, blockTime, height int64, err error) {
+	slot, err = uint64ToInt64(txSlot, "account history tx slot")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	blockHashKey := hex.EncodeToString(blockHash)
+	blockHeight, ok := blockNumbers[blockHashKey]
+	if !ok {
+		block, err := a.ledgerState.BlockByHash(blockHash)
+		if err != nil {
+			return 0, 0, 0, fmt.Errorf(
+				"get block %x for account history: %w",
+				blockHash,
+				err,
+			)
+		}
+		blockHeight = block.Number
+		blockNumbers[blockHashKey] = blockHeight
+	}
+	height, err = uint64ToInt64(blockHeight, "account history block height")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	slotTime, err := a.ledgerState.SlotToTime(txSlot)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf(
+			"get block time for slot %d: %w",
+			txSlot,
+			err,
+		)
+	}
+	return slot, slotTime.Unix(), height, nil
+}
+
 // ChainTip returns the current chain tip from the ledger
 // state.
 func (a *NodeAdapter) ChainTip() (
@@ -1046,27 +1091,71 @@ func (a *NodeAdapter) Account(
 		activeEpoch = &epochID
 	}
 
+	// Per Blockfrost OpenAPI (>=0.1.85), `active` is the delegation
+	// state (the account is registered and currently delegated to a
+	// pool), while `registered` is the registration state on its own.
+	// account.Active is Dingo's registration flag, so it backs
+	// `registered`; `active` additionally requires a pool delegation.
+	delegating := account.Active && len(account.Pool) > 0
+
 	var poolID *string
-	if account.Active && len(account.Pool) > 0 {
+	if delegating {
 		pool := lcommon.PoolId(
 			lcommon.NewBlake2b224(account.Pool),
 		).String()
 		poolID = &pool
 	}
 
+	sums, err := db.GetAccountSumsByCredential(
+		credentialTag,
+		stakeKey,
+		nil,
+	)
+	if err != nil {
+		return AccountInfo{}, fmt.Errorf(
+			"get account sums: %w",
+			err,
+		)
+	}
+
 	reward := strconv.FormatUint(uint64(account.Reward), 10)
 	return AccountInfo{
 		StakeAddress:       stakeAddress,
-		Active:             account.Active,
+		Active:             delegating,
 		ActiveEpoch:        activeEpoch,
 		ControlledAmount:   strconv.FormatUint(controlledAmount, 10),
 		RewardsSum:         reward,
-		WithdrawalsSum:     "0",
-		ReservesSum:        "0",
-		TreasurySum:        "0",
+		WithdrawalsSum:     strconv.FormatUint(sums.WithdrawalsSum, 10),
+		ReservesSum:        strconv.FormatUint(sums.ReservesSum, 10),
+		TreasurySum:        strconv.FormatUint(sums.TreasurySum, 10),
 		WithdrawableAmount: reward,
 		PoolID:             poolID,
+		DrepID:             accountDrepID(account.Drep, account.DrepType),
+		Registered:         account.Active,
 	}, nil
+}
+
+// accountDrepID renders the Bech32 DRep ID a stake account is delegated to,
+// matching the Blockfrost account_content drep_id field. It returns nil when
+// the account has no DRep delegation (no credential and the default key-hash
+// type), distinguishing that from an explicit always-abstain/no-confidence
+// delegation, which carry no credential but a non-default type.
+func accountDrepID(credential []byte, drepType uint64) *string {
+	if len(credential) == 0 && drepType == models.DrepTypeAddrKeyHash {
+		return nil
+	}
+	// DrepType is a small ledger enum (0-3); guard the narrowing
+	// conversion so gosec is satisfied and an out-of-range value
+	// degrades to "no DRep" rather than wrapping negative.
+	if drepType > uint64(math.MaxInt) {
+		return nil
+	}
+	drep := lcommon.Drep{
+		Type:       int(drepType),
+		Credential: credential,
+	}
+	id := drep.String()
+	return &id
 }
 
 // AccountAssociatedAddresses returns payment addresses
@@ -1204,6 +1293,7 @@ func (a *NodeAdapter) AccountDelegationHistory(
 		)
 	}
 
+	blockNumbers := make(map[string]uint64, len(rows))
 	ret := make([]AccountDelegationHistoryInfo, 0, len(rows))
 	for _, row := range rows {
 		activeEpoch, err := delegationActivationEpoch(
@@ -1217,6 +1307,14 @@ func (a *NodeAdapter) AccountDelegationHistory(
 				err,
 			)
 		}
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+			row.TxSlot,
+			row.BlockHash,
+			blockNumbers,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
 		ret = append(ret, AccountDelegationHistoryInfo{
 			ActiveEpoch: activeEpoch,
 			TxHash:      hex.EncodeToString(row.TxHash),
@@ -1224,6 +1322,9 @@ func (a *NodeAdapter) AccountDelegationHistory(
 			PoolID: lcommon.PoolId(
 				lcommon.NewBlake2b224(row.PoolKeyHash),
 			).String(),
+			TxSlot:      txSlot,
+			BlockTime:   blockTime,
+			BlockHeight: blockHeight,
 		})
 	}
 	return ret, total, nil
@@ -1281,15 +1382,28 @@ func (a *NodeAdapter) AccountRegistrationHistory(
 		)
 	}
 
+	blockNumbers := make(map[string]uint64, len(rows))
 	ret := make(
 		[]AccountRegistrationHistoryInfo,
 		0,
 		len(rows),
 	)
 	for _, row := range rows {
+		txSlot, blockTime, blockHeight, err := a.accountHistoryBlockInfo(
+			row.TxSlot,
+			row.BlockHash,
+			blockNumbers,
+		)
+		if err != nil {
+			return nil, 0, err
+		}
 		ret = append(ret, AccountRegistrationHistoryInfo{
-			TxHash: hex.EncodeToString(row.TxHash),
-			Action: row.Action,
+			TxHash:      hex.EncodeToString(row.TxHash),
+			Action:      row.Action,
+			Deposit:     strconv.FormatUint(row.Deposit, 10),
+			TxSlot:      txSlot,
+			BlockTime:   blockTime,
+			BlockHeight: blockHeight,
 		})
 	}
 	return ret, total, nil

@@ -131,3 +131,28 @@ func (d *Database) CountAccountRegistrationHistoryByCredential(
 	}
 	return count, nil
 }
+
+// GetAccountSumsByCredential returns the aggregated withdrawal, reserves, and
+// treasury lovelace totals for a stake credential.
+func (d *Database) GetAccountSumsByCredential(
+	credentialTag uint8,
+	stakeKey []byte,
+	txn *Txn,
+) (models.AccountSums, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	sums, err := d.metadata.GetAccountSumsByCredential(
+		credentialTag,
+		stakeKey,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return models.AccountSums{}, fmt.Errorf(
+			"get account sums: %w",
+			err,
+		)
+	}
+	return sums, nil
+}
