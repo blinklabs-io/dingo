@@ -103,8 +103,18 @@ func verifyBlockHeaderHex(
 		SkipStakePoolValidation:   true,
 	}
 
+	header, err := normalizeHeaderVrfResultFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: "+
+				"normalize VRF result from header body CBOR: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+
 	isValid, _, _, _, err := ledger.VerifyBlock(
-		block,
+		headerOnlyBlock{header: header},
 		epochNonceHex,
 		slotsPerKesPeriod,
 		config,
