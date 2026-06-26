@@ -1426,6 +1426,10 @@ type MetadataStore interface {
 	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
 	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
+	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
+	FindMidnightAriadneRollbacksByBlock(types.Txn, uint64) ([]models.MidnightAriadneRollback, error)
+	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
+	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 }
 

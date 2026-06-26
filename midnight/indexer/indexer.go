@@ -113,11 +113,6 @@ type candidateEntry struct {
 	Datum       []byte `cbor:"3,keyasint"`
 }
 
-type ariadneRollbackEntry struct {
-	existed bool
-	datum   []byte
-}
-
 // Indexer scans blocks for Midnight-relevant transactions and writes rows
 // to the midnight_* tables.
 type Indexer struct {
@@ -155,7 +150,6 @@ type Indexer struct {
 	// governance state
 	candidates        map[candidateKey][]byte
 	candidateRemovals map[uint64]map[candidateKey][]byte
-	ariadneRollbacks  map[uint64]map[uint64]ariadneRollbackEntry
 	lastAriadneDatum  []byte
 	currentEpoch      uint64
 	hasCurrentEpoch   bool
@@ -175,7 +169,6 @@ func New(cfg Config) (*Indexer, error) {
 		regUTxOs:          make(map[utxoKey]registrationUTxO),
 		candidates:        make(map[candidateKey][]byte),
 		candidateRemovals: make(map[uint64]map[candidateKey][]byte),
-		ariadneRollbacks:  make(map[uint64]map[uint64]ariadneRollbackEntry),
 	}
 
 	if cfg.CNightPolicyID != "" && cfg.CNightAssetName != "" {
@@ -635,34 +628,53 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 }
 
 func (idx *Indexer) rollbackAriadne(blockNumber uint64) {
-	idx.mu.Lock()
-	entries := idx.ariadneRollbacks[blockNumber]
-	delete(idx.ariadneRollbacks, blockNumber)
-	idx.mu.Unlock()
+	entries, err := idx.config.Metadata.FindMidnightAriadneRollbacksByBlock(nil, blockNumber)
+	if err != nil {
+		if idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: load ariadne rollback journal",
+				"error", err,
+				"block", blockNumber,
+			)
+		}
+		return
+	}
 
-	for epoch, entry := range entries {
+	hasError := false
+	for _, entry := range entries {
 		var err error
-		if entry.existed {
+		if entry.PreviousExists {
 			err = idx.config.Metadata.UpsertMidnightAriadneParams(
 				nil,
 				&models.MidnightAriadneParams{
-					Epoch: epoch,
-					Datum: bytes.Clone(entry.datum),
+					Epoch: entry.Epoch,
+					Datum: bytes.Clone(entry.PreviousDatum),
 				},
 			)
 		} else {
-			err = idx.config.Metadata.DeleteMidnightAriadneParamsByEpoch(nil, epoch)
+			err = idx.config.Metadata.DeleteMidnightAriadneParamsByEpoch(nil, entry.Epoch)
 		}
 		if err != nil {
+			hasError = true
 			if idx.config.Logger != nil {
 				idx.config.Logger.Error(
 					"midnight indexer: rollback ariadne params",
 					"error", err,
 					"block", blockNumber,
-					"epoch", epoch,
+					"epoch", entry.Epoch,
 				)
 			}
 			continue
+		}
+	}
+	if !hasError {
+		if err := idx.config.Metadata.DeleteMidnightAriadneRollbacksByBlock(nil, blockNumber); err != nil &&
+			idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: delete ariadne rollback journal",
+				"error", err,
+				"block", blockNumber,
+			)
 		}
 	}
 
@@ -748,7 +760,7 @@ func (idx *Indexer) processBlock(
 		}
 	}
 
-	// Prune candidateRemovals entries that are beyond the rollback window.
+	// Prune rollback journals that are beyond the rollback window.
 	// Ouroboros cannot roll back more than candidateRollbackDepth blocks, so
 	// journal entries older than that depth will never be needed for rollback.
 	if (len(idx.candidateAddrBytes) > 0 || len(idx.permCandidatePolicyBytes) > 0) &&
@@ -760,12 +772,18 @@ func (idx *Indexer) processBlock(
 				delete(idx.candidateRemovals, bn)
 			}
 		}
-		for bn := range idx.ariadneRollbacks {
-			if bn < pruneBelow {
-				delete(idx.ariadneRollbacks, bn)
+		idx.mu.Unlock()
+		if len(idx.permCandidatePolicyBytes) > 0 {
+			if err := idx.config.Metadata.DeleteMidnightAriadneRollbacksBeforeBlock(nil, pruneBelow); err != nil &&
+				idx.config.Logger != nil {
+				idx.config.Logger.Error(
+					"midnight indexer: prune ariadne rollback journal",
+					"error", err,
+					"block", block.Number,
+					"prune_below", pruneBelow,
+				)
 			}
 		}
-		idx.mu.Unlock()
 	}
 	return nil
 }
@@ -1053,37 +1071,20 @@ func (idx *Indexer) processOutput(
 }
 
 func (idx *Indexer) recordAriadneRollback(blockNumber, epoch uint64) error {
-	idx.mu.RLock()
-	if entries := idx.ariadneRollbacks[blockNumber]; entries != nil {
-		if _, ok := entries[epoch]; ok {
-			idx.mu.RUnlock()
-			return nil
-		}
-	}
-	idx.mu.RUnlock()
-
 	existing, err := idx.config.Metadata.GetMidnightAriadneParamsByEpoch(epoch, nil)
 	if err != nil {
 		return err
 	}
 
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-	entries := idx.ariadneRollbacks[blockNumber]
-	if entries == nil {
-		entries = make(map[uint64]ariadneRollbackEntry)
-		idx.ariadneRollbacks[blockNumber] = entries
+	entry := &models.MidnightAriadneRollback{
+		BlockNumber: blockNumber,
+		Epoch:       epoch,
 	}
-	if _, ok := entries[epoch]; ok {
-		return nil
-	}
-	entry := ariadneRollbackEntry{}
 	if existing != nil {
-		entry.existed = true
-		entry.datum = bytes.Clone(existing.Datum)
+		entry.PreviousExists = true
+		entry.PreviousDatum = bytes.Clone(existing.Datum)
 	}
-	entries[epoch] = entry
-	return nil
+	return idx.config.Metadata.CreateMidnightAriadneRollback(nil, entry)
 }
 
 // hasAuthToken returns true if the output assets contain at least one unit of

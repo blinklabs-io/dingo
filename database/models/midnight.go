@@ -110,6 +110,20 @@ func (MidnightAriadneParams) TableName() string {
 	return "midnight_ariadne_params"
 }
 
+// MidnightAriadneRollback stores the previous Ariadne row for a block upsert,
+// so a later rollback can restore state even after process restart.
+type MidnightAriadneRollback struct {
+	ID             uint   `gorm:"primarykey"`
+	BlockNumber    uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:1;not null"`
+	Epoch          uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:2;not null"`
+	PreviousExists bool   `gorm:"not null"`
+	PreviousDatum  []byte
+}
+
+func (MidnightAriadneRollback) TableName() string {
+	return "midnight_ariadne_rollbacks"
+}
+
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.
 type MidnightEpochCandidates struct {
 	ID             uint   `gorm:"primarykey"`

@@ -347,6 +347,58 @@ func (d *MetadataStorePostgres) DeleteMidnightAriadneParamsByEpoch(
 		Delete(&models.MidnightAriadneParams{}).Error
 }
 
+func (d *MetadataStorePostgres) CreateMidnightAriadneRollback(
+	txn types.Txn,
+	rollback *models.MidnightAriadneRollback,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(rollback).Error
+}
+
+func (d *MetadataStorePostgres) FindMidnightAriadneRollbacksByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightAriadneRollback, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rollbacks []models.MidnightAriadneRollback
+	if err := db.Where("block_number = ?", blockNumber).
+		Order("epoch ASC").
+		Find(&rollbacks).Error; err != nil {
+		return nil, err
+	}
+	return rollbacks, nil
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneRollbacksByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightAriadneRollback{}).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneRollbacksBeforeBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number < ?", blockNumber).
+		Delete(&models.MidnightAriadneRollback{}).Error
+}
+
 func (d *MetadataStorePostgres) UpsertMidnightEpochCandidates(
 	txn types.Txn,
 	ec *models.MidnightEpochCandidates,

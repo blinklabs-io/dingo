@@ -30,6 +30,7 @@ func TestMidnightModelsAutoMigrate(t *testing.T) {
 		&MidnightDeregistration{},
 		&MidnightGovernanceDatum{},
 		&MidnightAriadneParams{},
+		&MidnightAriadneRollback{},
 		&MidnightEpochCandidates{},
 	))
 
@@ -70,6 +71,11 @@ func TestMidnightModelsAutoMigrate(t *testing.T) {
 			index: "idx_midnight_ariadne_params_epoch",
 		},
 		{
+			model: &MidnightAriadneRollback{},
+			table: "midnight_ariadne_rollbacks",
+			index: "idx_midnight_ariadne_rollbacks_block_epoch",
+		},
+		{
 			model: &MidnightEpochCandidates{},
 			table: "midnight_epoch_candidates",
 			index: "idx_midnight_epoch_candidates_epoch",
@@ -99,5 +105,6 @@ func TestMigrateModelsIncludesMidnightModels(t *testing.T) {
 	require.True(t, models[reflect.TypeFor[*MidnightDeregistration]()])
 	require.True(t, models[reflect.TypeFor[*MidnightGovernanceDatum]()])
 	require.True(t, models[reflect.TypeFor[*MidnightAriadneParams]()])
+	require.True(t, models[reflect.TypeFor[*MidnightAriadneRollback]()])
 	require.True(t, models[reflect.TypeFor[*MidnightEpochCandidates]()])
 }

@@ -1441,8 +1441,9 @@ An optional block scanner that indexes Midnight chain events into multiple
 - **Ariadne params**: an output carrying the configured
   `permissioned_candidate_policy` token and an inline datum that differs from
   the last stored datum upserts a `midnight_ariadne_params` row for the current
-  epoch. Before each upsert, the indexer journals the previous row for that
-  epoch (or its absence) so a live block rollback can restore/delete the row and
+  epoch. Before each upsert, the indexer persists the previous row for that
+  epoch (or its absence) in `midnight_ariadne_rollbacks` so a later rollback,
+  including one delivered after process restart, can restore/delete the row and
   refresh the in-memory dedupe datum.
 - **Committee-candidate tracking**: an output at the configured candidate
   address is added to an in-memory set; inputs consuming a tracked candidate

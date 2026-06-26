@@ -855,29 +855,31 @@ func TestAriadneRollbackRestoresPriorEpochState(t *testing.T) {
 	require.NotNil(t, params)
 	assert.Equal(t, datumB, params.Datum)
 
-	idx.rollbackAriadne(block2.Number)
+	restarted := setupGovIndexer(t, store)
+	restarted.rollbackAriadne(block2.Number)
 
 	params, err = store.GetMidnightAriadneParamsByEpoch(1, nil)
 	require.NoError(t, err)
 	require.NotNil(t, params)
 	assert.Equal(t, datumA, params.Datum, "rollback must restore the overwritten epoch row")
-	idx.mu.RLock()
-	assert.Equal(t, datumA, idx.lastAriadneDatum)
-	idx.mu.RUnlock()
+	restarted.mu.RLock()
+	assert.Equal(t, datumA, restarted.lastAriadneDatum)
+	restarted.mu.RUnlock()
 
 	outC := buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datumC)
 	txC := buildTx(t, pad32("ab000004"), []lcommon.TransactionInput{buildInput(t, pad32("ab000005"), 0)}, []lcommon.TransactionOutput{outC})
 	block3 := testBlock(3, 200, 0xA3)
-	require.NoError(t, idx.processBlock(block3, []lcommon.Transaction{txC}, 2_000))
+	require.NoError(t, restarted.processBlock(block3, []lcommon.Transaction{txC}, 2_000))
 
-	idx.rollbackAriadne(block3.Number)
+	restartedAgain := setupGovIndexer(t, store)
+	restartedAgain.rollbackAriadne(block3.Number)
 
 	params, err = store.GetMidnightAriadneParamsByEpoch(2, nil)
 	require.NoError(t, err)
 	assert.Nil(t, params, "rollback must delete an epoch row created by the rolled-back block")
-	idx.mu.RLock()
-	assert.Equal(t, datumA, idx.lastAriadneDatum)
-	idx.mu.RUnlock()
+	restartedAgain.mu.RLock()
+	assert.Equal(t, datumA, restartedAgain.lastAriadneDatum)
+	restartedAgain.mu.RUnlock()
 }
 
 // TestCandidateAddRemove verifies the in-memory candidate set lifecycle:
