@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -87,6 +88,12 @@ type BootstrapConfig struct {
 	// resets, HTTP 429, HTTP 5xx) per download. Zero uses the downloader
 	// default. Negative disables transient retries.
 	DownloadMaxTransientRetries int
+	// httpClient, when set, is the shared keep-alive client the v2
+	// immutable-download pool reuses across all archive fetches so
+	// connections are pooled instead of re-handshaked per file. It is set
+	// internally by downloadImmutables on a by-value copy of the config;
+	// callers do not populate it.
+	httpClient *http.Client
 }
 
 // VerificationMode selects the level of Mithril certificate verification.

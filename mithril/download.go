@@ -110,6 +110,12 @@ type DownloadConfig struct {
 	// conservative default is used. If negative, transient retries
 	// are disabled.
 	MaxTransientRetries int
+	// HTTPClient, when non-nil, is reused for the download instead of
+	// constructing a fresh client per call. Callers that fetch many
+	// files (the v2 immutable pool) pass one shared keep-alive client so
+	// connections are pooled across files. When nil, a per-call client
+	// with keep-alives disabled is used (single-archive downloads).
+	HTTPClient *http.Client
 }
 
 // Validate checks DownloadConfig values before use.
@@ -331,6 +337,34 @@ func newDownloadTransport() *http.Transport {
 		Proxy:             http.ProxyFromEnvironment,
 		DisableKeepAlives: true,
 	}
+}
+
+// newPooledDownloadTransport returns a transport that keeps connections
+// alive and pools them across many sequential downloads sharing one
+// http.Client. This amortizes the TCP+TLS handshake over the whole batch
+// instead of paying it per file, which matters for the v2 immutable
+// download where tens of thousands of small archives are fetched.
+//
+// maxConns must be >= the number of concurrent download workers; the
+// default http.Transport caps idle connections per host at 2, so without
+// raising MaxIdleConnsPerHost most workers would close and re-handshake
+// their connection after every file and keep-alive would buy nothing.
+func newPooledDownloadTransport(maxConns int) *http.Transport {
+	if maxConns < 1 {
+		maxConns = 1
+	}
+	var transport *http.Transport
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = base.Clone()
+	} else {
+		transport = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	transport.DisableKeepAlives = false
+	transport.MaxIdleConns = maxConns * 2
+	transport.MaxIdleConnsPerHost = maxConns
+	transport.MaxConnsPerHost = maxConns
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
 }
 
 // progressWriter wraps an io.Writer to track bytes written and
@@ -555,12 +589,18 @@ func downloadSnapshotOnce(
 		)
 	}
 
-	transport := newDownloadTransport()
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
-		Timeout:       0, // No timeout for large downloads
-		Transport:     transport,
-		CheckRedirect: httpsOnlyRedirect,
+	// Reuse a shared keep-alive client when the caller provides one (the
+	// v2 immutable pool); otherwise build a per-call client with
+	// keep-alives disabled for single-archive downloads.
+	client := cfg.HTTPClient
+	if client == nil {
+		transport := newDownloadTransport()
+		defer transport.CloseIdleConnections()
+		client = &http.Client{
+			Timeout:       0, // No timeout for large downloads
+			Transport:     transport,
+			CheckRedirect: httpsOnlyRedirect,
+		}
 	}
 	var headerTimer *idleTimer
 	if idleTimeout > 0 {

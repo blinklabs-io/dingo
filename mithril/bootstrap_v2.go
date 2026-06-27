@@ -25,6 +25,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,8 +37,13 @@ import (
 )
 
 // immutableDownloadWorkers is the number of concurrent immutable
-// archive downloads during a v2 bootstrap.
-const immutableDownloadWorkers = 4
+// archive downloads during a v2 bootstrap. Paired with a shared
+// keep-alive client (see downloadImmutables) so each worker holds a
+// warm pooled connection; the connection pool in
+// newPooledDownloadTransport is sized to this value. 16 is a safe
+// default across constrained pods; bandwidth/CPU-rich hosts can go
+// higher with diminishing returns past ~32.
+const immutableDownloadWorkers = 16
 
 // ancillaryManifestFilename is the signed manifest file inside a v2
 // ancillary archive.
@@ -662,6 +668,19 @@ func downloadImmutables(
 	// progress is reported by onArchiveDone instead.
 	quietLogger := slog.New(slog.DiscardHandler)
 
+	// One shared keep-alive client for the whole pool so workers reuse
+	// pooled connections instead of paying a TCP+TLS handshake per
+	// archive. Sized to the worker count; idle connections are closed
+	// when the pool finishes. Carried on the (by-value) cfg so each
+	// fetchImmutableArchive call reuses it without a signature change.
+	dlTransport := newPooledDownloadTransport(immutableDownloadWorkers)
+	defer dlTransport.CloseIdleConnections()
+	cfg.httpClient = &http.Client{
+		Timeout:       0,
+		Transport:     dlTransport,
+		CheckRedirect: httpsOnlyRedirect,
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(immutableDownloadWorkers)
 	for num := range totalArchives {
@@ -830,6 +849,7 @@ func fetchImmutableArchive(
 			DestDir:             archiveDir,
 			Filename:            filepath.Base(immutableArchivePath(archiveDir, num)),
 			Logger:              dlLogger,
+			HTTPClient:          cfg.httpClient,
 			IdleTimeout:         cfg.DownloadIdleTimeout,
 			MaxIdleRetries:      cfg.DownloadMaxIdleRetries,
 			MaxTransientRetries: cfg.DownloadMaxTransientRetries,
