@@ -16,7 +16,7 @@ Hi folks! Here’s what we shipped in v0.59.1.
 
 ### 💪 Improvements
 
-* Improved **speed Mithril immutable archive downloads during bootstrap:** Mithril bootstrap now reuses pooled keep alive HTTP connections and runs more download work in parallel, which helps immutable archive downloads finish faster and more reliably.
+* Improved **speed Mithril immutable archive downloads during bootstrap:** Mithril bootstrap now reuses pooled keep alive HTTP connections and runs more download workers in parallel, which helps immutable archive downloads finish faster and more reliably.
 * Updated **keep the published v0.59.0 release history current:** The repository release history now includes the published v0.59.0 notes, which keeps recent release context current and easier to review.
 
 ### 🔧 Fixes
@@ -25,7 +25,7 @@ Hi folks! Here’s what we shipped in v0.59.1.
 
 ### 📋 What You Need to Know
 
-* Clarified **expect faster and steadier Mithril bootstrap downloads:** Pooled keep alive connections and higher download concurrency now help immutable archive downloads move faster and more reliably during bootstrap.
+* Clarified **expect faster and steadier Mithril bootstrap downloads:** Pooled keep alive connections and more download workers now help immutable archive downloads move faster and more reliably during bootstrap.
 * Highlighted **expect steadier Leios backfill recovery across peer failures:** Recently failed connections now cool down individually while healthy peers stay preferred, which keeps backfill behavior steadier.
 * Reviewed **use the published v0.59.0 notes for recent release context:** The repository release history now includes the published v0.59.0 notes for recent release review.
 
