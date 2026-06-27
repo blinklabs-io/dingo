@@ -88,19 +88,20 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		// fetchEndorserBlockOnConn records the cooldown outcome
+		// (markFetchFailed/markFetchOK) itself, under the connection's fetch
+		// guard, so concurrent backfill fetches on the same connection publish
+		// their cooldown state in fetch-completion order. Doing it here, after
+		// the guard is released, would let a slow failure's mark land after a
+		// newer success's mark and wrongly cool down a healthy connection.
 		if err := o.fetchEndorserBlockOnConn(
 			connId,
 			conn.LeiosFetch().Client,
 			point,
 		); err != nil {
 			lastErr = err
-			o.leiosFetchGuardFor(connId).markFetchFailed(
-				time.Now(),
-				leiosBackfillConnCooldown,
-			)
 			continue
 		}
-		o.leiosFetchGuardFor(connId).markFetchOK()
 		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
 			data.completeTxCache() {
 			return nil
@@ -118,15 +119,27 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // fetchEndorserBlockOnConn fetches the manifest (if not already cached) and all
 // transaction bodies for point on a single connection, holding that
 // connection's fetch guard so the strict request/response leios-fetch client is
-// never used concurrently with a tip-driven fetch.
+// never used concurrently with a tip-driven fetch. It records the connection's
+// cooldown outcome (markFetchFailed on error, markFetchOK on success) while the
+// guard is still held, so concurrent backfill fetches on the same connection
+// publish their cooldown state in fetch-completion order rather than racing.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
-) error {
+) (err error) {
 	g := o.leiosFetchGuardFor(connId)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
+	// published while the guard is still held and stays ordered with the fetch.
+	defer func() {
+		if err != nil {
+			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
+		} else {
+			g.markFetchOK()
+		}
+	}()
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
 		resp, err := client.BlockRequest(point)
