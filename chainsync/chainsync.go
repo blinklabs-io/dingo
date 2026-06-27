@@ -210,10 +210,11 @@ type State struct {
 	// seenHeadersGauge tracks the current number of slots retained in the
 	// deduplication cache. Never nil; unregistered when PromRegistry is nil.
 	seenHeadersGauge prometheus.Gauge
-	// blockfetchLatencyGauge exposes the per-peer blockfetch latency EWMA
-	// (seconds), labelled by remote peer address. Never nil; unregistered
-	// when PromRegistry is nil. Series are deleted on disconnect in
-	// RemoveClientConnId so cardinality stays bounded by live connections.
+	// blockfetchLatencyGauge exposes the per-connection blockfetch latency
+	// EWMA (seconds), labelled by remote peer address and full connection
+	// ID. Never nil; unregistered when PromRegistry is nil. Series are
+	// deleted on disconnect in RemoveClientConnId so cardinality stays
+	// bounded by live connections.
 	blockfetchLatencyGauge *prometheus.GaugeVec
 
 	observedHeaders      map[ouroboros.ConnectionId]*observedHeaderChain
@@ -285,9 +286,9 @@ func NewStateWithConfig(
 	s.blockfetchLatencyGauge = promauto.With(cfg.PromRegistry).NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "dingo_chainsync_blockfetch_latency_seconds",
-			Help: "exponential moving average (alpha=0.2) of blockfetch RequestRange-to-first-block latency in seconds, by peer",
+			Help: "exponential moving average (alpha=0.2) of blockfetch RequestRange-to-first-block latency in seconds, by peer connection",
 		},
-		[]string{"peer"},
+		[]string{"peer", "connection_id"},
 	)
 	return s
 }
@@ -369,7 +370,8 @@ func (s *State) RemoveClientConnId(
 		*s.activeClientConnId == connId
 	wasEligible := exists && tc != nil && !tc.ObservabilityOnly
 	delete(s.trackedClients, connId)
-	s.blockfetchLatencyGauge.DeleteLabelValues(connId.RemoteAddr.String())
+	peer, connectionID := blockfetchLatencyMetricLabels(connId)
+	s.blockfetchLatencyGauge.DeleteLabelValues(peer, connectionID)
 	s.clearObservedHeaderHistory(connId)
 	if wasPrimary {
 		s.activeClientConnId = nil
@@ -1301,8 +1303,27 @@ func (s *State) RecordBlockfetchLatency(
 				float64(tc.BlockfetchLatencyEWMA)*(1-blockfetchLatencyAlpha),
 		)
 	}
-	s.blockfetchLatencyGauge.WithLabelValues(connId.RemoteAddr.String()).
+	peer, connectionID := blockfetchLatencyMetricLabels(connId)
+	s.blockfetchLatencyGauge.WithLabelValues(peer, connectionID).
 		Set(tc.BlockfetchLatencyEWMA.Seconds())
+}
+
+func blockfetchLatencyMetricLabels(
+	connId ouroboros.ConnectionId,
+) (string, string) {
+	return netAddrLabel(connId.RemoteAddr),
+		fmt.Sprintf(
+			"%s<->%s",
+			netAddrLabel(connId.LocalAddr),
+			netAddrLabel(connId.RemoteAddr),
+		)
+}
+
+func netAddrLabel(addr net.Addr) string {
+	if addr == nil {
+		return ""
+	}
+	return addr.String()
 }
 
 // BlockfetchLatency returns the blockfetch EWMA for the given
