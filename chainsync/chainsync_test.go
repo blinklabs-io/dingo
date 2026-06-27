@@ -30,6 +30,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1534,4 +1535,84 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	// LookupObservedHeader must not be visible from a different connection.
 	_, _, ok = s.LookupObservedHeader(newTestConnId(99), hash)
 	require.False(t, ok)
+}
+
+// --- Blockfetch latency metric tests ---
+
+const blockfetchLatencyMetricName = "dingo_chainsync_blockfetch_latency_seconds"
+
+func TestBlockfetchLatencyMetricExposedPerPeer(t *testing.T) {
+	bus := newTestEventBus(t)
+	reg := prometheus.NewRegistry()
+	cfg := chainsync.DefaultConfig()
+	cfg.PromRegistry = reg
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(42)
+	require.True(t, s.AddClientConnId(conn))
+
+	// First sample sets the EWMA directly to the observed latency.
+	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
+
+	got, ok := gaugeValueForLabel(
+		t, reg, blockfetchLatencyMetricName,
+		"peer", conn.RemoteAddr.String(),
+	)
+	require.True(t, ok, "expected a per-peer gauge series after recording")
+	require.InDelta(t, 0.2, got, 1e-9)
+}
+
+func TestBlockfetchLatencyMetricRemovedOnDisconnect(t *testing.T) {
+	bus := newTestEventBus(t)
+	reg := prometheus.NewRegistry()
+	cfg := chainsync.DefaultConfig()
+	cfg.PromRegistry = reg
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(42)
+	require.True(t, s.AddClientConnId(conn))
+	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
+
+	_, ok := gaugeValueForLabel(
+		t, reg, blockfetchLatencyMetricName,
+		"peer", conn.RemoteAddr.String(),
+	)
+	require.True(t, ok, "precondition: gauge series should exist before removal")
+
+	// Removing the connection must delete the per-peer series so cardinality
+	// stays bounded by live tracked connections.
+	s.RemoveClientConnId(conn)
+
+	_, ok = gaugeValueForLabel(
+		t, reg, blockfetchLatencyMetricName,
+		"peer", conn.RemoteAddr.String(),
+	)
+	require.False(t, ok, "expected per-peer series to be removed on disconnect")
+}
+
+// gaugeValueForLabel gathers from reg and returns the gauge value for the
+// metric family `name` whose label `labelName` equals `labelValue`, plus
+// whether such a series exists.
+func gaugeValueForLabel(
+	t *testing.T,
+	reg *prometheus.Registry,
+	name, labelName, labelValue string,
+) (float64, bool) {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == labelName &&
+					lp.GetValue() == labelValue {
+					return m.GetGauge().GetValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
 }
