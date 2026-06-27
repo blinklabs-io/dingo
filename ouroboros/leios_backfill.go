@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -28,6 +29,13 @@ import (
 // requests so concurrent fetches spread over the available relay connections
 // instead of contending on a single connection's fetch guard.
 var leiosBackfillConnCursor atomic.Uint64
+
+// leiosBackfillConnCooldown is how long the backfill connection selector skips a
+// leios-fetch connection after a failed or timed-out fetch, so it prefers
+// healthy connections instead of repeatedly retrying a stalled or flaky one. It
+// only falls back to a cooled-down connection when no healthy connection is
+// available, so every connection is still eventually tried.
+const leiosBackfillConnCooldown = 20 * time.Second
 
 // FetchEndorserBlockByPoint fetches the endorser block identified by
 // (ebSlot, ebHash) -- its manifest and all transaction bodies -- over
@@ -58,9 +66,23 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	point := ocommon.Point{Slot: ebSlot, Hash: ebHash}
 	//nolint:gosec // bounded by len(connIds), so it fits in int
 	start := int(leiosBackfillConnCursor.Add(1) % uint64(len(connIds)))
-	var lastErr error
+	// Try connections in round-robin order, but visit ones not cooling down
+	// from a recent failed fetch first; fall back to cooled-down connections
+	// only if no healthy connection is available, so every connection is still
+	// eventually tried while a stalled or flaky one is skipped.
+	now := time.Now()
+	healthy := make([]ouroboros.ConnectionId, 0, len(connIds))
+	cooled := make([]ouroboros.ConnectionId, 0, len(connIds))
 	for off := range connIds {
 		connId := connIds[(start+off)%len(connIds)]
+		if o.leiosFetchGuardFor(connId).inCooldown(now) {
+			cooled = append(cooled, connId)
+		} else {
+			healthy = append(healthy, connId)
+		}
+	}
+	var lastErr error
+	for _, connId := range append(healthy, cooled...) {
 		conn := o.ConnManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
@@ -72,8 +94,13 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 			point,
 		); err != nil {
 			lastErr = err
+			o.leiosFetchGuardFor(connId).markFetchFailed(
+				time.Now(),
+				leiosBackfillConnCooldown,
+			)
 			continue
 		}
+		o.leiosFetchGuardFor(connId).markFetchOK()
 		if data, ok := o.lookupLeiosEndorserBlock(ebHash); ok &&
 			data.completeTxCache() {
 			return nil
