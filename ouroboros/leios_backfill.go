@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -28,6 +29,13 @@ import (
 // requests so concurrent fetches spread over the available relay connections
 // instead of contending on a single connection's fetch guard.
 var leiosBackfillConnCursor atomic.Uint64
+
+// leiosBackfillConnCooldown is how long the backfill connection selector skips a
+// leios-fetch connection after a failed or timed-out fetch, so it prefers
+// healthy connections instead of repeatedly retrying a stalled or flaky one. It
+// only falls back to a cooled-down connection when no healthy connection is
+// available, so every connection is still eventually tried.
+const leiosBackfillConnCooldown = 20 * time.Second
 
 // FetchEndorserBlockByPoint fetches the endorser block identified by
 // (ebSlot, ebHash) -- its manifest and all transaction bodies -- over
@@ -58,14 +66,34 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 	point := ocommon.Point{Slot: ebSlot, Hash: ebHash}
 	//nolint:gosec // bounded by len(connIds), so it fits in int
 	start := int(leiosBackfillConnCursor.Add(1) % uint64(len(connIds)))
-	var lastErr error
+	// Try connections in round-robin order, but visit ones not cooling down
+	// from a recent failed fetch first; fall back to cooled-down connections
+	// only if no healthy connection is available, so every connection is still
+	// eventually tried while a stalled or flaky one is skipped.
+	now := time.Now()
+	healthy := make([]ouroboros.ConnectionId, 0, len(connIds))
+	cooled := make([]ouroboros.ConnectionId, 0, len(connIds))
 	for off := range connIds {
 		connId := connIds[(start+off)%len(connIds)]
+		if o.leiosFetchGuardFor(connId).inCooldown(now) {
+			cooled = append(cooled, connId)
+		} else {
+			healthy = append(healthy, connId)
+		}
+	}
+	var lastErr error
+	for _, connId := range append(healthy, cooled...) {
 		conn := o.ConnManager.GetConnectionById(connId)
 		if conn == nil || conn.LeiosFetch() == nil ||
 			conn.LeiosFetch().Client == nil {
 			continue
 		}
+		// fetchEndorserBlockOnConn records the cooldown outcome
+		// (markFetchFailed/markFetchOK) itself, under the connection's fetch
+		// guard, so concurrent backfill fetches on the same connection publish
+		// their cooldown state in fetch-completion order. Doing it here, after
+		// the guard is released, would let a slow failure's mark land after a
+		// newer success's mark and wrongly cool down a healthy connection.
 		if err := o.fetchEndorserBlockOnConn(
 			connId,
 			conn.LeiosFetch().Client,
@@ -91,15 +119,27 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // fetchEndorserBlockOnConn fetches the manifest (if not already cached) and all
 // transaction bodies for point on a single connection, holding that
 // connection's fetch guard so the strict request/response leios-fetch client is
-// never used concurrently with a tip-driven fetch.
+// never used concurrently with a tip-driven fetch. It records the connection's
+// cooldown outcome (markFetchFailed on error, markFetchOK on success) while the
+// guard is still held, so concurrent backfill fetches on the same connection
+// publish their cooldown state in fetch-completion order rather than racing.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
-) error {
+) (err error) {
 	g := o.leiosFetchGuardFor(connId)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
+	// published while the guard is still held and stays ordered with the fetch.
+	defer func() {
+		if err != nil {
+			g.markFetchFailed(time.Now(), leiosBackfillConnCooldown)
+		} else {
+			g.markFetchOK()
+		}
+	}()
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
 		resp, err := client.BlockRequest(point)

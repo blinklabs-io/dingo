@@ -569,6 +569,29 @@ const leiosFetchMaxInflightPerConn = 4
 type leiosFetchGuard struct {
 	mu       sync.Mutex
 	inflight atomic.Int32
+	// cooledUntilNano is a unix-nano deadline before which the backfill
+	// connection selector should skip this connection after a failed or
+	// timed-out fetch, so it prefers healthy connections instead of repeatedly
+	// retrying a stalled or flaky one.
+	cooledUntilNano atomic.Int64
+}
+
+// markFetchFailed puts this connection on a short cooldown after a failed or
+// timed-out backfill fetch.
+func (g *leiosFetchGuard) markFetchFailed(now time.Time, d time.Duration) {
+	g.cooledUntilNano.Store(now.Add(d).UnixNano())
+}
+
+// markFetchOK clears any cooldown after a successful fetch on this connection.
+func (g *leiosFetchGuard) markFetchOK() {
+	g.cooledUntilNano.Store(0)
+}
+
+// inCooldown reports whether this connection is still cooling down from a
+// recent failed fetch as of now.
+func (g *leiosFetchGuard) inCooldown(now time.Time) bool {
+	until := g.cooledUntilNano.Load()
+	return until > 0 && now.UnixNano() < until
 }
 
 func (o *Ouroboros) leiosFetchGuardFor(
