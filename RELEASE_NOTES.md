@@ -1,5 +1,48 @@
 # Dingo Releases
 
+## v0.59.1 (June 27, 2026)
+
+**Title:** Faster Mithril bootstrap, steadier Leios backfill, and current release history
+
+**Date:** June 27, 2026
+
+**Version:** v0.59.1
+
+Hi folks! Here’s what we shipped in v0.59.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, and release history maintenance.
+
+### 💪 Improvements
+
+* Improved **speed Mithril immutable archive downloads during bootstrap:** Mithril bootstrap now reuses pooled keep alive HTTP connections and runs more download workers in parallel, which helps immutable archive downloads finish faster and more reliably.
+* Updated **keep the published v0.59.0 release history current:** The repository release history now includes the published v0.59.0 notes, which keeps recent release context current and easier to review.
+
+### 🔧 Fixes
+
+* Fixed **steady Leios endorser block backfill across connection failures:** Leios backfill now cools down failed connections individually for 20 seconds, prefers healthy connections first, and avoids incorrect cooldown tracking during concurrent fetches.
+
+### 📋 What You Need to Know
+
+* Clarified **expect faster and steadier Mithril bootstrap downloads:** Pooled keep alive connections and more download workers now help immutable archive downloads move faster and more reliably during bootstrap.
+* Highlighted **expect steadier Leios backfill recovery across peer failures:** Recently failed connections now cool down individually while healthy peers stay preferred, which keeps backfill behavior steadier.
+* Reviewed **use the published v0.59.0 notes for recent release context:** The repository release history now includes the published v0.59.0 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.59.0 (June 26, 2026)
 
 **Title:** Midnight indexing, steadier synchronization, and broader compatibility
