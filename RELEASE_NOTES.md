@@ -1,5 +1,51 @@
 # Dingo Releases
 
+## v0.60.0 (June 28, 2026)
+
+**Title:** Per-peer blockfetch visibility, Dijkstra forging correctness, and leaner default builds
+
+**Date:** June 28, 2026
+
+**Version:** v0.60.0
+
+Hi folks! Here’s what we shipped in v0.60.0.
+
+### ✨ What's New
+
+* Added **surface per peer blockfetch latency metrics with connection level labels:** Operators can now spot slower peer connections more easily and troubleshoot blockfetch delays with clearer per peer visibility. ([#2655](https://github.com/blinklabs-io/dingo/pull/2655))
+
+### 💪 Improvements
+
+* Improved **keep default builds leaner with explicit extra plugin opt in:** Default builds now register only the Badger blob plugin, while `s3` and `gcs` blob plugins are available only when builds use `-tags dingo_extra_plugins`, which keeps standard builds smaller and makes extra cloud storage support an explicit choice. ([#2659](https://github.com/blinklabs-io/dingo/pull/2659))
+* Updated **keep the published v0.59.1 release history current:** The repository release history now includes the published v0.59.1 notes, which keeps recent release context current and easier to review. ([#2658](https://github.com/blinklabs-io/dingo/pull/2658))
+
+### 🔧 Fixes
+
+* Fixed **forge Dijkstra era blocks with the correct validation details:** Dijkstra era forging now uses the correct protocol parameter handling, body hash commitment, and CBOR encoding so forged blocks validate correctly instead of failing because of mismatches. ([#2664](https://github.com/blinklabs-io/dingo/pull/2664))
+* Corrected **keep auxiliary listener startup from stopping the main node:** Metrics and optional `pprof` listener startup failures are now non fatal, so port conflicts or listener startup problems no longer stop the main node from running. ([#2660](https://github.com/blinklabs-io/dingo/pull/2660))
+
+### 📋 What You Need to Know
+
+* Clarified **use per peer blockfetch metrics for easier peer specific troubleshooting:** Per peer blockfetch latency metrics with connection level labels now make slower peer connections easier to identify and troubleshoot.
+* Highlighted **build with `-tags dingo_extra_plugins` when extra blob plugins are required:** Operators who need `s3` or `gcs` blob plugins must build with `-tags dingo_extra_plugins`, while untagged builds include only the default blob plugin.
+* Emphasized **expect correct Dijkstra era forging and valid body hash commitments:** Dijkstra era block producers should now see correct forging behavior and valid body hash commitments after this fix.
+* Summarized **expect metrics or `pprof` port conflicts to no longer block startup:** Listener startup problems on those auxiliary ports no longer prevent the main node from starting.
+* Reviewed **use the published v0.59.1 notes for recent release review:** The in repository release history now includes the published v0.59.1 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.59.1 (June 27, 2026)
 
 **Title:** Faster Mithril bootstrap, steadier Leios backfill, and current release history
