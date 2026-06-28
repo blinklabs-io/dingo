@@ -15,8 +15,12 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +42,47 @@ func TestWaitForSignalOrErrorPrefersQueuedError(t *testing.T) {
 	}
 	if !errors.Is(err, expectedErr) {
 		t.Fatalf("expected error %v, got %v", expectedErr, err)
+	}
+}
+
+// A bind failure on a non-essential observability listener (metrics or pprof)
+// must be logged and non-fatal: it returns instead of blocking, and never
+// signals an error that would take down an otherwise-healthy node.
+func TestServeAuxiliaryListenerBindFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	// Occupy a port so the auxiliary listener cannot bind.
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to occupy port: %s", err)
+	}
+	defer occupied.Close()
+
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	srv := &http.Server{
+		Addr:              occupied.Addr().String(),
+		Handler:           http.NewServeMux(),
+		ReadHeaderTimeout: time.Second,
+	}
+
+	done := make(chan struct{})
+	go func() {
+		serveAuxiliaryListener("metrics", srv, logger)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal(
+			"serveAuxiliaryListener did not return on bind failure; " +
+				"a non-essential listener must not block or be fatal",
+		)
+	}
+	// Read after the goroutine finished, so no concurrent buffer access.
+	if logged := buf.String(); !strings.Contains(logged, "metrics") {
+		t.Fatalf("expected a log mentioning the metrics listener, got: %q", logged)
 	}
 }
 

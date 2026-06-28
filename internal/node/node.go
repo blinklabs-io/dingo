@@ -117,6 +117,29 @@ func shutdownNodeResources(
 	return err
 }
 
+// serveAuxiliaryListener runs a non-essential observability HTTP server (the
+// prometheus metrics endpoint or the pprof debug endpoint). A bind or serve
+// failure is logged but never fatal: losing metrics or pprof must not take
+// down a node that is otherwise healthy (for example a node that has just
+// finished an expensive backfill, started while the configured port is held
+// by another process). This mirrors how `dingo mithril sync` already tolerates
+// a metrics-port conflict.
+func serveAuxiliaryListener(
+	name string,
+	srv *http.Server,
+	logger *slog.Logger,
+) {
+	if err := srv.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
+		logger.Error(
+			name+" listener stopped; continuing without it",
+			"component", "node",
+			"addr", srv.Addr,
+			"error", err,
+		)
+	}
+}
+
 func Run(cfg *config.Config, logger *slog.Logger) error {
 	logger.Debug(fmt.Sprintf("config: %+v", cfg), "component", "node")
 	logger.Debug(
@@ -477,29 +500,14 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	)
 	defer signalCtxStop()
 
-	// Error channel for node, metrics, and optional debug goroutines
-	errChan := make(chan error, 3)
-	go func() {
-		if err := metricsServer.ListenAndServe(); err != nil &&
-			err != http.ErrServerClosed {
-			logger.Error(
-				fmt.Sprintf("failed to start metrics listener: %s", err),
-				"component", "node",
-			)
-			errChan <- fmt.Errorf("metrics server: %w", err)
-		}
-	}()
+	// Error channel for the node goroutine. The metrics and pprof debug
+	// listeners are non-essential observability endpoints handled by
+	// serveAuxiliaryListener; their bind/serve failures are logged but never
+	// queued here, so a port conflict on them cannot take down the node.
+	errChan := make(chan error, 1)
+	go serveAuxiliaryListener("metrics", metricsServer, logger)
 	if debugServer != nil {
-		go func() {
-			if err := debugServer.ListenAndServe(); err != nil &&
-				err != http.ErrServerClosed {
-				logger.Error(
-					fmt.Sprintf("failed to start debug listener: %s", err),
-					"component", "node",
-				)
-				errChan <- fmt.Errorf("debug server: %w", err)
-			}
-		}()
+		go serveAuxiliaryListener("pprof debug", debugServer, logger)
 	}
 	go func() {
 		//nolint:contextcheck
