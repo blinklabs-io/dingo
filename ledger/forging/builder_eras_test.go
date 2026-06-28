@@ -22,6 +22,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -167,4 +168,76 @@ func TestBuildBlockSupportsAllEras(t *testing.T) {
 			assert.Equal(t, 0, len(block.Transactions()))
 		})
 	}
+}
+
+// TestBuildBlockSupportsDijkstraEra verifies BuildBlock forges on the
+// Dijkstra (Leios) era: a musashi block producer must build a block from
+// *dijkstra.DijkstraProtocolParameters instead of failing the forge with
+// "unsupported protocol parameter type". Dijkstra shares Conway's Praos
+// block/header layout, so the forged block round-trips through the
+// Dijkstra block constructor.
+func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
+	creds := setupTestCredentials(t)
+
+	// DijkstraProtocolParameters embeds ConwayProtocolParameters, so the
+	// shared limits are set via the embedded field.
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:        16384,
+			MaxBlockBodySize: 90112,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+			MaxBlockExUnits: lcommon.ExUnits{
+				Memory: 62000000,
+				Steps:  20000000000,
+			},
+		},
+	}
+
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1000,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	block, blockCbor, err := builder.BuildBlock(1001, 0)
+	require.NoError(t, err, "BuildBlock must succeed in the Dijkstra era")
+	require.NotNil(t, block)
+	require.NotEmpty(t, blockCbor)
+
+	assert.IsType(
+		t,
+		(*dijkstra.DijkstraBlock)(nil),
+		block,
+		"Dijkstra era must round-trip through the Dijkstra block constructor",
+	)
+	assert.Equal(t, uint64(1001), block.SlotNumber())
+	assert.Equal(t, uint64(101), block.BlockNumber())
+	assert.Equal(t, 0, len(block.Transactions()))
+
+	// The forged block's body hash must match the header commitment, i.e.
+	// the Dijkstra six-component body hash including the null leios_cert and
+	// peras_cert. A mismatch means the network would reject the block.
+	dblock := block.(*dijkstra.DijkstraBlock)
+	assert.Equal(
+		t,
+		dblock.BlockBodyHash(),
+		dblock.CalculatedBlockBodyHash(),
+		"forged Dijkstra block body hash must match the header commitment",
+	)
 }
