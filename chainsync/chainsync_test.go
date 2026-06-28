@@ -30,6 +30,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1435,9 +1436,9 @@ func TestTryAddClientConnIdWithDirection_LimitEnforced(t *testing.T) {
 
 // mockChainProvider is a test double for the ChainProvider interface.
 type mockChainProvider struct {
-	iter          *chain.ChainIterator
-	iterErr       error
-	stabilityWin  uint64
+	iter         *chain.ChainIterator
+	iterErr      error
+	stabilityWin uint64
 }
 
 func (m *mockChainProvider) GetChainFromPoint(
@@ -1534,4 +1535,155 @@ func TestObservedHeader_RoundTrip(t *testing.T) {
 	// LookupObservedHeader must not be visible from a different connection.
 	_, _, ok = s.LookupObservedHeader(newTestConnId(99), hash)
 	require.False(t, ok)
+}
+
+// --- Blockfetch latency metric tests ---
+
+const blockfetchLatencyMetricName = "dingo_chainsync_blockfetch_latency_seconds"
+
+func TestBlockfetchLatencyMetricExposedPerConnection(t *testing.T) {
+	bus := newTestEventBus(t)
+	reg := prometheus.NewRegistry()
+	cfg := chainsync.DefaultConfig()
+	cfg.PromRegistry = reg
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(42)
+	require.True(t, s.AddClientConnId(conn))
+
+	// First sample sets the EWMA directly to the observed latency.
+	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
+
+	got, ok := gaugeValueForLabels(
+		t,
+		reg,
+		blockfetchLatencyMetricName,
+		map[string]string{
+			"peer":          conn.RemoteAddr.String(),
+			"connection_id": conn.String(),
+		},
+	)
+	require.True(t, ok, "expected a per-connection gauge series after recording")
+	require.InDelta(t, 0.2, got, 1e-9)
+}
+
+func TestBlockfetchLatencyMetricRemovedOnDisconnect(t *testing.T) {
+	bus := newTestEventBus(t)
+	reg := prometheus.NewRegistry()
+	cfg := chainsync.DefaultConfig()
+	cfg.PromRegistry = reg
+	s := newTestState(t, bus, cfg)
+
+	conn := newTestConnId(42)
+	require.True(t, s.AddClientConnId(conn))
+	s.RecordBlockfetchLatency(conn, 200*time.Millisecond)
+
+	labels := map[string]string{
+		"peer":          conn.RemoteAddr.String(),
+		"connection_id": conn.String(),
+	}
+	_, ok := gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labels,
+	)
+	require.True(t, ok, "precondition: gauge series should exist before removal")
+
+	// Removing the connection must delete the per-connection series so
+	// cardinality stays bounded by live tracked connections.
+	s.RemoveClientConnId(conn)
+
+	_, ok = gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labels,
+	)
+	require.False(t, ok, "expected per-connection series to be removed on disconnect")
+}
+
+func TestBlockfetchLatencyMetricDisconnectPreservesSamePeerConnection(
+	t *testing.T,
+) {
+	bus := newTestEventBus(t)
+	reg := prometheus.NewRegistry()
+	cfg := chainsync.DefaultConfig()
+	cfg.PromRegistry = reg
+	s := newTestState(t, bus, cfg)
+
+	remoteA := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
+	remoteB := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 3001}
+	connA := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4001},
+		RemoteAddr: remoteA,
+	}
+	connB := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4002},
+		RemoteAddr: remoteB,
+	}
+	require.Equal(t, connA.RemoteAddr.String(), connB.RemoteAddr.String())
+	require.NotEqual(t, connA.String(), connB.String())
+	require.True(t, s.AddClientConnId(connA))
+	require.True(t, s.AddClientConnId(connB))
+
+	s.RecordBlockfetchLatency(connA, 200*time.Millisecond)
+	s.RecordBlockfetchLatency(connB, 500*time.Millisecond)
+
+	labelsA := map[string]string{
+		"peer":          connA.RemoteAddr.String(),
+		"connection_id": connA.String(),
+	}
+	labelsB := map[string]string{
+		"peer":          connB.RemoteAddr.String(),
+		"connection_id": connB.String(),
+	}
+	gotA, ok := gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labelsA,
+	)
+	require.True(t, ok, "precondition: first connection series should exist")
+	require.InDelta(t, 0.2, gotA, 1e-9)
+	gotB, ok := gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labelsB,
+	)
+	require.True(t, ok, "precondition: second connection series should exist")
+	require.InDelta(t, 0.5, gotB, 1e-9)
+
+	s.RemoveClientConnId(connA)
+
+	_, ok = gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labelsA,
+	)
+	require.False(t, ok, "removed connection series should be deleted")
+	gotB, ok = gaugeValueForLabels(
+		t, reg, blockfetchLatencyMetricName, labelsB,
+	)
+	require.True(t, ok, "same-peer live connection series should remain")
+	require.InDelta(t, 0.5, gotB, 1e-9)
+}
+
+// gaugeValueForLabels gathers from reg and returns the gauge value for the
+// metric family `name` whose labels include all entries in `labels`, plus
+// whether such a series exists.
+func gaugeValueForLabels(
+	t *testing.T,
+	reg *prometheus.Registry,
+	name string,
+	labels map[string]string,
+) (float64, bool) {
+	t.Helper()
+	families, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			matchedLabels := 0
+			for _, lp := range m.GetLabel() {
+				if expectedValue, ok := labels[lp.GetName()]; ok &&
+					expectedValue == lp.GetValue() {
+					matchedLabels++
+				}
+			}
+			if matchedLabels == len(labels) {
+				return m.GetGauge().GetValue(), true
+			}
+		}
+	}
+	return 0, false
 }
