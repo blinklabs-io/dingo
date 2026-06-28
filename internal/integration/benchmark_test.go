@@ -26,9 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 )
 

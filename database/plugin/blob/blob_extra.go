@@ -1,4 +1,4 @@
-// Copyright 2024 Blink Labs Software
+// Copyright 2025 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -14,30 +14,9 @@
 
 //go:build dingo_extra_plugins
 
-package gcs
+package blob
 
 import (
-	"github.com/prometheus/client_golang/prometheus"
+	_ "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
+	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 )
-
-const (
-	gcsMetricNamePrefix = "database_blob_"
-)
-
-func (d *BlobStoreGCS) registerBlobMetrics() {
-	opsTotal := prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: gcsMetricNamePrefix + "ops_total",
-			Help: "Total number of GCS blob operations",
-		},
-	)
-
-	bytesTotal := prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: gcsMetricNamePrefix + "bytes_total",
-			Help: "Total bytes read/written for GCS blob operations",
-		},
-	)
-
-	d.promRegistry.MustRegister(opsTotal, bytesTotal)
-}

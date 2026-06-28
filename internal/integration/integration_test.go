@@ -29,9 +29,7 @@ import (
 
 	"github.com/blinklabs-io/dingo"
 	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/internal/config"
 )
@@ -194,7 +192,7 @@ func TestPluginLifecycleEndToEnd(t *testing.T) {
 	// 1. Verify plugins are registered
 	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
 	// Check for expected plugins by name instead of count
-	expectedBlobs := []string{config.DefaultBlobPlugin, "gcs", "s3"}
+	expectedBlobs := append([]string{config.DefaultBlobPlugin}, additionalBlobPlugins()...)
 	for _, name := range expectedBlobs {
 		if findPluginEntry(blobPlugins, name) == nil {
 			t.Errorf("expected blob plugin %q not found", name)
@@ -344,127 +342,6 @@ func TestPluginSwitching(t *testing.T) {
 
 	// Note: We don't instantiate cloud plugins here as they require configuration
 	// This test validates that the plugin registry works correctly
-}
-
-func TestCloudPluginGCS(t *testing.T) {
-	// Test GCS plugin with real credentials if available
-	if !hasGCSCredentials() {
-		t.Skip("GCS credentials not found, skipping test")
-	}
-
-	// Set up test configuration
-	testBucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
-	if testBucket == "" {
-		testBucket = "dingo-test-bucket"
-	}
-
-	// Create GCS plugin directly with test configuration
-	gcsPlugin, err := gcs.NewWithOptions(
-		gcs.WithBucket(testBucket),
-	)
-	if err != nil {
-		t.Fatalf("failed to create GCS plugin: %v", err)
-	}
-
-	// Test basic lifecycle
-	if err := gcsPlugin.Start(); err != nil {
-		t.Fatalf("failed to start GCS plugin: %v", err)
-	}
-	defer func() {
-		if err := gcsPlugin.Stop(); err != nil {
-			t.Errorf("failed to stop GCS plugin: %v", err)
-		}
-	}()
-}
-
-func TestCloudPluginS3(t *testing.T) {
-	// Test S3 plugin with real credentials if available
-	if !hasS3Credentials() {
-		t.Skip("S3 credentials not found, skipping test")
-	}
-
-	// Set up test configuration
-	testBucket := os.Getenv("DINGO_TEST_S3_BUCKET")
-	if testBucket == "" {
-		testBucket = "dingo-test-bucket"
-	}
-
-	opts := []aws.BlobStoreS3OptionFunc{
-		aws.WithBucket(testBucket),
-	}
-
-	if os.Getenv("AWS_ENDPOINT") != "" {
-		opts = append(opts, aws.WithEndpoint(os.Getenv("AWS_ENDPOINT")))
-	}
-
-	// Create S3 plugin directly with test configuration
-	s3Plugin, err := aws.NewWithOptions(opts...)
-	if err != nil {
-		t.Fatalf("failed to create S3 plugin: %v", err)
-	}
-
-	// Test basic lifecycle
-	if err := s3Plugin.Start(); err != nil {
-		t.Fatalf("failed to start S3 plugin: %v", err)
-	}
-	defer func() {
-		if err := s3Plugin.Stop(); err != nil {
-			t.Errorf("failed to stop S3 plugin: %v", err)
-		}
-	}()
-}
-
-func hasGCSCredentials() bool {
-	// Check for GCS credentials in various locations
-	credentials := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-	if credentials != "" {
-		return true
-	}
-
-	// Check if gcloud is configured
-	home := os.Getenv("HOME")
-	if home != "" {
-		// Check for application default credentials
-		adcPath := filepath.Join(
-			home,
-			".config",
-			"gcloud",
-			"application_default_credentials.json",
-		)
-		if _, err := os.Stat(adcPath); err == nil {
-			return true
-		}
-	}
-
-	return false
-}
-
-func hasS3Credentials() bool {
-	// Check for AWS credentials in standard locations
-	accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-	secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	if accessKey != "" && secretKey != "" {
-		return true
-	}
-
-	// Check for AWS profile or IAM role
-	// This is a basic check - AWS SDK will handle the full credential chain
-	home := os.Getenv("HOME")
-	if home != "" {
-		credentialsPath := filepath.Join(home, ".aws", "credentials")
-		if _, err := os.Stat(credentialsPath); err == nil {
-			return true
-		}
-	}
-
-	// Check for EC2 instance metadata (IAM role)
-	// This would require a network call, so we'll assume if AWS_REGION is set,
-	// there might be credentials available
-	if os.Getenv("AWS_REGION") != "" {
-		return true
-	}
-
-	return false
 }
 
 func findPluginEntry(
