@@ -12,27 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build dingo_extra_plugins
+//go:build !dingo_extra_plugins
 
-package aws
+package integration
 
-import "github.com/prometheus/client_golang/prometheus"
+func additionalBlobPlugins() []string { return nil }
 
-const s3MetricNamePrefix = "database_blob_"
+func hasGCSCredentials() bool { return false }
 
-func (d *BlobStoreS3) registerBlobMetrics() {
-	opsTotal := prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: s3MetricNamePrefix + "ops_total",
-			Help: "Total number of S3 blob operations",
-		},
-	)
-	bytesTotal := prometheus.NewCounter(
-		prometheus.CounterOpts{
-			Name: s3MetricNamePrefix + "bytes_total",
-			Help: "Total bytes read/written for S3 blob operations",
-		},
-	)
-
-	d.promRegistry.MustRegister(opsTotal, bytesTotal)
-}
+func hasS3Credentials() bool { return false }
