@@ -12,7 +12,7 @@ Hi folks! Here’s what we shipped in v0.60.0.
 
 ### ✨ What's New
 
-* Added **surface per peer blockfetch latency metrics with connection level labels:** Operators can now spot slower peer connections more easily and troubleshoot blockfetch delays with clearer per peer visibility. ([#2655](https://github.com/blinklabs-io/dingo/pull/2655))
+* Added **surface per peer blockfetch latency metrics with connection level labels:** Operators can now identify slower peer connections more easily and troubleshoot blockfetch delays with clearer per peer visibility. ([#2655](https://github.com/blinklabs-io/dingo/pull/2655))
 
 ### 💪 Improvements
 
@@ -21,8 +21,8 @@ Hi folks! Here’s what we shipped in v0.60.0.
 
 ### 🔧 Fixes
 
-* Fixed **forge Dijkstra era blocks with the correct validation details:** Dijkstra era forging now uses the correct protocol parameter handling, body hash commitment, and CBOR encoding so forged blocks validate correctly instead of failing because of mismatches. ([#2664](https://github.com/blinklabs-io/dingo/pull/2664))
-* Corrected **keep auxiliary listener startup from stopping the main node:** Metrics and optional `pprof` listener startup failures are now non fatal, so port conflicts or listener startup problems no longer stop the main node from running. ([#2660](https://github.com/blinklabs-io/dingo/pull/2660))
+* Fixed **forge Dijkstra era blocks with the correct validation details:** Dijkstra era forging now uses the correct protocol parameter handling, body hash commitment, and CBOR encoding so forged blocks validate correctly rather than failing with mismatches. ([#2664](https://github.com/blinklabs-io/dingo/pull/2664))
+* Corrected **keep auxiliary listener startup from stopping the main node:** Dingo now treats metrics and optional `pprof` listener startup problems as non fatal, so port conflicts or listener startup issues no longer stop the main node from running. ([#2660](https://github.com/blinklabs-io/dingo/pull/2660))
 
 ### 📋 What You Need to Know
 
