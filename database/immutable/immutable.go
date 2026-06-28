@@ -227,6 +227,43 @@ func (i *ImmutableDb) GetTip() (*ocommon.Point, error) {
 	return ret, nil
 }
 
+// LastSlotInChunk returns the slot of the last block in the chunk at the
+// given 0-based index. The second return value is false when num is beyond
+// the chunks currently present, with no error. This bounds an incremental
+// copy to a contiguous chunk prefix while later chunks may still be
+// downloading out of order: chunks 0..num are known complete, so num maps
+// to the num-th sorted chunk name.
+func (i *ImmutableDb) LastSlotInChunk(
+	num uint64,
+) (uint64, bool, error) {
+	chunkNames, err := i.getChunkNames()
+	if err != nil {
+		return 0, false, err
+	}
+	if num >= uint64(len(chunkNames)) {
+		return 0, false, nil
+	}
+	secondary, err := i.getChunkSecondaryIndex(chunkNames[num])
+	if err != nil {
+		return 0, false, err
+	}
+	defer func() { _ = secondary.Close() }()
+	var last uint64
+	found := false
+	for {
+		next, err := secondary.Next()
+		if err != nil {
+			return 0, false, err
+		}
+		if next == nil {
+			break
+		}
+		last = next.BlockOrEbb
+		found = true
+	}
+	return last, found, nil
+}
+
 func (i *ImmutableDb) GetBlock(point ocommon.Point) (*Block, error) {
 	var err error
 	chunkNames, err := i.getChunkNamesFromPoint(point)

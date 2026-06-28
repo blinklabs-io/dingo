@@ -24,8 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
 	"github.com/blinklabs-io/dingo/ledgerstate"
@@ -191,10 +193,107 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		)
 	}
 
+	// Open the database before bootstrap so the immutable copy can overlap the
+	// download: chunks are copied into the blob store in contiguous order as
+	// they finish downloading, instead of waiting for the whole download.
+	db, err := database.New(&database.Config{
+		DataDir:        cfg.DataDir,
+		Logger:         logger,
+		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        cfg.RunMode,
+		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: cfg.DatabaseWorkers,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+	})
+	if err != nil {
+		// Tolerate a recoverable commit-timestamp mismatch from a previously
+		// interrupted run; mithril import heals it on forward progress.
+		var cte database.CommitTimestampError
+		if errors.As(err, &cte) && db != nil {
+			logger.Warn(
+				"opened database with commit timestamp mismatch; "+
+					"continuing mithril sync — import will heal it",
+				"component", "mithril",
+				"metadata_timestamp", cte.MetadataTimestamp,
+				"blob_timestamp", cte.BlobTimestamp,
+			)
+		} else {
+			return SyncResult{}, fmt.Errorf("opening database: %w", err)
+		}
+	}
+	defer db.Close()
+
+	// Mark sync in-progress so `dingo serve` refuses to start on an incomplete
+	// sync, and pre-seed the API backfill checkpoint before any blob writes.
+	if err := db.SetSyncState("sync_status", syncStatusInProgress, nil); err != nil {
+		return SyncResult{}, fmt.Errorf("marking sync in-progress: %w", err)
+	}
+	if isAPIMode(cfg.StorageMode) {
+		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"marking backfill in-progress: %w", err,
+			)
+		}
+	}
+
+	// Pipelined copy consumer. Bootstrap invokes onChunkContiguous for each
+	// immutable file number in contiguous order as it finishes downloading; we
+	// copy that contiguous prefix into the blob store while later chunks are
+	// still downloading. The sequencer drives this from a single in-order
+	// consumer goroutine, so the closure needs no locking.
+	copyCm, err := chain.NewManager(db, nil)
+	if err != nil {
+		return SyncResult{}, fmt.Errorf("loading chain manager: %w", err)
+	}
+	copyChain := copyCm.PrimaryChain()
+	if copyChain == nil {
+		return SyncResult{}, errors.New("primary chain not available")
+	}
+	var pipeImm *immutable.ImmutableDb
+	var pipeLastChunk uint64
+	pipeCopied := false
+	const pipelineCopyChunkStride = 64
+	onChunkContiguous := func(immutableDir string, num uint64) error {
+		if pipeImm == nil {
+			var nerr error
+			if pipeImm, nerr = immutable.New(immutableDir); nerr != nil {
+				return fmt.Errorf(
+					"opening immutable DB for pipelined copy: %w", nerr,
+				)
+			}
+		}
+		// Throttle: copy every N contiguous chunks rather than on each one;
+		// the post-bootstrap copy finishes whatever remainder is left.
+		if pipeCopied && num < pipeLastChunk+pipelineCopyChunkStride {
+			return nil
+		}
+		maxSlot, ok, serr := pipeImm.LastSlotInChunk(num)
+		if serr != nil {
+			return fmt.Errorf(
+				"pipelined copy bound for chunk %d: %w", num, serr,
+			)
+		}
+		if !ok {
+			return nil
+		}
+		if _, _, cerr := node.CopyImmutableBlobsBounded(
+			ctx, logger, pipeImm, copyChain, maxSlot, nil,
+		); cerr != nil {
+			return fmt.Errorf(
+				"pipelined copy to slot %d: %w", maxSlot, cerr,
+			)
+		}
+		pipeLastChunk = num
+		pipeCopied = true
+		return nil
+	}
+
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: true})
 	result, err := Bootstrap(
 		ctx,
 		BootstrapConfig{
+			OnChunkContiguous:      onChunkContiguous,
 			Network:                network,
 			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
@@ -254,57 +353,6 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
 	}
 
-	// Open database once and reuse for both import and ImmutableDB load
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DataDir,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        cfg.RunMode,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
-	if err != nil {
-		// Tolerate a recoverable commit-timestamp mismatch carried
-		// over from a previously interrupted run. The mithril import
-		// writes blocks and ledger state through full transactions
-		// that update both stores' timestamps in lockstep, so the
-		// mismatch heals as soon as we make forward progress.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && db != nil {
-			logger.Warn(
-				"opened database with commit timestamp mismatch; "+
-					"continuing mithril sync — import will heal it",
-				"component", "mithril",
-				"metadata_timestamp", cte.MetadataTimestamp,
-				"blob_timestamp", cte.BlobTimestamp,
-			)
-		} else {
-			return SyncResult{}, fmt.Errorf("opening database: %w", err)
-		}
-	}
-	defer db.Close()
-
-	// Mark sync as in-progress so `dingo serve` can detect an
-	// incomplete sync and refuse to start.
-	if err := db.SetSyncState("sync_status", syncStatusInProgress, nil); err != nil {
-		return SyncResult{}, fmt.Errorf("marking sync in-progress: %w", err)
-	}
-
-	// For API mode, mark an incomplete backfill checkpoint BEFORE any
-	// blob writes. If the process dies between writing blocks and
-	// node.Backfill.Run() creating its own initial checkpoint, the next
-	// startup would see blocks but no checkpoint and skip the backfill.
-	// Pre-seeding the checkpoint here ensures NeedsBackfill() returns
-	// the correct answer at any interruption point.
-	if isAPIMode(cfg.StorageMode) {
-		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"marking backfill in-progress: %w", err,
-			)
-		}
-	}
 	// On error, log a message guiding the user to re-run.
 	syncComplete := false
 	defer func() {

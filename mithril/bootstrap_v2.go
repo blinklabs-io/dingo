@@ -681,6 +681,21 @@ func downloadImmutables(
 		CheckRedirect: httpsOnlyRedirect,
 	}
 
+	// Optional download<->processing pipeline: chunks are fetched in
+	// parallel (out of order) but seq invokes OnChunkContiguous in strict
+	// 0,1,2,... order as each prefix completes, so the caller can copy
+	// blocks while later chunks still download. nil hook => no sequencer,
+	// legacy "download everything, then process" behaviour.
+	var seq *inOrderSequencer
+	if cfg.OnChunkContiguous != nil {
+		seq = newInOrderSequencer(
+			totalArchives,
+			func(num uint64) error {
+				return cfg.OnChunkContiguous(immutableDir, num)
+			},
+		)
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(immutableDownloadWorkers)
 	for num := range totalArchives {
@@ -692,6 +707,9 @@ func downloadImmutables(
 				immutableDir, num, digests,
 			); err == nil {
 				onArchiveDone(bytes)
+				if seq != nil {
+					seq.Complete(num)
+				}
 				return nil
 			}
 			var bytes int64
@@ -751,10 +769,26 @@ func downloadImmutables(
 				)
 			}
 			onArchiveDone(bytes)
+			if seq != nil {
+				seq.Complete(num)
+			}
 			return nil
 		})
 	}
-	return g.Wait()
+	err := g.Wait()
+	if seq != nil {
+		// A fetch failure means the contiguous prefix can never advance
+		// past the gap; cancel so the consumer's Wait unblocks. On
+		// success, Wait drains any processing still trailing the last
+		// downloads.
+		if err != nil {
+			seq.Cancel(err)
+		}
+		if procErr := seq.Wait(); procErr != nil && err == nil {
+			err = procErr
+		}
+	}
+	return err
 }
 
 // newImmutableProgress returns a callback that aggregates per-archive

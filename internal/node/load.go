@@ -583,6 +583,122 @@ func copyBlocksDirect(
 	return blocksCopied, immutableTip.Slot, nil
 }
 
+// CopyImmutableBlobsBounded copies immutable blocks into the blob store from
+// the current chain tip up to and including maxSlot, storing produced-UTxO
+// offsets per block. maxSlot of 0 copies to the immutable tip. It reuses a
+// caller-opened ImmutableDb and Chain so it can be invoked repeatedly during a
+// download to overlap the copy with fetching (parallel fetch, sequenced
+// processing). Returns the number of blocks copied and the highest slot copied.
+//
+// Safe against chunks that arrive out of order: bounding by maxSlot (the last
+// slot of a known-contiguous chunk prefix) stops the copy before it can reach a
+// higher out-of-order chunk past a gap. Blocks above maxSlot are left for a
+// later call with a higher bound.
+func CopyImmutableBlobsBounded(
+	ctx context.Context,
+	logger *slog.Logger,
+	imm *immutable.ImmutableDb,
+	c *chain.Chain,
+	maxSlot uint64,
+	onProgress func(LoadBlobsProgress),
+) (int, uint64, error) {
+	callback := func(rb chain.RawBlock, txn *database.Txn) error {
+		_, err := storeRawBlockUtxoOffsets(txn, rb)
+		return err
+	}
+
+	startPoint := c.Tip().Point
+	if maxSlot > 0 && startPoint.Slot >= maxSlot {
+		return 0, startPoint.Slot, nil
+	}
+
+	// Progress denominator: the bound when set, else the immutable tip.
+	tipSlot := maxSlot
+	if tipSlot == 0 {
+		immutableTip, err := imm.GetTip()
+		if err != nil {
+			return 0, startPoint.Slot, fmt.Errorf(
+				"reading immutable DB tip: %w", err,
+			)
+		}
+		if immutableTip != nil {
+			tipSlot = immutableTip.Slot
+		}
+	}
+
+	iter, err := imm.BlocksFromPoint(startPoint)
+	if err != nil {
+		return 0, startPoint.Slot, fmt.Errorf(
+			"failed to get immutable DB iterator: %w", err,
+		)
+	}
+	defer iter.Close()
+
+	blockBatch := make([]chain.RawBlock, 0, loadBlockBatchSize)
+	blocksCopied := 0
+	lastSlot := startPoint.Slot
+	startTime := time.Now()
+	lastProgressLog := time.Time{}
+	done := false
+	for !done {
+		for {
+			next, err := iter.Next()
+			if err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"reading next block: %w", err,
+				)
+			}
+			if next == nil {
+				done = true
+				break
+			}
+			// Skip the resume anchor block (already in the chain).
+			if blocksCopied == 0 && len(blockBatch) == 0 &&
+				next.Slot == startPoint.Slot &&
+				bytes.Equal(next.Hash, startPoint.Hash) {
+				continue
+			}
+			rawBlock, err := rawBlockFromImmutableBlock(next)
+			if err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"building raw block: %w", err,
+				)
+			}
+			if maxSlot > 0 && rawBlock.Slot > maxSlot {
+				// Reached the contiguous bound; this block belongs to a
+				// later call. Discard it (re-read when the bound advances).
+				done = true
+				break
+			}
+			blockBatch = append(blockBatch, rawBlock)
+			if len(blockBatch) == cap(blockBatch) {
+				break
+			}
+		}
+		if len(blockBatch) > 0 {
+			if err := c.AddRawBlocksWithCallback(blockBatch, callback); err != nil {
+				return blocksCopied, lastSlot, fmt.Errorf(
+					"failed to import block: %w", err,
+				)
+			}
+			blocksCopied += len(blockBatch)
+			lastSlot = blockBatch[len(blockBatch)-1].Slot
+			blockBatch = blockBatch[:0]
+			reportLoadBlobsProgress(
+				onProgress, blocksCopied, lastSlot, tipSlot, startTime,
+			)
+			maybeLogBlockCopyProgress(
+				logger, "copying blocks from immutable DB (pipelined)",
+				blocksCopied, lastSlot, tipSlot, startTime, &lastProgressLog,
+			)
+		}
+		if err := ctx.Err(); err != nil {
+			return blocksCopied, lastSlot, fmt.Errorf("loading blocks: %w", err)
+		}
+	}
+	return blocksCopied, lastSlot, nil
+}
+
 // copyBlocksRawWithCallback is a lightweight variant of copyBlocks that
 // decodes only block headers instead of full blocks. This is significantly
 // faster for bulk loading since it skips decoding transaction bodies and
