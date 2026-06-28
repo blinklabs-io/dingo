@@ -126,6 +126,25 @@ func pctOf(cur, total int64) float64 {
 	return float64(cur) / float64(total) * 100
 }
 
+// markSyncInProgress marks the database as an incomplete sync (so `dingo serve`
+// refuses to start) and, for API mode, pre-seeds the backfill checkpoint. It is
+// called at the first actual write rather than before bootstrap, so a bootstrap
+// that fails before writing anything leaves an existing healthy database
+// untouched. Idempotent: safe to call more than once per sync.
+func markSyncInProgress(db *database.Database, storageMode string) error {
+	if err := db.SetSyncState(
+		"sync_status", syncStatusInProgress, nil,
+	); err != nil {
+		return fmt.Errorf("marking sync in-progress: %w", err)
+	}
+	if isAPIMode(storageMode) {
+		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
+			return fmt.Errorf("marking backfill in-progress: %w", err)
+		}
+	}
+	return nil
+}
+
 // Sync performs a full Mithril bootstrap of the database at cfg.DataDir:
 // download + verify + extract a snapshot, import ledger state and immutable
 // blocks, close the volatile gap, backfill metadata, and mark the sync
@@ -224,18 +243,12 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	}
 	defer db.Close()
 
-	// Mark sync in-progress so `dingo serve` refuses to start on an incomplete
-	// sync, and pre-seed the API backfill checkpoint before any blob writes.
-	if err := db.SetSyncState("sync_status", syncStatusInProgress, nil); err != nil {
-		return SyncResult{}, fmt.Errorf("marking sync in-progress: %w", err)
-	}
-	if isAPIMode(cfg.StorageMode) {
-		if err := ensureMithrilBackfillCheckpoint(db); err != nil {
-			return SyncResult{}, fmt.Errorf(
-				"marking backfill in-progress: %w", err,
-			)
-		}
-	}
+	// The sync-in-progress marker and the API backfill checkpoint are NOT set
+	// here: setting them before bootstrap would leave an existing healthy
+	// database permanently marked incomplete (blocking `dingo serve`) if the
+	// bootstrap fails before anything is written. They are set by
+	// markSyncInProgress at the first actual write instead (the pipelined copy
+	// below, and again before the post-bootstrap import as a backstop).
 
 	// Pipelined copy consumer. Bootstrap invokes onChunkContiguous for each
 	// immutable file number in contiguous order as it finishes downloading; we
@@ -276,6 +289,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		}
 		if !ok {
 			return nil
+		}
+		// First blob write: mark the sync in-progress now (not before
+		// bootstrap), so a bootstrap that fails before any write leaves an
+		// existing healthy database untouched.
+		if !pipeCopied {
+			if merr := markSyncInProgress(db, cfg.StorageMode); merr != nil {
+				return merr
+			}
 		}
 		if _, _, cerr := node.CopyImmutableBlobsBounded(
 			ctx, logger, pipeImm, copyChain, maxSlot, nil,
@@ -351,6 +372,14 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: false})
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
+	}
+
+	// Backstop the in-progress marker for paths that did not pipeline a copy
+	// (for example the v1 backend, which has no per-chunk hook). Idempotent
+	// when the pipelined copy already set it. Set after a successful bootstrap
+	// and before any post-bootstrap write or deferred-index drop.
+	if err := markSyncInProgress(db, cfg.StorageMode); err != nil {
+		return SyncResult{}, err
 	}
 
 	// On error, log a message guiding the user to re-run.
@@ -455,6 +484,22 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	if err := g.Wait(); err != nil {
 		return SyncResult{}, err
+	}
+
+	// The pipelined copy stores produced-UTxO offsets per block but does not
+	// advance the offsets-complete marker, and the post-bootstrap copy only
+	// marks it when it copied at least one block (so it is skipped when the
+	// pipeline already copied the entire immutable DB). Record it explicitly
+	// for the full immutable tip so a later API backfill or resume does not
+	// redo offset work the copy already performed. Idempotent.
+	if loadResult != nil {
+		if err := node.MarkImmutableUtxoOffsetsComplete(
+			db, loadResult.ImmutableTipSlot,
+		); err != nil {
+			return SyncResult{}, fmt.Errorf(
+				"recording immutable UTxO offsets complete: %w", err,
+			)
+		}
 	}
 
 	// Fetch volatile blocks between the ImmutableDB tip and the

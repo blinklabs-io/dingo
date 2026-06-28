@@ -658,17 +658,19 @@ func CopyImmutableBlobsBounded(
 				bytes.Equal(next.Hash, startPoint.Hash) {
 				continue
 			}
+			// Stop at the contiguous bound BEFORE decoding the block. next.Slot
+			// comes from the secondary index, so this defers a higher
+			// out-of-order chunk's block without decoding it (decoding could
+			// otherwise fail or waste work on a block meant for a later call).
+			if maxSlot > 0 && next.Slot > maxSlot {
+				done = true
+				break
+			}
 			rawBlock, err := rawBlockFromImmutableBlock(next)
 			if err != nil {
 				return blocksCopied, lastSlot, fmt.Errorf(
 					"building raw block: %w", err,
 				)
-			}
-			if maxSlot > 0 && rawBlock.Slot > maxSlot {
-				// Reached the contiguous bound; this block belongs to a
-				// later call. Discard it (re-read when the bound advances).
-				done = true
-				break
 			}
 			blockBatch = append(blockBatch, rawBlock)
 			if len(blockBatch) == cap(blockBatch) {
@@ -914,6 +916,19 @@ func ImmutableUtxoOffsetsTipSlot(
 		)
 	}
 	return slot, true, nil
+}
+
+// MarkImmutableUtxoOffsetsComplete records that produced-UTxO offset references
+// are stored for every immutable block up to immutableTipSlot, so a later API
+// backfill can skip re-writing them. It is idempotent. Callers that split the
+// immutable copy (for example the pipelined download/copy) must call this after
+// the copy completes, because the per-block copy stores the offsets but does
+// not advance this marker on its own.
+func MarkImmutableUtxoOffsetsComplete(
+	db *database.Database,
+	immutableTipSlot uint64,
+) error {
+	return markImmutableUtxoOffsetsComplete(db, immutableTipSlot)
 }
 
 func markImmutableUtxoOffsetsComplete(
