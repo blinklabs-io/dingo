@@ -60,9 +60,6 @@ func hasS3Credentials() bool {
 			return true
 		}
 	}
-	if os.Getenv("AWS_REGION") != "" {
-		return true
-	}
 	return false
 }
 
