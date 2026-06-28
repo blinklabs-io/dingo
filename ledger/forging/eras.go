@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
@@ -42,6 +43,7 @@ const (
 	eraAlonzo
 	eraBabbage
 	eraConway
+	eraDijkstra
 )
 
 // isTPraos reports whether the era runs on TPraos (Shelley→Alonzo).
@@ -86,6 +88,17 @@ func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 		return pparamsLimits{}, errors.New("protocol parameters are nil")
 	}
 	switch pp := p.(type) {
+	case *dijkstra.DijkstraProtocolParameters:
+		// Dijkstra shares Conway's Praos block/header layout; the
+		// Leios header extension lives in the header, not these limits.
+		return pparamsLimits{
+			era:          eraDijkstra,
+			maxTxSize:    uint64(pp.MaxTxSize),
+			maxBlockSize: uint64(pp.MaxBlockBodySize),
+			maxExUnits:   pp.MaxBlockExUnits,
+			protoMajor:   uint64(pp.ProtocolVersion.Major),
+			protoMinor:   uint64(pp.ProtocolVersion.Minor),
+		}, nil
 	case *conway.ConwayProtocolParameters:
 		return pparamsLimits{
 			era:          eraConway,
@@ -184,6 +197,8 @@ func splitTxCbor(txCbor []byte) (body, witnesses cbor.RawMessage, err error) {
 // block, so we round-trip through the matching era's decoder.
 func decodeBlockFromCbor(era eraKind, blockCbor []byte) (ledger.Block, error) {
 	switch era {
+	case eraDijkstra:
+		return dijkstra.NewDijkstraBlockFromCbor(blockCbor)
 	case eraConway:
 		return conway.NewConwayBlockFromCbor(blockCbor)
 	case eraBabbage:

@@ -806,6 +806,28 @@ func computeBlockBodyHash(
 		totalSize += uint64(len(invalidCbor))
 	}
 
+	if era == eraDijkstra {
+		// Dijkstra blocks append two nullable certificate fields after
+		// invalid_transactions — leios_cert then peras_cert (CDDL
+		// "<cert> / nil"). A producer that forges no endorser block emits
+		// both as CBOR null, and DijkstraBlockBody.Hash hashes all six body
+		// components, so the header body hash must include both null-cert
+		// components or the forged block fails body-hash validation. The
+		// same null encoding is emitted by encodeBlockCbor.
+		nullCert, err := cbor.Encode(nil)
+		if err != nil {
+			return lcommon.Blake2b256{}, 0, fmt.Errorf(
+				"failed to encode null Dijkstra certificate: %w",
+				err,
+			)
+		}
+		nullHash := blake2b.Sum256(nullCert)
+		// leios_cert, then peras_cert.
+		bodyHashes = append(bodyHashes, nullHash[:]...)
+		bodyHashes = append(bodyHashes, nullHash[:]...)
+		totalSize += 2 * uint64(len(nullCert))
+	}
+
 	// Final hash of concatenated hashes
 	finalHash := blake2b.Sum256(bodyHashes)
 	return lcommon.NewBlake2b256(finalHash[:]), totalSize, nil
@@ -894,6 +916,21 @@ type rawBabbageEraBlock struct {
 	InvalidTransactions    []uint
 }
 
+// rawDijkstraBlock encodes a Dijkstra block: 7 elements — the
+// Babbage/Conway five plus the two trailing nullable certificate fields
+// leios_cert and peras_cert (CDDL "<cert> / nil"). The forge produces no
+// endorser block, so both certificates are CBOR null.
+type rawDijkstraBlock struct {
+	cbor.StructAsArray
+	Header                 cbor.RawMessage
+	TransactionBodies      []cbor.RawMessage
+	TransactionWitnessSets []cbor.RawMessage
+	TransactionMetadataSet lcommon.TransactionMetadataSet
+	InvalidTransactions    []uint
+	LeiosCertificate       cbor.RawMessage
+	PerasCertificate       cbor.RawMessage
+}
+
 // encodeBlockCbor selects the era-correct raw-block envelope and
 // encodes it. The forge path never produces invalid_transactions so
 // the list is always empty when present; we still emit it because
@@ -905,6 +942,28 @@ func encodeBlockCbor(
 	witnessSets []cbor.RawMessage,
 	metadataSet lcommon.TransactionMetadataSet,
 ) ([]byte, error) {
+	if era == eraDijkstra {
+		// Dijkstra appends leios_cert and peras_cert after
+		// invalid_transactions; both are CBOR null when no endorser
+		// block is forged. The same null encoding feeds the body hash
+		// in computeBlockBodyHash, so they stay consistent.
+		nullCert, err := cbor.Encode(nil)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"failed to encode null Dijkstra certificate: %w",
+				err,
+			)
+		}
+		return cbor.Encode(rawDijkstraBlock{
+			Header:                 header,
+			TransactionBodies:      txBodies,
+			TransactionWitnessSets: witnessSets,
+			TransactionMetadataSet: metadataSet,
+			InvalidTransactions:    []uint{},
+			LeiosCertificate:       cbor.RawMessage(nullCert),
+			PerasCertificate:       cbor.RawMessage(nullCert),
+		})
+	}
 	if !era.hasInvalidTxs() {
 		return cbor.Encode(rawShelleyEraBlock{
 			Header:                 header,
