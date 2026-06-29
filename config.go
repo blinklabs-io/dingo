@@ -379,8 +379,8 @@ func (n *Node) configValidate() error {
 			"listener must provide net.Listener or listen network/address values",
 		)
 	}
-	if n.config.cardanoNodeConfig != nil {
-		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if n.config.CardanoNodeConfig() != nil {
+		shelleyGenesis := n.config.CardanoNodeConfig().ShelleyGenesis()
 		if shelleyGenesis == nil {
 			return errors.New("unable to get Shelley genesis information")
 		}

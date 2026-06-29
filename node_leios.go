@@ -122,7 +122,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
 		Registry:        registry,
-		PromRegistry:    n.config.promRegistry,
+		PromRegistry:    n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios vote manager: %w", err)
@@ -165,7 +165,7 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 			ledgerState: n.ledgerState,
 		},
 		Timing:       n.leiosPipelineTiming(),
-		PromRegistry: n.config.promRegistry,
+		PromRegistry: n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios pipeline manager: %w", err)

@@ -103,7 +103,7 @@ func New(cfg Config) (*Node, error) {
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
-	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
+	n.eventBus = event.NewEventBus(n.config.PrometheusRegistry(), n.config.logger)
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -159,7 +159,7 @@ func (n *Node) Run(ctx context.Context) error {
 	dbConfig := &database.Config{
 		DataDir:        n.config.DatabasePath(),
 		Logger:         n.config.logger,
-		PromRegistry:   n.config.promRegistry,
+		PromRegistry:   n.config.PrometheusRegistry(),
 		BlobPlugin:     n.config.BlobPlugin(),
 		RunMode:        string(n.config.RunMode()),
 		MetadataPlugin: n.config.MetadataPlugin(),
@@ -208,7 +208,7 @@ func (n *Node) Run(ctx context.Context) error {
 	cm, err := chain.NewManager(
 		n.db,
 		n.eventBus,
-		n.config.promRegistry,
+		n.config.PrometheusRegistry(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to load chain manager: %w", err)
@@ -239,8 +239,8 @@ func (n *Node) Run(ctx context.Context) error {
 	// the Shelley slot length; zero disables the retry (e.g. networking off or
 	// unknown slot length).
 	var leiosTxFetchTailBudget time.Duration
-	if enableLeiosNetworking && n.config.cardanoNodeConfig != nil {
-		if sg := n.config.cardanoNodeConfig.ShelleyGenesis(); sg != nil {
+	if enableLeiosNetworking && n.config.CardanoNodeConfig() != nil {
+		if sg := n.config.CardanoNodeConfig().ShelleyGenesis(); sg != nil {
 			if secs, _ := sg.SlotLength.Float64(); secs > 0 {
 				leiosTxFetchTailBudget = time.Duration(
 					float64(n.leiosPipelineTiming().DiffuseWindowSlots) *
@@ -257,7 +257,7 @@ func (n *Node) Run(ctx context.Context) error {
 		PeerSharing:           func() bool { p := n.config.PeerSharing(); return p != nil && *p }(),
 		IntersectTip:          n.config.IntersectTip(),
 		IntersectPoints:       n.config.IntersectPoints(),
-		PromRegistry:          n.config.promRegistry,
+		PromRegistry:          n.config.PrometheusRegistry(),
 		ChainsyncBlockTimeout: n.config.ChainsyncStallTimeoutDuration(),
 		EnableLeios:           enableLeiosNetworking,
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
@@ -285,8 +285,8 @@ func (n *Node) Run(ctx context.Context) error {
 			Database:           n.db,
 			EventBus:           n.eventBus,
 			Logger:             n.config.logger,
-			CardanoNodeConfig:  n.config.cardanoNodeConfig,
-			PromRegistry:       n.config.promRegistry,
+			CardanoNodeConfig:  n.config.CardanoNodeConfig(),
+			PromRegistry:       n.config.PrometheusRegistry(),
 			ForgeBlocks:        n.config.isDevMode(),
 			ValidateHistorical: n.config.ValidateHistorical(),
 			EnableDijkstra:     enableDijkstra,
@@ -532,7 +532,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
-	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	n.snapshotMgr.SetPromRegistry(n.config.PrometheusRegistry())
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -577,7 +577,7 @@ func (n *Node) Run(ctx context.Context) error {
 		RejectionWatermark: n.config.RejectionWatermark(),
 		Logger:             n.config.logger,
 		EventBus:           n.eventBus,
-		PromRegistry:       n.config.promRegistry,
+		PromRegistry:       n.config.PrometheusRegistry(),
 		Validator:          n.ledgerState,
 		CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
 	},
@@ -610,7 +610,7 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
 	chainsyncCfg.HeaderSyncStrategy = strat
-	chainsyncCfg.PromRegistry = n.config.promRegistry
+	chainsyncCfg.PromRegistry = n.config.PrometheusRegistry()
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
 		n.ledgerState,
@@ -761,7 +761,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	started = append(started, func() { n.chainSelector.Stop() })
 	// Configure connection manager
-	tmpListeners := n.ouroboros.ConfigureListeners(n.config.listeners)
+	tmpListeners := n.ouroboros.ConfigureListeners(n.config.Listeners())
 	n.connManager = connmanager.NewConnectionManager(
 		connmanager.ConnectionManagerConfig{
 			Logger:              n.config.logger,
@@ -769,7 +769,7 @@ func (n *Node) Run(ctx context.Context) error {
 			Listeners:           tmpListeners,
 			OutboundSourcePort:  n.config.RelayPort(),
 			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
-			PromRegistry:        n.config.promRegistry,
+			PromRegistry:        n.config.PrometheusRegistry(),
 			MaxConnectionsPerIP: n.config.MaxConnectionsPerIP(),
 			MaxInboundConns:     n.config.MaxInboundConns(),
 		},
@@ -854,8 +854,8 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Get UseLedgerAfterSlot from topology config (defaults to -1 = disabled).
 	var useLedgerAfterSlot int64 = -1
-	if n.config.topologyConfig != nil {
-		useLedgerAfterSlot = n.config.topologyConfig.UseLedgerAfterSlot
+	if n.config.TopologyConfig() != nil {
+		useLedgerAfterSlot = n.config.TopologyConfig().UseLedgerAfterSlot
 	}
 
 	n.peerGov = peergov.NewPeerGovernor(
@@ -864,7 +864,7 @@ func (n *Node) Run(ctx context.Context) error {
 			EventBus:                             n.eventBus,
 			ConnManager:                          n.connManager,
 			DisableOutbound:                      n.config.isDevMode(),
-			PromRegistry:                         n.config.promRegistry,
+			PromRegistry:                         n.config.PrometheusRegistry(),
 			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
 			LedgerPeerProvider:                   ledgerPeerProvider,
 			UseLedgerAfterSlot:                   useLedgerAfterSlot,
@@ -894,8 +894,8 @@ func (n *Node) Run(ctx context.Context) error {
 		peergov.OutboundConnectionEventType,
 		n.ouroboros.HandleOutboundConnEvent,
 	)
-	if n.config.topologyConfig != nil {
-		topologyConfig := n.config.topologyConfig
+	if n.config.TopologyConfig() != nil {
+		topologyConfig := n.config.TopologyConfig()
 		usePeerSnapshot := genesisSelectionMode &&
 			topologyConfig.PeerSnapshot != nil &&
 			topologyConfig.PeerSnapshot.HasRelays()
@@ -905,25 +905,25 @@ func (n *Node) Run(ctx context.Context) error {
 		n.peerGov.LoadTopologyConfig(topologyConfig)
 		if usePeerSnapshot {
 			added := n.peerGov.LoadPeerSnapshot(
-				n.config.topologyConfig.PeerSnapshot,
+				topologyConfig.PeerSnapshot,
 			)
 			if added > 0 {
 				n.config.logger.Info(
 					"using peer snapshot for Genesis bootstrap",
 					"snapshot_slot",
-					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+					topologyConfig.PeerSnapshot.Point.BlockPointSlot,
 					"snapshot_peers_added",
 					added,
 					"bootstrap_peers_omitted",
-					len(n.config.topologyConfig.BootstrapPeers),
+					len(topologyConfig.BootstrapPeers),
 				)
 			} else {
 				n.config.logger.Warn(
 					"peer snapshot produced no usable peers; falling back to topology bootstrap peers",
 					"snapshot_slot",
-					n.config.topologyConfig.PeerSnapshot.Point.BlockPointSlot,
+					topologyConfig.PeerSnapshot.Point.BlockPointSlot,
 				)
-				n.peerGov.LoadTopologyConfig(n.config.topologyConfig)
+				n.peerGov.LoadTopologyConfig(n.config.TopologyConfig())
 			}
 		}
 	}
@@ -1147,7 +1147,7 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.config.StorageModeEnum().IsAPI() && n.config.MeshPort() > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
-		if nc := n.config.cardanoNodeConfig; nc != nil {
+		if nc := n.config.CardanoNodeConfig(); nc != nil {
 			genesisHash = nc.ByronGenesisHash
 			if sg := nc.ShelleyGenesis(); sg != nil {
 				genesisStartTimeSec = sg.SystemStart.Unix()

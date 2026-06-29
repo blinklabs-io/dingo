@@ -49,12 +49,12 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 	// KES-period plausibility requires a Shelley genesis. Block producer
 	// mode without one is unsafe — a node with no genesis cannot tell
 	// whether the opcert is current — so refuse to start.
-	if n.config.cardanoNodeConfig == nil {
+	if n.config.CardanoNodeConfig() == nil {
 		return nil, errors.New(
 			"block producer mode requires Cardano node config with Shelley genesis",
 		)
 	}
-	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	genesis := n.config.CardanoNodeConfig().ShelleyGenesis()
 	if genesis == nil {
 		return nil, errors.New(
 			"block producer mode requires Shelley genesis information",
@@ -230,7 +230,7 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
-	election.SetPromRegistry(n.config.promRegistry)
+	election.SetPromRegistry(n.config.PrometheusRegistry())
 	if n.db != nil {
 		if scheduleStore := leader.NewSyncStateScheduleStore(
 			n.db.Metadata(),
@@ -281,7 +281,7 @@ func (n *Node) initBlockForger(
 		ForgeSyncToleranceSlots:     n.config.ForgeSyncToleranceSlots(),
 		ForgeStaleGapThresholdSlots: n.config.ForgeStaleGapThresholdSlots(),
 		BlockValidator:              blockValidator,
-		PromRegistry:                n.config.promRegistry,
+		PromRegistry:                n.config.PrometheusRegistry(),
 		LeiosProduceChecker:         leiosChecker,
 		LeiosEBBroadcaster:          leiosEBCaster,
 		LeiosMempool:                leiosMempool,
