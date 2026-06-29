@@ -1,5 +1,23 @@
 # Dingo Releases
 
+## v0.60.1 (June 29, 2026)
+
+**Title:** Faster Mithril bootstrap, safer at-tip nonce handling, and refreshed dependencies
+
+**Date:** June 29, 2026
+
+**Version:** v0.60.1
+
+Hi folks! Here’s what we shipped in v0.60.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, dependency refreshes, example maintenance, CI maintenance, and release history updates.
+
+### 💪 Improvements
+
+* Improved **overlap Mithril bootstrap downloads and contiguous processing more effectively:** Mithril bootstrap now keeps immutable chunks moving in order while downloads continue in parallel, which helps bootstrap work overlap more effectively, records progress more safely, and makes failed bootstrap attempts less likely to leave incomplete sync state behind.
+
 ## v0.60.0 (June 28, 2026)
 
 **Title:** Per-peer blockfetch visibility, Dijkstra forging correctness, and leaner default builds
