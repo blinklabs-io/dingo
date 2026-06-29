@@ -136,6 +136,10 @@ type Config struct {
 	tracingStdout       bool
 	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
+	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
+	offchainMetadata OffchainMetadataConfig
+	// Parsed duration for chainsync stall timeout (runtime convenience)
+	chainsyncStallTimeout time.Duration
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
@@ -438,12 +442,31 @@ func NewConfigFromInternal(
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
+	// If caller did not provide an internal config, seed defaults so accessors
+	// and consumers never hit a nil pointer. This mirrors NewConfig's default
+	// internal configuration.
+	if cfg == nil {
+		tmp := NewConfig()
+		cfg = tmp.cfg
+	}
+	// Parse chainsync stall timeout for runtime use. Fall back to 2m on error.
+	var chainsyncDur time.Duration
+	if cfg.Chainsync.StallTimeout != "" {
+		if d, err := time.ParseDuration(cfg.Chainsync.StallTimeout); err == nil {
+			chainsyncDur = d
+		} else {
+			chainsyncDur = 2 * time.Minute
+		}
+	} else {
+		chainsyncDur = 2 * time.Minute
+	}
 	return Config{
-		cfg:               cfg,
-		logger:            logger,
-		cardanoNodeConfig: cardanoCfg,
-		topologyConfig:    topoCfg,
-		promRegistry:      promRegistry,
+		cfg:                   cfg,
+		logger:                logger,
+		cardanoNodeConfig:     cardanoCfg,
+		topologyConfig:        topoCfg,
+		promRegistry:          promRegistry,
+		chainsyncStallTimeout: chainsyncDur,
 	}
 }
 
@@ -662,8 +685,8 @@ func WithDatabaseWorkerPoolConfig(
 	cfg ledger.DatabaseWorkerPoolConfig,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.DatabaseWorkers = cfg.NumWorkers
-		c.cfg.DatabaseQueueSize = cfg.QueueSize
+		c.cfg.DatabaseWorkers = cfg.WorkerPoolSize
+		c.cfg.DatabaseQueueSize = cfg.TaskQueueSize
 	}
 }
 
@@ -952,6 +975,8 @@ func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 // fetcher. Zero values use the fetcher's internal defaults.
 func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		// Preserve the programmatic runtime-only HTTPClient and full cfg
+		c.offchainMetadata = cfg
 		c.cfg.OffchainMetadata = internalconfig.OffchainMetadataConfig{
 			Interval:              cfg.Interval,
 			RequestTimeout:        cfg.RequestTimeout,
@@ -1003,6 +1028,7 @@ func WithChainsyncStallTimeout(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.Chainsync.StallTimeout = timeout.String()
+		c.chainsyncStallTimeout = timeout
 	}
 }
 
@@ -1212,6 +1238,11 @@ func (c *Config) StorageMode() string {
 	return c.cfg.StorageMode
 }
 
+// StorageModeEnum returns the storage mode as the typed StorageMode.
+func (c *Config) StorageModeEnum() StorageMode {
+	return StorageMode(c.cfg.StorageMode)
+}
+
 // SetStorageMode updates the storage mode. This is used during validation
 // when a mode-specific default must be applied.
 func (c *Config) SetStorageMode(mode string) {
@@ -1349,6 +1380,19 @@ func (c *Config) Cache() internalconfig.CacheConfig {
 // Chainsync returns the chainsync configuration.
 func (c *Config) Chainsync() internalconfig.ChainsyncConfig {
 	return c.cfg.Chainsync
+}
+
+// ChainsyncStallTimeoutDuration returns the parsed chainsync stall timeout.
+func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
+	if c.chainsyncStallTimeout != 0 {
+		return c.chainsyncStallTimeout
+	}
+	if c.cfg.Chainsync.StallTimeout != "" {
+		if d, err := time.ParseDuration(c.cfg.Chainsync.StallTimeout); err == nil {
+			return d
+		}
+	}
+	return 2 * time.Minute
 }
 
 // GenesisBootstrap returns the Genesis bootstrap configuration.

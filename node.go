@@ -157,20 +157,20 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		DataDir:        n.config.dataDir,
+		DataDir:        n.config.DatabasePath(),
 		Logger:         n.config.logger,
 		PromRegistry:   n.config.promRegistry,
-		BlobPlugin:     n.config.blobPlugin,
-		RunMode:        n.config.runMode,
-		MetadataPlugin: n.config.metadataPlugin,
-		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
-		StorageMode:    string(n.config.storageMode),
-		Network:        n.config.network,
+		BlobPlugin:     n.config.BlobPlugin(),
+		RunMode:        string(n.config.RunMode()),
+		MetadataPlugin: n.config.MetadataPlugin(),
+		MaxConnections: n.config.DatabaseWorkers(),
+		StorageMode:    n.config.StorageMode(),
+		Network:        n.config.Network(),
 		CacheConfig: database.CborCacheConfig{
-			BlockLRUEntries: n.config.cacheBlockLRUEntries,
-			HotUtxoEntries:  n.config.cacheHotUtxoEntries,
-			HotTxEntries:    n.config.cacheHotTxEntries,
-			HotTxMaxBytes:   n.config.cacheHotTxMaxBytes,
+			BlockLRUEntries: n.config.Cache().BlockLRUEntries,
+			HotUtxoEntries:  n.config.Cache().HotUtxoEntries,
+			HotTxEntries:    n.config.Cache().HotTxEntries,
+			HotTxMaxBytes:   n.config.Cache().HotTxMaxBytes,
 		},
 	}
 	db, err := database.New(dbConfig)
@@ -253,12 +253,12 @@ func (n *Node) Run(ctx context.Context) error {
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
 		ConnManager:           n.connManager,
-		NetworkMagic:          n.config.networkMagic,
-		PeerSharing:           n.config.peerSharing,
-		IntersectTip:          n.config.intersectTip,
-		IntersectPoints:       n.config.intersectPoints,
+		NetworkMagic:          n.config.NetworkMagic(),
+		PeerSharing:           func() bool { p := n.config.PeerSharing(); return p != nil && *p }(),
+		IntersectTip:          n.config.IntersectTip(),
+		IntersectPoints:       n.config.IntersectPoints(),
 		PromRegistry:          n.config.promRegistry,
-		ChainsyncBlockTimeout: n.config.chainsyncStallTimeout,
+		ChainsyncBlockTimeout: n.config.ChainsyncStallTimeoutDuration(),
 		EnableLeios:           enableLeiosNetworking,
 		// The standalone leios-votes mini-protocol (protocol 20) is a dingo
 		// extension ahead of the IOG Leios prototype. The prototype relays do
@@ -288,9 +288,9 @@ func (n *Node) Run(ctx context.Context) error {
 			CardanoNodeConfig:  n.config.cardanoNodeConfig,
 			PromRegistry:       n.config.promRegistry,
 			ForgeBlocks:        n.config.isDevMode(),
-			ValidateHistorical: n.config.validateHistorical,
+			ValidateHistorical: n.config.ValidateHistorical(),
 			EnableDijkstra:     enableDijkstra,
-			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			StartInDijkstra:    n.config.StartEra().IsDijkstra(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -347,7 +347,11 @@ func (n *Node) Run(ctx context.Context) error {
 				}
 				return n.chainsyncState.BlockfetchLatencyMedian()
 			},
-			DatabaseWorkerPoolConfig: n.config.DatabaseWorkerPoolConfig,
+			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
+				WorkerPoolSize: n.config.DatabaseWorkers(),
+				TaskQueueSize:  n.config.DatabaseQueueSize(),
+				Disabled:       false,
+			},
 			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
 				// Return the current best peer for rollback filtering and
 				// blockfetch fallback. Headers can arrive from any eligible
@@ -416,9 +420,9 @@ func (n *Node) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to configure chain security parameter: %w", err)
 	}
 
-	if n.config.barkBaseUrl != "" {
+	if n.config.BarkBaseUrl() != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl: n.config.barkBaseUrl,
+			BaseUrl: n.config.BarkBaseUrl(),
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},
@@ -461,17 +465,17 @@ func (n *Node) Run(ctx context.Context) error {
 	// (a) the EventBus subscription exists before any BlockActionApply events
 	// can be emitted, and (b) the synchronous backfill runs while no new
 	// blocks can arrive, eliminating the startup gap identified in #2114.
-	if n.config.storageMode.IsAPI() {
+	if n.config.StorageModeEnum().IsAPI() {
 		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
 			EventBus:                n.eventBus,
 			Metadata:                n.db.Metadata(),
 			SlotTimer:               n.ledgerState,
 			Logger:                  n.config.logger,
-			CNightPolicyID:          n.config.midnight.CNightPolicyID,
-			CNightAssetName:         n.config.midnight.CNightAssetName,
-			MappingValidatorAddress: n.config.midnight.MappingValidatorAddress,
-			AuthTokenPolicyID:       n.config.midnight.AuthTokenPolicyID,
-			AuthTokenAssetName:      n.config.midnight.AuthTokenAssetName,
+			CNightPolicyID:          n.config.Midnight().CNightPolicyID,
+			CNightAssetName:         n.config.Midnight().CNightAssetName,
+			MappingValidatorAddress: n.config.Midnight().MappingValidatorAddress,
+			AuthTokenPolicyID:       n.config.Midnight().AuthTokenPolicyID,
+			AuthTokenAssetName:      n.config.Midnight().AuthTokenAssetName,
 			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
 			},
@@ -539,7 +543,7 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 		started = append(started, func() { _ = n.leiosPipelineManager.Stop() })
-	} else if n.config.leiosVoteSigningKeyFile != "" {
+	} else if n.config.LeiosVoteSigningKeyFile() != "" {
 		n.config.logger.Warn(
 			"leios vote signing key configured without leios mode; voting disabled",
 			"component", "node",
@@ -547,9 +551,9 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	// Initialize mempool
 	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
-		MempoolCapacity:    n.config.mempoolCapacity,
-		EvictionWatermark:  n.config.evictionWatermark,
-		RejectionWatermark: n.config.rejectionWatermark,
+		MempoolCapacity:    n.config.MempoolCapacity(),
+		EvictionWatermark:  n.config.EvictionWatermark(),
+		RejectionWatermark: n.config.RejectionWatermark(),
 		Logger:             n.config.logger,
 		EventBus:           n.eventBus,
 		PromRegistry:       n.config.promRegistry,
@@ -574,13 +578,17 @@ func (n *Node) Run(ctx context.Context) error {
 	n.ouroboros.Mempool = n.mempool
 	// Initialize chainsync state with multi-client configuration
 	chainsyncCfg := chainsync.DefaultConfig()
-	if n.config.chainsyncMaxClients > 0 {
-		chainsyncCfg.MaxClients = n.config.chainsyncMaxClients
+	if n.config.Chainsync().MaxClients > 0 {
+		chainsyncCfg.MaxClients = n.config.Chainsync().MaxClients
 	}
-	if n.config.chainsyncStallTimeout > 0 {
-		chainsyncCfg.StallTimeout = n.config.chainsyncStallTimeout
+	if d := n.config.ChainsyncStallTimeoutDuration(); d > 0 {
+		chainsyncCfg.StallTimeout = d
 	}
-	chainsyncCfg.HeaderSyncStrategy = n.config.chainsyncStrategy
+	if strat, err := chainsync.ParseHeaderSyncStrategy(n.config.Chainsync().Strategy); err == nil {
+		chainsyncCfg.HeaderSyncStrategy = strat
+	} else {
+		chainsyncCfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyPrimary
+	}
 	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
@@ -738,11 +746,11 @@ func (n *Node) Run(ctx context.Context) error {
 			Logger:              n.config.logger,
 			EventBus:            n.eventBus,
 			Listeners:           tmpListeners,
-			OutboundSourcePort:  n.config.outboundSourcePort,
+			OutboundSourcePort:  n.config.RelayPort(),
 			OutboundConnOpts:    n.ouroboros.OutboundConnOpts(),
 			PromRegistry:        n.config.promRegistry,
-			MaxConnectionsPerIP: n.config.maxConnectionsPerIP,
-			MaxInboundConns:     n.config.maxInboundConns,
+			MaxConnectionsPerIP: n.config.MaxConnectionsPerIP(),
+			MaxInboundConns:     n.config.MaxInboundConns(),
 		},
 	)
 	n.eventBus.SubscribeFunc(
@@ -982,18 +990,18 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
 	// Configure UTxO RPC (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
+	if n.config.StorageModeEnum().IsAPI() && n.config.UtxorpcPort() > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
 			utxorpc.UtxorpcConfig{
 				Logger:             n.config.logger,
 				EventBus:           n.eventBus,
 				LedgerState:        n.ledgerState,
 				Mempool:            n.mempool,
-				Host:               n.config.bindAddr,
-				Port:               n.config.utxorpcPort,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
-				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				Host:               n.config.BindAddr(),
+				Port:               n.config.UtxorpcPort(),
+				TlsCertFilePath:    n.config.TlsCertFilePath(),
+				TlsKeyFilePath:     n.config.TlsKeyFilePath(),
+				CORSAllowedOrigins: n.config.CORSAllowedOrigins(),
 			},
 		)
 		if err := n.utxorpc.Start(n.ctx); err != nil { //nolint:contextcheck
@@ -1010,16 +1018,16 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	if n.config.barkPort > 0 {
+	if n.config.BarkPort() > 0 {
 		var err error
 		n.bark, err = bark.NewBark(
 			bark.BarkConfig{
 				Logger:             n.config.logger,
 				DB:                 db,
-				TlsCertFilePath:    n.config.tlsCertFilePath,
-				TlsKeyFilePath:     n.config.tlsKeyFilePath,
-				Port:               n.config.barkPort,
-				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				TlsCertFilePath:    n.config.TlsCertFilePath(),
+				TlsKeyFilePath:     n.config.TlsKeyFilePath(),
+				Port:               n.config.BarkPort(),
+				CORSAllowedOrigins: n.config.CORSAllowedOrigins(),
 			},
 		)
 		if err != nil {
@@ -1038,16 +1046,16 @@ func (n *Node) Run(ctx context.Context) error {
 	// Configure the Midnight gRPC server (only in API mode with a non-zero
 	// port). Port 0 disables the server while leaving the indexer eligible to
 	// run.
-	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
+	if n.config.StorageModeEnum().IsAPI() && n.config.Midnight().Port > 0 {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
 				Logger:          n.config.logger,
-				Host:            n.config.midnight.Host,
-				Port:            n.config.midnight.Port,
-				TLSCertFilePath: n.config.tlsCertFilePath,
-				TLSKeyFilePath:  n.config.tlsKeyFilePath,
-				ShutdownTimeout: n.config.shutdownTimeout,
+				Host:            n.config.Midnight().Host,
+				Port:            n.config.Midnight().Port,
+				TLSCertFilePath: n.config.TlsCertFilePath(),
+				TLSKeyFilePath:  n.config.TlsKeyFilePath(),
+				ShutdownTimeout: n.config.ShutdownTimeout(),
 			},
 		)
 		if err != nil {
@@ -1068,10 +1076,10 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// Configure Blockfrost API (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.blockfrostPort > 0 {
+	if n.config.StorageModeEnum().IsAPI() && n.config.BlockfrostPort() > 0 {
 		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.blockfrostPort), 10),
+			n.config.BindAddr(),
+			strconv.FormatUint(uint64(n.config.BlockfrostPort()), 10),
 		)
 		adapter, err := blockfrost.NewNodeAdapter(
 			n.ledgerState,
@@ -1086,7 +1094,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.blockfrostAPI = blockfrost.New(
 			blockfrost.BlockfrostConfig{
 				ListenAddress:      listenAddr,
-				CORSAllowedOrigins: n.config.corsAllowedOrigins,
+				CORSAllowedOrigins: n.config.CORSAllowedOrigins(),
 			},
 			adapter,
 			n.config.logger,
@@ -1106,7 +1114,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// Configure Mesh API (only in API mode with a non-zero port)
-	if n.config.storageMode.IsAPI() && n.config.meshPort > 0 {
+	if n.config.StorageModeEnum().IsAPI() && n.config.MeshPort() > 0 {
 		var genesisHash string
 		var genesisStartTimeSec int64
 		if nc := n.config.cardanoNodeConfig; nc != nil {
@@ -1122,8 +1130,8 @@ func (n *Node) Run(ctx context.Context) error {
 			)
 		}
 		listenAddr := net.JoinHostPort(
-			n.config.bindAddr,
-			strconv.FormatUint(uint64(n.config.meshPort), 10),
+			n.config.BindAddr(),
+			strconv.FormatUint(uint64(n.config.MeshPort()), 10),
 		)
 		var meshErr error
 		n.meshAPI, meshErr = mesh.NewServer(
@@ -1134,11 +1142,11 @@ func (n *Node) Run(ctx context.Context) error {
 				Chain:               n.ledgerState.Chain(),
 				Mempool:             n.mempool,
 				ListenAddress:       listenAddr,
-				Network:             n.config.network,
-				NetworkMagic:        n.config.networkMagic,
+				Network:             n.config.Network(),
+				NetworkMagic:        n.config.NetworkMagic(),
 				GenesisHash:         genesisHash,
 				GenesisStartTimeSec: genesisStartTimeSec,
-				CORSAllowedOrigins:  n.config.corsAllowedOrigins,
+				CORSAllowedOrigins:  n.config.CORSAllowedOrigins(),
 			},
 		)
 		if meshErr != nil {
@@ -1161,19 +1169,19 @@ func (n *Node) Run(ctx context.Context) error {
 		})
 	}
 
-	if n.config.storageMode.IsAPI() {
+	if n.config.StorageModeEnum().IsAPI() {
 		fetcher, err := offchainmetadata.New(
 			offchainmetadata.Config{
 				Logger:                n.config.logger,
 				Store:                 n.db.Metadata(),
 				HTTPClient:            n.config.offchainMetadata.HTTPClient,
-				Interval:              n.config.offchainMetadata.Interval,
-				RequestTimeout:        n.config.offchainMetadata.RequestTimeout,
-				UserAgent:             n.config.offchainMetadata.UserAgent,
-				IPFSGatewayURL:        n.config.offchainMetadata.IPFSGatewayURL,
-				BatchSize:             n.config.offchainMetadata.BatchSize,
-				MaxBytes:              n.config.offchainMetadata.MaxBytes,
-				AllowPrivateAddresses: n.config.offchainMetadata.AllowPrivateAddresses,
+				Interval:              n.config.OffchainMetadata().Interval,
+				RequestTimeout:        n.config.OffchainMetadata().RequestTimeout,
+				UserAgent:             n.config.OffchainMetadata().UserAgent,
+				IPFSGatewayURL:        n.config.OffchainMetadata().IPFSGatewayURL,
+				BatchSize:             n.config.OffchainMetadata().BatchSize,
+				MaxBytes:              n.config.OffchainMetadata().MaxBytes,
+				AllowPrivateAddresses: n.config.OffchainMetadata().AllowPrivateAddresses,
 			},
 		)
 		if err != nil {
