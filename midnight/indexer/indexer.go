@@ -151,11 +151,17 @@ type Indexer struct {
 	// governance state
 	candidates        map[candidateKey][]byte
 	candidateRemovals map[uint64]map[candidateKey][]byte
+	// epochTransitions journals the currentEpoch value *before* each block that
+	// caused an epoch advance via advanceEpochLocked.  On rollback the entry
+	// lets us restore currentEpoch to the pre-advance value so that a
+	// re-applied block at the same slot is assigned the correct epoch instead
+	// of the post-transition one.  Entries are pruned beyond candidateRollbackDepth.
+	epochTransitions  map[uint64]uint64 // blockNumber → prevCurrentEpoch
 	lastAriadneDatum  []byte
 	currentEpoch      uint64
 	hasCurrentEpoch   bool
-	snapshotEpoch    uint64
-	hasSnapshotEpoch bool
+	snapshotEpoch     uint64
+	hasSnapshotEpoch  bool
 }
 
 // New creates and initialises a new Indexer. It parses the configured policy
@@ -169,6 +175,7 @@ func New(cfg Config) (*Indexer, error) {
 		regUTxOs:          make(map[utxoKey]registrationUTxO),
 		candidates:        make(map[candidateKey][]byte),
 		candidateRemovals: make(map[uint64]map[candidateKey][]byte),
+		epochTransitions:  make(map[uint64]uint64),
 	}
 
 	if cfg.CNightPolicyID != "" && cfg.CNightAssetName != "" {
@@ -621,6 +628,9 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 	}
 
 	if len(idx.candidateAddrBytes) > 0 {
+		// Snapshot cleanup only needs block.Number; do it before decoding so
+		// that a decode error cannot leave stale snapshot rows in the DB.
+		idx.rollbackCandidateSnapshots(block)
 		decoded, err := block.Decode()
 		if err != nil {
 			if idx.config.Logger != nil {
@@ -630,11 +640,20 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 					"block", block.Number,
 				)
 			}
-			return
+		} else {
+			idx.rollbackCandidates(block.Number, decoded.Transactions())
 		}
-		idx.rollbackCandidateSnapshots(block)
-		idx.rollbackCandidates(block.Number, decoded.Transactions())
 	}
+
+	// Restore currentEpoch if this block caused an epoch advance.
+	// Without this, a re-applied block at the same slot would see
+	// epoch <= currentEpoch and be assigned the wrong (post-transition) epoch.
+	idx.mu.Lock()
+	if prevEpoch, ok := idx.epochTransitions[block.Number]; ok {
+		idx.currentEpoch = prevEpoch
+		delete(idx.epochTransitions, block.Number)
+	}
+	idx.mu.Unlock()
 }
 
 func (idx *Indexer) rollbackCandidateSnapshots(block models.Block) {
@@ -803,13 +822,17 @@ func (idx *Indexer) processBlock(
 	// Prune rollback journals that are beyond the rollback window.
 	// Ouroboros cannot roll back more than candidateRollbackDepth blocks, so
 	// journal entries older than that depth will never be needed for rollback.
-	if (len(idx.candidateAddrBytes) > 0 || len(idx.permCandidatePolicyBytes) > 0) &&
-		block.Number > candidateRollbackDepth {
+	if block.Number > candidateRollbackDepth {
 		pruneBelow := block.Number - candidateRollbackDepth
 		idx.mu.Lock()
 		for bn := range idx.candidateRemovals {
 			if bn < pruneBelow {
 				delete(idx.candidateRemovals, bn)
+			}
+		}
+		for bn := range idx.epochTransitions {
+			if bn < pruneBelow {
+				delete(idx.epochTransitions, bn)
 			}
 		}
 		idx.mu.Unlock()
@@ -1172,6 +1195,8 @@ func (idx *Indexer) advanceEpochLocked(epoch uint64, blockNumber uint64) {
 	if epoch <= idx.currentEpoch {
 		return
 	}
+	// Journal the pre-advance value so rollbackBlock can restore it.
+	idx.epochTransitions[blockNumber] = idx.currentEpoch
 	for e := idx.currentEpoch; e < epoch; e++ {
 		idx.snapshotEpochLocked(e, blockNumber)
 	}
