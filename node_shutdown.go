@@ -74,8 +74,12 @@ func (n *Node) closeWithShutdownTimeout(
 }
 
 func (n *Node) configuredShutdownTimeout() time.Duration {
-	if n.config.shutdownTimeout > 0 {
-		return n.config.shutdownTimeout
+	// Parse configured shutdown timeout string into duration. Fall back to 30s.
+	if s := n.config.ShutdownTimeout(); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			return d
+		}
+		n.config.logger.Warn("invalid shutdown timeout, using default", "value", s, "error", err)
 	}
 	return 30 * time.Second
 }

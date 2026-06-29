@@ -37,9 +37,9 @@ import (
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
-		n.config.shelleyVRFKey,
-		n.config.shelleyKESKey,
-		n.config.shelleyOperationalCertificate,
+		n.config.ShelleyVRFKey(),
+		n.config.ShelleyKESKey(),
+		n.config.ShelleyOperationalCertificate(),
 	); err != nil {
 		return nil, fmt.Errorf("load pool credentials: %w", err)
 	}
@@ -124,8 +124,7 @@ func (n *Node) validateBlockProducerLedgerWithView(
 	}
 	registered, vrfMatched, err := creds.ValidateAgainstLedger(view)
 	if err != nil {
-		if errors.Is(err, forging.ErrVRFKeyHashMismatch) &&
-			n.config.network == "devnet" {
+		if errors.Is(err, forging.ErrVRFKeyHashMismatch) && n.config.Network() == "devnet" {
 			n.config.logger.Warn(
 				"devnet block producer VRF cross-check failed; node will continue",
 				"component", "node",
@@ -164,7 +163,7 @@ func (n *Node) validateBlockProducerLedgerWithView(
 // require the genesis snapshot for leader election) and logs a warning for
 // relay nodes (which do not perform leader election).
 func (n *Node) handleGenesisSnapshotError(err error) error {
-	if n.config.blockProducer {
+	if n.config.BlockProducer() {
 		return fmt.Errorf("failed to capture genesis snapshot: %w", err)
 	}
 	n.config.logger.Warn(
@@ -263,7 +262,7 @@ func (n *Node) initBlockForger(
 	// Wire self-validation when the operator opts in. The validator runs
 	// header crypto, body-hash, and per-tx ledger checks before AddBlock.
 	var blockValidator forging.BlockValidator
-	if n.config.validateForgedBlock {
+	if n.config.ValidateForgedBlock() {
 		blockValidator = &forgedBlockValidatorAdapter{
 			ledgerState: n.ledgerState,
 		}
@@ -279,8 +278,8 @@ func (n *Node) initBlockForger(
 		BlockBroadcaster:            broadcaster,
 		BlockForged:                 n.ledgerState.RecordForgedBlock,
 		SlotClock:                   slotClock,
-		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
+		ForgeSyncToleranceSlots:     n.config.ForgeSyncToleranceSlots(),
+		ForgeStaleGapThresholdSlots: n.config.ForgeStaleGapThresholdSlots(),
 		BlockValidator:              blockValidator,
 		PromRegistry:                n.config.promRegistry,
 		LeiosProduceChecker:         leiosChecker,

@@ -132,7 +132,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
-	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
+	if n.config.LeiosVoteSigningKeyFile() != "" && !n.config.BlockProducer() {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",
 			"component", "node",

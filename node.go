@@ -886,7 +886,7 @@ func (n *Node) Run(ctx context.Context) error {
 			ReconcileInterval:                    n.config.ReconcileInterval(),
 			InactivityTimeout:                    n.config.InactivityTimeout(),
 			SyncProgressProvider:                 n.ledgerState,
-			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
+			BootstrapPromotionMinDiversityGroups: n.config.GenesisBootstrap().PromotionMinDiversityGroups,
 		},
 	)
 	n.ouroboros.PeerGov = n.peerGov
@@ -1069,6 +1069,15 @@ func (n *Node) Run(ctx context.Context) error {
 	// run.
 	if n.config.StorageModeEnum().IsAPI() && n.config.Midnight().Port > 0 {
 		var err error
+		// Parse shutdown timeout string into time.Duration for the midnight server.
+		shutdownTimeout := 30 * time.Second
+		if s := n.config.ShutdownTimeout(); s != "" {
+			if d, err := time.ParseDuration(s); err == nil {
+				shutdownTimeout = d
+			} else {
+				n.config.logger.Warn("invalid midnight shutdown timeout, using default", "value", s, "error", err)
+			}
+		}
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
 				Logger:          n.config.logger,
@@ -1076,7 +1085,7 @@ func (n *Node) Run(ctx context.Context) error {
 				Port:            n.config.Midnight().Port,
 				TLSCertFilePath: n.config.TlsCertFilePath(),
 				TLSKeyFilePath:  n.config.TlsKeyFilePath(),
-				ShutdownTimeout: n.config.ShutdownTimeout(),
+				ShutdownTimeout: shutdownTimeout,
 			},
 		)
 		if err != nil {
@@ -1225,7 +1234,7 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// Initialize block forger if production mode is enabled
-	if n.config.blockProducer {
+	if n.config.BlockProducer() {
 		creds, err := n.validateBlockProducerStartup()
 		if err != nil {
 			return fmt.Errorf("block producer startup validation failed: %w", err)
