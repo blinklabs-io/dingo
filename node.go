@@ -464,7 +464,7 @@ func (n *Node) Run(ctx context.Context) error {
 	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
 	// Ariadne/candidate rows.
 	if n.config.storageMode.IsAPI() {
-		if err := n.ledgerState.LoadEpochCache(); err != nil {
+		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
 			return fmt.Errorf("load epoch cache before Midnight indexer start: %w", err)
 		}
 		midnightIdx, err := midnightindexer.New(midnightindexer.Config{

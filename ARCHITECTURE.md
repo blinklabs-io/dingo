@@ -616,17 +616,18 @@ When `Node.Run()` is called, components are initialized in this order:
  5. LedgerState creation (UTXO tracking, validation)
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
- 8. Ledger epoch-cache preload, then Midnight indexer creation + backfill +
-    EventBus subscription (if API storage mode).
+ 8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
+    backfill + EventBus subscription (if API storage mode).
     Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
     Technical Committee and Council governance datums, Ariadne permissioned-candidate
     parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
     block-event epoch advancement, with EpochTransitionEvent as a secondary path).
     Runs synchronously before LedgerState starts so no
-    BlockActionApply events are missed. The epoch cache is preloaded first so
-    backfill can resolve Ariadne/candidate epoch keys without falling back to
-    epoch 0. Backfill iterates stored blocks from the last checkpoint slot
-    onward; inserts are idempotent (ON CONFLICT DO NOTHING) so a
+    BlockActionApply events are missed. The epoch cache is prepared first,
+    inside a startup-only transaction, so backfill can resolve
+    Ariadne/candidate epoch keys without falling back to epoch 0. Backfill
+    iterates stored blocks from the last checkpoint slot onward; inserts are
+    idempotent (ON CONFLICT DO NOTHING) so a
     crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
@@ -1466,14 +1467,15 @@ by the block-event path (`hasSnapshotEpoch` guard). On cold start
 snapshotting so no spurious empty snapshot is written before any candidates are
 observed.
 
-**Startup and catch-up**: `node.go` preloads the ledger epoch cache, then
-creates and starts the indexer (via `Start()`) *before* `LedgerState.Start()`,
-so backfill can resolve epoch-keyed Midnight rows and the EventBus subscription
-exists before any `BlockActionApply` event can be emitted. `Start()` runs a
-synchronous backfill pass (via the `BlockIterator` callback) that iterates all
-blocks stored in the database from the last checkpoint slot onward and processes
-them through the same scan logic before subscribing to live events. The
-checkpoint (phase `"midnight"`)
+**Startup and catch-up**: `node.go` calls
+`LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
+indexer (via `Start()`) *before* `LedgerState.Start()`, so backfill can resolve
+epoch-keyed Midnight rows and the EventBus subscription exists before any
+`BlockActionApply` event can be emitted. `Start()` runs a synchronous backfill
+pass (via the `BlockIterator` callback) that iterates all blocks stored in the
+database from the last checkpoint slot onward and processes them through the
+same scan logic before subscribing to live events. The checkpoint (phase
+`"midnight"`)
 is stored in the `backfill_checkpoint` table via `SetBackfillCheckpoint` and is
 updated after each block — both during backfill and for each live event. Because
 the checkpoint write and the block's `Create*` writes are separate (not
