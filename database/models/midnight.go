@@ -130,7 +130,7 @@ func (MidnightAriadneRollback) TableName() string {
 type MidnightEpochCandidates struct {
 	ID             uint   `gorm:"primarykey"`
 	Epoch          uint64 `gorm:"uniqueIndex;not null"`
-	BlockNumber    uint64 `gorm:"index;not null"`
+	BlockNumber    uint64 `gorm:"index;not null;default:0"`
 	CandidatesCbor []byte `gorm:"not null"`
 }
 

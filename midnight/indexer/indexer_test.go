@@ -23,7 +23,6 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -1014,9 +1013,9 @@ func TestCandidateAddRemove(t *testing.T) {
 	idx.mu.RUnlock()
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
-	idx.handleEpochTransition(event.Event{
-		Data: event.EpochTransitionEvent{PreviousEpoch: 1, NewEpoch: 2},
-	})
+	idx.mu.Lock()
+	idx.advanceEpochLocked(2, 2)
+	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
@@ -1148,30 +1147,31 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
 
-	idx.handleEpochTransition(event.Event{
-		Data: event.EpochTransitionEvent{PreviousEpoch: 0, NewEpoch: 1},
-	})
+	idx.mu.Lock()
+	idx.advanceEpochLocked(0, 0) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	idx.advanceEpochLocked(1, 1) // advance to epoch 1, snapshots epoch 0
+	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "epoch transition must write a snapshot even with no candidates")
+	require.Len(t, snapshots, 1, "epoch boundary must write a snapshot even with no candidates")
 	assert.Equal(t, uint64(0), snapshots[0].Epoch)
 }
 
-// TestEpochTransitionIdempotent verifies that replaying the same epoch
-// transition does not produce duplicate snapshot rows.
+// TestEpochTransitionIdempotent verifies that advancing the epoch twice for
+// the same epoch does not produce duplicate snapshot rows.
 func TestEpochTransitionIdempotent(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
 
-	et := event.Event{
-		Data: event.EpochTransitionEvent{PreviousEpoch: 3, NewEpoch: 4},
-	}
-	idx.handleEpochTransition(et)
-	idx.handleEpochTransition(et)
+	idx.mu.Lock()
+	idx.advanceEpochLocked(3, 0)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	idx.advanceEpochLocked(4, 42) // advance to epoch 4, snapshots epoch 3
+	idx.advanceEpochLocked(4, 42) // no-op: same epoch, guard prevents a second snapshot
+	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "duplicate epoch transition must not write a second snapshot row")
+	require.Len(t, snapshots, 1, "advancing to the same epoch twice must not write a second snapshot row")
 }

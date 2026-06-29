@@ -154,9 +154,8 @@ type Indexer struct {
 	lastAriadneDatum  []byte
 	currentEpoch      uint64
 	hasCurrentEpoch   bool
-	snapshotEpoch     uint64
-	hasSnapshotEpoch  bool
-	epochSubID        event.EventSubscriberId
+	snapshotEpoch    uint64
+	hasSnapshotEpoch bool
 }
 
 // New creates and initialises a new Indexer. It parses the configured policy
@@ -360,17 +359,6 @@ func (idx *Indexer) Subscribe() {
 		event.EventQueueSize,
 		idx.handleBlockEvent,
 	)
-	// Subscribe to epoch transitions if any governance config is set.
-	if idx.config.CommitteeCandidateAddress != "" ||
-		idx.config.PermissionedCandidatePolicy != "" ||
-		idx.config.TechnicalCommitteeAddress != "" ||
-		idx.config.CouncilAddress != "" {
-		idx.epochSubID = idx.config.EventBus.SubscribeFuncWithBuffer(
-			event.EpochTransitionEventType,
-			event.EventQueueSize,
-			idx.handleEpochTransition,
-		)
-	}
 }
 
 // Backfill replays all stored blocks from the last checkpoint through the
@@ -464,9 +452,6 @@ func (idx *Indexer) updateCheckpoint(slot uint64) error {
 // Stop unsubscribes from block events.
 func (idx *Indexer) Stop() {
 	idx.config.EventBus.Unsubscribe(ledger.BlockEventType, idx.subID)
-	if idx.epochSubID != 0 {
-		idx.config.EventBus.Unsubscribe(event.EpochTransitionEventType, idx.epochSubID)
-	}
 }
 
 // fatal logs err and forwards it to FatalErrorFunc (typically node cancel).
@@ -1172,24 +1157,6 @@ func (idx *Indexer) hasAuthToken(out lcommon.TransactionOutput) bool {
 		}
 	}
 	return false
-}
-
-// handleEpochTransition processes an EpochTransitionEvent by snapshotting the
-// in-memory candidate set for the previous epoch and advancing the current epoch.
-func (idx *Indexer) handleEpochTransition(evt event.Event) {
-	epochEvt, ok := evt.Data.(event.EpochTransitionEvent)
-	if !ok {
-		return
-	}
-
-	idx.mu.Lock()
-	defer idx.mu.Unlock()
-
-	idx.snapshotEpochLocked(epochEvt.PreviousEpoch, 0)
-	if epochEvt.NewEpoch > idx.currentEpoch {
-		idx.currentEpoch = epochEvt.NewEpoch
-		idx.hasCurrentEpoch = true
-	}
 }
 
 // advanceEpochLocked snapshots all intermediate epochs between the current
