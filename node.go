@@ -462,20 +462,39 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// Create and start the Midnight indexer before LedgerState.Start so that
-	// (a) the EventBus subscription exists before any BlockActionApply events
-	// can be emitted, and (b) the synchronous backfill runs while no new
-	// blocks can arrive, eliminating the startup gap identified in #2114.
+	// (a) the synchronous backfill runs while no new blocks can arrive, and
+	// (b) the EventBus subscription exists before any BlockActionApply events
+	// can be emitted, eliminating the startup gap identified in #2114. The
+	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
+	// Ariadne/candidate rows.
 	if n.config.StorageModeEnum().IsAPI() {
+		if err := n.ledgerState.PrepareEpochCacheForStartup(); err != nil {
+			return fmt.Errorf("load epoch cache before Midnight indexer start: %w", err)
+		}
+		midnightCfg := n.config.Midnight()
 		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
-			EventBus:                n.eventBus,
-			Metadata:                n.db.Metadata(),
-			SlotTimer:               n.ledgerState,
-			Logger:                  n.config.logger,
-			CNightPolicyID:          n.config.Midnight().CNightPolicyID,
-			CNightAssetName:         n.config.Midnight().CNightAssetName,
-			MappingValidatorAddress: n.config.Midnight().MappingValidatorAddress,
-			AuthTokenPolicyID:       n.config.Midnight().AuthTokenPolicyID,
-			AuthTokenAssetName:      n.config.Midnight().AuthTokenAssetName,
+			EventBus:                    n.eventBus,
+			Metadata:                    n.db.Metadata(),
+			SlotTimer:                   n.ledgerState,
+			Logger:                      n.config.logger,
+			CNightPolicyID:              midnightCfg.CNightPolicyID,
+			CNightAssetName:             midnightCfg.CNightAssetName,
+			MappingValidatorAddress:     midnightCfg.MappingValidatorAddress,
+			AuthTokenPolicyID:           midnightCfg.AuthTokenPolicyID,
+			AuthTokenAssetName:          midnightCfg.AuthTokenAssetName,
+			TechnicalCommitteeAddress:   midnightCfg.TechnicalCommitteeAddress,
+			TechnicalCommitteePolicyID:  midnightCfg.TechnicalCommitteePolicyID,
+			CouncilAddress:              midnightCfg.CouncilAddress,
+			CouncilPolicyID:             midnightCfg.CouncilPolicyID,
+			PermissionedCandidatePolicy: midnightCfg.PermissionedCandidatePolicy,
+			CommitteeCandidateAddress:   midnightCfg.CommitteeCandidateAddress,
+			SlotToEpoch: func(slot uint64) (uint64, error) {
+				epoch, err := n.ledgerState.SlotToEpoch(slot)
+				if err != nil {
+					return 0, err
+				}
+				return epoch.EpochId, nil
+			},
 			BlockIterator: func(startSlot, endSlot uint64, fn func(models.Block) error) error {
 				return database.ForEachBlockInRangeDB(n.db, startSlot, endSlot, fn)
 			},
@@ -491,11 +510,13 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
 		n.midnightIndexer = midnightIdx
-		// Start runs backfill synchronously then subscribes to live events.
-		n.midnightIndexer.Start()
+		n.config.logger.Info("midnight indexer created, running backfill and subscribing to live events")
+		if err := n.midnightIndexer.Start(); err != nil {
+			return fmt.Errorf("starting midnight indexer: %w", err)
+		}
 	}
 
-	// Start ledger
+	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}

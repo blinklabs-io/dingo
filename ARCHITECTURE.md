@@ -596,7 +596,7 @@ type Node struct {
     meshAPI        *mesh.Server                   // Mesh (Rosetta) API
     midnightServer *midnightserver.Server         // Midnight MidnightState gRPC server
     offchainMetadataFetcher *offchainmetadata.Fetcher // Off-chain metadata
-    midnightIndexer *midnightindexer.Indexer      // Midnight cNIGHT/registration scanner
+    midnightIndexer *midnightindexer.Indexer      // Midnight cNIGHT/registration/governance/candidate scanner
     ouroboros      *ouroboros.Ouroboros            // Protocol handlers
     blockForger    *forging.BlockForger           // Block production
     leaderElection *leader.Election               // Slot leader checks
@@ -616,10 +616,19 @@ When `Node.Run()` is called, components are initialized in this order:
  5. LedgerState creation (UTXO tracking, validation)
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
- 8. Midnight indexer creation + backfill + EventBus subscription (if API storage mode).
-    Runs synchronously before LedgerState starts so no BlockActionApply events are
-    missed. Backfill iterates stored blocks from the last checkpoint slot onward;
-    inserts are idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
+ 8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
+    backfill + EventBus subscription (if API storage mode).
+    Indexes cNIGHT creates/spends, mapping-validator registrations/deregistrations,
+    Technical Committee and Council governance datums, Ariadne permissioned-candidate
+    parameters, and committee-candidate UTxO snapshots (taken at epoch boundaries via
+    block-event epoch advancement, with EpochTransitionEvent as a secondary path).
+    Runs synchronously before LedgerState starts so no
+    BlockActionApply events are missed. The epoch cache is prepared first,
+    inside a startup-only transaction, so backfill can resolve
+    Ariadne/candidate epoch keys without falling back to epoch 0. Backfill
+    iterates stored blocks from the last checkpoint slot onward; inserts are
+    idempotent (ON CONFLICT DO NOTHING) so a
+    crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
     `last_epoch_block_nonce` was persisted empty by the pre-fix
@@ -1413,7 +1422,7 @@ local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 
 ### Midnight Indexer (`midnight/indexer/`)
 
-An optional block scanner that indexes Midnight chain events into four
+An optional block scanner that indexes Midnight chain events into multiple
 `midnight_*` metadata tables. It subscribes to `ledger.block`
 (`ledger.BlockEventType`) and for each applied block scans every transaction:
 
@@ -1428,13 +1437,49 @@ An optional block scanner that indexes Midnight chain events into four
   in-memory tracked set.
 - **Deregistration**: an input consuming a tracked registration UTxO writes a
   `midnight_deregistrations` row and removes the entry from the tracked set.
+- **Technical Committee / Council governance**: an output at the configured TC
+  or Council address carrying the corresponding policy token and an inline datum
+  writes a `midnight_governance_datums` row (datum_type =
+  `technical_committee` or `council`). Distinct outputs are preserved as
+  history rows, while replay of the same output is ignored by the
+  `(datum_type, tx_hash, output_index)` key.
+- **Ariadne params**: an output carrying the configured
+  `permissioned_candidate_policy` token and an inline datum that differs from
+  the last stored datum upserts a `midnight_ariadne_params` row for the current
+  epoch. Before each upsert, the indexer persists the previous row for that
+  epoch (or its absence) in `midnight_ariadne_rollbacks` so a later rollback,
+  including one delivered after process restart, can restore/delete the row and
+  refresh the in-memory dedupe datum.
+- **Committee-candidate tracking**: an output at the configured candidate
+  address is added to an in-memory set; inputs consuming a tracked candidate
+  UTxO remove it from the set. At every epoch boundary the set is serialised as
+  deterministically ordered CBOR and upserted into `midnight_epoch_candidates`.
+  During block rollback, candidate removals recorded while applying that block
+  are restored, and candidate outputs created by the rolled-back block are
+  removed before any later epoch snapshot can use stale state. Persisted
+  candidate snapshots record the block that created them, so rollback deletes
+  snapshots created by the rolled-back block before readers can observe stale
+  `midnight_epoch_candidates` rows.
 
-**Startup and catch-up**: The indexer is created and started (via `Start()`) in
-`node.go` *before* `LedgerState.Start()`, so the EventBus subscription exists
-before any `BlockActionApply` event can be emitted. `Start()` additionally runs
-a synchronous backfill pass (via the `BlockIterator` callback) that iterates
-all blocks stored in the database from the last checkpoint slot onward and
-processes them through the same scan logic. The checkpoint (phase `"midnight"`)
+**Epoch tracking**: The indexer subscribes to `epoch.transition`
+(`event.EpochTransitionEventType`) as well as block events. Before scanning the
+first block of a new epoch, `handleBlockEvent` calls `advanceEpochLocked` to
+snapshot any skipped epochs and update `currentEpoch`. A late or duplicate
+`epoch.transition` event is ignored when the epoch has already been snapshotted
+by the block-event path (`hasSnapshotEpoch` guard). On cold start
+(`hasCurrentEpoch = false`), the first block's epoch is recorded without
+snapshotting so no spurious empty snapshot is written before any candidates are
+observed.
+
+**Startup and catch-up**: `node.go` calls
+`LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
+indexer (via `Start()`) *before* `LedgerState.Start()`, so backfill can resolve
+epoch-keyed Midnight rows and the EventBus subscription exists before any
+`BlockActionApply` event can be emitted. `Start()` runs a synchronous backfill
+pass (via the `BlockIterator` callback) that iterates all blocks stored in the
+database from the last checkpoint slot onward and processes them through the
+same scan logic before subscribing to live events. The checkpoint (phase
+`"midnight"`)
 is stored in the `backfill_checkpoint` table via `SetBackfillCheckpoint` and is
 updated after each block — both during backfill and for each live event. Because
 the checkpoint write and the block's `Create*` writes are separate (not
@@ -1445,10 +1490,13 @@ checkpoint update did not commit. All four `Create*` methods use
 (`tx_hash + output_index` / `utxo_tx_hash + utxo_index`), so re-processing an
 already-indexed block is safe and produces no duplicate rows.
 
-On startup the indexer also calls `FindUnspentMidnightAssetCreates` and
-`FindUnspentMidnightRegistrations` (NOT EXISTS subqueries) to restore both
-in-memory sets so that spends arriving in the first block after a restart are
-matched correctly. The indexer starts only in `storageMode: api`.
+On startup the indexer also calls `FindUnspentMidnightAssetCreates`,
+`FindUnspentMidnightRegistrations` (NOT EXISTS subqueries), and
+`GetMidnightCandidates` to restore all three in-memory sets so that spends and
+epoch snapshots arriving in the first block after a restart are handled
+correctly. The last stored Ariadne datum is also seeded from
+`GetLatestMidnightAriadneParams` so in-memory deduplication works across
+restarts. The indexer starts only in `storageMode: api`.
 
 ## Architectural Boundaries
 

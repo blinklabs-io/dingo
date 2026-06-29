@@ -4445,6 +4445,24 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	if err != nil {
 		return err
 	}
+	return ls.setEpochCache(txn, epochs)
+}
+
+// PrepareEpochCacheForStartup loads epoch metadata before LedgerState.Start().
+// It is startup-only: callers use this when another component needs
+// SlotToEpoch before the ledger processing loop is running.
+func (ls *LedgerState) PrepareEpochCacheForStartup() error {
+	if ls.ctx != nil {
+		return errors.New("PrepareEpochCacheForStartup must be called before LedgerState.Start")
+	}
+	txn := ls.db.Transaction(true)
+	defer txn.Release()
+	return txn.Do(func(txn *database.Txn) error {
+		return ls.loadEpochs(txn)
+	})
+}
+
+func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) error {
 	ls.epochCache = epochs
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {

@@ -40,6 +40,7 @@ var MigrateModels = []any{
 	&MoveInstantaneousRewards{},
 	&MoveInstantaneousRewardsReward{},
 	&MidnightAriadneParams{},
+	&MidnightAriadneRollback{},
 	&MidnightAssetCreate{},
 	&MidnightAssetSpend{},
 	&MidnightDeregistration{},
