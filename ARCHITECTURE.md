@@ -434,8 +434,8 @@ dingo/
 │       │   └── gcs/     # Google Cloud Storage
 │       └── metadata/    # Metadata plugins
 │           ├── sqlite/  # SQLite (default)
-│           ├── postgres/# PostgreSQL
-│           └── mysql/   # MySQL
+│           ├── postgres/# PostgreSQL (non-default, planned tag-gating #2586)
+│           └── mysql/   # MySQL (non-default, planned tag-gating #2586)
 ├── event/               # Event bus for decoupled communication
 │   ├── event.go         # EventBus, async delivery
 │   ├── epoch.go         # Epoch transition events
@@ -543,7 +543,7 @@ dingo/
 ├── midnight/            # Midnight MidnightState gRPC compatibility surface
 │   ├── midnight_state*.pb.go # Generated google.golang.org/grpc service stubs
 │   └── server/          # Native gRPC server lifecycle (reflection, health, TLS)
-│       └── server.go    # Serves a stub MidnightState (Unimplemented) scaffold
+│       └── server.go    # Serves the MidnightState gRPC compatibility surface
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -750,16 +750,17 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
     |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3 (optional)        |  - PostgreSQL (optional)|
-    |  - Google Cloud Storage (optional)|  - MySQL (optional)|
+    |  - AWS S3 (tag-gated)       |  - PostgreSQL (non-default)|
+    |  - Google Cloud Storage (tag-gated)|  - MySQL (non-default)|
     -------------------------------------------------
 ```
 
-Badger and SQLite are always compiled into Dingo. The non-default storage
-plugins (`s3`, `gcs`, `postgres`, and `mysql`) are compiled only when the
-`dingo_extra_plugins` build tag is enabled; project builds, CI, and release
-binaries opt into that tag, while a plain `go build ./cmd/dingo` produces a
-minimal binary.
+Badger and SQLite are always compiled into Dingo. The non-default blob plugins
+(`s3` and `gcs`) are compiled only when the `dingo_extra_plugins` build tag is
+enabled; project builds, CI, and release binaries opt into that tag, while a
+plain `go build ./cmd/dingo` omits the cloud blob SDKs. The non-default
+metadata plugins (`postgres` and `mysql`) are still compiled into plain builds
+on current `main`; issue #2586 tracks moving them behind the same tag.
 
 ### Storage Modes
 
@@ -773,10 +774,12 @@ Dingo supports two storage modes, configured via `storageMode`:
 In `storageMode: api` with `midnight.port > 0`, `node.go` starts
 `midnight/server.Server`, a native `google.golang.org/grpc` server (not
 ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
-on its own `midnight.host:midnight.port` listener. It registers a stub
-`MidnightState` service whose RPCs return `Unimplemented`, plus gRPC reflection
-and a `grpc_health_v1` health service reporting `SERVING`. TLS is enabled when
-the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the
+on its own `midnight.host:midnight.port` listener. It registers the
+`MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
+service reporting `SERVING`. The compatibility surface is still incomplete:
+merged work covers server lifecycle and block scanning, while the remaining RPC
+bodies are tracked by the Midnight plan and issues #2118/#2119. TLS is enabled
+when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the
 listener synchronously (so bind/cert errors surface immediately) and serves in
 a goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
 a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
