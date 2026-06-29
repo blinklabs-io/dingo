@@ -58,6 +58,44 @@ func TestGetTip(t *testing.T) {
 	}
 }
 
+func TestLastSlotInChunk(t *testing.T) {
+	imm, err := immutable.New(testDataDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	// testdata has 300 chunks (0..299); chunk 299's last block is the DB tip.
+	last, ok, err := imm.LastSlotInChunk(299)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+	if !ok {
+		t.Fatalf("expected chunk 299 to be present")
+	}
+	if last != 1295990 {
+		t.Fatalf("chunk 299 last slot: expected 1295990, got %d", last)
+	}
+	// Per-chunk last slots must increase with chunk number.
+	s0, ok0, err0 := imm.LastSlotInChunk(0)
+	s1, ok1, err1 := imm.LastSlotInChunk(1)
+	if err0 != nil || err1 != nil {
+		t.Fatalf("unexpected error: %v %v", err0, err1)
+	}
+	if !ok0 || !ok1 {
+		t.Fatalf("expected chunks 0 and 1 present")
+	}
+	if !(s0 < s1) {
+		t.Fatalf("expected chunk 0 last slot < chunk 1, got %d >= %d", s0, s1)
+	}
+	// An out-of-range chunk number returns ok=false, no error.
+	_, ok, err = imm.LastSlotInChunk(300)
+	if err != nil {
+		t.Fatalf("unexpected error for out-of-range chunk: %s", err)
+	}
+	if ok {
+		t.Fatalf("expected ok=false for out-of-range chunk 300")
+	}
+}
+
 func TestGetSpecificBlock(t *testing.T) {
 	imm, err := immutable.New(testDataDir)
 	if err != nil {

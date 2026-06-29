@@ -94,6 +94,17 @@ type BootstrapConfig struct {
 	// internally by downloadImmutables on a by-value copy of the config;
 	// callers do not populate it.
 	httpClient *http.Client
+	// OnChunkContiguous, when set, enables download<->processing
+	// pipelining: chunks are fetched in parallel (out of order) but this
+	// callback is invoked for each immutable file number in strict
+	// contiguous order (0,1,2,...) as soon as that prefix is fully
+	// downloaded. immutableDir is the directory the chunks are extracted
+	// into. It lets the caller copy blocks into the blob store while later
+	// chunks are still downloading. When nil, downloads run to completion
+	// before any processing (legacy behaviour). The callback runs on a
+	// single consumer goroutine and serializes processing, so it needs no
+	// internal locking.
+	OnChunkContiguous func(immutableDir string, num uint64) error
 }
 
 // VerificationMode selects the level of Mithril certificate verification.

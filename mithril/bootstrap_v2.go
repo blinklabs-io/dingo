@@ -681,7 +681,41 @@ func downloadImmutables(
 		CheckRedirect: httpsOnlyRedirect,
 	}
 
-	g, gctx := errgroup.WithContext(ctx)
+	// Optional download<->processing pipeline: chunks are fetched in
+	// parallel (out of order) but seq invokes OnChunkContiguous in strict
+	// 0,1,2,... order as each prefix completes, so the caller can copy
+	// blocks while later chunks still download. nil hook => no sequencer,
+	// legacy "download everything, then process" behaviour.
+	// errgroup only cancels its context when a download worker (a g.Go) returns
+	// an error. The pipelined copy runs in the sequencer's own goroutine, so a
+	// copy failure would otherwise let the remaining archives finish
+	// downloading before the error surfaced. Cancel the download context
+	// explicitly when the sequencer's processing fails so downloads stop at
+	// once.
+	dlCtx := ctx
+	var seq *inOrderSequencer
+	// copyErr captures a pipelined-copy failure as the root cause. It is
+	// written in the sequencer's single consumer goroutine and read only after
+	// seq.Wait() returns, so the mutex inside the sequencer orders the access.
+	var copyErr error
+	if cfg.OnChunkContiguous != nil {
+		var cancelDownloads context.CancelCauseFunc
+		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
+		defer cancelDownloads(nil)
+		seq = newInOrderSequencer(
+			totalArchives,
+			func(num uint64) error {
+				if err := cfg.OnChunkContiguous(immutableDir, num); err != nil {
+					copyErr = err
+					cancelDownloads(err)
+					return err
+				}
+				return nil
+			},
+		)
+	}
+
+	g, gctx := errgroup.WithContext(dlCtx)
 	g.SetLimit(immutableDownloadWorkers)
 	for num := range totalArchives {
 		g.Go(func() error {
@@ -692,6 +726,9 @@ func downloadImmutables(
 				immutableDir, num, digests,
 			); err == nil {
 				onArchiveDone(bytes)
+				if seq != nil {
+					seq.Complete(num)
+				}
 				return nil
 			}
 			var bytes int64
@@ -751,10 +788,29 @@ func downloadImmutables(
 				)
 			}
 			onArchiveDone(bytes)
+			if seq != nil {
+				seq.Complete(num)
+			}
 			return nil
 		})
 	}
-	return g.Wait()
+	err := g.Wait()
+	if seq != nil {
+		// A download failure (or the copy-triggered cancel above) means the
+		// contiguous prefix can never advance, so unblock the consumer's Wait.
+		if err != nil {
+			seq.Cancel(err)
+		}
+		// Block until the consumer drains; its error is redundant here (copyErr
+		// holds a processing failure and err holds a download failure).
+		_ = seq.Wait()
+		// A pipelined-copy failure is the root cause; surface it instead of the
+		// context cancellation it triggered in the download workers.
+		if copyErr != nil {
+			return copyErr
+		}
+	}
+	return err
 }
 
 // newImmutableProgress returns a callback that aggregates per-archive
