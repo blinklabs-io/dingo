@@ -628,9 +628,11 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 	}
 
 	if len(idx.candidateAddrBytes) > 0 {
-		// Snapshot cleanup only needs block.Number; do it before decoding so
-		// that a decode error cannot leave stale snapshot rows in the DB.
+		// Snapshot cleanup and spend-journal restore only need block.Number;
+		// do both before decoding so a decode error leaves neither stale DB
+		// rows nor unrestored in-memory candidates.
 		idx.rollbackCandidateSnapshots(block)
+		idx.rollbackCandidateSpends(block.Number)
 		decoded, err := block.Decode()
 		if err != nil {
 			if idx.config.Logger != nil {
@@ -641,7 +643,7 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 				)
 			}
 		} else {
-			idx.rollbackCandidates(block.Number, decoded.Transactions())
+			idx.rollbackCandidateCreates(block.Number, decoded.Transactions())
 		}
 	}
 
@@ -745,19 +747,25 @@ func (idx *Indexer) rollbackAriadne(blockNumber uint64) {
 	idx.mu.Unlock()
 }
 
-// rollbackCandidates restores candidate UTxOs spent by the rolled-back block
-// and removes candidate outputs created by that same block.
-func (idx *Indexer) rollbackCandidates(blockNumber uint64, txs []lcommon.Transaction) {
+// rollbackCandidateSpends restores candidate UTxOs that were spent (removed
+// from idx.candidates) by the rolled-back block, using the candidateRemovals
+// journal.  It does not require block decoding.
+func (idx *Indexer) rollbackCandidateSpends(blockNumber uint64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-
 	if removals := idx.candidateRemovals[blockNumber]; len(removals) > 0 {
 		for key, datum := range removals {
 			idx.candidates[key] = bytes.Clone(datum)
 		}
 		delete(idx.candidateRemovals, blockNumber)
 	}
+}
 
+// rollbackCandidateCreates removes candidate UTxOs that were created by the
+// rolled-back block.  It requires the decoded transactions.
+func (idx *Indexer) rollbackCandidateCreates(blockNumber uint64, txs []lcommon.Transaction) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
 	for _, tx := range txs {
 		txHashBytes := tx.Id().Bytes()
 		for outIdx, out := range tx.Outputs() {
