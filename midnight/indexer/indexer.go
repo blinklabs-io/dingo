@@ -156,12 +156,12 @@ type Indexer struct {
 	// lets us restore currentEpoch to the pre-advance value so that a
 	// re-applied block at the same slot is assigned the correct epoch instead
 	// of the post-transition one.  Entries are pruned beyond candidateRollbackDepth.
-	epochTransitions  map[uint64]uint64 // blockNumber → prevCurrentEpoch
-	lastAriadneDatum  []byte
-	currentEpoch      uint64
-	hasCurrentEpoch   bool
-	snapshotEpoch     uint64
-	hasSnapshotEpoch  bool
+	epochTransitions map[uint64]uint64 // blockNumber to prevCurrentEpoch
+	lastAriadneDatum []byte
+	currentEpoch     uint64
+	hasCurrentEpoch  bool
+	snapshotEpoch    uint64
+	hasSnapshotEpoch bool
 }
 
 // New creates and initialises a new Indexer. It parses the configured policy

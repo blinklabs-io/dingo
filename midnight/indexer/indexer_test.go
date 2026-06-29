@@ -1118,9 +1118,11 @@ func TestCandidateRollbackDeletesPersistedSnapshots(t *testing.T) {
 	idx.mu.RUnlock()
 }
 
-// TestCandidateRollbackDecodeFailureKeepsPersistedSnapshots verifies rollback
-// does not delete snapshot rows unless the rolled-back block can be decoded.
-func TestCandidateRollbackDecodeFailureKeepsPersistedSnapshots(t *testing.T) {
+// TestCandidateRollbackDecodeFailureDeletesSnapshots verifies that snapshot
+// rows for the rolled-back block are cleaned up even when the block cannot be
+// decoded.  Snapshot cleanup only requires block.Number, so it runs before the
+// decode attempt; a decode failure must not leave stale snapshot rows.
+func TestCandidateRollbackDecodeFailureDeletesSnapshots(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
@@ -1136,8 +1138,7 @@ func TestCandidateRollbackDecodeFailureKeepsPersistedSnapshots(t *testing.T) {
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
-	require.Len(t, snapshots, 1, "decode failure must not delete candidate snapshots")
-	assert.Equal(t, block.Number, snapshots[0].BlockNumber)
+	require.Len(t, snapshots, 0, "snapshot for rolled-back block must be deleted even on decode failure")
 }
 
 // TestCandidateEmptySnapshot verifies that an epoch transition with no
