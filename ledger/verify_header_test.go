@@ -17,6 +17,7 @@ package ledger
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"io"
 	"log/slog"
@@ -105,13 +106,18 @@ func createTestBlock(
 		epochNonce[i] = nonceSeed + byte(i) //nolint:gosec
 	}
 
-	// Create OpCert: cold key signs [hot_vkey, seq_number, kes_period]
+	// Create OpCert: the cold key signs the cardano-ledger OCertSignable
+	// representation — KES vkey (32) || issue number (8 BE) || KES period
+	// (8 BE), the raw concatenation real cardano-cli opcerts use, NOT a CBOR
+	// array. See ledger/forging/keys.go ValidateOpCert and
+	// verifyOpCertColdSignature.
 	opCertSeqNum := uint32(0)
 	opCertKesPeriod := uint32(0)
-	opCertBody := []any{kesPk, opCertSeqNum, opCertKesPeriod}
-	opCertBodyBytes, err := cbor.Encode(opCertBody)
-	require.NoError(t, err, "CBOR encode OpCert body should succeed")
-	opCertSig := ed25519.Sign(coldPrivKey, opCertBodyBytes)
+	var opCertBody [48]byte
+	copy(opCertBody[:32], kesPk)
+	binary.BigEndian.PutUint64(opCertBody[32:40], uint64(opCertSeqNum))
+	binary.BigEndian.PutUint64(opCertBody[40:48], uint64(opCertKesPeriod))
+	opCertSig := ed25519.Sign(coldPrivKey, opCertBody[:])
 
 	if tamper == tamperOpCertSig {
 		opCertSig[0] ^= 0xFF
@@ -333,23 +339,22 @@ func TestVerifyBlockHeader_TamperedVRFProof(t *testing.T) {
 	)
 }
 
-// TestVerifyBlockHeader_TamperedOpCertSignature verifies the current
-// behavior for blocks with tampered OpCert signatures. Because
-// verifyBlockHeader uses SkipStakePoolValidation (OpCert cold-key
-// signature verification requires pool registration data from ledger
-// state), the tampered signature is not caught at this layer. Full
-// OpCert validation happens during stake pool verification in the
-// ledger processing pipeline.
+// TestVerifyBlockHeader_TamperedOpCertSignature verifies that the
+// VerifyBlock-based crypto path (verifyBlockHeaderHex) does not, by itself,
+// validate the OpCert cold-key signature: it runs with SkipStakePoolValidation.
+// Inbound OpCert validation lives in the sibling verifyOpCertHeaderCrypto
+// (exercised by verify_opcert_test.go), which verifyBlockHeaderCrypto invokes
+// alongside this path. This test pins the boundary so the two layers stay
+// distinct.
 func TestVerifyBlockHeader_TamperedOpCertSignature(t *testing.T) {
 	tb := createTestBlock(t, [32]byte{4}, 77, tamperOpCertSig)
 	err := verifyBlockHeader(tb.block, tb.epochNonce, tb.slotsPerKesPeriod)
-	// OpCert signature is NOT verified at this layer (requires ledger
-	// state for pool registration lookup), so tampering does not cause
-	// an error here.
+	// The hex/VerifyBlock layer does not verify the OpCert signature, so
+	// tampering does not cause an error here; verifyOpCertHeaderCrypto does.
 	assert.NoError(
 		t,
 		err,
-		"OpCert signature not validated at header-only layer",
+		"OpCert signature not validated by the VerifyBlock crypto layer",
 	)
 }
 
