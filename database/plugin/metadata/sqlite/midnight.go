@@ -250,7 +250,7 @@ func (d *MetadataStoreSqlite) InsertMidnightGovernanceDatum(
 	if err != nil {
 		return err
 	}
-	return db.Create(datum).Error
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(datum).Error
 }
 
 func (d *MetadataStoreSqlite) DeleteMidnightGovernanceDatumsByBlock(
@@ -411,4 +411,16 @@ func (d *MetadataStoreSqlite) UpsertMidnightEpochCandidates(
 		Columns:   []clause.Column{{Name: "epoch"}},
 		DoUpdates: clause.AssignmentColumns([]string{"candidates_cbor"}),
 	}).Create(ec).Error
+}
+
+func (d *MetadataStoreSqlite) DeleteMidnightEpochCandidatesFromEpoch(
+	txn types.Txn,
+	epoch uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("epoch >= ?", epoch).
+		Delete(&models.MidnightEpochCandidates{}).Error
 }

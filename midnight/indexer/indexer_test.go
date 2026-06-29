@@ -641,9 +641,9 @@ func TestLoadTrackedUTxOs_RestoredOnStartup(t *testing.T) {
 // Governance / Ariadne / candidate tests
 // -------------------------------------------------------------------------
 
-// buildGovOutput builds an output at the given address carrying an inline datum.
-// policyHex may be empty to produce a plain ADA output (used to verify the
-// indexer does NOT record datums for unrecognised addresses).
+// buildGovOutput builds a plain ADA output at the given address carrying an
+// inline datum. It is used for candidate-address tests where no policy token is
+// required.
 func buildGovOutput(t *testing.T, addr string, datumCbor []byte) lcommon.TransactionOutput {
 	t.Helper()
 	out, err := mockledger.NewTransactionOutputBuilder().
@@ -771,6 +771,33 @@ func TestGovernanceTwoOutputsProduceTwoRows(t *testing.T) {
 	var rows []models.MidnightGovernanceDatum
 	require.NoError(t, store.DB().Find(&rows).Error)
 	require.Len(t, rows, 2, "each governance output must produce its own DB row")
+}
+
+// TestGovernanceDatumReplayIdempotent verifies that replaying the same block
+// does not duplicate the same governance output after restart/backfill overlap.
+func TestGovernanceDatumReplayIdempotent(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	govOut := buildPolicyOutput(t, testMappingAddr, testGovPolicyID, datum)
+	dummyIn := buildInput(t, pad32("e0000001"), 0)
+	txHash := pad32("e0000002")
+	tx := buildTx(t, txHash, []lcommon.TransactionInput{dummyIn}, []lcommon.TransactionOutput{govOut})
+	block := testBlock(9, 900, 0x09)
+
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 9_000))
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{tx}, 9_000))
+
+	var rows []models.MidnightGovernanceDatum
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Len(t, rows, 1)
+	assert.Equal(t, models.MidnightGovernanceDatumTypeTechnicalCommittee, rows[0].DatumType)
+	assert.Equal(t, uint32(0), rows[0].OutputIndex)
+	expectedTxHash, err := hex.DecodeString(txHash)
+	require.NoError(t, err)
+	assert.Equal(t, expectedTxHash, rows[0].TxHash)
 }
 
 // TestAriadneParamsDeduplicated verifies that re-scanning the same Ariadne
@@ -1053,6 +1080,43 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 	assert.Equal(t, datum, restoredDatum)
 	assert.False(t, hasKey2AfterRollback, "candidate created by rolled-back block must be removed")
 	assert.False(t, hasRemovalLog, "rollback removal log must be cleared after use")
+}
+
+// TestCandidateRollbackDeletesPersistedSnapshots verifies that candidate
+// rollback removes persisted epoch snapshots that may contain stale candidates.
+func TestCandidateRollbackDeletesPersistedSnapshots(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	txHash := pad32("ca200001")
+	createTx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32("ca200000"), 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	block := testBlock(1, 100, 0xD1)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+
+	idx.handleEpochTransition(event.Event{
+		Data: event.EpochTransitionEvent{PreviousEpoch: 1, NewEpoch: 2},
+	})
+	var snapshots []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	require.Len(t, snapshots, 1, "snapshot must exist before rollback")
+	assert.Equal(t, uint64(1), snapshots[0].Epoch)
+
+	idx.rollbackCandidateSnapshots(block)
+	idx.rollbackCandidates(block.Number, []lcommon.Transaction{createTx})
+
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	assert.Empty(t, snapshots, "rollback must delete stale persisted candidate snapshots")
+
+	idx.mu.RLock()
+	assert.True(t, !idx.hasSnapshotEpoch || idx.snapshotEpoch < 1, "snapshot marker must allow future epoch 1 snapshot rewrite")
+	idx.mu.RUnlock()
 }
 
 // TestCandidateEmptySnapshot verifies that an epoch transition with no

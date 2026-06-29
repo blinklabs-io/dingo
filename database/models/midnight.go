@@ -90,7 +90,9 @@ func (MidnightDeregistration) TableName() string {
 // MidnightGovernanceDatum stores latest Technical Committee and Council datums.
 type MidnightGovernanceDatum struct {
 	ID          uint   `gorm:"primarykey"`
-	DatumType   string `gorm:"size:32;index:idx_midnight_governance_datums_latest,priority:1;not null"`
+	DatumType   string `gorm:"size:32;index:idx_midnight_governance_datums_latest,priority:1;uniqueIndex:idx_midnight_governance_datums_output,priority:1;not null"`
+	TxHash      []byte `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:2;size:32;not null"`
+	OutputIndex uint32 `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:3;not null"`
 	Datum       []byte `gorm:"not null"`
 	BlockNumber uint64 `gorm:"index:idx_midnight_governance_datums_latest,priority:2,sort:desc;not null"`
 }

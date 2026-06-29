@@ -1431,6 +1431,7 @@ type MetadataStore interface {
 	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
+	DeleteMidnightEpochCandidatesFromEpoch(types.Txn, uint64) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

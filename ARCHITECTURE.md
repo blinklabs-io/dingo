@@ -1440,8 +1440,9 @@ An optional block scanner that indexes Midnight chain events into multiple
 - **Technical Committee / Council governance**: an output at the configured TC
   or Council address carrying the corresponding policy token and an inline datum
   writes a `midnight_governance_datums` row (datum_type =
-  `technical_committee` or `council`). Always INSERT — never overwrites — so
-  the full history is preserved.
+  `technical_committee` or `council`). Distinct outputs are preserved as
+  history rows, while replay of the same output is ignored by the
+  `(datum_type, tx_hash, output_index)` key.
 - **Ariadne params**: an output carrying the configured
   `permissioned_candidate_policy` token and an inline datum that differs from
   the last stored datum upserts a `midnight_ariadne_params` row for the current
@@ -1455,7 +1456,9 @@ An optional block scanner that indexes Midnight chain events into multiple
   deterministically ordered CBOR and upserted into `midnight_epoch_candidates`.
   During block rollback, candidate removals recorded while applying that block
   are restored, and candidate outputs created by the rolled-back block are
-  removed before any later epoch snapshot can use stale state.
+  removed before any later epoch snapshot can use stale state. Persisted
+  candidate snapshots for the rolled-back block's epoch and later are deleted
+  so readers do not observe stale `midnight_epoch_candidates` rows.
 
 **Epoch tracking**: The indexer subscribes to `epoch.transition`
 (`event.EpochTransitionEventType`) as well as block events. Before scanning the

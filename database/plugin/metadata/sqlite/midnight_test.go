@@ -28,9 +28,27 @@ func TestMidnightGovernanceDatumLatestAtOrBefore(t *testing.T) {
 	store := setupTestStore(t)
 
 	for _, datum := range []*models.MidnightGovernanceDatum{
-		{DatumType: models.MidnightGovernanceDatumTypeTechnicalCommittee, Datum: []byte{1}, BlockNumber: 10},
-		{DatumType: models.MidnightGovernanceDatumTypeCouncil, Datum: []byte{2}, BlockNumber: 15},
-		{DatumType: models.MidnightGovernanceDatumTypeTechnicalCommittee, Datum: []byte{3}, BlockNumber: 20},
+		{
+			DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+			TxHash:      []byte{1},
+			OutputIndex: 0,
+			Datum:       []byte{1},
+			BlockNumber: 10,
+		},
+		{
+			DatumType:   models.MidnightGovernanceDatumTypeCouncil,
+			TxHash:      []byte{2},
+			OutputIndex: 0,
+			Datum:       []byte{2},
+			BlockNumber: 15,
+		},
+		{
+			DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+			TxHash:      []byte{3},
+			OutputIndex: 0,
+			Datum:       []byte{3},
+			BlockNumber: 20,
+		},
 	} {
 		require.NoError(t, store.InsertMidnightGovernanceDatum(nil, datum))
 	}

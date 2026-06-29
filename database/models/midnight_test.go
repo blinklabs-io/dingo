@@ -66,6 +66,11 @@ func TestMidnightModelsAutoMigrate(t *testing.T) {
 			index: "idx_midnight_governance_datums_latest",
 		},
 		{
+			model: &MidnightGovernanceDatum{},
+			table: "midnight_governance_datums",
+			index: "idx_midnight_governance_datums_output",
+		},
+		{
 			model: &MidnightAriadneParams{},
 			table: "midnight_ariadne_params",
 			index: "idx_midnight_ariadne_params_epoch",

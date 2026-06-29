@@ -636,6 +636,7 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 	}
 
 	if len(idx.candidateAddrBytes) > 0 {
+		idx.rollbackCandidateSnapshots(block)
 		decoded, err := block.Decode()
 		if err != nil {
 			if idx.config.Logger != nil {
@@ -649,6 +650,46 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 		}
 		idx.rollbackCandidates(block.Number, decoded.Transactions())
 	}
+}
+
+func (idx *Indexer) rollbackCandidateSnapshots(block models.Block) {
+	if idx.config.SlotToEpoch == nil {
+		return
+	}
+	epoch, err := idx.config.SlotToEpoch(block.Slot)
+	if err != nil {
+		if idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: resolve candidate rollback epoch",
+				"error", err,
+				"block", block.Number,
+				"slot", block.Slot,
+			)
+		}
+		return
+	}
+	if err := idx.config.Metadata.DeleteMidnightEpochCandidatesFromEpoch(nil, epoch); err != nil {
+		if idx.config.Logger != nil {
+			idx.config.Logger.Error(
+				"midnight indexer: rollback epoch candidate snapshots",
+				"error", err,
+				"block", block.Number,
+				"epoch", epoch,
+			)
+		}
+		return
+	}
+
+	idx.mu.Lock()
+	if idx.hasSnapshotEpoch && idx.snapshotEpoch >= epoch {
+		if epoch == 0 {
+			idx.hasSnapshotEpoch = false
+			idx.snapshotEpoch = 0
+		} else {
+			idx.snapshotEpoch = epoch - 1
+		}
+	}
+	idx.mu.Unlock()
 }
 
 func (idx *Indexer) rollbackAriadne(blockNumber uint64) {
@@ -1028,6 +1069,8 @@ func (idx *Indexer) processOutput(
 			nil,
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeTechnicalCommittee,
+				TxHash:      txHashBytes,
+				OutputIndex: outIdx,
 				Datum:       datumCbor,
 				BlockNumber: block.Number,
 			},
@@ -1048,6 +1091,8 @@ func (idx *Indexer) processOutput(
 			nil,
 			&models.MidnightGovernanceDatum{
 				DatumType:   models.MidnightGovernanceDatumTypeCouncil,
+				TxHash:      txHashBytes,
+				OutputIndex: outIdx,
 				Datum:       datumCbor,
 				BlockNumber: block.Number,
 			},
