@@ -620,7 +620,13 @@ When `Node.Run()` is called, components are initialized in this order:
     Runs synchronously before LedgerState starts so no BlockActionApply events are
     missed. Backfill iterates stored blocks from the last checkpoint slot onward;
     inserts are idempotent (ON CONFLICT DO NOTHING) so a crash-restart replay is safe.
- 9. LedgerState start
+ 9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
+    `healEmptyLabNonces`: it repairs any epoch record whose
+    `last_epoch_block_nonce` was persisted empty by the pre-fix
+    endorser-block/`BlockBeforeSlot` collision — re-deriving the lab from the
+    real boundary block and recomputing the affected next epoch's nonce in the
+    cache so leader-VRF verification matches the network (an empty lab would
+    otherwise collapse that epoch's nonce to the NeutralNonce identity).
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros

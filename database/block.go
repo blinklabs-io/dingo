@@ -632,7 +632,21 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 		if strings.HasSuffix(string(k), types.BlockBlobMetadataKeySuffix) {
 			continue
 		}
-		return blockByKey(txn, k)
+		blk, blkErr := blockByKey(txn, k)
+		if blkErr != nil {
+			return models.Block{}, blkErr
+		}
+		// Skip synthetic blobs. Genesis CBOR and Leios endorser blocks are
+		// persisted at block-blob keys via SetGenesisCbor with ID=0 and no
+		// chain index entry; they are not ranking blocks. Returning one here
+		// would feed callers (epoch-nonce labNonce/candidate computation,
+		// chain reconciliation) a non-block whose PrevHash/Type are empty —
+		// the source of the empty-labNonce epoch-nonce corruption. Real
+		// blocks created via BlockCreate always have ID >= BlockInitialIndex.
+		if blk.ID == 0 {
+			continue
+		}
+		return blk, nil
 	}
 	if err := it.Err(); err != nil {
 		return models.Block{}, err

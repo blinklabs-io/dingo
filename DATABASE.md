@@ -344,7 +344,15 @@ endorser transactions' CBOR is written as a standalone blob under a `bp` +
 `(endorser-block slot, endorser-block hash)` key via `SetGenesisCbor` — which,
 like the genesis UTxO blob, writes only the `bp` and `bp..._metadata` keys and
 deliberately omits the `bi`/`bh` index keys, so the chain iterator never treats
-it as a chain block. Each endorser transaction's `t` entry and its outputs' `u`
+it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
+created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
+scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
+synthetic endorser/genesis blob is never returned as the "previous block." This
+matters for the epoch-nonce computation — the lagged `last_epoch_block_nonce`
+(lab) is derived from the previous epoch's last block's `PrevHash`; returning an
+endorser blob there (its `PrevHash` is empty) saves an empty lab, collapsing the
+next epoch's nonce to the NeutralNonce identity and failing every leader-VRF
+check in that epoch. Each endorser transaction's `t` entry and its outputs' `u`
 entries store ordinary `DOFF` references whose `block_slot`/`block_hash` point at
 that endorser-block blob, so cold-extract resolution is identical to chain-block
 transactions. The transactions' metadata rows, however, are recorded under the
