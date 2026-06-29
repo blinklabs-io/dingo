@@ -1457,8 +1457,9 @@ An optional block scanner that indexes Midnight chain events into multiple
   During block rollback, candidate removals recorded while applying that block
   are restored, and candidate outputs created by the rolled-back block are
   removed before any later epoch snapshot can use stale state. Persisted
-  candidate snapshots for the rolled-back block's epoch and later are deleted
-  so readers do not observe stale `midnight_epoch_candidates` rows.
+  candidate snapshots record the block that created them, so rollback deletes
+  snapshots created by the rolled-back block before readers can observe stale
+  `midnight_epoch_candidates` rows.
 
 **Epoch tracking**: The indexer subscribes to `epoch.transition`
 (`event.EpochTransitionEventType`) as well as block events. Before scanning the

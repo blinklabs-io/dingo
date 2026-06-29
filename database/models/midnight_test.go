@@ -85,6 +85,11 @@ func TestMidnightModelsAutoMigrate(t *testing.T) {
 			table: "midnight_epoch_candidates",
 			index: "idx_midnight_epoch_candidates_epoch",
 		},
+		{
+			model: &MidnightEpochCandidates{},
+			table: "midnight_epoch_candidates",
+			index: "idx_midnight_epoch_candidates_block_number",
+		},
 	}
 
 	for _, tt := range tests {

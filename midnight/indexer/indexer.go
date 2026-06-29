@@ -519,7 +519,7 @@ func (idx *Indexer) handleBlockEvent(evt event.Event) {
 				}
 			} else {
 				idx.mu.Lock()
-				idx.advanceEpochLocked(epoch)
+				idx.advanceEpochLocked(epoch, block.Number)
 				idx.mu.Unlock()
 			}
 		}
@@ -636,7 +636,6 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 	}
 
 	if len(idx.candidateAddrBytes) > 0 {
-		idx.rollbackCandidateSnapshots(block)
 		decoded, err := block.Decode()
 		if err != nil {
 			if idx.config.Logger != nil {
@@ -648,47 +647,26 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 			}
 			return
 		}
+		idx.rollbackCandidateSnapshots(block)
 		idx.rollbackCandidates(block.Number, decoded.Transactions())
 	}
 }
 
 func (idx *Indexer) rollbackCandidateSnapshots(block models.Block) {
-	if idx.config.SlotToEpoch == nil {
-		return
-	}
-	epoch, err := idx.config.SlotToEpoch(block.Slot)
-	if err != nil {
-		if idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: resolve candidate rollback epoch",
-				"error", err,
-				"block", block.Number,
-				"slot", block.Slot,
-			)
-		}
-		return
-	}
-	if err := idx.config.Metadata.DeleteMidnightEpochCandidatesFromEpoch(nil, epoch); err != nil {
+	if err := idx.config.Metadata.DeleteMidnightEpochCandidatesByBlock(nil, block.Number); err != nil {
 		if idx.config.Logger != nil {
 			idx.config.Logger.Error(
 				"midnight indexer: rollback epoch candidate snapshots",
 				"error", err,
 				"block", block.Number,
-				"epoch", epoch,
 			)
 		}
 		return
 	}
 
 	idx.mu.Lock()
-	if idx.hasSnapshotEpoch && idx.snapshotEpoch >= epoch {
-		if epoch == 0 {
-			idx.hasSnapshotEpoch = false
-			idx.snapshotEpoch = 0
-		} else {
-			idx.snapshotEpoch = epoch - 1
-		}
-	}
+	idx.hasSnapshotEpoch = false
+	idx.snapshotEpoch = 0
 	idx.mu.Unlock()
 }
 
@@ -821,7 +799,7 @@ func (idx *Indexer) processBlock(
 			idx.mu.RUnlock()
 		} else {
 			idx.mu.Lock()
-			idx.advanceEpochLocked(epoch)
+			idx.advanceEpochLocked(epoch, block.Number)
 			govEpoch = idx.currentEpoch
 			idx.mu.Unlock()
 		}
@@ -1207,7 +1185,7 @@ func (idx *Indexer) handleEpochTransition(evt event.Event) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	idx.snapshotEpochLocked(epochEvt.PreviousEpoch)
+	idx.snapshotEpochLocked(epochEvt.PreviousEpoch, 0)
 	if epochEvt.NewEpoch > idx.currentEpoch {
 		idx.currentEpoch = epochEvt.NewEpoch
 		idx.hasCurrentEpoch = true
@@ -1218,7 +1196,7 @@ func (idx *Indexer) handleEpochTransition(evt event.Event) {
 // epoch and the new epoch, then sets currentEpoch = epoch.
 // If hasCurrentEpoch is false (cold start), it skips snapshotting and just
 // sets the current epoch. idx.mu must be held.
-func (idx *Indexer) advanceEpochLocked(epoch uint64) {
+func (idx *Indexer) advanceEpochLocked(epoch uint64, blockNumber uint64) {
 	if !idx.hasCurrentEpoch {
 		idx.currentEpoch = epoch
 		idx.hasCurrentEpoch = true
@@ -1228,14 +1206,14 @@ func (idx *Indexer) advanceEpochLocked(epoch uint64) {
 		return
 	}
 	for e := idx.currentEpoch; e < epoch; e++ {
-		idx.snapshotEpochLocked(e)
+		idx.snapshotEpochLocked(e, blockNumber)
 	}
 	idx.currentEpoch = epoch
 }
 
 // snapshotEpochLocked writes the current candidate set as the epoch snapshot.
 // Skips if this epoch has already been snapshotted. idx.mu must be held.
-func (idx *Indexer) snapshotEpochLocked(epoch uint64) {
+func (idx *Indexer) snapshotEpochLocked(epoch uint64, blockNumber uint64) {
 	if idx.hasSnapshotEpoch && epoch <= idx.snapshotEpoch {
 		return
 	}
@@ -1271,6 +1249,7 @@ func (idx *Indexer) snapshotEpochLocked(epoch uint64) {
 		nil,
 		&models.MidnightEpochCandidates{
 			Epoch:          epoch,
+			BlockNumber:    blockNumber,
 			CandidatesCbor: snapshotCbor,
 		},
 	); err != nil {

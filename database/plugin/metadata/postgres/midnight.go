@@ -409,18 +409,18 @@ func (d *MetadataStorePostgres) UpsertMidnightEpochCandidates(
 	}
 	return db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "epoch"}},
-		DoUpdates: clause.AssignmentColumns([]string{"candidates_cbor"}),
+		DoUpdates: clause.AssignmentColumns([]string{"block_number", "candidates_cbor"}),
 	}).Create(ec).Error
 }
 
-func (d *MetadataStorePostgres) DeleteMidnightEpochCandidatesFromEpoch(
+func (d *MetadataStorePostgres) DeleteMidnightEpochCandidatesByBlock(
 	txn types.Txn,
-	epoch uint64,
+	blockNumber uint64,
 ) error {
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
-	return db.Where("epoch >= ?", epoch).
+	return db.Where("block_number = ?", blockNumber).
 		Delete(&models.MidnightEpochCandidates{}).Error
 }

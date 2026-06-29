@@ -1100,23 +1100,45 @@ func TestCandidateRollbackDeletesPersistedSnapshots(t *testing.T) {
 	block := testBlock(1, 100, 0xD1)
 	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
 
-	idx.handleEpochTransition(event.Event{
-		Data: event.EpochTransitionEvent{PreviousEpoch: 1, NewEpoch: 2},
-	})
+	boundaryBlock := testBlock(2, 200, 0xD2)
+	require.NoError(t, idx.processBlock(boundaryBlock, nil, 2_000))
+
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
 	require.Len(t, snapshots, 1, "snapshot must exist before rollback")
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
+	assert.Equal(t, boundaryBlock.Number, snapshots[0].BlockNumber)
 
-	idx.rollbackCandidateSnapshots(block)
-	idx.rollbackCandidates(block.Number, []lcommon.Transaction{createTx})
+	idx.rollbackCandidateSnapshots(boundaryBlock)
 
 	require.NoError(t, store.DB().Find(&snapshots).Error)
 	assert.Empty(t, snapshots, "rollback must delete stale persisted candidate snapshots")
 
 	idx.mu.RLock()
-	assert.True(t, !idx.hasSnapshotEpoch || idx.snapshotEpoch < 1, "snapshot marker must allow future epoch 1 snapshot rewrite")
+	assert.False(t, idx.hasSnapshotEpoch, "snapshot marker must allow future snapshot rewrite")
 	idx.mu.RUnlock()
+}
+
+// TestCandidateRollbackDecodeFailureKeepsPersistedSnapshots verifies rollback
+// does not delete snapshot rows unless the rolled-back block can be decoded.
+func TestCandidateRollbackDecodeFailureKeepsPersistedSnapshots(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	block := testBlock(3, 300, 0xD3)
+	require.NoError(t, store.UpsertMidnightEpochCandidates(nil, &models.MidnightEpochCandidates{
+		Epoch:          2,
+		BlockNumber:    block.Number,
+		CandidatesCbor: []byte{0x80},
+	}))
+
+	idx.rollbackBlock(block)
+
+	var snapshots []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&snapshots).Error)
+	require.Len(t, snapshots, 1, "decode failure must not delete candidate snapshots")
+	assert.Equal(t, block.Number, snapshots[0].BlockNumber)
 }
 
 // TestCandidateEmptySnapshot verifies that an epoch transition with no
