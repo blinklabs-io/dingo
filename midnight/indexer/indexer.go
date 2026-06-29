@@ -643,7 +643,7 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 				)
 			}
 		} else {
-			idx.rollbackCandidateCreates(block.Number, decoded.Transactions())
+			idx.rollbackCandidateCreates(decoded.Transactions())
 		}
 	}
 
@@ -763,7 +763,7 @@ func (idx *Indexer) rollbackCandidateSpends(blockNumber uint64) {
 
 // rollbackCandidateCreates removes candidate UTxOs that were created by the
 // rolled-back block.  It requires the decoded transactions.
-func (idx *Indexer) rollbackCandidateCreates(blockNumber uint64, txs []lcommon.Transaction) {
+func (idx *Indexer) rollbackCandidateCreates(txs []lcommon.Transaction) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 	for _, tx := range txs {

@@ -1068,7 +1068,7 @@ func TestCandidateRollbackRestoresSpentAndRemovesCreated(t *testing.T) {
 	assert.True(t, hasKey2AfterApply, "new candidate must be present after applying block 2")
 
 	idx.rollbackCandidateSpends(block2.Number)
-	idx.rollbackCandidateCreates(block2.Number, []lcommon.Transaction{spendAndCreateTx})
+	idx.rollbackCandidateCreates([]lcommon.Transaction{spendAndCreateTx})
 
 	idx.mu.RLock()
 	restoredDatum, hasKey1AfterRollback := idx.candidates[key1]
