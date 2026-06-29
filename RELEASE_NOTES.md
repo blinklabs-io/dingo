@@ -1,5 +1,62 @@
 # Dingo Releases
 
+## v0.60.1 (June 29, 2026)
+
+**Title:** Faster Mithril bootstrap, safer at-tip nonce handling, and refreshed dependencies
+
+**Date:** June 29, 2026
+
+**Version:** v0.60.1
+
+Hi folks! Here’s what we shipped in v0.60.1.
+
+### ✨ What's New
+
+* Noted **no new features in this patch release:** This patch release focuses on improvements, fixes, dependency refreshes, example maintenance, CI maintenance, and release history updates.
+
+### 💪 Improvements
+
+* Improved **overlap Mithril bootstrap downloads and contiguous processing more effectively:** Mithril bootstrap now keeps immutable chunks moving in order while downloads continue in parallel, which helps bootstrap work overlap more effectively, records progress more safely, and makes failed bootstrap attempts less likely to leave incomplete sync state behind.
+* Updated **refresh the bundled nview interface for clearer node status visibility:** The bundled `nview` interface now uses v0.15.0, which corrects the block propagation percentage display and the reported node version so operators can trust the built in status view more easily.
+* Refined **strengthen Plutus decoding and evaluation handling:** Plutus data handling now validates and decodes more safely, avoids panic failures more effectively, and improves evaluation performance for affected workloads.
+* Enhanced **refresh Google Cloud Storage behavior with newer upstream recovery safeguards:** Google Cloud Storage backed deployments now benefit from refreshed upstream retry handling and checksum fixes, which support steadier object storage behavior.
+* Modernized **refresh database-layer behavior with safer ORM handling:** Database backed deployments now benefit from upstream fixes that improve panic safety and migration handling in the database layer.
+* Strengthened **keep build cache automation current in release workflows:** Build and validation automation now uses refreshed cache maintenance, which helps routine release and CI runs stay current.
+* Advanced **keep Go setup automation current in build and publish workflows:** Build and publish automation now uses a refreshed Go setup workflow so release pipeline maintenance stays current.
+* Polished **refresh artifact attestation automation for release workflows:** Artifact attestation and release automation now track a refreshed workflow release, which keeps release provenance maintenance current.
+* Refreshed **keep the Sundae preview example aligned with current Node type definitions:** The `dingo-sundae-preview` example now uses updated Node type definitions, which keeps its local TypeScript environment current.
+* Streamlined **refresh the Blockfrost explorer example with current Vite tooling:** The `dingo-blockfrost-explorer` example now uses refreshed Vite tooling, which keeps local frontend work more current.
+* Sharpened **refresh the Sundae preview example with current Vite tooling:** The `dingo-sundae-preview` example now uses refreshed Vite tooling, which keeps local frontend work more current.
+* Tuned **keep the Blockfrost explorer example aligned with current Node type definitions:** The `dingo-blockfrost-explorer` example now uses updated Node type definitions, which keeps its local TypeScript environment current.
+* Updated **keep the published v0.60.0 release history current:** The in repository release history now includes the published v0.60.0 notes, which keeps recent release context current and easier to review.
+
+### 🔧 Fixes
+
+* Fixed **correct at-tip epoch nonce handling around Dijkstra boundaries:** Previous-block lookup now ignores synthetic blobs, and startup repairs empty persisted nonce inputs, which prevents leader VRF verification failures and incorrect nonce handling around epoch boundaries.
+
+### 📋 What You Need to Know
+
+* Clarified **expect Mithril bootstrap to overlap downloads and processing more effectively:** Mithril bootstrap now continues downloading while it processes contiguous immutable data, and failed bootstrap attempts are less likely to leave incomplete sync state behind.
+* Highlighted **expect corrected at-tip epoch nonce handling around Dijkstra era boundaries:** Dijkstra and Leios operators should see safer restart behavior and correct nonce handling around epoch boundaries.
+* Emphasized **expect clearer bundled node-status screens in container deployments:** Container users who rely on the bundled node-status interface should now see corrected block propagation percentages and the correct node version.
+* Summarized **expect refreshed upstream behavior across Plutus, cloud storage, and database-backed deployments:** Plutus evaluation and decoding, Google Cloud Storage behavior, and database-backed deployments all benefit from refreshed upstream handling in this release.
+* Reviewed **expect refreshed local frontend tooling in both bundled examples:** Both example applications now use refreshed frontend tooling and current Node type definitions for smoother local maintenance.
+* Noted **review the published v0.60.0 notes in the in repository release history:** The repository release history now includes the published v0.60.0 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.60.0 (June 28, 2026)
 
 **Title:** Per-peer blockfetch visibility, Dijkstra forging correctness, and leaner default builds
