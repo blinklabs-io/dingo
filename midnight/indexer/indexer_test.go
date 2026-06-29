@@ -16,6 +16,7 @@ package indexer
 
 import (
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
@@ -826,6 +827,75 @@ func TestAriadneParamsDeduplicated(t *testing.T) {
 	lastDatum := idx.lastAriadneDatum
 	idx.mu.RUnlock()
 	assert.Equal(t, datumB, lastDatum)
+}
+
+// TestBackfillUsesResolvedEpochForAriadne exercises the startup/backfill path:
+// with SlotToEpoch available before ledger processing starts, Ariadne params
+// are stored under the real block epoch instead of defaulting to epoch 0.
+func TestBackfillUsesResolvedEpochForAriadne(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	tx := buildTx(
+		t,
+		pad32("ba000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("ba000000"), 0)},
+		[]lcommon.TransactionOutput{buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum)},
+	)
+	block := testBlock(7, 250, 0xB7)
+	idx.config.BlockIterator = func(startSlot, endSlot uint64, fn func(models.Block) error) error {
+		assert.Equal(t, uint64(0), startSlot)
+		return fn(block)
+	}
+	idx.config.blockDecoder = func(got models.Block) ([]lcommon.Transaction, error) {
+		assert.Equal(t, block.Number, got.Number)
+		return []lcommon.Transaction{tx}, nil
+	}
+
+	require.NoError(t, idx.Backfill())
+
+	params, err := store.GetMidnightAriadneParamsByEpoch(2, nil)
+	require.NoError(t, err)
+	require.NotNil(t, params)
+	assert.Equal(t, datum, params.Datum)
+
+	epochZero, err := store.GetMidnightAriadneParamsByEpoch(0, nil)
+	require.NoError(t, err)
+	assert.Nil(t, epochZero, "backfill must not write Ariadne params under epoch 0")
+}
+
+// TestProcessBlockEpochResolutionErrorSkipsEpochKeyedWrites verifies that a
+// SlotToEpoch failure stops processing before Ariadne/candidate epoch rows can
+// be written with epoch 0 or stale context.
+func TestProcessBlockEpochResolutionErrorSkipsEpochKeyedWrites(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+	idx.config.SlotToEpoch = func(uint64) (uint64, error) {
+		return 0, errors.New("epoch cache not ready")
+	}
+
+	datum := simpleDatumCbor(t)
+	tx := buildTx(
+		t,
+		pad32("be000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("be000000"), 0)},
+		[]lcommon.TransactionOutput{buildPolicyOutput(t, testOtherAddr, testPermPolicyID, datum)},
+	)
+
+	err := idx.processBlock(testBlock(8, 250, 0xB8), []lcommon.Transaction{tx}, 2_500)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "epoch resolution required")
+
+	var ariadneRows []models.MidnightAriadneParams
+	require.NoError(t, store.DB().Find(&ariadneRows).Error)
+	assert.Empty(t, ariadneRows)
+
+	var candidateRows []models.MidnightEpochCandidates
+	require.NoError(t, store.DB().Find(&candidateRows).Error)
+	assert.Empty(t, candidateRows)
 }
 
 // TestAriadneRollbackRestoresPriorEpochState verifies that rollback undoes

@@ -458,10 +458,15 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 
 	// Create and start the Midnight indexer before LedgerState.Start so that
-	// (a) the EventBus subscription exists before any BlockActionApply events
-	// can be emitted, and (b) the synchronous backfill runs while no new
-	// blocks can arrive, eliminating the startup gap identified in #2114.
+	// (a) the synchronous backfill runs while no new blocks can arrive, and
+	// (b) the EventBus subscription exists before any BlockActionApply events
+	// can be emitted, eliminating the startup gap identified in #2114. The
+	// epoch cache is loaded first because Midnight backfill writes epoch-keyed
+	// Ariadne/candidate rows.
 	if n.config.storageMode.IsAPI() {
+		if err := n.ledgerState.LoadEpochCache(); err != nil {
+			return fmt.Errorf("load epoch cache before Midnight indexer start: %w", err)
+		}
 		midnightIdx, err := midnightindexer.New(midnightindexer.Config{
 			EventBus:                n.eventBus,
 			Metadata:                n.db.Metadata(),
@@ -501,13 +506,13 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("creating midnight indexer: %w", err)
 		}
 		n.midnightIndexer = midnightIdx
-		n.config.logger.Info("midnight indexer created, starting backfill")
-		// Start runs backfill synchronously then subscribes to live events.
-		n.midnightIndexer.Start()
-		n.config.logger.Info("midnight indexer started, subscribed to live block and epoch events")
+		n.config.logger.Info("midnight indexer created, running backfill and subscribing to live events")
+		if err := n.midnightIndexer.Start(); err != nil {
+			return fmt.Errorf("starting midnight indexer: %w", err)
+		}
 	}
 
-	// Start ledger
+	// Start ledger.
 	if err := n.ledgerState.Start(n.ctx); err != nil { //nolint:contextcheck
 		return fmt.Errorf("failed to start ledger: %w", err)
 	}

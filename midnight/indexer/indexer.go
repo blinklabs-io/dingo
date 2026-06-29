@@ -69,6 +69,7 @@ type Config struct {
 	// events, processing any blocks whose slot is >= the last checkpoint slot.
 	// Node.go provides this via database.ForEachBlockInRangeDB.
 	BlockIterator func(startSlot, endSlot uint64, fn func(models.Block) error) error
+	blockDecoder  func(models.Block) ([]lcommon.Transaction, error)
 	// FatalErrorFunc is called when the indexer encounters an error that
 	// cannot be recovered without risking a checkpoint gap. Node wiring
 	// should cancel the node context so the process exits cleanly.
@@ -349,19 +350,11 @@ func (idx *Indexer) loadTrackedUTxOs() error {
 	return nil
 }
 
-// Start runs a catch-up backfill (if BlockIterator is configured) and then
-// subscribes to live ledger block events. The backfill completes synchronously
-// before any live events are processed, so the caller must not start
-// LedgerState until Start returns.
-func (idx *Indexer) Start() {
-	if idx.config.BlockIterator != nil {
-		if err := idx.backfill(); err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Warn(
-				"midnight indexer: backfill incomplete; missed blocks will be recovered on next restart",
-				"error", err,
-			)
-		}
-	}
+// Subscribe registers the EventBus handlers for live block and epoch events.
+// It must be called before LedgerState.Start so that no event is missed.
+// If Backfill is called before Subscribe, no ledger block producer should be
+// running yet.
+func (idx *Indexer) Subscribe() {
 	idx.subID = idx.config.EventBus.SubscribeFuncWithBuffer(
 		ledger.BlockEventType,
 		event.EventQueueSize,
@@ -380,26 +373,57 @@ func (idx *Indexer) Start() {
 	}
 }
 
+// Backfill replays all stored blocks from the last checkpoint through the
+// database. The configured SlotToEpoch resolver must already be usable before
+// this method is called.
+func (idx *Indexer) Backfill() error {
+	if idx.config.BlockIterator == nil {
+		return nil
+	}
+	return idx.backfill()
+}
+
+// Start runs catch-up backfill and then subscribes to live events. Callers must
+// ensure SlotToEpoch is ready and that ledger block processing has not started
+// yet, so there is no overlap between backfill and live events.
+func (idx *Indexer) Start() error {
+	if err := idx.Backfill(); err != nil {
+		return err
+	}
+	idx.Subscribe()
+	return nil
+}
+
 // backfill iterates all blocks stored in the database starting from the last
 // checkpoint slot and processes each one through the midnight indexer.
-// Because Start calls backfill before subscribing to live events, and
-// LedgerState has not yet started at this point, there is no overlap between
-// backfill and live events, so no duplicate rows can arise.
 func (idx *Indexer) backfill() error {
 	return idx.config.BlockIterator(
 		idx.checkpointSlot,
 		math.MaxUint64,
 		func(block models.Block) error {
-			decoded, err := block.Decode()
-			if err != nil {
-				if idx.config.Logger != nil {
-					idx.config.Logger.Warn(
-						"midnight indexer: backfill: skipping undecodable block",
-						"slot", block.Slot,
-						"error", err,
+			var txs []lcommon.Transaction
+			if idx.config.blockDecoder != nil {
+				decodedTxs, err := idx.config.blockDecoder(block)
+				if err != nil {
+					return fmt.Errorf(
+						"midnight indexer: backfill: decode block slot=%d block=%d: %w",
+						block.Slot, block.Number, err,
 					)
 				}
-				return nil
+				txs = decodedTxs
+			} else {
+				decoded, err := block.Decode()
+				if err != nil {
+					if idx.config.Logger != nil {
+						idx.config.Logger.Warn(
+							"midnight indexer: backfill: skipping undecodable block",
+							"slot", block.Slot,
+							"error", err,
+						)
+					}
+					return nil
+				}
+				txs = decoded.Transactions()
 			}
 			var timestampMs uint64
 			if idx.config.SlotTimer != nil {
@@ -407,7 +431,7 @@ func (idx *Indexer) backfill() error {
 					timestampMs = uint64(t.UnixMilli()) //nolint:gosec
 				}
 			}
-			if err := idx.processBlock(block, decoded.Transactions(), timestampMs); err != nil {
+			if err := idx.processBlock(block, txs, timestampMs); err != nil {
 				return fmt.Errorf(
 					"midnight indexer: backfill: process block slot=%d block=%d: %w",
 					block.Slot, block.Number, err,
@@ -738,15 +762,27 @@ func (idx *Indexer) processBlock(
 	// processBlock directly, so we must resolve and advance here as well.
 	var govEpoch uint64
 	if idx.config.SlotToEpoch != nil {
-		if epoch, err := idx.config.SlotToEpoch(block.Slot); err == nil {
+		epoch, err := idx.config.SlotToEpoch(block.Slot)
+		if err != nil {
+			// Ariadne and candidate-snapshot writes are keyed by epoch: writing
+			// them under epoch 0 or a stale epoch would silently corrupt the
+			// index. Return an error so the caller (backfill or fatal path)
+			// can surface it rather than persisting incorrect data.
+			if len(idx.permCandidatePolicyBytes) > 0 || len(idx.candidateAddrBytes) > 0 {
+				return fmt.Errorf(
+					"midnight indexer: epoch resolution required for slot=%d but SlotToEpoch failed: %w",
+					block.Slot, err,
+				)
+			}
+			// Governance-only path: epoch is not a write key; fall back safely.
+			idx.mu.RLock()
+			govEpoch = idx.currentEpoch
+			idx.mu.RUnlock()
+		} else {
 			idx.mu.Lock()
 			idx.advanceEpochLocked(epoch)
 			govEpoch = idx.currentEpoch
 			idx.mu.Unlock()
-		} else {
-			idx.mu.RLock()
-			govEpoch = idx.currentEpoch
-			idx.mu.RUnlock()
 		}
 	} else {
 		idx.mu.RLock()
