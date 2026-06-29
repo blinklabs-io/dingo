@@ -433,8 +433,8 @@ func (n *Node) Run(ctx context.Context) error {
 		n.db.SetBlobStore(barkBlobStore)
 	}
 
-	if n.config.historyExpiry.Enabled {
-		prunerFreq := n.config.historyExpiry.Frequency
+	if n.config.HistoryExpiry().Enabled {
+		prunerFreq := n.config.HistoryExpiry().Frequency
 		if prunerFreq <= 0 {
 			prunerFreq = time.Hour
 		}
@@ -634,16 +634,16 @@ func (n *Node) Run(ctx context.Context) error {
 	if k := n.ledgerState.SecurityParam(); k > 0 {
 		chainSelectorSecurityParam = uint64(k) //nolint:gosec
 	}
-	genesisWindowSlots := n.config.genesisWindowSlots
+	genesisWindowSlots := n.config.GenesisBootstrap().WindowSlots
 	if genesisWindowSlots == 0 {
 		genesisWindowSlots = chainselection.GenesisWindowSlotsForParams(
 			chainSelectorSecurityParam,
 			n.ledgerState.ActiveSlotCoeff(),
 		)
 	}
-	genesisSelectionMode := n.config.genesisBootstrap &&
-		!n.config.intersectTip &&
-		len(n.config.intersectPoints) == 0
+	genesisSelectionMode := n.config.GenesisBootstrap().Enabled &&
+		!n.config.IntersectTip() &&
+		len(n.config.IntersectPoints()) == 0
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
 			Logger:             n.config.logger,
@@ -868,23 +868,23 @@ func (n *Node) Run(ctx context.Context) error {
 			PeerRequestFunc:                      n.ouroboros.RequestPeersFromPeer,
 			LedgerPeerProvider:                   ledgerPeerProvider,
 			UseLedgerAfterSlot:                   useLedgerAfterSlot,
-			LedgerPeerTarget:                     n.config.ledgerPeerTarget,
-			TargetNumberOfKnownPeers:             n.config.targetNumberOfKnownPeers,
-			TargetNumberOfEstablishedPeers:       n.config.targetNumberOfEstablishedPeers,
-			TargetNumberOfActivePeers:            n.config.targetNumberOfActivePeers,
-			ActivePeersTopologyQuota:             n.config.activePeersTopologyQuota,
-			ActivePeersGossipQuota:               n.config.activePeersGossipQuota,
-			ActivePeersLedgerQuota:               n.config.activePeersLedgerQuota,
-			InboundWarmTarget:                    n.config.inboundWarmTarget,
-			InboundHotQuota:                      n.config.inboundHotQuota,
-			InboundMinTenure:                     n.config.inboundMinTenure,
-			InboundHotScoreThreshold:             n.config.inboundHotScoreThreshold,
-			InboundPruneAfter:                    n.config.inboundPruneAfter,
-			InboundDuplexOnlyForHot:              n.config.inboundDuplexOnlyForHot,
-			InboundCooldown:                      n.config.inboundCooldown,
-			MinHotPeers:                          n.config.minHotPeers,
-			ReconcileInterval:                    n.config.reconcileInterval,
-			InactivityTimeout:                    n.config.inactivityTimeout,
+			LedgerPeerTarget:                     n.config.LedgerPeerTarget(),
+			TargetNumberOfKnownPeers:             n.config.TargetNumberOfKnownPeers(),
+			TargetNumberOfEstablishedPeers:       n.config.TargetNumberOfEstablishedPeers(),
+			TargetNumberOfActivePeers:            n.config.TargetNumberOfActivePeers(),
+			ActivePeersTopologyQuota:             n.config.ActivePeersTopologyQuota(),
+			ActivePeersGossipQuota:               n.config.ActivePeersGossipQuota(),
+			ActivePeersLedgerQuota:               n.config.ActivePeersLedgerQuota(),
+			InboundWarmTarget:                    n.config.InboundWarmTarget(),
+			InboundHotQuota:                      n.config.InboundHotQuota(),
+			InboundMinTenure:                     n.config.InboundMinTenure(),
+			InboundHotScoreThreshold:             n.config.InboundHotScoreThreshold(),
+			InboundPruneAfter:                    n.config.InboundPruneAfter(),
+			InboundDuplexOnlyForHot:              n.config.InboundDuplexOnlyForHot(),
+			InboundCooldown:                      n.config.InboundCooldown(),
+			MinHotPeers:                          n.config.MinHotPeers(),
+			ReconcileInterval:                    n.config.ReconcileInterval(),
+			InactivityTimeout:                    n.config.InactivityTimeout(),
 			SyncProgressProvider:                 n.ledgerState,
 			BootstrapPromotionMinDiversityGroups: n.config.bootstrapPromotionMinDiversityGroups,
 		},
