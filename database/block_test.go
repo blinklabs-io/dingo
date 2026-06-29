@@ -72,3 +72,61 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 	require.Equal(t, lowerIDBlock.ID, block.ID)
 	require.Equal(t, lowerIDBlock.Hash, block.Hash)
 }
+
+// TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
+// highest real ranking block before a slot and skips synthetic blobs. Genesis
+// CBOR and Leios endorser blocks are persisted at block-blob keys via
+// SetGenesisCbor with ID=0 and an empty PrevHash; returning one to the
+// epoch-nonce lab computation saves an empty lastEpochBlockNonce, which
+// collapses the next epoch's nonce to the NeutralNonce identity and fails every
+// leader-VRF check (the Dijkstra/Leios at-tip wedge).
+func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
+	db := newTestDB(t)
+
+	realBlock := models.Block{
+		ID:       7,
+		Slot:     100,
+		Hash:     bytes.Repeat([]byte{0xaa}, 32),
+		PrevHash: bytes.Repeat([]byte{0xbb}, 32),
+		Cbor:     []byte{0x80},
+		Number:   7,
+		Type:     6,
+	}
+	require.NoError(t, db.BlockCreate(realBlock, nil))
+
+	// Synthetic endorser-block blob at a HIGHER slot than the real block but
+	// still before the query slot. SetGenesisCbor stores it with ID=0 and a
+	// nil PrevHash.
+	ebHash := bytes.Repeat([]byte{0xcc}, 32)
+	require.NoError(t, db.SetGenesisCbor(110, ebHash, []byte{0x80}, nil))
+
+	got, err := BlockBeforeSlot(db, 120)
+	require.NoError(t, err)
+	require.Equal(
+		t,
+		realBlock.Slot,
+		got.Slot,
+		"BlockBeforeSlot must skip the synthetic blob at slot 110 and return "+
+			"the real ranking block at slot 100",
+	)
+	require.Equal(t, realBlock.Hash, got.Hash)
+	require.Equal(
+		t,
+		realBlock.PrevHash,
+		got.PrevHash,
+		"the real block's PrevHash must survive — it feeds the epoch-nonce lab",
+	)
+}
+
+// TestBlockBeforeSlotSyntheticOnlyNotFound verifies that when only synthetic
+// blobs precede the slot (no real ranking block), BlockBeforeSlot reports
+// ErrBlockNotFound rather than returning a synthetic blob.
+func TestBlockBeforeSlotSyntheticOnlyNotFound(t *testing.T) {
+	db := newTestDB(t)
+
+	ebHash := bytes.Repeat([]byte{0xcc}, 32)
+	require.NoError(t, db.SetGenesisCbor(110, ebHash, []byte{0x80}, nil))
+
+	_, err := BlockBeforeSlot(db, 120)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
