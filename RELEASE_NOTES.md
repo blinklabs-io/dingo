@@ -30,6 +30,33 @@ Hi folks! Here’s what we shipped in v0.60.1.
 * Tuned **keep the Blockfrost explorer example aligned with current Node type definitions:** The `dingo-blockfrost-explorer` example now uses updated Node type definitions, which keeps its local TypeScript environment current.
 * Updated **keep the published v0.60.0 release history current:** The in repository release history now includes the published v0.60.0 notes, which keeps recent release context current and easier to review.
 
+### 🔧 Fixes
+
+* Fixed **correct at-tip epoch nonce handling around Dijkstra boundaries:** Previous-block lookup now ignores synthetic blobs, and startup repairs empty persisted nonce inputs, which prevents leader VRF verification failures and incorrect nonce handling around epoch boundaries.
+
+### 📋 What You Need to Know
+
+* Clarified **expect Mithril bootstrap to overlap downloads and processing more effectively:** Mithril bootstrap now continues downloading while it processes contiguous immutable data, and failed bootstrap attempts are less likely to leave incomplete sync state behind.
+* Highlighted **expect corrected at-tip epoch nonce handling around Dijkstra era boundaries:** Dijkstra and Leios operators should see safer restart behavior and correct nonce handling around epoch boundaries.
+* Emphasized **expect clearer bundled node-status screens in container deployments:** Container users who rely on the bundled node-status interface should now see corrected block propagation percentages and the correct node version.
+* Summarized **expect refreshed upstream behavior across Plutus, cloud storage, and database-backed deployments:** Plutus evaluation and decoding, Google Cloud Storage behavior, and database-backed deployments all benefit from refreshed upstream handling in this release.
+* Reviewed **expect refreshed local frontend tooling in both bundled examples:** Both example applications now use refreshed frontend tooling and current Node type definitions for smoother local maintenance.
+* Noted **review the published v0.60.0 notes in the in repository release history:** The repository release history now includes the published v0.60.0 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.60.0 (June 28, 2026)
 
 **Title:** Per-peer blockfetch visibility, Dijkstra forging correctness, and leaner default builds
