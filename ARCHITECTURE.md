@@ -1030,8 +1030,33 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 `ledger/verify_header.go` performs cryptographic validation of block headers:
 - VRF proof verification against the epoch nonce
 - KES signature verification with period checks
-- Operational certificate chain validation
 - Slot leader eligibility checking
+
+### Operational Certificate Validation
+
+Inbound operational-certificate (opcert) validation is split by its data
+dependency across two points in the pipeline:
+
+- **Stateless checks at header verification** (`ledger/verify_opcert.go`,
+  invoked from `verifyBlockHeaderCrypto`): the cold-key signature and the KES
+  period expiry. The cold verification key is the header's issuer vkey — a
+  registered pool's cold key is, by construction, the vkey whose Blake2b224
+  hash is its pool id. `opCertFromHeader` extracts the opcert across the
+  Shelley- and Babbage-family header layouts; `gouroboros`'
+  `ledger.VerifyOpCertSignature` and `ledger.ValidateKesPeriod`
+  (against `maxKESEvolutions` from Shelley genesis) perform the checks. Running
+  here rejects forged or expired opcerts before the block body is fetched.
+  These checks share the existing skip-during-historical-sync gating.
+- **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
+  from `ledgerProcessBlock` under `shouldValidate`): a read-before-write of the
+  pool's stored opcert counter inside the validation transaction. The counter
+  must equal the last-seen value or be exactly one greater; backward counters
+  (stale/stolen hot key) and gapped counters (skipped rotation) are rejected. A
+  pool with no recorded counter has no baseline (genuine first sighting, or a
+  Mithril-restored start) and is accepted as the baseline. Rollback safety is
+  inherited from the per-`(pool, slot)` `PoolOpCertSequence` store, which drops
+  rows past the rollback slot and recomputes the latest counter, so the counter
+  never advances for a block that is later rolled back.
 
 ### Epoch Nonce Computation
 

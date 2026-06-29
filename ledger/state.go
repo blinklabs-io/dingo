@@ -48,14 +48,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -3932,12 +3928,49 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
-	if seqNum, ok := opCertSequenceNumber(block); ok {
+	if opCert, ok := opCertFromHeader(block.Header()); ok {
 		issuerVkey := block.IssuerVkey()
 		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+		// Counter monotonicity is the stateful half of inbound opcert
+		// validation: read the pool's last-seen counter before writing this
+		// block's, inside the same validation transaction. The opcert counter
+		// must equal the last-seen counter or be exactly one greater. A
+		// backward counter signals a stale or stolen hot key; a gapped counter
+		// signals a skipped rotation. Both must be rejected. Only enforced
+		// under shouldValidate (live, current-era blocks): historical blocks
+		// were already network-validated, and the over-increment rule postdates
+		// the early eras replayed during sync. Rollback safety is inherited
+		// from the per-(pool,slot) PoolOpCertSequence store, which drops rows
+		// past the rollback slot and recomputes the latest counter.
+		if shouldValidate {
+			stored, found, err := ls.db.LatestPoolOpCertSequence(
+				poolKeyHash,
+				txn,
+			)
+			if err != nil {
+				if delta != nil {
+					delta.Release()
+				}
+				return nil, fmt.Errorf(
+					"read opcert counter for pool %x: %w",
+					poolKeyHash,
+					err,
+				)
+			}
+			if err := validateOpCertCounter(
+				stored,
+				found,
+				opCert.IssueNumber,
+			); err != nil {
+				if delta != nil {
+					delta.Release()
+				}
+				return nil, fmt.Errorf("pool %x: %w", poolKeyHash, err)
+			}
+		}
 		if err := ls.db.UpdatePoolOpCertSequence(
 			poolKeyHash,
-			uint64(seqNum),
+			opCert.IssueNumber,
 			point.Slot,
 			txn,
 		); err != nil {
@@ -3948,31 +3981,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
-}
-
-func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
-	switch header := block.Header().(type) {
-	case *dijkstra.DijkstraBlockHeader:
-		// Distinct concrete type embedding BabbageBlockHeader; a type
-		// switch won't fall through to the Babbage case, so it needs an
-		// explicit entry or per-pool OpCert sequence tracking is skipped
-		// for Dijkstra-era blocks.
-		return header.Body.OpCert.SequenceNumber, true
-	case *shelley.ShelleyBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *allegra.AllegraBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *mary.MaryBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *alonzo.AlonzoBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *babbage.BabbageBlockHeader:
-		return header.Body.OpCert.SequenceNumber, true
-	case *conway.ConwayBlockHeader:
-		return header.Body.OpCert.SequenceNumber, true
-	default:
-		return 0, false
-	}
 }
 
 // updateTipMetrics updates gauges from in-memory state. Call under ls.Lock().
