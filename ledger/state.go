@@ -4448,8 +4448,14 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 	ls.epochCache = epochs
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
-		// Set current epoch and era
-		ls.currentEpoch = epochs[len(epochs)-1]
+		// Recover epoch records whose LastEpochBlockNonce was persisted empty
+		// by the pre-fix BlockBeforeSlot endorser-block collision (see
+		// healEmptyLabNonces). New syncs are unaffected now that
+		// BlockBeforeSlotTxn skips synthetic blobs.
+		ls.healEmptyLabNonces()
+		// Set current epoch and era after healing so currentEpoch reflects
+		// any repaired nonce in epochCache.
+		ls.currentEpoch = ls.epochCache[len(ls.epochCache)-1]
 		eraDesc, _ := ls.eraById(ls.currentEpoch.EraId)
 		if eraDesc == nil {
 			return fmt.Errorf("unknown era ID %d", ls.currentEpoch.EraId)
@@ -4457,11 +4463,6 @@ func (ls *LedgerState) loadEpochs(txn *database.Txn) error {
 		ls.currentEra = *eraDesc
 		// Update metrics
 		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
-		// Recover epoch records whose LastEpochBlockNonce was persisted empty
-		// by the pre-fix BlockBeforeSlot endorser-block collision (see
-		// healEmptyLabNonces). New syncs are unaffected now that
-		// BlockBeforeSlotTxn skips synthetic blobs.
-		ls.healEmptyLabNonces()
 		return nil
 	}
 	// Populate initial epoch

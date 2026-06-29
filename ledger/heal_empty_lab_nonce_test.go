@@ -22,7 +22,9 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -127,4 +129,64 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
+}
+
+func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	boundaryPrevHash := bytes.Repeat([]byte{0xbb}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       3,
+		Slot:     150,
+		Hash:     bytes.Repeat([]byte{0x01}, 32),
+		PrevHash: boundaryPrevHash,
+		Cbor:     []byte{0x80},
+		Number:   3,
+		Type:     6,
+	}, nil))
+
+	candidate := bytes.Repeat([]byte{0xaa}, 32)
+	require.NoError(t, db.SetEpoch(
+		200,
+		5,
+		bytes.Repeat([]byte{0x55}, 32),
+		nil,
+		nil,
+		nil,
+		eras.ShelleyEraDesc.Id,
+		1,
+		100,
+		nil,
+	))
+	require.NoError(t, db.SetEpoch(
+		300,
+		6,
+		append([]byte(nil), candidate...),
+		nil,
+		candidate,
+		bytes.Repeat([]byte{0x66}, 32),
+		eras.ShelleyEraDesc.Id,
+		1,
+		100,
+		nil,
+	))
+
+	want, err := lcommon.CalculateEpochNonce(candidate, boundaryPrevHash, nil)
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.metrics.init(prometheus.NewRegistry())
+	require.NoError(t, ls.loadEpochs(nil))
+
+	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
+	require.Equal(t, want.Bytes(), ls.currentEpoch.Nonce)
+	require.Equal(t, want.Bytes(), ls.EpochNonce(6))
+	require.NotEqual(t, candidate, ls.EpochNonce(6))
 }
