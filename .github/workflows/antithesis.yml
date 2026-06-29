@@ -78,7 +78,7 @@ jobs:
           build-args: |
             COMMIT_HASH=${{ github.sha }}
       - name: Attest dingo-antithesis GHCR image
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
@@ -107,7 +107,7 @@ jobs:
           tags: ${{ steps.configurator-meta.outputs.tags }}
           labels: ${{ steps.configurator-meta.outputs.labels }}
       - name: Attest configurator GHCR image
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-configurator
           subject-digest: ${{ steps.configurator-push.outputs.digest }}
@@ -136,7 +136,7 @@ jobs:
           tags: ${{ steps.txpump-meta.outputs.tags }}
           labels: ${{ steps.txpump-meta.outputs.labels }}
       - name: Attest txpump GHCR image
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
           subject-digest: ${{ steps.txpump-push.outputs.digest }}
@@ -165,7 +165,7 @@ jobs:
           tags: ${{ steps.analysis-meta.outputs.tags }}
           labels: ${{ steps.analysis-meta.outputs.labels }}
       - name: Attest analysis GHCR image
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0 https://github.com/actions/attest/releases/tag/v4.1.0
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
           subject-digest: ${{ steps.analysis-push.outputs.digest }}
