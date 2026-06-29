@@ -3568,6 +3568,48 @@ func (ls *LedgerState) ledgerProcessBlock(
 			return nil, err
 		}
 	}
+	// Validate the operational certificate counter before processing the
+	// block's transactions, so a stale or gapped opcert is rejected by this
+	// cheap stateful check rather than after full transaction and Plutus
+	// validation. The cold-key signature and KES-period expiry were already
+	// checked at header verification.
+	opCert, hasOpCert := opCertFromHeader(block.Header())
+	var opCertPoolKeyHash lcommon.PoolKeyHash
+	if hasOpCert {
+		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
+		// Counter monotonicity is the stateful half of inbound opcert
+		// validation: read the pool's last-seen counter before processing this
+		// block, inside the same validation transaction. The opcert counter
+		// must equal the last-seen counter or be exactly one greater. A
+		// backward counter signals a stale or stolen hot key; a gapped counter
+		// signals a skipped rotation. Both must be rejected. Only enforced
+		// under shouldValidate (live, current-era blocks): historical blocks
+		// were already network-validated, and the over-increment rule postdates
+		// the early eras replayed during sync. The counter is recorded once the
+		// block's transactions are processed (below); rollback safety is
+		// inherited from the per-(pool,slot) PoolOpCertSequence store, which
+		// drops rows past the rollback slot and recomputes the latest counter.
+		if shouldValidate {
+			stored, found, err := ls.db.LatestPoolOpCertSequence(
+				opCertPoolKeyHash,
+				txn,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"read opcert counter for pool %x: %w",
+					opCertPoolKeyHash,
+					err,
+				)
+			}
+			if err := validateOpCertCounter(
+				stored,
+				found,
+				opCert.IssueNumber,
+			); err != nil {
+				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+			}
+		}
+	}
 	// Apply the referenced Leios endorser block's transactions before the
 	// ranking block's own, so the endorser-resident outputs the ranking block
 	// spends are present in the UTxO set. The endorser block is identified by
@@ -3844,48 +3886,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
-	if opCert, ok := opCertFromHeader(block.Header()); ok {
-		issuerVkey := block.IssuerVkey()
-		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
-		// Counter monotonicity is the stateful half of inbound opcert
-		// validation: read the pool's last-seen counter before writing this
-		// block's, inside the same validation transaction. The opcert counter
-		// must equal the last-seen counter or be exactly one greater. A
-		// backward counter signals a stale or stolen hot key; a gapped counter
-		// signals a skipped rotation. Both must be rejected. Only enforced
-		// under shouldValidate (live, current-era blocks): historical blocks
-		// were already network-validated, and the over-increment rule postdates
-		// the early eras replayed during sync. Rollback safety is inherited
-		// from the per-(pool,slot) PoolOpCertSequence store, which drops rows
-		// past the rollback slot and recomputes the latest counter.
-		if shouldValidate {
-			stored, found, err := ls.db.LatestPoolOpCertSequence(
-				poolKeyHash,
-				txn,
-			)
-			if err != nil {
-				if delta != nil {
-					delta.Release()
-				}
-				return nil, fmt.Errorf(
-					"read opcert counter for pool %x: %w",
-					poolKeyHash,
-					err,
-				)
-			}
-			if err := validateOpCertCounter(
-				stored,
-				found,
-				opCert.IssueNumber,
-			); err != nil {
-				if delta != nil {
-					delta.Release()
-				}
-				return nil, fmt.Errorf("pool %x: %w", poolKeyHash, err)
-			}
-		}
+	// Record the opcert counter now that the block's transactions are
+	// processed. The monotonicity check ran before transaction validation
+	// (above); this write is what advances the stored counter, and it is
+	// rolled back with the transaction if the block is rejected.
+	if hasOpCert {
 		if err := ls.db.UpdatePoolOpCertSequence(
-			poolKeyHash,
+			opCertPoolKeyHash,
 			opCert.IssueNumber,
 			point.Slot,
 			txn,
