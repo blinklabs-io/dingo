@@ -584,11 +584,11 @@ func (n *Node) Run(ctx context.Context) error {
 	if d := n.config.ChainsyncStallTimeoutDuration(); d > 0 {
 		chainsyncCfg.StallTimeout = d
 	}
-	if strat, err := chainsync.ParseHeaderSyncStrategy(n.config.Chainsync().Strategy); err == nil {
-		chainsyncCfg.HeaderSyncStrategy = strat
-	} else {
-		chainsyncCfg.HeaderSyncStrategy = chainsync.HeaderSyncStrategyPrimary
+	strat, err := chainsync.ParseHeaderSyncStrategy(n.config.Chainsync().Strategy)
+	if err != nil {
+		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
+	chainsyncCfg.HeaderSyncStrategy = strat
 	chainsyncCfg.PromRegistry = n.config.promRegistry
 	n.chainsyncState = chainsync.NewStateWithConfig(
 		n.eventBus,
