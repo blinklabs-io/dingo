@@ -17,6 +17,18 @@ Hi folks! Here’s what we shipped in v0.60.1.
 ### 💪 Improvements
 
 * Improved **overlap Mithril bootstrap downloads and contiguous processing more effectively:** Mithril bootstrap now keeps immutable chunks moving in order while downloads continue in parallel, which helps bootstrap work overlap more effectively, records progress more safely, and makes failed bootstrap attempts less likely to leave incomplete sync state behind.
+* Updated **refresh the bundled nview interface for clearer node status visibility:** The bundled `nview` interface now uses v0.15.0, which corrects the block propagation percentage display and the reported node version so operators can trust the built in status view more easily.
+* Refined **strengthen Plutus decoding and evaluation handling:** Plutus data handling now validates and decodes more safely, avoids panic failures more effectively, and improves evaluation performance for affected workloads.
+* Enhanced **refresh Google Cloud Storage behavior with newer upstream recovery safeguards:** Google Cloud Storage backed deployments now benefit from refreshed upstream retry handling and checksum fixes, which support steadier object storage behavior.
+* Modernized **refresh database-layer behavior with safer ORM handling:** Database backed deployments now benefit from upstream fixes that improve panic safety and migration handling in the database layer.
+* Strengthened **keep build cache automation current in release workflows:** Build and validation automation now uses refreshed cache maintenance, which helps routine release and CI runs stay current.
+* Advanced **keep Go setup automation current in build and publish workflows:** Build and publish automation now uses a refreshed Go setup workflow so release pipeline maintenance stays current.
+* Polished **refresh artifact attestation automation for release workflows:** Artifact attestation and release automation now track a refreshed workflow release, which keeps release provenance maintenance current.
+* Refreshed **keep the Sundae preview example aligned with current Node type definitions:** The `dingo-sundae-preview` example now uses updated Node type definitions, which keeps its local TypeScript environment current.
+* Streamlined **refresh the Blockfrost explorer example with current Vite tooling:** The `dingo-blockfrost-explorer` example now uses refreshed Vite tooling, which keeps local frontend work more current.
+* Sharpened **refresh the Sundae preview example with current Vite tooling:** The `dingo-sundae-preview` example now uses refreshed Vite tooling, which keeps local frontend work more current.
+* Tuned **keep the Blockfrost explorer example aligned with current Node type definitions:** The `dingo-blockfrost-explorer` example now uses updated Node type definitions, which keeps its local TypeScript environment current.
+* Updated **keep the published v0.60.0 release history current:** The in repository release history now includes the published v0.60.0 notes, which keeps recent release context current and easier to review.
 
 ## v0.60.0 (June 28, 2026)
 
