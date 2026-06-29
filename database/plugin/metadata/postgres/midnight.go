@@ -15,8 +15,12 @@
 package postgres
 
 import (
+	"errors"
+
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/ledger"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -196,4 +200,227 @@ func (d *MetadataStorePostgres) DeleteMidnightDeregistrationsByBlock(
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (d *MetadataStorePostgres) GetMidnightCandidates(
+	addr ledger.Address,
+	txn types.Txn,
+) ([]models.Utxo, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	addrQuery, err := addressWhereClause(db, addr)
+	if err != nil {
+		return nil, err
+	}
+	if addrQuery == nil {
+		return nil, nil
+	}
+	type candidateRow struct {
+		TxId      []byte `gorm:"column:tx_id"`
+		Datum     []byte `gorm:"column:datum"`
+		OutputIdx uint32 `gorm:"column:output_idx"`
+	}
+	var rows []candidateRow
+	if err := db.Table("utxo").
+		Select("utxo.tx_id, utxo.output_idx, datum.raw_datum AS datum").
+		Joins("LEFT JOIN datum ON datum.hash = utxo.datum_hash").
+		Where("utxo.deleted_slot = 0").
+		Where(addrQuery).
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	ret := make([]models.Utxo, len(rows))
+	for i, row := range rows {
+		ret[i] = models.Utxo{
+			TxId:      row.TxId,
+			OutputIdx: row.OutputIdx,
+			Datum:     row.Datum,
+		}
+	}
+	return ret, nil
+}
+
+func (d *MetadataStorePostgres) InsertMidnightGovernanceDatum(
+	txn types.Txn,
+	datum *models.MidnightGovernanceDatum,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(datum).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightGovernanceDatumsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightGovernanceDatum{}).Error
+}
+
+func (d *MetadataStorePostgres) GetLatestMidnightGovernanceDatum(
+	datumType string,
+	blockNumber uint64,
+	txn types.Txn,
+) (*models.MidnightGovernanceDatum, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var datum models.MidnightGovernanceDatum
+	result := db.Where("datum_type = ? AND block_number <= ?", datumType, blockNumber).
+		Order("block_number DESC, id DESC").First(&datum)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &datum, nil
+}
+
+func (d *MetadataStorePostgres) GetLatestMidnightAriadneParams(
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	if result := db.Order("epoch DESC").First(&params); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
+func (d *MetadataStorePostgres) GetMidnightAriadneParamsByEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	if result := db.Where("epoch = ?", epoch).First(&params); result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
+func (d *MetadataStorePostgres) UpsertMidnightAriadneParams(
+	txn types.Txn,
+	params *models.MidnightAriadneParams,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "epoch"}},
+		DoUpdates: clause.AssignmentColumns([]string{"datum"}),
+	}).Create(params).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneParamsByEpoch(
+	txn types.Txn,
+	epoch uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("epoch = ?", epoch).
+		Delete(&models.MidnightAriadneParams{}).Error
+}
+
+func (d *MetadataStorePostgres) CreateMidnightAriadneRollback(
+	txn types.Txn,
+	rollback *models.MidnightAriadneRollback,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(rollback).Error
+}
+
+func (d *MetadataStorePostgres) FindMidnightAriadneRollbacksByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) ([]models.MidnightAriadneRollback, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rollbacks []models.MidnightAriadneRollback
+	if err := db.Where("block_number = ?", blockNumber).
+		Order("epoch ASC").
+		Find(&rollbacks).Error; err != nil {
+		return nil, err
+	}
+	return rollbacks, nil
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneRollbacksByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightAriadneRollback{}).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightAriadneRollbacksBeforeBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number < ?", blockNumber).
+		Delete(&models.MidnightAriadneRollback{}).Error
+}
+
+func (d *MetadataStorePostgres) UpsertMidnightEpochCandidates(
+	txn types.Txn,
+	ec *models.MidnightEpochCandidates,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "epoch"}},
+		DoUpdates: clause.AssignmentColumns([]string{"block_number", "candidates_cbor"}),
+	}).Create(ec).Error
+}
+
+func (d *MetadataStorePostgres) DeleteMidnightEpochCandidatesByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightEpochCandidates{}).Error
 }

@@ -833,6 +833,10 @@ type MetadataStore interface {
 	// amounts controlled by the given stake credential.
 	GetControlledAmountByCredential(uint8, []byte, types.Txn) (uint64, error)
 
+	// GetMidnightCandidates retrieves live committee-candidate UTxOs with
+	// inline datum bytes from metadata rows, without materializing block CBOR.
+	GetMidnightCandidates(ledger.Address, types.Txn) ([]models.Utxo, error)
+
 	// GetScriptLockedSupply returns the sum of lovelace held in live
 	// UTxOs whose payment credential is a script. This is the network's
 	// script-locked supply (blockfrost /network supply.locked).
@@ -1413,6 +1417,21 @@ type MetadataStore interface {
 	// DiskSize returns the on-disk size of the metadata store in bytes.
 	// Returns 0 for remote databases where local size is not meaningful.
 	DiskSize() (int64, error)
+
+	// Midnight indexer methods
+	InsertMidnightGovernanceDatum(types.Txn, *models.MidnightGovernanceDatum) error
+	DeleteMidnightGovernanceDatumsByBlock(types.Txn, uint64) error
+	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
+	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
+	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
+	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
+	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
+	FindMidnightAriadneRollbacksByBlock(types.Txn, uint64) ([]models.MidnightAriadneRollback, error)
+	DeleteMidnightAriadneRollbacksByBlock(types.Txn, uint64) error
+	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
+	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
+	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

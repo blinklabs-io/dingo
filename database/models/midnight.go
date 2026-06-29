@@ -90,7 +90,9 @@ func (MidnightDeregistration) TableName() string {
 // MidnightGovernanceDatum stores latest Technical Committee and Council datums.
 type MidnightGovernanceDatum struct {
 	ID          uint   `gorm:"primarykey"`
-	DatumType   string `gorm:"size:32;index:idx_midnight_governance_datums_latest,priority:1;not null"`
+	DatumType   string `gorm:"size:32;index:idx_midnight_governance_datums_latest,priority:1;uniqueIndex:idx_midnight_governance_datums_output,priority:1;not null"`
+	TxHash      []byte `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:2;size:32;not null"`
+	OutputIndex uint32 `gorm:"uniqueIndex:idx_midnight_governance_datums_output,priority:3;not null"`
 	Datum       []byte `gorm:"not null"`
 	BlockNumber uint64 `gorm:"index:idx_midnight_governance_datums_latest,priority:2,sort:desc;not null"`
 }
@@ -110,10 +112,25 @@ func (MidnightAriadneParams) TableName() string {
 	return "midnight_ariadne_params"
 }
 
+// MidnightAriadneRollback stores the previous Ariadne row for a block upsert,
+// so a later rollback can restore state even after process restart.
+type MidnightAriadneRollback struct {
+	ID             uint   `gorm:"primarykey"`
+	BlockNumber    uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:1;not null"`
+	Epoch          uint64 `gorm:"uniqueIndex:idx_midnight_ariadne_rollbacks_block_epoch,priority:2;not null"`
+	PreviousExists bool   `gorm:"not null"`
+	PreviousDatum  []byte
+}
+
+func (MidnightAriadneRollback) TableName() string {
+	return "midnight_ariadne_rollbacks"
+}
+
 // MidnightEpochCandidates stores candidate snapshots at epoch boundaries.
 type MidnightEpochCandidates struct {
 	ID             uint   `gorm:"primarykey"`
 	Epoch          uint64 `gorm:"uniqueIndex;not null"`
+	BlockNumber    uint64 `gorm:"index;not null;default:0"`
 	CandidatesCbor []byte `gorm:"not null"`
 }
 
