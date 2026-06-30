@@ -1042,9 +1042,11 @@ dependency across two points in the pipeline:
   period expiry. The cold verification key is the header's issuer vkey — a
   registered pool's cold key is, by construction, the vkey whose Blake2b224
   hash is its pool id. `opCertFromHeader` extracts the opcert across the
-  Shelley- and Babbage-family header layouts; `gouroboros`'
-  `ledger.VerifyOpCertSignature` and `ledger.ValidateKesPeriod`
-  (against `maxKESEvolutions` from Shelley genesis) perform the checks. Running
+  Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
+  verifies the cold-key signature over the raw cardano-ledger `OCertSignable`
+  bytes (not `gouroboros`' `ledger.VerifyOpCertSignature`, which hashes a CBOR
+  array that does not match real opcerts), and `ledger.ValidateKesPeriod`
+  (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
   here rejects forged or expired opcerts before the block body is fetched.
   These checks share the existing skip-during-historical-sync gating.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
