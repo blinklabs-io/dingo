@@ -128,7 +128,7 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
 }
 
-func TestHealEmptyLabNoncesRepairsStaleLabWithGenesisCandidateFallback(t *testing.T) {
+func TestHealEmptyLabNoncesSkipsStaleLabWhenCandidateMissing(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer db.Close()
@@ -145,7 +145,6 @@ func TestHealEmptyLabNoncesRepairsStaleLabWithGenesisCandidateFallback(t *testin
 	}, nil))
 
 	cfg := newConwayBootstrapStabilityCfg(t)
-	genesisCandidate := bytes.Repeat([]byte{0x11}, 32)
 	oldLab := bytes.Repeat([]byte{0x99}, 32)
 	oldNonce := bytes.Repeat([]byte{0xaa}, 32)
 	epochs := []models.Epoch{
@@ -168,15 +167,9 @@ func TestHealEmptyLabNoncesRepairsStaleLabWithGenesisCandidateFallback(t *testin
 
 	repaired := ls.healEmptyLabNoncesInPlace(epochs)
 
-	want, err := lcommon.CalculateEpochNonce(
-		genesisCandidate,
-		boundaryHash,
-		nil,
-	)
-	require.NoError(t, err)
-	require.True(t, repaired)
-	require.Equal(t, boundaryHash, epochs[0].LastEpochBlockNonce)
-	require.Equal(t, want.Bytes(), epochs[0].Nonce)
+	require.False(t, repaired)
+	require.Equal(t, oldLab, epochs[0].LastEpochBlockNonce)
+	require.Equal(t, oldNonce, epochs[0].Nonce)
 	require.Empty(t, epochs[0].CandidateNonce)
 }
 

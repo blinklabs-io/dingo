@@ -4648,23 +4648,7 @@ func (ls *LedgerState) epochRepairCandidateNonce(
 	case lcommon.Blake2b256Size:
 		return cloneNonce(ep.CandidateNonce), nil
 	case 0:
-		if ls.config.CardanoNodeConfig == nil ||
-			ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
-			return nil, errors.New("shelley genesis hash not available")
-		}
-		genesisHash, err := hex.DecodeString(
-			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("decode genesis hash: %w", err)
-		}
-		if len(genesisHash) != lcommon.Blake2b256Size {
-			return nil, fmt.Errorf(
-				"invalid genesis hash length %d",
-				len(genesisHash),
-			)
-		}
-		return genesisHash, nil
+		return nil, errors.New("candidate nonce not stored")
 	default:
 		return nil, fmt.Errorf(
 			"invalid candidate nonce length %d",

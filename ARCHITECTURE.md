@@ -634,8 +634,10 @@ When `Node.Run()` is called, components are initialized in this order:
     `healEmptyLabNonces`: it repairs any epoch record whose
     `last_epoch_block_nonce` was persisted empty or stale by pre-fix boundary
     lookup bugs, re-deriving the lab from the active chain's boundary block and
-    recomputing the affected epoch's nonce in the cache so leader-VRF
-    verification matches the network.
+    recomputing the affected epoch's nonce in the cache when that epoch has a
+    stored `candidate_nonce`, so leader-VRF verification matches the network.
+    If the candidate is missing, startup leaves the epoch unchanged rather than
+    substituting Shelley genesis for a candidate that may have evolved.
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros
@@ -1750,7 +1752,8 @@ On chain rollback past an epoch boundary:
 - Recalculate affected snapshots on forward replay
 - Reload the remaining epoch rows into the in-memory cache and run the same
   empty/stale `last_epoch_block_nonce` repair used at startup before publishing
-  the new cache.
+  the new cache. Epochs without a stored `candidate_nonce` are skipped because
+  their nonce cannot be safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
   writes (`network_state`) from governance refunds and POOLREAP deposit refunds
   are slot-keyed, so they are reverted by slot and re-derived on forward replay
