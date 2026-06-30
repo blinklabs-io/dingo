@@ -194,6 +194,7 @@ func checkEpoch(
 	// Using the global /pools/extended as the Dingo side would flag pools that
 	// exist in Dingo but were inactive this epoch as false pool_only_dingo hits.
 	var onlyKoios []string
+	dingoFound := 0
 
 	for i := range koiosPools {
 		koiosPool := &koiosPools[i]
@@ -203,6 +204,8 @@ func checkEpoch(
 		)
 		if dingoItem == nil && histErr == nil {
 			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
+		} else if dingoItem != nil {
+			dingoFound++
 		}
 		allMismatches = append(allMismatches, poolMismatches...)
 	}
@@ -219,7 +222,7 @@ func checkEpoch(
 		LastCheckedAt:  now,
 		Status:         status,
 		MismatchCount:  len(allMismatches),
-		DingoPoolCount: len(koiosPools),
+		DingoPoolCount: dingoFound,
 		KoiosPoolCount: len(koiosPools),
 		OnlyDingoPools: MarshalPoolList(nil),
 		OnlyKoiosPools: MarshalPoolList(onlyKoios),
@@ -232,6 +235,8 @@ func checkEpoch(
 		"epoch", epoch,
 		"status", status,
 		"mismatches", len(allMismatches),
+		"dingo_found", dingoFound,
+		"koios_pools", len(koiosPools),
 	)
 
 	return &EpochCompareResult{
@@ -239,7 +244,7 @@ func checkEpoch(
 		Epoch:          epoch,
 		Status:         status,
 		Mismatches:     allMismatches,
-		DingoPoolCount: len(koiosPools),
+		DingoPoolCount: dingoFound,
 		KoiosPoolCount: len(koiosPools),
 		OnlyDingo:      nil,
 		OnlyKoios:      onlyKoios,

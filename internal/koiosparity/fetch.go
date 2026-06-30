@@ -90,13 +90,6 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
 	}
 
-	// Fetch pool list once; it is epoch-independent and re-downloading it for
-	// every epoch wastes rate-limit quota on wide backfills.
-	pools, err := koios.GetPoolList(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get pool list: %w", err)
-	}
-
 	// Build list of epochs to fetch.
 	epochs := make([]uint64, 0)
 	for e := fromEpoch; e <= throughEpoch; e++ {
@@ -130,7 +123,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, pools, logger)
+			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, logger)
 			if fetchErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
@@ -161,19 +154,22 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 }
 
 // fetchEpoch fetches and caches one epoch's worth of Koios data.
-// Pool rows are written before epoch info so that the resume cursor (based on
-// koios_epoch_info presence) is never advanced for a partially-cached epoch.
-// Returns the number of pool rows upserted.
+//
+// GetAllPoolHistoryForEpoch is used instead of the two-step /pool_list +
+// per-pool /pool_history approach: the epoch-scoped call includes retired
+// pools that /pool_list omits, avoiding false parity mismatches for older epochs.
+//
+// Pool rows are written before epoch info so the resume cursor (koios_epoch_info
+// presence) is never advanced for a partially-cached epoch.
 func fetchEpoch(
 	ctx context.Context,
 	koios *KoiosClient,
 	cache *Cache,
 	network string,
 	epoch uint64,
-	pools []KoiosPoolListItem,
 	logger *slog.Logger,
 ) (int, error) {
-	// 1. Fetch epoch info (but do not write it yet).
+	// 1. Fetch epoch info (not written yet).
 	info, err := koios.GetEpochInfo(ctx, epoch)
 	if err != nil {
 		return 0, fmt.Errorf("get epoch info: %w", err)
@@ -181,67 +177,31 @@ func fetchEpoch(
 
 	now := time.Now()
 
-	// 2. Fetch pool history rows. Errors are propagated so incomplete cache
-	//    rows are never treated as valid reference data.
+	// 2. Fetch all pool history rows for this epoch in a single paginated call.
+	poolHistory, err := koios.GetAllPoolHistoryForEpoch(ctx, epoch)
+	if err != nil {
+		return 0, fmt.Errorf("get pool history for epoch %d: %w", epoch, err)
+	}
+
+	// 3. Upsert pool rows. A failure here leaves epoch info unwritten, so the
+	//    epoch is retried on resume rather than skipped as complete.
 	poolCount := 0
-	poolSem := make(chan struct{}, 5)
-	var poolWg sync.WaitGroup
-	var poolMu sync.Mutex
-	poolErrCh := make(chan error, 1)
-
-	for _, pool := range pools {
-		select {
-		case <-ctx.Done():
-			return poolCount, ctx.Err()
-		case poolSem <- struct{}{}:
+	for _, item := range poolHistory {
+		if upsertErr := cache.UpsertPoolEpoch(KoiosPoolEpoch{
+			Network:     network,
+			Epoch:       epoch,
+			PoolBech32:  item.PoolIDBech32,
+			ActiveStake: item.ActiveStake,
+			BlockCnt:    item.BlockCnt,
+			Delegators:  item.DelegatorCnt,
+			FetchedAt:   now,
+		}); upsertErr != nil {
+			return poolCount, fmt.Errorf("upsert pool %s: %w", item.PoolIDBech32, upsertErr)
 		}
-
-		poolWg.Add(1)
-		go func(p KoiosPoolListItem) {
-			defer poolWg.Done()
-			defer func() { <-poolSem }()
-
-			item, histErr := koios.GetPoolEpochHistory(ctx, p.PoolIDBech32, epoch)
-			if histErr != nil {
-				select {
-				case poolErrCh <- fmt.Errorf("pool %s history: %w", p.PoolIDBech32, histErr):
-				default:
-				}
-				return
-			}
-			if item == nil {
-				return // Pool wasn't active this epoch.
-			}
-
-			if upsertErr := cache.UpsertPoolEpoch(KoiosPoolEpoch{
-				Network:     network,
-				Epoch:       epoch,
-				PoolBech32:  p.PoolIDBech32,
-				ActiveStake: item.ActiveStake,
-				BlockCnt:    item.BlockCnt,
-				Delegators:  item.DelegatorCnt,
-				FetchedAt:   now,
-			}); upsertErr != nil {
-				select {
-				case poolErrCh <- fmt.Errorf("upsert pool %s: %w", p.PoolIDBech32, upsertErr):
-				default:
-				}
-				return
-			}
-			poolMu.Lock()
-			poolCount++
-			poolMu.Unlock()
-		}(pool)
+		poolCount++
 	}
 
-	poolWg.Wait()
-	select {
-	case err := <-poolErrCh:
-		return poolCount, err
-	default:
-	}
-
-	// 3. Write epoch info only after all pool rows have succeeded.
+	// 4. Write epoch info only after all pool rows have succeeded.
 	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
