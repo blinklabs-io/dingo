@@ -90,13 +90,15 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
 	}
 
-	// Fetch pool list once per Fetch run. /pool_list returns all pools including
-	// retired ones (pool_status ∈ {registered, retiring, retired}), so no pool
-	// that ever had on-chain history is excluded. Hoisting it here avoids one
-	// full Koios walk per epoch on wide backfills.
-	pools, err := koios.GetPoolList(ctx)
+	// Collect every pool that has ever been registered on chain, including
+	// retired pools. /pool_registrations is the authoritative certificate
+	// history; deduplicating its pool_id_bech32 column gives the complete set.
+	// We hoist this once per Fetch run rather than once per epoch because the
+	// list grows monotonically and fetching it once is far cheaper on wide
+	// backfills.
+	poolIDs, err := koios.GetAllHistoricalPoolIDs(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("get pool list: %w", err)
+		return nil, fmt.Errorf("get historical pool IDs: %w", err)
 	}
 
 	// Build list of epochs to fetch.
@@ -110,6 +112,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		"from", fromEpoch,
 		"through", throughEpoch,
 		"count", len(epochs),
+		"pools", len(poolIDs),
 		"concurrency", cfg.Concurrency,
 	)
 
@@ -132,7 +135,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, pools, logger)
+			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, poolIDs, logger)
 			if fetchErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
@@ -174,7 +177,7 @@ func fetchEpoch(
 	cache *Cache,
 	network string,
 	epoch uint64,
-	pools []KoiosPoolListItem,
+	poolIDs []string,
 	logger *slog.Logger,
 ) (int, error) {
 	// 1. Fetch epoch info (not written yet).
@@ -194,22 +197,27 @@ func fetchEpoch(
 	var poolMu sync.Mutex
 	poolErrCh := make(chan error, 1)
 
-	for _, pool := range pools {
+	// Use a labeled break so that on cancellation we stop spawning new workers
+	// but still drain already-started goroutines via poolWg.Wait() below.
+	// An early return here would let running goroutines race the cache after
+	// the caller proceeds.
+outer:
+	for _, poolID := range poolIDs {
 		select {
 		case <-ctx.Done():
-			return poolCount, ctx.Err()
+			break outer
 		case poolSem <- struct{}{}:
 		}
 
 		poolWg.Add(1)
-		go func(p KoiosPoolListItem) {
+		go func(id string) {
 			defer poolWg.Done()
 			defer func() { <-poolSem }()
 
-			item, histErr := koios.GetPoolEpochHistory(ctx, p.PoolIDBech32, epoch)
+			item, histErr := koios.GetPoolEpochHistory(ctx, id, epoch)
 			if histErr != nil {
 				select {
-				case poolErrCh <- fmt.Errorf("pool %s history: %w", p.PoolIDBech32, histErr):
+				case poolErrCh <- fmt.Errorf("pool %s history: %w", id, histErr):
 				default:
 				}
 				return
@@ -221,14 +229,14 @@ func fetchEpoch(
 			if upsertErr := cache.UpsertPoolEpoch(KoiosPoolEpoch{
 				Network:     network,
 				Epoch:       epoch,
-				PoolBech32:  p.PoolIDBech32,
+				PoolBech32:  id,
 				ActiveStake: item.ActiveStake,
 				BlockCnt:    item.BlockCnt,
 				Delegators:  item.DelegatorCnt,
 				FetchedAt:   now,
 			}); upsertErr != nil {
 				select {
-				case poolErrCh <- fmt.Errorf("upsert pool %s: %w", p.PoolIDBech32, upsertErr):
+				case poolErrCh <- fmt.Errorf("upsert pool %s: %w", id, upsertErr):
 				default:
 				}
 				return
@@ -236,10 +244,16 @@ func fetchEpoch(
 			poolMu.Lock()
 			poolCount++
 			poolMu.Unlock()
-		}(pool)
+		}(poolID)
 	}
 
-	poolWg.Wait()
+	poolWg.Wait() // always drain started goroutines before returning
+
+	// If context was cancelled, report that rather than any pool error.
+	if ctx.Err() != nil {
+		return poolCount, ctx.Err()
+	}
+
 	select {
 	case err := <-poolErrCh:
 		return poolCount, err
