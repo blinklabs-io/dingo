@@ -26,6 +26,30 @@ Hi folks! Here’s what we shipped in v0.61.0.
 
 * Fixed **steady BlockFetch serving with send queue backpressure during large range transfers:** Large range serving now applies backpressure more effectively, which helps downstream catch up work stay stable under load.
 * Corrected **keep Leios endorser block fetch and backfill moving through partial and final windows:** Leios bitmap handling now follows the correct bit order, which prevents endorser block fetch and historical backfill from stalling in affected windows.
+* Strengthened **start SQLite metadata deployments with full schema setup automatically:** SQLite backed metadata deployments now create schema objects and foreign key setup automatically at startup, which makes fresh and upgraded databases easier to bring online.
+
+### 📋 What You Need to Know
+
+* Clarified **expect broader Midnight governance coverage and steadier rollback recovery:** Midnight users should expect broader governance, Ariadne, and committee candidate indexing coverage with more reliable restart and rollback handling.
+* Highlighted **expect steadier BlockFetch behavior while serving large Leios ranges:** Operators serving large Leios ranges should now see more stable downstream catch up behavior under load.
+* Emphasized **expect historical Leios sync to avoid bitmap related backfill stalls:** From genesis and historical Leios syncs should now keep endorser block backfill moving instead of stalling in partial or final windows.
+* Summarized **expect SQLite schema setup to happen automatically at startup:** SQLite backed deployments should now create schema and foreign key setup automatically when they start on fresh databases.
+* Reviewed **switch local examples to the shared Docker Compose workflow and updated names:** Local example users should move to `examples/docker-compose.yml` and follow the updated environment variable names.
+* Noted **review the published v0.60.1 notes in the in repository release history:** The repository release history now includes the published v0.60.1 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.60.1 (June 29, 2026)
 
