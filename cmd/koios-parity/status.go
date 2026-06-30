@@ -34,7 +34,7 @@ func statusCommand() *cobra.Command {
 }
 
 func statusRun(cmd *cobra.Command, _ []string) error {
-	network, err := requireNetwork(cmd)
+	network, err := requireNetwork()
 	if err != nil {
 		return err
 	}

@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 )
 
 // ErrAPINotFound is returned when the Dingo API returns 404 (endpoint not implemented).
-var ErrAPINotFound = fmt.Errorf("dingo api: endpoint not found (404)")
+var ErrAPINotFound = errors.New("dingo api: endpoint not found (404)")
 
 // ErrAPIError is returned when the Dingo API returns 5xx.
 type ErrAPIError struct {
@@ -51,21 +52,21 @@ type DingoEpochResp struct {
 
 // DingoPoolExtendedResp is one item from GET /api/v0/pools/extended.
 type DingoPoolExtendedResp struct {
-	PoolID      string  `json:"pool_id"`
-	Hex         string  `json:"hex"`
-	ActiveStake string  `json:"active_stake"`
-	LiveStake   string  `json:"live_stake"`
+	PoolID      string `json:"pool_id"`
+	Hex         string `json:"hex"`
+	ActiveStake string `json:"active_stake"`
+	LiveStake   string `json:"live_stake"`
 }
 
 // DingoPoolHistoryItem is one epoch entry from GET /api/v0/pools/{pool_id}/history.
 type DingoPoolHistoryItem struct {
-	Epoch       uint64 `json:"epoch"`
-	Blocks      int    `json:"blocks"`
-	ActiveStake string `json:"active_stake"`
+	Epoch       uint64  `json:"epoch"`
+	Blocks      int     `json:"blocks"`
+	ActiveStake string  `json:"active_stake"`
 	ActiveSize  float64 `json:"active_size"`
-	Delegators  int    `json:"delegators_count"`
-	Rewards     string `json:"rewards"`
-	Fees        string `json:"fees"`
+	Delegators  int     `json:"delegators_count"`
+	Rewards     string  `json:"rewards"`
+	Fees        string  `json:"fees"`
 }
 
 // BlockfrostClient queries Dingo's Blockfrost-compatible API.

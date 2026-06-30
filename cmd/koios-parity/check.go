@@ -44,7 +44,7 @@ No Koios HTTP calls; no direct SQLite reads outside the cache.`,
 }
 
 func checkRun(cmd *cobra.Command, _ []string) error {
-	network, err := requireNetwork(cmd)
+	network, err := requireNetwork()
 	if err != nil {
 		return err
 	}
