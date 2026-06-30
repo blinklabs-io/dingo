@@ -69,7 +69,7 @@ var errNoncesMissing = errors.New("block nonce rows missing for epoch")
 // window cutoff (slot + stabilityWindow >= firstSlotNextEpoch), then
 // freezes. The frozen value is used in the epoch nonce formula:
 //
-//	epochNonce(N+1) = blake2b_256(candidateNonce(N) || labNonce(N))
+//	epochNonce(N+1) = blake2b_256(candidateNonce(N) || lastEpochBlockNonce(N))
 //
 // The evolving nonce continues to be updated past the cutoff with
 // all remaining blocks. Its end-of-epoch value becomes the starting

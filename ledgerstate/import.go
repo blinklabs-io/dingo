@@ -91,8 +91,8 @@ type RawLedgerState struct {
 	// tip. This is required to correctly continue nonce accumulation
 	// from snapshot tip to epoch boundary.
 	CandidateNonce []byte
-	// LastEpochBlockNonce is the lagged lab nonce from consensus
-	// state (used in epoch nonce calculation).
+	// LastEpochBlockNonce is the Praos last applied block hash from
+	// consensus state (used in epoch nonce calculation).
 	LastEpochBlockNonce []byte
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to

@@ -373,16 +373,17 @@ it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
 created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
 scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
 synthetic endorser/genesis blob is never returned as the "previous block." This
-matters for the epoch-nonce computation — the lagged `last_epoch_block_nonce`
-(lab) is derived from the previous epoch's last block's `PrevHash`; returning an
-endorser blob there (its `PrevHash` is empty) saves an empty lab, collapsing the
-next epoch's nonce to the NeutralNonce identity and failing every leader-VRF
-check in that epoch. Each endorser transaction's `t` entry and its outputs' `u`
-entries store ordinary `DOFF` references whose `block_slot`/`block_hash` point at
-that endorser-block blob, so cold-extract resolution is identical to chain-block
-transactions. The transactions' metadata rows, however, are recorded under the
-referencing ranking block's point, so a rollback of the ranking block removes
-them (the orphaned endorser-block blob is harmless and re-created on reprocess).
+matters for the epoch-nonce computation — `last_epoch_block_nonce` is derived
+from the previous epoch's last ranking-block hash; returning an endorser blob
+there would save a non-chain hash. Older PrevHash-based lab lookup also saved an
+empty lab here, collapsing the epoch's nonce to the NeutralNonce identity and
+failing leader-VRF checks. Each endorser transaction's `t` entry and its outputs'
+`u` entries store ordinary `DOFF` references whose `block_slot`/`block_hash`
+point at that endorser-block blob, so cold-extract resolution is identical to
+chain-block transactions. The transactions' metadata rows, however, are recorded
+under the referencing ranking block's point, so a rollback of the ranking block
+removes them (the orphaned endorser-block blob is harmless and re-created on
+reprocess).
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.

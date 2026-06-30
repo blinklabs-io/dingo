@@ -723,8 +723,8 @@ type praosNonces struct {
 	// CandidateNonce is the current Praos candidate nonce (eta_c)
 	// at the imported tip.
 	CandidateNonce []byte
-	// LastEpochBlockNonce is the lagged lab nonce used in epoch
-	// nonce calculation.
+	// LastEpochBlockNonce is the Praos last applied block hash used
+	// in epoch nonce calculation.
 	LastEpochBlockNonce []byte
 }
 

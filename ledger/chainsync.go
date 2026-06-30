@@ -2933,16 +2933,16 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 }
 
 // calculateEpochNonce computes the epoch nonce for epoch N+1, the
-// end-of-epoch evolving nonce, and the labNonce to save for epoch
-// N+2's computation.
+// end-of-epoch evolving nonce, and the lastEpochBlockNonce to carry
+// into epoch N+1.
 //
 // The Ouroboros Praos formula is:
 //
 //	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N)
 //
-// where lastEpochBlockNonce(N) was saved at the N-1→N transition
-// (it's the prevHash of the last block of epoch N-1). This value
-// is stored in currentEpoch.LastEpochBlockNonce.
+// where lastEpochBlockNonce(N) is the hash of the last block in epoch N.
+// If epoch N has no blocks, the consensus state carries the previous
+// lastEpochBlockNonce forward.
 //
 // The ⭒ operator has NeutralNonce as identity:
 //
@@ -2953,8 +2953,8 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 //
 // Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
 // The caller must store candidateNonce as the new epoch's CandidateNonce
-// and labNonce as the new epoch's LastEpochBlockNonce so the next
-// transition can use them.
+// and labNonce as the new epoch's LastEpochBlockNonce so an empty next
+// epoch can carry it forward.
 func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
@@ -3101,31 +3101,24 @@ func (ls *LedgerState) calculateEpochNonce(
 		)
 	}
 
-	// Compute the labNonce to SAVE for epoch N+2's computation.
-	// This is prevHashToNonce(prevHash of last block of current
-	// epoch N). It will be stored as LastEpochBlockNonce on the
-	// new epoch record.
-	var labNonceToSave []byte
-	blockLastCurrentEpoch, err := database.BlockBeforeSlotTxn(
+	// Compute the lastEpochBlockNonce for the epoch being closed.
+	// This is the hash of the last block of current epoch N, or the
+	// carried value when the epoch has no blocks. It will be stored on
+	// the new epoch record and used immediately in this boundary's
+	// epoch-nonce formula.
+	lastEpochBlockNonce, err := ls.epochLabNonce(
 		txn,
+		currentEpoch.StartSlot,
 		epochEndSlot,
+		currentEpoch.LastEpochBlockNonce,
 	)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"lookup block before slot: %w", err,
-			)
-		}
-		// No block — labNonceToSave stays nil (NeutralNonce)
-	} else if len(blockLastCurrentEpoch.PrevHash) > 0 {
-		labNonceToSave = blockLastCurrentEpoch.PrevHash
+		return nil, nil, nil, nil, err
 	}
+	labNonceToSave := lastEpochBlockNonce
 
-	// Use the LAGGED lastEpochBlockNonce from the current epoch
-	// record (set at the PREVIOUS transition) in the formula.
 	// If nil/empty, it's NeutralNonce (identity): result is
 	// just candidateNonce.
-	lastEpochBlockNonce := currentEpoch.LastEpochBlockNonce
 	if len(lastEpochBlockNonce) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce

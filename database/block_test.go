@@ -76,10 +76,10 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 // TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
 // highest real ranking block before a slot and skips synthetic blobs. Genesis
 // CBOR and Leios endorser blocks are persisted at block-blob keys via
-// SetGenesisCbor with ID=0 and an empty PrevHash; returning one to the
-// epoch-nonce lab computation saves an empty lastEpochBlockNonce, which
-// collapses the next epoch's nonce to the NeutralNonce identity and fails every
-// leader-VRF check (the Dijkstra/Leios at-tip wedge).
+// SetGenesisCbor with ID=0 and no chain index; returning one to the
+// epoch-nonce lab computation saves a non-chain hash. Older PrevHash-based lab
+// lookup also saved an empty lastEpochBlockNonce here, collapsing the new
+// epoch's nonce to the NeutralNonce identity and failing leader-VRF checks.
 func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
 	db := newTestDB(t)
 
@@ -114,7 +114,7 @@ func TestBlockBeforeSlotSkipsSyntheticBlobs(t *testing.T) {
 		t,
 		realBlock.PrevHash,
 		got.PrevHash,
-		"the real block's PrevHash must survive — it feeds the epoch-nonce lab",
+		"the real block's PrevHash must survive for chain continuity",
 	)
 }
 

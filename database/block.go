@@ -640,9 +640,10 @@ func BlockBeforeSlotTxn(txn *Txn, slotNumber uint64) (models.Block, error) {
 		// persisted at block-blob keys via SetGenesisCbor with ID=0 and no
 		// chain index entry; they are not ranking blocks. Returning one here
 		// would feed callers (epoch-nonce labNonce/candidate computation,
-		// chain reconciliation) a non-block whose PrevHash/Type are empty —
-		// the source of the empty-labNonce epoch-nonce corruption. Real
-		// blocks created via BlockCreate always have ID >= BlockInitialIndex.
+		// chain reconciliation) a non-ranking blob whose hash is not on the
+		// chain. Older PrevHash-based lab lookup also collapsed this case to
+		// an empty lab. Real blocks created via BlockCreate always have ID >=
+		// BlockInitialIndex.
 		if blk.ID == 0 {
 			continue
 		}

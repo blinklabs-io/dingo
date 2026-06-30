@@ -276,6 +276,7 @@ sequenceDiagram
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
+    LS->>LS: reload epoch cache, repair empty lab nonces
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
@@ -633,7 +634,7 @@ When `Node.Run()` is called, components are initialized in this order:
     `healEmptyLabNonces`: it repairs any epoch record whose
     `last_epoch_block_nonce` was persisted empty by the pre-fix
     endorser-block/`BlockBeforeSlot` collision — re-deriving the lab from the
-    real boundary block and recomputing the affected next epoch's nonce in the
+    real boundary block and recomputing the affected epoch's nonce in the
     cache so leader-VRF verification matches the network (an empty lab would
     otherwise collapse that epoch's nonce to the NeutralNonce identity).
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
@@ -1743,6 +1744,9 @@ visible to the withdrawals checked in step 3. The ordering is locked in by
 On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
+- Reload the remaining epoch rows into the in-memory cache and run the same
+  empty `last_epoch_block_nonce` repair used at startup before publishing the
+  new cache.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
   writes (`network_state`) from governance refunds and POOLREAP deposit refunds
   are slot-keyed, so they are reverted by slot and re-derived on forward replay
