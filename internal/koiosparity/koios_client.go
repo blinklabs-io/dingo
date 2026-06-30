@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -159,7 +160,7 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("koios /tip decode: %w", err)
 	}
 	if len(tips) == 0 {
-		return 0, fmt.Errorf("koios /tip: empty response")
+		return 0, errors.New("koios /tip: empty response")
 	}
 	return tips[0].EpochNo, nil
 }

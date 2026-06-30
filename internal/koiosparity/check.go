@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -104,7 +105,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 
 	// Pre-fetch pool list from Dingo once (shared across epoch checks).
 	dingoPools, dingoPoolsErr := dingo.GetPoolsExtended(ctx)
-	if dingoPoolsErr != nil && dingoPoolsErr != ErrAPINotFound {
+	if dingoPoolsErr != nil && !errors.Is(dingoPoolsErr, ErrAPINotFound) {
 		logger.Warn("koiosparity: could not fetch Dingo pool list",
 			"error", dingoPoolsErr,
 		)
@@ -130,7 +131,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 
 			res, checkErr := checkEpoch(
 				ctx, cache, dingo, cfg.Network, epoch,
-				dingoPoolSet, dingoPoolsErr, grace, logger,
+				dingoPoolSet, grace, logger,
 			)
 			if checkErr != nil {
 				select {
@@ -178,7 +179,6 @@ func checkEpoch(
 	network string,
 	epoch uint64,
 	dingoPoolSet map[string]bool,
-	dingoPoolsErr error,
 	grace time.Duration,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {

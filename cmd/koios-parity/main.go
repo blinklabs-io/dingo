@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,7 +113,7 @@ func resolveReportDir(override string) string {
 }
 
 // requireNetwork returns the network name or an error.
-func requireNetwork(cmd *cobra.Command) (string, error) {
+func requireNetwork() (string, error) {
 	net := globalFlags.network
 	if net == "" {
 		if v := os.Getenv("KOIOS_NETWORK"); v != "" {
@@ -120,7 +121,7 @@ func requireNetwork(cmd *cobra.Command) (string, error) {
 		}
 	}
 	if net == "" {
-		return "", fmt.Errorf("--network is required (preview or preprod)")
+		return "", errors.New("--network is required (preview or preprod)")
 	}
 	if net != "preview" && net != "preprod" {
 		return "", fmt.Errorf("--network must be 'preview' or 'preprod', got %q", net)

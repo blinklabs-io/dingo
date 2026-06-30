@@ -24,8 +24,8 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
-	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
@@ -100,16 +100,16 @@ func (CheckRun) TableName() string { return "check_runs" }
 
 // CheckMismatch records a single field-level or set-level mismatch.
 type CheckMismatch struct {
-	ID           uint      `gorm:"primarykey;autoIncrement"`
-	Network      string    `gorm:"not null"`
-	Epoch        uint64    `gorm:"not null"`
-	PoolBech32   string    `gorm:"not null"`
-	StakeAddress string    `gorm:"not null"`
-	Field        string    `gorm:"not null"`
-	DingoValue   string    `gorm:"not null"`
-	KoiosValue   string    `gorm:"not null"`
-	Category     string    `gorm:"not null"`
-	CheckedAt    time.Time `gorm:"not null"`
+	ID           uint      `gorm:"primarykey;autoIncrement" json:"id"`
+	Network      string    `gorm:"not null"                json:"network"`
+	Epoch        uint64    `gorm:"not null"                json:"epoch"`
+	PoolBech32   string    `gorm:"not null"                json:"pool_bech32"`
+	StakeAddress string    `gorm:"not null"                json:"stake_address"`
+	Field        string    `gorm:"not null"                json:"field"`
+	DingoValue   string    `gorm:"not null"                json:"dingo_value"`
+	KoiosValue   string    `gorm:"not null"                json:"koios_value"`
+	Category     string    `gorm:"not null"                json:"category"`
+	CheckedAt    time.Time `gorm:"not null"                json:"checked_at"`
 }
 
 func (CheckMismatch) TableName() string { return "check_mismatches" }
@@ -321,7 +321,10 @@ func (c *Cache) GetStatusSummary(network string) ([]CheckEpochStatus, error) {
 
 // MarshalPoolList encodes a pool ID slice as a JSON string for DB storage.
 func MarshalPoolList(pools []string) string {
-	b, _ := json.Marshal(pools)
+	b, err := json.Marshal(pools)
+	if err != nil {
+		return "[]"
+	}
 	return string(b)
 }
 

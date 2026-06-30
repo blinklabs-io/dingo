@@ -40,7 +40,7 @@ Does not contact Dingo. Safe to interrupt and resume.`,
 }
 
 func fetchRun(cmd *cobra.Command, _ []string) error {
-	network, err := requireNetwork(cmd)
+	network, err := requireNetwork()
 	if err != nil {
 		return err
 	}
