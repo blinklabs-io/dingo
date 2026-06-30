@@ -19,10 +19,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -203,11 +205,164 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		)
 	}
 
-	return verifyBlockHeaderHex(
+	if err := verifyBlockHeaderHex(
 		block,
 		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
 		slotsPerKesPeriod,
+	); err != nil {
+		return err
+	}
+
+	return ls.verifyBlockLeaderEligibility(block, epoch.EpochId)
+}
+
+// verifyBlockLeaderEligibility checks that the block's producer pool was
+// eligible to produce a block at this slot under the Praos stake-derived
+// leadership threshold. This enforces the Cardano Blueprint chain validity
+// requirement that header validation confirms slot-leader eligibility.
+//
+// The eligibility condition is:
+//
+//	vrfLeaderOutput < threshold(sigma, f)
+//
+// where sigma = poolStake / totalStake (from the "mark" snapshot at epoch-2)
+// and f is the active slot coefficient from Shelley genesis.
+//
+// TPraos (Shelley/Allegra/Mary/Alonzo) and CPraos (Babbage/Conway) differ in
+// how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
+// selects the correct path for the block's era.
+//
+// Early epochs (< 2) and Byron blocks are skipped because no mark snapshot
+// exists two epochs prior. A missing total-stake or zero active-slot-coeff
+// is logged and skipped rather than rejecting, to tolerate early-chain states.
+func (ls *LedgerState) verifyBlockLeaderEligibility(
+	block ledger.Block,
+	epochId uint64,
+) error {
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+
+	// The mark snapshot used for leader eligibility is taken at epoch-2.
+	// Skip the check for the first two epochs where no such snapshot exists.
+	if epochId < 2 {
+		return nil
+	}
+	snapshotEpoch := epochId - 2
+
+	// Derive pool key hash from the block's issuer verification key.
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+
+	// Look up the pool's stake in the mark snapshot.
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		"mark",
+		poolKeyHash[:],
+		nil,
 	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"lookup pool stake: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if snapshot == nil || snapshot.TotalStake == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x has no stake in epoch %d snapshot",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			snapshotEpoch,
+		)
+	}
+	poolStake := uint64(snapshot.TotalStake)
+
+	// Look up the total active stake for the threshold denominator.
+	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
+		snapshotEpoch,
+		"mark",
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"lookup total active stake: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if totalStake == 0 {
+		// No total stake in snapshot yet — occurs during very early chain
+		// bootstrap. Skip rather than reject.
+		ls.config.Logger.Warn(
+			"skipping leader eligibility check: total active stake is zero",
+			"slot", block.SlotNumber(),
+			"epoch", epochId,
+			"component", "ledger",
+		)
+		return nil
+	}
+
+	activeSlotCoeff := ls.ActiveSlotCoeff()
+	if activeSlotCoeff <= 0 {
+		ls.config.Logger.Warn(
+			"skipping leader eligibility check: active slot coefficient unavailable",
+			"slot", block.SlotNumber(),
+			"component", "ledger",
+		)
+		return nil
+	}
+	activeSlotCoeffRat := new(big.Rat).SetFloat64(activeSlotCoeff)
+
+	// Consensus mode determines the VRF leader-value derivation path.
+	mode := ls.ConsensusModeForEpoch(epochId)
+
+	// Extract the VRF output from the header body CBOR.
+	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF result: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfResult.Output) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF output unavailable for eligibility check",
+			block.SlotNumber(),
+		)
+	}
+
+	// Compute the Praos leadership threshold and compare.
+	threshold := consensus.CertifiedNatThresholdWithMode(
+		poolStake,
+		totalStake,
+		activeSlotCoeffRat,
+		mode,
+	)
+	if !consensus.IsVRFOutputBelowThresholdWithMode(
+		vrfResult.Output,
+		threshold,
+		mode,
+	) {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF leader value exceeds stake-derived threshold "+
+				"(pool stake: %d, total stake: %d, epoch: %d)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			poolStake,
+			totalStake,
+			epochId,
+		)
+	}
+
+	return nil
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {

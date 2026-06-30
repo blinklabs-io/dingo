@@ -25,7 +25,9 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -840,4 +842,196 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 		err,
 		"block verified against wrong epoch nonce should fail",
 	)
+}
+
+// --- verifyBlockLeaderEligibility tests ---
+
+// newHighFreqShelleyGenesisCfg returns a CardanoNodeConfig with
+// activeSlotsCoeff=0.99, matching the coefficient used in createTestBlock
+// so that VRF outputs found eligible there are also eligible here.
+func newHighFreqShelleyGenesisCfg(t testing.TB) *cardano.CardanoNodeConfig {
+	t.Helper()
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.99,
+		"securityParam": 432,
+		"slotsPerKESPeriod": 129600,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{}
+	err := cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON))
+	require.NoError(t, err)
+	return cfg
+}
+
+// newEligibilityTestLedger builds a LedgerState backed by in-memory SQLite,
+// with an epoch cache that places any slot in [0, 1_000_000) at epoch 5
+// (so snapshotEpoch = 3). The Shelley genesis uses activeSlotsCoeff=0.99
+// to match createTestBlock's VRF eligibility threshold.
+func newEligibilityTestLedger(
+	t *testing.T,
+	epochNonce []byte,
+) (*LedgerState, *database.Database) {
+	t.Helper()
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+
+	ls := &LedgerState{
+		db: db,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       5,
+				StartSlot:     0,
+				LengthInSlots: 1_000_000,
+				Nonce:         epochNonce,
+			},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: newHighFreqShelleyGenesisCfg(t),
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	return ls, db
+}
+
+// seedPoolStakeSnapshot inserts a pool stake snapshot using the store interface.
+func seedPoolStakeSnapshot(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+	poolKeyHash []byte,
+	totalStake uint64,
+) {
+	t.Helper()
+	err := db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:        epoch,
+			SnapshotType: "mark",
+			PoolKeyHash:  poolKeyHash,
+			TotalStake:   types.Uint64(totalStake),
+		},
+		nil,
+	)
+	require.NoError(t, err)
+}
+
+// TestVerifyBlockLeaderEligibility_ByronSkipped verifies that Byron blocks
+// bypass eligibility checking entirely (Byron uses PBFT, not Praos).
+func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
+	ls := &LedgerState{} // no db needed
+	block := &mockByronBlock{}
+	err := ls.verifyBlockLeaderEligibility(block, 5)
+	assert.NoError(t, err, "Byron blocks must be skipped")
+}
+
+// TestVerifyBlockLeaderEligibility_EarlyEpochSkipped verifies that epochs
+// 0 and 1 are skipped because no mark snapshot exists at epoch-2.
+func TestVerifyBlockLeaderEligibility_EarlyEpochSkipped(t *testing.T) {
+	ls := &LedgerState{} // no db needed — must not reach DB
+	block := &mockBabbageBlock{slot: 100}
+	for _, epoch := range []uint64{0, 1} {
+		err := ls.verifyBlockLeaderEligibility(block, epoch)
+		assert.NoErrorf(t, err, "epoch %d should be skipped (no snapshot)", epoch)
+	}
+}
+
+// TestVerifyBlockLeaderEligibility_EligiblePoolPasses verifies that a block
+// from a pool with sufficient stake and an eligible VRF output passes the check.
+func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{30}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	// Pool owns 100% of stake — matches createTestBlock's threshold assumption.
+	const totalStake = uint64(1_000_000_000)
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], totalStake)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "eligible pool with full stake should pass")
+}
+
+// TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block
+// from a pool absent from the epoch-2 mark snapshot is rejected.
+func TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{31}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	// No snapshot seeded — pool is unknown.
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has no stake in epoch")
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroStakeFails verifies that a block
+// from a pool with a zero-stake snapshot entry is rejected.
+func TestVerifyBlockLeaderEligibility_ZeroStakeFails(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{32}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 0)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "has no stake in epoch")
+}
+
+// TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails verifies that a block
+// whose VRF leader value is above the stake-derived threshold is rejected.
+// The block was produced eligible at 100% stake (f=0.99 threshold ≈ 2^256*0.99),
+// but the pool only holds 1 lovelace out of 10^18 — making its threshold
+// near zero and ensuring the VRF output exceeds it.
+func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{33}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	// Actual pool: tiny stake (1 lovelace).
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1)
+	// Dummy pool: huge stake to make the total far exceed the pool's share,
+	// pushing sigma ≈ 1/10^18 and the threshold to essentially zero.
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshot(t, db, 3, dummyHash, 1_000_000_000_000_000_000)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+}
+
+// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips verifies that
+// when the active slot coefficient is unavailable (Shelley genesis not loaded),
+// the eligibility check is skipped rather than rejecting the block.
+func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{34}, 0, tamperNone)
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+
+	// Seed a pool stake snapshot so the check reaches the coeff lookup.
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+
+	ls := &LedgerState{
+		db: db,
+		epochCache: []models.Epoch{
+			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		},
+		config: LedgerStateConfig{
+			// No CardanoNodeConfig → ActiveSlotCoeff() returns 0 → skip.
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "missing active slot coeff should skip, not reject")
 }

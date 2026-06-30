@@ -5702,6 +5702,9 @@ func (ls *LedgerState) SlotsPerEpoch() uint64 {
 // ActiveSlotCoeff returns the active slot coefficient (f parameter).
 // This is used in the Ouroboros Praos leader election probability.
 func (ls *LedgerState) ActiveSlotCoeff() float64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
 		return 0
