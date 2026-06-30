@@ -221,6 +221,10 @@ returning a signed object-storage URL plus block metadata. Badger is valid for a
 normal local blob store, but it does not provide signed URLs and should not be
 used as the Bark archive backend.
 
+For local source builds, the `s3` and `gcs` blob plugins require
+`-tags dingo_extra_plugins` or `make build`. Official release binaries include
+the extra plugin tag.
+
 ```yaml
 storageMode: "core"
 database:
@@ -363,6 +367,11 @@ These are approximate values that grow over time. The snapshot can be deleted af
 Dingo supports pluggable storage backends for both blob storage (blocks, transactions) and metadata storage. This allows you to choose the best storage solution for your use case.
 
 ### Available Plugins
+
+For local source builds, `badger` is always available. The `gcs` and `s3` blob
+plugins require `-tags dingo_extra_plugins` or `make build`. `postgres` and
+`mysql` are still compiled into plain builds on current `main`; issue #2586
+tracks moving them behind the same tag.
 
 Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)

@@ -73,8 +73,9 @@ database:
   # Metadata storage plugin configuration
   metadata:
     # Plugin to use for metadata storage (sqlite, postgres, mysql)
-    # sqlite is always built; postgres and mysql require a build with
-    # -tags dingo_extra_plugins or an official release binary.
+    # sqlite is the default. postgres and mysql are still included in plain
+    # source builds on current main; issue #2586 tracks moving them behind
+    # -tags dingo_extra_plugins.
     plugin: "sqlite"
     # Configuration options for each plugin
     sqlite:
