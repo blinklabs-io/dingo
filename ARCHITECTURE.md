@@ -1938,6 +1938,43 @@ Implements the Mesh (formerly Rosetta) API specification for wallet integration 
 
 A gRPC server implementing the UTxO RPC specification with query, submit, sync, and watch services. Supports optional TLS.
 
+### Koios Parity Tracker (`cmd/koios-parity/`, `internal/koiosparity/`)
+
+An operator tool that validates Dingo's closed-epoch reward inputs against Koios
+reference data on preview and preprod networks. It is not part of the node
+process; it is a standalone binary built from `cmd/koios-parity/`.
+
+**Architecture:**
+
+```
+internal/koiosparity/      # shared library
+  cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
+  koios_client.go          # Koios v1 REST client with pagination + retry
+  blockfrost_client.go     # Dingo Blockfrost API client
+  compare.go               # field-level comparison, Mismatch category constants
+  fetch.go                 # Koios fetch orchestration (worker pool per epoch)
+  check.go                 # parity check orchestration (pool-level comparison)
+  report.go                # human-readable status + JSON report generation
+
+cmd/koios-parity/          # thin Cobra CLI wrapper
+  main.go                  # root command (default action: fetch+check+status)
+  run.go, fetch.go, check.go, status.go, explain.go, watch.go
+```
+
+**Data sources:**
+- **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
+  via the `fetch` subcommand. The cache holds `koios_epoch_info` and
+  `koios_pool_epoch` rows per closed epoch.
+- **Dingo:** queried live via Dingo's Blockfrost-compatible API (`--dingo-api`)
+  during the `check` phase. The `check` command does not open SQLite directly.
+
+**Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
+`dingo_api_missing` (endpoint not yet implemented), `dingo_api_error`,
+`reference_lag`. Results are stored in `check_mismatches` and
+summarised in `check_epoch_status`.
+
+**Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
+
 ### Bark (`bark/`)
 
 Bark is Dingo's own protocol for Dingo-to-Dingo control-plane and archive
