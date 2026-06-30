@@ -48,6 +48,13 @@ type KoiosEpochInfoResp struct {
 	TotalRewards string `json:"total_rewards"`
 }
 
+// KoiosPoolListItem is one entry from /pool_list.
+// pool_status is one of: registered, retiring, retired.
+type KoiosPoolListItem struct {
+	PoolIDBech32 string `json:"pool_id_bech32"`
+	PoolStatus   string `json:"pool_status"`
+}
+
 // KoiosPoolHistoryItem is one epoch entry from /pool_history.
 type KoiosPoolHistoryItem struct {
 	PoolIDBech32 string `json:"pool_id_bech32"`
@@ -184,32 +191,27 @@ func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpo
 	return &items[0], nil
 }
 
-// GetAllPoolHistoryForEpoch returns all pool history entries for a given epoch.
-// Using _epoch_no without _pool_bech32 returns every pool that was active in
-// the epoch, including retired pools that /pool_list omits.
-func (k *KoiosClient) GetAllPoolHistoryForEpoch(ctx context.Context, epoch uint64) ([]KoiosPoolHistoryItem, error) {
-	path := fmt.Sprintf(
-		"/pool_history?_epoch_no=%d&select=pool_id_bech32,epoch_no,active_stake,block_cnt,delegator_cnt",
-		epoch,
-	)
-	var all []KoiosPoolHistoryItem
+// GetPoolList returns all pool IDs from Koios (paginated), including retired pools.
+// pool_status values are: registered, retiring, retired.
+func (k *KoiosClient) GetPoolList(ctx context.Context) ([]KoiosPoolListItem, error) {
+	var all []KoiosPoolListItem
 	for start := 0; ; start += koiosPageSize {
 		end := start + koiosPageSize - 1
-		resp, err := k.get(ctx, path, start, end)
+		resp, err := k.get(ctx, "/pool_list?select=pool_id_bech32,pool_status", start, end)
 		if err != nil {
 			return nil, err
 		}
 		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			return nil, fmt.Errorf("koios /pool_history read: %w", readErr)
+			return nil, fmt.Errorf("koios /pool_list read: %w", readErr)
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf("koios /pool_history: status %d", resp.StatusCode)
+			return nil, fmt.Errorf("koios /pool_list: status %d", resp.StatusCode)
 		}
-		var page []KoiosPoolHistoryItem
+		var page []KoiosPoolListItem
 		if err := json.Unmarshal(body, &page); err != nil {
-			return nil, fmt.Errorf("koios /pool_history decode: %w", err)
+			return nil, fmt.Errorf("koios /pool_list decode: %w", err)
 		}
 		all = append(all, page...)
 		if len(page) < koiosPageSize {
@@ -221,6 +223,41 @@ func (k *KoiosClient) GetAllPoolHistoryForEpoch(ctx context.Context, epoch uint6
 		}
 	}
 	return all, nil
+}
+
+// GetPoolEpochHistory fetches a pool's history entry for a specific epoch.
+// Returns nil, nil if the pool has no row for that epoch.
+// _pool_bech32 is a required Koios function parameter; the epoch filter is
+// applied server-side so only one row is returned instead of the full history.
+func (k *KoiosClient) GetPoolEpochHistory(
+	ctx context.Context,
+	poolBech32 string,
+	epoch uint64,
+) (*KoiosPoolHistoryItem, error) {
+	path := fmt.Sprintf(
+		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=pool_id_bech32,epoch_no,active_stake,block_cnt,delegator_cnt",
+		poolBech32, epoch,
+	)
+	resp, err := k.get(ctx, path, -1, -1)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("koios /pool_history: status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("koios /pool_history read: %w", err)
+	}
+	var items []KoiosPoolHistoryItem
+	if err := json.Unmarshal(body, &items); err != nil {
+		return nil, fmt.Errorf("koios /pool_history decode: %w", err)
+	}
+	if len(items) == 0 {
+		return nil, nil
+	}
+	return &items[0], nil
 }
 
 // parseTotalFromContentRange extracts the total count from a Content-Range header
