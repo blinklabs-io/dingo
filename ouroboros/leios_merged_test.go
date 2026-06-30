@@ -135,7 +135,8 @@ func TestLeiosTxsFromBitmapPreservesRequestedOrder(t *testing.T) {
 		mustCbor(t, "tx3"),
 	}
 
-	got := leiosTxsFromBitmap(txs, map[uint16]uint64{0: 0b1010})
+	// MSB-first (see leiosWindowNeededMask): txs 1 and 3 are bits 62 and 60.
+	got := leiosTxsFromBitmap(txs, map[uint16]uint64{0: (1 << 62) | (1 << 60)})
 	require.Equal(t, []cbor.RawMessage{txs[1], txs[3]}, got)
 }
 

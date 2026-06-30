@@ -227,7 +227,9 @@ func leiosTxsFromBitmap(
 			break
 		}
 		mask := bitmaps[uint16(bucket)] // #nosec G115 -- checked above
-		if mask&(1<<uint(idx%64)) == 0 {
+		// MSB-first bitmap (see leiosWindowNeededMask): the tx at window
+		// offset o is bit 63-o.
+		if mask&(1<<uint(63-(idx%64))) == 0 {
 			continue
 		}
 		ret = append(ret, slices.Clone(tx))
@@ -241,11 +243,13 @@ func validateLeiosTxBitmap(count int, bitmaps map[uint16]uint64) error {
 			continue
 		}
 		baseIdx := int(bucket) * 64
-		for offset := range 64 {
-			if mask&(1<<uint(offset)) == 0 {
+		for bit := range 64 {
+			if mask&(1<<uint(bit)) == 0 {
 				continue
 			}
-			idx := baseIdx + offset
+			// MSB-first bitmap (see leiosWindowNeededMask): bit b denotes
+			// window offset 63-b.
+			idx := baseIdx + (63 - bit)
 			if idx >= count {
 				return fmt.Errorf(
 					"leios tx bitmap references tx index %d beyond %d cached txs",

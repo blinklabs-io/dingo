@@ -60,11 +60,12 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	require.NoError(t, o.BroadcastEndorserBlock(slot, ebHash, ebCbor, bodies))
 	point := ocommon.Point{Slot: slot, Hash: ebHash}
 
-	// Full request: all three transactions (window 0, bits 0..2).
+	// Full request: all three transactions. MSB-first, so offsets 0..2 are the
+	// top three bits 63,62,61 (see leiosWindowNeededMask).
 	resp, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
-		map[uint16]uint64{0: 0b111},
+		map[uint16]uint64{0: uint64(0b111) << 61},
 	)
 	require.NoError(t, err)
 	msg, ok := resp.(*oleiosfetch.MsgBlockTxs)
@@ -83,11 +84,11 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 		)
 	}
 
-	// Partial request: only transaction index 1 (window 0, bit 1).
+	// Partial request: only transaction index 1 (MSB-first: bit 62).
 	resp2, err := o.leiosfetchServerBlockTxsRequest(
 		oleiosfetch.CallbackContext{},
 		point,
-		map[uint16]uint64{0: 0b010},
+		map[uint16]uint64{0: 1 << 62},
 	)
 	require.NoError(t, err)
 	msg2, ok := resp2.(*oleiosfetch.MsgBlockTxs)
