@@ -276,6 +276,7 @@ sequenceDiagram
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
+    LS->>LS: reload epoch cache, repair lab nonces
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
@@ -641,11 +642,12 @@ When `Node.Run()` is called, components are initialized in this order:
     crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
-    `last_epoch_block_nonce` was persisted empty by the pre-fix
-    endorser-block/`BlockBeforeSlot` collision — re-deriving the lab from the
-    real boundary block and recomputing the affected next epoch's nonce in the
-    cache so leader-VRF verification matches the network (an empty lab would
-    otherwise collapse that epoch's nonce to the NeutralNonce identity).
+    `last_epoch_block_nonce` was persisted empty or stale by pre-fix boundary
+    lookup bugs, re-deriving the lab from the active chain's boundary block and
+    recomputing the affected epoch's nonce in the cache when that epoch has a
+    stored `candidate_nonce`, so leader-VRF verification matches the network.
+    If the candidate is missing, startup leaves the epoch unchanged rather than
+    substituting Shelley genesis for a candidate that may have evolved.
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros
@@ -985,10 +987,15 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 
 ### Epoch Nonce Computation
 
-`ledger/chainsync.go` and `ledger/candidate_nonce.go` implement the Ouroboros Praos nonce evolution:
+`ledger/chainsync.go`, `ledger/candidate_nonce.go`, and `ledger/epoch_lab_nonce.go` implement the Ouroboros Praos nonce evolution:
 - Evolving nonce: accumulated from each block's VRF output
 - Candidate nonce: frozen at the stability window cutoff
 - Epoch nonce: derived from candidate nonce and previous epoch's last block hash
+
+The previous epoch's last-block hash is resolved through the active chain index
+(`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
+retain synthetic endorser/genesis blobs and fork blobs that are useful for other
+storage paths but are not part of the selected chain.
 
 ### Ledger View
 
@@ -1753,6 +1760,10 @@ visible to the withdrawals checked in step 3. The ordering is locked in by
 On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
+- Reload the remaining epoch rows into the in-memory cache and run the same
+  empty/stale `last_epoch_block_nonce` repair used at startup before publishing
+  the new cache. Epochs without a stored `candidate_nonce` are skipped because
+  their nonce cannot be safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
   writes (`network_state`) from governance refunds and POOLREAP deposit refunds
   are slot-keyed, so they are reverted by slot and re-derived on forward replay

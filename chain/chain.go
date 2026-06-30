@@ -1143,6 +1143,38 @@ func (c *Chain) BlockByPoint(
 	return c.manager.BlockByPoint(point, txn)
 }
 
+// BlockBeforeSlot returns the highest-slot block before slotNumber on this
+// chain. It walks the chain index instead of scanning blob keys so retained
+// fork or synthetic blobs cannot be returned as canonical blocks.
+func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
+	if c == nil {
+		return models.Block{}, errors.New("chain is nil")
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.manager.mutex.RLock()
+	defer c.manager.mutex.RUnlock()
+	if err := c.reconcile(); err != nil {
+		return models.Block{}, err
+	}
+	if c.tipBlockIndex < initialBlockIndex {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	for blockIndex := c.tipBlockIndex; blockIndex >= initialBlockIndex; blockIndex-- {
+		block, err := c.blockByIndex(blockIndex)
+		if err != nil {
+			return models.Block{}, err
+		}
+		if block.Slot < slotNumber {
+			return block, nil
+		}
+		if blockIndex == initialBlockIndex {
+			break
+		}
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 func (c *Chain) blockByIndex(
 	blockIndex uint64,
 ) (models.Block, error) {

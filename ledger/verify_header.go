@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
@@ -393,7 +392,7 @@ func (ls *LedgerState) advanceEpochCache() error {
 }
 
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
-// and labNonce for a new epoch starting at epochStartSlot. This
+// and lastEpochBlockNonce for a new epoch starting at epochStartSlot. This
 // mirrors calculateEpochNonce but uses non-transactional DB lookups
 // since we're not inside the ledger processing pipeline.
 //
@@ -514,24 +513,20 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// Compute the labNonce to SAVE for the next epoch's formula.
-	var labNonceToSave []byte
-	boundaryBlock, err := database.BlockBeforeSlot(
-		ls.db,
+	// Compute the lastEpochBlockNonce for the epoch being closed.
+	// This is the hash of the last block in prevEpoch, or the carried
+	// value when prevEpoch has no blocks.
+	lastEpochBlockNonce, err := ls.epochLabNonce(
+		nil,
+		prevEpoch.StartSlot,
 		prevEpochEndSlot,
+		prevEpoch.LastEpochBlockNonce,
 	)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"lookup boundary block: %w", err,
-			)
-		}
-	} else if len(boundaryBlock.PrevHash) > 0 {
-		labNonceToSave = boundaryBlock.PrevHash
+		return nil, nil, nil, nil, err
 	}
+	labNonceToSave := lastEpochBlockNonce
 
-	// Use the LAGGED lastEpochBlockNonce in the formula.
-	lastEpochBlockNonce := prevEpoch.LastEpochBlockNonce
 	if len(lastEpochBlockNonce) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce

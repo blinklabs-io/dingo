@@ -1849,12 +1849,13 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// then applied atomically under a single Lock to avoid data
 	// races with concurrent readers.
 	var (
-		newEpochs       []models.Epoch
-		newCurrentEpoch models.Epoch
-		newCurrentEra   eras.EraDesc
-		newPParams      lcommon.ProtocolParameters
-		newPrevPParams  lcommon.ProtocolParameters
-		eraResolved     bool
+		newEpochs         []models.Epoch
+		newEpochsRepaired bool
+		newCurrentEpoch   models.Epoch
+		newCurrentEra     eras.EraDesc
+		newPParams        lcommon.ProtocolParameters
+		newPrevPParams    lcommon.ProtocolParameters
+		eraResolved       bool
 	)
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
@@ -1872,6 +1873,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}
 	if epochs != nil {
 		newEpochs = epochs
+		// Keep rollback reloads consistent with startup reloads: a
+		// persisted empty lab must not re-enter the in-memory cache.
+		newEpochsRepaired = ls.healEmptyLabNoncesInPlace(newEpochs)
 		// Reset currentEpoch to the last remaining epoch so
 		// that ledgerProcessBlocks correctly detects the next
 		// epoch boundary and EpochNonce() returns the right
@@ -1933,6 +1937,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.Lock()
 	if newEpochs != nil {
 		ls.epochCache = newEpochs
+		if newEpochsRepaired {
+			clear(ls.epochNonceHexCache)
+		}
 
 		if len(newEpochs) > 0 {
 			ls.currentEpoch = newCurrentEpoch
@@ -4467,9 +4474,7 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Recover epoch records whose LastEpochBlockNonce was persisted empty
-		// by the pre-fix BlockBeforeSlot endorser-block collision (see
-		// healEmptyLabNonces). New syncs are unaffected now that
-		// BlockBeforeSlotTxn skips synthetic blobs.
+		// or stale by pre-fix boundary lookup bugs (see healEmptyLabNonces).
 		ls.healEmptyLabNonces()
 		// Set current epoch and era after healing so currentEpoch reflects
 		// any repaired nonce in epochCache.
@@ -4547,80 +4552,108 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 }
 
 // healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce was
-// persisted empty by the pre-fix BlockBeforeSlot endorser-block collision.
+// persisted empty by pre-fix boundary block lookup bugs.
 //
-// LastEpochBlockNonce is the lagged "prevHash of the last block of the previous
-// epoch" that feeds the next epoch's nonce as candidateNonce ⭒ labNonce. Before
-// BlockBeforeSlotTxn was taught to skip synthetic blobs, the labNonce lookup at
-// an epoch transition could return a Leios endorser block (persisted at a
-// block-blob key via SetGenesisCbor with an empty PrevHash) instead of the real
-// ranking block, saving an empty lab. An empty lab collapses the next epoch's
-// nonce to the NeutralNonce identity (η = candidateNonce, skipping the labNonce
-// mix), so every leader-VRF check in that epoch fails and the node wedges at
-// the first block it must verify live.
+// LastEpochBlockNonce is the hash of the last block of the previous epoch. It
+// feeds the current epoch's nonce as candidateNonce ⭒ lastEpochBlockNonce.
+// Earlier boundary lookups scanned block-blob keys, so they could return a
+// synthetic Leios endorser block or retained fork blob instead of the active
+// chain's real ranking block. Empty or wrong lab values diverge epoch nonces
+// from peers and break leader-VRF verification.
 //
 // This runs once at startup over the loaded epoch cache. For each non-genesis
-// epoch with an empty lab whose boundary block (now resolved to the real
-// ranking block) carries a valid PrevHash, it restores the lab and recomputes
-// the affected next epoch's nonce in the cache. It is a pure function of
-// already-stored chain data and is idempotent across restarts.
+// epoch whose lab is empty or differs from the boundary block resolved through
+// the canonical chain index, it restores the lab and recomputes the affected
+// epoch's nonce in the cache. It is a pure function of already-stored chain
+// data and is idempotent across restarts.
 func (ls *LedgerState) healEmptyLabNonces() {
+	if ls.healEmptyLabNoncesInPlace(ls.epochCache) {
+		clear(ls.epochNonceHexCache)
+	}
+}
+
+func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	repaired := false
-	for i := range ls.epochCache {
-		ep := &ls.epochCache[i]
-		// The genesis epoch legitimately carries no lagged block nonce.
-		if len(ep.LastEpochBlockNonce) != 0 || ep.StartSlot == 0 {
+	for i := range epochs {
+		ep := &epochs[i]
+		// The genesis epoch legitimately carries no last block nonce.
+		if ep.StartSlot == 0 {
 			continue
 		}
-		boundary, err := database.BlockBeforeSlot(ls.db, ep.StartSlot)
+		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
 		if err != nil ||
-			len(boundary.PrevHash) != lcommon.Blake2b256Size {
+			len(boundary.Hash) != lcommon.Blake2b256Size {
 			continue
 		}
-		ep.LastEpochBlockNonce = boundary.PrevHash
+		if bytes.Equal(ep.LastEpochBlockNonce, boundary.Hash) {
+			continue
+		}
+		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"skipping epoch lab recovery; candidate nonce unavailable",
+				"epoch", ep.EpochId,
+				"error", err,
+				"component", "ledger",
+			)
+			continue
+		}
+		// Recompute this epoch's nonce before mutating the record; the lab and
+		// nonce must be repaired together or not at all.
+		res, err := lcommon.CalculateEpochNonce(
+			candidateNonce,
+			boundary.Hash,
+			nil,
+		)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"failed to recompute epoch nonce during lab recovery",
+				"epoch", ep.EpochId,
+				"error", err,
+				"component", "ledger",
+			)
+			continue
+		}
+		previousLab := cloneNonce(ep.LastEpochBlockNonce)
+		previousNonce := cloneNonce(ep.Nonce)
+		newNonce := res.Bytes()
+		ep.LastEpochBlockNonce = cloneNonce(boundary.Hash)
+		ep.Nonce = newNonce
 		repaired = true
 		ls.config.Logger.Info(
-			"recovered empty epoch lastEpochBlockNonce",
+			"repaired epoch lastEpochBlockNonce",
 			"epoch", ep.EpochId,
 			"boundary_slot", boundary.Slot,
+			"previous_last_epoch_block_nonce",
+			hex.EncodeToString(previousLab),
 			"last_epoch_block_nonce",
 			hex.EncodeToString(ep.LastEpochBlockNonce),
 			"component", "ledger",
 		)
-		// Recompute the next epoch's nonce: it used this lab in its formula
-		// and would otherwise be the NeutralNonce-collapsed (η=candidate) value.
-		for j := range ls.epochCache {
-			nxt := &ls.epochCache[j]
-			if nxt.EpochId != ep.EpochId+1 ||
-				len(nxt.CandidateNonce) != lcommon.Blake2b256Size {
-				continue
-			}
-			res, err := lcommon.CalculateEpochNonce(
-				nxt.CandidateNonce,
-				ep.LastEpochBlockNonce,
-				nil,
-			)
-			if err != nil {
-				ls.config.Logger.Warn(
-					"failed to recompute epoch nonce during lab recovery",
-					"epoch", nxt.EpochId,
-					"error", err,
-					"component", "ledger",
-				)
-				continue
-			}
-			ls.config.Logger.Info(
-				"recomputed epoch nonce after lab recovery",
-				"epoch", nxt.EpochId,
-				"previous_nonce", hex.EncodeToString(nxt.Nonce),
-				"epoch_nonce", hex.EncodeToString(res.Bytes()),
-				"component", "ledger",
-			)
-			nxt.Nonce = res.Bytes()
-		}
+		ls.config.Logger.Info(
+			"recomputed epoch nonce after lab recovery",
+			"epoch", ep.EpochId,
+			"previous_nonce", hex.EncodeToString(previousNonce),
+			"epoch_nonce", hex.EncodeToString(newNonce),
+			"component", "ledger",
+		)
 	}
-	if repaired {
-		clear(ls.epochNonceHexCache)
+	return repaired
+}
+
+func (ls *LedgerState) epochRepairCandidateNonce(
+	ep models.Epoch,
+) ([]byte, error) {
+	switch len(ep.CandidateNonce) {
+	case lcommon.Blake2b256Size:
+		return cloneNonce(ep.CandidateNonce), nil
+	case 0:
+		return nil, errors.New("candidate nonce not stored")
+	default:
+		return nil, fmt.Errorf(
+			"invalid candidate nonce length %d",
+			len(ep.CandidateNonce),
+		)
 	}
 }
 
@@ -5644,7 +5677,8 @@ func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
 
 // computeNextEpochNonce speculatively computes the epoch nonce for the
 // next epoch (currentEpoch.EpochId + 1) using data from the current epoch.
-// Uses the lagged lastEpochBlockNonce from the current epoch record.
+// Uses the current epoch's last block hash, carrying the stored
+// lastEpochBlockNonce only when the epoch has no blocks.
 //
 // Returns nil if the nonce cannot be computed (e.g., missing block data,
 // Byron era, or missing genesis config).

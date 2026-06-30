@@ -35,7 +35,7 @@ func TestEpochNonceFormula(t *testing.T) {
 		t,
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	)
-	// Synthetic 32-byte lastEpochBlockNonce (prevHash of last block)
+	// Synthetic 32-byte lastEpochBlockNonce (hash of last block)
 	lastEpochBlockNonce := mustDecodeHex(
 		t,
 		"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
