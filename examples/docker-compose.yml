@@ -97,7 +97,7 @@ services:
       dingo:
         condition: service_started
     working_dir: /app
-    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    command: ["sh", "-c", "npm ci && npm run dev"]
     environment:
       DINGO_BLOCKFROST_URL: http://dingo:3000
       DINGO_METRICS_URL: http://dingo:12798
@@ -114,7 +114,7 @@ services:
       dingo:
         condition: service_started
     working_dir: /app
-    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    command: ["sh", "-c", "npm ci && npm run dev"]
     environment:
       DINGO_UTXORPC_URL: http://dingo:9090
     ports:
