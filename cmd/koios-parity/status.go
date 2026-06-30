@@ -41,8 +41,11 @@ func statusRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	cachePath := resolveCachePath()
-	if _, statErr := os.Stat(cachePath); os.IsNotExist(statErr) {
-		return fmt.Errorf("cache not found at %s; run 'fetch' first", cachePath)
+	if _, statErr := os.Stat(cachePath); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return fmt.Errorf("cache not found at %s; run 'fetch' first", cachePath)
+		}
+		return fmt.Errorf("cache stat %s: %w", cachePath, statErr)
 	}
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
