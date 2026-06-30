@@ -5718,6 +5718,20 @@ func (ls *LedgerState) ActiveSlotCoeff() float64 {
 	return float64(num) / float64(denom)
 }
 
+// activeSlotCoeffRat returns the active slot coefficient as a *big.Rat,
+// preserving the full precision from the Shelley genesis without a
+// float64 roundtrip. Returns nil when the genesis is unavailable.
+func (ls *LedgerState) activeSlotCoeffRat() *big.Rat {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
+		return nil
+	}
+	return shelleyGenesis.ActiveSlotsCoeff.Rat
+}
+
 // Database returns the underlying database for transaction operations.
 func (ls *LedgerState) Database() *database.Database {
 	return ls.db

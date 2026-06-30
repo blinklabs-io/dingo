@@ -721,17 +721,38 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 // when blocks span an epoch boundary, each block is verified against
 // the nonce of its own epoch, not the "current" epoch. This is the
 // epoch-aware lookup that prevents the LDG-08 bypass.
+//
+// The test also exercises the full pipeline including leader-eligibility:
+// epoch 0 blocks query the genesis snapshot (epoch 0, "mark"), so the
+// database is seeded with the pool's stake before calling verifyBlockHeaderCrypto.
 func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 	t *testing.T,
 ) {
-	epoch0Nonce := make([]byte, 32)
+	// createTestBlock uses f=0.99 to find eligible slots; use the same
+	// coefficient in the Shelley genesis so the eligibility check matches.
+	tb := createTestBlock(t, [32]byte{10}, 0, tamperNone)
+
+	epoch0Nonce := tb.epochNonce // nonceSeed=0 → epoch0Nonce
 	epoch1Nonce := make([]byte, 32)
-	for i := range epoch0Nonce {
-		epoch0Nonce[i] = byte(i)     //nolint:gosec
+	for i := range epoch1Nonce {
 		epoch1Nonce[i] = byte(i + 1) //nolint:gosec
 	}
 
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+
+	// Seed genesis snapshot (epoch 0, "mark") for the pool so leader
+	// eligibility succeeds for blocks in epoch 0.
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 0, poolKeyHash[:], 1_000_000_000)
+
 	ls := &LedgerState{
+		db: db,
 		currentEpoch: models.Epoch{
 			EpochId:       1,
 			StartSlot:     1000,
@@ -753,16 +774,13 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 			},
 		},
 		config: LedgerStateConfig{
-			CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+			CardanoNodeConfig: newHighFreqShelleyGenesisCfg(t),
 			Logger: slog.New(
 				slog.NewJSONHandler(io.Discard, nil),
 			),
 		},
 	}
 
-	// Create a valid block in epoch 0 (slot < 1000).
-	// The block's VRF proof was generated with epoch0Nonce.
-	tb := createTestBlock(t, [32]byte{10}, 0, tamperNone)
 	// The test block's slot is in [1, 200]. Ensure epoch 0 covers it.
 	require.Less(
 		t,
@@ -773,8 +791,7 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 
 	// Verify: the epoch-aware lookup should find epoch 0 for this block
 	// and use epoch0Nonce (which matches the block's VRF proof).
-	// tb.epochNonce == epoch0Nonce by construction (nonceSeed=0).
-	err := ls.verifyBlockHeaderCrypto(tb.block)
+	err = ls.verifyBlockHeaderCrypto(tb.block)
 	assert.NoError(
 		t,
 		err,
@@ -928,15 +945,31 @@ func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
 	assert.NoError(t, err, "Byron blocks must be skipped")
 }
 
-// TestVerifyBlockLeaderEligibility_EarlyEpochSkipped verifies that epochs
-// 0 and 1 are skipped because no mark snapshot exists at epoch-2.
-func TestVerifyBlockLeaderEligibility_EarlyEpochSkipped(t *testing.T) {
-	ls := &LedgerState{} // no db needed — must not reach DB
-	block := &mockBabbageBlock{slot: 100}
-	for _, epoch := range []uint64{0, 1} {
-		err := ls.verifyBlockLeaderEligibility(block, epoch)
-		assert.NoErrorf(t, err, "epoch %d should be skipped (no snapshot)", epoch)
+// TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot verifies that
+// epochs 0 and 1 query the genesis snapshot (epoch 0, "mark") rather than
+// skipping eligibility checks. A pool absent from that snapshot is rejected.
+func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{35}, 0, tamperNone)
+	// Use epoch 5 nonce for the genesis epoch cache entry; the actual nonce
+	// is not used by verifyBlockLeaderEligibility itself.
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+
+	// Override epoch cache to place the block in epoch 1 (snapshotEpoch = 0).
+	ls.epochCache = []models.Epoch{
+		{EpochId: 1, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
 	}
+
+	// No genesis snapshot seeded — pool has no stake at epoch 0.
+	err := ls.verifyBlockLeaderEligibility(tb.block, 1)
+	require.Error(t, err, "epoch 1 without genesis snapshot must be rejected")
+	assert.Contains(t, err.Error(), "has no stake in epoch")
+
+	// Now seed the genesis snapshot at epoch 0.
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 0, poolKeyHash[:], 1_000_000_000)
+
+	err = ls.verifyBlockLeaderEligibility(tb.block, 1)
+	assert.NoError(t, err, "epoch 1 with valid genesis snapshot should pass")
 }
 
 // TestVerifyBlockLeaderEligibility_EligiblePoolPasses verifies that a block

@@ -19,7 +19,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/database"
@@ -225,16 +224,20 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 //
 //	vrfLeaderOutput < threshold(sigma, f)
 //
-// where sigma = poolStake / totalStake (from the "mark" snapshot at epoch-2)
-// and f is the active slot coefficient from Shelley genesis.
+// where sigma = poolStake / totalStake and f is the active slot coefficient
+// from Shelley genesis.
+//
+// Snapshot epoch selection follows the Mark→Set→Go rotation:
+//   - epoch 0 and 1: genesis snapshot (stored at epoch 0, "mark")
+//   - epoch e >= 2:  mark snapshot at epoch e-2
 //
 // TPraos (Shelley/Allegra/Mary/Alonzo) and CPraos (Babbage/Conway) differ in
 // how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
 // selects the correct path for the block's era.
 //
-// Early epochs (< 2) and Byron blocks are skipped because no mark snapshot
-// exists two epochs prior. A missing total-stake or zero active-slot-coeff
-// is logged and skipped rather than rejecting, to tolerate early-chain states.
+// Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
+// slot coefficient is logged and skipped rather than rejecting, to tolerate
+// early-chain bootstrap states where the genesis snapshot is not yet written.
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,
@@ -243,12 +246,13 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return nil
 	}
 
-	// The mark snapshot used for leader eligibility is taken at epoch-2.
-	// Skip the check for the first two epochs where no such snapshot exists.
-	if epochId < 2 {
-		return nil
+	// Determine which mark snapshot epoch to query.
+	// Epochs 0 and 1 use the genesis distribution stored at epoch 0.
+	// Epoch e >= 2 uses the mark snapshot captured at epoch e-2.
+	snapshotEpoch := uint64(0)
+	if epochId >= 2 {
+		snapshotEpoch = epochId - 2
 	}
-	snapshotEpoch := epochId - 2
 
 	// Derive pool key hash from the block's issuer verification key.
 	issuerVkey := block.IssuerVkey()
@@ -295,8 +299,8 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		)
 	}
 	if totalStake == 0 {
-		// No total stake in snapshot yet — occurs during very early chain
-		// bootstrap. Skip rather than reject.
+		// Genesis snapshot not yet written (very early bootstrap).
+		// Skip rather than reject.
 		ls.config.Logger.Warn(
 			"skipping leader eligibility check: total active stake is zero",
 			"slot", block.SlotNumber(),
@@ -306,8 +310,9 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return nil
 	}
 
-	activeSlotCoeff := ls.ActiveSlotCoeff()
-	if activeSlotCoeff <= 0 {
+	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
+	activeSlotCoeffRat := ls.activeSlotCoeffRat()
+	if activeSlotCoeffRat == nil {
 		ls.config.Logger.Warn(
 			"skipping leader eligibility check: active slot coefficient unavailable",
 			"slot", block.SlotNumber(),
@@ -315,7 +320,6 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		)
 		return nil
 	}
-	activeSlotCoeffRat := new(big.Rat).SetFloat64(activeSlotCoeff)
 
 	// Consensus mode determines the VRF leader-value derivation path.
 	mode := ls.ConsensusModeForEpoch(epochId)
