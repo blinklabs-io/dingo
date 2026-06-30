@@ -12,20 +12,20 @@ Hi folks! Here’s what we shipped in v0.61.0.
 
 ### ✨ What's New
 
-* Added **expand Midnight indexing for governance, Ariadne, and committee candidate scans:** Midnight users can now capture broader governance related data, keep persistence safe across rollbacks, and rely on steadier startup and backfill behavior.
+* Added **expand Midnight indexing for governance, Ariadne, and committee candidate scans:** Midnight users can now capture broader governance related data, keep rollback safe persistence, and rely on steadier startup and backfill behavior.
 
 ### 💪 Improvements
 
-* Improved **simplify local example deployments with a shared Docker Compose stack:** Example users can now run a single local workflow through `examples/docker-compose.yml`, and the updated environment variable names and paths make that setup easier to follow.
-* Updated **refresh the bundled protocol library to the current upstream patch release:** This release now includes the newer protocol library patch, which keeps protocol handling aligned with the latest upstream maintenance updates.
+* Improved **simplify local example deployments with a shared Docker Compose stack:** Example users can now run a single local workflow through `examples/docker-compose.yml`, and the renamed environment variables and paths make that setup easier to follow.
+* Updated **refresh the bundled protocol library to the current upstream patch release:** This release now includes the current upstream protocol library patch, which keeps protocol handling aligned with the latest maintenance updates.
 * Refined **refresh the bundled service library with current upstream JSON and host validation fixes:** Service integrations now benefit from upstream fixes for JSON document encoding and endpoint host label validation, which improves compatibility and request handling reliability.
-* Enhanced **align the documentation with current storage plugin builds and MidnightState support:** The documentation now reflects the current storage plugin build tag behavior and the implemented MidnightState compatibility surface, which reduces build and integration confusion.
+* Enhanced **align the documentation with current storage plugin builds and implemented MidnightState support:** The documentation now reflects the current storage plugin build tag behavior and the implemented MidnightState compatibility surface, which reduces build and integration confusion.
 * Modernized **keep the in repository release history current with the latest patch notes:** The release history now includes the published v0.60.1 entry, which keeps recent release context easier to review.
 
 ### 🔧 Fixes
 
-* Fixed **steady BlockFetch serving with send queue backpressure during large range transfers:** Large range serving now applies backpressure more effectively, which helps downstream catch up work stay stable under load.
-* Corrected **keep Leios endorser block fetch and backfill moving through partial and final windows:** Leios bitmap handling now follows the correct bit order, which prevents endorser block fetch and historical backfill from stalling in affected windows.
+* Fixed **steady BlockFetch serving with send queue backpressure during large range transfers:** Large range serving now applies send queue backpressure more effectively, which helps downstream catch up work stay stable under load.
+* Corrected **keep Leios endorser block fetch and backfill moving through partial and final windows:** Leios bitmap handling now follows the correct MSB first order, which prevents endorser block fetch and historical backfill from stalling in affected windows.
 * Strengthened **start SQLite metadata deployments with full schema setup automatically:** SQLite backed metadata deployments now create schema objects and foreign key setup automatically at startup, which makes fresh and upgraded databases easier to bring online.
 
 ### 📋 What You Need to Know
@@ -34,7 +34,7 @@ Hi folks! Here’s what we shipped in v0.61.0.
 * Highlighted **expect steadier BlockFetch behavior while serving large Leios ranges:** Operators serving large Leios ranges should now see more stable downstream catch up behavior under load.
 * Emphasized **expect historical Leios sync to avoid bitmap related backfill stalls:** From genesis and historical Leios syncs should now keep endorser block backfill moving instead of stalling in partial or final windows.
 * Summarized **expect SQLite schema setup to happen automatically at startup:** SQLite backed deployments should now create schema and foreign key setup automatically when they start on fresh databases.
-* Reviewed **switch local examples to the shared Docker Compose workflow and updated names:** Local example users should move to `examples/docker-compose.yml` and follow the updated environment variable names.
+* Reviewed **switch local examples to the shared Docker Compose workflow and updated names:** Local example users should move to `examples/docker-compose.yml` and follow the renamed environment variables.
 * Noted **review the published v0.60.1 notes in the in repository release history:** The repository release history now includes the published v0.60.1 notes for recent release review.
 
 ### Recommended Network Compatibility ⚠️
