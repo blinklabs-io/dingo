@@ -17,6 +17,15 @@ Hi folks! Here’s what we shipped in v0.61.0.
 ### 💪 Improvements
 
 * Improved **simplify local example deployments with a shared Docker Compose stack:** Example users can now run a single local workflow through `examples/docker-compose.yml`, and the updated environment variable names and paths make that setup easier to follow.
+* Updated **refresh the bundled protocol library to the current upstream patch release:** This release now includes the newer protocol library patch, which keeps protocol handling aligned with the latest upstream maintenance updates.
+* Refined **refresh the bundled service library with current upstream JSON and host validation fixes:** Service integrations now benefit from upstream fixes for JSON document encoding and endpoint host label validation, which improves compatibility and request handling reliability.
+* Enhanced **align the documentation with current storage plugin builds and MidnightState support:** The documentation now reflects the current storage plugin build tag behavior and the implemented MidnightState compatibility surface, which reduces build and integration confusion.
+* Modernized **keep the in repository release history current with the latest patch notes:** The release history now includes the published v0.60.1 entry, which keeps recent release context easier to review.
+
+### 🔧 Fixes
+
+* Fixed **steady BlockFetch serving with send queue backpressure during large range transfers:** Large range serving now applies backpressure more effectively, which helps downstream catch up work stay stable under load.
+* Corrected **keep Leios endorser block fetch and backfill moving through partial and final windows:** Leios bitmap handling now follows the correct bit order, which prevents endorser block fetch and historical backfill from stalling in affected windows.
 
 ## v0.60.1 (June 29, 2026)
 
