@@ -232,6 +232,7 @@ func TestFlushBatch_Witnesses(t *testing.T) {
 	store := setupTestDBWithMode(t, "api")
 	batch := NewBatchAccumulator()
 
+	require.NoError(t, createSequentialTestTransactions(store.DB(), 5, 1))
 	for i := uint(1); i <= 5; i++ {
 		batch.AddKeyWitness(models.KeyWitness{
 			TransactionID: i,
@@ -374,6 +375,7 @@ func TestFlushBatch_Idempotent(t *testing.T) {
 	batch := NewBatchAccumulator()
 
 	txID := uint(77)
+	require.NoError(t, createTestTransaction(store.DB(), txID, 300))
 	batch.AddDeleteTxID(txID)
 	batch.AddKeyWitness(models.KeyWitness{
 		TransactionID: txID,

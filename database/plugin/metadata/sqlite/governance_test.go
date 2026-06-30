@@ -28,7 +28,6 @@ func setupTestStore(t *testing.T) *MetadataStoreSqlite {
 	store, err := New("", nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, store.Start())
-	require.NoError(t, store.DB().AutoMigrate(models.MigrateModels...))
 	t.Cleanup(func() {
 		store.Close() //nolint:errcheck
 	})

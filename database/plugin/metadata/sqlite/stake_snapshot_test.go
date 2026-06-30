@@ -31,11 +31,6 @@ func setupStakeSnapshotTestStore(t *testing.T) *MetadataStoreSqlite {
 	sqliteStore, err := New("", nil, nil)
 	require.NoError(t, err, "failed to create sqlite store")
 	require.NoError(t, sqliteStore.Start(), "failed to start sqlite store")
-	require.NoError(
-		t,
-		sqliteStore.DB().AutoMigrate(models.MigrateModels...),
-		"failed to auto-migrate",
-	)
 	return sqliteStore
 }
 
