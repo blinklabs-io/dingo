@@ -47,9 +47,6 @@ func setupTestDB(t testing.TB) *MetadataStoreSqlite {
 	t.Cleanup(func() {
 		sqliteStore.Close() //nolint:errcheck
 	})
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 	return sqliteStore
 }
 
@@ -728,6 +725,31 @@ func createTestTransaction(db *gorm.DB, id uint, slot uint64) error {
 	).Error
 }
 
+func createSequentialTestTransactions(
+	db *gorm.DB,
+	count int,
+	startSlot uint64,
+) error {
+	txs := make([]models.Transaction, count)
+	for i := range txs {
+		id := uint(i + 1)
+		txs[i] = models.Transaction{
+			ID: id,
+			Hash: []byte{
+				byte(id),
+				byte(id >> 8),
+				byte(id >> 16),
+				byte(id >> 24),
+			},
+			Slot:       startSlot + uint64(i),
+			Valid:      true,
+			Type:       0,
+			BlockIndex: 0,
+		}
+	}
+	return db.CreateInBatches(txs, batchChunkRows).Error
+}
+
 func TestGetTransactionsByAddressIndex(t *testing.T) {
 	t.Parallel()
 	store := setupTestDB(t)
@@ -970,11 +992,6 @@ func TestUnifiedCertificateCreation(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-
-	// Run auto-migration to ensure tables exist
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	// Create a mock transaction with certificates
 	mockTx := &mockTransaction{
@@ -1284,11 +1301,6 @@ func TestDeleteCertificatesAfterSlot(t *testing.T) {
 	}
 	defer sqliteStore.Close() //nolint:errcheck
 
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
-
 	// Create Transaction records for foreign key constraints
 	if err := createTestTransaction(sqliteStore.DB(), 1, 1000); err != nil {
 		t.Fatalf("failed to create transaction 1: %v", err)
@@ -1399,11 +1411,6 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("unexpected error starting store: %s", err)
 		}
 		defer sqliteStore.Close() //nolint:errcheck
-
-		// Run auto-migration
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
 
 		// Create Transaction records for foreign key constraints
 		for i := uint(1); i <= 3; i++ {
@@ -1534,10 +1541,6 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			}
 			defer sqliteStore.Close() //nolint:errcheck
 
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
-
 			// Create Transaction records for foreign key constraints
 			for i := uint(1); i <= 2; i++ {
 				if err := createTestTransaction(sqliteStore.DB(), i, uint64(i*1000)); err != nil {
@@ -1637,10 +1640,6 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			// Create Transaction records for foreign key constraints
 			for i := uint(1); i <= 3; i++ {
@@ -1763,10 +1762,6 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 		}
 		defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
-
 		// Create Transaction for foreign key constraints
 		if err := createTestTransaction(sqliteStore.DB(), 1, 2000); err != nil {
 			t.Fatalf("failed to create transaction: %v", err)
@@ -1838,11 +1833,6 @@ func TestDeletePParamsAfterSlot(t *testing.T) {
 	}
 	defer sqliteStore.Close() //nolint:errcheck
 
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
-
 	// Create pparams at slot 1000
 	pparams1 := models.PParams{
 		AddedSlot: 1000,
@@ -1894,11 +1884,6 @@ func TestDeletePParamUpdatesAfterSlot(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	// Create pparam update at slot 1000
 	update1 := models.PParamUpdate{
@@ -1956,11 +1941,6 @@ func TestDeleteTransactionsAfterSlot(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	// Create transaction at slot 1000 (should be kept)
 	tx1 := models.Transaction{
@@ -2126,9 +2106,6 @@ func TestDeleteTransactionsAfterSlotChunksManyHashes(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	// More than batchChunkSize (499) so the IN (...) clauses must be chunked.
 	const n = batchChunkSize*2 + 37
@@ -2240,10 +2217,6 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 		}
 		defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
-
 		poolHash := []byte("pool_key_hash_01234567890123")
 
 		// Create a pool with registration after rollback point
@@ -2286,10 +2259,6 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 			t.Fatalf("unexpected error starting store: %s", err)
 		}
 		defer sqliteStore.Close() //nolint:errcheck
-
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
 
 		poolHash := []byte("pool_key_hash_01234567890123")
 
@@ -2356,10 +2325,6 @@ func TestRestorePoolStateAtSlot(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			poolHash := []byte("pool_key_hash_01234567890123")
 
@@ -3298,10 +3263,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 		}
 		defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
-
 		drepCredential := []byte("drep_credential_12345678901234567890123456")
 
 		// Create a DRep registered at slot 2000 (after rollback point)
@@ -3341,10 +3302,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
@@ -3454,10 +3411,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			t.Fatalf("unexpected error starting store: %s", err)
 		}
 		defer sqliteStore.Close() //nolint:errcheck
-
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
 
 		drepCredential := []byte("drep_credential_12345678901234567890123456")
 
@@ -3570,10 +3523,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
@@ -3721,10 +3670,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 			}
 			defer sqliteStore.Close() //nolint:errcheck
 
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
-
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
 			)
@@ -3862,10 +3807,6 @@ func TestRestoreDrepStateAtSlot(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			drepCredential := []byte(
 				"drep_credential_12345678901234567890123456",
@@ -4005,10 +3946,6 @@ func TestPoolCascadeDelete(t *testing.T) {
 			}
 			defer sqliteStore.Close() //nolint:errcheck
 
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
-
 			poolHash := []byte("pool_key_hash_01234567890123")
 
 			// Create a pool
@@ -4097,10 +4034,6 @@ func TestPoolCascadeDelete(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			poolHash := []byte("pool_key_hash_01234567890123")
 
@@ -4230,10 +4163,6 @@ func TestPoolCrossPoolOwnerRelay(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			// Create two different pools
 			poolA := models.Pool{
@@ -4368,10 +4297,6 @@ func TestUtxoCascadeDelete(t *testing.T) {
 		}
 		defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
-
 		txId := []byte("tx_hash_1234567890123456789012345678901234567890")
 
 		// Create a Utxo with multiple assets
@@ -4444,10 +4369,6 @@ func TestUtxoCascadeDelete(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			// Create first utxo with asset
 			utxo1 := models.Utxo{
@@ -4563,10 +4484,6 @@ func TestCollateralReturnUniqueConstraint(t *testing.T) {
 		}
 		defer sqliteStore.Close() //nolint:errcheck
 
-		if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-			t.Fatalf("failed to auto-migrate: %v", err)
-		}
-
 		// Create multiple UTXOs with NULL CollateralReturnForTxID (normal outputs)
 		utxo1 := models.Utxo{
 			TxId: []byte(
@@ -4616,10 +4533,6 @@ func TestCollateralReturnUniqueConstraint(t *testing.T) {
 				t.Fatalf("unexpected error starting store: %s", err)
 			}
 			defer sqliteStore.Close() //nolint:errcheck
-
-			if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-				t.Fatalf("failed to auto-migrate: %v", err)
-			}
 
 			// Create a transaction first (needed for FK)
 			tx := models.Transaction{
@@ -4696,11 +4609,6 @@ func TestPoolStakeSnapshotCRUD(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	poolKeyHash := []byte("pool_key_hash_12345678901234")
 
@@ -4820,11 +4728,6 @@ func TestEpochSummaryCRUD(t *testing.T) {
 	}
 	defer sqliteStore.Close() //nolint:errcheck
 
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
-
 	// Test SaveEpochSummary
 	summary := &models.EpochSummary{
 		Epoch:            100,
@@ -4924,11 +4827,6 @@ func TestGetTotalActiveStakeEmpty(t *testing.T) {
 		t.Fatalf("unexpected error starting store: %s", err)
 	}
 	defer sqliteStore.Close() //nolint:errcheck
-
-	// Run auto-migration
-	if err := sqliteStore.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("failed to auto-migrate: %v", err)
-	}
 
 	// GetTotalActiveStake should return 0 when no snapshots exist
 	total, err := sqliteStore.GetTotalActiveStake(999, "go", nil)

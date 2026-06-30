@@ -295,9 +295,6 @@ func TestCrashRecoveryDetectedAcrossReopen(t *testing.T) {
 	if err := first.Start(); err != nil {
 		t.Fatalf("start first store: %v", err)
 	}
-	if err := first.DB().AutoMigrate(models.MigrateModels...); err != nil {
-		t.Fatalf("migrate first store: %v", err)
-	}
 	if err := first.DropDeferredIndexes(); err != nil {
 		t.Fatalf("DropDeferredIndexes: %v", err)
 	}

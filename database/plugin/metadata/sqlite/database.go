@@ -527,14 +527,12 @@ func (d *MetadataStoreSqlite) Start() error {
 	if err := d.db.AutoMigrate(&NodeSettings{}); err != nil {
 		return err
 	}
-	for _, model := range models.MigrateModels {
-		d.logger.Debug(
-			"creating table",
-			"model", fmt.Sprintf("%T", model),
-		)
-		if err := d.db.AutoMigrate(model); err != nil {
-			return err
-		}
+	d.logger.Debug(
+		"creating tables",
+		"models", len(models.MigrateModels),
+	)
+	if err := d.db.AutoMigrate(models.MigrateModels...); err != nil {
+		return err
 	}
 	success = true
 	return nil

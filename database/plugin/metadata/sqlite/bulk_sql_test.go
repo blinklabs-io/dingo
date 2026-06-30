@@ -96,6 +96,7 @@ func TestExecBulkInsert_PartialChunkWritesAllRows(t *testing.T) {
 			Type:          models.KeyWitnessTypeVkey,
 		}
 	}
+	require.NoError(t, createSequentialTestTransactions(store.DB(), n, 1))
 	require.NoError(t, insertKeyWitnesses(store.DB(), items))
 
 	var count int64
@@ -273,6 +274,9 @@ func benchKeyWitnessRows(n int) []models.KeyWitness {
 // path. key_witness has no unique constraint, so repeated inserts just append.
 func BenchmarkInsertKeyWitnesses(b *testing.B) {
 	store := newBenchStore(b)
+	if err := createSequentialTestTransactions(store.DB(), 1000, 1); err != nil {
+		b.Fatal(err)
+	}
 	rows := benchKeyWitnessRows(1000)
 	b.ResetTimer()
 	for range b.N {
@@ -284,6 +288,9 @@ func BenchmarkInsertKeyWitnesses(b *testing.B) {
 
 func BenchmarkInsertKeyWitnessesGORM(b *testing.B) {
 	store := newBenchStore(b)
+	if err := createSequentialTestTransactions(store.DB(), 1000, 1); err != nil {
+		b.Fatal(err)
+	}
 	b.ResetTimer()
 	for range b.N {
 		// GORM mutates the slice's PKs on Create, so rebuild per iteration
