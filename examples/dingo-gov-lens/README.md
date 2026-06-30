@@ -33,23 +33,24 @@ zero rows from `governance_vote`.
 
 ### Docker Compose
 
-The Compose stack runs:
+The consolidated examples Compose stack runs Gov Lens together with the other
+example apps on one shared Preview Dingo node:
 
 - `postgres`: Dingo metadata database
 - `dingo-sync`: one-shot `dingo mithril sync` job
 - `dingo`: Preview node using the same Postgres metadata DB
-- `app`: Gov Lens web server using the read-only Postgres role
+- `gov-lens`: Gov Lens web server using the read-only Postgres role
 
 By default Compose builds Dingo from this checkout as
-`dingo-gov-lens-dingo:local`, so changes to Dingo's Postgres storage code are
+`dingo-examples-dingo:local`, so changes to Dingo's Postgres storage code are
 covered by the E2E run. Set `DINGO_IMAGE=ghcr.io/blinklabs-io/dingo:<tag>` in
-`.env` if you explicitly want to test a published image instead.
+the environment if you explicitly want to test a published image instead.
 
 ```sh
-cd examples/dingo-gov-lens
+cd examples
 cp .env.example .env
 
-# Review .env and change the default credentials (POSTGRES_PASSWORD,
+# Change the default credentials (POSTGRES_PASSWORD,
 # DINGO_GOV_LENS_PASSWORD, API keys, etc.) before any production deployment.
 # The shipped values are weak local-development defaults only.
 
@@ -65,19 +66,23 @@ docker compose up -d
 Open `http://127.0.0.1:8088`.
 
 The app port is bound to `127.0.0.1` by default. Set
-`APP_BIND_ADDR=0.0.0.0` only when you intentionally want to expose the dashboard
-outside the local machine.
+`GOV_LENS_BIND_ADDR=0.0.0.0` only when you intentionally want to expose the
+dashboard outside the local machine.
 
-For a one-command full validation after editing `.env`:
+For a one-command Gov Lens-only validation using the shared examples Compose
+stack:
 
 ```sh
-./scripts/e2e-compose.sh
+cd examples
+cp .env.example .env
+./dingo-gov-lens/scripts/e2e-compose.sh
 ```
 
 If you change Postgres init credentials after the first run, reset the Compose
 volumes before rerunning:
 
 ```sh
+cd examples
 docker compose down -v
 ```
 
@@ -107,7 +112,8 @@ DINGO_MESH_PORT=0
 
 Compose defaults `DINGO_DATABASE_WORKERS=16`, `DINGO_DATABASE_QUEUE_SIZE=500`,
 and `DINGO_BACKFILL_BATCH_SIZE=1000` so Preview API backfill resumes faster than
-the Dingo defaults. Lower them in `.env` on constrained machines.
+the Dingo defaults. Lower them through environment variables or an `examples/.env`
+file on constrained machines.
 
 For Kubernetes, start from `k8s/dingo-values.yaml`. Replace the Postgres DSN
 with your cluster-local database service and mount the configured CA certificate

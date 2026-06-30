@@ -11,7 +11,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker/postgres-init:/docker-entrypoint-initdb.d:ro
+      - ./dingo-gov-lens/docker/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
@@ -20,10 +20,10 @@ services:
 
   dingo-sync:
     build:
-      context: ../..
+      context: ..
       dockerfile: Dockerfile
       target: final
-    image: ${DINGO_IMAGE:-dingo-gov-lens-dingo:local}
+    image: ${DINGO_IMAGE:-dingo-examples-dingo:local}
     restart: "no"
     depends_on:
       postgres:
@@ -41,19 +41,19 @@ services:
       DINGO_DATABASE_WORKERS: ${DINGO_DATABASE_WORKERS:-16}
       DINGO_DATABASE_QUEUE_SIZE: ${DINGO_DATABASE_QUEUE_SIZE:-500}
       DINGO_BACKFILL_BATCH_SIZE: ${DINGO_BACKFILL_BATCH_SIZE:-1000}
-      DINGO_UTXORPC_PORT: "0"
-      DINGO_BLOCKFROST_PORT: "0"
-      DINGO_MESH_PORT: "0"
+      DINGO_UTXORPC_PORT: "9090"
+      DINGO_BLOCKFROST_PORT: "3000"
+      DINGO_MESH_PORT: "8080"
     volumes:
       - dingo-data:/data/db
       - dingo-ipc:/ipc
 
   dingo:
     build:
-      context: ../..
+      context: ..
       dockerfile: Dockerfile
       target: final
-    image: ${DINGO_IMAGE:-dingo-gov-lens-dingo:local}
+    image: ${DINGO_IMAGE:-dingo-examples-dingo:local}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -64,15 +64,18 @@ services:
     environment:
       <<: *dingo-env
     ports:
-      - "127.0.0.1:${DINGO_METRICS_PORT:-12798}:12798"
-      - "${DINGO_RELAY_PORT:-3001}:3001"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_BLOCKFROST_PORT:-3000}:3000"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_UTXORPC_PORT:-9090}:9090"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_MESH_PORT:-8080}:8080"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_METRICS_PORT:-12798}:12798"
+      - "${DINGO_BIND_ADDR:-0.0.0.0}:${DINGO_RELAY_PORT:-3001}:3001"
     volumes:
       - dingo-data:/data/db
       - dingo-ipc:/ipc
 
-  app:
+  gov-lens:
     build:
-      context: .
+      context: ./dingo-gov-lens
       dockerfile: Dockerfile
     restart: unless-stopped
     depends_on:
@@ -85,9 +88,44 @@ services:
       GOVTOOL_BASE_URL: ${GOVTOOL_BASE_URL:-https://preview.gov.tools}
       DATABASE_URL: "host=postgres port=5432 user=dingo_gov_lens password=${DINGO_GOV_LENS_PASSWORD:-dingo_gov_lens} dbname=${POSTGRES_DB:-dingo_metadata} sslmode=disable TimeZone=UTC"
     ports:
-      - "${APP_BIND_ADDR:-127.0.0.1}:${APP_PORT:-8088}:8088"
+      - "${GOV_LENS_BIND_ADDR:-127.0.0.1}:${GOV_LENS_PORT:-8088}:8088"
+
+  blockfrost-explorer:
+    image: node:24-alpine
+    restart: unless-stopped
+    depends_on:
+      dingo:
+        condition: service_started
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    environment:
+      DINGO_BLOCKFROST_URL: http://dingo:3000
+      DINGO_METRICS_URL: http://dingo:12798
+    ports:
+      - "${BLOCKFROST_EXPLORER_BIND_ADDR:-0.0.0.0}:${BLOCKFROST_EXPLORER_PORT:-5173}:5173"
+    volumes:
+      - ./dingo-blockfrost-explorer:/app
+      - blockfrost-explorer-node-modules:/app/node_modules
+
+  sundae-preview:
+    image: node:24-alpine
+    restart: unless-stopped
+    depends_on:
+      dingo:
+        condition: service_started
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev -- --host 0.0.0.0"]
+    environment:
+      DINGO_UTXORPC_URL: http://dingo:9090
+    ports:
+      - "${SUNDAE_PREVIEW_BIND_ADDR:-0.0.0.0}:${SUNDAE_PREVIEW_PORT:-5174}:5173"
+    volumes:
+      - ./dingo-sundae-preview:/app
+      - sundae-preview-node-modules:/app/node_modules
 
 volumes:
   postgres-data:
   dingo-data:
   dingo-ipc:
+  blockfrost-explorer-node-modules:
+  sundae-preview-node-modules:
