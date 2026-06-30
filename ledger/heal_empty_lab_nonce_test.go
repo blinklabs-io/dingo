@@ -96,7 +96,8 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 }
 
 // TestHealEmptyLabNoncesLeavesValidRecordsUntouched verifies the recovery is a
-// no-op when no epoch has an empty lab — it must not perturb correct state.
+// no-op when no epoch has a repairable lab mismatch — it must not perturb
+// correct state.
 func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
 	require.NoError(t, err)
@@ -125,6 +126,99 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 
 	require.Equal(t, lab, ls.epochCache[0].LastEpochBlockNonce)
 	require.Equal(t, nonce, ls.epochCache[0].Nonce)
+}
+
+func TestHealEmptyLabNoncesRepairsStaleLabWithGenesisCandidateFallback(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       3,
+		Slot:     250,
+		Hash:     boundaryHash,
+		PrevHash: bytes.Repeat([]byte{0xbb}, 32),
+		Cbor:     []byte{0x80},
+		Number:   3,
+		Type:     6,
+	}, nil))
+
+	cfg := newConwayBootstrapStabilityCfg(t)
+	genesisCandidate := bytes.Repeat([]byte{0x11}, 32)
+	oldLab := bytes.Repeat([]byte{0x99}, 32)
+	oldNonce := bytes.Repeat([]byte{0xaa}, 32)
+	epochs := []models.Epoch{
+		{
+			EpochId:             6,
+			StartSlot:           300,
+			LengthInSlots:       100,
+			Nonce:               oldNonce,
+			CandidateNonce:      nil,
+			LastEpochBlockNonce: oldLab,
+		},
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+
+	want, err := lcommon.CalculateEpochNonce(
+		genesisCandidate,
+		boundaryHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, repaired)
+	require.Equal(t, boundaryHash, epochs[0].LastEpochBlockNonce)
+	require.Equal(t, want.Bytes(), epochs[0].Nonce)
+	require.Empty(t, epochs[0].CandidateNonce)
+}
+
+func TestHealEmptyLabNoncesSkipsWithoutCandidateFallback(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       3,
+		Slot:     250,
+		Hash:     boundaryHash,
+		PrevHash: bytes.Repeat([]byte{0xbb}, 32),
+		Cbor:     []byte{0x80},
+		Number:   3,
+		Type:     6,
+	}, nil))
+
+	oldNonce := bytes.Repeat([]byte{0xaa}, 32)
+	epochs := []models.Epoch{
+		{
+			EpochId:             6,
+			StartSlot:           300,
+			LengthInSlots:       100,
+			Nonce:               oldNonce,
+			CandidateNonce:      nil,
+			LastEpochBlockNonce: nil,
+		},
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	repaired := ls.healEmptyLabNoncesInPlace(epochs)
+
+	require.False(t, repaired)
+	require.Empty(t, epochs[0].LastEpochBlockNonce)
+	require.Equal(t, oldNonce, epochs[0].Nonce)
 }
 
 func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {

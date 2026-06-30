@@ -4474,9 +4474,7 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Recover epoch records whose LastEpochBlockNonce was persisted empty
-		// by the pre-fix BlockBeforeSlot endorser-block collision (see
-		// healEmptyLabNonces). New syncs are unaffected now that
-		// BlockBeforeSlotTxn skips synthetic blobs.
+		// or stale by pre-fix boundary lookup bugs (see healEmptyLabNonces).
 		ls.healEmptyLabNonces()
 		// Set current epoch and era after healing so currentEpoch reflects
 		// any repaired nonce in epochCache.
@@ -4564,10 +4562,10 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 // from peers and break leader-VRF verification.
 //
 // This runs once at startup over the loaded epoch cache. For each non-genesis
-// epoch with an empty lab whose boundary block (resolved through the canonical
-// chain index) carries a valid Hash, it restores the lab and recomputes
-// the affected epoch's nonce in the cache. It is a pure function of
-// already-stored chain data and is idempotent across restarts.
+// epoch whose lab is empty or differs from the boundary block resolved through
+// the canonical chain index, it restores the lab and recomputes the affected
+// epoch's nonce in the cache. It is a pure function of already-stored chain
+// data and is idempotent across restarts.
 func (ls *LedgerState) healEmptyLabNonces() {
 	if ls.healEmptyLabNoncesInPlace(ls.epochCache) {
 		clear(ls.epochNonceHexCache)
@@ -4579,7 +4577,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	for i := range epochs {
 		ep := &epochs[i]
 		// The genesis epoch legitimately carries no last block nonce.
-		if len(ep.LastEpochBlockNonce) != 0 || ep.StartSlot == 0 {
+		if ep.StartSlot == 0 {
 			continue
 		}
 		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
@@ -4587,24 +4585,24 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			len(boundary.Hash) != lcommon.Blake2b256Size {
 			continue
 		}
-		ep.LastEpochBlockNonce = cloneNonce(boundary.Hash)
-		repaired = true
-		ls.config.Logger.Info(
-			"recovered empty epoch lastEpochBlockNonce",
-			"epoch", ep.EpochId,
-			"boundary_slot", boundary.Slot,
-			"last_epoch_block_nonce",
-			hex.EncodeToString(ep.LastEpochBlockNonce),
-			"component", "ledger",
-		)
-		// Recompute this epoch's nonce: it used this lab in its formula
-		// and would otherwise be the NeutralNonce-collapsed (η=candidate) value.
-		if len(ep.CandidateNonce) != lcommon.Blake2b256Size {
+		if bytes.Equal(ep.LastEpochBlockNonce, boundary.Hash) {
 			continue
 		}
+		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
+		if err != nil {
+			ls.config.Logger.Warn(
+				"skipping epoch lab recovery; candidate nonce unavailable",
+				"epoch", ep.EpochId,
+				"error", err,
+				"component", "ledger",
+			)
+			continue
+		}
+		// Recompute this epoch's nonce before mutating the record; the lab and
+		// nonce must be repaired together or not at all.
 		res, err := lcommon.CalculateEpochNonce(
-			ep.CandidateNonce,
-			ep.LastEpochBlockNonce,
+			candidateNonce,
+			boundary.Hash,
 			nil,
 		)
 		if err != nil {
@@ -4616,16 +4614,63 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			)
 			continue
 		}
+		previousLab := cloneNonce(ep.LastEpochBlockNonce)
+		previousNonce := cloneNonce(ep.Nonce)
+		newNonce := res.Bytes()
+		ep.LastEpochBlockNonce = cloneNonce(boundary.Hash)
+		ep.Nonce = newNonce
+		repaired = true
+		ls.config.Logger.Info(
+			"repaired epoch lastEpochBlockNonce",
+			"epoch", ep.EpochId,
+			"boundary_slot", boundary.Slot,
+			"previous_last_epoch_block_nonce",
+			hex.EncodeToString(previousLab),
+			"last_epoch_block_nonce",
+			hex.EncodeToString(ep.LastEpochBlockNonce),
+			"component", "ledger",
+		)
 		ls.config.Logger.Info(
 			"recomputed epoch nonce after lab recovery",
 			"epoch", ep.EpochId,
-			"previous_nonce", hex.EncodeToString(ep.Nonce),
-			"epoch_nonce", hex.EncodeToString(res.Bytes()),
+			"previous_nonce", hex.EncodeToString(previousNonce),
+			"epoch_nonce", hex.EncodeToString(newNonce),
 			"component", "ledger",
 		)
-		ep.Nonce = res.Bytes()
 	}
 	return repaired
+}
+
+func (ls *LedgerState) epochRepairCandidateNonce(
+	ep models.Epoch,
+) ([]byte, error) {
+	switch len(ep.CandidateNonce) {
+	case lcommon.Blake2b256Size:
+		return cloneNonce(ep.CandidateNonce), nil
+	case 0:
+		if ls.config.CardanoNodeConfig == nil ||
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash == "" {
+			return nil, errors.New("shelley genesis hash not available")
+		}
+		genesisHash, err := hex.DecodeString(
+			ls.config.CardanoNodeConfig.ShelleyGenesisHash,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("decode genesis hash: %w", err)
+		}
+		if len(genesisHash) != lcommon.Blake2b256Size {
+			return nil, fmt.Errorf(
+				"invalid genesis hash length %d",
+				len(genesisHash),
+			)
+		}
+		return genesisHash, nil
+	default:
+		return nil, fmt.Errorf(
+			"invalid candidate nonce length %d",
+			len(ep.CandidateNonce),
+		)
+	}
 }
 
 func (ls *LedgerState) loadTip() error {

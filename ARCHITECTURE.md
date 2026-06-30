@@ -276,7 +276,7 @@ sequenceDiagram
     LS->>ChM: chain.Rollback(point)
     ChM->>DB: delete blocks/txs after point
     ChM->>DB: restore account/pool/DRep state
-    LS->>LS: reload epoch cache, repair empty lab nonces
+    LS->>LS: reload epoch cache, repair lab nonces
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
@@ -632,11 +632,10 @@ When `Node.Run()` is called, components are initialized in this order:
     crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
-    `last_epoch_block_nonce` was persisted empty by pre-fix boundary lookup
-    bugs, re-deriving the lab from the active chain's boundary block and
+    `last_epoch_block_nonce` was persisted empty or stale by pre-fix boundary
+    lookup bugs, re-deriving the lab from the active chain's boundary block and
     recomputing the affected epoch's nonce in the cache so leader-VRF
-    verification matches the network (an empty lab would otherwise collapse
-    that epoch's nonce to the NeutralNonce identity).
+    verification matches the network.
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros
@@ -1750,8 +1749,8 @@ On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
 - Reload the remaining epoch rows into the in-memory cache and run the same
-  empty `last_epoch_block_nonce` repair used at startup before publishing the
-  new cache.
+  empty/stale `last_epoch_block_nonce` repair used at startup before publishing
+  the new cache.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
   writes (`network_state`) from governance refunds and POOLREAP deposit refunds
   are slot-keyed, so they are reverted by slot and re-derived on forward replay
