@@ -17,6 +17,7 @@ package koiosparity
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -177,8 +178,8 @@ func ComparePoolEpoch(
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
 			Field:      "delegator_count",
-			DingoValue: fmt.Sprintf("%d", dingoItem.Delegators),
-			KoiosValue: fmt.Sprintf("%d", koiosPool.Delegators),
+			DingoValue: strconv.Itoa(dingoItem.Delegators),
+			KoiosValue: strconv.Itoa(koiosPool.Delegators),
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
 		})
@@ -191,8 +192,8 @@ func ComparePoolEpoch(
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
 			Field:      "blocks_produced",
-			DingoValue: fmt.Sprintf("%d", dingoItem.Blocks),
-			KoiosValue: fmt.Sprintf("%d", koiosPool.BlockCnt),
+			DingoValue: strconv.Itoa(dingoItem.Blocks),
+			KoiosValue: strconv.Itoa(koiosPool.BlockCnt),
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
 		})

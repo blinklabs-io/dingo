@@ -46,7 +46,7 @@ Does not replace manual 'run --all' after a ledger replay.`,
 }
 
 func watchRun(cmd *cobra.Command, _ []string) error {
-	network, err := requireNetwork(cmd)
+	network, err := requireNetwork()
 	if err != nil {
 		return err
 	}

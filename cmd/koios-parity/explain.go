@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -43,14 +44,14 @@ Use --live to re-run the comparison against Dingo's API (requires --dingo-api).`
 }
 
 func explainRun(cmd *cobra.Command, _ []string) error {
-	network, err := requireNetwork(cmd)
+	network, err := requireNetwork()
 	if err != nil {
 		return err
 	}
 
 	epoch, _ := cmd.Flags().GetUint64("epoch")
 	if epoch == 0 {
-		return fmt.Errorf("--epoch is required")
+		return errors.New("--epoch is required")
 	}
 	poolFilter, _ := cmd.Flags().GetString("pool")
 	live, _ := cmd.Flags().GetBool("live")

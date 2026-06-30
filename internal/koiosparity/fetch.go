@@ -87,7 +87,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	}
 
 	// Build list of epochs to fetch.
-	epochs := make([]uint64, 0, int(throughEpoch-fromEpoch+1))
+	epochs := make([]uint64, 0)
 	for e := fromEpoch; e <= throughEpoch; e++ {
 		epochs = append(epochs, e)
 	}

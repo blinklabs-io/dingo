@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -284,7 +285,7 @@ func PrintExplain(w io.Writer, network string, epoch uint64, mismatches []CheckM
 func joinUint64s(ns []uint64) string {
 	ss := make([]string, len(ns))
 	for i, n := range ns {
-		ss[i] = fmt.Sprintf("%d", n)
+		ss[i] = strconv.FormatUint(n, 10)
 	}
 	return strings.Join(ss, ", ")
 }
