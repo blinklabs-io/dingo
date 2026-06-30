@@ -47,9 +47,10 @@ type Config struct {
 	CooldownMin int
 	CooldownMax int
 
-	// ConfirmationSlots is the number of slots to wait before spending outputs
-	// created by a submitted transaction.
-	// Default: 30
+	// ConfirmationSlots is reserved for future use. The payment flow currently
+	// returns outputs to the wallet immediately after submission (0 = immediate
+	// spend is intentional). Any non-zero value set via TXPUMP_CONFIRMATION_SLOTS
+	// is accepted but has no effect.
 	ConfirmationSlots uint64
 
 	// Types is the set of transaction types to generate.
@@ -65,8 +66,10 @@ type Config struct {
 	// Empty string means no fallback.
 	FallbackAddr string
 
-	// GenesisUTxOFile is an optional path to a JSON file containing initial
-	// UTxO entries (used when the wallet is empty on first start).
+	// GenesisUTxOFile is a path to a directory (or a single JSON file) containing
+	// initial UTxO entries. When signing keys are present it must be a directory:
+	// LoadSigningKeys globs genesis.*.skey inside it, while LoadGenesisUTxOs
+	// accepts either a directory of JSON files or a single JSON file.
 	GenesisUTxOFile string
 
 	// GenesisFile is the path to the testnet.yaml genesis configuration.

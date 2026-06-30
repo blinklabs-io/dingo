@@ -200,6 +200,7 @@ set -e
 
 if [[ ${COUNTS_EXIT} -ne 0 || -z "${TXPUMP_COUNTS}" ]]; then
   warn "Unable to inspect txpump transaction log"
+  TEST_EXIT=1
 else
   read -r TXPUMP_SUBMITTED TXPUMP_REJECTED TXPUMP_ERRORS <<<"${TXPUMP_COUNTS}"
   log "txpump submitted=${TXPUMP_SUBMITTED} rejected=${TXPUMP_REJECTED} error=${TXPUMP_ERRORS}"

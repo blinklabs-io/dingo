@@ -235,15 +235,21 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 		return
 	}
 
-	// If any input has a signing key, use it to sign the transaction and
-	// route both the recipient and change outputs back to the same address.
-	// This keeps the wallet self-funding: change UTxOs remain spendable
-	// across batches without requiring additional key management.
+	// Collect a witness key for every distinct signing key among the inputs.
+	// SelectCoins may return UTxOs from different genesis keys; each one needs
+	// its own VKey witness or the transaction will be rejected.
 	var signingKey *UTxOKey
+	witnessKeys := make([]*UTxOKey, 0, len(inputs))
+	seenWitnessKeys := make(map[*UTxOKey]struct{}, len(inputs))
 	for _, u := range inputs {
 		if u.SigningKey != nil {
-			signingKey = u.SigningKey
-			break
+			if signingKey == nil {
+				signingKey = u.SigningKey
+			}
+			if _, ok := seenWitnessKeys[u.SigningKey]; !ok {
+				witnessKeys = append(witnessKeys, u.SigningKey)
+				seenWitnessKeys[u.SigningKey] = struct{}{}
+			}
 		}
 	}
 	addr := deterministicAddr(inputs[0].TxHash)
@@ -257,7 +263,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 		ChangeAddr:  addr,
 		SendAmount:  sendAmount,
 		Change:      change,
-		WitnessKeys: []*UTxOKey{signingKey}, // nil key is filtered in BuildWitnessMap
+		WitnessKeys: witnessKeys,
 	}
 
 	txBytes, txID, err := BuildPayment(params)

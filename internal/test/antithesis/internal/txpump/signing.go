@@ -15,6 +15,7 @@
 package txpump
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -63,8 +64,14 @@ func parseKeyFile(path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode cborHex in %s: %w", path, err)
 	}
-	// Expect CBOR byte-string header: 0x58 (1-byte length follows), 0x20 (32 bytes).
-	if len(raw) < 34 || raw[0] != 0x58 || raw[1] != 0x20 {
+	// Expect exactly 34 bytes: 2-byte CBOR header (0x58 0x20) + 32-byte key.
+	if len(raw) != 34 {
+		return nil, fmt.Errorf(
+			"unexpected key encoding in %s (want 34 bytes with 5820 prefix, got %d bytes)",
+			path, len(raw),
+		)
+	}
+	if raw[0] != 0x58 || raw[1] != 0x20 {
 		return nil, fmt.Errorf(
 			"unexpected key encoding in %s (want 5820 prefix, got %x)",
 			path, raw[:2],
@@ -136,6 +143,10 @@ func loadSigningKeyPrefix(prefix string) (*UTxOKey, error) {
 	vkey, err := parseKeyFile(prefix + ".vkey")
 	if err != nil {
 		return nil, fmt.Errorf("load verification key: %w", err)
+	}
+	derivedVKey := ed25519.NewKeyFromSeed(skey).Public().(ed25519.PublicKey)
+	if !bytes.Equal(vkey, derivedVKey) {
+		return nil, fmt.Errorf("verification key does not match signing key for %s", prefix)
 	}
 	addr, err := parseAddrInfoFile(prefix + ".addr.info")
 	if err != nil {

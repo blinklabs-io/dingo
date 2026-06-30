@@ -94,9 +94,15 @@ func main() {
 					spendable = append(spendable, u)
 				}
 			}
-			if len(spendable) > 0 {
-				utxos = spendable
+			if len(spendable) == 0 {
+				logger.Error(
+					"no genesis UTxOs matched loaded signing keys",
+					"utxo_count", len(utxos),
+					"key_count", len(signingKeys),
+				)
+				os.Exit(1)
 			}
+			utxos = spendable
 			for _, signingKey := range signingKeys {
 				logger.Info(
 					"signing key loaded",
