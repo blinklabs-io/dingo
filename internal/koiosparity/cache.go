@@ -100,16 +100,16 @@ func (CheckRun) TableName() string { return "check_runs" }
 
 // CheckMismatch records a single field-level or set-level mismatch.
 type CheckMismatch struct {
-	ID           uint      `gorm:"primarykey;autoIncrement" json:"id"`
-	Network      string    `gorm:"not null"                json:"network"`
-	Epoch        uint64    `gorm:"not null"                json:"epoch"`
-	PoolBech32   string    `gorm:"not null"                json:"pool_bech32"`
-	StakeAddress string    `gorm:"not null"                json:"stake_address"`
-	Field        string    `gorm:"not null"                json:"field"`
-	DingoValue   string    `gorm:"not null"                json:"dingo_value"`
-	KoiosValue   string    `gorm:"not null"                json:"koios_value"`
-	Category     string    `gorm:"not null"                json:"category"`
-	CheckedAt    time.Time `gorm:"not null"                json:"checked_at"`
+	ID           uint      `gorm:"primarykey;autoIncrement"                    json:"id"`
+	Network      string    `gorm:"index:idx_cm_net_epoch;not null"             json:"network"`
+	Epoch        uint64    `gorm:"index:idx_cm_net_epoch;not null"             json:"epoch"`
+	PoolBech32   string    `gorm:"not null"                                    json:"pool_bech32"`
+	StakeAddress string    `gorm:"not null"                                    json:"stake_address"`
+	Field        string    `gorm:"not null"                                    json:"field"`
+	DingoValue   string    `gorm:"not null"                                    json:"dingo_value"`
+	KoiosValue   string    `gorm:"not null"                                    json:"koios_value"`
+	Category     string    `gorm:"not null"                                    json:"category"`
+	CheckedAt    time.Time `gorm:"not null"                                    json:"checked_at"`
 }
 
 func (CheckMismatch) TableName() string { return "check_mismatches" }
@@ -146,6 +146,11 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	// WAL mode for better concurrent read performance.
 	if err := db.Exec("PRAGMA journal_mode=WAL").Error; err != nil {
 		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+	// Busy timeout prevents concurrent writers from failing immediately with
+	// "database is locked"; 5 s is sufficient for the parallel check workers.
+	if err := db.Exec("PRAGMA busy_timeout=5000").Error; err != nil {
+		return nil, fmt.Errorf("set busy timeout: %w", err)
 	}
 	if err := db.AutoMigrate(migrateModels...); err != nil {
 		return nil, fmt.Errorf("migrate cache db: %w", err)

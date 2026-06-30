@@ -25,7 +25,7 @@ import (
 )
 
 func addRunFlags(cmd *cobra.Command) {
-	cmd.Flags().String("dingo-api", defaultDingoAPI,
+	cmd.Flags().String("dingo-api", "",
 		"Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
 	cmd.Flags().String("api-key", "",
 		"Koios Bearer token (or KOIOS_API_KEY)")
@@ -102,24 +102,31 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	summary := koiosparity.BuildStatusSummary(network, fetchedEpochs, statuses)
 	koiosparity.PrintStatus(os.Stdout, summary, false, statuses)
 
-	// Write JSON report.
+	// Write JSON report; log each failure so operators know when the report is missing.
 	dir := resolveReportDir(reportDir)
-	if mkErr := os.MkdirAll(dir, 0o750); mkErr == nil {
-		reportPath := fmt.Sprintf("%s/report-%s-%s.json",
-			dir, network, time.Now().Format("2006-01-02"))
-		if f, openErr := os.Create(reportPath); openErr == nil {
-			report, buildErr := koiosparity.BuildJSONReport(
-				network,
-				time.Now().UTC().Format(time.RFC3339),
-				fetchedEpochs,
-				statuses,
-				func(epoch uint64) ([]koiosparity.CheckMismatch, error) {
-					return cache.GetMismatches(network, epoch, "")
-				},
-			)
-			if buildErr == nil {
-				_ = koiosparity.WriteJSONReport(f, report)
-			}
+	reportPath := fmt.Sprintf("%s/report-%s-%s.json",
+		dir, network, time.Now().Format("2006-01-02"))
+	if mkErr := os.MkdirAll(dir, 0o750); mkErr != nil {
+		logger.Warn("koios-parity: could not create report dir", "path", dir, "error", mkErr)
+	} else if f, openErr := os.Create(reportPath); openErr != nil {
+		logger.Warn("koios-parity: could not create report file", "path", reportPath, "error", openErr)
+	} else {
+		report, buildErr := koiosparity.BuildJSONReport(
+			network,
+			time.Now().UTC().Format(time.RFC3339),
+			fetchedEpochs,
+			statuses,
+			func(epoch uint64) ([]koiosparity.CheckMismatch, error) {
+				return cache.GetMismatches(network, epoch, "")
+			},
+		)
+		if buildErr != nil {
+			f.Close()
+			logger.Warn("koios-parity: could not build report", "error", buildErr)
+		} else if writeErr := koiosparity.WriteJSONReport(f, report); writeErr != nil {
+			f.Close()
+			logger.Warn("koios-parity: could not write report", "path", reportPath, "error", writeErr)
+		} else {
 			f.Close()
 			slog.Info("koios-parity: report written", "path", reportPath)
 		}

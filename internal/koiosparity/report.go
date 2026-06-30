@@ -218,16 +218,17 @@ func BuildJSONReport(
 		}
 		if getMismatches != nil {
 			mismatches, err := getMismatches(st.Epoch)
-			if err == nil {
-				for _, m := range mismatches {
-					entry.Mismatches = append(entry.Mismatches, JSONMismatch{
-						Pool:       m.PoolBech32,
-						Field:      m.Field,
-						DingoValue: m.DingoValue,
-						KoiosValue: m.KoiosValue,
-						Category:   m.Category,
-					})
-				}
+			if err != nil {
+				return nil, fmt.Errorf("get mismatches for epoch %d: %w", st.Epoch, err)
+			}
+			for _, m := range mismatches {
+				entry.Mismatches = append(entry.Mismatches, JSONMismatch{
+					Pool:       m.PoolBech32,
+					Field:      m.Field,
+					DingoValue: m.DingoValue,
+					KoiosValue: m.KoiosValue,
+					Category:   m.Category,
+				})
 			}
 		}
 
