@@ -1068,3 +1068,50 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "missing active slot coeff should skip, not reject")
 }
+
+// TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips_ExplicitZero
+// verifies that a genesis with activeSlotsCoeff=0 also triggers the skip path.
+// A zero coefficient produces a zero threshold and would otherwise reject every
+// non-Byron block.
+func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{36}, 0, tamperNone)
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+
+	// Build a genesis config with activeSlotsCoeff explicitly set to 0.
+	// big.Rat.SetString("0") gives Sign()==0, which the guard must catch.
+	zeroCoeffJSON := `{
+		"activeSlotsCoeff": 0,
+		"securityParam": 432,
+		"slotsPerKESPeriod": 129600,
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	zeroCfg := &cardano.CardanoNodeConfig{}
+	require.NoError(
+		t,
+		zeroCfg.LoadShelleyGenesisFromReader(strings.NewReader(zeroCoeffJSON)),
+	)
+
+	ls := &LedgerState{
+		db: db,
+		epochCache: []models.Epoch{
+			{EpochId: 5, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
+		},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: zeroCfg,
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err, "zero active slot coeff should skip, not reject all blocks")
+}

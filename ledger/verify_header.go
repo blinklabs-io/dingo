@@ -311,10 +311,12 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	}
 
 	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
+	// A zero or negative coefficient would compute a zero threshold and
+	// reject every non-Byron block; treat it as unavailable.
 	activeSlotCoeffRat := ls.activeSlotCoeffRat()
-	if activeSlotCoeffRat == nil {
+	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
 		ls.config.Logger.Warn(
-			"skipping leader eligibility check: active slot coefficient unavailable",
+			"skipping leader eligibility check: active slot coefficient unavailable or non-positive",
 			"slot", block.SlotNumber(),
 			"component", "ledger",
 		)
