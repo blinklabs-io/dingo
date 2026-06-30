@@ -373,15 +373,19 @@ it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
 created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
 scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
 synthetic endorser/genesis blob is never returned as the "previous block." This
-matters for the epoch-nonce computation — `last_epoch_block_nonce` is derived
-from the previous epoch's last ranking-block hash; returning an endorser blob
-there would save a non-chain hash. Older PrevHash-based lab lookup also saved an
-empty lab here, collapsing the epoch's nonce to the NeutralNonce identity and
-failing leader-VRF checks. Each endorser transaction's `t` entry and its outputs'
-`u` entries store ordinary `DOFF` references whose `block_slot`/`block_hash`
-point at that endorser-block blob, so cold-extract resolution is identical to
-chain-block transactions. The transactions' metadata rows, however, are recorded
-under the referencing ranking block's point, so a rollback of the ranking block
+matters for storage callers, but it does not make a slot-key scan a canonical
+chain query: retained fork blobs can still sort before an epoch boundary.
+Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
+ranking-block hash through the active chain index (`chain.BlockBeforeSlot`),
+not directly from `BlockBeforeSlotTxn`, so synthetic blobs and stored fork blobs
+cannot be mixed into the boundary nonce. Older PrevHash-based lab lookup also
+saved an empty lab here, collapsing the epoch's nonce to the NeutralNonce
+identity and failing leader-VRF checks. Each endorser transaction's `t` entry
+and its outputs' `u` entries store ordinary `DOFF` references whose
+`block_slot`/`block_hash` point at that endorser-block blob, so cold-extract
+resolution is identical to chain-block transactions. The transactions' metadata
+rows, however, are recorded under the referencing ranking block's point, so a
+rollback of the ranking block
 removes them (the orphaned endorser-block blob is harmless and re-created on
 reprocess).
 Decode/build failures are ignored before storage is touched; once the blob or

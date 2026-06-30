@@ -21,13 +21,74 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/stretchr/testify/require"
+	utxorpc_cardano "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 )
+
+type epochLabNonceTestBlock struct {
+	slot     uint64
+	number   uint64
+	hash     []byte
+	prevHash []byte
+}
+
+func (b epochLabNonceTestBlock) Era() lcommon.Era {
+	return conway.EraConway
+}
+
+func (b epochLabNonceTestBlock) SlotNumber() uint64 {
+	return b.slot
+}
+
+func (b epochLabNonceTestBlock) Hash() lcommon.Blake2b256 {
+	return lcommon.NewBlake2b256(b.hash)
+}
+
+func (b epochLabNonceTestBlock) PrevHash() lcommon.Blake2b256 {
+	return lcommon.NewBlake2b256(b.prevHash)
+}
+
+func (b epochLabNonceTestBlock) BlockNumber() uint64 {
+	return b.number
+}
+
+func (b epochLabNonceTestBlock) IssuerVkey() lcommon.IssuerVkey {
+	return lcommon.IssuerVkey{}
+}
+
+func (b epochLabNonceTestBlock) BlockBodySize() uint64 {
+	return 0
+}
+
+func (b epochLabNonceTestBlock) Cbor() []byte {
+	return []byte{0x80}
+}
+
+func (b epochLabNonceTestBlock) BlockBodyHash() lcommon.Blake2b256 {
+	return lcommon.Blake2b256{}
+}
+
+func (b epochLabNonceTestBlock) Header() lcommon.BlockHeader {
+	return b
+}
+
+func (b epochLabNonceTestBlock) Type() int {
+	return conway.BlockTypeConway
+}
+
+func (b epochLabNonceTestBlock) Transactions() []lcommon.Transaction {
+	return nil
+}
+
+func (b epochLabNonceTestBlock) Utxorpc() (*utxorpc_cardano.Block, error) {
+	return nil, nil
+}
 
 func TestEpochNonceUsesCurrentEpochLastBlockHash(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
@@ -176,4 +237,51 @@ func TestEpochLabNonceNormalizesOldPrevHashCarryForEmptyEpoch(t *testing.T) {
 	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, boundaryPrevHash)
 	require.NoError(t, err)
 	require.Equal(t, boundaryHash, lab)
+}
+
+func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	canonicalChain := cm.PrimaryChain()
+
+	canonicalPrevHash := bytes.Repeat([]byte{0x01}, 32)
+	canonicalBoundaryHash := bytes.Repeat([]byte{0x02}, 32)
+	forkHash := bytes.Repeat([]byte{0xf0}, 32)
+
+	require.NoError(t, canonicalChain.AddBlock(epochLabNonceTestBlock{
+		slot:   10,
+		number: 1,
+		hash:   canonicalPrevHash,
+	}, nil))
+	require.NoError(t, canonicalChain.AddBlock(epochLabNonceTestBlock{
+		slot:     20,
+		number:   2,
+		hash:     canonicalBoundaryHash,
+		prevHash: canonicalPrevHash,
+	}, nil))
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:       99,
+		Slot:     30,
+		Hash:     forkHash,
+		PrevHash: canonicalPrevHash,
+		Cbor:     []byte{0x80},
+		Number:   99,
+		Type:     conway.BlockTypeConway,
+	}, nil))
+
+	rawBlock, err := database.BlockBeforeSlot(db, 40)
+	require.NoError(t, err)
+	require.Equal(t, forkHash, rawBlock.Hash)
+
+	ls := &LedgerState{
+		db:    db,
+		chain: canonicalChain,
+	}
+	lab, err := ls.epochLabNonce(nil, 0, 40, nil)
+	require.NoError(t, err)
+	require.Equal(t, canonicalBoundaryHash, lab)
 }

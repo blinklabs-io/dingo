@@ -632,11 +632,11 @@ When `Node.Run()` is called, components are initialized in this order:
     crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
     `healEmptyLabNonces`: it repairs any epoch record whose
-    `last_epoch_block_nonce` was persisted empty by the pre-fix
-    endorser-block/`BlockBeforeSlot` collision — re-deriving the lab from the
-    real boundary block and recomputing the affected epoch's nonce in the
-    cache so leader-VRF verification matches the network (an empty lab would
-    otherwise collapse that epoch's nonce to the NeutralNonce identity).
+    `last_epoch_block_nonce` was persisted empty by pre-fix boundary lookup
+    bugs, re-deriving the lab from the active chain's boundary block and
+    recomputing the affected epoch's nonce in the cache so leader-VRF
+    verification matches the network (an empty lab would otherwise collapse
+    that epoch's nonce to the NeutralNonce identity).
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros
@@ -976,10 +976,15 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 
 ### Epoch Nonce Computation
 
-`ledger/chainsync.go` and `ledger/candidate_nonce.go` implement the Ouroboros Praos nonce evolution:
+`ledger/chainsync.go`, `ledger/candidate_nonce.go`, and `ledger/epoch_lab_nonce.go` implement the Ouroboros Praos nonce evolution:
 - Evolving nonce: accumulated from each block's VRF output
 - Candidate nonce: frozen at the stability window cutoff
 - Epoch nonce: derived from candidate nonce and previous epoch's last block hash
+
+The previous epoch's last-block hash is resolved through the active chain index
+(`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
+retain synthetic endorser/genesis blobs and fork blobs that are useful for other
+storage paths but are not part of the selected chain.
 
 ### Ledger View
 

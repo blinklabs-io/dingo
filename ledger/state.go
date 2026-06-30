@@ -4554,21 +4554,18 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 }
 
 // healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce was
-// persisted empty by the pre-fix BlockBeforeSlot endorser-block collision.
+// persisted empty by pre-fix boundary block lookup bugs.
 //
 // LastEpochBlockNonce is the hash of the last block of the previous epoch. It
-// feeds the current epoch's nonce as candidateNonce ⭒ lastEpochBlockNonce. Before
-// BlockBeforeSlotTxn was taught to skip synthetic blobs, the labNonce lookup at
-// an epoch transition could return a Leios endorser block (persisted at a
-// block-blob key via SetGenesisCbor with an empty PrevHash) instead of the real
-// ranking block, saving an empty lab. An empty lab collapses the current epoch's
-// nonce to the NeutralNonce identity (η = candidateNonce, skipping the labNonce
-// mix), so every leader-VRF check in that epoch fails and the node wedges at
-// the first block it must verify live.
+// feeds the current epoch's nonce as candidateNonce ⭒ lastEpochBlockNonce.
+// Earlier boundary lookups scanned block-blob keys, so they could return a
+// synthetic Leios endorser block or retained fork blob instead of the active
+// chain's real ranking block. Empty or wrong lab values diverge epoch nonces
+// from peers and break leader-VRF verification.
 //
 // This runs once at startup over the loaded epoch cache. For each non-genesis
-// epoch with an empty lab whose boundary block (now resolved to the real
-// ranking block) carries a valid Hash, it restores the lab and recomputes
+// epoch with an empty lab whose boundary block (resolved through the canonical
+// chain index) carries a valid Hash, it restores the lab and recomputes
 // the affected epoch's nonce in the cache. It is a pure function of
 // already-stored chain data and is idempotent across restarts.
 func (ls *LedgerState) healEmptyLabNonces() {
@@ -4585,7 +4582,7 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 		if len(ep.LastEpochBlockNonce) != 0 || ep.StartSlot == 0 {
 			continue
 		}
-		boundary, err := database.BlockBeforeSlot(ls.db, ep.StartSlot)
+		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
 		if err != nil ||
 			len(boundary.Hash) != lcommon.Blake2b256Size {
 			continue

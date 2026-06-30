@@ -33,7 +33,7 @@ func (ls *LedgerState) epochLabNonce(
 	epochEndSlot uint64,
 	carriedLabNonce []byte,
 ) ([]byte, error) {
-	lastBlock, err := lookupBlockBeforeSlot(ls.db, txn, epochEndSlot)
+	lastBlock, err := ls.canonicalBlockBeforeSlot(txn, epochEndSlot)
 	if err != nil {
 		if !errors.Is(err, models.ErrBlockNotFound) {
 			return nil, fmt.Errorf("lookup boundary block: %w", err)
@@ -57,7 +57,7 @@ func (ls *LedgerState) normalizeCarriedLabNonce(
 	if len(carriedLabNonce) == 0 || epochStartSlot == 0 {
 		return cloneNonce(carriedLabNonce), nil
 	}
-	boundary, err := lookupBlockBeforeSlot(ls.db, txn, epochStartSlot)
+	boundary, err := ls.canonicalBlockBeforeSlot(txn, epochStartSlot)
 	if err != nil {
 		if !errors.Is(err, models.ErrBlockNotFound) {
 			return nil, fmt.Errorf("lookup carried boundary block: %w", err)
@@ -70,6 +70,19 @@ func (ls *LedgerState) normalizeCarriedLabNonce(
 		return cloneNonce(boundary.Hash), nil
 	}
 	return cloneNonce(carriedLabNonce), nil
+}
+
+func (ls *LedgerState) canonicalBlockBeforeSlot(
+	txn *database.Txn,
+	slot uint64,
+) (models.Block, error) {
+	if ls == nil {
+		return models.Block{}, errors.New("ledger state is nil")
+	}
+	if ls.chain != nil {
+		return ls.chain.BlockBeforeSlot(slot)
+	}
+	return lookupBlockBeforeSlot(ls.db, txn, slot)
 }
 
 func cloneNonce(nonce []byte) []byte {
