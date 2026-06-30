@@ -25,17 +25,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// explainMismatch is the CLI-facing JSON shape for explain --json.
-// Using a dedicated type avoids leaking internal DB fields (ID, StakeAddress,
-// CheckedAt, etc.) into the stable CLI output format.
-type explainMismatch struct {
-	Pool       string `json:"pool,omitempty"`
-	Field      string `json:"field"`
-	DingoValue string `json:"dingo_value"`
-	KoiosValue string `json:"koios_value"`
-	Category   string `json:"category"`
-}
-
 func explainCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "explain",
@@ -98,9 +87,9 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	if asJSON {
-		out := make([]explainMismatch, len(mismatches))
+		out := make([]koiosparity.JSONMismatch, len(mismatches))
 		for i, m := range mismatches {
-			out[i] = explainMismatch{
+			out[i] = koiosparity.JSONMismatch{
 				Pool:       m.PoolBech32,
 				Field:      m.Field,
 				DingoValue: m.DingoValue,

@@ -81,7 +81,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			logger.Warn("koios-parity: could not get latest epoch from Dingo",
 				"error", epochErr,
 			)
-		} else if current != lastEpoch {
+		} else if current > 0 && current != lastEpoch {
 			// Determine the range of newly closed epochs.
 			// First iteration: only the most recently closed epoch.
 			// Subsequent iterations: all epochs that closed since last poll.
@@ -93,45 +93,53 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			}
 			toClosed := current - 1
 
-			if fromClosed <= toClosed {
-				logger.Info("koios-parity: new closed epochs detected",
-					"from", fromClosed, "through", toClosed)
-			}
+			// Advance the cursor unconditionally so a stale latest-epoch
+			// response on the next tick cannot move lastEpoch backward.
 			lastEpoch = current
 
-			if _, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
-				Network:      network,
-				APIKey:       apiKey,
-				CachePath:    cachePath,
-				Concurrency:  concurrency,
-				FromEpoch:    fromClosed,
-				ThroughEpoch: toClosed,
-			}, logger); fetchErr != nil {
-				logger.Warn("koios-parity: fetch error", "error", fetchErr)
-			}
-
-			result, checkErr := koiosparity.Check(ctx, koiosparity.CheckConfig{
-				Network:      network,
-				DingoAPIURL:  dingoURL,
-				CachePath:    cachePath,
-				Workers:      workers,
-				FromEpoch:    fromClosed,
-				ThroughEpoch: toClosed,
-				GraceHours:   graceHours,
-			}, logger)
-			if checkErr != nil {
-				logger.Warn("koios-parity: check error", "error", checkErr)
+			if fromClosed > toClosed {
+				// Edge-case guard: should not occur with current > 0, but skip
+				// rather than passing an inverted range to Fetch/Check.
+				logger.Warn("koios-parity: skipping inverted epoch range",
+					"from", fromClosed, "through", toClosed)
 			} else {
-				status := "PASS"
-				if len(result.FailEpochs) > 0 {
-					status = fmt.Sprintf("FAIL (%d mismatches)", result.MismatchCount)
-				} else if len(result.ErrorEpochs) > 0 {
-					status = "ERROR"
+				logger.Info("koios-parity: new closed epochs detected",
+					"from", fromClosed, "through", toClosed)
+
+				if _, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
+					Network:      network,
+					APIKey:       apiKey,
+					CachePath:    cachePath,
+					Concurrency:  concurrency,
+					FromEpoch:    fromClosed,
+					ThroughEpoch: toClosed,
+				}, logger); fetchErr != nil {
+					logger.Warn("koios-parity: fetch error", "error", fetchErr)
 				}
-				logger.Info("koios-parity: epochs result",
-					"from", fromClosed, "through", toClosed,
-					"status", status,
-				)
+
+				result, checkErr := koiosparity.Check(ctx, koiosparity.CheckConfig{
+					Network:      network,
+					DingoAPIURL:  dingoURL,
+					CachePath:    cachePath,
+					Workers:      workers,
+					FromEpoch:    fromClosed,
+					ThroughEpoch: toClosed,
+					GraceHours:   graceHours,
+				}, logger)
+				if checkErr != nil {
+					logger.Warn("koios-parity: check error", "error", checkErr)
+				} else {
+					status := "PASS"
+					if len(result.FailEpochs) > 0 {
+						status = fmt.Sprintf("FAIL (%d mismatches)", result.MismatchCount)
+					} else if len(result.ErrorEpochs) > 0 {
+						status = "ERROR"
+					}
+					logger.Info("koios-parity: epochs result",
+						"from", fromClosed, "through", toClosed,
+						"status", status,
+					)
+				}
 			}
 		}
 
