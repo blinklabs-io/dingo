@@ -445,8 +445,8 @@ dingo/
 │       │   └── gcs/     # Google Cloud Storage
 │       └── metadata/    # Metadata plugins
 │           ├── sqlite/  # SQLite (default)
-│           ├── postgres/# PostgreSQL (non-default, planned tag-gating #2586)
-│           └── mysql/   # MySQL (non-default, planned tag-gating #2586)
+│           ├── postgres/# PostgreSQL (tag-gated)
+│           └── mysql/   # MySQL (tag-gated)
 ├── event/               # Event bus for decoupled communication
 │   ├── event.go         # EventBus, async delivery
 │   ├── epoch.go         # Epoch transition events
@@ -771,17 +771,17 @@ Dingo uses a dual-layer storage architecture with pluggable backends:
     -------------------------------------------------
     | Plugins:                    | Plugins:          |
     |  - Badger (default)         |  - SQLite (default)|
-    |  - AWS S3 (tag-gated)       |  - PostgreSQL (non-default)|
-    |  - Google Cloud Storage (tag-gated)|  - MySQL (non-default)|
+    |  - AWS S3 (tag-gated)       |  - PostgreSQL (tag-gated)|
+    |  - Google Cloud Storage (tag-gated)|  - MySQL (tag-gated)|
     -------------------------------------------------
 ```
 
 Badger and SQLite are always compiled into Dingo. The non-default blob plugins
-(`s3` and `gcs`) are compiled only when the `dingo_extra_plugins` build tag is
-enabled; project builds, CI, and release binaries opt into that tag, while a
-plain `go build ./cmd/dingo` omits the cloud blob SDKs. The non-default
-metadata plugins (`postgres` and `mysql`) are still compiled into plain builds
-on current `main`; issue #2586 tracks moving them behind the same tag.
+(`s3` and `gcs`) and metadata plugins (`postgres` and `mysql`) are compiled
+only when the `dingo_extra_plugins` build tag is enabled; project builds, CI,
+and release binaries opt into that tag, while a plain `go build ./cmd/dingo`
+omits the cloud blob SDKs and SQL driver dependencies for non-default metadata
+stores.
 
 ### Storage Modes
 
@@ -1362,6 +1362,41 @@ Package layout:
 Both backends produce the same `BootstrapResult` (immutable directory,
 ancillary ledger-state directory, synthesized snapshot metadata), so
 everything downstream of `Bootstrap()` is backend-agnostic.
+
+### Catch-up vs bootstrap dispatch
+
+`mithril.Sync` (the `dingo mithril sync` entry point) selects what to do from
+the database state alone, so the operator never needs to know it:
+
+- empty database -> full bootstrap
+- `sync_status` = `in_progress`/`backfill` -> resume the existing path
+- complete database (chain data present, `sync_status` clear), v2 backend, core
+  storage mode -> catch-up/reconcile (from the marker when present, otherwise
+  from immutable 0)
+- complete database already at or beyond the latest artifact, same chain -> no-op
+- a complete database whose chain diverges from the target -> abort with a
+  full-resync message; nothing is mutated
+
+Catch-up advances an existing core database to a v2 artifact with a
+pre-mutation chain check and reconcile import. When the persisted
+immutable-import marker exists (`mithril_immutable_max`, the highest immutable
+file number a prior sync loaded), catch-up downloads only the immutable archives
+above it (`BootstrapConfig.StartImmutable`). Markerless complete core databases
+still use catch-up semantics, but over the full artifact range, so a re-import
+cannot overwrite live state without reconciliation. Before any mutation, catch-up
+confirms either that the local chain tip is an ancestor of the target artifact's
+chain, or that the local chain is already ahead and contains the artifact tip;
+divergence aborts untouched. It then forward-copies the missing blocks and
+imports the new ledger state as a replacement boundary. The ledger import
+reconciles stale live rows (`ImportConfig.Reconcile`): the new snapshot is the
+complete ledger state at its tip, so any live row absent from it has been
+spent/deregistered/retired and is marked inactive (UTxOs tombstoned via
+`DeletedSlot`, accounts/DReps `Active=false`, pools given a `pool_retirement`)
+before the metadata tip is advanced to the snapshot tip — rows are never
+deleted. Complete API-mode databases with an immutable marker are rejected
+because incremental metadata replacement is not implemented; markerless API
+databases and the v1 backend use the bootstrap path. The marker is written
+after sync completion clears `sync_status`, so it survives across runs.
 
 The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
