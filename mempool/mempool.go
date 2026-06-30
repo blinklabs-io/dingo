@@ -182,6 +182,20 @@ func (o *utxoOverlay) rebuildAggregates() {
 	}
 }
 
+// removeByHashes removes the specified TXs from the overlay without cascading
+// to their descendants. Use for confirmed TXs whose outputs now exist in the
+// confirmed ledger state, making any chained descendants still valid.
+func (o *utxoOverlay) removeByHashes(hashes map[string]struct{}) {
+	remaining := make([]appliedTx, 0, len(o.applied))
+	for _, at := range o.applied {
+		if _, remove := hashes[at.hash]; !remove {
+			remaining = append(remaining, at)
+		}
+	}
+	o.applied = remaining
+	o.rebuildAggregates()
+}
+
 // removeBatchWithDescendants removes the specified TXs from the applied list,
 // then iteratively prunes any descendant TXs that consume UTxOs created by
 // removed TXs. Calls rebuildAggregates before returning.
@@ -895,6 +909,39 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 	m.consumersMutex.Unlock()
 	m.Unlock()
 	// MEM-03: Publish events outside the lock
+	if m.eventBus != nil {
+		for _, evt := range events {
+			m.eventBus.Publish(RemoveTransactionEventType, evt)
+		}
+	}
+}
+
+// RemoveTxsByHash removes a batch of transactions by hash without cascading to
+// descendants. Use after a block is confirmed: the block's outputs are now in
+// the ledger, so chained pending transactions remain valid and must not be
+// evicted.
+func (m *Mempool) RemoveTxsByHash(hashes []string) {
+	if len(hashes) == 0 {
+		return
+	}
+	hashSet := make(map[string]struct{}, len(hashes))
+	for _, h := range hashes {
+		hashSet[h] = struct{}{}
+	}
+	var events []event.Event
+	m.Lock()
+	m.consumersMutex.Lock()
+	m.overlay.removeByHashes(hashSet)
+	for i, v := range slices.Backward(m.transactions) {
+		if _, ok := hashSet[v.Hash]; ok {
+			evt := m.removeTransactionByIndexLocked(i)
+			if evt != nil {
+				events = append(events, *evt)
+			}
+		}
+	}
+	m.consumersMutex.Unlock()
+	m.Unlock()
 	if m.eventBus != nil {
 		for _, evt := range events {
 			m.eventBus.Publish(RemoveTransactionEventType, evt)

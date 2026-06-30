@@ -211,7 +211,7 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 	balance := p.wallet.Balance()
 	maxSend := balance / 2
 	if maxSend < minSendAmount+MinFee {
-		p.logger.Warn(
+		p.logger.Debug(
 			"wallet balance too low for payment, skipping",
 			"balance_lovelace", balance,
 		)
@@ -235,27 +235,37 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 		return
 	}
 
-	// Use the first input's address as a stand-in for both recipient and
-	// change.  In a real scenario these would come from key derivation.
-	// For Antithesis testing the address just needs to be syntactically valid.
+	// If any input has a signing key, use it to sign the transaction and
+	// route both the recipient and change outputs back to the same address.
+	// This keeps the wallet self-funding: change UTxOs remain spendable
+	// across batches without requiring additional key management.
+	var signingKey *UTxOKey
+	for _, u := range inputs {
+		if u.SigningKey != nil {
+			signingKey = u.SigningKey
+			break
+		}
+	}
 	addr := deterministicAddr(inputs[0].TxHash)
-
-	params := PaymentParams{
-		Inputs:     inputs,
-		ToAddr:     addr,
-		ChangeAddr: addr,
-		SendAmount: sendAmount,
-		Change:     change,
+	if signingKey != nil {
+		addr = signingKey.Address
 	}
 
-	txBytes, err := BuildPayment(params)
+	params := PaymentParams{
+		Inputs:      inputs,
+		ToAddr:      addr,
+		ChangeAddr:  addr,
+		SendAmount:  sendAmount,
+		Change:      change,
+		WitnessKeys: []*UTxOKey{signingKey}, // nil key is filtered in BuildWitnessMap
+	}
+
+	txBytes, txID, err := BuildPayment(params)
 	if err != nil {
 		p.logger.Error("build payment failed", "err", err)
 		p.wallet.ReturnUTxOs(inputs)
 		return
 	}
-
-	txID := deriveTestTxID(txBytes)
 
 	submitErr := client.SubmitTx(conwayEraID, txBytes)
 	entry := TxLog{
@@ -273,8 +283,8 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"tx_id", txID,
 			"err", submitErr,
 		)
-		// Return inputs so future batches can reuse them.
-		p.wallet.ReturnUTxOs(inputs)
+		// Do not retry rejected inputs. A repeated retry loop can turn one
+		// stale input into thousands of identical validation failures.
 	} else {
 		entry.Status = "submitted"
 		p.logger.Info(
@@ -282,9 +292,17 @@ func (p *Pump) submitPayment(client *NodeClient, batchSize int) {
 			"tx_id", txID,
 			"send_lovelace", sendAmount,
 		)
-		// Return change output to wallet so future transactions can spend it.
+		// Return both outputs to the wallet immediately so chained
+		// transactions can spend them within the same batch.
+		if signingKey != nil {
+			p.wallet.Add(UTxO{TxHash: txID, Index: 0, Amount: sendAmount, SigningKey: signingKey})
+		}
 		if change > 0 {
-			p.wallet.Add(UTxO{TxHash: txID, Index: 1, Amount: change})
+			changeUTxO := UTxO{TxHash: txID, Index: 1, Amount: change}
+			if signingKey != nil {
+				changeUTxO.SigningKey = signingKey
+			}
+			p.wallet.Add(changeUTxO)
 		}
 	}
 

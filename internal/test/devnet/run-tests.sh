@@ -181,4 +181,32 @@ else
   log "DevNet tests FAILED (exit code: ${TEST_EXIT})"
 fi
 
+log "Checking txpump accepted submissions..."
+set +e
+TXPUMP_COUNTS=$(
+  docker compose -f "${COMPOSE_FILE}" exec -T txpump sh -c '
+    if [ ! -f /logs/txpump.log ]; then
+      echo "0 0 0"
+      exit 0
+    fi
+    submitted=$(grep -c "\"status\":\"submitted\"" /logs/txpump.log 2>/dev/null || true)
+    rejected=$(grep -c "\"status\":\"rejected\"" /logs/txpump.log 2>/dev/null || true)
+    errors=$(grep -c "\"status\":\"error\"" /logs/txpump.log 2>/dev/null || true)
+    printf "%s %s %s\n" "${submitted}" "${rejected}" "${errors}"
+  ' 2>/dev/null
+)
+COUNTS_EXIT=$?
+set -e
+
+if [[ ${COUNTS_EXIT} -ne 0 || -z "${TXPUMP_COUNTS}" ]]; then
+  warn "Unable to inspect txpump transaction log"
+else
+  read -r TXPUMP_SUBMITTED TXPUMP_REJECTED TXPUMP_ERRORS <<<"${TXPUMP_COUNTS}"
+  log "txpump submitted=${TXPUMP_SUBMITTED} rejected=${TXPUMP_REJECTED} error=${TXPUMP_ERRORS}"
+  if [[ "${TXPUMP_SUBMITTED}" -eq 0 ]]; then
+    warn "txpump produced zero accepted submissions"
+    TEST_EXIT=1
+  fi
+fi
+
 exit ${TEST_EXIT}

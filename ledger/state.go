@@ -468,6 +468,9 @@ type PendingTransaction struct {
 // MempoolProvider provides pending transactions without exposing mempool DTOs.
 type MempoolProvider interface {
 	Transactions() []PendingTransaction
+	// RemoveTxsByHash removes confirmed transactions without cascading to
+	// chained descendants, which remain valid against the updated ledger.
+	RemoveTxsByHash(hashes []string)
 }
 type rollbackRecord struct {
 	point     ocommon.Point
@@ -6282,6 +6285,7 @@ func (ls *LedgerState) forgeBlock() {
 		transactionBodies      []conway.ConwayTransactionBody
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
+		includedTxHashes       []string
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = uint64(conwayPParams.MaxTxSize)
@@ -6420,6 +6424,7 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Add transaction to our lists for later block creation
+			includedTxHashes = append(includedTxHashes, mempoolTx.Hash)
 			transactionBodies = append(transactionBodies, fullTx.Body)
 			transactionWitnessSets = append(
 				transactionWitnessSets,
@@ -6542,6 +6547,13 @@ func (ls *LedgerState) forgeBlock() {
 			"error", err,
 		)
 		return
+	}
+
+	// Synchronously evict confirmed transactions so the next forging slot
+	// sees a clean mempool without waiting for the async ChainUpdateEvent
+	// rebuild cycle.
+	if ls.mempool != nil && len(includedTxHashes) > 0 {
+		ls.mempool.RemoveTxsByHash(includedTxHashes)
 	}
 
 	// Wake chainsync server iterators so connected peers discover
