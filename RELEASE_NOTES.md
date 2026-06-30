@@ -1,5 +1,23 @@
 # Dingo Releases
 
+## v0.61.0 (June 30, 2026)
+
+**Title:** Midnight governance indexing, steadier Leios serving, and simpler example deployments
+
+**Date:** June 30, 2026
+
+**Version:** v0.61.0
+
+Hi folks! Here’s what we shipped in v0.61.0.
+
+### ✨ What's New
+
+* Added **expand Midnight indexing for governance, Ariadne, and committee candidate scans:** Midnight users can now capture broader governance related data, keep persistence safe across rollbacks, and rely on steadier startup and backfill behavior.
+
+### 💪 Improvements
+
+* Improved **simplify local example deployments with a shared Docker Compose stack:** Example users can now run a single local workflow through `examples/docker-compose.yml`, and the updated environment variable names and paths make that setup easier to follow.
+
 ## v0.60.1 (June 29, 2026)
 
 **Title:** Faster Mithril bootstrap, safer at-tip nonce handling, and refreshed dependencies
