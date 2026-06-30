@@ -79,34 +79,35 @@ func CompareEpochAggregates(
 		return out
 	}
 
-	// active_stake
+	// active_stake — treat a nil/missing field as an empty string so omission
+	// is flagged as a mismatch rather than silently passing parity.
+	dingoStake := ""
 	if dingoEpoch.ActiveStake != nil {
-		if *dingoEpoch.ActiveStake != koios.ActiveStake {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "total_active_stake",
-				DingoValue: *dingoEpoch.ActiveStake,
-				KoiosValue: koios.ActiveStake,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
+		dingoStake = *dingoEpoch.ActiveStake
+	}
+	if dingoStake != koios.ActiveStake {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "total_active_stake",
+			DingoValue: dingoStake,
+			KoiosValue: koios.ActiveStake,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
 	}
 
-	// fees
-	if dingoEpoch.Fees != "" && koios.Fees != "" {
-		if dingoEpoch.Fees != koios.Fees {
-			out = append(out, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				Field:      "epoch_fees",
-				DingoValue: dingoEpoch.Fees,
-				KoiosValue: koios.Fees,
-				Category:   CategoryValueMismatch,
-				CheckedAt:  now,
-			})
-		}
+	// fees — compare directly; empty-string on either side is still a mismatch.
+	if dingoEpoch.Fees != koios.Fees {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "epoch_fees",
+			DingoValue: dingoEpoch.Fees,
+			KoiosValue: koios.Fees,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
 	}
 
 	return out

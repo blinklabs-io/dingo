@@ -167,7 +167,7 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 
 // GetEpochInfo fetches epoch info for a specific epoch.
 func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpochInfoResp, error) {
-	path := fmt.Sprintf("/epoch_info?_epoch_no=eq.%d", epoch)
+	path := fmt.Sprintf("/epoch_info?_epoch_no=%d", epoch)
 	resp, err := k.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
@@ -232,7 +232,7 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	epoch uint64,
 ) (*KoiosPoolHistoryItem, error) {
 	path := fmt.Sprintf(
-		"/pool_history?_pool_bech32=eq.%s&_epoch_no=eq.%d&select=pool_id_bech32,epoch_no,active_stake,block_cnt,delegator_cnt",
+		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=pool_id_bech32,epoch_no,active_stake,block_cnt,delegator_cnt",
 		poolBech32, epoch,
 	)
 	resp, err := k.get(ctx, path, -1, -1)

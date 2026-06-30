@@ -25,6 +25,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// explainMismatch is the CLI-facing JSON shape for explain --json.
+// Using a dedicated type avoids leaking internal DB fields (ID, StakeAddress,
+// CheckedAt, etc.) into the stable CLI output format.
+type explainMismatch struct {
+	Pool       string `json:"pool,omitempty"`
+	Field      string `json:"field"`
+	DingoValue string `json:"dingo_value"`
+	KoiosValue string `json:"koios_value"`
+	Category   string `json:"category"`
+}
+
 func explainCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "explain",
@@ -37,7 +48,7 @@ Use --live to re-run the comparison against Dingo's API (requires --dingo-api).`
 	cmd.Flags().Uint64("epoch", 0, "epoch to explain (required)")
 	cmd.Flags().String("pool", "", "optional pool bech32 filter")
 	cmd.Flags().Bool("live", false, "re-compare against Dingo API instead of cached results")
-	cmd.Flags().String("dingo-api", defaultDingoAPI, "Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
+	cmd.Flags().String("dingo-api", "", "Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
 	cmd.Flags().Bool("json", false, "emit JSON output")
 
 	return cmd
@@ -49,10 +60,11 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	epoch, _ := cmd.Flags().GetUint64("epoch")
-	if epoch == 0 {
-		return errors.New("--epoch is required")
+	// Use Changed() so that epoch 0 is a valid argument.
+	if !cmd.Flags().Changed("epoch") {
+		return errors.New("--epoch is required (use --epoch <number>)")
 	}
+	epoch, _ := cmd.Flags().GetUint64("epoch")
 	poolFilter, _ := cmd.Flags().GetString("pool")
 	live, _ := cmd.Flags().GetBool("live")
 	asJSON, _ := cmd.Flags().GetBool("json")
@@ -86,9 +98,19 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	if asJSON {
+		out := make([]explainMismatch, len(mismatches))
+		for i, m := range mismatches {
+			out[i] = explainMismatch{
+				Pool:       m.PoolBech32,
+				Field:      m.Field,
+				DingoValue: m.DingoValue,
+				KoiosValue: m.KoiosValue,
+				Category:   m.Category,
+			}
+		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(mismatches)
+		return enc.Encode(out)
 	}
 
 	koiosparity.PrintExplain(os.Stdout, network, epoch, mismatches, poolFilter)

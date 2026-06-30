@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -61,6 +62,9 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	if err != nil {
 		return nil, fmt.Errorf("get tip epoch: %w", err)
 	}
+	if tipEpoch == 0 {
+		return nil, errors.New("koios tip epoch is 0: no closed epochs to fetch")
+	}
 	// We only compare closed epochs: tip - 1.
 	throughEpoch := tipEpoch - 1
 	if cfg.ThroughEpoch > 0 && cfg.ThroughEpoch < throughEpoch {
@@ -84,6 +88,13 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			"last_epoch", throughEpoch,
 		)
 		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
+	}
+
+	// Fetch pool list once; it is epoch-independent and re-downloading it for
+	// every epoch wastes rate-limit quota on wide backfills.
+	pools, err := koios.GetPoolList(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get pool list: %w", err)
 	}
 
 	// Build list of epochs to fetch.
@@ -119,7 +130,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			pools, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, logger)
+			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, pools, logger)
 			if fetchErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
@@ -129,7 +140,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 			}
 			mu.Lock()
 			result.EpochsFetched++
-			result.PoolsFetched += pools
+			result.PoolsFetched += cnt
 			mu.Unlock()
 		}(epoch)
 	}
@@ -150,6 +161,8 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 }
 
 // fetchEpoch fetches and caches one epoch's worth of Koios data.
+// Pool rows are written before epoch info so that the resume cursor (based on
+// koios_epoch_info presence) is never advanced for a partially-cached epoch.
 // Returns the number of pool rows upserted.
 func fetchEpoch(
 	ctx context.Context,
@@ -157,35 +170,19 @@ func fetchEpoch(
 	cache *Cache,
 	network string,
 	epoch uint64,
+	pools []KoiosPoolListItem,
 	logger *slog.Logger,
 ) (int, error) {
-	// 1. Epoch info.
+	// 1. Fetch epoch info (but do not write it yet).
 	info, err := koios.GetEpochInfo(ctx, epoch)
 	if err != nil {
 		return 0, fmt.Errorf("get epoch info: %w", err)
 	}
 
 	now := time.Now()
-	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
-		Network:      network,
-		Epoch:        epoch,
-		ActiveStake:  info.ActiveStake,
-		PoolCnt:      info.PoolCnt,
-		DelegatorCnt: info.DelegatorCnt,
-		Fees:         info.Fees,
-		TotalRewards: info.TotalRewards,
-		FetchedAt:    now,
-	}); err != nil {
-		return 0, fmt.Errorf("upsert epoch info: %w", err)
-	}
 
-	// 2. Discover all pools active in this epoch via pool_list.
-	pools, err := koios.GetPoolList(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("get pool list: %w", err)
-	}
-
-	// 3. For each pool, fetch history for this epoch and store if present.
+	// 2. Fetch pool history rows. Errors are propagated so incomplete cache
+	//    rows are never treated as valid reference data.
 	poolCount := 0
 	poolSem := make(chan struct{}, 5)
 	var poolWg sync.WaitGroup
@@ -206,11 +203,10 @@ func fetchEpoch(
 
 			item, histErr := koios.GetPoolEpochHistory(ctx, p.PoolIDBech32, epoch)
 			if histErr != nil {
-				logger.Debug("koiosparity: skip pool history",
-					"pool", p.PoolIDBech32,
-					"epoch", epoch,
-					"error", histErr,
-				)
+				select {
+				case poolErrCh <- fmt.Errorf("pool %s history: %w", p.PoolIDBech32, histErr):
+				default:
+				}
 				return
 			}
 			if item == nil {
@@ -243,6 +239,20 @@ func fetchEpoch(
 	case err := <-poolErrCh:
 		return poolCount, err
 	default:
+	}
+
+	// 3. Write epoch info only after all pool rows have succeeded.
+	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
+		Network:      network,
+		Epoch:        epoch,
+		ActiveStake:  info.ActiveStake,
+		PoolCnt:      info.PoolCnt,
+		DelegatorCnt: info.DelegatorCnt,
+		Fees:         info.Fees,
+		TotalRewards: info.TotalRewards,
+		FetchedAt:    now,
+	}); err != nil {
+		return 0, fmt.Errorf("upsert epoch info: %w", err)
 	}
 
 	logger.Debug("koiosparity: epoch fetched",

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -33,7 +34,7 @@ Does not replace manual 'run --all' after a ledger replay.`,
 		RunE: watchRun,
 	}
 
-	cmd.Flags().String("dingo-api", defaultDingoAPI,
+	cmd.Flags().String("dingo-api", "",
 		"Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
 	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
 	cmd.Flags().Duration("interval", 15*time.Minute, "poll interval")
@@ -53,6 +54,9 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 
 	cachePath := resolveCachePath()
 	interval, _ := cmd.Flags().GetDuration("interval")
+	if interval <= 0 {
+		return errors.New("--interval must be positive")
+	}
 	concurrency, _ := cmd.Flags().GetInt("concurrency")
 	workers, _ := cmd.Flags().GetInt("workers")
 	graceHours, _ := cmd.Flags().GetInt("grace-hours")
@@ -78,9 +82,20 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				"error", epochErr,
 			)
 		} else if current != lastEpoch {
-			closedEpoch := current - 1
-			if lastEpoch > 0 {
-				logger.Info("koios-parity: new closed epoch detected", "epoch", closedEpoch)
+			// Determine the range of newly closed epochs.
+			// First iteration: only the most recently closed epoch.
+			// Subsequent iterations: all epochs that closed since last poll.
+			var fromClosed uint64
+			if lastEpoch == 0 {
+				fromClosed = current - 1
+			} else {
+				fromClosed = lastEpoch
+			}
+			toClosed := current - 1
+
+			if fromClosed <= toClosed {
+				logger.Info("koios-parity: new closed epochs detected",
+					"from", fromClosed, "through", toClosed)
 			}
 			lastEpoch = current
 
@@ -89,8 +104,8 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				APIKey:       apiKey,
 				CachePath:    cachePath,
 				Concurrency:  concurrency,
-				FromEpoch:    closedEpoch,
-				ThroughEpoch: closedEpoch,
+				FromEpoch:    fromClosed,
+				ThroughEpoch: toClosed,
 			}, logger); fetchErr != nil {
 				logger.Warn("koios-parity: fetch error", "error", fetchErr)
 			}
@@ -100,8 +115,8 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				DingoAPIURL:  dingoURL,
 				CachePath:    cachePath,
 				Workers:      workers,
-				FromEpoch:    closedEpoch,
-				ThroughEpoch: closedEpoch,
+				FromEpoch:    fromClosed,
+				ThroughEpoch: toClosed,
 				GraceHours:   graceHours,
 			}, logger)
 			if checkErr != nil {
@@ -113,8 +128,8 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 				} else if len(result.ErrorEpochs) > 0 {
 					status = "ERROR"
 				}
-				logger.Info("koios-parity: epoch result",
-					"epoch", closedEpoch,
+				logger.Info("koios-parity: epochs result",
+					"from", fromClosed, "through", toClosed,
 					"status", status,
 				)
 			}

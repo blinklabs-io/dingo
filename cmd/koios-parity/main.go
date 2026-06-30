@@ -113,10 +113,13 @@ func resolveReportDir(override string) string {
 }
 
 // requireNetwork returns the network name or an error.
+// Env precedence: CARDANO_NETWORK (repo-standard) then KOIOS_NETWORK (compat).
 func requireNetwork() (string, error) {
 	net := globalFlags.network
 	if net == "" {
-		if v := os.Getenv("KOIOS_NETWORK"); v != "" {
+		if v := os.Getenv("CARDANO_NETWORK"); v != "" {
+			net = v
+		} else if v := os.Getenv("KOIOS_NETWORK"); v != "" {
 			net = v
 		}
 	}
@@ -130,8 +133,10 @@ func requireNetwork() (string, error) {
 }
 
 // dingoAPIURL returns the Dingo Blockfrost URL from flag, env, or the default.
+// Using Changed() ensures an empty flag default doesn't shadow DINGO_BLOCKFROST_URL.
 func dingoAPIURL(cmd *cobra.Command) string {
-	if url, _ := cmd.Flags().GetString("dingo-api"); url != "" {
+	if cmd.Flags().Changed("dingo-api") {
+		url, _ := cmd.Flags().GetString("dingo-api")
 		return url
 	}
 	if url := os.Getenv("DINGO_BLOCKFROST_URL"); url != "" {

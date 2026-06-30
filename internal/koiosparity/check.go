@@ -16,7 +16,6 @@ package koiosparity
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -33,7 +32,7 @@ type CheckConfig struct {
 	All          bool   // re-check all cached epochs
 	FromEpoch    uint64 // 0 = all unchecked
 	ThroughEpoch uint64 // 0 = no upper bound
-	GraceHours   int    // pools-only-in-dingo in recently-fetched epochs → reference_lag
+	GraceHours   int    // retained for config compatibility; not currently used
 }
 
 // CheckResult summarises a completed check run.
@@ -94,7 +93,6 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 		"network", cfg.Network,
 		"count", len(epochs),
 		"workers", cfg.Workers,
-		"grace_hours", cfg.GraceHours,
 	)
 
 	result := &CheckResult{}
@@ -102,20 +100,6 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	sem := make(chan struct{}, cfg.Workers)
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
-
-	// Pre-fetch pool list from Dingo once (shared across epoch checks).
-	dingoPools, dingoPoolsErr := dingo.GetPoolsExtended(ctx)
-	if dingoPoolsErr != nil && !errors.Is(dingoPoolsErr, ErrAPINotFound) {
-		logger.Warn("koiosparity: could not fetch Dingo pool list",
-			"error", dingoPoolsErr,
-		)
-	}
-	dingoPoolSet := make(map[string]bool, len(dingoPools))
-	for _, p := range dingoPools {
-		dingoPoolSet[p.PoolID] = true
-	}
-
-	grace := time.Duration(cfg.GraceHours) * time.Hour
 
 	for _, epoch := range epochs {
 		select {
@@ -129,10 +113,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			res, checkErr := checkEpoch(
-				ctx, cache, dingo, cfg.Network, epoch,
-				dingoPoolSet, grace, logger,
-			)
+			res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, logger)
 			if checkErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, checkErr):
@@ -143,7 +124,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 
 			mu.Lock()
 			result.EpochsChecked++
-			result.PoolsChecked += res.DingoPoolCount + res.KoiosPoolCount
+			result.PoolsChecked += res.KoiosPoolCount
 			result.MismatchCount += len(res.Mismatches)
 			switch res.Status {
 			case StatusFail:
@@ -172,14 +153,15 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 }
 
 // checkEpoch performs the comparison for a single epoch and persists results.
+// Koios pool membership is authoritative: only pools Koios knows about for
+// this epoch are compared, avoiding false pool_only_dingo mismatches from the
+// global /pools/extended registry.
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
 	dingo *BlockfrostClient,
 	network string,
 	epoch uint64,
-	dingoPoolSet map[string]bool,
-	grace time.Duration,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {
 	now := time.Now()
@@ -192,16 +174,6 @@ func checkEpoch(
 	koiosPools, err := cache.GetAllPoolsForEpoch(network, epoch)
 	if err != nil {
 		return nil, fmt.Errorf("get koios pool epoch: %w", err)
-	}
-
-	// If Koios data was fetched within the grace window the epoch may still be
-	// incomplete on Koios's side — pools absent from Koios get reference_lag.
-	recentFetch := time.Since(koiosEpoch.FetchedAt) < grace
-
-	// Build a map of Koios pools by ID.
-	koiosPoolMap := make(map[string]*KoiosPoolEpoch, len(koiosPools))
-	for i := range koiosPools {
-		koiosPoolMap[koiosPools[i].PoolBech32] = &koiosPools[i]
 	}
 
 	// Clear previous mismatch records for this epoch.
@@ -218,57 +190,20 @@ func checkEpoch(
 	)
 	allMismatches = append(allMismatches, aggMismatches...)
 
-	// Per-pool comparison: build union of pool IDs from both sides.
-	allPoolIDs := make(map[string]bool, len(koiosPoolMap)+len(dingoPoolSet))
-	for id := range koiosPoolMap {
-		allPoolIDs[id] = true
-	}
-	for id := range dingoPoolSet {
-		allPoolIDs[id] = true
-	}
-
-	var onlyDingo []string
+	// Per-pool comparison: iterate Koios pools only.
+	// Using the global /pools/extended as the Dingo side would flag pools that
+	// exist in Dingo but were inactive this epoch as false pool_only_dingo hits.
 	var onlyKoios []string
 
-	for poolID := range allPoolIDs {
-		koiosPool, inKoios := koiosPoolMap[poolID]
-		_, inDingo := dingoPoolSet[poolID]
-
-		if inDingo && !inKoios {
-			// Pool is in Dingo but absent from Koios.
-			// If the Koios data is recent, Koios may simply not have indexed it yet.
-			cat := CategoryPoolOnlyDingo
-			if recentFetch {
-				cat = CategoryReferenceLag
-			}
-			onlyDingo = append(onlyDingo, poolID)
-			allMismatches = append(allMismatches, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: poolID,
-				Field:      "pool_presence",
-				DingoValue: "present",
-				KoiosValue: "",
-				Category:   cat,
-				CheckedAt:  now,
-			})
-			continue
-		}
-
-		if !inDingo && inKoios {
-			onlyKoios = append(onlyKoios, poolID)
-			poolMismatches := ComparePoolEpoch(
-				network, epoch, koiosPool, nil, nil, now,
-			)
-			allMismatches = append(allMismatches, poolMismatches...)
-			continue
-		}
-
-		// In both — fetch Dingo pool history for this epoch.
-		dingoItem, histErr := dingo.GetPoolHistoryForEpoch(ctx, poolID, epoch)
+	for i := range koiosPools {
+		koiosPool := &koiosPools[i]
+		dingoItem, histErr := dingo.GetPoolHistoryForEpoch(ctx, koiosPool.PoolBech32, epoch)
 		poolMismatches := ComparePoolEpoch(
 			network, epoch, koiosPool, dingoItem, histErr, now,
 		)
+		if dingoItem == nil && histErr == nil {
+			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
+		}
 		allMismatches = append(allMismatches, poolMismatches...)
 	}
 
@@ -284,9 +219,9 @@ func checkEpoch(
 		LastCheckedAt:  now,
 		Status:         status,
 		MismatchCount:  len(allMismatches),
-		DingoPoolCount: len(dingoPoolSet),
+		DingoPoolCount: len(koiosPools),
 		KoiosPoolCount: len(koiosPools),
-		OnlyDingoPools: MarshalPoolList(onlyDingo),
+		OnlyDingoPools: MarshalPoolList(nil),
 		OnlyKoiosPools: MarshalPoolList(onlyKoios),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert check status: %w", err)
@@ -297,7 +232,6 @@ func checkEpoch(
 		"epoch", epoch,
 		"status", status,
 		"mismatches", len(allMismatches),
-		"recent_fetch", recentFetch,
 	)
 
 	return &EpochCompareResult{
@@ -305,9 +239,9 @@ func checkEpoch(
 		Epoch:          epoch,
 		Status:         status,
 		Mismatches:     allMismatches,
-		DingoPoolCount: len(dingoPoolSet),
+		DingoPoolCount: len(koiosPools),
 		KoiosPoolCount: len(koiosPools),
-		OnlyDingo:      onlyDingo,
+		OnlyDingo:      nil,
 		OnlyKoios:      onlyKoios,
 	}, nil
 }

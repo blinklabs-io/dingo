@@ -15,6 +15,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -40,6 +41,9 @@ func statusRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	cachePath := resolveCachePath()
+	if _, statErr := os.Stat(cachePath); os.IsNotExist(statErr) {
+		return fmt.Errorf("cache not found at %s; run 'fetch' first", cachePath)
+	}
 	verbose, _ := cmd.Flags().GetBool("verbose")
 
 	cache, err := koiosparity.OpenCache(cachePath, slog.Default())
