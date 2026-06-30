@@ -43,6 +43,10 @@ const MaxBlockFetchRange = 129600
 // responses for the same (connId, start) tuple before closing the connection.
 const blockfetchMaxConsecutiveNoBlocks = 5
 
+// blockfetchServerSendDrainTimeout is the maximum time the range server waits
+// for the underlying protocol send queue to drain between blockfetch messages.
+const blockfetchServerSendDrainTimeout = 60 * time.Second
+
 // blockfetchNoBlocksPoint identifies the start point used by the last
 // NoBlocks response tracked for a connection.
 type blockfetchNoBlocksPoint struct {
@@ -64,6 +68,10 @@ type blockfetchBatchServer interface {
 	StartBatch() error
 	Block(uint, []byte) error
 	BatchDone() error
+}
+
+type blockfetchSendDrainWaiter interface {
+	WaitSendQueueDrained(time.Duration) bool
 }
 
 type blockfetchConnection interface {
@@ -207,6 +215,16 @@ func (o *Ouroboros) blockfetchServerSendBatch(
 		)
 		return fmt.Errorf("blockfetch StartBatch failed: %w", err)
 	}
+	if err := o.blockfetchServerWaitForSendDrain(
+		connectionID,
+		start,
+		end,
+		server,
+		conn,
+		"StartBatch",
+	); err != nil {
+		return err
+	}
 Loop:
 	for {
 		select {
@@ -264,6 +282,16 @@ Loop:
 			if o.blockfetchMetrics != nil {
 				o.blockfetchMetrics.servedBlockCount.Inc()
 			}
+			if err := o.blockfetchServerWaitForSendDrain(
+				connectionID,
+				start,
+				end,
+				server,
+				conn,
+				"Block",
+			); err != nil {
+				return err
+			}
 			// Make sure we don't hang waiting for the next block if we've already hit the end
 			if next.Block.Slot == end.Slot {
 				break Loop
@@ -287,6 +315,46 @@ Loop:
 		return fmt.Errorf("blockfetch BatchDone failed: %w", err)
 	}
 	return nil
+}
+
+func (o *Ouroboros) blockfetchServerWaitForSendDrain(
+	connectionID string,
+	start ocommon.Point,
+	end ocommon.Point,
+	server blockfetchBatchServer,
+	conn blockfetchConnection,
+	phase string,
+) error {
+	drainWaiter, ok := server.(blockfetchSendDrainWaiter)
+	if !ok {
+		return nil
+	}
+	if drainWaiter.WaitSendQueueDrained(blockfetchServerSendDrainTimeout) {
+		return nil
+	}
+	select {
+	case <-conn.ErrorChan():
+		return nil
+	default:
+	}
+	o.config.Logger.Error(
+		"blockfetch: send queue did not drain",
+		"connection_id", connectionID,
+		"start_slot", start.Slot,
+		"end_slot", end.Slot,
+		"phase", phase,
+		"timeout", blockfetchServerSendDrainTimeout,
+	)
+	o.closeBlockfetchConnection(
+		conn,
+		connectionID,
+		"blockfetch send queue did not drain",
+	)
+	return fmt.Errorf(
+		"blockfetch send queue did not drain after %s within %s",
+		phase,
+		blockfetchServerSendDrainTimeout,
+	)
 }
 
 func (o *Ouroboros) reportBlockfetchServerAsyncError(

@@ -32,6 +32,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/immutable"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 )
 
@@ -65,6 +66,26 @@ func (s *stubBlockfetchBatchServer) Block(_ uint, _ []byte) error {
 func (s *stubBlockfetchBatchServer) BatchDone() error {
 	s.batchDoneCalls++
 	return s.batchDoneErr
+}
+
+type stubBlockfetchDrainBatchServer struct {
+	stubBlockfetchBatchServer
+	drainCalls    int
+	drainResults  []bool
+	drainTimeouts []time.Duration
+}
+
+func (s *stubBlockfetchDrainBatchServer) WaitSendQueueDrained(
+	timeout time.Duration,
+) bool {
+	s.drainCalls++
+	s.drainTimeouts = append(s.drainTimeouts, timeout)
+	if len(s.drainResults) == 0 {
+		return true
+	}
+	result := s.drainResults[0]
+	s.drainResults = s.drainResults[1:]
+	return result
 }
 
 type blockfetchIteratorStep struct {
@@ -104,6 +125,17 @@ func (c *stubBlockfetchConnection) ErrorChan() chan error {
 func (c *stubBlockfetchConnection) Close() error {
 	c.closeCalls++
 	return c.closeErr
+}
+
+func testBlockfetchIteratorBlock(slot uint64) *chain.ChainIteratorResult {
+	return &chain.ChainIteratorResult{
+		Point: ocommon.NewPoint(slot, []byte{byte(slot)}),
+		Block: models.Block{
+			Slot: slot,
+			Type: 1,
+			Cbor: []byte{byte(slot), byte(slot + 1)},
+		},
+	}
 }
 
 func TestBlockfetchServerRequestRange_StartAfterEnd(t *testing.T) {
@@ -330,6 +362,90 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	assert.Equal(t, 1, server.batchDoneCalls)
 	assert.Equal(t, 0, conn.closeCalls)
 	assert.Equal(t, 1, iter.cancelCalls)
+}
+
+func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	iter := &stubBlockfetchIterator{
+		steps: []blockfetchIteratorStep{
+			{result: testBlockfetchIteratorBlock(100)},
+			{result: testBlockfetchIteratorBlock(101)},
+		},
+	}
+	server := &stubBlockfetchDrainBatchServer{}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(101, []byte{0x02})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(t, 2, server.blockCalls)
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
+	assert.Equal(t, 3, server.drainCalls)
+	for _, timeout := range server.drainTimeouts {
+		assert.Equal(t, blockfetchServerSendDrainTimeout, timeout)
+	}
+}
+
+func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	iter := &stubBlockfetchIterator{
+		steps: []blockfetchIteratorStep{
+			{result: testBlockfetchIteratorBlock(100)},
+			{result: testBlockfetchIteratorBlock(101)},
+		},
+	}
+	server := &stubBlockfetchDrainBatchServer{
+		drainResults: []bool{true, false},
+	}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(101, []byte{0x02})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "send queue did not drain after Block")
+	assert.Equal(t, 1, server.startBatchCalls)
+	assert.Equal(t, 1, server.blockCalls)
+	assert.Equal(t, 0, server.batchDoneCalls)
+	assert.Equal(t, 1, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
+	assert.Equal(t, 2, server.drainCalls)
 }
 
 func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(

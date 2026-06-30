@@ -279,6 +279,16 @@ sequenceDiagram
     LS->>EB: publish TransactionEvent(rollback: true) per tx
 ```
 
+The BlockFetch server path mirrors the retrieval flow for downstream peers:
+when a peer requests a range, `ouroboros/blockfetch.go` validates the bounds,
+opens a chain iterator at the requested start point, sends `StartBatch`, then
+streams `Block` messages until the requested end or local tip before
+`BatchDone`. The range sender is asynchronous so the mini-protocol callback can
+return promptly, but it applies backpressure between messages by waiting for
+the underlying gouroboros protocol send queue to drain. This keeps large Leios
+catch-up ranges from filling the mux pending-message queue and turning a slow
+consumer into a connection-level protocol violation.
+
 ### Peer-to-Peer Networking
 
 Connection lifecycle, protocol multiplexing, and peer governance.
