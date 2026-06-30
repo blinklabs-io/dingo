@@ -7,19 +7,28 @@ accidental hosted API usage.
 
 ## Dingo
 
-Deploy Dingo `0.46.2` on Preview:
+The consolidated examples Compose stack runs Dingo on Preview with UTxO RPC
+enabled and serves this app together with the other example apps:
+
+```sh
+cd examples
+cp .env.example .env
+docker compose up -d
+```
+
+Open `http://127.0.0.1:5174`.
+
+For Kubernetes, deploy Dingo on Preview:
 
 ```sh
 cd examples/dingo-sundae-preview
 ./scripts/deploy-dingo.sh
+./scripts/port-forward-dingo.sh
 ```
 
 The chart uses a `LoadBalancer` service and enables only `DINGO_UTXORPC_PORT`.
-If the load balancer is not reachable from the dev host, keep a local proxy open:
-
-```sh
-./scripts/port-forward-dingo.sh
-```
+If the load balancer is not reachable from the dev host, keep the port-forward
+open while running the frontend.
 
 ## Frontend
 

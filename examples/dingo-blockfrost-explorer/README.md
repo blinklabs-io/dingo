@@ -55,19 +55,20 @@ The LoadBalancer manifest exposes Blockfrost `3000`, UTxO RPC `9090`, Mesh
 
 ### Docker Compose
 
-Compose uses the same published Dingo image by default, runs a one-shot
+The consolidated examples Compose stack runs the explorer together with the
+other example apps on one shared Preview Dingo node. It runs a one-shot
 `dingo mithril sync`, starts `dingo serve` after the sync job succeeds, and
-serves the Vite explorer. Ports bind to `0.0.0.0` by default so another machine
-on the LAN can reach them.
+serves the Vite explorer.
 
 ```sh
-cd examples/dingo-blockfrost-explorer
+cd examples
+cp .env.example .env
 docker compose up -d
 ```
 
 Open `http://127.0.0.1:5173`. Set `DINGO_BIND_ADDR=127.0.0.1` or
-`EXPLORER_BIND_ADDR=127.0.0.1` before `docker compose up` if you want local-only
-bindings.
+`BLOCKFROST_EXPLORER_BIND_ADDR=127.0.0.1` before `docker compose up` if you
+want local-only bindings.
 
 ## Frontend
 
