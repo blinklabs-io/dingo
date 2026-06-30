@@ -2,7 +2,7 @@
 
 Dingo stores chain state in two sibling stores:
 
-- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. `sqlite` is the default plugin; `postgres` and `mysql` are non-default plugins that are still compiled into plain builds on current `main`. Issue #2586 tracks moving them behind the `dingo_extra_plugins` build tag.
+- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. The always-built plugin is `sqlite`; `postgres` and `mysql` are optional and are built only with the `dingo_extra_plugins` build tag.
 - The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3` are optional and are built only with the `dingo_extra_plugins` build tag.
 
 The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin. The SQLite plugin migrates the full model set in one pass after its compatibility migrations so GORM-declared relationships and cascade constraints are present on fresh SQLite databases. On a database created before auto-migrate was enabled, adding a missing `OnDelete:CASCADE` foreign key rebuilds the child table with the constraint enforced; because those older databases never enforced the cascade, orphaned child rows may have accumulated (for example `asset` rows left behind when their `utxo` was deleted) and would fail the rebuild with `FOREIGN KEY constraint failed (787)`. To avoid this, every plugin purges orphaned rows whose cascade-FK parent no longer exists before running `AutoMigrate` (`models.PurgeOrphanedCascadeRows` in `database/models/purge_orphans.go`); this is a no-op once the foreign keys exist, since the constraint then prevents orphans.
@@ -166,9 +166,19 @@ erDiagram
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
-| `sync_state` | `sync_key`, `value` | PK `sync_key` | Ephemeral key/value state for one-time sync/load work. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. |
+| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | API-mode historical metadata backfill progress. |
-| `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. |
+| `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
+
+Mithril v2 catch-up reconcile: when `dingo mithril sync` advances an existing
+core database to a newer v2 artifact, the new ledger-state snapshot is the
+complete ledger state at its tip, so any live row absent from it is marked
+inactive rather than deleted — live UTxOs get a `deleted_slot` tombstone,
+`account` and `drep` rows go `active = false`, and a `pool_retirement` row is
+added for retired pools. This uses the `metadata.MetadataStore` methods
+`GetActiveAccountCredentials`, `DeactivateAccounts`, `DeactivateDreps`, and
+`RetirePools` (implemented for sqlite, postgres, and mysql) plus the existing
+`IterateLiveUtxos` / `MarkUtxosDeletedAtSlot`. Live-state rows are never deleted.
 
 ### Transactions, UTxO, and API Indexes
 
@@ -246,7 +256,7 @@ to still be available.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `account` | `id`, `staking_key`, `credential_tag`, `pool`, `drep`, `added_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique `(credential_tag, staking_key)`; indexes pool/DRep/active lookup combinations | Current stake account state. `credential_tag`: 0 key hash, 1 script hash. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. |
+| `account` | `id`, `staking_key`, `credential_tag`, `pool`, `drep`, `added_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique `(credential_tag, staking_key)`; indexes pool/DRep/active lookup combinations, including leftmost `active` coverage for reconcile scans | Current stake account state. `credential_tag`: 0 key hash, 1 script hash. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. |
 | `account_reward_delta` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes `(credential_tag, staking_key)`, `tx_hash`, `added_slot`, `withdrawal`; unique `(withdrawal, tx_hash, credential_tag, staking_key, added_slot)` | Rollback-aware reward-account change journal. `tx_hash` is non-null; credit writers use an empty blob only when no event discriminator exists. Credit rows add `amount`; withdrawal rows clear `account.reward`, store `previous_reward`, and use `tx_hash`, the full stake credential identity, and `added_slot` to keep transaction and epoch-boundary re-ingest idempotent while preserving distinct per-epoch credits. Governance proposal credits store a 32-byte proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. Logical join to `account.(credential_tag, staking_key)`. |
 | `registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
 | `deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
@@ -270,14 +280,14 @@ to still be available.
 | `pool_registration` | `id`, `pool_id`, `pool_key_hash`, `vrf_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `cost`, `margin`, `metadata_url`, `metadata_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(pool_id, added_slot)`; indexes `pool_key_hash`, `certificate_id` | Pool registration certificate. Join `pool_id -> pool.id` and `certificate_id -> certs.id`. `reward_account_credential_tag`: 0 key hash, 1 script hash. |
 | `pool_registration_owner` | `id`, `pool_registration_id`, `pool_id`, `key_hash` | PK `id`; indexes `pool_registration_id`, `pool_id` | Owners for a pool registration. Join `pool_registration_id -> pool_registration.id`; `pool_id -> pool.id`. |
 | `pool_registration_relay` | `id`, `pool_registration_id`, `pool_id`, `ipv4`, `ipv6`, `hostname`, `port` | PK `id`; indexes `pool_registration_id`, `pool_id` | Relay addresses for a pool registration. |
-| `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. |
+| `pool_retirement` | `id`, `pool_id`, `pool_key_hash`, `certificate_id`, `epoch`, `added_slot` | PK `id`; indexes `pool_id`, `pool_key_hash`, `certificate_id`, `added_slot` | Pool retirement certificate. Synthetic reconcile retirements written by a Mithril v2 catch-up have `certificate_id = 0` and join to no `certs` row (`epoch`/`added_slot` are the catch-up tip); joins on `certificate_id` must be LEFT JOINs to keep them visible. |
 | `pool_opcert_sequence` | `id`, `pool_key_hash`, `slot`, `sequence` | PK `id`; unique `(pool_key_hash, slot)`; index `slot` | Observed operational certificate sequence by slot. |
 
 ### DReps, Governance, and Committee
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. |
+| `drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | PK `id`; unique `(credential_tag, credential)`; indexes `added_slot`, `last_activity_epoch`, `expiry_epoch`, `active` | Current DRep state. `credential_tag`: 0 key-hash, 1 script-hash. The composite unique key distinguishes same-hash key and script DReps. The `active` index supports reconcile scans for live DReps. |
 | `registration_drep` | `id`, `credential_tag`, `drep_credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; unique `(credential_tag, drep_credential, added_slot)`; index `certificate_id` | DRep registration certificate. `credential_tag` mirrors `drep.credential_tag` for the registered DRep. |
 | `deregistration_drep` | `id`, `credential_tag`, `drep_credential`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, drep_credential)`, `certificate_id`, `added_slot` | DRep deregistration certificate. |
 | `update_drep` | `id`, `credential_tag`, `credential`, `anchor_url`, `anchor_hash`, `certificate_id`, `added_slot` | PK `id`; indexes `(credential_tag, credential)`, `certificate_id`, `added_slot` | DRep update certificate. |
@@ -885,9 +895,18 @@ FROM pool_retirement r
 LEFT JOIN certs c ON c.id = r.certificate_id
 LEFT JOIN "transaction" t ON t.id = c.transaction_id
 WHERE r.pool_key_hash = decode($1, 'hex')
-ORDER BY r.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+ORDER BY r.added_slot DESC,
+  CASE WHEN r.certificate_id = 0 THEN 1 ELSE 0 END DESC,
+  COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 LIMIT 1;
 ```
+
+The retirement ordering ranks synthetic reconcile retirements
+(`certificate_id = 0`, written by a Mithril v2 catch-up) ahead of any
+certificate-backed retirement at the same slot: a synthetic row has no
+`certs`/`transaction` join, so without the `CASE WHEN` key its
+`COALESCE(..., 0)` values would lose the same-slot tie-break and a
+reconcile-retired pool could read as still active.
 
 ### `GetPoolsRetiringAtEpoch`
 
@@ -896,9 +915,15 @@ account and deposit needed to refund their POOLREAP deposit at the epoch
 boundary. A pool is included when, as of the boundary slot, its latest
 retirement certificate names the target epoch and has not been cancelled by a
 later re-registration (same-slot disambiguation uses `block_index` then
-`cert_index`, matching `GetActivePoolKeyHashesAtSlot`). The deposit and reward
-account come from the latest registration. Backends differ only in identifier
-quoting (`"transaction"` on SQLite/Postgres, `` `transaction` `` on MySQL).
+`cert_index`). Unlike `GetActivePoolKeyHashesAtSlot`, this query does not rank
+synthetic reconcile retirements (`certificate_id = 0`) first: those rows carry
+the catch-up tip as `epoch`/`added_slot`, so the `added_slot < $boundarySlot`
+and `epoch = $epoch` filters exclude them from boundary refund processing by
+design — a reconcile-retired pool gets no POOLREAP refund because its real
+retirement (or lack of one) was already settled in the imported snapshot's
+ledger state. The deposit and reward account come from the latest
+registration. Backends differ only in identifier quoting (`"transaction"` on
+SQLite/Postgres, `` `transaction` `` on MySQL).
 
 ```sql
 WITH latest_reg AS (

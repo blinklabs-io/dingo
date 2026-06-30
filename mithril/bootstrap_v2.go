@@ -648,20 +648,27 @@ func downloadImmutables(
 	}
 
 	totalArchives := artifact.Beacon.ImmutableFileNumber + 1
+	// startArchive is the lowest immutable number this run downloads. A catch-up
+	// sets cfg.StartImmutable to the immutable-import marker so the archives
+	// already present in the blob store are skipped; a fresh bootstrap leaves it
+	// zero. Clamp defensively so a stale marker never exceeds the artifact.
+	startArchive := min(cfg.StartImmutable, totalArchives)
+	downloadArchives := totalArchives - startArchive
 	// Progress denominator must be the immutable-only uncompressed size,
 	// not TotalDbSizeUncompressed. The latter covers the whole database
 	// (immutable archives plus the ancillary ledger state), but this pool
 	// downloads only the immutable archives — the ancillary archive runs
 	// concurrently and reports its own progress. Using the whole-DB size
 	// here would cap immutable progress below 100%. Fall back to the
-	// whole-DB size only when the per-file average is unavailable.
+	// whole-DB size only when the per-file average is unavailable. The
+	// denominator counts only the archives actually downloaded ([start..N]).
 	immutableTotalBytes := artifact.Immutables.AverageSizeUncompressed *
-		int64(totalArchives) // #nosec G115 -- archive count, non-negative
+		int64(downloadArchives) // #nosec G115 -- archive count, non-negative
 	if immutableTotalBytes <= 0 {
 		immutableTotalBytes = artifact.TotalDbSizeUncompressed
 	}
 	onArchiveDone := newImmutableProgress(
-		cfg, totalArchives, immutableTotalBytes,
+		cfg, downloadArchives, immutableTotalBytes,
 	)
 	// Per-archive extraction is too chatty for the main log at
 	// mainnet scale (tens of thousands of archives); aggregate
@@ -702,22 +709,34 @@ func downloadImmutables(
 		var cancelDownloads context.CancelCauseFunc
 		dlCtx, cancelDownloads = context.WithCancelCause(ctx)
 		defer cancelDownloads(nil)
-		seq = newInOrderSequencer(
-			totalArchives,
-			func(num uint64) error {
-				if err := cfg.OnChunkContiguous(immutableDir, num); err != nil {
-					copyErr = err
-					cancelDownloads(err)
-					return err
-				}
-				return nil
-			},
-		)
+		seqProcess := func(num uint64) error {
+			if err := cfg.OnChunkContiguous(immutableDir, num); err != nil {
+				copyErr = err
+				cancelDownloads(err)
+				return err
+			}
+			return nil
+		}
+		// A full sync starts the contiguous processing window at 0; a catch-up
+		// starts it at the immutable-import marker so already-present archives
+		// are neither downloaded nor re-processed.
+		if startArchive == 0 {
+			seq = newInOrderSequencer(totalArchives, seqProcess)
+		} else {
+			seq = newInOrderSequencerFrom(
+				startArchive, totalArchives, seqProcess,
+			)
+		}
 	}
 
 	g, gctx := errgroup.WithContext(dlCtx)
 	g.SetLimit(immutableDownloadWorkers)
 	for num := range totalArchives {
+		if num < startArchive {
+			// Already present in the blob store from a prior sync; the catch-up
+			// forward-copy fills only what is missing above this point.
+			continue
+		}
 		g.Go(func() error {
 			if err := gctx.Err(); err != nil {
 				return err

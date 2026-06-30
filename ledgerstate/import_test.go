@@ -730,6 +730,64 @@ func TestCollectPoolsFromSnapshotsMarkWins(t *testing.T) {
 		"Mark-era reward account must take precedence over Go-era")
 }
 
+// TestImportSnapShotsFallbackPopulatesReconcileKeys verifies that pools
+// imported via the stake-snapshot fallback are recorded in the reconcile key
+// set. Without this, a catch-up whose cert-state parses zero pools would see
+// an empty pool key set in the reconcile pass and retire the very pools the
+// fallback just imported.
+func TestImportSnapShotsFallbackPopulatesReconcileKeys(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	poolHash := toFixed28([]byte("fallback pool for reconcile"))
+	vrfHash := bytes.Repeat([]byte{0x44}, 32)
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			uint64(0),
+			[]any{uint64(0), uint64(1)},
+			[]any{},
+			uint64(0),
+			vrfHash,
+			uint64(0),
+			uint64(0),
+			[]any{uint64(0), uint64(1)},
+			uint64(0),
+			[]any{},
+		},
+	)
+	emptyMap, err := cbor.Encode(map[uint64]uint64{})
+	require.NoError(t, err)
+	snapshot, err := cbor.Encode([]any{
+		cbor.RawMessage(emptyMap),
+		cbor.RawMessage(poolMap),
+	})
+	require.NoError(t, err)
+	data, err := cbor.Encode([]any{
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+		cbor.RawMessage(snapshot),
+	})
+	require.NoError(t, err)
+
+	cfg := ImportConfig{
+		Database:      db,
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		State:         &RawLedgerState{Epoch: 2, SnapShotsData: data},
+		Reconcile:     true,
+		reconcileKeys: newReconcileKeys(),
+	}
+	require.NoError(t, importSnapShots(
+		context.Background(), cfg, 999, func(ImportProgress) {}, true,
+	))
+	_, ok := cfg.reconcileKeys.pools[string(poolHash[:])]
+	require.True(t, ok,
+		"fallback-imported pool must be recorded in the reconcile key set")
+}
+
 // TestImportSnapShotsFallbackPoolsResolveCurrentEpoch verifies the end-to-end
 // fix from issue #2440: when pools come from the snapshot-pool fallback path
 // (importPools runs before persistImportedSnapshot), the current-epoch snapshot
