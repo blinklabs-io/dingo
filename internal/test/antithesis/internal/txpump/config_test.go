@@ -56,6 +56,15 @@ func TestLoadConfig_LoadsGenesisSystemStartUnix(t *testing.T) {
 	require.Equal(t, int64(1700000000), cfg.SystemStartUnix)
 }
 
+func TestLoadConfig_LoadsConfirmationSlots(t *testing.T) {
+	clearTxpumpEnv(t)
+	t.Setenv("TXPUMP_CONFIRMATION_SLOTS", "42")
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), cfg.ConfirmationSlots)
+}
+
 func clearTxpumpEnv(t *testing.T) {
 	t.Helper()
 
@@ -66,6 +75,7 @@ func clearTxpumpEnv(t *testing.T) {
 		"TXPUMP_TX_COUNT_MAX",
 		"TXPUMP_COOLDOWN_MIN",
 		"TXPUMP_COOLDOWN_MAX",
+		"TXPUMP_CONFIRMATION_SLOTS",
 		"TXPUMP_TYPES",
 		"TXPUMP_LOG_DIR",
 		"TXPUMP_FALLBACK_ADDR",

@@ -47,6 +47,12 @@ type Config struct {
 	CooldownMin int
 	CooldownMax int
 
+	// ConfirmationSlots is reserved for future use. The payment flow currently
+	// returns outputs to the wallet immediately after submission (0 = immediate
+	// spend is intentional). Any non-zero value set via TXPUMP_CONFIRMATION_SLOTS
+	// is accepted but has no effect.
+	ConfirmationSlots uint64
+
 	// Types is the set of transaction types to generate.
 	// Recognised values: "payment", "delegation", "governance", "plutus".
 	// Default: ["payment","delegation","governance","plutus"]
@@ -60,8 +66,10 @@ type Config struct {
 	// Empty string means no fallback.
 	FallbackAddr string
 
-	// GenesisUTxOFile is an optional path to a JSON file containing initial
-	// UTxO entries (used when the wallet is empty on first start).
+	// GenesisUTxOFile is a path to a directory (or a single JSON file) containing
+	// initial UTxO entries. When signing keys are present it must be a directory:
+	// LoadSigningKeys globs genesis.*.skey inside it, while LoadGenesisUTxOs
+	// accepts either a directory of JSON files or a single JSON file.
 	GenesisUTxOFile string
 
 	// GenesisFile is the path to the testnet.yaml genesis configuration.
@@ -89,15 +97,16 @@ type Config struct {
 // fully-populated Config struct.
 func LoadConfig() (*Config, error) {
 	cfg := &Config{
-		NodeAddr:     envString("TXPUMP_NODE_ADDR", "/ipc/node.socket"),
-		NetworkMagic: 42,
-		TxCountMin:   1,
-		TxCountMax:   10,
-		CooldownMin:  500,
-		CooldownMax:  2000,
-		Types:        []string{"payment", "delegation", "governance", "plutus"},
-		LogDir:       envString("TXPUMP_LOG_DIR", "/logs"),
-		FallbackAddr: envString("TXPUMP_FALLBACK_ADDR", ""),
+		NodeAddr:          envString("TXPUMP_NODE_ADDR", "/ipc/node.socket"),
+		NetworkMagic:      42,
+		TxCountMin:        1,
+		TxCountMax:        10,
+		CooldownMin:       500,
+		CooldownMax:       2000,
+		ConfirmationSlots: 30,
+		Types:             []string{"payment", "delegation", "governance", "plutus"},
+		LogDir:            envString("TXPUMP_LOG_DIR", "/logs"),
+		FallbackAddr:      envString("TXPUMP_FALLBACK_ADDR", ""),
 		GenesisUTxOFile: envString(
 			"TXPUMP_GENESIS_UTXO_FILE", "",
 		),
@@ -161,6 +170,17 @@ func LoadConfig() (*Config, error) {
 			)
 		}
 		cfg.CooldownMax = n
+	}
+
+	if v := os.Getenv("TXPUMP_CONFIRMATION_SLOTS"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"TXPUMP_CONFIRMATION_SLOTS: must be a non-negative integer, got %q",
+				v,
+			)
+		}
+		cfg.ConfirmationSlots = n
 	}
 
 	if v := os.Getenv("TXPUMP_TYPES"); v != "" {

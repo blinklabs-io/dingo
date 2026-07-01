@@ -856,6 +856,14 @@ func (v *mockTxValidator) ValidateTx(tx ledger.Transaction) error {
 	return nil
 }
 
+func (v *mockTxValidator) ValidateTxWithOverlay(
+	tx ledger.Transaction,
+	_ map[string]struct{},
+	_ map[string]lcommon.Utxo,
+) error {
+	return v.ValidateTx(tx)
+}
+
 // makeMinimalTxCborWithInput creates a minimal Conway transaction
 // CBOR that spends a specific input (inputHash, inputIndex). This
 // allows tests to construct double-spend scenarios.

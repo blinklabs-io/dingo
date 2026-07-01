@@ -92,7 +92,7 @@ func loadGenesisFile(path string) ([]UTxO, error) {
 	if rawErr == nil {
 		utxos := make([]UTxO, len(raw))
 		for i, r := range raw {
-			utxos[i] = UTxO(r)
+			utxos[i] = UTxO{TxHash: r.TxHash, Index: r.Index, Amount: r.Amount}
 		}
 		return utxos, nil
 	}

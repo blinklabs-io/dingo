@@ -77,6 +77,15 @@ type EpochNonceProvider interface {
 // previously-accepted transactions.
 type TxValidator interface {
 	ValidateTx(tx ledger.Transaction) error
+	// ValidateTxWithOverlay re-validates with intra-block UTxO state:
+	// consumedUtxos are inputs spent by earlier txs in the same block
+	// (double-spend guard), createdUtxos are outputs produced by those
+	// txs (enables spending intra-block outputs).
+	ValidateTxWithOverlay(
+		tx ledger.Transaction,
+		consumedUtxos map[string]struct{},
+		createdUtxos map[string]lcommon.Utxo,
+	) error
 }
 
 // DefaultBlockBuilder implements BlockBuilder using LedgerState components.
@@ -214,6 +223,10 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	// for this block. This detects intra-block double-spends where
 	// two mempool transactions attempt to spend the same UTxO.
 	consumedInputs := make(map[string]struct{})
+	// Track UTxO outputs created by already-selected transactions.
+	// Passed to ValidateTxWithOverlay so later transactions in the
+	// same block can spend outputs from earlier intra-block txs.
+	createdOutputs := make(map[string]lcommon.Utxo)
 
 	// Iterate through transactions and add them until we hit limits
 	for _, mempoolTx := range mempoolTxs {
@@ -265,7 +278,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// have changed, or other state mutations may have
 		// invalidated the transaction.
 		if b.txValidator != nil {
-			if err := b.txValidator.ValidateTx(fullTx); err != nil {
+			if err := b.txValidator.ValidateTxWithOverlay(fullTx, consumedInputs, createdOutputs); err != nil {
 				b.logger.Debug(
 					"skipping transaction - failed re-validation",
 					"component", "forging",
@@ -405,6 +418,12 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// block cannot spend the same UTxOs.
 		for _, key := range txInputKeys {
 			consumedInputs[key] = struct{}{}
+		}
+		// Record created outputs so later transactions in this block
+		// can spend intra-block outputs without hitting the DB.
+		for _, utxo := range fullTx.Produced() {
+			key := fmt.Sprintf("%s:%d", utxo.Id.Id().String(), utxo.Id.Index())
+			createdOutputs[key] = utxo
 		}
 
 		b.logger.Debug(

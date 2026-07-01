@@ -24,6 +24,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"os"
@@ -32,6 +33,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/test/antithesis/internal/txpump"
+	"github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
 func main() {
@@ -60,6 +62,55 @@ func main() {
 			logger.Error("failed to load genesis UTxOs", "err", loadErr)
 			os.Exit(1)
 		}
+
+		// Attach signing keys to UTxOs whose TxHashes were derived from the
+		// generated genesis addresses. This lets txpump submit valid signed
+		// transactions immediately.
+		signingKeys, keyErr := txpump.LoadSigningKeys(cfg.GenesisUTxOFile)
+		if keyErr != nil {
+			logger.Error("failed to load signing keys", "err", keyErr)
+			os.Exit(1)
+		}
+		if len(signingKeys) > 0 {
+			keysByHash := make(map[string]*txpump.UTxOKey, len(signingKeys))
+			for _, signingKey := range signingKeys {
+				expectedHash := common.Blake2b256Hash(signingKey.Address).String()
+				keysByHash[expectedHash] = signingKey
+			}
+			for i, u := range utxos {
+				if signingKey := keysByHash[u.TxHash]; signingKey != nil {
+					utxos[i].SigningKey = signingKey
+				}
+			}
+			logger.Info(
+				"signing keys loaded",
+				"count", len(signingKeys),
+			)
+			// Keep only UTxOs we can sign for; UTxOs without a signing key
+			// cannot be spent and would cause witness-validation failures.
+			var spendable []txpump.UTxO
+			for _, u := range utxos {
+				if u.SigningKey != nil {
+					spendable = append(spendable, u)
+				}
+			}
+			if len(spendable) == 0 {
+				logger.Error(
+					"no genesis UTxOs matched loaded signing keys",
+					"utxo_count", len(utxos),
+					"key_count", len(signingKeys),
+				)
+				os.Exit(1)
+			}
+			utxos = spendable
+			for _, signingKey := range signingKeys {
+				logger.Info(
+					"signing key loaded",
+					"address", hex.EncodeToString(signingKey.Address),
+				)
+			}
+		}
+
 		wallet.Add(utxos...)
 		logger.Info(
 			"seeded wallet from genesis UTxOs",

@@ -258,6 +258,8 @@ func (s testMempoolTransactionSource) Transactions() []mempool.MempoolTransactio
 	return s.txs
 }
 
+func (s testMempoolTransactionSource) RemoveTxsByHash(_ []string) {}
+
 // TestMempoolAdaptersPreservePendingTransactionView verifies the node-level
 // adapters preserve the pending transaction fields needed for block building.
 func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
