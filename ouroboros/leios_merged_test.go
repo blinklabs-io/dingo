@@ -160,7 +160,7 @@ func TestLeiosFetchServerBlockTxsRejectsIncompleteCache(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Nil(t, msg)
-	require.Contains(t, err.Error(), "tx cache incomplete")
+	require.Contains(t, err.Error(), "txs not available")
 }
 
 func TestLeiosFetchServerBlockTxsRejectsOutOfRangeBitmap(t *testing.T) {
