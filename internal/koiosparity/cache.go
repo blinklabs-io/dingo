@@ -238,34 +238,65 @@ func (c *Cache) GetAllFetchedEpochs(network string) ([]uint64, error) {
 	return epochs, err
 }
 
-// GetEpochsNeedingCheck returns epochs with Koios data but no check result yet.
+// GetEpochsNeedingCheck returns epochs that have Koios reference data but
+// either have no check result yet OR whose Koios data was refreshed (fetched_at
+// updated) after the last check. This ensures a forced re-fetch is followed by
+// an automatic re-check rather than leaving stale PASS/FAIL rows in the cache.
 func (c *Cache) GetEpochsNeedingCheck(network string) ([]uint64, error) {
-	var all []uint64
-	if err := c.db.Model(&KoiosEpochInfo{}).
-		Select("epoch").
-		Where("network = ?", network).
-		Order("epoch ASC").
-		Pluck("epoch", &all).Error; err != nil {
+	// LEFT JOIN so we pick up epochs with no status row (NULL last_checked_at)
+	// AND epochs where fetched_at > last_checked_at (stale check).
+	type row struct {
+		Epoch uint64
+	}
+	var rows []row
+	err := c.db.Raw(`
+		SELECT k.epoch
+		FROM koios_epoch_info k
+		LEFT JOIN check_epoch_status s
+		       ON k.network = s.network AND k.epoch = s.epoch
+		WHERE k.network = ?
+		  AND (s.epoch IS NULL OR k.fetched_at > s.last_checked_at)
+		ORDER BY k.epoch ASC
+	`, network).Scan(&rows).Error
+	if err != nil {
 		return nil, err
 	}
-	var done []uint64
-	if err := c.db.Model(&CheckEpochStatus{}).
-		Select("epoch").
-		Where("network = ?", network).
-		Pluck("epoch", &done).Error; err != nil {
-		return nil, err
-	}
-	checked := make(map[uint64]bool, len(done))
-	for _, e := range done {
-		checked[e] = true
-	}
-	result := make([]uint64, 0)
-	for _, e := range all {
-		if !checked[e] {
-			result = append(result, e)
-		}
+	result := make([]uint64, len(rows))
+	for i, r := range rows {
+		result[i] = r.Epoch
 	}
 	return result, nil
+}
+
+// GetUncachedEpochs returns epoch numbers in [from, through] (inclusive) that
+// are NOT yet in koios_epoch_info for the given network. This is used by Fetch
+// to fill holes left by prior failed or interrupted runs rather than naively
+// resuming from max(fetched) + 1.
+func (c *Cache) GetUncachedEpochs(network string, from, through uint64) ([]uint64, error) {
+	// Build the full desired range in memory (typically ≤ a few thousand epochs).
+	want := make(map[uint64]bool, through-from+1)
+	for e := from; e <= through; e++ {
+		want[e] = true
+	}
+
+	var have []uint64
+	if err := c.db.Model(&KoiosEpochInfo{}).
+		Select("epoch").
+		Where("network = ? AND epoch >= ? AND epoch <= ?", network, from, through).
+		Pluck("epoch", &have).Error; err != nil {
+		return nil, err
+	}
+	for _, e := range have {
+		delete(want, e)
+	}
+
+	missing := make([]uint64, 0, len(want))
+	for e := from; e <= through; e++ {
+		if want[e] {
+			missing = append(missing, e)
+		}
+	}
+	return missing, nil
 }
 
 // UpsertCheckEpochStatus idempotently stores a check result for an epoch.

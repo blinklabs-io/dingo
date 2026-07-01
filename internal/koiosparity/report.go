@@ -18,7 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,8 +92,8 @@ func BuildStatusSummary(
 		}
 	}
 
-	sort.Slice(s.FailEpochs, func(i, j int) bool { return s.FailEpochs[i] < s.FailEpochs[j] })
-	sort.Slice(s.ErrorEpochs, func(i, j int) bool { return s.ErrorEpochs[i] < s.ErrorEpochs[j] })
+	slices.Sort(s.FailEpochs)
+	slices.Sort(s.ErrorEpochs)
 	return s
 }
 
@@ -268,7 +268,7 @@ func PrintExplain(w io.Writer, network string, epoch uint64, mismatches []CheckM
 	for c := range byCat {
 		cats = append(cats, c)
 	}
-	sort.Strings(cats)
+	slices.Sort(cats)
 	for _, cat := range cats {
 		items := byCat[cat]
 		fmt.Fprintf(w, "  [%s] %d\n", cat, len(items))

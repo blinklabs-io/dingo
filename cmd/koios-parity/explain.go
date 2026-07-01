@@ -30,15 +30,15 @@ func explainCommand() *cobra.Command {
 		Use:   "explain",
 		Short: "Drill down into mismatches for a specific epoch",
 		Long: `Shows field-level mismatches from the cache for the given epoch.
-Use --live to re-run the comparison against Dingo's API (requires --dingo-api).`,
+Use --live to re-run the comparison against Dingo's database (requires access to metadata.sqlite).`,
 		RunE: explainRun,
 	}
 
 	cmd.Flags().Uint64("epoch", 0, "epoch to explain (required)")
 	cmd.Flags().String("pool", "", "optional pool bech32 filter")
-	cmd.Flags().Bool("live", false, "re-compare against Dingo API instead of cached results")
-	cmd.Flags().String("dingo-api", "", "Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
+	cmd.Flags().Bool("live", false, "re-compare against Dingo DB instead of cached results")
 	cmd.Flags().Bool("json", false, "emit JSON output")
+	addDingoDBFlags(cmd)
 
 	return cmd
 }
@@ -64,12 +64,10 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	var mismatches []koiosparity.CheckMismatch
-
 	if live {
 		checkResult, checkErr := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
 			Network:      network,
-			DingoAPIURL:  dingoAPIURL(cmd),
+			DingoDB:      resolveDingoDB(cmd),
 			CachePath:    cachePath,
 			All:          true,
 			FromEpoch:    epoch,
@@ -81,7 +79,7 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 		_ = checkResult
 	}
 
-	mismatches, err = cache.GetMismatches(network, epoch, poolFilter)
+	mismatches, err := cache.GetMismatches(network, epoch, poolFilter)
 	if err != nil {
 		return fmt.Errorf("get mismatches: %w", err)
 	}

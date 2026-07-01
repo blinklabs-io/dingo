@@ -26,13 +26,13 @@ import (
 // CheckConfig holds parameters for a parity check run.
 type CheckConfig struct {
 	Network      string
-	DingoAPIURL  string
+	DingoDB      DingoDBConfig // which backend to read Dingo reward state from
 	CachePath    string
 	Workers      int
-	All          bool   // re-check all cached epochs
-	FromEpoch    uint64 // 0 = all unchecked
+	All          bool   // re-check all cached epochs, not just unchecked/stale ones
+	FromEpoch    uint64 // 0 = all unchecked/stale
 	ThroughEpoch uint64 // 0 = no upper bound
-	GraceHours   int    // retained for config compatibility; not currently used
+	GraceHours   int    // pools/epochs missing from Dingo within this window → reference_lag, not FAIL
 }
 
 // CheckResult summarises a completed check run.
@@ -44,13 +44,12 @@ type CheckResult struct {
 	ErrorEpochs   []uint64
 }
 
-// Check compares Koios cache against Dingo's Blockfrost API for unchecked epochs.
+// Check compares the Koios reference cache against Dingo's metadata database
+// for unchecked or stale epochs. It reads reward_pool_input and epoch_summary
+// directly — no Blockfrost or other HTTP endpoints are contacted.
 func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckResult, error) {
 	if cfg.Workers <= 0 {
 		cfg.Workers = runtime.NumCPU()
-	}
-	if cfg.GraceHours <= 0 {
-		cfg.GraceHours = 24
 	}
 
 	cache, err := OpenCache(cfg.CachePath, logger)
@@ -58,7 +57,11 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
 
-	dingo := NewBlockfrostClient(cfg.DingoAPIURL)
+	dingo, err := OpenDingoDB(cfg.DingoDB)
+	if err != nil {
+		return nil, fmt.Errorf("open dingo db: %w", err)
+	}
+	defer dingo.Close() //nolint:errcheck
 
 	// Determine which epochs to check.
 	var epochs []uint64
@@ -113,7 +116,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, logger)
+			res, checkErr := checkEpoch(ctx, cache, dingo, cfg.Network, epoch, cfg.GraceHours, logger)
 			if checkErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, checkErr):
@@ -152,18 +155,23 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	return result, nil
 }
 
-// checkEpoch performs the comparison for a single epoch and persists results.
-// Koios pool membership is authoritative: only pools Koios knows about for
-// this epoch are compared, avoiding false pool_only_dingo mismatches from the
-// global /pools/extended registry.
+// checkEpoch performs the full comparison for one epoch and persists results.
+//
+// Epoch aggregates (epoch_summary, reward_ada_pots) are compared against the
+// Koios epoch_info row. Per-pool reward inputs (reward_pool_input) are compared
+// against Koios pool_history rows using a single bulk DB query per epoch.
+// Koios defines epoch pool membership; pools in Dingo but not in Koios are
+// flagged as pool_only_dingo.
 func checkEpoch(
 	ctx context.Context,
 	cache *Cache,
-	dingo *BlockfrostClient,
+	dingo *DingoDB,
 	network string,
 	epoch uint64,
+	graceHours int,
 	logger *slog.Logger,
 ) (*EpochCompareResult, error) {
+	_ = ctx // reserved for future cancellation within DB calls
 	now := time.Now()
 
 	// Load Koios reference data.
@@ -176,38 +184,83 @@ func checkEpoch(
 		return nil, fmt.Errorf("get koios pool epoch: %w", err)
 	}
 
-	// Clear previous mismatch records for this epoch.
+	// Clear previous mismatch records for this epoch before writing new ones.
 	if err := cache.DeleteEpochMismatches(network, epoch); err != nil {
 		return nil, fmt.Errorf("delete old mismatches: %w", err)
 	}
 
 	var allMismatches []CheckMismatch
 
-	// Compare epoch aggregates.
-	dingoEpoch, epochFetchErr := dingo.GetEpoch(ctx, epoch)
-	aggMismatches := CompareEpochAggregates(
-		network, epoch, koiosEpoch, dingoEpoch, epochFetchErr, now,
+	// 1. Compare epoch-level aggregates.
+	dingoEpoch, epochErr := dingo.GetEpochData(epoch)
+	allMismatches = append(allMismatches,
+		CompareEpochAggregates(network, epoch, koiosEpoch, dingoEpoch, epochErr, now, graceHours)...,
 	)
-	allMismatches = append(allMismatches, aggMismatches...)
 
-	// Per-pool comparison: iterate Koios pools only.
-	// Using the global /pools/extended as the Dingo side would flag pools that
-	// exist in Dingo but were inactive this epoch as false pool_only_dingo hits.
+	// 2. Bulk-load all pool reward inputs for this epoch from Dingo's DB.
+	// This is a single query regardless of how many pools Koios knows about.
+	dingoPoolMap, dingoPoolErr := dingo.GetPoolEpochDataMap(epoch)
+	if dingoPoolErr != nil {
+		allMismatches = append(allMismatches, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "reward_pool_input",
+			DingoValue: fmt.Sprintf("error: %v", dingoPoolErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+		dingoPoolMap = nil
+	}
+
+	// 3. Build a set of pool-key-hash → bech32 from Koios pools so we can
+	// detect pools present in Dingo but absent from Koios.
+	koiosKeySet := make(map[string]struct{}, len(koiosPools))
 	var onlyKoios []string
 	dingoFound := 0
 
 	for i := range koiosPools {
 		koiosPool := &koiosPools[i]
-		dingoItem, histErr := dingo.GetPoolHistoryForEpoch(ctx, koiosPool.PoolBech32, epoch)
-		poolMismatches := ComparePoolEpoch(
-			network, epoch, koiosPool, dingoItem, histErr, now,
-		)
-		if dingoItem == nil && histErr == nil {
+		keyHex, decErr := PoolKeyHashHex(koiosPool.PoolBech32)
+		if decErr != nil {
+			logger.Warn("koiosparity: failed to decode pool bech32",
+				"pool", koiosPool.PoolBech32, "error", decErr)
+			continue
+		}
+		koiosKeySet[keyHex] = struct{}{}
+
+		var dingoPool *DingoPoolEpochData
+		if dingoPoolMap != nil {
+			dingoPool = dingoPoolMap[keyHex]
+		}
+
+		poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours)
+		allMismatches = append(allMismatches, poolMismatches...)
+
+		if dingoPool == nil {
 			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
-		} else if dingoItem != nil {
+		} else {
 			dingoFound++
 		}
-		allMismatches = append(allMismatches, poolMismatches...)
+	}
+
+	// 4. Detect pools that Dingo computed rewards for but Koios doesn't list.
+	// These are unexpected entries that warrant investigation.
+	var onlyDingo []string
+	for keyHex := range dingoPoolMap {
+		if _, inKoios := koiosKeySet[keyHex]; !inKoios {
+			onlyDingo = append(onlyDingo, keyHex) // reported as key hash hex (bech32 not available)
+			allMismatches = append(allMismatches, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: keyHex, // best available identifier
+				Field:      "pool_presence",
+				DingoValue: "present",
+				KoiosValue: "",
+				Category:   CategoryPoolOnlyDingo,
+				CheckedAt:  now,
+			})
+		}
 	}
 
 	status := DetermineStatus(allMismatches)
@@ -224,7 +277,7 @@ func checkEpoch(
 		MismatchCount:  len(allMismatches),
 		DingoPoolCount: dingoFound,
 		KoiosPoolCount: len(koiosPools),
-		OnlyDingoPools: MarshalPoolList(nil),
+		OnlyDingoPools: MarshalPoolList(onlyDingo),
 		OnlyKoiosPools: MarshalPoolList(onlyKoios),
 	}); err != nil {
 		return nil, fmt.Errorf("upsert check status: %w", err)
@@ -237,6 +290,7 @@ func checkEpoch(
 		"mismatches", len(allMismatches),
 		"dingo_found", dingoFound,
 		"koios_pools", len(koiosPools),
+		"only_dingo", len(onlyDingo),
 	)
 
 	return &EpochCompareResult{
@@ -246,7 +300,7 @@ func checkEpoch(
 		Mismatches:     allMismatches,
 		DingoPoolCount: dingoFound,
 		KoiosPoolCount: len(koiosPools),
-		OnlyDingo:      nil,
+		OnlyDingo:      onlyDingo,
 		OnlyKoios:      onlyKoios,
 	}, nil
 }

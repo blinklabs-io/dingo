@@ -111,19 +111,30 @@ func (k *KoiosClient) get(
 			if attempt < koiosMaxRetries-1 {
 				select {
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					return nil, context.Canceled
 				case <-time.After(koiosRetryBackoff):
 				}
 				continue
 			}
 			return nil, fmt.Errorf("koios GET %s: %w", path, err)
 		}
+		// http.Client.Do guarantees non-nil resp when err is nil, but nilaway
+		// can't see that invariant through the stdlib. Guard explicitly.
+		if resp == nil {
+			return nil, errors.New("koios: http.Do returned nil response without error")
+		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
 			if attempt < koiosMaxRetries-1 {
 				select {
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					return nil, context.Canceled
 				case <-time.After(koiosRetryBackoff * time.Duration(attempt+1)):
 				}
 				continue
@@ -131,6 +142,11 @@ func (k *KoiosClient) get(
 			return nil, fmt.Errorf("koios rate-limited after %d retries on %s", koiosMaxRetries, path)
 		}
 		break
+	}
+	if resp == nil {
+		// Unreachable: the loop always returns early on permanent error or breaks
+		// on a successful Do(). Guard satisfies nilaway's nil-flow analysis.
+		return nil, errors.New("koios: internal: no response after retry loop")
 	}
 	return resp, nil
 }
