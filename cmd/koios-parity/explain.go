@@ -63,6 +63,7 @@ func explainRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	defer cache.Close() //nolint:errcheck
 
 	if live {
 		checkResult, checkErr := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{

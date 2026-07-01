@@ -56,6 +56,7 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
+	defer cache.Close() //nolint:errcheck
 
 	dingo, err := OpenDingoDB(cfg.DingoDB)
 	if err != nil {
