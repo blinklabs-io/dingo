@@ -90,6 +90,8 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("open cache: %w", err)
 	}
+	defer cache.Close() //nolint:errcheck
+
 	fetchedEpochs, err := cache.GetAllFetchedEpochs(network)
 	if err != nil {
 		return fmt.Errorf("get fetched epochs: %w", err)
