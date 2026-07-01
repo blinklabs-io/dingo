@@ -80,8 +80,8 @@ func (d *Database) GetLeiosEBManifest(hash []byte) (slot uint64, manifestRaw []b
 // Only call this when the transaction cache is complete (all txCount txs).
 // key: "et" + hash(32) → value: CBOR-encoded []cbor.RawMessage.
 func (d *Database) SetLeiosEBTxs(hash []byte, txsRaw []cbor.RawMessage) error {
-	if len(txsRaw) == 0 {
-		return nil
+	if txsRaw == nil {
+		txsRaw = []cbor.RawMessage{}
 	}
 	blob := d.Blob()
 	if blob == nil {

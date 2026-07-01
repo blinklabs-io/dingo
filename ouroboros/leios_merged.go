@@ -252,15 +252,17 @@ func (o *Ouroboros) lookupLeiosEndorserBlock(
 	o.leiosMu.RUnlock()
 
 	o.leiosMu.Lock()
-	defer o.leiosMu.Unlock()
 	data, ok = o.leiosEndorserBlocks[key]
 	if !ok || data == nil {
-		return nil, false
+		o.leiosMu.Unlock()
+		return o.loadLeiosEBFromDB(hash)
 	}
 	if data.expired(now) {
 		o.deleteLeiosEndorserBlockDataLocked(data)
-		return nil, false
+		o.leiosMu.Unlock()
+		return o.loadLeiosEBFromDB(hash)
 	}
+	o.leiosMu.Unlock()
 	return data, true
 }
 
@@ -296,7 +298,15 @@ func (o *Ouroboros) loadLeiosEBFromDB(hash []byte) (*leiosEndorserBlockData, boo
 	}
 	// Load txs if they were persisted (best-effort; may not be present for
 	// EBs that completed before tx persistence was added).
-	txsRaw, _ := db.GetLeiosEBTxs(hash)
+	txsRaw, err := db.GetLeiosEBTxs(hash)
+	if err != nil && !errors.Is(err, types.ErrBlobKeyNotFound) {
+		o.config.Logger.Debug(
+			"failed to load leios EB txs from blob store",
+			"component", "network",
+			"error", err,
+		)
+		return nil, false
+	}
 
 	cacheKeys := []string{leiosBlockKey(hash)}
 	data := &leiosEndorserBlockData{
