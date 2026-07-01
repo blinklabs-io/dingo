@@ -25,20 +25,20 @@ import (
 func checkCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check",
-		Short: "Compare Koios cache against Dingo Blockfrost API",
-		Long: `Compares cached Koios reference data against Dingo's Blockfrost API.
-No Koios HTTP calls; no direct SQLite reads outside the cache.`,
+		Short: "Compare Koios cache against Dingo's reward database",
+		Long: `Compares cached Koios reference data against Dingo's metadata database.
+Reads reward_pool_input and epoch_summary directly — sqlite, postgres, or mysql.
+No Koios HTTP calls; no Dingo API endpoint contacted.`,
 		RunE: checkRun,
 	}
 
-	cmd.Flags().String("dingo-api", defaultDingoAPI,
-		"Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
 	cmd.Flags().Int("workers", 0, "parallel check workers (default: NumCPU)")
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"pools absent from Koios in recently-fetched epochs → reference_lag (not FAIL)")
 	cmd.Flags().Bool("all", false, "re-check all cached epochs, ignoring prior results")
 	cmd.Flags().Uint64("from-epoch", 0, "lower bound (inclusive)")
 	cmd.Flags().Uint64("through-epoch", 0, "upper bound (inclusive)")
+	addDingoDBFlags(cmd)
 
 	return cmd
 }
@@ -57,7 +57,7 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 
 	result, err := koiosparity.Check(cmd.Context(), koiosparity.CheckConfig{
 		Network:      network,
-		DingoAPIURL:  dingoAPIURL(cmd),
+		DingoDB:      resolveDingoDB(cmd),
 		CachePath:    resolveCachePath(),
 		Workers:      workers,
 		All:          all,
@@ -67,6 +67,9 @@ func checkRun(cmd *cobra.Command, _ []string) error {
 	}, slog.Default())
 	if err != nil {
 		return err
+	}
+	if result == nil {
+		return nil
 	}
 
 	fmt.Printf("check complete: %d epochs, %d mismatches (%d fail, %d error)\n",
