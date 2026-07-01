@@ -264,10 +264,17 @@ outer:
 	}
 
 	// 3. Write epoch info only after all pool rows have succeeded.
-	epochEndTime := time.Time{}
-	if info.EndTime > 0 {
-		epochEndTime = time.Unix(info.EndTime, 0).UTC()
+	//
+	// Reject epochs where Koios returned no end_time. All closed epochs should
+	// have a valid Unix timestamp; a zero means the response is incomplete.
+	// Rather than cache broken data that permanently disables the grace-window
+	// logic, return an error so the epoch stays uncached and is retried on the
+	// next fetch run.
+	if info.EndTime == 0 {
+		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
 	}
+	epochEndTime := time.Unix(info.EndTime, 0).UTC()
+
 	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
