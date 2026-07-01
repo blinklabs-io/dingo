@@ -155,6 +155,16 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	if err := db.AutoMigrate(migrateModels...); err != nil {
 		return nil, fmt.Errorf("migrate cache db: %w", err)
 	}
+	// Drop columns removed from KoiosEpochInfo in prior schema versions.
+	// AutoMigrate never drops columns; stale NOT NULL columns without a default
+	// cause a constraint failure when the generated INSERT omits them.
+	for _, col := range []string{"pool_cnt", "delegator_cnt"} {
+		if db.Migrator().HasColumn(&KoiosEpochInfo{}, col) {
+			if err := db.Migrator().DropColumn(&KoiosEpochInfo{}, col); err != nil {
+				return nil, fmt.Errorf("drop stale column %s from koios_epoch_info: %w", col, err)
+			}
+		}
+	}
 	return &Cache{db: db, logger: logger}, nil
 }
 
