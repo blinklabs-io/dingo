@@ -91,15 +91,17 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			)
 		} else if current > 0 && current != lastEpoch {
 			// Determine the range of newly closed epochs.
-			// First iteration: only the most recently closed epoch.
-			// Subsequent iterations: all epochs that closed since last poll.
+			// GetLatestEpoch returns the epoch whose summary Dingo has already written,
+			// so current is checkable immediately — no off-by-one subtraction needed.
+			// First iteration: check only the latest available epoch.
+			// Subsequent iterations: all epochs since the last processed one.
 			var fromClosed uint64
 			if lastEpoch == 0 {
-				fromClosed = current - 1
+				fromClosed = current
 			} else {
-				fromClosed = lastEpoch
+				fromClosed = lastEpoch + 1
 			}
-			toClosed := current - 1
+			toClosed := current
 
 			if fromClosed > toClosed {
 				// Edge-case guard: skip an inverted range rather than pass it
