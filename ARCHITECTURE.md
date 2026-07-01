@@ -1378,13 +1378,18 @@ The Mithril snapshot also acts as the local trust anchor during live
 chainsync. The ledger refuses any rollback below the imported ledger slot
 (`mithrilLedgerSlot`), since blocks at or below that boundary were certified
 as a single ledger state and intermediate UTxO states for a replacement fork
-cannot be reconstructed. The boundary block is always offered as an intersect
-point, so the peer's reported tip classifies the refusal: a peer whose own
-tip is below the boundary is treated as stale (it is simply behind and
-matched an old rung of the intersect ladder), while a peer claiming a tip at
-or above the boundary that still demands a rollback below it is rejected as
-genuinely divergent. Both classifications close the connection for a fresh
-intersect and deny the peer for a cooldown via peer governance.
+cannot be reconstructed. Mithril sync persists the full boundary point in
+`sync_state` (`mithril_ledger_slot` and `mithril_ledger_hash`) so outbound
+chainsync can always offer that point during `FindIntersect`, even if recent
+ledger-tip point generation is temporarily empty or stale. Slot-only older
+databases fall back to reconstructing the boundary point from canonical local
+chain data. The boundary block is always offered as an intersect point, so the
+peer's reported tip classifies the refusal: a peer whose own tip is below the
+boundary is treated as stale (it is simply behind and matched an old rung of the
+intersect ladder), while a peer claiming a tip at or above the boundary that
+still demands a rollback below it is rejected as genuinely divergent. Both
+classifications close the connection for a fresh intersect and deny the peer for
+a cooldown via peer governance.
 
 In API storage mode, the SQLite metadata plugin can defer selected query indexes
 during bulk load. Deferred indexes are classified as critical or lazy in
