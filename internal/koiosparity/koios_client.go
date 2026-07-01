@@ -157,13 +157,13 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("koios /tip: unexpected status %d", resp.StatusCode)
-	}
 	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
-		return 0, fmt.Errorf("koios /tip read body: %w", err)
+		return 0, fmt.Errorf("koios /tip read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("koios /tip: status %d body: %s", resp.StatusCode, body)
 	}
 	var tips []KoiosTipResp
 	if err := json.Unmarshal(body, &tips); err != nil {
@@ -182,13 +182,13 @@ func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpo
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /epoch_info: status %d", resp.StatusCode)
-	}
 	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
 		return nil, fmt.Errorf("koios /epoch_info read: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("koios /epoch_info: status %d body: %s", resp.StatusCode, body)
 	}
 	var items []KoiosEpochInfoResp
 	if err := json.Unmarshal(body, &items); err != nil {
@@ -264,13 +264,13 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /pool_history: status %d", resp.StatusCode)
+	body, readErr := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("koios /pool_history read: %w", readErr)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("koios /pool_history read: %w", err)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("koios /pool_history: status %d body: %s", resp.StatusCode, body)
 	}
 	var items []KoiosPoolHistoryItem
 	if err := json.Unmarshal(body, &items); err != nil {
