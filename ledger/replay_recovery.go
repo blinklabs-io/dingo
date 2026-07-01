@@ -34,7 +34,7 @@ var errRestartLedgerPipeline = errors.New(
 )
 
 var errHaltLedgerPipeline = errors.New(
-	"halt ledger pipeline after persistent tx validation failure",
+	"persistent tx validation failure after recovery attempts",
 )
 
 // errStaleChainIterator is returned by ledgerProcessBlock when a block's
@@ -65,12 +65,11 @@ func (e *txValidationError) Unwrap() error {
 	return e.Cause
 }
 
-// maxAtTipRecoveryAttempts caps how many times the ledger will try to
-// recover from the same persistent at-tip validation failure before
-// halting. Each attempt rewinds the primary chain progressively
-// deeper to give chainselection room to pick a different fork. We
-// only halt when even a deep rewind to security-param-sized depth
-// has not let a different chain win.
+// maxAtTipRecoveryAttempts caps the depth schedule for recovering from the
+// same persistent at-tip validation failure. Each attempt rewinds the primary
+// chain progressively deeper to give chainselection room to pick a different
+// fork. After the cap, recovery keeps retrying at the deepest rewind depth and
+// relies on ChainSync peer rotation to find a valid candidate chain.
 const maxAtTipRecoveryAttempts = 3
 
 type atTipRecoveryAttempt struct {
@@ -293,8 +292,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		ls.lastAtTipRecovery.matches(validationErr) {
 		attempts = ls.lastAtTipRecovery.Attempts + 1
 		if attempts > maxAtTipRecoveryAttempts {
-			ls.config.Logger.Error(
-				"at-tip recovery exhausted attempts, halting to avoid infinite loop",
+			ls.config.Logger.Warn(
+				"at-tip recovery exhausted scheduled rewind attempts, retrying with deepest rewind",
 				"component", "ledger",
 				"failing_slot", validationErr.BlockPoint.Slot,
 				"failing_block_hash", hex.EncodeToString(
@@ -303,11 +302,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 				"tx_hash", hex.EncodeToString(validationErr.TxHash),
 				"attempts", attempts,
 			)
-			return false, fmt.Errorf(
-				"%w: %w",
-				errHaltLedgerPipeline,
-				validationErr,
-			)
+			attempts = maxAtTipRecoveryAttempts
 		}
 	}
 	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)

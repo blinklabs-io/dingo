@@ -2639,21 +2639,25 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, errRestartLedgerPipeline) {
-			continue
-		}
-		if errors.Is(err, errHaltLedgerPipeline) {
-			ls.config.Logger.Error(
-				"block processing halted after persistent validation failure",
-				"error", err,
-			)
-			return
-		}
+		ls.handleLedgerProcessBlocksError(err)
+	}
+}
+
+func (ls *LedgerState) handleLedgerProcessBlocksError(err error) {
+	if errors.Is(err, errRestartLedgerPipeline) {
+		return
+	}
+	if errors.Is(err, errHaltLedgerPipeline) {
 		ls.config.Logger.Warn(
-			"block processing failed, restarting pipeline",
+			"block processing hit persistent validation failure, restarting pipeline",
 			"error", err,
 		)
+		return
 	}
+	ls.config.Logger.Warn(
+		"block processing failed, restarting pipeline",
+		"error", err,
+	)
 }
 
 // ProcessTrustedBlockBatches processes already-decoded trusted block batches

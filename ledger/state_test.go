@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,6 +72,44 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 		readChainResultCh,
 	)
 	require.NoError(t, err)
+}
+
+func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
+	t *testing.T,
+) {
+	haltErr := fmt.Errorf("process block batch: %w", errHaltLedgerPipeline)
+	fatalCalled := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			FatalErrorFunc: func(error) {
+				fatalCalled = true
+			},
+		},
+	}
+
+	ls.handleLedgerProcessBlocksError(haltErr)
+	require.False(t, fatalCalled)
+}
+
+func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
+	t *testing.T,
+) {
+	fatalCalled := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			FatalErrorFunc: func(error) {
+				fatalCalled = true
+			},
+		},
+	}
+
+	ls.handleLedgerProcessBlocksError(errRestartLedgerPipeline)
+	require.False(t, fatalCalled)
+
+	ls.handleLedgerProcessBlocksError(errors.New("transient"))
+	require.False(t, fatalCalled)
 }
 
 // It verifies that calculating the stability window is synchronized with

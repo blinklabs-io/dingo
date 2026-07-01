@@ -534,13 +534,19 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 		ls.lastAtTipRecovery.Attempts,
 	)
 
-	// One more attempt past the cap halts the pipeline.
+	// One more attempt past the cap keeps recovering at the deepest
+	// scheduled rewind. A persistent bad candidate chain is a peer/fork
+	// selection problem; the node should keep trying fresh ChainSync
+	// connections instead of halting the ledger pipeline.
 	recovered, err = ls.tryRecoverFromTxValidationError(validationErr)
-	require.ErrorIs(t, err, errHaltLedgerPipeline)
-	require.False(t, recovered)
-	var txErr *txValidationError
-	require.ErrorAs(t, err, &txErr)
-	assert.Equal(t, validationErr, txErr)
+	require.NoError(t, err)
+	require.True(t, recovered)
+	require.NotNil(t, ls.lastAtTipRecovery)
+	assert.Equal(
+		t,
+		maxAtTipRecoveryAttempts,
+		ls.lastAtTipRecovery.Attempts,
+	)
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
