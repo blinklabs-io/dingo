@@ -62,6 +62,25 @@ func TestPurgeOrphanedCascadeRows_NoTables(t *testing.T) {
 	require.NoError(t, PurgeOrphanedCascadeRows(db, discardLogger()))
 }
 
+// TestPurgeOrphanedCascadeRows_MissingForeignKeyColumn verifies that legacy
+// child tables predating a newer FK column do not fail the pre-migration purge.
+func TestPurgeOrphanedCascadeRows_MissingForeignKeyColumn(t *testing.T) {
+	db := openForeignKeyMemoryDB(t)
+	require.NoError(t, db.Exec(
+		`CREATE TABLE "transaction" (id integer PRIMARY KEY AUTOINCREMENT)`,
+	).Error)
+	require.NoError(t, db.Exec(
+		`CREATE TABLE plutus_data (id integer PRIMARY KEY AUTOINCREMENT)`,
+	).Error)
+	require.NoError(t, db.Exec(`INSERT INTO plutus_data (id) VALUES (1)`).Error)
+
+	require.NoError(t, PurgeOrphanedCascadeRows(db, discardLogger()))
+
+	require.EqualValues(t, 1, tableCount(t, db, "plutus_data"))
+	require.NoError(t, db.AutoMigrate(&Transaction{}, &PlutusData{}))
+	require.True(t, db.Migrator().HasColumn(&PlutusData{}, "transaction_id"))
+}
+
 // TestAutoMigrateFailsOnOrphansWithoutPurge documents the bug from #2696: a
 // legacy table without the cascade FK that holds orphaned rows cannot be
 // migrated because the table rebuild enforces the new constraint.
@@ -129,6 +148,58 @@ func TestPurgeOrphanedCascadeRows_UtxoAssetChain(t *testing.T) {
 		db.AutoMigrate(&Transaction{}, &Utxo{}, &Asset{}),
 		"AutoMigrate should succeed once orphans are purged",
 	)
+}
+
+// TestPurgeOrphanedCascadeRows_TransactionChildren covers the transaction ->
+// witness/certificate child specs that do not have a second-level cascade.
+func TestPurgeOrphanedCascadeRows_TransactionChildren(t *testing.T) {
+	db := openForeignKeyMemoryDB(t)
+	require.NoError(t, db.Exec(
+		`CREATE TABLE "transaction" (id integer PRIMARY KEY AUTOINCREMENT)`,
+	).Error)
+
+	childTables := []string{
+		"plutus_data",
+		"certs",
+		"key_witness",
+		"witness_scripts",
+		"redeemer",
+	}
+	for _, table := range childTables {
+		require.NoError(t, db.Exec(
+			fmt.Sprintf(
+				`CREATE TABLE %s (id integer PRIMARY KEY AUTOINCREMENT, transaction_id integer)`,
+				table,
+			),
+		).Error)
+	}
+
+	require.NoError(t, db.Exec(`INSERT INTO "transaction" (id) VALUES (1)`).Error)
+	for _, table := range childTables {
+		require.NoError(t, db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (id, transaction_id) VALUES (1, 1)`, table),
+		).Error)
+		require.NoError(t, db.Exec(
+			fmt.Sprintf(`INSERT INTO %s (id, transaction_id) VALUES (2, 999)`, table),
+		).Error)
+	}
+
+	require.NoError(t, PurgeOrphanedCascadeRows(db, discardLogger()))
+
+	for _, table := range childTables {
+		require.EqualValues(t, 1, tableCount(t, db, table), "orphan rows purged from %s", table)
+
+		var keptValid int64
+		require.NoError(t, db.Table(table).
+			Where("id = 1 AND transaction_id = 1").
+			Count(&keptValid).Error)
+		require.EqualValues(t, 1, keptValid, "valid row kept in %s", table)
+	}
+
+	require.NoError(t, db.AutoMigrate(
+		&Transaction{}, &PlutusData{}, &Certificate{},
+		&KeyWitness{}, &WitnessScripts{}, &Redeemer{},
+	))
 }
 
 // TestPurgeOrphanedCascadeRows_PoolChain covers the pool -> registration ->

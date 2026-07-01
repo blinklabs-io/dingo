@@ -158,6 +158,11 @@ func purgeOrphanedChildRows(
 	if !db.Migrator().HasTable(spec.child) {
 		return nil
 	}
+	// Legacy schemas may have the child table but predate a newer FK column.
+	// There are no values for that FK to purge yet, so let AutoMigrate add it.
+	if !db.Migrator().HasColumn(spec.child, spec.fkColumn) {
+		return nil
+	}
 	// If the cascade foreign key already exists, the database is already
 	// consistent and no orphans can accumulate. Skip the scan, which would
 	// otherwise run on every startup against large tables.
