@@ -86,6 +86,26 @@ func (t *postgresTxn) Rollback() error {
 	return nil
 }
 
+func (t *postgresTxn) SavePoint(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.SavePoint(name).Error
+}
+
+func (t *postgresTxn) RollbackTo(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.RollbackTo(name).Error
+}
+
 // MetadataStorePostgres stores metadata in Postgres.
 type MetadataStorePostgres struct {
 	promRegistry prometheus.Registerer

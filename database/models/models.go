@@ -31,6 +31,7 @@ var MigrateModels = []any{
 	&Deregistration{},
 	&DeregistrationDrep{},
 	&Drep{},
+	&EndorserTransaction{},
 	&Epoch{},
 	&EpochSummary{},
 	&GovernanceProposal{},

@@ -291,6 +291,12 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.validateHistorical,
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			// The Musashi prototype network's successive endorser blocks carry
+			// mutually-conflicting, never-confirmed mempool transactions, so
+			// tolerate and resolve those conflicts (skip conflicting endorser
+			// spends, let authoritative ranking-block spends revoke them)
+			// instead of wedging on "UTxO already spent" (issue #2699).
+			LeiosTolerateEndorserConflicts: n.config.isMusashiNetwork(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).

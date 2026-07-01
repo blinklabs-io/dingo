@@ -512,6 +512,55 @@ type MetadataStore interface {
 		types.Txn,
 	) ([][]byte, error)
 
+	// AddEndorserTransactions records the given transaction hashes as
+	// endorser-block (speculative) transactions applied under the referencing
+	// ranking block at rbSlot. Used only when endorser-block conflict
+	// resolution is enabled (Musashi); it marks these spends as revocable so a
+	// later authoritative ranking-block transaction can override them
+	// (issue #2699). Idempotent: re-recording an existing hash is a no-op.
+	AddEndorserTransactions(
+		[][]byte, // hashes
+		uint64, // rbSlot
+		types.Txn,
+	) error
+
+	// FilterEndorserTransactions returns the subset of the given hashes that
+	// are recorded endorser-block transactions. Used to tell a revocable
+	// endorser-block spend from a final ranking-block spend when resolving a
+	// conflict, and to walk the endorser-on-endorser revoke cascade.
+	FilterEndorserTransactions(
+		[][]byte, // hashes
+		types.Txn,
+	) ([][]byte, error)
+
+	// UtxoSpenders returns the distinct hashes of transactions that spent any
+	// output produced by the given producer transaction hashes (i.e. the
+	// spent_at_tx_id of every utxo whose tx_id is in the set). Used to expand
+	// the endorser-on-endorser revoke cascade: revoking an endorser
+	// transaction must also revoke any endorser transaction that spent one of
+	// its outputs.
+	UtxoSpenders(
+		[][]byte, // producer hashes
+		types.Txn,
+	) ([][]byte, error)
+
+	// RevokeEndorserTransactions undoes the ledger effect of the given
+	// endorser-block transactions: it un-spends the inputs they consumed
+	// (clearing deleted_slot and spent_at_tx_id), deletes the outputs they
+	// produced, and removes their transaction, endorser-transaction, and
+	// address-mapping rows. The caller is responsible for passing a complete
+	// revoke set (the transitive endorser-on-endorser closure); this method
+	// does not expand the cascade itself.
+	RevokeEndorserTransactions(
+		[][]byte, // hashes
+		types.Txn,
+	) error
+
+	// DeleteEndorserTransactionsAfterSlot removes endorser-transaction records
+	// whose referencing ranking block is after the given slot, so a chain
+	// rollback drops the provenance for the spends it is undoing.
+	DeleteEndorserTransactionsAfterSlot(uint64, types.Txn) error
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes
