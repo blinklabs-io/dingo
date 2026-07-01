@@ -201,6 +201,9 @@ func checkEpoch(
 	// This is a single query regardless of how many pools Koios knows about.
 	dingoPoolMap, dingoPoolErr := dingo.GetPoolEpochDataMap(epoch)
 	if dingoPoolErr != nil {
+		// Record the DB failure and skip all per-pool comparisons.
+		// Continuing with dingoPoolMap == nil would make every Koios pool appear
+		// as pool_only_koios (FAIL), masking the real ERROR cause.
 		allMismatches = append(allMismatches, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
@@ -210,74 +213,75 @@ func checkEpoch(
 			Category:   CategoryDBError,
 			CheckedAt:  now,
 		})
-		dingoPoolMap = nil
 	}
 
 	// 3. Build a set of pool-key-hash → bech32 from Koios pools so we can
 	// detect pools present in Dingo but absent from Koios.
+	// Skipped entirely when the bulk DB query failed — the dingo_db_error above covers it.
 	epochEndTime := koiosEpoch.EpochEndTime // zero for old cache rows; grace window skips if zero
-	koiosKeySet := make(map[string]struct{}, len(koiosPools))
+	var koiosKeySet map[string]struct{}
 	var onlyKoios []string
 	dingoFound := 0
 
-	for i := range koiosPools {
-		koiosPool := &koiosPools[i]
-		keyHex, decErr := PoolKeyHashHex(koiosPool.PoolBech32)
-		if decErr != nil {
-			// Bad bech32 in our cache — surface as ERROR so PASS is never silently wrong.
-			logger.Warn("koiosparity: failed to decode pool bech32",
-				"pool", koiosPool.PoolBech32, "error", decErr)
-			allMismatches = append(allMismatches, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: koiosPool.PoolBech32,
-				Field:      "pool_bech32_decode",
-				DingoValue: fmt.Sprintf("error: %v", decErr),
-				KoiosValue: koiosPool.PoolBech32,
-				Category:   CategoryDBError,
-				CheckedAt:  now,
-			})
-			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
-			continue
-		}
-		koiosKeySet[keyHex] = struct{}{}
+	if dingoPoolErr == nil {
+		koiosKeySet = make(map[string]struct{}, len(koiosPools))
+		for i := range koiosPools {
+			koiosPool := &koiosPools[i]
+			keyHex, decErr := PoolKeyHashHex(koiosPool.PoolBech32)
+			if decErr != nil {
+				// Bad bech32 in our cache — surface as ERROR so PASS is never silently wrong.
+				logger.Warn("koiosparity: failed to decode pool bech32",
+					"pool", koiosPool.PoolBech32, "error", decErr)
+				allMismatches = append(allMismatches, CheckMismatch{
+					Network:    network,
+					Epoch:      epoch,
+					PoolBech32: koiosPool.PoolBech32,
+					Field:      "pool_bech32_decode",
+					DingoValue: fmt.Sprintf("error: %v", decErr),
+					KoiosValue: koiosPool.PoolBech32,
+					Category:   CategoryDBError,
+					CheckedAt:  now,
+				})
+				onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
+				continue
+			}
+			koiosKeySet[keyHex] = struct{}{}
 
-		var dingoPool *DingoPoolEpochData
-		if dingoPoolMap != nil {
-			dingoPool = dingoPoolMap[keyHex]
-		}
+			dingoPool := dingoPoolMap[keyHex]
+			poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours, epochEndTime)
+			allMismatches = append(allMismatches, poolMismatches...)
 
-		poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours, epochEndTime)
-		allMismatches = append(allMismatches, poolMismatches...)
-
-		if dingoPool == nil {
-			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
-		} else {
-			dingoFound++
+			if dingoPool == nil {
+				onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
+			} else {
+				dingoFound++
+			}
 		}
 	}
 
 	// 4. Detect pools that Dingo computed rewards for but Koios doesn't list.
-	// These are unexpected entries that warrant investigation.
+	// Skipped when bulk DB query failed (dingoPoolMap is nil/invalid).
 	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
-	for keyHex := range dingoPoolMap {
-		if _, inKoios := koiosKeySet[keyHex]; !inKoios {
-			poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
-			if bechErr != nil {
-				poolBech32 = keyHex // unreachable: hex from GetPoolEpochDataMap is always valid
+	if dingoPoolErr == nil {
+		for keyHex := range dingoPoolMap {
+			if _, inKoios := koiosKeySet[keyHex]; !inKoios {
+				poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
+				if bechErr != nil {
+					poolBech32 = keyHex // unreachable: hex from GetPoolEpochDataMap is always valid
+				}
+				onlyDingo = append(onlyDingo, poolBech32)
+				allMismatches = append(allMismatches, CheckMismatch{
+					Network:    network,
+					Epoch:      epoch,
+					PoolBech32: poolBech32,
+					Field:      "pool_presence",
+					DingoValue: "present",
+					KoiosValue: "",
+					Category:   CategoryPoolOnlyDingo,
+					CheckedAt:  now,
+				})
 			}
-			onlyDingo = append(onlyDingo, poolBech32)
-			allMismatches = append(allMismatches, CheckMismatch{
-				Network:    network,
-				Epoch:      epoch,
-				PoolBech32: poolBech32,
-				Field:      "pool_presence",
-				DingoValue: "present",
-				KoiosValue: "",
-				Category:   CategoryPoolOnlyDingo,
-				CheckedAt:  now,
-			})
 		}
 	}
 
