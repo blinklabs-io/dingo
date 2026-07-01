@@ -84,7 +84,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	)
 
 	for {
-		current, epochErr := dingo.GetLatestEpoch()
+		current, epochErr := dingo.GetLatestEpoch(ctx)
 		if epochErr != nil {
 			logger.Warn("koios-parity: could not get latest epoch from Dingo DB",
 				"error", epochErr,

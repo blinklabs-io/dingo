@@ -17,9 +17,13 @@
 //
 // It fetches Koios reference data (epoch info, per-pool history) into a local
 // SQLite cache and then compares it directly against Dingo's metadata database
-// (reward_pool_input, epoch_summary, reward_ada_pots). No Blockfrost or HTTP
-// endpoint on the Dingo node is contacted for the comparison; the tool reads
-// the node's SQLite file directly in read-only mode.
+// (reward_pool_input, epoch_summary, reward_ada_pots). No Blockfrost or any
+// other HTTP endpoint on the Dingo node is contacted for the comparison.
+//
+// Three metadata backends are supported (matching Dingo's --metadata-plugin):
+//   - sqlite (default): opens {data-dir}/metadata.sqlite in read-only WAL mode
+//   - postgres: connects via --metadata-dsn or DINGO_METADATA_DSN
+//   - mysql:    connects via --metadata-dsn or DINGO_METADATA_DSN
 package main
 
 import (

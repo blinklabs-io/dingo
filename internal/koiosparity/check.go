@@ -215,6 +215,7 @@ func checkEpoch(
 
 	// 3. Build a set of pool-key-hash → bech32 from Koios pools so we can
 	// detect pools present in Dingo but absent from Koios.
+	epochEndTime := koiosEpoch.EpochEndTime // zero for old cache rows; grace window skips if zero
 	koiosKeySet := make(map[string]struct{}, len(koiosPools))
 	var onlyKoios []string
 	dingoFound := 0
@@ -223,8 +224,20 @@ func checkEpoch(
 		koiosPool := &koiosPools[i]
 		keyHex, decErr := PoolKeyHashHex(koiosPool.PoolBech32)
 		if decErr != nil {
+			// Bad bech32 in our cache — surface as ERROR so PASS is never silently wrong.
 			logger.Warn("koiosparity: failed to decode pool bech32",
 				"pool", koiosPool.PoolBech32, "error", decErr)
+			allMismatches = append(allMismatches, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				PoolBech32: koiosPool.PoolBech32,
+				Field:      "pool_bech32_decode",
+				DingoValue: fmt.Sprintf("error: %v", decErr),
+				KoiosValue: koiosPool.PoolBech32,
+				Category:   CategoryDBError,
+				CheckedAt:  now,
+			})
+			onlyKoios = append(onlyKoios, koiosPool.PoolBech32)
 			continue
 		}
 		koiosKeySet[keyHex] = struct{}{}
@@ -234,7 +247,7 @@ func checkEpoch(
 			dingoPool = dingoPoolMap[keyHex]
 		}
 
-		poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours)
+		poolMismatches := ComparePoolEpoch(network, epoch, koiosPool, dingoPool, now, graceHours, epochEndTime)
 		allMismatches = append(allMismatches, poolMismatches...)
 
 		if dingoPool == nil {
@@ -246,14 +259,19 @@ func checkEpoch(
 
 	// 4. Detect pools that Dingo computed rewards for but Koios doesn't list.
 	// These are unexpected entries that warrant investigation.
+	// Convert key-hash hex back to bech32 so PoolBech32 is consistently formatted.
 	var onlyDingo []string
 	for keyHex := range dingoPoolMap {
 		if _, inKoios := koiosKeySet[keyHex]; !inKoios {
-			onlyDingo = append(onlyDingo, keyHex) // reported as key hash hex (bech32 not available)
+			poolBech32, bechErr := PoolKeyHashHexToBech32(keyHex)
+			if bechErr != nil {
+				poolBech32 = keyHex // unreachable: hex from GetPoolEpochDataMap is always valid
+			}
+			onlyDingo = append(onlyDingo, poolBech32)
 			allMismatches = append(allMismatches, CheckMismatch{
 				Network:    network,
 				Epoch:      epoch,
-				PoolBech32: keyHex, // best available identifier
+				PoolBech32: poolBech32,
 				Field:      "pool_presence",
 				DingoValue: "present",
 				KoiosValue: "",

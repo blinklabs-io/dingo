@@ -15,6 +15,7 @@
 package koiosparity
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -136,9 +137,10 @@ func (d *DingoDB) Close() error {
 }
 
 // GetLatestEpoch returns the highest epoch number recorded in epoch_summary.
-func (d *DingoDB) GetLatestEpoch() (uint64, error) {
+// ctx is forwarded to the DB driver so that a cancelled context aborts the query.
+func (d *DingoDB) GetLatestEpoch(ctx context.Context) (uint64, error) {
 	var epoch *uint64
-	if err := d.db.Model(&models.EpochSummary{}).
+	if err := d.db.WithContext(ctx).Model(&models.EpochSummary{}).
 		Select("MAX(epoch)").
 		Scan(&epoch).Error; err != nil {
 		return 0, fmt.Errorf("get latest epoch: %w", err)
@@ -211,4 +213,21 @@ func PoolKeyHashHex(bech32 string) (string, error) {
 		return "", fmt.Errorf("decode pool bech32 %q: %w", bech32, err)
 	}
 	return hex.EncodeToString(poolID[:]), nil
+}
+
+// PoolKeyHashHexToBech32 is the inverse of PoolKeyHashHex: it converts a
+// lower-hex 28-byte pool key hash (as returned by GetPoolEpochDataMap) back
+// to a bech32 "pool1…" string. Used so pool_only_dingo mismatches store a
+// bech32 value in PoolBech32 rather than a raw hex string.
+func PoolKeyHashHexToBech32(keyHex string) (string, error) {
+	b, err := hex.DecodeString(keyHex)
+	if err != nil {
+		return "", fmt.Errorf("decode hex pool key hash %q: %w", keyHex, err)
+	}
+	if len(b) != 28 {
+		return "", fmt.Errorf("pool key hash: expected 28 bytes, got %d", len(b))
+	}
+	var pid lcommon.PoolId
+	copy(pid[:], b)
+	return pid.String(), nil
 }

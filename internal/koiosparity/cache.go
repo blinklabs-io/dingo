@@ -38,6 +38,7 @@ type KoiosEpochInfo struct {
 	DelegatorCnt int       `gorm:"not null"`
 	Fees         string    `gorm:"not null"`
 	TotalRewards string    `gorm:"not null"`
+	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows
 	FetchedAt    time.Time `gorm:"not null"`
 }
 
@@ -167,7 +168,7 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"active_stake", "pool_cnt", "delegator_cnt",
-			"fees", "total_rewards", "fetched_at",
+			"fees", "total_rewards", "epoch_end_time", "fetched_at",
 		}),
 	}).Create(&info).Error
 }
