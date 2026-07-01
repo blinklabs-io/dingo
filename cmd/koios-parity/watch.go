@@ -157,11 +157,13 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			}
 		}
 
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			logger.Info("koios-parity: watch stopped")
 			return nil
-		case <-time.After(interval):
+		case <-timer.C:
 		}
 	}
 }
