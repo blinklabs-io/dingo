@@ -74,7 +74,7 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 	require.NoError(t, err)
 }
 
-func TestHandleLedgerProcessBlocksErrorRestartsOnPersistentValidationFailure(
+func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
 	t *testing.T,
 ) {
 	haltErr := fmt.Errorf("process block batch: %w", errHaltLedgerPipeline)
@@ -88,12 +88,11 @@ func TestHandleLedgerProcessBlocksErrorRestartsOnPersistentValidationFailure(
 		},
 	}
 
-	restart := ls.handleLedgerProcessBlocksError(haltErr)
-	require.True(t, restart)
+	ls.handleLedgerProcessBlocksError(haltErr)
 	require.False(t, fatalCalled)
 }
 
-func TestHandleLedgerProcessBlocksErrorRestartsOnRecoverableErrors(
+func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
 	t *testing.T,
 ) {
 	fatalCalled := false
@@ -106,16 +105,10 @@ func TestHandleLedgerProcessBlocksErrorRestartsOnRecoverableErrors(
 		},
 	}
 
-	require.True(
-		t,
-		ls.handleLedgerProcessBlocksError(errRestartLedgerPipeline),
-	)
+	ls.handleLedgerProcessBlocksError(errRestartLedgerPipeline)
 	require.False(t, fatalCalled)
 
-	require.True(
-		t,
-		ls.handleLedgerProcessBlocksError(errors.New("transient")),
-	)
+	ls.handleLedgerProcessBlocksError(errors.New("transient"))
 	require.False(t, fatalCalled)
 }
 
