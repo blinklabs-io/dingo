@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build dingo_extra_plugins
+
 package metadata
 
 import (
-	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/mysql"
+	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/postgres"
 )
