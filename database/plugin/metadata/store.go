@@ -501,6 +501,17 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint, bool, error)
 
+	// ExistingTransactionHashes returns the subset of the given hashes that
+	// are already recorded. Lightweight (selects the hash column only, no
+	// associations); used to skip re-applying transactions that an earlier
+	// endorser block already applied, since the Leios prototype re-includes
+	// unconfirmed mempool transactions in successive endorser blocks
+	// (issue #2699).
+	ExistingTransactionHashes(
+		[][]byte, // hashes
+		types.Txn,
+	) ([][]byte, error)
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes

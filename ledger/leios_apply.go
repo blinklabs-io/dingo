@@ -122,6 +122,47 @@ func (ls *LedgerState) applyEndorserBlock(
 		bodyCbors = append(bodyCbors, []byte(elems[0]))
 	}
 
+	// Deduplicate against the ledger. The Leios prototype re-includes
+	// unconfirmed mempool transactions in successive endorser blocks, so a
+	// transaction here may already have been applied by an earlier endorser
+	// block in this batch (visible through the open txn's read-your-writes) or
+	// by a committed block. Re-applying it would double-spend its inputs and
+	// wedge the ledger in a permanent "UTxO already spent" retry loop
+	// (issue #2699), so drop any transaction already recorded before building
+	// the blob and delta.
+	if len(txs) > 0 {
+		hashes := make([][]byte, len(txs))
+		for i, tx := range txs {
+			hashes[i] = tx.Hash().Bytes()
+		}
+		existing, err := ls.db.GetExistingTransactionHashes(hashes, txn)
+		if err != nil {
+			return 0, fmt.Errorf("dedup endorser transactions: %w", err)
+		}
+		if len(existing) > 0 {
+			skip := make(map[string]struct{}, len(existing))
+			for _, h := range existing {
+				skip[string(h)] = struct{}{}
+			}
+			keptTxs := txs[:0]
+			keptBodies := bodyCbors[:0]
+			for i, tx := range txs {
+				if _, dup := skip[string(tx.Hash().Bytes())]; dup {
+					continue
+				}
+				keptTxs = append(keptTxs, tx)
+				keptBodies = append(keptBodies, bodyCbors[i])
+			}
+			txs = keptTxs
+			bodyCbors = keptBodies
+		}
+	}
+	if len(txs) == 0 {
+		// Every transaction was already applied by an earlier endorser block
+		// (or a committed block); nothing new to store or apply.
+		return 0, nil
+	}
+
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)

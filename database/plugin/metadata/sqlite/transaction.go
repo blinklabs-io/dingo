@@ -104,6 +104,28 @@ func (d *MetadataStoreSqlite) resolveReadDB(
 	return db, nil
 }
 
+// ExistingTransactionHashes returns transaction hashes already recorded.
+func (d *MetadataStoreSqlite) ExistingTransactionHashes(
+	hashes [][]byte,
+	txn types.Txn,
+) ([][]byte, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var existing [][]byte
+	result := db.Model(&models.Transaction{}).
+		Where("hash IN ?", hashes).
+		Pluck("hash", &existing)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return existing, nil
+}
+
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
