@@ -28,20 +28,20 @@ func watchCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "watch",
 		Short: "Long-running loop: fetch+check whenever a new epoch closes",
-		Long: `Polls Dingo's /epochs/latest at --interval and runs fetch+check
-when the epoch advances. Useful for operators running a continuously-syncing node.
+		Long: `Polls Dingo's epoch_summary table at --interval and runs fetch+check
+when the epoch number advances. Reads directly from metadata.sqlite — no API contact.
+Useful for operators running a continuously-syncing node.
 Does not replace manual 'run --all' after a ledger replay.`,
 		RunE: watchRun,
 	}
 
-	cmd.Flags().String("dingo-api", "",
-		"Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
 	cmd.Flags().String("api-key", "", "Koios Bearer token (or KOIOS_API_KEY)")
 	cmd.Flags().Duration("interval", 15*time.Minute, "poll interval")
 	cmd.Flags().Int("concurrency", 5, "Koios fetch workers")
 	cmd.Flags().Int("workers", 0, "check workers (default: NumCPU)")
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"pools absent from Koios in recently-fetched epochs → reference_lag (not FAIL)")
+	addDingoDBFlags(cmd)
 
 	return cmd
 }
@@ -53,6 +53,7 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	cachePath := resolveCachePath()
+	dbCfg := resolveDingoDB(cmd)
 	interval, _ := cmd.Flags().GetDuration("interval")
 	if interval <= 0 {
 		return errors.New("--interval must be positive")
@@ -61,24 +62,31 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 	workers, _ := cmd.Flags().GetInt("workers")
 	graceHours, _ := cmd.Flags().GetInt("grace-hours")
 	apiKey := koiosAPIKey(cmd)
-	dingoURL := dingoAPIURL(cmd)
 
 	logger := slog.Default()
 	ctx := cmd.Context()
 
-	dingo := koiosparity.NewBlockfrostClient(dingoURL)
-	var lastEpoch uint64
+	// Open the Dingo database once for the lifetime of the watch loop.
+	// Read-only connections (SQLite WAL, or a shared postgres/mysql pool) see
+	// rows committed by the live node on each new query.
+	dingo, err := koiosparity.OpenDingoDB(dbCfg)
+	if err != nil {
+		return fmt.Errorf("open dingo db: %w", err)
+	}
+	defer dingo.Close() //nolint:errcheck
+
+	var lastEpoch uint64 // last epoch we successfully processed
 
 	logger.Info("koios-parity: watch started",
 		"network", network,
-		"dingo_api", dingoURL,
+		"metadata_plugin", dbCfg.Plugin,
 		"interval", interval,
 	)
 
 	for {
-		current, epochErr := dingo.GetLatestEpoch(ctx)
+		current, epochErr := dingo.GetLatestEpoch()
 		if epochErr != nil {
-			logger.Warn("koios-parity: could not get latest epoch from Dingo",
+			logger.Warn("koios-parity: could not get latest epoch from Dingo DB",
 				"error", epochErr,
 			)
 		} else if current > 0 && current != lastEpoch {
@@ -93,20 +101,18 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 			}
 			toClosed := current - 1
 
-			// Advance the cursor unconditionally so a stale latest-epoch
-			// response on the next tick cannot move lastEpoch backward.
-			lastEpoch = current
-
 			if fromClosed > toClosed {
-				// Edge-case guard: should not occur with current > 0, but skip
-				// rather than passing an inverted range to Fetch/Check.
+				// Edge-case guard: skip an inverted range rather than pass it
+				// downstream. Advance cursor so the next tick reflects reality.
 				logger.Warn("koios-parity: skipping inverted epoch range",
 					"from", fromClosed, "through", toClosed)
+				lastEpoch = current
 			} else {
 				logger.Info("koios-parity: new closed epochs detected",
 					"from", fromClosed, "through", toClosed)
 
-				if _, fetchErr := koiosparity.Fetch(ctx, koiosparity.FetchConfig{
+				fetchErr := error(nil)
+				if _, fetchErr = koiosparity.Fetch(ctx, koiosparity.FetchConfig{
 					Network:      network,
 					APIKey:       apiKey,
 					CachePath:    cachePath,
@@ -119,16 +125,22 @@ func watchRun(cmd *cobra.Command, _ []string) error {
 
 				result, checkErr := koiosparity.Check(ctx, koiosparity.CheckConfig{
 					Network:      network,
-					DingoAPIURL:  dingoURL,
+					DingoDB:      dbCfg,
 					CachePath:    cachePath,
 					Workers:      workers,
 					FromEpoch:    fromClosed,
 					ThroughEpoch: toClosed,
 					GraceHours:   graceHours,
 				}, logger)
-				if checkErr != nil {
-					logger.Warn("koios-parity: check error", "error", checkErr)
-				} else {
+
+				if fetchErr != nil || checkErr != nil {
+					// Keep lastEpoch unchanged so the next tick retries this range.
+					if checkErr != nil {
+						logger.Warn("koios-parity: check error", "error", checkErr)
+					}
+				} else if result != nil {
+					// Only advance the cursor after both fetch and check succeed.
+					lastEpoch = current
 					status := "PASS"
 					if len(result.FailEpochs) > 0 {
 						status = fmt.Sprintf("FAIL (%d mismatches)", result.MismatchCount)

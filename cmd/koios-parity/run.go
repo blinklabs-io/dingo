@@ -25,19 +25,18 @@ import (
 )
 
 func addRunFlags(cmd *cobra.Command) {
-	cmd.Flags().String("dingo-api", "",
-		"Dingo Blockfrost base URL (or DINGO_BLOCKFROST_URL)")
+	addDingoDBFlags(cmd)
 	cmd.Flags().String("api-key", "",
 		"Koios Bearer token (or KOIOS_API_KEY)")
 	cmd.Flags().String("report-dir", "",
-		"directory for JSON report (default: {dingo-data}/.koios/ or .koios/)")
+		"directory for JSON report (default: {dingo-data}/.koios/)")
 	cmd.Flags().Int("concurrency", 5, "Koios fetch worker count")
 	cmd.Flags().Int("workers", 0, "check worker count (default: NumCPU)")
 	cmd.Flags().Int("grace-hours", defaultGraceHours,
 		"pools absent from Koios in epochs fetched within this window → reference_lag")
 	cmd.Flags().Bool("skip-fetch", false, "skip Koios fetch phase")
 	cmd.Flags().Bool("skip-check", false, "skip compare phase")
-	cmd.Flags().Bool("all", false, "re-check all cached epochs (not just unchecked)")
+	cmd.Flags().Bool("all", false, "re-check all cached epochs (not just unchecked/stale)")
 }
 
 func runCommand(cmd *cobra.Command, _ []string) error {
@@ -74,12 +73,12 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	if !skipCheck {
 		slog.Info("koios-parity: check phase starting", "network", network)
 		checkResult, err = koiosparity.Check(ctx, koiosparity.CheckConfig{
-			Network:     network,
-			DingoAPIURL: dingoAPIURL(cmd),
-			CachePath:   cachePath,
-			Workers:     workers,
-			All:         all,
-			GraceHours:  graceHours,
+			Network:    network,
+			DingoDB:    resolveDingoDB(cmd),
+			CachePath:  cachePath,
+			Workers:    workers,
+			All:        all,
+			GraceHours: graceHours,
 		}, logger)
 		if err != nil {
 			return fmt.Errorf("check: %w", err)
@@ -102,7 +101,7 @@ func runCommand(cmd *cobra.Command, _ []string) error {
 	summary := koiosparity.BuildStatusSummary(network, fetchedEpochs, statuses)
 	koiosparity.PrintStatus(os.Stdout, summary, false, statuses)
 
-	// Write JSON report; log each failure so operators know when the report is missing.
+	// Write JSON report.
 	dir := resolveReportDir(reportDir)
 	reportPath := fmt.Sprintf("%s/report-%s-%s.json",
 		dir, network, time.Now().Format("2006-01-02"))

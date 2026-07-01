@@ -15,7 +15,6 @@
 package koiosparity
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -23,12 +22,12 @@ import (
 
 // Mismatch categories.
 const (
-	CategoryValueMismatch   = "value_mismatch"
-	CategoryPoolOnlyDingo   = "pool_only_dingo"
-	CategoryPoolOnlyKoios   = "pool_only_koios"
-	CategoryReferenceLag    = "reference_lag"
-	CategoryDingoAPIMissing = "dingo_api_missing"
-	CategoryDingoAPIError   = "dingo_api_error"
+	CategoryValueMismatch = "value_mismatch"
+	CategoryPoolOnlyDingo = "pool_only_dingo"
+	CategoryPoolOnlyKoios = "pool_only_koios"
+	CategoryReferenceLag  = "reference_lag"
+	CategoryDBError       = "dingo_db_error"   // DB query returned an unexpected error
+	CategoryDBMissing     = "dingo_db_missing" // expected DB row is absent
 )
 
 // Epoch check status values.
@@ -50,55 +49,70 @@ type EpochCompareResult struct {
 	OnlyKoios      []string
 }
 
-// CompareEpochAggregates compares epoch-level fields from Dingo vs Koios.
-// It records ErrAPINotFound → CategoryDingoAPIMissing, 5xx → CategoryDingoAPIError.
+// CompareEpochAggregates compares epoch-level fields from Dingo's database
+// against the Koios reference row for that epoch.
+// dingoEpoch may be nil when the epoch_summary row is absent (not yet computed).
+// fetchErr is set when the DB query itself failed.
+// graceHours: if the Koios row was fetched within this many hours and Dingo's
+// row is missing, emit reference_lag (ERROR) instead of dingo_db_missing (ERROR)
+// so operators don't mistake an in-progress sync for a real discrepancy.
 func CompareEpochAggregates(
 	network string,
 	epoch uint64,
 	koios *KoiosEpochInfo,
-	dingoEpoch *DingoEpochResp,
+	dingoEpoch *DingoEpochData,
 	fetchErr error,
 	now time.Time,
+	graceHours int,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
 	if fetchErr != nil {
-		cat := CategoryDingoAPIError
-		if errors.Is(fetchErr, ErrAPINotFound) {
-			cat = CategoryDingoAPIMissing
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "epoch_summary",
+			DingoValue: fmt.Sprintf("error: %v", fetchErr),
+			KoiosValue: "",
+			Category:   CategoryDBError,
+			CheckedAt:  now,
+		})
+		return out
+	}
+
+	if dingoEpoch == nil {
+		cat := CategoryDBMissing
+		if graceHours > 0 && koios != nil &&
+			now.Sub(koios.FetchedAt) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
 		}
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
-			Field:      "epoch_info",
-			DingoValue: fmt.Sprintf("error: %v", fetchErr),
-			KoiosValue: "",
+			Field:      "epoch_summary",
+			DingoValue: "",
+			KoiosValue: "present",
 			Category:   cat,
 			CheckedAt:  now,
 		})
 		return out
 	}
 
-	// active_stake — treat a nil/missing field as an empty string so omission
-	// is flagged as a mismatch rather than silently passing parity.
-	dingoStake := ""
-	if dingoEpoch.ActiveStake != nil {
-		dingoStake = *dingoEpoch.ActiveStake
-	}
-	if dingoStake != koios.ActiveStake {
+	// total_active_stake
+	if dingoEpoch.TotalActiveStake != koios.ActiveStake {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			Field:      "total_active_stake",
-			DingoValue: dingoStake,
+			DingoValue: dingoEpoch.TotalActiveStake,
 			KoiosValue: koios.ActiveStake,
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
 		})
 	}
 
-	// fees — compare directly; empty-string on either side is still a mismatch.
-	if dingoEpoch.Fees != koios.Fees {
+	// fees — only compared when Dingo has a reward_ada_pots row.
+	if dingoEpoch.Fees != "" && dingoEpoch.Fees != koios.Fees {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
@@ -110,41 +124,62 @@ func CompareEpochAggregates(
 		})
 	}
 
+	// pool_count
+	dingoPoolCnt := strconv.FormatUint(dingoEpoch.PoolCount, 10)
+	koiosPoolCnt := strconv.Itoa(koios.PoolCnt)
+	if dingoPoolCnt != koiosPoolCnt {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "pool_count",
+			DingoValue: dingoPoolCnt,
+			KoiosValue: koiosPoolCnt,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	// delegator_count
+	dingoDelegCnt := strconv.FormatUint(dingoEpoch.DelegatorCount, 10)
+	koiosDelegCnt := strconv.Itoa(koios.DelegatorCnt)
+	if dingoDelegCnt != koiosDelegCnt {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "delegator_count",
+			DingoValue: dingoDelegCnt,
+			KoiosValue: koiosDelegCnt,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
 	return out
 }
 
-// ComparePoolEpoch compares per-pool fields from Dingo vs Koios for one pool.
-// dingoItem may be nil (pool not in Dingo) or fetchErr non-nil (API failure).
+// ComparePoolEpoch compares per-pool reward-input fields from Dingo's database
+// against the Koios reference row for (pool, epoch).
+// dingoPool is nil when the pool has no reward_pool_input row for this epoch.
+// graceHours: if the Koios pool row was fetched within this many hours and
+// Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
 func ComparePoolEpoch(
 	network string,
 	epoch uint64,
 	koiosPool *KoiosPoolEpoch,
-	dingoItem *DingoPoolHistoryItem,
-	fetchErr error,
+	dingoPool *DingoPoolEpochData,
 	now time.Time,
+	graceHours int,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
-	if fetchErr != nil {
-		cat := CategoryDingoAPIError
-		if errors.Is(fetchErr, ErrAPINotFound) {
-			cat = CategoryDingoAPIMissing
+	if dingoPool == nil {
+		// Pool known to Koios but has no reward_pool_input row in Dingo.
+		// Within the grace window the absence may mean Dingo hasn't finished
+		// computing rewards for this epoch yet — flag as reference_lag, not FAIL.
+		cat := CategoryPoolOnlyKoios
+		if graceHours > 0 && now.Sub(koiosPool.FetchedAt) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
 		}
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			PoolBech32: koiosPool.PoolBech32,
-			Field:      "pool_history",
-			DingoValue: fmt.Sprintf("error: %v", fetchErr),
-			KoiosValue: "",
-			Category:   cat,
-			CheckedAt:  now,
-		})
-		return out
-	}
-
-	if dingoItem == nil {
-		// Pool known to Koios but absent from Dingo.
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
@@ -152,20 +187,20 @@ func ComparePoolEpoch(
 			Field:      "pool_presence",
 			DingoValue: "",
 			KoiosValue: "present",
-			Category:   CategoryPoolOnlyKoios,
+			Category:   cat,
 			CheckedAt:  now,
 		})
 		return out
 	}
 
 	// delegated_stake
-	if dingoItem.ActiveStake != koiosPool.ActiveStake {
+	if dingoPool.DelegatedStake != koiosPool.ActiveStake {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
 			Field:      "delegated_stake",
-			DingoValue: dingoItem.ActiveStake,
+			DingoValue: dingoPool.DelegatedStake,
 			KoiosValue: koiosPool.ActiveStake,
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
@@ -173,28 +208,32 @@ func ComparePoolEpoch(
 	}
 
 	// delegator_count
-	if dingoItem.Delegators != koiosPool.Delegators {
+	dingoDelegStr := strconv.FormatUint(dingoPool.DelegatorCount, 10)
+	koiosDelegStr := strconv.Itoa(koiosPool.Delegators)
+	if dingoDelegStr != koiosDelegStr {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
 			Field:      "delegator_count",
-			DingoValue: strconv.Itoa(dingoItem.Delegators),
-			KoiosValue: strconv.Itoa(koiosPool.Delegators),
+			DingoValue: dingoDelegStr,
+			KoiosValue: koiosDelegStr,
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
 		})
 	}
 
 	// blocks_produced
-	if dingoItem.Blocks != koiosPool.BlockCnt {
+	dingoBlockStr := strconv.FormatUint(dingoPool.BlocksProduced, 10)
+	koiosBlockStr := strconv.Itoa(koiosPool.BlockCnt)
+	if dingoBlockStr != koiosBlockStr {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,
 			PoolBech32: koiosPool.PoolBech32,
 			Field:      "blocks_produced",
-			DingoValue: strconv.Itoa(dingoItem.Blocks),
-			KoiosValue: strconv.Itoa(koiosPool.BlockCnt),
+			DingoValue: dingoBlockStr,
+			KoiosValue: koiosBlockStr,
 			Category:   CategoryValueMismatch,
 			CheckedAt:  now,
 		})
@@ -206,7 +245,7 @@ func ComparePoolEpoch(
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.
 //
 //   - FAIL: any value_mismatch, pool_only_dingo, or pool_only_koios entry.
-//   - ERROR: only API-level failures (dingo_api_missing, dingo_api_error) or
+//   - ERROR: only DB-level failures (dingo_db_error, dingo_db_missing) or
 //     reference_lag (Koios data may be incomplete for a recent epoch).
 //   - PASS: no mismatches.
 func DetermineStatus(mismatches []CheckMismatch) string {
@@ -216,7 +255,7 @@ func DetermineStatus(mismatches []CheckMismatch) string {
 	hasError := false
 	for _, m := range mismatches {
 		switch m.Category {
-		case CategoryDingoAPIError, CategoryDingoAPIMissing, CategoryReferenceLag:
+		case CategoryDBError, CategoryDBMissing, CategoryReferenceLag:
 			hasError = true
 		default:
 			return StatusFail

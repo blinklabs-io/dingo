@@ -71,16 +71,9 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		throughEpoch = cfg.ThroughEpoch
 	}
 
+	// fromEpoch = 0 means start from genesis; GetUncachedEpochs will skip
+	// whatever is already cached, so no resume logic is needed here.
 	fromEpoch := cfg.FromEpoch
-	if fromEpoch == 0 {
-		// Resume: start from last cached epoch + 1.
-		_, lastCached, rangeErr := cache.GetFetchedEpochRange(cfg.Network)
-		if rangeErr == nil && lastCached > 0 {
-			fromEpoch = lastCached + 1
-		} else {
-			fromEpoch = 0 // start from genesis
-		}
-	}
 
 	if fromEpoch > throughEpoch {
 		logger.Info("koiosparity: fetch cache is up-to-date",
@@ -101,10 +94,20 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return nil, fmt.Errorf("get historical pool IDs: %w", err)
 	}
 
-	// Build list of epochs to fetch.
-	epochs := make([]uint64, 0)
-	for e := fromEpoch; e <= throughEpoch; e++ {
-		epochs = append(epochs, e)
+	// Build list of epochs to fetch: only those NOT already in the cache.
+	// GetUncachedEpochs fills holes left by prior failed or interrupted runs
+	// rather than naively resuming from max(fetched)+1, which would skip gaps.
+	epochs, err := cache.GetUncachedEpochs(cfg.Network, fromEpoch, throughEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get uncached epochs: %w", err)
+	}
+
+	if len(epochs) == 0 {
+		logger.Info("koiosparity: fetch cache is up-to-date",
+			"network", cfg.Network,
+			"last_epoch", throughEpoch,
+		)
+		return &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}, nil
 	}
 
 	logger.Info("koiosparity: fetching epochs from Koios",

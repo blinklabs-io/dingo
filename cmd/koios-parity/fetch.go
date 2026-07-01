@@ -60,6 +60,9 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if result == nil {
+		return nil
+	}
 
 	fmt.Printf("fetch complete: %d epochs, %d pool rows (epochs %d–%d)\n",
 		result.EpochsFetched, result.PoolsFetched,
