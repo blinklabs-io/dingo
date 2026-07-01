@@ -15,6 +15,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -50,6 +51,10 @@ func fetchRun(cmd *cobra.Command, _ []string) error {
 	fromEpoch, _ := cmd.Flags().GetUint64("from-epoch")
 	throughEpoch, _ := cmd.Flags().GetUint64("through-epoch")
 	forceRefresh, _ := cmd.Flags().GetBool("force-refresh")
+
+	if forceRefresh && !cmd.Flags().Changed("from-epoch") {
+		return errors.New("--force-refresh requires an explicit --from-epoch to prevent accidental full historical re-fetch")
+	}
 
 	result, err := koiosparity.Fetch(cmd.Context(), koiosparity.FetchConfig{
 		Network:      network,
