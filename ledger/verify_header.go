@@ -202,11 +202,46 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		)
 	}
 
-	return verifyBlockHeaderHex(
+	if err := verifyBlockHeaderHex(
 		block,
 		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
 		slotsPerKesPeriod,
-	)
+	); err != nil {
+		return err
+	}
+
+	// Validate the operational certificate's cold-key signature and KES
+	// period expiry. This is the stateless half of inbound opcert validation;
+	// the counter-monotonicity check lives in the block-apply transaction.
+	if err := verifyOpCertHeaderCrypto(
+		block.Header(),
+		blockSlot,
+		slotsPerKesPeriod,
+		ls.maxKESEvolutions(),
+	); err != nil {
+		return fmt.Errorf(
+			"block header verification failed at slot %d: %w",
+			blockSlot,
+			err,
+		)
+	}
+
+	return nil
+}
+
+// maxKESEvolutions returns the maximum number of KES evolutions allowed before
+// an operational certificate expires, from Shelley genesis. Returns 0 when the
+// genesis is unavailable, in which case opcert KES-period expiry is left to the
+// lighter future-cert guard inside VerifyBlock.
+func (ls *LedgerState) maxKESEvolutions() uint64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || shelleyGenesis.MaxKESEvolutions <= 0 {
+		return 0
+	}
+	return uint64(shelleyGenesis.MaxKESEvolutions) // #nosec G115 -- guarded > 0
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {

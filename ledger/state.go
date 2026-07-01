@@ -47,14 +47,10 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
-	"github.com/blinklabs-io/gouroboros/ledger/allegra"
-	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
-	"github.com/blinklabs-io/gouroboros/ledger/mary"
-	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -3579,6 +3575,48 @@ func (ls *LedgerState) ledgerProcessBlock(
 			return nil, err
 		}
 	}
+	// Validate the operational certificate counter before processing the
+	// block's transactions, so a stale or gapped opcert is rejected by this
+	// cheap stateful check rather than after full transaction and Plutus
+	// validation. The cold-key signature and KES-period expiry were already
+	// checked at header verification.
+	opCert, hasOpCert := opCertFromHeader(block.Header())
+	var opCertPoolKeyHash lcommon.PoolKeyHash
+	if hasOpCert {
+		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
+		// Counter monotonicity is the stateful half of inbound opcert
+		// validation: read the pool's last-seen counter before processing this
+		// block, inside the same validation transaction. The opcert counter
+		// must equal the last-seen counter or be exactly one greater. A
+		// backward counter signals a stale or stolen hot key; a gapped counter
+		// signals a skipped rotation. Both must be rejected. Only enforced
+		// under shouldValidate (live, current-era blocks): historical blocks
+		// were already network-validated, and the over-increment rule postdates
+		// the early eras replayed during sync. The counter is recorded once the
+		// block's transactions are processed (below); rollback safety is
+		// inherited from the per-(pool,slot) PoolOpCertSequence store, which
+		// drops rows past the rollback slot and recomputes the latest counter.
+		if shouldValidate {
+			stored, found, err := ls.db.LatestPoolOpCertSequence(
+				opCertPoolKeyHash,
+				txn,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"read opcert counter for pool %x: %w",
+					opCertPoolKeyHash,
+					err,
+				)
+			}
+			if err := validateOpCertCounter(
+				stored,
+				found,
+				opCert.IssueNumber,
+			); err != nil {
+				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
+			}
+		}
+	}
 	// Apply the referenced Leios endorser block's transactions before the
 	// ranking block's own, so the endorser-resident outputs the ranking block
 	// spends are present in the UTxO set. The endorser block is identified by
@@ -3855,12 +3893,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
-	if seqNum, ok := opCertSequenceNumber(block); ok {
-		issuerVkey := block.IssuerVkey()
-		poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+	// Record the opcert counter now that the block's transactions are
+	// processed. The monotonicity check ran before transaction validation
+	// (above); this write is what advances the stored counter, and it is
+	// rolled back with the transaction if the block is rejected.
+	if hasOpCert {
 		if err := ls.db.UpdatePoolOpCertSequence(
-			poolKeyHash,
-			uint64(seqNum),
+			opCertPoolKeyHash,
+			opCert.IssueNumber,
 			point.Slot,
 			txn,
 		); err != nil {
@@ -3871,31 +3911,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
-}
-
-func opCertSequenceNumber(block ledger.Block) (uint32, bool) {
-	switch header := block.Header().(type) {
-	case *dijkstra.DijkstraBlockHeader:
-		// Distinct concrete type embedding BabbageBlockHeader; a type
-		// switch won't fall through to the Babbage case, so it needs an
-		// explicit entry or per-pool OpCert sequence tracking is skipped
-		// for Dijkstra-era blocks.
-		return header.Body.OpCert.SequenceNumber, true
-	case *shelley.ShelleyBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *allegra.AllegraBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *mary.MaryBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *alonzo.AlonzoBlockHeader:
-		return header.Body.OpCertSequenceNumber, true
-	case *babbage.BabbageBlockHeader:
-		return header.Body.OpCert.SequenceNumber, true
-	case *conway.ConwayBlockHeader:
-		return header.Body.OpCert.SequenceNumber, true
-	default:
-		return 0, false
-	}
 }
 
 // updateTipMetrics updates gauges from in-memory state. Call under ls.Lock().
