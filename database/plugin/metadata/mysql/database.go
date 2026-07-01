@@ -353,6 +353,18 @@ func (d *MetadataStoreMysql) Start() error {
 			"account reward delta slot index migration failed: %w", err,
 		)
 	}
+	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
+	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
+	// was enabled never enforced these cascades, so orphaned children
+	// accumulated and would fail the constrained table rebuild with
+	// "FOREIGN KEY constraint failed (787)". See issue #2696.
+	if err := models.PurgeOrphanedCascadeRows(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"purging orphaned cascade rows failed: %w", err,
+		)
+	}
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
