@@ -264,6 +264,10 @@ outer:
 	}
 
 	// 3. Write epoch info only after all pool rows have succeeded.
+	epochEndTime := time.Time{}
+	if info.EndTime > 0 {
+		epochEndTime = time.Unix(info.EndTime, 0).UTC()
+	}
 	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
@@ -272,6 +276,7 @@ outer:
 		DelegatorCnt: info.DelegatorCnt,
 		Fees:         info.Fees,
 		TotalRewards: info.TotalRewards,
+		EpochEndTime: epochEndTime,
 		FetchedAt:    now,
 	}); err != nil {
 		return 0, fmt.Errorf("upsert epoch info: %w", err)

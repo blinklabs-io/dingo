@@ -41,6 +41,7 @@ var koiosBaseURLs = map[string]string{
 // KoiosEpochInfoResp is the Koios /epoch_info response shape.
 type KoiosEpochInfoResp struct {
 	EpochNo      uint64 `json:"epoch_no"`
+	EndTime      int64  `json:"end_time"` // Unix timestamp of epoch boundary
 	ActiveStake  string `json:"active_stake"`
 	PoolCnt      int    `json:"pool_cnt"`
 	DelegatorCnt int    `json:"delegator_cnt"`
