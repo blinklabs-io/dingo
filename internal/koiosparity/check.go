@@ -104,10 +104,11 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 
+loop:
 	for _, epoch := range epochs {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			break loop
 		case sem <- struct{}{}:
 		}
 
@@ -140,6 +141,12 @@ func Check(ctx context.Context, cfg CheckConfig, logger *slog.Logger) (*CheckRes
 	}
 
 	wg.Wait()
+
+	// Check cancellation before consuming errCh so a clean shutdown returns
+	// ctx.Err() rather than a mid-flight epoch error.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case err := <-errCh:
 		return nil, err

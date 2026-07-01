@@ -31,6 +31,7 @@ type FetchConfig struct {
 	Concurrency  int
 	FromEpoch    uint64 // 0 = resume from last cached + 1
 	ThroughEpoch uint64 // 0 = tip - 1
+	ForceRefresh bool   // re-fetch epochs already in cache (overwrite); implies FromEpoch is a hard start
 }
 
 // FetchResult summarises a completed fetch run.
@@ -94,12 +95,21 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 		return nil, fmt.Errorf("get historical pool IDs: %w", err)
 	}
 
-	// Build list of epochs to fetch: only those NOT already in the cache.
-	// GetUncachedEpochs fills holes left by prior failed or interrupted runs
-	// rather than naively resuming from max(fetched)+1, which would skip gaps.
-	epochs, err := cache.GetUncachedEpochs(cfg.Network, fromEpoch, throughEpoch)
-	if err != nil {
-		return nil, fmt.Errorf("get uncached epochs: %w", err)
+	// Build list of epochs to fetch.
+	// Normal mode: only epochs NOT already in the cache (fills holes from prior
+	// failed/interrupted runs rather than naively resuming from max+1).
+	// ForceRefresh mode: fetch the full range and overwrite cached rows, used
+	// when the user suspects stale or corrupt cached data in [fromEpoch, through].
+	var epochs []uint64
+	if cfg.ForceRefresh {
+		for e := fromEpoch; e <= throughEpoch; e++ {
+			epochs = append(epochs, e)
+		}
+	} else {
+		epochs, err = cache.GetUncachedEpochs(cfg.Network, fromEpoch, throughEpoch)
+		if err != nil {
+			return nil, fmt.Errorf("get uncached epochs: %w", err)
+		}
 	}
 
 	if len(epochs) == 0 {
@@ -126,10 +136,11 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 
+loop:
 	for _, epoch := range epochs {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			break loop
 		case sem <- struct{}{}:
 		}
 
@@ -154,6 +165,12 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	}
 
 	wg.Wait()
+
+	// Check cancellation before consuming errCh so a clean shutdown returns
+	// ctx.Err() rather than a mid-flight epoch error.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case err := <-errCh:
 		return nil, err
