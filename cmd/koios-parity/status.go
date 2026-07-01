@@ -53,6 +53,7 @@ func statusRun(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	defer cache.Close() //nolint:errcheck
 
 	fetchedEpochs, err := cache.GetAllFetchedEpochs(network)
 	if err != nil {

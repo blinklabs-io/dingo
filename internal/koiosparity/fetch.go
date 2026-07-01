@@ -52,6 +52,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	if err != nil {
 		return nil, fmt.Errorf("open cache: %w", err)
 	}
+	defer cache.Close() //nolint:errcheck
 
 	koios, err := NewKoiosClient(cfg.Network, cfg.APIKey)
 	if err != nil {
@@ -296,8 +297,6 @@ outer:
 		Network:      network,
 		Epoch:        epoch,
 		ActiveStake:  info.ActiveStake,
-		PoolCnt:      info.PoolCnt,
-		DelegatorCnt: info.DelegatorCnt,
 		Fees:         info.Fees,
 		TotalRewards: info.TotalRewards,
 		EpochEndTime: epochEndTime,

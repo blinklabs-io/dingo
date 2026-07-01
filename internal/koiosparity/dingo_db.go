@@ -51,8 +51,6 @@ type DingoDBConfig struct {
 // DingoEpochData holds epoch-level aggregates read directly from Dingo's database.
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
-	PoolCount        uint64
-	DelegatorCount   uint64
 	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
 }
 
@@ -164,8 +162,6 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 
 	data := &DingoEpochData{
 		TotalActiveStake: strconv.FormatUint(uint64(summary.TotalActiveStake), 10),
-		PoolCount:        summary.TotalPoolCount,
-		DelegatorCount:   summary.TotalDelegators,
 	}
 
 	var pots models.RewardAdaPots

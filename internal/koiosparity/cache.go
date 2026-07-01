@@ -29,13 +29,12 @@ import (
 )
 
 // KoiosEpochInfo holds Koios reference data for a closed epoch.
+// Note: pool_cnt and delegator_cnt are not returned by preview/preprod Koios and are omitted.
 type KoiosEpochInfo struct {
 	ID           uint      `gorm:"primarykey;autoIncrement"`
 	Network      string    `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
 	Epoch        uint64    `gorm:"uniqueIndex:idx_kei_net_epoch;not null"`
 	ActiveStake  string    `gorm:"not null"`
-	PoolCnt      int       `gorm:"not null"`
-	DelegatorCnt int       `gorm:"not null"`
 	Fees         string    `gorm:"not null"`
 	TotalRewards string    `gorm:"not null"`
 	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows
@@ -159,6 +158,15 @@ func OpenCache(path string, logger *slog.Logger) (*Cache, error) {
 	return &Cache{db: db, logger: logger}, nil
 }
 
+// Close releases the underlying database connection.
+func (c *Cache) Close() error {
+	sqlDB, err := c.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
+}
+
 // UpsertEpochInfo idempotently inserts or updates a Koios epoch info row.
 func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 	return c.db.Clauses(clause.OnConflict{
@@ -167,8 +175,7 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 			{Name: "epoch"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"active_stake", "pool_cnt", "delegator_cnt",
-			"fees", "total_rewards", "epoch_end_time", "fetched_at",
+			"active_stake", "fees", "total_rewards", "epoch_end_time", "fetched_at",
 		}),
 	}).Create(&info).Error
 }

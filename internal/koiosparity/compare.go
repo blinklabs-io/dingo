@@ -141,36 +141,6 @@ func CompareEpochAggregates(
 		})
 	}
 
-	// pool_count
-	dingoPoolCnt := strconv.FormatUint(dingoEpoch.PoolCount, 10)
-	koiosPoolCnt := strconv.Itoa(koios.PoolCnt)
-	if dingoPoolCnt != koiosPoolCnt {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "pool_count",
-			DingoValue: dingoPoolCnt,
-			KoiosValue: koiosPoolCnt,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
-	}
-
-	// delegator_count
-	dingoDelegCnt := strconv.FormatUint(dingoEpoch.DelegatorCount, 10)
-	koiosDelegCnt := strconv.Itoa(koios.DelegatorCnt)
-	if dingoDelegCnt != koiosDelegCnt {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "delegator_count",
-			DingoValue: dingoDelegCnt,
-			KoiosValue: koiosDelegCnt,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
-	}
-
 	return out
 }
 
