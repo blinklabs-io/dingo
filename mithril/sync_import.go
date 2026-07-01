@@ -33,6 +33,11 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
+const (
+	mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+	mithrilLedgerHashSyncKey = "mithril_ledger_hash"
+)
+
 // epochLengthFromConfig returns an EpochLengthFunc that resolves
 // era parameters from the Cardano node config.
 func epochLengthFromConfig(
@@ -89,6 +94,7 @@ func updateMithrilReadyState(
 	logger *slog.Logger,
 	loadResult *node.LoadBlobsResult,
 	ledgerStateSlot uint64,
+	ledgerStateHash []byte,
 	syncStatus string,
 	clearSyncState bool,
 ) error {
@@ -128,8 +134,10 @@ func updateMithrilReadyState(
 	// (no UTxO tracking), so chainsync replay must skip them too.
 	// Fall back to the snapshot slot when no gap blocks were fetched.
 	trustBoundarySlot := ledgerStateSlot
+	trustBoundaryHash := ledgerStateHash
 	if len(recentBlocks) > 0 {
 		trustBoundarySlot = recentBlocks[0].Slot
+		trustBoundaryHash = recentBlocks[0].Hash
 	}
 
 	txn := db.MetadataTxn(true)
@@ -148,12 +156,32 @@ func updateMithrilReadyState(
 			}
 		}
 		if err := db.SetSyncState(
-			"mithril_ledger_slot",
+			mithrilLedgerSlotSyncKey,
 			strconv.FormatUint(trustBoundarySlot, 10),
 			txn,
 		); err != nil {
 			return fmt.Errorf(
 				"recording mithril ledger slot: %w", err,
+			)
+		}
+		if len(trustBoundaryHash) > 0 {
+			if err := db.SetSyncState(
+				mithrilLedgerHashSyncKey,
+				hex.EncodeToString(trustBoundaryHash),
+				txn,
+			); err != nil {
+				return fmt.Errorf(
+					"recording mithril ledger hash: %w",
+					err,
+				)
+			}
+		} else if err := db.DeleteSyncState(
+			mithrilLedgerHashSyncKey,
+			txn,
+		); err != nil {
+			return fmt.Errorf(
+				"clearing mithril ledger hash: %w",
+				err,
 			)
 		}
 		return nil

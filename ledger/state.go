@@ -67,6 +67,8 @@ const (
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
 	firstBlockIndex              = 1
+	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
+	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 )
 
 type metadataDbReader interface {
@@ -542,6 +544,7 @@ type LedgerState struct {
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery             *atTipRecoveryAttempt
 	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq          uint64
 	lastLocalRollbackPoint        ocommon.Point
 
@@ -713,37 +716,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
 	}
 
-	// Read Mithril ledger state slot if present. Blocks at or below
-	// this slot were verified by the Mithril certificate chain during
-	// import and must not be re-validated during chainsync replay.
-	if mithrilSlotStr, err := ls.db.GetSyncState(
-		"mithril_ledger_slot", nil,
-	); err != nil {
-		ls.config.Logger.Warn(
-			"failed to read Mithril trust boundary from database",
-			"component", "ledger",
-			"error", err,
-		)
-	} else if mithrilSlotStr != "" {
-		mls, parseErr := strconv.ParseUint(
-			mithrilSlotStr, 10, 64,
-		)
-		if parseErr != nil {
-			ls.config.Logger.Warn(
-				"malformed mithril_ledger_slot value, ignoring",
-				"component", "ledger",
-				"value", mithrilSlotStr,
-				"error", parseErr,
-			)
-		} else {
-			ls.mithrilLedgerSlot = mls
-			ls.config.Logger.Info(
-				"loaded Mithril trust boundary",
-				"component", "ledger",
-				"mithril_ledger_slot", mls,
-			)
-		}
-	}
+	ls.loadMithrilTrustBoundary()
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -851,6 +824,76 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		go ls.ledgerProcessBlocks(ctx)
 	}
 	return nil
+}
+
+func (ls *LedgerState) loadMithrilTrustBoundary() {
+	// Read Mithril ledger state point if present. Blocks at or below
+	// this point were verified by the Mithril certificate chain during
+	// import and must not be re-validated during chainsync replay.
+	mithrilSlotStr, err := ls.db.GetSyncState(
+		mithrilLedgerSlotSyncKey,
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read Mithril trust boundary from database",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	if mithrilSlotStr == "" {
+		return
+	}
+	mls, parseErr := strconv.ParseUint(mithrilSlotStr, 10, 64)
+	if parseErr != nil {
+		ls.config.Logger.Warn(
+			"malformed mithril_ledger_slot value, ignoring",
+			"component", "ledger",
+			"value", mithrilSlotStr,
+			"error", parseErr,
+		)
+		return
+	}
+
+	ls.mithrilLedgerSlot = mls
+	hashStr, err := ls.db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read Mithril trust boundary hash from database",
+			"component", "ledger",
+			"mithril_ledger_slot", mls,
+			"error", err,
+		)
+		return
+	}
+	if hashStr != "" {
+		hash, decodeErr := hex.DecodeString(hashStr)
+		if decodeErr != nil || len(hash) != lcommon.Blake2b256Size {
+			ls.config.Logger.Warn(
+				"malformed mithril_ledger_hash value, ignoring hash",
+				"component", "ledger",
+				"mithril_ledger_slot", mls,
+				"value", hashStr,
+				"error", decodeErr,
+			)
+		} else {
+			ls.mithrilLedgerHash = hash
+		}
+	}
+
+	attrs := []any{
+		"component", "ledger",
+		"mithril_ledger_slot", mls,
+	}
+	if len(ls.mithrilLedgerHash) > 0 {
+		attrs = append(
+			attrs,
+			"mithril_ledger_hash",
+			hex.EncodeToString(ls.mithrilLedgerHash),
+		)
+	}
+	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
@@ -5076,7 +5119,7 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 	points []ocommon.Point,
 	count int,
 ) []ocommon.Point {
-	if count <= 0 || len(points) == 0 {
+	if count <= 0 {
 		return points
 	}
 	point, ok := ls.mithrilTrustBoundaryPoint()
@@ -5116,10 +5159,17 @@ func (ls *LedgerState) mithrilTrustBoundaryPoint() (ocommon.Point, bool) {
 	}
 	ls.RLock()
 	boundarySlot := ls.mithrilLedgerSlot
+	boundaryHash := append([]byte(nil), ls.mithrilLedgerHash...)
 	currentTip := ls.currentTip
 	ls.RUnlock()
 	if boundarySlot == 0 || boundarySlot == ^uint64(0) {
 		return ocommon.Point{}, false
+	}
+	if len(boundaryHash) > 0 {
+		if len(boundaryHash) != lcommon.Blake2b256Size {
+			return ocommon.Point{}, false
+		}
+		return ocommon.NewPoint(boundarySlot, boundaryHash), true
 	}
 	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
 		return ocommon.Point{}, false

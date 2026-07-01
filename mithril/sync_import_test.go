@@ -15,6 +15,8 @@
 package mithril
 
 import (
+	"bytes"
+	"encoding/hex"
 	"io"
 	"log/slog"
 	"testing"
@@ -111,4 +113,89 @@ func TestEnsureMithrilBackfillCheckpointReopensCompleted(t *testing.T) {
 	require.False(t, cp.Completed)
 	require.Equal(t, startedAt.UnixNano(), cp.StartedAt.UnixNano())
 	require.True(t, cp.UpdatedAt.After(startedAt))
+}
+
+func TestUpdateMithrilReadyStateStoresTrustBoundaryFromRecentTip(
+	t *testing.T,
+) {
+	db := newMithrilTestDB(t)
+	tipHash := bytes.Repeat([]byte{0x11}, 32)
+	ledgerStateHash := bytes.Repeat([]byte{0x22}, 32)
+	require.NoError(t, db.BlockCreate(models.Block{
+		ID:     1,
+		Slot:   42,
+		Hash:   tipHash,
+		Number: 1,
+		Type:   1,
+		Cbor:   []byte{0x80},
+	}, nil))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "42", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(tipHash), hash)
+}
+
+func TestUpdateMithrilReadyStateStoresTrustBoundaryFromLedgerState(
+	t *testing.T,
+) {
+	db := newMithrilTestDB(t)
+	ledgerStateHash := bytes.Repeat([]byte{0x33}, 32)
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		ledgerStateHash,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "30", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, hex.EncodeToString(ledgerStateHash), hash)
+}
+
+func TestUpdateMithrilReadyStateClearsStaleTrustBoundaryHash(
+	t *testing.T,
+) {
+	db := newMithrilTestDB(t)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey,
+		hex.EncodeToString(bytes.Repeat([]byte{0x44}, 32)),
+		nil,
+	))
+
+	require.NoError(t, updateMithrilReadyState(
+		db,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nil,
+		30,
+		nil,
+		"",
+		true,
+	))
+
+	slot, err := db.GetSyncState(mithrilLedgerSlotSyncKey, nil)
+	require.NoError(t, err)
+	require.Equal(t, "30", slot)
+	hash, err := db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	require.NoError(t, err)
+	require.Empty(t, hash)
 }
