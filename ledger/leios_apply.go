@@ -122,14 +122,14 @@ func (ls *LedgerState) applyEndorserBlock(
 		bodyCbors = append(bodyCbors, []byte(elems[0]))
 	}
 
-	// Deduplicate against the ledger. The Leios prototype re-includes
-	// unconfirmed mempool transactions in successive endorser blocks, so a
-	// transaction here may already have been applied by an earlier endorser
-	// block in this batch (visible through the open txn's read-your-writes) or
-	// by a committed block. Re-applying it would double-spend its inputs and
+	// Deduplicate against the ledger and within this endorser block. The
+	// Leios prototype re-includes unconfirmed mempool transactions in
+	// successive endorser blocks, so a transaction here may already have been
+	// applied by an earlier endorser block in this batch (visible through the
+	// open txn's read-your-writes), by a committed block, or repeated in this
+	// raw transaction list. Re-applying it would double-spend its inputs and
 	// wedge the ledger in a permanent "UTxO already spent" retry loop
-	// (issue #2699), so drop any transaction already recorded before building
-	// the blob and delta.
+	// (issue #2699), so drop duplicates before building the blob and delta.
 	if len(txs) > 0 {
 		hashes := make([][]byte, len(txs))
 		for i, tx := range txs {
@@ -139,23 +139,27 @@ func (ls *LedgerState) applyEndorserBlock(
 		if err != nil {
 			return 0, fmt.Errorf("dedup endorser transactions: %w", err)
 		}
-		if len(existing) > 0 {
-			skip := make(map[string]struct{}, len(existing))
-			for _, h := range existing {
-				skip[string(h)] = struct{}{}
-			}
-			keptTxs := txs[:0]
-			keptBodies := bodyCbors[:0]
-			for i, tx := range txs {
-				if _, dup := skip[string(tx.Hash().Bytes())]; dup {
-					continue
-				}
-				keptTxs = append(keptTxs, tx)
-				keptBodies = append(keptBodies, bodyCbors[i])
-			}
-			txs = keptTxs
-			bodyCbors = keptBodies
+		skip := make(map[string]struct{}, len(existing))
+		for _, h := range existing {
+			skip[string(h)] = struct{}{}
 		}
+		seen := make(map[string]struct{}, len(txs))
+		keptTxs := txs[:0]
+		keptBodies := bodyCbors[:0]
+		for i, tx := range txs {
+			hashKey := string(tx.Hash().Bytes())
+			if _, dup := skip[hashKey]; dup {
+				continue
+			}
+			if _, dup := seen[hashKey]; dup {
+				continue
+			}
+			seen[hashKey] = struct{}{}
+			keptTxs = append(keptTxs, tx)
+			keptBodies = append(keptBodies, bodyCbors[i])
+		}
+		txs = keptTxs
+		bodyCbors = keptBodies
 	}
 	if len(txs) == 0 {
 		// Every transaction was already applied by an earlier endorser block
