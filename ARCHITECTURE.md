@@ -1404,7 +1404,7 @@ process; it is a standalone binary built from `cmd/koios-parity/`.
 internal/koiosparity/      # shared library
   cache.go                 # SQLite cache schema + CRUD (GORM, glebarez/sqlite)
   koios_client.go          # Koios v1 REST client with pagination + retry
-  blockfrost_client.go     # Dingo Blockfrost API client
+  dingo_db.go              # read-only GORM access to Dingo's metadata database
   compare.go               # field-level comparison, Mismatch category constants
   fetch.go                 # Koios fetch orchestration (worker pool per epoch)
   check.go                 # parity check orchestration (pool-level comparison)
@@ -1419,13 +1419,21 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 - **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
   via the `fetch` subcommand. The cache holds `koios_epoch_info` and
   `koios_pool_epoch` rows per closed epoch.
-- **Dingo:** queried live via Dingo's Blockfrost-compatible API (`--dingo-api`)
-  during the `check` phase. The `check` command does not open SQLite directly.
+- **Dingo:** read directly from Dingo's metadata database during the `check`
+  phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
+  supported via `--metadata-plugin` (defaulting to `sqlite`):
+  - `sqlite`: opens `{data-dir}/metadata.sqlite` in read-only WAL mode
+  - `postgres` / `mysql`: connects via `--metadata-dsn` or `DINGO_METADATA_DSN`
+
+  Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
+  `epoch_summary` (total active stake, pool count, delegator count),
+  `reward_ada_pots` (epoch fees).
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
-`dingo_api_missing` (endpoint not yet implemented), `dingo_api_error`,
-`reference_lag`. Results are stored in `check_mismatches` and
-summarised in `check_epoch_status`.
+`dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`
+(DB query failed), `reference_lag` (epoch closed within --grace-hours; absence
+may be transient). Results are stored in `check_mismatches` and summarised in
+`check_epoch_status`.
 
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
 

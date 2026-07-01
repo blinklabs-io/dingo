@@ -82,8 +82,8 @@ func CompareEpochAggregates(
 
 	if dingoEpoch == nil {
 		cat := CategoryDBMissing
-		if graceHours > 0 && koios != nil &&
-			now.Sub(koios.FetchedAt) < time.Duration(graceHours)*time.Hour {
+		if graceHours > 0 && koios != nil && !koios.EpochEndTime.IsZero() &&
+			now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
 			cat = CategoryReferenceLag
 		}
 		out = append(out, CheckMismatch{
@@ -160,7 +160,8 @@ func CompareEpochAggregates(
 // ComparePoolEpoch compares per-pool reward-input fields from Dingo's database
 // against the Koios reference row for (pool, epoch).
 // dingoPool is nil when the pool has no reward_pool_input row for this epoch.
-// graceHours: if the Koios pool row was fetched within this many hours and
+// epochEndTime is the actual epoch close time (from KoiosEpochInfo.EpochEndTime);
+// zero means unknown. graceHours: if the epoch closed within this many hours and
 // Dingo has no reward_pool_input row, emit reference_lag instead of pool_only_koios.
 func ComparePoolEpoch(
 	network string,
@@ -169,6 +170,7 @@ func ComparePoolEpoch(
 	dingoPool *DingoPoolEpochData,
 	now time.Time,
 	graceHours int,
+	epochEndTime time.Time,
 ) []CheckMismatch {
 	var out []CheckMismatch
 
@@ -177,7 +179,8 @@ func ComparePoolEpoch(
 		// Within the grace window the absence may mean Dingo hasn't finished
 		// computing rewards for this epoch yet — flag as reference_lag, not FAIL.
 		cat := CategoryPoolOnlyKoios
-		if graceHours > 0 && now.Sub(koiosPool.FetchedAt) < time.Duration(graceHours)*time.Hour {
+		if graceHours > 0 && !epochEndTime.IsZero() &&
+			now.Sub(epochEndTime) < time.Duration(graceHours)*time.Hour {
 			cat = CategoryReferenceLag
 		}
 		out = append(out, CheckMismatch{
