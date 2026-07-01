@@ -111,8 +111,25 @@ func CompareEpochAggregates(
 		})
 	}
 
-	// fees — only compared when Dingo has a reward_ada_pots row.
-	if dingoEpoch.Fees != "" && dingoEpoch.Fees != koios.Fees {
+	// fees — sourced from reward_ada_pots, which may not be present for every epoch.
+	if dingoEpoch.Fees == "" {
+		// No reward_ada_pots row: the epoch should have one; flag it explicitly
+		// so the epoch is never silently classified as PASS without fees checked.
+		cat := CategoryDBMissing
+		if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
+			now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
+			cat = CategoryReferenceLag
+		}
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			Field:      "epoch_fees",
+			DingoValue: "",
+			KoiosValue: koios.Fees,
+			Category:   cat,
+			CheckedAt:  now,
+		})
+	} else if dingoEpoch.Fees != koios.Fees {
 		out = append(out, CheckMismatch{
 			Network:    network,
 			Epoch:      epoch,

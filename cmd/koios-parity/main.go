@@ -22,8 +22,8 @@
 //
 // Three metadata backends are supported (matching Dingo's --metadata-plugin):
 //   - sqlite (default): opens {data-dir}/metadata.sqlite in read-only WAL mode
-//   - postgres: connects via --metadata-dsn or DINGO_METADATA_DSN
-//   - mysql:    connects via --metadata-dsn or DINGO_METADATA_DSN
+//   - postgres: connects via --metadata-dsn or DINGO_DATABASE_METADATA_POSTGRES_DSN
+//   - mysql:    connects via --metadata-dsn or DINGO_DATABASE_METADATA_MYSQL_DSN
 package main
 
 import (
@@ -64,10 +64,12 @@ Data sources:
   Dingo:     Node's metadata.sqlite read directly (reward_pool_input, epoch_summary)
 
 Environment:
-  DINGO_DATA_DIR     path to Dingo data directory (default: .dingo)
-  CARDANO_NETWORK    cardano network name (preview or preprod)
-  KOIOS_NETWORK      fallback network name env var
-  KOIOS_API_KEY      Koios Bearer token for rate-limited access`,
+  DINGO_DATA_DIR                       path to Dingo data directory (default: .dingo)
+  DINGO_DATABASE_METADATA_PLUGIN       metadata backend: sqlite (default), postgres, mysql
+  DINGO_DATABASE_METADATA_POSTGRES_DSN postgres DSN (when plugin=postgres)
+  DINGO_DATABASE_METADATA_MYSQL_DSN    mysql DSN    (when plugin=mysql)
+  CARDANO_NETWORK                      cardano network name (preview or preprod)
+  KOIOS_API_KEY                        Koios Bearer token for rate-limited access`,
 		RunE: runCommand,
 	}
 
@@ -168,19 +170,41 @@ func addDingoDBFlags(cmd *cobra.Command) {
 
 // resolveDingoDB returns the DingoDBConfig for cmd.
 // Plugin defaults to "sqlite"; DataDir is always set for cache-path resolution.
+//
+// Env var priority (highest first):
+//  1. --metadata-plugin / --metadata-dsn flags
+//  2. DINGO_DATABASE_METADATA_PLUGIN  (Dingo's canonical env var)
+//  3. DINGO_METADATA_PLUGIN           (koios-parity override, for non-standard setups)
+//
+// DSN priority after plugin is known:
+//  1. --metadata-dsn flag
+//  2. DINGO_DATABASE_METADATA_POSTGRES_DSN / DINGO_DATABASE_METADATA_MYSQL_DSN
+//     (Dingo's per-plugin DSN env vars, consumed by the real Dingo process)
+//  3. DINGO_METADATA_DSN (generic override)
 func resolveDingoDB(cmd *cobra.Command) koiosparity.DingoDBConfig {
 	plugin, _ := cmd.Flags().GetString("metadata-plugin")
 	dsn, _ := cmd.Flags().GetString("metadata-dsn")
+
 	if plugin == "" {
-		if v := os.Getenv("DINGO_METADATA_PLUGIN"); v != "" {
+		if v := os.Getenv("DINGO_DATABASE_METADATA_PLUGIN"); v != "" {
+			plugin = v
+		} else if v := os.Getenv("DINGO_METADATA_PLUGIN"); v != "" {
 			plugin = v
 		}
 	}
+
 	if dsn == "" {
-		if v := os.Getenv("DINGO_METADATA_DSN"); v != "" {
-			dsn = v
+		switch plugin {
+		case "postgres":
+			dsn = os.Getenv("DINGO_DATABASE_METADATA_POSTGRES_DSN")
+		case "mysql":
+			dsn = os.Getenv("DINGO_DATABASE_METADATA_MYSQL_DSN")
+		}
+		if dsn == "" {
+			dsn = os.Getenv("DINGO_METADATA_DSN")
 		}
 	}
+
 	return koiosparity.DingoDBConfig{
 		Plugin:  plugin,
 		DataDir: resolveDingoDataDir(),
