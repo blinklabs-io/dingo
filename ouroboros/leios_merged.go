@@ -276,7 +276,7 @@ func (o *Ouroboros) loadLeiosEBFromDB(hash []byte) (*leiosEndorserBlockData, boo
 	if err != nil {
 		// ErrBlobKeyNotFound is the normal "not stored" path; anything else
 		// is worth surfacing at Debug for diagnostics.
-		if err != types.ErrBlobKeyNotFound {
+		if !errors.Is(err, types.ErrBlobKeyNotFound) {
 			o.config.Logger.Debug(
 				"failed to load leios EB manifest from blob store",
 				"component", "network",
