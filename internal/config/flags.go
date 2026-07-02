@@ -61,6 +61,8 @@ var flagSpecs = []flagSpec{
 	stringFlag("ImmutableDbPath", "immutable-db-path", "", "path to ImmutableDB for load mode"),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
+	boolFlag("Tracing", "tracing", "enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)"),
+	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
 	// Networking
 	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", ValidateNetworkName),
