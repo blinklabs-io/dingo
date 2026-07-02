@@ -37,6 +37,7 @@ const (
 	ChainsyncResyncReasonForkResolutionExceedsK       = "fork resolution exceeds security parameter K"
 	ChainsyncResyncReasonLocalLedgerRollback          = "local ledger rollback"
 	ChainsyncResyncReasonLiveTxValidationRecovery     = "live tx validation recovery"
+	ChainsyncResyncReasonChainSwitchCursorAhead       = "chain switch cursor ahead of local tip"
 	ChainsyncResyncReasonBlockfetchTimeoutRetryFailed = "blockfetch timeout retry failed on all available connections"
 )
 

@@ -139,6 +139,7 @@ func chainsyncResyncRequiresFreshConnection(reason string) bool {
 		event.ChainsyncResyncReasonRollbackNotFound,
 		event.ChainsyncResyncReasonPersistentFork,
 		event.ChainsyncResyncReasonLiveTxValidationRecovery,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
 		event.ChainsyncResyncReasonRollbackExceedsK,
 		event.ChainsyncResyncReasonRollbackExceedsMithril,
 		event.ChainsyncResyncReasonPeerTipBehindMithril,
