@@ -2973,6 +2973,68 @@ func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
 			}
 		})
 
+		t.Run("synthetic retirement supersedes same slot registration", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			tx1 := models.Transaction{ID: 1, Slot: 1000, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+			regCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     1,
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: 200,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+			poolRet := models.PoolRetirement{
+				PoolID:      pool.ID,
+				PoolKeyHash: poolHash,
+				AddedSlot:   1000,
+				Epoch:       10,
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 0 {
+				t.Errorf("expected 0 hashes (synthetic retirement wins same-slot ordering), got %d", len(hashes))
+			}
+		})
+
 		// Test case 2: Retirement has higher cert_index (came after registration)
 		// Pool should be inactive (retirement epoch has passed)
 		t.Run("retirement after registration in same slot", func(t *testing.T) {

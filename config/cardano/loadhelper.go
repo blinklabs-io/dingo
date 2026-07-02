@@ -18,6 +18,8 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 )
 
 // LoadCardanoNodeConfigWithFallback tries to load config from file,
@@ -38,8 +40,10 @@ func LoadCardanoNodeConfigWithFallback(
 		)
 	}
 
-	// File doesn't exist, try embedded config
-	cfg, embedErr := NewCardanoNodeConfigFromEmbedFS(embedFS, cfgPath)
+	// File doesn't exist, try embedded config. embed.FS always uses slash
+	// paths, while callers may have built cfgPath with filepath.Join.
+	embedPath := strings.ReplaceAll(filepath.ToSlash(cfgPath), "\\", "/")
+	cfg, embedErr := NewCardanoNodeConfigFromEmbedFS(embedFS, embedPath)
 	if embedErr != nil {
 		return nil, fmt.Errorf(
 			"config file %q not found and no embedded config available for network %q: %w",

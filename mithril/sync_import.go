@@ -200,6 +200,7 @@ func importLedgerState(
 	logger *slog.Logger,
 	nodeCfg *cardano.CardanoNodeConfig,
 	result *BootstrapResult,
+	reconcile bool,
 	onLedger func(ledgerstate.ImportProgress),
 ) (ledgerStateSlot uint64, ledgerStateHash []byte, err error) {
 	// Search for ledger state: prefer ancillary dir, fall back to
@@ -280,9 +281,11 @@ func importLedgerState(
 		"epoch_nonce", nonceHex,
 	)
 
-	// Build import key for resume tracking
+	// Build import key for resume tracking. A catch-up reconcile must run the
+	// full import pass (so its snapshot key set is complete), so resume is
+	// disabled by leaving the import key empty.
 	importKey := ""
-	if result.Snapshot != nil && result.Snapshot.Digest != "" {
+	if !reconcile && result.Snapshot != nil && result.Snapshot.Digest != "" {
 		digest := result.Snapshot.Digest
 		if len(digest) > 16 {
 			digest = digest[:16]
@@ -302,6 +305,7 @@ func importLedgerState(
 			State:     state,
 			Logger:    logger,
 			ImportKey: importKey,
+			Reconcile: reconcile,
 			EpochLength: epochLengthFromConfig(
 				nodeCfg,
 			),

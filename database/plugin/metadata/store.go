@@ -440,6 +440,35 @@ type MetadataStore interface {
 	// GetActiveDreps retrieves all active DReps.
 	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
+	// GetActiveAccountCredentials returns the stake credentials (tag + key) of
+	// every currently active account. Used by Mithril v2 catch-up
+	// reconciliation to find accounts absent from a newer snapshot's live set.
+	GetActiveAccountCredentials(
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
+	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+
+	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
+	// Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateDreps(types.Txn, []models.StakeCredentialRef) error
+
+	// RetirePools records a retirement at the given epoch (and added slot) for
+	// each supplied pool key hash, mirroring a retirement certificate. Used by
+	// Mithril v2 catch-up reconciliation to retire pools absent from a newer
+	// snapshot's active set; registrations are preserved. Key hashes that match
+	// no pool are ignored.
+	RetirePools(
+		txn types.Txn,
+		poolKeyHashes [][]byte,
+		epoch uint64,
+		addedSlot uint64,
+	) error
+
 	// GetPParams retrieves the latest protocol-parameters row at
 	// epoch <= the supplied epoch whose stored era_id matches the
 	// supplied era. The era filter is required: at era boundaries the
