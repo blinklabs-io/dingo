@@ -370,8 +370,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithShutdownTimeout(shutdownTimeout),
 			// Enable metrics with default prometheus registry
 			dingo.WithPrometheusRegistry(prometheus.DefaultRegisterer),
-			// TODO: make this configurable (#387)
-			// dingo.WithTracing(true),
+			dingo.WithTracing(cfg.Tracing),
+			dingo.WithTracingStdout(cfg.TracingStdout),
 			dingo.WithTopologyConfig(config.GetTopologyConfig()),
 			dingo.WithDatabaseWorkerPoolConfig(ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,

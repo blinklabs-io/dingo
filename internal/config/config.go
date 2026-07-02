@@ -382,9 +382,17 @@ type Config struct {
 	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
 	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
 	ValidateHistorical   bool     `yaml:"validateHistorical"                                               split_words:"true"`
-	RunMode              RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	StartEra             StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
-	ImmutableDbPath      string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
+	// collector listening, the OTLP exporter logs noisy connection errors.
+	// Spans are sent via OTLP HTTP; configure the destination with the
+	// standard OTEL_EXPORTER_OTLP_* env vars.
+	Tracing bool `yaml:"tracing" envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingStdout redirects spans to stdout instead of OTLP. Requires
+	// Tracing to also be enabled. Mostly useful for local debugging.
+	TracingStdout   bool     `yaml:"tracingStdout" envconfig:"DINGO_TRACING_STDOUT"`
+	RunMode         RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	StartEra        StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
+	ImmutableDbPath string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -704,6 +712,8 @@ var globalConfig = &Config{
 	SocketPath:           "dingo.socket",
 	IntersectTip:         false,
 	ValidateHistorical:   false,
+	Tracing:              false,
+	TracingStdout:        false,
 	Network:              "preview",
 	NetworkMagic:         0,
 	MetricsPort:          12798,

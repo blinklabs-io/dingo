@@ -161,6 +161,19 @@ metricsPort: 12798
 # CLI: --debug-port  Env: DINGO_DEBUG_PORT
 debugPort: 0
 
+# Enable OpenTelemetry tracing. Disabled by default: with no collector
+# listening, the OTLP exporter logs noisy connection errors. When enabled,
+# spans are sent via OTLP HTTP; configure the destination with the standard
+# OTEL_EXPORTER_OTLP_* env vars documented for
+# go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp.
+# CLI: --tracing  Env: DINGO_TRACING_ENABLED
+tracing: false
+
+# Export traces to stdout instead of OTLP. Requires tracing to also be
+# enabled. Mostly useful for local debugging.
+# CLI: --tracing-stdout  Env: DINGO_TRACING_STDOUT
+tracingStdout: false
+
 # Internal/private address to bind for listening for Ouroboros NtC
 privateBindAddr: "127.0.0.1"
 
