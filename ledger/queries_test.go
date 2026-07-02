@@ -1620,3 +1620,42 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		babbageEndTime.String(), conwayStartTime.String(),
 	)
 }
+
+// TestQueryChainBlockNoAtGenesis verifies origin is encoded as WithOrigin [0].
+func TestQueryChainBlockNoAtGenesis(t *testing.T) {
+	ls := &LedgerState{}
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// WithOrigin at genesis: [0]
+	assert.Equal(t, []any{0}, result)
+}
+
+// TestQueryChainBlockNoAtBlock verifies a non-origin tip is encoded as [1, blockNo].
+func TestQueryChainBlockNoAtBlock(t *testing.T) {
+	ls := &LedgerState{}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.Point{
+			Hash: []byte("tip-hash"),
+		},
+		BlockNumber: 12345,
+	}
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// WithOrigin at block: [1, blockNo]
+	assert.Equal(t, []any{1, uint64(12345)}, result)
+}
+
+// TestQueryChainBlockNoAtFirstBlock verifies BlockNo 0 is not treated as origin.
+func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
+	ls := &LedgerState{}
+	ls.currentTip = ochainsync.Tip{
+		Point: ocommon.Point{
+			Hash: []byte("first-block-hash"),
+		},
+		BlockNumber: 0,
+	}
+	result, err := ls.queryChainBlockNo()
+	assert.NoError(t, err)
+	// Cardano block numbers are 0-indexed, so block 0 is not origin.
+	assert.Equal(t, []any{1, uint64(0)}, result)
+}
