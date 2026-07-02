@@ -537,7 +537,7 @@ func runMithrilSync(
 		CleanupAfterLoad:       cfg.Mithril.CleanupAfterLoad,
 		BlobPlugin:             cfg.BlobPlugin,
 		MetadataPlugin:         cfg.MetadataPlugin,
-		RunMode:                string(cfg.RunMode),
+		RunMode:                string(config.RunModeLoad),
 		BackfillBatchSize:      cfg.BackfillBatchSize,
 		DatabaseWorkers:        cfg.DatabaseWorkers,
 		Logger:                 logger,
