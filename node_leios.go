@@ -122,7 +122,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
 		Registry:        registry,
-		PromRegistry:    n.config.promRegistry,
+		PromRegistry:    n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios vote manager: %w", err)
@@ -132,7 +132,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
-	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
+	if n.config.LeiosVoteSigningKeyFile() != "" && !n.config.BlockProducer() {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",
 			"component", "node",
@@ -165,7 +165,7 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 			ledgerState: n.ledgerState,
 		},
 		Timing:       n.leiosPipelineTiming(),
-		PromRegistry: n.config.promRegistry,
+		PromRegistry: n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios pipeline manager: %w", err)

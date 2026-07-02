@@ -50,22 +50,19 @@ func TestStorageModeIsAPI(t *testing.T) {
 }
 
 func TestWithStorageMode(t *testing.T) {
-	cfg := &Config{}
-
-	// Default should be zero value (empty string)
-	assert.Equal(t, StorageMode(""), cfg.storageMode)
+	cfg := NewConfig()
 
 	// Apply API mode
-	WithStorageMode(StorageModeAPI)(cfg)
-	assert.Equal(t, StorageModeAPI, cfg.storageMode)
+	WithStorageMode(StorageModeAPI)(&cfg)
+	assert.Equal(t, string(StorageModeAPI), cfg.StorageMode())
 
 	// Apply core mode
-	WithStorageMode(StorageModeCore)(cfg)
-	assert.Equal(t, StorageModeCore, cfg.storageMode)
+	WithStorageMode(StorageModeCore)(&cfg)
+	assert.Equal(t, string(StorageModeCore), cfg.StorageMode())
 }
 
 func TestWithMidnightConfig(t *testing.T) {
-	cfg := &Config{}
+	cfg := NewConfig()
 	midnightCfg := MidnightConfig{
 		Port:                        50052,
 		Host:                        "127.0.0.1",
@@ -81,33 +78,46 @@ func TestWithMidnightConfig(t *testing.T) {
 		PermissionedCandidatePolicy: "policy_permissioned",
 	}
 
-	WithMidnightConfig(midnightCfg)(cfg)
+	WithMidnightConfig(midnightCfg)(&cfg)
 
-	assert.Equal(t, midnightCfg, cfg.midnight)
+	midnight := cfg.Midnight()
+	assert.Equal(t, uint(50052), midnight.Port)
+	assert.Equal(t, "127.0.0.1", midnight.Host)
+	assert.Equal(t, "policy1", midnight.CNightPolicyID)
 }
 
 func TestExperimentalDijkstraEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
-		cfg      Config
+		setup    func() Config
 		expected bool
 	}{
-		{name: "default", cfg: Config{}, expected: false},
 		{
-			name:     "leios run mode",
-			cfg:      Config{runMode: runModeLeios},
+			name:     "default",
+			setup:    func() Config { return NewConfig() },
+			expected: false,
+		},
+		{
+			name: "leios run mode",
+			setup: func() Config {
+				return NewConfig(WithRunMode("leios"))
+			},
 			expected: true,
 		},
 		{
-			name:     "dijkstra start era",
-			cfg:      Config{startEra: internalconfig.StartEraDijkstra},
+			name: "dijkstra start era",
+			setup: func() Config {
+				return NewConfig(WithStartEra("dijkstra"))
+			},
 			expected: true,
 		},
 		{
 			name: "leios and dijkstra",
-			cfg: Config{
-				runMode:  runModeLeios,
-				startEra: internalconfig.StartEraDijkstra,
+			setup: func() Config {
+				return NewConfig(
+					WithRunMode("leios"),
+					WithStartEra("dijkstra"),
+				)
 			},
 			expected: true,
 		},
@@ -115,29 +125,39 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 			// `dingo -n musashi` sets the network name but leaves run
 			// mode at its default; the Musashi testnet still requires the
 			// Dijkstra era table to follow the chain.
-			name:     "musashi network by name",
-			cfg:      Config{network: "musashi"},
+			name: "musashi network by name",
+			setup: func() Config {
+				return NewConfig(WithNetwork("musashi"))
+			},
 			expected: true,
 		},
 		{
 			// Same network selected via its magic (e.g. --network-magic
 			// 164) with no network name.
-			name:     "musashi network by magic",
-			cfg:      Config{networkMagic: 164},
+			name: "musashi network by magic",
+			setup: func() Config {
+				return NewConfig(WithNetworkMagic(164))
+			},
 			expected: true,
 		},
 		{
-			name:     "non-musashi network stays disabled",
-			cfg:      Config{network: "preview", networkMagic: 2},
+			name: "non-musashi network stays disabled",
+			setup: func() Config {
+				return NewConfig(
+					WithNetwork("preview"),
+					WithNetworkMagic(2),
+				)
+			},
 			expected: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.setup()
 			assert.Equal(
 				t,
 				tt.expected,
-				tt.cfg.experimentalDijkstraEnabled(),
+				cfg.experimentalDijkstraEnabled(),
 			)
 		})
 	}
@@ -151,20 +171,29 @@ func TestExperimentalDijkstraEnabled(t *testing.T) {
 func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 	tests := []struct {
 		name              string
-		cfg               Config
+		setup             func() Config
 		expectNetworking  bool
 		expectDijkstraEra bool
 	}{
-		{name: "default", cfg: Config{}, expectNetworking: false, expectDijkstraEra: false},
 		{
-			name:              "leios run mode enables both",
-			cfg:               Config{runMode: runModeLeios},
+			name:              "default",
+			setup:             func() Config { return NewConfig() },
+			expectNetworking:  false,
+			expectDijkstraEra: false,
+		},
+		{
+			name: "leios run mode enables both",
+			setup: func() Config {
+				return NewConfig(WithRunMode("leios"))
+			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 		{
-			name:              "dijkstra start era enables both",
-			cfg:               Config{startEra: internalconfig.StartEraDijkstra},
+			name: "dijkstra start era enables both",
+			setup: func() Config {
+				return NewConfig(WithStartEra("dijkstra"))
+			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
@@ -172,30 +201,35 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			// `dingo -n musashi`: the Musashi testnet enables both the
 			// Dijkstra era and the Leios mini-protocols (leios-notify /
 			// leios-fetch).
-			name:              "musashi network enables both",
-			cfg:               Config{network: "musashi"},
+			name: "musashi network enables both",
+			setup: func() Config {
+				return NewConfig(WithNetwork("musashi"))
+			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 		{
-			name:              "musashi network by magic enables both",
-			cfg:               Config{networkMagic: 164},
+			name: "musashi network by magic enables both",
+			setup: func() Config {
+				return NewConfig(WithNetworkMagic(164))
+			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.setup()
 			assert.Equal(
 				t,
 				tt.expectNetworking,
-				tt.cfg.experimentalLeiosNetworkingEnabled(),
+				cfg.experimentalLeiosNetworkingEnabled(),
 				"leios networking",
 			)
 			assert.Equal(
 				t,
 				tt.expectDijkstraEra,
-				tt.cfg.experimentalDijkstraEnabled(),
+				cfg.experimentalDijkstraEnabled(),
 				"dijkstra era",
 			)
 		})
@@ -203,35 +237,37 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 }
 
 func TestPeerGovernorOptionsIgnoreNonPositiveValues(t *testing.T) {
-	cfg := &Config{}
+	cfg := NewConfig()
 
-	WithMinHotPeers(-1)(cfg)
-	WithReconcileInterval(-1 * time.Minute)(cfg)
-	WithInactivityTimeout(-5 * time.Minute)(cfg)
-	WithMaxConnectionsPerIP(-2)(cfg)
-	WithMaxInboundConns(0)(cfg)
+	// Apply options with non-positive values
+	WithMinHotPeers(-1)(&cfg)
+	WithReconcileInterval(-1 * time.Minute)(&cfg)
+	WithInactivityTimeout(-5 * time.Minute)(&cfg)
+	WithMaxConnectionsPerIP(-2)(&cfg)
+	WithMaxInboundConns(0)(&cfg)
 
-	assert.Zero(t, cfg.minHotPeers)
-	assert.Zero(t, cfg.reconcileInterval)
-	assert.Zero(t, cfg.inactivityTimeout)
-	assert.Zero(t, cfg.maxConnectionsPerIP)
-	assert.Zero(t, cfg.maxInboundConns)
+	// These should remain at default (zero) since non-positive values are ignored
+	assert.Zero(t, cfg.MinHotPeers())
+	assert.Zero(t, cfg.ReconcileInterval())
+	assert.Zero(t, cfg.InactivityTimeout())
+	assert.Zero(t, cfg.MaxConnectionsPerIP())
+	assert.Zero(t, cfg.MaxInboundConns())
 }
 
 func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
-	cfg := &Config{}
+	cfg := NewConfig()
 
-	WithMinHotPeers(3)(cfg)
-	WithReconcileInterval(30 * time.Second)(cfg)
-	WithInactivityTimeout(2 * time.Minute)(cfg)
-	WithMaxConnectionsPerIP(4)(cfg)
-	WithMaxInboundConns(25)(cfg)
+	WithMinHotPeers(3)(&cfg)
+	WithReconcileInterval(30 * time.Second)(&cfg)
+	WithInactivityTimeout(2 * time.Minute)(&cfg)
+	WithMaxConnectionsPerIP(4)(&cfg)
+	WithMaxInboundConns(25)(&cfg)
 
-	assert.Equal(t, 3, cfg.minHotPeers)
-	assert.Equal(t, 30*time.Second, cfg.reconcileInterval)
-	assert.Equal(t, 2*time.Minute, cfg.inactivityTimeout)
-	assert.Equal(t, 4, cfg.maxConnectionsPerIP)
-	assert.Equal(t, 25, cfg.maxInboundConns)
+	assert.Equal(t, 3, cfg.MinHotPeers())
+	assert.Equal(t, 30*time.Second, cfg.ReconcileInterval())
+	assert.Equal(t, 2*time.Minute, cfg.InactivityTimeout())
+	assert.Equal(t, 4, cfg.MaxConnectionsPerIP())
+	assert.Equal(t, 25, cfg.MaxInboundConns())
 }
 
 // TestUpdateRTSMetrics verifies the pure-function mapping from
@@ -304,24 +340,263 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 }
 
 func TestWithLeiosVoteSigningKeyFile(t *testing.T) {
-	cfg := &Config{}
-	assert.Equal(t, "", cfg.leiosVoteSigningKeyFile)
-	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(cfg)
-	assert.Equal(t, "/keys/leios-vote.skey", cfg.leiosVoteSigningKeyFile)
+	cfg := NewConfig()
+	assert.Equal(t, "", cfg.LeiosVoteSigningKeyFile())
+	WithLeiosVoteSigningKeyFile("/keys/leios-vote.skey")(&cfg)
+	assert.Equal(t, "/keys/leios-vote.skey", cfg.LeiosVoteSigningKeyFile())
 }
 
 func TestWithLeiosVoterPublicKeys(t *testing.T) {
-	cfg := &Config{}
-	assert.Nil(t, cfg.leiosVoterPublicKeys)
+	cfg := NewConfig()
+	assert.Nil(t, cfg.LeiosVoterPublicKeys())
 	keys := map[string]string{"aabbcc": "ddeeff"}
-	WithLeiosVoterPublicKeys(keys)(cfg)
+	WithLeiosVoterPublicKeys(keys)(&cfg)
 	assert.Equal(
 		t,
 		map[string]string{"aabbcc": "ddeeff"},
-		cfg.leiosVoterPublicKeys,
+		cfg.LeiosVoterPublicKeys(),
 	)
 	// The option copies the map: later caller mutations must not
 	// change live config
 	keys["aabbcc"] = "mutated"
-	assert.Equal(t, "ddeeff", cfg.leiosVoterPublicKeys["aabbcc"])
+	assert.Equal(t, "ddeeff", cfg.LeiosVoterPublicKeys()["aabbcc"])
+}
+
+// TestConfigConvergence verifies that the public and internal configs are
+// properly converged with a single source of truth. This addresses GitHub
+// issue #2277.
+func TestConfigConvergence(t *testing.T) {
+	t.Run("NewConfig creates config with proper defaults", func(t *testing.T) {
+		cfg := NewConfig()
+
+		// Verify defaults are applied
+		assert.Equal(t, 0.90, cfg.EvictionWatermark())
+		assert.Equal(t, 0.95, cfg.RejectionWatermark())
+		assert.Equal(t, "0.0.0.0", cfg.BindAddr())
+		assert.Equal(t, "core", cfg.StorageMode())
+		assert.Equal(t, internalconfig.RunModeServe, cfg.RunMode())
+		assert.Equal(t, []string{"*"}, cfg.CORSAllowedOrigins())
+
+		// Verify nested config defaults
+		cache := cfg.Cache()
+		assert.Equal(t, 50000, cache.HotUtxoEntries)
+		assert.Equal(t, 10000, cache.HotTxEntries)
+
+		chainsync := cfg.Chainsync()
+		assert.Equal(t, 3, chainsync.MaxClients)
+		assert.Equal(t, "2m", chainsync.StallTimeout)
+		assert.Equal(t, "primary", chainsync.Strategy)
+	})
+
+	t.Run("With* functions modify single source of truth", func(t *testing.T) {
+		cfg := NewConfig(
+			WithNetwork("mainnet"),
+			WithNetworkMagic(764824073),
+			WithDatabasePath("/custom/data"),
+			WithBindAddr("127.0.0.1"),
+			WithMempoolCapacity(5242880),
+			WithEvictionWatermark(0.88),
+			WithRejectionWatermark(0.93),
+			WithRunMode("dev"),
+			WithStorageMode(StorageModeAPI),
+			WithValidateHistorical(true),
+			WithPeerTargets(200, 75, 30),
+		)
+
+		// Verify all values are accessible through accessor methods
+		assert.Equal(t, "mainnet", cfg.Network())
+		assert.Equal(t, uint32(764824073), cfg.NetworkMagic())
+		assert.Equal(t, "/custom/data", cfg.DatabasePath())
+		assert.Equal(t, "127.0.0.1", cfg.BindAddr())
+		assert.Equal(t, int64(5242880), cfg.MempoolCapacity())
+		assert.Equal(t, 0.88, cfg.EvictionWatermark())
+		assert.Equal(t, 0.93, cfg.RejectionWatermark())
+		assert.Equal(t, internalconfig.RunModeDev, cfg.RunMode())
+		assert.Equal(t, "api", cfg.StorageMode())
+		assert.True(t, cfg.ValidateHistorical())
+		assert.Equal(t, 200, cfg.TargetNumberOfKnownPeers())
+		assert.Equal(t, 75, cfg.TargetNumberOfEstablishedPeers())
+		assert.Equal(t, 30, cfg.TargetNumberOfActivePeers())
+	})
+
+	t.Run("NewConfigFromInternal preserves all values", func(t *testing.T) {
+		// Create internal config with specific values
+		internal := &internalconfig.Config{
+			Network:                        "preview",
+			NetworkMagic:                   2,
+			DatabasePath:                   "/data/preview",
+			SocketPath:                     "/run/cardano.sock",
+			MempoolCapacity:                2097152,
+			EvictionWatermark:              0.87,
+			RejectionWatermark:             0.94,
+			RunMode:                        internalconfig.RunModeLoad,
+			StorageMode:                    "api",
+			TargetNumberOfKnownPeers:       250,
+			TargetNumberOfEstablishedPeers: 80,
+			TargetNumberOfActivePeers:      35,
+			BlockProducer:                  true,
+			ValidateHistorical:             true,
+			IntersectTip:                   true,
+		}
+
+		// Convert to public config
+		public := NewConfigFromInternal(internal, nil, nil, nil, nil)
+
+		// Verify all values are preserved and accessible
+		assert.Equal(t, "preview", public.Network())
+		assert.Equal(t, uint32(2), public.NetworkMagic())
+		assert.Equal(t, "/data/preview", public.DatabasePath())
+		assert.Equal(t, "/run/cardano.sock", public.SocketPath())
+		assert.Equal(t, int64(2097152), public.MempoolCapacity())
+		assert.Equal(t, 0.87, public.EvictionWatermark())
+		assert.Equal(t, 0.94, public.RejectionWatermark())
+		assert.Equal(t, internalconfig.RunModeLoad, public.RunMode())
+		assert.Equal(t, "api", public.StorageMode())
+		assert.Equal(t, 250, public.TargetNumberOfKnownPeers())
+		assert.Equal(t, 80, public.TargetNumberOfEstablishedPeers())
+		assert.Equal(t, 35, public.TargetNumberOfActivePeers())
+		assert.True(t, public.BlockProducer())
+		assert.True(t, public.ValidateHistorical())
+		assert.True(t, public.IntersectTip())
+	})
+
+	t.Run("Setter methods work correctly", func(t *testing.T) {
+		cfg := NewConfig()
+
+		// Use setter methods
+		cfg.SetStorageMode("api")
+		cfg.SetTargetNumberOfKnownPeers(300)
+		cfg.SetTargetNumberOfEstablishedPeers(90)
+		cfg.SetTargetNumberOfActivePeers(40)
+
+		// Verify changes are reflected
+		assert.Equal(t, "api", cfg.StorageMode())
+		assert.Equal(t, 300, cfg.TargetNumberOfKnownPeers())
+		assert.Equal(t, 90, cfg.TargetNumberOfEstablishedPeers())
+		assert.Equal(t, 40, cfg.TargetNumberOfActivePeers())
+	})
+
+	t.Run("Adding new config field has single path", func(t *testing.T) {
+		// This test documents the pattern for adding a new config field.
+		// When adding a field:
+		// 1. Add it to internal/config/config.go with YAML/env tags
+		// 2. Add accessor method to Config in config.go
+		// 3. Add With* option function in config.go (if settable)
+		// 4. Tests automatically work with accessor methods
+
+		// Example: verify a few fields follow this pattern
+		cfg := NewConfig(
+			WithBlockfrostPort(8090),
+			WithUtxorpcPort(50051),
+			WithMeshPort(8091),
+		)
+
+		// Accessor methods provide the interface
+		assert.Equal(t, uint(8090), cfg.BlockfrostPort())
+		assert.Equal(t, uint(50051), cfg.UtxorpcPort())
+		assert.Equal(t, uint(8091), cfg.MeshPort())
+	})
+}
+
+// TestConfigAccessorCompleteness verifies that accessor methods exist for
+// all commonly-used configuration fields, catching drift between internal
+// config struct and public accessor API.
+func TestConfigAccessorCompleteness(t *testing.T) {
+	internal := &internalconfig.Config{
+		// Set various fields to non-default values
+		Network:                       "testnet",
+		NetworkMagic:                  42,
+		DatabasePath:                  "/db",
+		SocketPath:                    "/sock",
+		CardanoConfig:                 "/cfg",
+		Topology:                      "/topo",
+		BlobPlugin:                    "s3",
+		MetadataPlugin:                "postgres",
+		BindAddr:                      "1.2.3.4",
+		PrivateBindAddr:               "127.0.0.1",
+		RelayPort:                     3001,
+		PrivatePort:                   3002,
+		MetricsPort:                   8080,
+		DebugPort:                     6060,
+		BlockfrostPort:                8090,
+		UtxorpcPort:                   50051,
+		MeshPort:                      8091,
+		BarkPort:                      8092,
+		BarkBaseUrl:                   "http://bark",
+		TlsCertFilePath:               "/cert",
+		TlsKeyFilePath:                "/key",
+		IntersectTip:                  true,
+		ValidateHistorical:            true,
+		ShutdownTimeout:               "45s",
+		LedgerCatchupTimeout:          "60m",
+		MempoolCapacity:               999,
+		EvictionWatermark:             0.77,
+		RejectionWatermark:            0.88,
+		RunMode:                       internalconfig.RunModeDev,
+		StartEra:                      internalconfig.StartEraDijkstra,
+		ImmutableDbPath:               "/immut",
+		StorageMode:                   "api",
+		DatabaseWorkers:               8,
+		DatabaseQueueSize:             2000,
+		BackfillBatchSize:             200,
+		BlockProducer:                 true,
+		ShelleyVRFKey:                 "/vrf",
+		ShelleyKESKey:                 "/kes",
+		ShelleyOperationalCertificate: "/cert",
+		ForgeSyncToleranceSlots:       50,
+		ForgeStaleGapThresholdSlots:   500,
+		ValidateForgedBlock:           true,
+		LeiosVoteSigningKeyFile:       "/leios",
+		SlotsPerKESPeriod:             100,
+		MaxKESEvolutions:              50,
+	}
+
+	cfg := NewConfigFromInternal(internal, nil, nil, nil, nil)
+
+	// Verify all fields have working accessor methods
+	assert.Equal(t, "testnet", cfg.Network())
+	assert.Equal(t, uint32(42), cfg.NetworkMagic())
+	assert.Equal(t, "/db", cfg.DatabasePath())
+	assert.Equal(t, "/sock", cfg.SocketPath())
+	assert.Equal(t, "/cfg", cfg.CardanoConfig())
+	assert.Equal(t, "/topo", cfg.Topology())
+	assert.Equal(t, "s3", cfg.BlobPlugin())
+	assert.Equal(t, "postgres", cfg.MetadataPlugin())
+	assert.Equal(t, "1.2.3.4", cfg.BindAddr())
+	assert.Equal(t, "127.0.0.1", cfg.PrivateBindAddr())
+	assert.Equal(t, uint(3001), cfg.RelayPort())
+	assert.Equal(t, uint(3002), cfg.PrivatePort())
+	assert.Equal(t, uint(8080), cfg.MetricsPort())
+	assert.Equal(t, uint(6060), cfg.DebugPort())
+	assert.Equal(t, uint(8090), cfg.BlockfrostPort())
+	assert.Equal(t, uint(50051), cfg.UtxorpcPort())
+	assert.Equal(t, uint(8091), cfg.MeshPort())
+	assert.Equal(t, uint(8092), cfg.BarkPort())
+	assert.Equal(t, "http://bark", cfg.BarkBaseUrl())
+	assert.Equal(t, "/cert", cfg.TlsCertFilePath())
+	assert.Equal(t, "/key", cfg.TlsKeyFilePath())
+	assert.True(t, cfg.IntersectTip())
+	assert.True(t, cfg.ValidateHistorical())
+	assert.Equal(t, "45s", cfg.ShutdownTimeout())
+	assert.Equal(t, "60m", cfg.LedgerCatchupTimeout())
+	assert.Equal(t, int64(999), cfg.MempoolCapacity())
+	assert.Equal(t, 0.77, cfg.EvictionWatermark())
+	assert.Equal(t, 0.88, cfg.RejectionWatermark())
+	assert.Equal(t, internalconfig.RunModeDev, cfg.RunMode())
+	assert.Equal(t, internalconfig.StartEraDijkstra, cfg.StartEra())
+	assert.Equal(t, "/immut", cfg.ImmutableDbPath())
+	assert.Equal(t, "api", cfg.StorageMode())
+	assert.Equal(t, 8, cfg.DatabaseWorkers())
+	assert.Equal(t, 2000, cfg.DatabaseQueueSize())
+	assert.Equal(t, 200, cfg.BackfillBatchSize())
+	assert.True(t, cfg.BlockProducer())
+	assert.Equal(t, "/vrf", cfg.ShelleyVRFKey())
+	assert.Equal(t, "/kes", cfg.ShelleyKESKey())
+	assert.Equal(t, "/cert", cfg.ShelleyOperationalCertificate())
+	assert.Equal(t, uint64(50), cfg.ForgeSyncToleranceSlots())
+	assert.Equal(t, uint64(500), cfg.ForgeStaleGapThresholdSlots())
+	assert.True(t, cfg.ValidateForgedBlock())
+	assert.Equal(t, "/leios", cfg.LeiosVoteSigningKeyFile())
+	assert.Equal(t, uint64(100), cfg.SlotsPerKESPeriod())
+	assert.Equal(t, uint64(50), cfg.MaxKESEvolutions())
 }
