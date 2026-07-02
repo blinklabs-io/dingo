@@ -30,24 +30,43 @@ import (
 )
 
 const (
+	vrfKeyBodyIndex          = 4
 	praosVrfResultBodyIndex  = 5
 	tpraosLeaderVrfBodyIndex = 6
 	vrfResultFieldCount      = 2
 )
 
-// normalizeHeaderVrfResultFromBodyCbor returns a shallow header copy whose
-// typed VRF result is derived from the original header-body CBOR. Chainsync
-// and block decoders keep those original bytes for KES verification; using the
-// same source for VRF avoids rejecting canonical headers when a decoded
-// VrfResult field is stale or otherwise inconsistent with the wire bytes.
-func normalizeHeaderVrfResultFromBodyCbor(
+// normalizeHeaderVrfFieldsFromBodyCbor returns a shallow header copy whose
+// typed VRF key and result are derived from the original header-body CBOR.
+// Chainsync and block decoders keep those original bytes for KES verification;
+// using the same source for VRF avoids rejecting canonical headers when a
+// decoded VRF field is stale or otherwise inconsistent with the wire bytes.
+func normalizeHeaderVrfFieldsFromBodyCbor(
 	header ledger.BlockHeader,
 ) (ledger.BlockHeader, error) {
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(header)
+	if err != nil || !ok {
+		return header, err
+	}
 	vrfResult, ok, err := headerVrfResultFromBodyCbor(header)
 	if err != nil || !ok {
 		return header, err
 	}
-	return headerWithVrfResult(header, vrfResult), nil
+	return headerWithVrfKeyAndResult(header, vrfKey, vrfResult), nil
+}
+
+func headerVrfKeyFromBodyCbor(
+	header ledger.BlockHeader,
+) ([]byte, bool, error) {
+	bodyCbor, ok := headerBodyCbor(header)
+	if !ok || len(bodyCbor) == 0 {
+		return nil, false, nil
+	}
+	vrfKey, err := decodeBytesFromHeaderBodyCbor(bodyCbor, vrfKeyBodyIndex)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode VRF key: %w", err)
+	}
+	return vrfKey, true, nil
 }
 
 func headerVrfResultFromBodyCbor(
@@ -90,6 +109,59 @@ func headerVrfResultFromBodyCbor(
 		return lcommon.VrfResult{}, false, err
 	}
 	return vrfResult, true, nil
+}
+
+func headerBodyCbor(header ledger.BlockHeader) ([]byte, bool) {
+	switch h := header.(type) {
+	case *shelley.ShelleyBlockHeader:
+		return h.Body.Cbor(), true
+	case *allegra.AllegraBlockHeader:
+		return h.Body.Cbor(), true
+	case *mary.MaryBlockHeader:
+		return h.Body.Cbor(), true
+	case *alonzo.AlonzoBlockHeader:
+		return h.Body.Cbor(), true
+	case *babbage.BabbageBlockHeader:
+		return h.Body.Cbor(), true
+	case *conway.ConwayBlockHeader:
+		return h.Body.Cbor(), true
+	case *dijkstra.DijkstraBlockHeader:
+		return h.Body.Cbor(), true
+	default:
+		return nil, false
+	}
+}
+
+func decodeBytesFromHeaderBodyCbor(
+	bodyCbor []byte,
+	index int,
+) ([]byte, error) {
+	decoder, err := cbor.NewStreamDecoder(bodyCbor)
+	if err != nil {
+		return nil, err
+	}
+	fieldCount, _, _, err := decoder.DecodeArrayHeader()
+	if err != nil {
+		return nil, err
+	}
+	if index >= fieldCount {
+		return nil, fmt.Errorf(
+			"header body has %d fields, cannot read bytes at index %d",
+			fieldCount,
+			index,
+		)
+	}
+	if _, _, err := decoder.SkipN(index); err != nil {
+		return nil, fmt.Errorf(
+			"skip header body fields before bytes: %w",
+			err,
+		)
+	}
+	var ret []byte
+	if _, _, err := decoder.Decode(&ret); err != nil {
+		return nil, err
+	}
+	return cloneBytes(ret), nil
 }
 
 func decodeVrfResultFromHeaderBodyCbor(
@@ -151,37 +223,45 @@ func decodeVrfResultFromHeaderBodyCbor(
 	}, nil
 }
 
-func headerWithVrfResult(
+func headerWithVrfKeyAndResult(
 	header ledger.BlockHeader,
+	vrfKey []byte,
 	vrfResult lcommon.VrfResult,
 ) ledger.BlockHeader {
 	switch h := header.(type) {
 	case *shelley.ShelleyBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.LeaderVrf = cloneVrfResult(vrfResult)
 		return &clone
 	case *allegra.AllegraBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.LeaderVrf = cloneVrfResult(vrfResult)
 		return &clone
 	case *mary.MaryBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.LeaderVrf = cloneVrfResult(vrfResult)
 		return &clone
 	case *alonzo.AlonzoBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.LeaderVrf = cloneVrfResult(vrfResult)
 		return &clone
 	case *babbage.BabbageBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.VrfResult = cloneVrfResult(vrfResult)
 		return &clone
 	case *conway.ConwayBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.VrfResult = cloneVrfResult(vrfResult)
 		return &clone
 	case *dijkstra.DijkstraBlockHeader:
 		clone := *h
+		clone.Body.VrfKey = cloneBytes(vrfKey)
 		clone.Body.VrfResult = cloneVrfResult(vrfResult)
 		return &clone
 	default:

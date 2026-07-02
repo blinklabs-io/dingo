@@ -103,11 +103,11 @@ func verifyBlockHeaderHex(
 		SkipStakePoolValidation:   true,
 	}
 
-	header, err := normalizeHeaderVrfResultFromBodyCbor(block.Header())
+	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification failed at slot %d: "+
-				"normalize VRF result from header body CBOR: %w",
+				"normalize VRF fields from header body CBOR: %w",
 			block.SlotNumber(),
 			err,
 		)
