@@ -1334,6 +1334,18 @@ func (d *Database) TransactionsDeleteRolledback(
 		)
 	}
 
+	// Drop endorser-transaction provenance for the undone spends (empty on
+	// networks that do not apply endorser blocks).
+	if err := d.metadata.DeleteEndorserTransactionsAfterSlot(
+		slot, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete endorser transactions after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
 	if owned {
 		if err := txn.Commit(); err != nil {
 			return fmt.Errorf("commit transaction: %w", err)

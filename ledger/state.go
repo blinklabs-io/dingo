@@ -408,14 +408,24 @@ type LedgerStateConfig struct {
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
 	// Shelley slot length. Zero disables the wait.
-	EndorserBlockWaitSlots   uint64
-	ValidateHistorical       bool
-	EnableDijkstra           bool
-	StartInDijkstra          bool
-	TrustedReplay            bool
-	ManualBlockProcessing    bool
-	ForgeBlocks              bool
-	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	EndorserBlockWaitSlots uint64
+	// LeiosTolerateEndorserConflicts enables endorser-block conflict resolution
+	// for the Musashi prototype network, where successive endorser blocks carry
+	// mutually-conflicting, never-confirmed mempool transactions. When set, an
+	// endorser-block transaction whose inputs are already spent is skipped
+	// (best-effort) rather than aborting, and an authoritative ranking-block
+	// transaction that needs an input a speculative endorser-block transaction
+	// already spent revokes that endorser-block transaction instead of wedging
+	// the ledger with "UTxO already spent" (issue #2699). Off on every other
+	// network, where endorser-block transactions are applied unconditionally.
+	LeiosTolerateEndorserConflicts bool
+	ValidateHistorical             bool
+	EnableDijkstra                 bool
+	StartInDijkstra                bool
+	TrustedReplay                  bool
+	ManualBlockProcessing          bool
+	ForgeBlocks                    bool
+	DatabaseWorkerPoolConfig       DatabaseWorkerPoolConfig
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone

@@ -87,6 +87,26 @@ func (t *mysqlTxn) Rollback() error {
 	return nil
 }
 
+func (t *mysqlTxn) SavePoint(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.SavePoint(name).Error
+}
+
+func (t *mysqlTxn) RollbackTo(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.RollbackTo(name).Error
+}
+
 // MetadataStoreMysql stores metadata in MySQL.
 type MetadataStoreMysql struct {
 	promRegistry prometheus.Registerer

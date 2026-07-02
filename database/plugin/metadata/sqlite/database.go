@@ -102,6 +102,26 @@ func (t *sqliteTxn) Rollback() error {
 	return nil
 }
 
+func (t *sqliteTxn) SavePoint(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.SavePoint(name).Error
+}
+
+func (t *sqliteTxn) RollbackTo(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.RollbackTo(name).Error
+}
+
 // MetadataStoreSqlite stores all data in sqlite. Data may not be persisted
 type MetadataStoreSqlite struct {
 	promRegistry   prometheus.Registerer

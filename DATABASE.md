@@ -186,6 +186,7 @@ erDiagram
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
+| `endorser_transaction` | `id`, `hash`, `rb_slot` | PK `id`; unique `hash`; index `rb_slot` | Leios endorser-block conflict-resolution provenance (issue #2699), populated only on the Musashi prototype network; empty on every other network. One row per applied endorser-block (speculative) transaction, keyed by the same `transaction.hash` recorded in `utxo.tx_id` (its outputs) and `utxo.spent_at_tx_id` (its spends). `rb_slot` is the referencing ranking block's slot, used to prune on rollback (`rb_slot > slot`). Its presence marks a spend as a revocable speculative spend: when an authoritative ranking-block transaction needs an input a speculative endorser-block transaction already spent, that endorser transaction (and its endorser-on-endorser closure) is revoked — inputs restored via `spent_at_tx_id`, produced outputs deleted by `tx_id` — instead of wedging on "UTxO already spent". A conflict whose prior spender is not present here is a genuine ranking-block double-spend and still errors. |
 
 ### Midnight Indexer
 
@@ -391,6 +392,22 @@ reprocess).
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.
+
+On the Musashi prototype network (where successive endorser blocks carry
+mutually-conflicting, never-confirmed mempool transactions) endorser-block
+application is additionally conflict-tolerant (issue #2699): an endorser
+transaction whose input is already spent is skipped rather than aborting the
+batch; any staged tx/UTxO blob offsets and metadata rows from the failed
+attempt are cleaned before continuing, so skipped transactions do not contribute
+donations, events, spend links, outputs, or API indexes. Each applied endorser
+transaction is recorded in `endorser_transaction` as a revocable speculative
+spend. When a later authoritative ranking-block transaction needs an input such
+a speculative transaction spent, the endorser transaction (and any endorser
+transaction that spent one of its outputs, transitively) is revoked — its
+consumed inputs restored through `utxo.spent_at_tx_id`, produced `utxo.tx_id`
+outputs deleted, and non-cascaded address and metadata-label index rows removed
+— before the ranking-block transaction is applied. This is gated off on every
+other network, where endorser-block transactions are applied unconditionally.
 
 ### Archive And History Expiry Contract
 
