@@ -86,13 +86,14 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
 	ls.RLock()
+	point := ls.currentTip.Point
 	blockNumber := ls.currentTip.BlockNumber
 	ls.RUnlock()
-	ret := []any{
-		1, // TODO: figure out what this value is (#393)
-		blockNumber,
+	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
+	if len(point.Hash) == 0 {
+		return []any{0}, nil
 	}
-	return ret, nil
+	return []any{1, blockNumber}, nil
 }
 
 func (ls *LedgerState) queryChainPoint() (any, error) {
