@@ -82,6 +82,20 @@ func TestDownloadSnapshot(t *testing.T) {
 	require.Equal(t, content, data)
 }
 
+func TestNewPooledDownloadTransportUsesHTTP1Connections(t *testing.T) {
+	transport := newPooledDownloadTransport(4)
+
+	require.False(t, transport.DisableKeepAlives)
+	require.False(t, transport.ForceAttemptHTTP2)
+	require.NotNil(t, transport.TLSNextProto)
+	require.Empty(t, transport.TLSNextProto)
+	require.NotNil(t, transport.TLSClientConfig)
+	require.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
+	require.Equal(t, 8, transport.MaxIdleConns)
+	require.Equal(t, 4, transport.MaxIdleConnsPerHost)
+	require.Equal(t, 4, transport.MaxConnsPerHost)
+}
+
 func TestDownloadSnapshotResume(t *testing.T) {
 	// Full content: "AAABBB"
 	fullContent := []byte("AAABBB")
