@@ -23,11 +23,13 @@ go.work
 # Program binary
 /dingo
 /bin/dingo
+/koios-parity
 
 # Local data directory
 /.dingo
 /.devnet
 /.tools
+/.koios
 
 # node_modules for npm publishing
 node_modules/
