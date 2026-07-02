@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -32,11 +33,13 @@ import (
 // StakeDistributionProvider provides stake distribution data for leader election.
 type StakeDistributionProvider interface {
 	// GetPoolStake returns the stake for a specific pool in the given epoch.
-	// For leader election, this should query the "go" snapshot (epoch - 2).
+	// For leader election, this should query the mark snapshot selected by
+	// praos.StakeSnapshotEpoch.
 	GetPoolStake(epoch uint64, poolKeyHash []byte) (uint64, error)
 
 	// GetTotalActiveStake returns the total active stake for the given epoch.
-	// For leader election, this should query the "go" snapshot (epoch - 2).
+	// For leader election, this should query the mark snapshot selected by
+	// praos.StakeSnapshotEpoch.
 	GetTotalActiveStake(epoch uint64) (uint64, error)
 }
 
@@ -543,7 +546,7 @@ func (e *Election) validatePersistedSchedule(
 		return false, "epoch nonce changed", nil
 	}
 
-	snapshotEpoch := scheduleSnapshotEpoch(epoch)
+	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
 		return false, "", fmt.Errorf(
@@ -607,13 +610,10 @@ func (e *Election) computeSchedule(
 		return nil, ctx.Err()
 	}
 
-	// Leader election uses the Go snapshot (epoch - 2).
-	// For genesis epochs (0 and 1), use the genesis snapshot directly.
-	// The Cardano spec uses genesis staking for leader election until
-	// the first Mark→Set→Go rotation completes at epoch 2.
-	snapshotEpoch := scheduleSnapshotEpoch(currentEpoch)
+	// Leader election uses the mark snapshot that is active for the epoch.
+	snapshotEpoch := praos.StakeSnapshotEpoch(currentEpoch)
 
-	// Get pool stake from Go snapshot
+	// Get pool stake from the active snapshot.
 	stakeLookupStart := time.Now()
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
@@ -624,7 +624,7 @@ func (e *Election) computeSchedule(
 	}
 
 	e.logger.Info(
-		"pool stake from Go snapshot",
+		"pool stake from active snapshot",
 		"component", "leader",
 		"epoch", currentEpoch,
 		"snapshot_epoch", snapshotEpoch,
@@ -632,7 +632,7 @@ func (e *Election) computeSchedule(
 	)
 	if poolStake == 0 {
 		e.logger.Info(
-			"pool has no stake in Go snapshot, skipping schedule computation",
+			"pool has no stake in active snapshot, skipping schedule computation",
 			"component", "leader",
 			"epoch", currentEpoch,
 			"snapshot_epoch", snapshotEpoch,
@@ -640,7 +640,7 @@ func (e *Election) computeSchedule(
 		return nil, nil
 	}
 
-	// Get total stake from Go snapshot
+	// Get total stake from the active snapshot.
 	totalStake, err := e.stakeProvider.GetTotalActiveStake(snapshotEpoch)
 	if e.metrics != nil {
 		e.metrics.stakeLookupDuration.Observe(time.Since(stakeLookupStart).Seconds())
@@ -650,7 +650,7 @@ func (e *Election) computeSchedule(
 	}
 
 	e.logger.Info(
-		"total active stake from Go snapshot",
+		"total active stake from active snapshot",
 		"component", "leader",
 		"epoch", currentEpoch,
 		"snapshot_epoch", snapshotEpoch,
@@ -724,13 +724,6 @@ func (e *Election) computeSchedule(
 	}
 
 	return schedule, nil
-}
-
-func scheduleSnapshotEpoch(epoch uint64) uint64 {
-	if epoch < 2 {
-		return 0
-	}
-	return epoch - 2
 }
 
 // storeSchedule saves a computed schedule under a brief write lock and

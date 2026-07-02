@@ -307,6 +307,49 @@ func TestPersistImportedSnapshotClearsEpochWhenEmpty(t *testing.T) {
 	require.True(t, bytes.Equal(existingSummary.EpochNonce, summary.EpochNonce))
 }
 
+func TestPersistImportedActivePoolDistribution(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x4a
+	rows := ActivePoolDistributionSnapshots(
+		[]ParsedActivePoolStake{
+			{
+				PoolKeyHash:      poolKeyHash,
+				StakeNumerator:   3,
+				StakeDenominator: 10,
+				VrfKeyHash:       bytes.Repeat([]byte{0x9b}, 32),
+			},
+		},
+		298,
+		127178646,
+	)
+
+	require.NoError(t, persistImportedActivePoolDistribution(
+		ImportConfig{
+			Database: db,
+			State:    &RawLedgerState{Epoch: 298},
+		},
+		rows,
+	))
+
+	stored, err := db.Metadata().GetPoolStakeSnapshot(
+		298,
+		models.PoolStakeSnapshotTypeActive,
+		poolKeyHash,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, stored)
+	require.Equal(t, uint64(3), uint64(stored.TotalStake))
+	require.Equal(t, uint64(10), uint64(stored.StakeDenominator))
+	require.Equal(t, uint64(127178646), stored.CapturedSlot)
+}
+
 // TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark verifies the
 // CIP-1694 reward-account auto-vote resolver runs against live Pool /
 // Account state for the "mark" rotation (whose target epoch equals
@@ -486,9 +529,9 @@ func TestPersistImportedSnapshotPoolPresentAccountStates(t *testing.T) {
 	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	require.True(t, ok, "test requires the sqlite metadata backend")
 
-	poolAbsent := bytes.Repeat([]byte{0x60}, 28)    // pool present, account absent
-	poolInactive := bytes.Repeat([]byte{0x61}, 28)  // pool present, account inactive
-	poolNoConf := bytes.Repeat([]byte{0x62}, 28)     // pool present, account active NoConf
+	poolAbsent := bytes.Repeat([]byte{0x60}, 28)   // pool present, account absent
+	poolInactive := bytes.Repeat([]byte{0x61}, 28) // pool present, account inactive
+	poolNoConf := bytes.Repeat([]byte{0x62}, 28)   // pool present, account active NoConf
 	rewardAbsent := bytes.Repeat([]byte{0x70}, 28)
 	rewardInactive := bytes.Repeat([]byte{0x71}, 28)
 	rewardNoConf := bytes.Repeat([]byte{0x72}, 28)

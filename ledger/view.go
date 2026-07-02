@@ -703,9 +703,8 @@ type StakeDistribution struct {
 	TotalStake uint64            // Sum of all pool stakes
 }
 
-// GetStakeDistribution returns the stake distribution for leader election.
-// Uses the "mark" snapshot at the given epoch. Callers pass currentEpoch-2
-// so the epoch offset already accounts for the Mark→Set→Go rotation.
+// GetStakeDistribution returns the mark stake distribution at the requested
+// snapshot epoch. Callers choose the Praos-active epoch before calling.
 func (lv *LedgerView) GetStakeDistribution(
 	epoch uint64,
 ) (*StakeDistribution, error) {
@@ -734,8 +733,7 @@ func (lv *LedgerView) GetStakeDistribution(
 }
 
 // GetPoolStake returns the stake for a specific pool from the snapshot.
-// Returns 0 if the pool has no stake in the snapshot. Callers pass
-// currentEpoch-2 so the epoch offset accounts for Mark→Set→Go rotation.
+// Returns 0 if the pool has no stake in the snapshot.
 func (lv *LedgerView) GetPoolStake(
 	epoch uint64,
 	poolKeyHash []byte,
@@ -755,8 +753,7 @@ func (lv *LedgerView) GetPoolStake(
 	return uint64(snapshot.TotalStake), nil
 }
 
-// GetTotalActiveStake returns the total active stake from the snapshot.
-// Callers pass currentEpoch-2 so the epoch offset accounts for rotation.
+// GetTotalActiveStake returns the total stake from the requested mark snapshot.
 func (lv *LedgerView) GetTotalActiveStake(epoch uint64) (uint64, error) {
 	return lv.ls.db.Metadata().GetTotalActiveStake(
 		epoch,

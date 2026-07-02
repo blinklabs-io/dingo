@@ -342,11 +342,9 @@ func (m *Manager) captureMarkSnapshot(
 }
 
 // CaptureGenesisSnapshot captures the initial stake distribution as mark
-// snapshots. For a fresh sync this seeds epoch 0 so that leader election
-// works at epoch 2. After a Mithril bootstrap the node starts at a much
-// later epoch, so the method also seeds the current Mark/Set/Go window
-// (epochs N, N-1, N-2) to ensure leader election can find its "Go"
-// snapshot immediately.
+// snapshots. For a fresh sync this seeds epoch 0. After a Mithril bootstrap
+// the node starts at a much later epoch, so the method also seeds the recent
+// historical window (epochs N, N-1, N-2).
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	start := time.Now()
 	if ok, epoch, pools, stake, err := m.hasExistingPostMithrilSnapshotWindow(); err != nil {
@@ -470,12 +468,9 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	}
 	successCount++
 
-	// After Mithril bootstrap: seed the Mark/Set/Go window for the
-	// current epoch so leader election works immediately. Leader
-	// election for epoch N queries the "mark" snapshot at epoch N-2
-	// (the "Go" snapshot), so we need mark snapshots at N, N-1, and
-	// N-2. Without these the pool shows pool_stake=0 and cannot
-	// forge until two epoch transitions pass.
+	// After Mithril bootstrap: seed the recent historical mark-snapshot
+	// window so epoch-offset consumers have the same nearby history normal
+	// syncing would have.
 	if currentEpochId > 0 {
 		for offset := uint64(0); offset <= 2 && offset <= currentEpochId; offset++ {
 			seedEpoch := currentEpochId - offset

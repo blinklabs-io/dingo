@@ -731,7 +731,7 @@ func (m *PipelineManager) pruneExpiredLocked(cur uint64) {
 // epoch. The previous epoch is retained so in-flight blocks near the
 // boundary survive. Committee/stake-snapshot rotation needs no work here:
 // the pipeline consumes already-built certificates via EbQuorumEvent and
-// inherits VoteManager's epoch-2 snapshot selection transparently.
+// inherits VoteManager's active snapshot selection transparently.
 func (m *PipelineManager) handleEpochTransition(
 	evt event.EpochTransitionEvent,
 ) {
