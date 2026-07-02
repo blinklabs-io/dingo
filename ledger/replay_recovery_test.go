@@ -549,6 +549,147 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	)
 }
 
+func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+
+	parentBlock := testRawBlock("at-tip-mithril-parent", 100, 1, nil)
+	ledgerTipBlock := testRawBlock(
+		"at-tip-mithril-ledger-tip",
+		60000,
+		2,
+		parentBlock.Hash,
+	)
+	failingBlock := testRawBlock(
+		"at-tip-mithril-failing",
+		60020,
+		3,
+		ledgerTipBlock.Hash,
+	)
+	require.NoError(
+		t,
+		cm.PrimaryChain().AddRawBlocks(
+			[]chain.RawBlock{
+				parentBlock,
+				ledgerTipBlock,
+				failingBlock,
+			},
+		),
+	)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	resyncCh := make(chan event.ChainsyncResyncEvent, 1)
+	subId := bus.SubscribeFunc(
+		event.ChainsyncResyncEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(event.ChainsyncResyncEvent)
+			if !ok {
+				return
+			}
+			select {
+			case resyncCh <- e:
+			default:
+			}
+		},
+	)
+	t.Cleanup(func() {
+		bus.Unsubscribe(event.ChainsyncResyncEventType, subId)
+	})
+	activeConnId := ouroboros.ConnectionId{
+		LocalAddr: &net.TCPAddr{
+			IP:   net.ParseIP("127.0.0.1"),
+			Port: 3000,
+		},
+		RemoteAddr: &net.TCPAddr{
+			IP:   net.ParseIP("192.0.2.12"),
+			Port: 3001,
+		},
+	}
+	ls, err := NewLedgerState(LedgerStateConfig{
+		Database:          db,
+		ChainManager:      cm,
+		EventBus:          bus,
+		CardanoNodeConfig: newTestShelleyGenesisCfg(t),
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+		GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+			return &activeConnId
+		},
+	})
+	require.NoError(t, err)
+	ls.metrics.init(prometheus.NewRegistry())
+
+	ledgerTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ledgerTipBlock.Slot, ledgerTipBlock.Hash),
+		BlockNumber: ledgerTipBlock.BlockNumber,
+	}
+	require.NoError(t, db.SetTip(ledgerTip, nil))
+	ls.currentTip = ledgerTip
+	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
+	ls.mithrilLedgerSlot = ledgerTip.Point.Slot
+	ls.reachedTip = true
+
+	validationErr := &txValidationError{
+		BlockPoint: ocommon.NewPoint(
+			failingBlock.Slot,
+			failingBlock.Hash,
+		),
+		TxHash: testHashBytes("failing-live-mithril-tx"),
+		Inputs: []lcommon.TransactionInput{
+			&replayRecoveryInput{
+				txId:  testHashBytes("producer-live-mithril-tx"),
+				index: 0,
+			},
+		},
+		Cause: errors.New("bad input"),
+	}
+	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)
+	ls.lastAtTipRecovery.Attempts = 1
+
+	recovered, err := ls.tryRecoverFromTxValidationError(validationErr)
+	require.NoError(t, err)
+	require.True(t, recovered)
+
+	assert.Equal(t, ledgerTip, ls.currentTip)
+	assert.Equal(t, ledgerTip, ls.chain.Tip())
+	dbTip, err := ls.db.GetTip(nil)
+	require.NoError(t, err)
+	assert.Equal(t, ledgerTip, dbTip)
+	_, err = database.BlockByPoint(
+		db,
+		ocommon.NewPoint(failingBlock.Slot, failingBlock.Hash),
+	)
+	assert.ErrorIs(t, err, models.ErrBlockNotFound)
+
+	resync := testutil.RequireReceive(
+		t,
+		resyncCh,
+		time.Second,
+		"expected Mithril boundary resync after at-tip recovery rejection",
+	)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonRollbackExceedsMithril,
+		resync.Reason,
+	)
+	assert.Equal(t, activeConnId.String(), resync.ConnectionId.String())
+	assert.Equal(t, ledgerTip.Point, resync.Point)
+	require.NotNil(t, ls.lastAtTipRecovery)
+	assert.Equal(t, 2, ls.lastAtTipRecovery.Attempts)
+}
+
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	t *testing.T,
 ) {
