@@ -4634,10 +4634,57 @@ func (ls *LedgerState) healEmptyLabNonces() {
 
 func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	repaired := false
+	var (
+		skippedMissingCandidate            int
+		firstMissingCandidateEpoch         uint64
+		lastMissingCandidateEpoch          uint64
+		skippedInvalidCandidate            int
+		firstInvalidCandidateEpoch         uint64
+		lastInvalidCandidateEpoch          uint64
+		skippedMithrilTrusted              int
+		firstMithrilTrustedEpoch           uint64
+		lastMithrilTrustedEpoch            uint64
+		recordSkippedMissingCandidateEpoch = func(epoch uint64) {
+			if skippedMissingCandidate == 0 {
+				firstMissingCandidateEpoch = epoch
+			}
+			lastMissingCandidateEpoch = epoch
+			skippedMissingCandidate++
+		}
+		recordSkippedInvalidCandidateEpoch = func(epoch uint64) {
+			if skippedInvalidCandidate == 0 {
+				firstInvalidCandidateEpoch = epoch
+			}
+			lastInvalidCandidateEpoch = epoch
+			skippedInvalidCandidate++
+		}
+		recordSkippedMithrilTrustedEpoch = func(epoch uint64) {
+			if skippedMithrilTrusted == 0 {
+				firstMithrilTrustedEpoch = epoch
+			}
+			lastMithrilTrustedEpoch = epoch
+			skippedMithrilTrusted++
+		}
+	)
 	for i := range epochs {
 		ep := &epochs[i]
 		// The genesis epoch legitimately carries no last block nonce.
 		if ep.StartSlot == 0 {
+			continue
+		}
+		if ls.mithrilLedgerSlot > 0 &&
+			ep.StartSlot <= ls.mithrilLedgerSlot &&
+			len(ep.LastEpochBlockNonce) == lcommon.Blake2b256Size {
+			recordSkippedMithrilTrustedEpoch(ep.EpochId)
+			continue
+		}
+		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
+		if err != nil {
+			if len(ep.CandidateNonce) == 0 {
+				recordSkippedMissingCandidateEpoch(ep.EpochId)
+			} else {
+				recordSkippedInvalidCandidateEpoch(ep.EpochId)
+			}
 			continue
 		}
 		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
@@ -4646,16 +4693,6 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			continue
 		}
 		if bytes.Equal(ep.LastEpochBlockNonce, boundary.Hash) {
-			continue
-		}
-		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"skipping epoch lab recovery; candidate nonce unavailable",
-				"epoch", ep.EpochId,
-				"error", err,
-				"component", "ledger",
-			)
 			continue
 		}
 		// Recompute this epoch's nonce before mutating the record; the lab and
@@ -4695,6 +4732,34 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			"epoch", ep.EpochId,
 			"previous_nonce", hex.EncodeToString(previousNonce),
 			"epoch_nonce", hex.EncodeToString(newNonce),
+			"component", "ledger",
+		)
+	}
+	if skippedMithrilTrusted > 0 {
+		ls.config.Logger.Info(
+			"skipped epoch lab recovery for epochs covered by Mithril trust boundary",
+			"count", skippedMithrilTrusted,
+			"first_epoch", firstMithrilTrustedEpoch,
+			"last_epoch", lastMithrilTrustedEpoch,
+			"mithril_ledger_slot", ls.mithrilLedgerSlot,
+			"component", "ledger",
+		)
+	}
+	if skippedMissingCandidate > 0 {
+		ls.config.Logger.Info(
+			"skipped epoch lab recovery for epochs without stored candidate nonce",
+			"count", skippedMissingCandidate,
+			"first_epoch", firstMissingCandidateEpoch,
+			"last_epoch", lastMissingCandidateEpoch,
+			"component", "ledger",
+		)
+	}
+	if skippedInvalidCandidate > 0 {
+		ls.config.Logger.Warn(
+			"skipped epoch lab recovery for epochs with invalid candidate nonce",
+			"count", skippedInvalidCandidate,
+			"first_epoch", firstInvalidCandidateEpoch,
+			"last_epoch", lastInvalidCandidateEpoch,
 			"component", "ledger",
 		)
 	}
