@@ -154,6 +154,58 @@ type databaseConfig struct {
 
 var midnightYAMLFields map[string]struct{}
 
+func databasePluginConfig(
+	pluginType string,
+	data map[string]any,
+) (string, map[string]map[string]any, error) {
+	pluginConfig := make(map[string]map[string]any)
+	var pluginName string
+	if pluginVal, exists := data["plugin"]; exists {
+		var ok bool
+		pluginName, ok = pluginVal.(string)
+		if !ok {
+			return "", nil, fmt.Errorf(
+				"%s plugin name must be a string, got %T",
+				pluginType,
+				pluginVal,
+			)
+		}
+	}
+	for k, v := range data {
+		if k == "plugin" {
+			continue
+		}
+		if val, ok := v.(map[string]any); ok {
+			pluginConfig[k] = val
+			continue
+		}
+		if val, ok := v.(map[any]any); ok {
+			stringAnyMap := make(map[string]any)
+			for vk, vv := range val {
+				keyStr, ok := vk.(string)
+				if !ok {
+					return "", nil, fmt.Errorf(
+						"%s plugin config %q key must be a string, got %T",
+						pluginType,
+						k,
+						vk,
+					)
+				}
+				stringAnyMap[keyStr] = vv
+			}
+			pluginConfig[k] = stringAnyMap
+			continue
+		}
+		return "", nil, fmt.Errorf(
+			"%s plugin config %q must be a map, got %T",
+			pluginType,
+			k,
+			v,
+		)
+	}
+	return pluginName, pluginConfig, nil
+}
+
 func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(buf, &doc); err != nil {
@@ -836,32 +888,15 @@ func LoadConfig(configFile string) (*Config, error) {
 		// Handle database section if present
 		if tempCfg.Database != nil {
 			if tempCfg.Database.Blob != nil {
-				// Extract plugin name if specified
-				if pluginVal, exists := tempCfg.Database.Blob["plugin"]; exists {
-					if pluginName, ok := pluginVal.(string); ok {
-						globalConfig.BlobPlugin = pluginName
-						// Remove plugin from config map
-						delete(tempCfg.Database.Blob, "plugin")
-					}
+				pluginName, blobConfig, err := databasePluginConfig(
+					"blob",
+					tempCfg.Database.Blob,
+				)
+				if err != nil {
+					return nil, err
 				}
-				// Build plugin config map
-				blobConfig := make(map[string]map[string]any)
-				for k, v := range tempCfg.Database.Blob {
-					if val, ok := v.(map[string]any); ok {
-						blobConfig[k] = val
-					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]any
-						stringAnyMap := make(map[string]any)
-						for vk, vv := range val {
-							if keyStr, ok := vk.(string); ok {
-								stringAnyMap[keyStr] = vv
-							}
-						}
-						blobConfig[k] = stringAnyMap
-					} else {
-						// Log skipped non-map config entries
-						fmt.Fprintf(os.Stderr, "warning: skipping blob config entry %q: expected map, got %T\n", k, v)
-					}
+				if pluginName != "" {
+					globalConfig.BlobPlugin = pluginName
 				}
 				// Merge with existing blob config instead of overwriting
 				if pluginConfig["blob"] == nil {
@@ -871,32 +906,15 @@ func LoadConfig(configFile string) (*Config, error) {
 				}
 			}
 			if tempCfg.Database.Metadata != nil {
-				// Extract plugin name if specified
-				if pluginVal, exists := tempCfg.Database.Metadata["plugin"]; exists {
-					if pluginName, ok := pluginVal.(string); ok {
-						globalConfig.MetadataPlugin = pluginName
-						// Remove plugin from config map
-						delete(tempCfg.Database.Metadata, "plugin")
-					}
+				pluginName, metadataConfig, err := databasePluginConfig(
+					"metadata",
+					tempCfg.Database.Metadata,
+				)
+				if err != nil {
+					return nil, err
 				}
-				// Build plugin config map
-				metadataConfig := make(map[string]map[string]any)
-				for k, v := range tempCfg.Database.Metadata {
-					if val, ok := v.(map[string]any); ok {
-						metadataConfig[k] = val
-					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]any
-						stringAnyMap := make(map[string]any)
-						for vk, vv := range val {
-							if keyStr, ok := vk.(string); ok {
-								stringAnyMap[keyStr] = vv
-							}
-						}
-						metadataConfig[k] = stringAnyMap
-					} else {
-						// Log skipped non-map config entries
-						fmt.Fprintf(os.Stderr, "warning: skipping metadata config entry %q: expected map, got %T\n", k, v)
-					}
+				if pluginName != "" {
+					globalConfig.MetadataPlugin = pluginName
 				}
 				// Merge with existing metadata config instead of overwriting
 				if pluginConfig["metadata"] == nil {

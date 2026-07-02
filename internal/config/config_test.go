@@ -855,6 +855,77 @@ database:
 	}
 }
 
+// Database plugin config must fail loudly when YAML values have the wrong shape.
+// These cases guard against silently falling back to zero-value plugin config.
+func TestLoad_DatabaseSectionInvalidPluginConfigTypes(t *testing.T) {
+	tests := []struct {
+		name       string
+		yaml       string
+		errContain string
+	}{
+		{
+			name: "blob plugin selector is not string",
+			yaml: `
+database:
+  blob:
+    plugin: 123
+`,
+			errContain: "blob plugin name must be a string",
+		},
+		{
+			name: "metadata plugin selector is not string",
+			yaml: `
+database:
+  metadata:
+    plugin: true
+`,
+			errContain: "metadata plugin name must be a string",
+		},
+		{
+			name: "blob plugin config is not map",
+			yaml: `
+database:
+  blob:
+    plugin: "badger"
+    badger: "/tmp/badger"
+`,
+			errContain: `blob plugin config "badger" must be a map`,
+		},
+		{
+			name: "metadata plugin config is not map",
+			yaml: `
+database:
+  metadata:
+    plugin: "sqlite"
+    sqlite: "/tmp/test.db"
+`,
+			errContain: `metadata plugin config "sqlite" must be a map`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetGlobalConfig()
+			tmpDir := t.TempDir()
+			tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+			if err := os.WriteFile(tmpFile, []byte(tt.yaml), 0644); err != nil {
+				t.Fatalf("failed to write config file: %v", err)
+			}
+
+			_, err := LoadConfig(tmpFile)
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.errContain)
+			}
+			if !strings.Contains(err.Error(), tt.errContain) {
+				t.Fatalf(
+					"error %q should contain %q",
+					err.Error(),
+					tt.errContain,
+				)
+			}
+		})
+	}
+}
+
 func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 	validTests := []struct {
 		name    string
