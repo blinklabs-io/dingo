@@ -18,10 +18,15 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -38,6 +43,37 @@ func mustCbor(t *testing.T, value any) cbor.RawMessage {
 	data, err := cbor.Encode(value)
 	require.NoError(t, err)
 	return cbor.RawMessage(data)
+}
+
+func newTestOuroborosWithLeiosDB(t *testing.T) *Ouroboros {
+	t.Helper()
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        t.TempDir(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, db.Close())
+	})
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(testSecurityParamLedger{securityParam: 2160}))
+
+	ls, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:     db,
+		ChainManager: cm,
+		Logger: slog.New(
+			slog.NewJSONHandler(io.Discard, nil),
+		),
+	})
+	require.NoError(t, err)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	o.LedgerState = ls
+	return o
 }
 
 func testDijkstraBlockRaw(
@@ -250,6 +286,60 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	cached, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	require.True(t, ok)
 	require.Equal(t, txRaw, cached.txsRaw[0])
+}
+
+// Covers the historical-serving path: after the in-memory EB cache is gone,
+// lookup reloads manifest+txs from blob storage and leios-fetch serves them.
+func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
+	t *testing.T,
+) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
+	txsRaw := []cbor.RawMessage{
+		mustCbor(t, "tx0"),
+		mustCbor(t, "tx1"),
+	}
+
+	o := newTestOuroborosWithLeiosDB(t)
+	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
+
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+
+	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, point.Slot, data.point.Slot)
+	require.Equal(t, point.Hash, data.point.Hash)
+	require.Equal(t, []byte(blockRaw), data.blockRaw)
+	require.Equal(t, txsRaw, data.txsRaw)
+	require.True(t, data.completeTxCache())
+
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+
+	blockResp, err := o.leiosfetchServerBlockRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+	)
+	require.NoError(t, err)
+	blockMsg, ok := blockResp.(*oleiosfetch.MsgBlock)
+	require.True(t, ok)
+	require.Equal(t, cbor.RawMessage(blockRaw), blockMsg.BlockRaw)
+
+	o.leiosMu.Lock()
+	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
+	o.leiosMu.Unlock()
+
+	txsResp, err := o.leiosfetchServerBlockTxsRequest(
+		oleiosfetch.CallbackContext{},
+		point,
+		map[uint16]uint64{0: (1 << 63) | (1 << 62)},
+	)
+	require.NoError(t, err)
+	txsMsg, ok := txsResp.(*oleiosfetch.MsgBlockTxs)
+	require.True(t, ok)
+	require.Equal(t, txsRaw, txsMsg.TxsRaw)
 }
 
 func TestStoreLeiosEndorserBlockRejectsPointHashMismatch(t *testing.T) {
