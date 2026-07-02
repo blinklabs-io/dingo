@@ -366,7 +366,7 @@ validateHistorical: false
 # point without a Mithril snapshot import, where pre-intersect UTxOs are
 # legitimately absent. (default: false)
 #
-# Can be overridden with the DINGO_STRICT_UTXO_VALIDATION environment variable
+# Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
 strictUtxoValidation: false
 
