@@ -139,14 +139,14 @@ func (o *Ouroboros) leiosfetchServerBlockTxsRequest(
 	data, ok := o.lookupLeiosEndorserBlock(point.Hash)
 	if !ok {
 		return nil, fmt.Errorf(
-			"leios endorser block txs not found: %d.%x",
+			"leios endorser block not available: %d.%x",
 			point.Slot,
 			point.Hash,
 		)
 	}
 	if !data.completeTxCache() {
 		return nil, fmt.Errorf(
-			"leios endorser block tx cache incomplete: %d.%x: have %d txs for %d cached txs",
+			"leios endorser block txs not available: %d.%x: have %d of %d txs",
 			point.Slot,
 			point.Hash,
 			len(data.txsRaw),
