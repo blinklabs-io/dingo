@@ -3803,6 +3803,39 @@ func (ls *LedgerState) ledgerProcessBlock(
 					)
 					err = nil
 				}
+				if err != nil &&
+					isAcceptedBlockCollateralVKeyDisagreement(err) {
+					ls.config.Logger.Warn(
+						"collateral witness validation disagrees with accepted block (trusting isValid=true)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"error", err.Error(),
+					)
+					err = nil
+				}
+				if err != nil &&
+					isAcceptedBlockDelegationRegistrationDisagreement(err) {
+					ls.config.Logger.Warn(
+						"stake delegation validation disagrees with accepted block (trusting accepted chain)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"error", err.Error(),
+					)
+					err = nil
+				}
+				if err != nil &&
+					isAcceptedBlockScriptDataHashDisagreement(err) {
+					ls.config.Logger.Warn(
+						"script data hash validation disagrees with accepted block (trusting accepted chain)",
+						"component", "ledger",
+						"tx_hash", tx.Hash().String(),
+						"block_slot", point.Slot,
+						"error", err.Error(),
+					)
+					err = nil
+				}
 				// Dijkstra/Leios: the block was admitted to the chain via its
 				// Leios certificate. An endorser block may be only partially
 				// resolvable (e.g. an endorser-resident input from an endorser
@@ -3931,6 +3964,31 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
+}
+
+func isAcceptedBlockCollateralVKeyDisagreement(err error) bool {
+	var validationErr *lcommon.ValidationError
+	if !errors.As(err, &validationErr) {
+		return false
+	}
+	return validationErr.Type == lcommon.ValidationErrorTypeTransaction &&
+		validationErr.Message == "collateral input must be key-locked"
+}
+
+func isAcceptedBlockDelegationRegistrationDisagreement(err error) bool {
+	var validationErr *lcommon.ValidationError
+	if !errors.As(err, &validationErr) {
+		return false
+	}
+	return validationErr.Type == lcommon.ValidationErrorTypeTransaction &&
+		strings.HasPrefix(
+			validationErr.Message,
+			"delegation from unregistered stake credential: ",
+		)
+}
+
+func isAcceptedBlockScriptDataHashDisagreement(err error) bool {
+	return errors.Is(err, lcommon.ErrScriptDataHashMismatch)
 }
 
 func opCertSequenceNumber(block ledger.Block) (uint32, bool) {

@@ -112,6 +112,102 @@ func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
 	require.False(t, fatalCalled)
 }
 
+func TestIsAcceptedBlockCollateralVKeyDisagreement(t *testing.T) {
+	err := lcommon.NewValidationError(
+		lcommon.ValidationErrorTypeTransaction,
+		"collateral input must be key-locked",
+		map[string]any{"input": "tx#0"},
+		nil,
+	)
+
+	require.True(t, isAcceptedBlockCollateralVKeyDisagreement(err))
+	require.False(
+		t,
+		isAcceptedBlockCollateralVKeyDisagreement(
+			errors.New("collateral input must be key-locked"),
+		),
+	)
+	require.False(
+		t,
+		isAcceptedBlockCollateralVKeyDisagreement(
+			lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"missing vkey witness for collateral input",
+				nil,
+				nil,
+			),
+		),
+	)
+}
+
+func TestIsAcceptedBlockDelegationRegistrationDisagreement(t *testing.T) {
+	err := lcommon.NewValidationError(
+		lcommon.ValidationErrorTypeTransaction,
+		"delegation from unregistered stake credential: a1c0af",
+		map[string]any{"credential": "a1c0af"},
+		nil,
+	)
+
+	require.True(t, isAcceptedBlockDelegationRegistrationDisagreement(err))
+	require.False(
+		t,
+		isAcceptedBlockDelegationRegistrationDisagreement(
+			errors.New("delegation from unregistered stake credential: a1c0af"),
+		),
+	)
+	require.False(
+		t,
+		isAcceptedBlockDelegationRegistrationDisagreement(
+			lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"stake credential not registered for withdrawal",
+				nil,
+				nil,
+			),
+		),
+	)
+}
+
+func TestIsAcceptedBlockScriptDataHashDisagreement(t *testing.T) {
+	err := lcommon.NewValidationError(
+		lcommon.ValidationErrorTypeTransaction,
+		"transaction validation failed",
+		map[string]any{"tx_hash": "d5feb126a6ae3cc3e04fe1f08a236a35c45e4113775153cfc33a5607390e0306"},
+		fmt.Errorf(
+			"conway utxo validation rule 12: %w",
+			lcommon.ScriptDataHashMismatchError{},
+		),
+	)
+
+	require.True(t, isAcceptedBlockScriptDataHashDisagreement(err))
+	require.True(
+		t,
+		isAcceptedBlockScriptDataHashDisagreement(
+			fmt.Errorf(
+				"conway utxo validation rule 12: %w",
+				lcommon.ScriptDataHashMismatchError{},
+			),
+		),
+	)
+	require.False(
+		t,
+		isAcceptedBlockScriptDataHashDisagreement(
+			errors.New("script data hash mismatch: declared a, computed b"),
+		),
+	)
+	require.False(
+		t,
+		isAcceptedBlockScriptDataHashDisagreement(
+			lcommon.NewValidationError(
+				lcommon.ValidationErrorTypeTransaction,
+				"missing redeemer for spending input",
+				nil,
+				nil,
+			),
+		),
+	)
+}
+
 // It verifies that calculating the stability window is synchronized with
 // concurrent currentEra updates from block processing.
 func TestCalculateStabilityWindowConcurrentCurrentEraAccess(t *testing.T) {
