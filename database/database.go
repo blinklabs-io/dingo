@@ -47,6 +47,16 @@ type Config struct {
 	StorageMode    string // "core" or "api"
 	Network        string // Cardano network name (e.g. "preview", "mainnet")
 	CacheConfig    CborCacheConfig
+	// StrictUtxoValidation, when true, turns an unrecoverable consumed UTxO
+	// (not present in the metadata store and not reconstructable from the
+	// blob store) into a hard error for blocks past the recorded Mithril
+	// trust boundary (the "mithril_ledger_slot" sync state key), instead of
+	// silently skipping it. Past that boundary the node should have complete
+	// producer history, so a miss indicates real corruption or a bug rather
+	// than an expected gap. Leave disabled (the default) when bootstrapping
+	// from a non-genesis chainsync intersect point without a Mithril
+	// snapshot import, where pre-intersect UTxOs are legitimately absent.
+	StrictUtxoValidation bool
 }
 
 // Database represents our data storage services

@@ -360,6 +360,16 @@ immutableDbPath: ""
 # Validate historical blocks during ledger processing (default: false)
 validateHistorical: false
 
+# Error out (instead of silently skipping) when a consumed UTxO cannot be
+# found or recovered for a block past the recorded Mithril sync boundary.
+# Leave disabled when bootstrapping from a non-genesis chainsync intersect
+# point without a Mithril snapshot import, where pre-intersect UTxOs are
+# legitimately absent. (default: false)
+#
+# Can be overridden with the DINGO_STRICT_UTXO_VALIDATION environment variable
+# CLI: --strict-utxo-validation
+strictUtxoValidation: false
+
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.
 # Use 0 for default values, -1 for unlimited
