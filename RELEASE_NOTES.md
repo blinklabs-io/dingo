@@ -21,7 +21,7 @@ Hi folks! Here’s what we shipped in v0.61.1.
 * Refined **fail fast on malformed storage plugin configuration:** Invalid storage plugin configuration now stops startup immediately instead of continuing with a broken setup.
 * Enhanced **persist Leios endorser blocks for historical serving after cache expiry or restart:** Historical Leios serving now keeps endorser blocks available after cache expiry and after a restart.
 * Modernized **make tracing configurable through config, environment variables, and CLI flags:** Tracing behavior now follows configuration files, environment variables, and CLI flags, which gives operators clearer control.
-* Strengthened **make MySQL and Postgres metadata plugins an explicit `-tags dingo_extra_plugins` opt in while SQLite remains in the default build:** MySQL and Postgres metadata support now requires an explicit extra plugins build, while SQLite remains available in the default build.
+* Strengthened **make MySQL and Postgres metadata plugins an explicit extra build opt in while SQLite remains in the default build:** MySQL and Postgres metadata support now requires an explicit extra build option, while SQLite remains available in the default build.
 * Advanced **persist the full Mithril trust boundary point for better recovery intersections:** Mithril recovery now keeps the full trust boundary point, including its hash, which helps recovery intersections stay more accurate.
 * Polished **chunk large Leios transaction hash lookups and skip duplicate endorser block transactions:** Large Leios transaction lookups now run in smaller chunks and ignore duplicate endorser block transactions, which helps historical recovery stay steadier.
 * Sharpened **purge orphaned metadata rows before auto migrate so upgrades start more safely:** Metadata upgrades now clear orphaned rows before auto migration begins, which makes upgrades safer to start.
@@ -31,8 +31,8 @@ Hi folks! Here’s what we shipped in v0.61.1.
 
 * Fixed **preserve Mithril covered recovery markers and epoch nonces during ledger healing:** Ledger healing now keeps Mithril covered recovery markers and epoch nonce data intact, which protects recovery correctness.
 * Corrected **normalize leader election proof data during block verification:** Block verification now uses normalized leader election proof data, which improves validation accuracy.
-* Strengthened **tolerate Musashi Leios speculative endorser conflicts so ranking blocks can proceed without wedging sync:** Musashi Leios sync now tolerates speculative endorser conflicts so ranking block processing can keep moving.
-* Repaired **fix DevNet txpump signing and encoding plus chained forging and mempool eviction so submitted transactions are accepted:** DevNet txpump and chained forging now submit transactions with the expected signing and encoding behavior, and mempool eviction no longer blocks acceptance.
+* Strengthened **tolerate speculative Leios endorser conflicts so ranking blocks can proceed without wedging sync:** Leios sync now tolerates speculative endorser conflicts so ranking block processing can keep moving.
+* Repaired **fix development transaction generation and chained forging so submitted transactions are accepted:** Development transaction generation and chained forging now use the expected submission behavior, and mempool eviction no longer blocks acceptance.
 * Stabilized **recover from wedged peers and persistent near tip validation failures by retrying and rotating to a fresh sync peer:** Sync now retries failed validation paths and rotates to a fresh sync peer, which helps recovery continue after a wedged connection.
 * Hardened **enforce slot leader eligibility against stake derived thresholds on inbound blocks:** Inbound block validation now checks slot leader eligibility against stake derived thresholds, which strengthens ledger validation.
 * Balanced **repair epoch boundary recovery marker derivation and startup and rollback nonce recovery:** Nonce recovery now handles epoch boundaries, startup, and rollback paths more reliably.
@@ -40,10 +40,10 @@ Hi folks! Here’s what we shipped in v0.61.1.
 ### 📋 What You Need to Know
 
 * Clarified **expect steadier Mithril bootstrap and snapshot recovery paths:** Mithril bootstrap transfers and snapshot imports should now recover more steadily during archive and snapshot work.
-* Highlighted **expect better Leios historical serving and steadier Musashi conflict handling:** Historical Leios serving now stays available after cache expiry or restart, and Musashi conflict handling now keeps ranking block processing moving.
-* Emphasized **build with `-tags dingo_extra_plugins` when MySQL or Postgres metadata plugins are required:** MySQL and Postgres metadata support now requires the explicit extra plugins build tag, while SQLite remains in the default build.
+* Highlighted **expect better Leios historical serving and steadier speculative conflict handling:** Historical Leios serving now stays available after cache expiry or restart, and speculative conflict handling now keeps ranking block processing moving.
+* Emphasized **build with the explicit extra plugins option when MySQL or Postgres metadata plugins are required:** MySQL and Postgres metadata support now requires the explicit extra plugins option, while SQLite remains in the default build.
 * Summarized **expect invalid storage plugin configuration to fail fast at startup:** Invalid storage plugin configuration now stops startup immediately instead of continuing with a broken setup.
-* Reviewed **expect corrected DevNet txpump and chained forging transaction acceptance:** DevNet txpump submission, chained forging, and mempool handling now align so submitted transactions are accepted.
+* Reviewed **expect corrected development transaction generation and chained forging acceptance:** Development transaction generation, chained forging, and mempool handling now align so submitted transactions are accepted.
 * Noted **review the in repository release history for the current v0.61.0 entry:** The repository release history now includes the v0.61.0 entry for recent release review.
 
 ### Recommended Network Compatibility ⚠️
