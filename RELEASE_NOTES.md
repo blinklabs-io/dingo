@@ -37,6 +37,29 @@ Hi folks! Here’s what we shipped in v0.61.1.
 * Hardened **enforce slot leader VRF eligibility against stake derived thresholds on inbound blocks:** Inbound block validation now checks slot leader eligibility against stake derived thresholds, which strengthens ledger validation.
 * Balanced **repair epoch boundary LAB nonce derivation and startup and rollback nonce recovery:** Nonce recovery now handles epoch boundaries, startup, and rollback paths more reliably.
 
+### 📋 What You Need to Know
+
+* Clarified **expect steadier Mithril bootstrap and snapshot recovery paths:** Mithril bootstrap transfers and snapshot imports should now recover more steadily during archive and snapshot work.
+* Highlighted **expect better Leios historical serving and steadier Musashi conflict handling:** Historical Leios serving now stays available after cache expiry or restart, and Musashi conflict handling now keeps ranking block processing moving.
+* Emphasized **build with `-tags dingo_extra_plugins` when MySQL or Postgres metadata plugins are required:** MySQL and Postgres metadata support now requires the explicit extra plugins build tag, while SQLite remains in the default build.
+* Summarized **expect invalid plugin configuration to fail fast at startup:** Invalid blob or metadata plugin configuration now stops startup immediately instead of continuing with a broken setup.
+* Reviewed **expect corrected DevNet txpump and chained forging transaction acceptance:** DevNet txpump submission, chained forging, and mempool handling now align so submitted transactions are accepted.
+* Noted **review the in repository release history for the current v0.61.0 entry:** The repository release history now includes the v0.61.0 entry for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.61.0 (June 30, 2026)
 
 **Title:** Midnight governance indexing, steadier Leios serving, and simpler example deployments
