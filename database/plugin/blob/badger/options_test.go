@@ -222,6 +222,74 @@ func TestUseCompactBlockMetadata(t *testing.T) {
 	}
 }
 
+func TestNewFromCmdlineOptionsDisablesGCInLoadModeByDefault(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	if err := plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		"badger",
+		"run-mode",
+		"load",
+	); err != nil {
+		t.Fatalf("set run-mode: %v", err)
+	}
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if b.gcEnabled {
+		t.Fatal("expected load mode to disable online GC by default")
+	}
+}
+
+func TestNewFromCmdlineOptionsPreservesExplicitGCInLoadMode(t *testing.T) {
+	cmdlineOptionsMutex.Lock()
+	saved := cmdlineOptions
+	cmdlineOptionsMutex.Unlock()
+	t.Cleanup(func() {
+		cmdlineOptionsMutex.Lock()
+		cmdlineOptions = saved
+		cmdlineOptionsMutex.Unlock()
+	})
+	initCmdlineOptions()
+
+	if err := plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		"badger",
+		"run-mode",
+		"load",
+	); err != nil {
+		t.Fatalf("set run-mode: %v", err)
+	}
+	if err := plugin.SetPluginOption(
+		plugin.PluginTypeBlob,
+		"badger",
+		"gc",
+		true,
+	); err != nil {
+		t.Fatalf("set gc: %v", err)
+	}
+
+	p := NewFromCmdlineOptions()
+	b, ok := p.(*BlobStoreBadger)
+	if !ok {
+		t.Fatal("expected *BlobStoreBadger from NewFromCmdlineOptions")
+	}
+	if !b.gcEnabled {
+		t.Fatal("expected explicit GC setting to be preserved")
+	}
+}
+
 func TestApplyStorageModeDefaultsPreservesExplicitOverrides(t *testing.T) {
 	blockCache := uint64(DefaultBlockCacheSize)
 	indexCache := uint64(DefaultIndexCacheSize)
