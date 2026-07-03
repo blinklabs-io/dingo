@@ -70,16 +70,25 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	if len(blockRaw) == 0 {
 		return errors.New("leios endorser block cache: empty block")
 	}
-	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
-	if err != nil {
-		return fmt.Errorf("decode leios endorser block: %w", err)
-	}
 	if len(point.Hash) == 0 {
 		return errors.New("leios endorser block cache: empty point hash")
 	}
+	// Verify the served bytes hash to the requested point BEFORE decoding.
+	// A peer that returns an empty, truncated, or otherwise wrong manifest
+	// (the prototype relay returns empty manifests for large endorser blocks
+	// when hammered; see leiosBackfiller) must be diagnosed as a fetch/serving
+	// problem ("point hash mismatch") rather than misreported as a decode
+	// invariant violation ("must contain at least one transaction reference").
+	// The hash covers the full manifest and does not require decoding, so
+	// checking it first is strictly safe and turns a wrong response into a
+	// retryable fetch error instead of a terminal-looking decode failure.
 	blockHash := lcommon.Blake2b256Hash(blockRaw)
 	if !slices.Equal(blockHash.Bytes(), point.Hash) {
 		return errors.New("leios endorser block cache: point hash mismatch")
+	}
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
+	if err != nil {
+		return fmt.Errorf("decode leios endorser block: %w", err)
 	}
 	cacheKeys := []string{leiosBlockKey(point.Hash)}
 	data := &leiosEndorserBlockData{
