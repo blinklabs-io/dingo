@@ -52,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 type Node struct {
@@ -250,6 +251,13 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}
+	// On Musashi wait up to the same keep-alive server timeout bound that the
+	// ouroboros layer enforces; elsewhere leave it 0 so gouroboros keeps its
+	// default.
+	var keepAliveTimeout time.Duration
+	if n.config.isMusashiNetwork() {
+		keepAliveTimeout = okeepalive.ServerTimeout
+	}
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
@@ -278,6 +286,13 @@ func (n *Node) Run(ctx context.Context) error {
 		EnableLeiosTxFetch:       enableLeiosNetworking,
 		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
+		// On the Musashi prototype network every mini-protocol shares one muxer
+		// to a single relay; block/EB traffic can delay the relay's keep-alive
+		// pong past the tight 10s gouroboros default, making dingo drop the
+		// only relay and pay a reconnect + fork rollback. Wait up to the
+		// keep-alive server timeout there so a slow-but-alive relay is not
+		// dropped. Unset on other networks (fast dead-peer eviction retained).
+		KeepAliveTimeout: keepAliveTimeout,
 	})
 	// Load state
 	state, err := ledger.NewLedgerState(
