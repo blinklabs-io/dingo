@@ -287,19 +287,11 @@ func cloneRat(r *types.Rat) *types.Rat {
 // rotateSnapshots promotes Mark→Set→Go for the new epoch.
 func (m *Manager) rotateSnapshots(ctx context.Context, newEpoch uint64) {
 	_ = ctx
-	// Snapshot rotation in Ouroboros Praos:
-	// - The Mark snapshot from epoch N-1 becomes Set for epoch N
-	// - The Set snapshot from epoch N-1 becomes Go for epoch N
-	// - We only need to track the type metadata, not copy data
-
 	// In practice, we store snapshots with their epoch and type.
-	// The "Go" snapshot used for leader election in epoch N is the
-	// "Mark" snapshot captured at the end of epoch N-2.
-
-	// For simplicity, we don't physically rotate - we query by epoch offset:
-	// - Go snapshot for epoch N = data from epoch N-2
-	// - Set snapshot for epoch N = data from epoch N-1
-	// - Mark snapshot for epoch N = data captured at epoch N boundary
+	// The active stake distribution for epoch N is the Mark snapshot
+	// captured at the epoch boundary. Historical Set/Go-equivalent data is
+	// addressed by older epoch numbers rather than by copying rows between
+	// snapshot types.
 
 	goEpoch := uint64(0)
 	setEpoch := uint64(0)

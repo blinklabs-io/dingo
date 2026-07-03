@@ -297,6 +297,122 @@ func TestParsePoolParamsMapAcceptsPoolDistrEntry(t *testing.T) {
 	require.Equal(t, vrfHash[:], pool.VrfKeyHash)
 }
 
+func TestParseActivePoolDistribution(t *testing.T) {
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	data := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			vrfHash[:],
+		},
+	)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, poolHash[:], pools[0].PoolKeyHash)
+	require.Equal(t, uint64(3), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+	require.Equal(t, vrfHash[:], pools[0].VrfKeyHash)
+}
+
+func TestParseActivePoolDistributionContainer(t *testing.T) {
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			uint64(3),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, poolHash[:], pools[0].PoolKeyHash)
+	require.Equal(t, uint64(3), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+	require.Equal(t, vrfHash[:], pools[0].VrfKeyHash)
+}
+
+func TestParseActivePoolDistributionContainerRejectsStakeMismatch(
+	t *testing.T,
+) {
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(3, 10)},
+			uint64(4),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	_, err = ParseActivePoolDistribution(data)
+	require.ErrorContains(t, err, "does not match active stake")
+}
+
+func TestParseActivePoolDistributionContainerAllowsZeroStake(
+	t *testing.T,
+) {
+	poolHash := toFixed28([]byte("active pool distribution"))
+	vrfHash := [32]byte{}
+	copy(vrfHash[:], []byte("active vrf key hash"))
+
+	poolMap := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{
+			&cbor.Rat{Rat: big.NewRat(0, 1)},
+			uint64(0),
+			vrfHash[:],
+		},
+	)
+	totalStake, err := cbor.Encode(uint64(10))
+	require.NoError(t, err)
+	data := append([]byte{0x82}, poolMap...)
+	data = append(data, totalStake...)
+
+	pools, err := ParseActivePoolDistribution(data)
+	require.NoError(t, err)
+	require.Len(t, pools, 1)
+	require.Equal(t, uint64(0), pools[0].StakeNumerator)
+	require.Equal(t, uint64(10), pools[0].StakeDenominator)
+}
+
+func TestParseActivePoolDistributionRejectsMalformedEntry(t *testing.T) {
+	poolHash := toFixed28([]byte("active pool distribution"))
+	data := encodeCredentialMapEntry(
+		t,
+		poolHash[:],
+		[]any{uint64(1)},
+	)
+
+	_, err := ParseActivePoolDistribution(data)
+	require.ErrorContains(t, err, "expected 2 or 3")
+}
+
 func TestVerifySnapshotDigest(t *testing.T) {
 	content := []byte("test snapshot content for hashing")
 	h := sha256.Sum256(content)

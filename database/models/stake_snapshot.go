@@ -47,16 +47,29 @@ const (
 	PoolRewardAccountAutoVoteNoConfidence uint8 = 2
 )
 
-// PoolStakeSnapshot captures aggregated pool stake at an epoch boundary.
-// Used for leader election in Ouroboros Praos consensus.
+const (
+	// PoolStakeSnapshotTypeMark is the epoch-boundary mark snapshot used by
+	// governance and by the normal Praos epoch-offset rotation.
+	PoolStakeSnapshotTypeMark = "mark"
+	// PoolStakeSnapshotTypeActive is the active consensus pool distribution
+	// imported from a Mithril NewEpochState.pool-distr field. TotalStake
+	// stores the fraction numerator and StakeDenominator stores the
+	// denominator for the same row.
+	PoolStakeSnapshotTypeActive = "actv"
+)
+
+// PoolStakeSnapshot captures pool stake for an epoch snapshot. Mark rows store
+// lovelace totals at an epoch boundary. Active rows imported from Mithril store
+// a consensus stake fraction as TotalStake/StakeDenominator.
 type PoolStakeSnapshot struct {
-	ID             uint         `gorm:"primarykey"`
-	Epoch          uint64       `gorm:"uniqueIndex:idx_pool_stake_epoch_pool,priority:1;not null"`
-	SnapshotType   string       `gorm:"type:varchar(4);uniqueIndex:idx_pool_stake_epoch_pool,priority:2;not null"` // "mark", "set", "go"
-	PoolKeyHash    []byte       `gorm:"uniqueIndex:idx_pool_stake_epoch_pool,priority:3;size:28;not null"`
-	TotalStake     types.Uint64 `gorm:"not null"`
-	DelegatorCount uint64       `gorm:"not null"`
-	CapturedSlot   uint64       `gorm:"not null"`
+	ID               uint         `gorm:"primarykey"`
+	Epoch            uint64       `gorm:"uniqueIndex:idx_pool_stake_epoch_pool,priority:1;not null"`
+	SnapshotType     string       `gorm:"type:varchar(4);uniqueIndex:idx_pool_stake_epoch_pool,priority:2;not null"` // "mark", "set", "go", "actv"
+	PoolKeyHash      []byte       `gorm:"uniqueIndex:idx_pool_stake_epoch_pool,priority:3;size:28;not null"`
+	TotalStake       types.Uint64 `gorm:"not null"`
+	StakeDenominator types.Uint64 `gorm:"not null;default:0"`
+	DelegatorCount   uint64       `gorm:"not null"`
+	CapturedSlot     uint64       `gorm:"not null"`
 	// RewardAccountAutoVote captures the CIP-1694 SPO auto-vote
 	// outcome implied by the pool's reward-account DRep delegation at
 	// the snapshot epoch. Values come from PoolRewardAccountAutoVote*.

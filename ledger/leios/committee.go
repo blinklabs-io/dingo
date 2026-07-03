@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+
+	"github.com/blinklabs-io/dingo/consensus/praos"
 )
 
 var (
@@ -53,17 +55,10 @@ type Committee struct {
 	byPoolHex        map[string]uint64 // hex pool key hash -> VoterId
 }
 
-// CommitteeSnapshotEpoch returns the epoch whose "mark" stake snapshot
-// backs the committee for the given epoch. This must stay in lockstep with
-// leader.scheduleSnapshotEpoch (ledger/leader/election.go): both consume
-// the snapshot captured two epochs earlier (the Mark->Set->Go rotation),
-// matching CIP-0164's requirement that the committee use the same stake
-// snapshot cadence as Praos leader election.
+// CommitteeSnapshotEpoch returns the epoch whose mark stake snapshot is active
+// for the given epoch. This must stay in lockstep with Praos leader election.
 func CommitteeSnapshotEpoch(epoch uint64) uint64 {
-	if epoch < 2 {
-		return 0
-	}
-	return epoch - 2
+	return praos.StakeSnapshotEpoch(epoch)
 }
 
 // ComputeCommittee selects the voting committee for an epoch from the

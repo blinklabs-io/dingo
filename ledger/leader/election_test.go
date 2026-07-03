@@ -298,8 +298,6 @@ func TestElectionStartStop(t *testing.T) {
 }
 
 func TestElectionScheduleEarlyEpochs(t *testing.T) {
-	// Epochs 0 and 1 use the genesis snapshot (epoch 0) for leader
-	// election, matching the Cardano spec.
 	poolId := lcommon.PoolKeyHash{}
 	stakeProvider := newMockStakeProvider()
 	stakeProvider.totalStake = 10000

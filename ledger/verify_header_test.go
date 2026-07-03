@@ -930,12 +930,34 @@ func seedPoolStakeSnapshot(
 	totalStake uint64,
 ) {
 	t.Helper()
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		epoch,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash,
+		totalStake,
+		0,
+	)
+}
+
+func seedPoolStakeSnapshotOfType(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+	snapshotType string,
+	poolKeyHash []byte,
+	totalStake uint64,
+	stakeDenominator uint64,
+) {
+	t.Helper()
 	err := db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
-			Epoch:        epoch,
-			SnapshotType: "mark",
-			PoolKeyHash:  poolKeyHash,
-			TotalStake:   types.Uint64(totalStake),
+			Epoch:            epoch,
+			SnapshotType:     snapshotType,
+			PoolKeyHash:      poolKeyHash,
+			TotalStake:       types.Uint64(totalStake),
+			StakeDenominator: types.Uint64(stakeDenominator),
 		},
 		nil,
 	)
@@ -991,6 +1013,47 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "eligible pool with full stake should pass")
+}
+
+func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{37}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	if tb.block.slot <= 1 {
+		// This test exercises stake-source selection, not VRF proof input.
+		// Slot 0 disables the Mithril boundary sentinel, so move the mock
+		// block's reported slot past it.
+		tb.block.slot = 2
+	}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		LengthInSlots: 1_000_000,
+		Nonce:         tb.epochNonce,
+	}
+	ls.mithrilLedgerSlot = tb.block.slot - 1
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	// Seed the normal rotated mark snapshot with full stake. In the imported
+	// Mithril epoch this must not substitute for NewEpochState.pool-distr.
+	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing from active pool distribution")
+
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		poolKeyHash[:],
+		1,
+		1,
+	)
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err)
 }
 
 // TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block

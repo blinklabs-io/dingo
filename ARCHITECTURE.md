@@ -370,7 +370,7 @@ sequenceDiagram
 
     Note over SC,EB: Epoch Preparation
     EB->>LE: EpochTransitionEvent(newEpoch)
-    LE->>LS: GetStakeDistribution("go" snapshot, epoch-2)
+    LE->>LS: GetStakeDistribution("mark" snapshot, epoch-2)
     LE->>LE: compute VRF schedule for new epoch
 
     Note over SC,EB: Per-Slot Forging Loop
@@ -1311,7 +1311,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake (from the "go" snapshot, 2 epochs old).
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake from the Mark snapshot two epochs back. Header validation uses the same epoch-2 Mark source except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction.
 
 ### Block Forging (`ledger/forging/`)
 
@@ -1406,6 +1406,14 @@ snapshot manager to ensure the initial stake snapshot state before starting the
 client APIs. If the imported database already contains a non-empty Mark snapshot
 window for the current epoch, N-1, and N-2, the snapshot manager reuses that
 window instead of recalculating stake distribution from live UTxO state.
+
+Ledger-state import also persists `NewEpochState.pool-distr` as
+`pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.
+Those rows store the consensus stake fraction as `total_stake /
+stake_denominator` and are required for block-header leader eligibility checks
+until the node leaves the imported epoch. The regular Mark snapshot window is
+kept for epoch-offset consumers, but it does not substitute for `"actv"` rows in
+the imported epoch.
 
 The Mithril snapshot also acts as the local trust anchor during live
 chainsync. The ledger refuses any rollback below the imported ledger slot
@@ -1689,7 +1697,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the stake distribution from 2 epochs ago to determine if it is the slot leader.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 ### Ouroboros Praos Snapshot Model
 
@@ -1705,7 +1713,7 @@ Epoch N-2        Epoch N-1        Epoch N (current)
 
 - Mark Snapshot: Captured at the end of epoch N, becomes Set at epoch N+1
 - Set Snapshot: Previous Mark, becomes Go at epoch N+1
-- Go Snapshot: Active snapshot used for leader election (2 epochs old)
+- Go Snapshot: Conceptual active snapshot used for leader election (the Mark snapshot from 2 epochs back)
 
 ### Stake Snapshot Components
 
@@ -1734,10 +1742,10 @@ LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
 
 | Model | Purpose |
 |-------|---------|
-| `PoolStakeSnapshot` | Per-pool stake at epoch boundary (epoch, type, pool hash, stake, delegator count) |
+| `PoolStakeSnapshot` | Per-pool stake snapshot (epoch, type, pool hash, stake numerator, optional denominator, delegator count) |
 | `EpochSummary` | Network-wide aggregates (total stake, pool count, delegator count, epoch nonce) |
 
-Snapshot types: `"mark"`, `"set"`, `"go"`
+Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
 
 ### Query Interface
 

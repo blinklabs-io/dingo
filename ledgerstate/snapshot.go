@@ -22,6 +22,7 @@ import (
 	"hash/crc32"
 	"io"
 	"log/slog"
+	"math/big"
 	"os"
 	"path/filepath"
 	"slices"
@@ -569,6 +570,9 @@ func parseCurrentEra(
 		UTxOData:      utxoState[0], // The UTxO map
 		CertStateData: ls[0],        // [VState, PState, DState]
 		SnapShotsData: es[2],        // mark/set/go
+	}
+	if len(nes) > 5 {
+		result.PoolDistrData = nes[5]
 	}
 
 	// GovState (index 3 in UTxOState)
@@ -1127,6 +1131,168 @@ func parseSnapShot(
 		Delegations: delegations,
 		PoolParams:  poolParams,
 	}, errors.Join(warnings...)
+}
+
+// ParseActivePoolDistribution decodes NewEpochState.pool-distr:
+// map[PoolKeyHash][UnitInterval, VrfKeyHash]. The UnitInterval is the exact
+// active stake fraction (sigma) used by Praos leader eligibility.
+func ParseActivePoolDistribution(
+	data cbor.RawMessage,
+) ([]ParsedActivePoolStake, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	mapData, totalActiveStake, hasTotal, err := activePoolDistributionMapData(data)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := decodeMapEntries(mapData)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"decoding active pool distribution: %w", err,
+		)
+	}
+	result := make([]ParsedActivePoolStake, 0, len(entries))
+	for idx, entry := range entries {
+		var poolKeyHash []byte
+		if _, err := cbor.Decode(entry.KeyRaw, &poolKeyHash); err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding pool key hash: %w",
+				idx,
+				err,
+			)
+		}
+		if len(poolKeyHash) != 28 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: pool key hash has %d bytes, expected 28",
+				idx,
+				len(poolKeyHash),
+			)
+		}
+
+		fields, err := decodeRawArray(entry.ValueRaw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding value: %w",
+				idx,
+				err,
+			)
+		}
+		if len(fields) != 2 && len(fields) != 3 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: value has %d fields, expected 2 or 3",
+				idx,
+				len(fields),
+			)
+		}
+
+		stakeNumerator, stakeDenominator, ok := parseRational(fields[0])
+		if !ok {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: stake fraction is not a non-negative uint64 ratio",
+				idx,
+			)
+		}
+
+		vrfFieldIdx := 1
+		if len(fields) == 3 {
+			vrfFieldIdx = 2
+			var activeStake uint64
+			if _, err := cbor.Decode(fields[1], &activeStake); err != nil {
+				return nil, fmt.Errorf(
+					"active pool distribution entry %d: decoding active stake: %w",
+					idx,
+					err,
+				)
+			}
+			if hasTotal {
+				actual := new(big.Rat).SetFrac(
+					new(big.Int).SetUint64(stakeNumerator),
+					new(big.Int).SetUint64(stakeDenominator),
+				)
+				expected := new(big.Rat).SetFrac(
+					new(big.Int).SetUint64(activeStake),
+					new(big.Int).SetUint64(totalActiveStake),
+				)
+				if actual.Cmp(expected) != 0 {
+					return nil, fmt.Errorf(
+						"active pool distribution entry %d: stake fraction does not match active stake",
+						idx,
+					)
+				}
+				stakeNumerator = activeStake
+				stakeDenominator = totalActiveStake
+			}
+		}
+
+		var vrfKeyHash []byte
+		if _, err := cbor.Decode(fields[vrfFieldIdx], &vrfKeyHash); err != nil {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: decoding VRF key hash: %w",
+				idx,
+				err,
+			)
+		}
+		if len(vrfKeyHash) != 32 {
+			return nil, fmt.Errorf(
+				"active pool distribution entry %d: VRF key hash has %d bytes, expected 32",
+				idx,
+				len(vrfKeyHash),
+			)
+		}
+
+		result = append(result, ParsedActivePoolStake{
+			PoolKeyHash:      slices.Clone(poolKeyHash),
+			StakeNumerator:   stakeNumerator,
+			StakeDenominator: stakeDenominator,
+			VrfKeyHash:       slices.Clone(vrfKeyHash),
+		})
+	}
+	return result, nil
+}
+
+func activePoolDistributionMapData(
+	data cbor.RawMessage,
+) ([]byte, uint64, bool, error) {
+	if len(data) == 0 {
+		return nil, 0, false, errors.New("active pool distribution is empty")
+	}
+	switch data[0] >> 5 {
+	case 5:
+		return data, 0, false, nil
+	case 4:
+		fields, err := decodeRawArray(data)
+		if err != nil {
+			return nil, 0, false, fmt.Errorf(
+				"decoding active pool distribution container: %w",
+				err,
+			)
+		}
+		if len(fields) != 2 {
+			return nil, 0, false, fmt.Errorf(
+				"active pool distribution container has %d fields, expected 2",
+				len(fields),
+			)
+		}
+		var totalActiveStake uint64
+		if _, err := cbor.Decode(fields[1], &totalActiveStake); err != nil {
+			return nil, 0, false, fmt.Errorf(
+				"decoding active pool distribution total stake: %w",
+				err,
+			)
+		}
+		if totalActiveStake == 0 {
+			return nil, 0, false, errors.New(
+				"active pool distribution total stake is zero",
+			)
+		}
+		return fields[0], totalActiveStake, true, nil
+	default:
+		return nil, 0, false, fmt.Errorf(
+			"decoding active pool distribution: expected map or container array, got major type %d",
+			data[0]>>5,
+		)
+	}
 }
 
 // parseStakeMap decodes a credential -> coin map. Handles both

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -226,9 +227,10 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 // where sigma = poolStake / totalStake and f is the active slot coefficient
 // from Shelley genesis.
 //
-// Snapshot epoch selection follows the Mark→Set→Go rotation:
-//   - epoch 0 and 1: genesis snapshot (stored at epoch 0, "mark")
-//   - epoch e >= 2:  mark snapshot at epoch e-2
+// Stake selection follows the ledger's active pool distribution. For the
+// epoch imported from a Mithril snapshot, NewEpochState.pool-distr is used
+// directly. Otherwise, the active distribution is the mark snapshot from
+// epoch-2, clamped to genesis for early epochs.
 //
 // TPraos (Shelley/Allegra/Mary/Alonzo) and CPraos (Babbage/Conway) differ in
 // how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
@@ -245,57 +247,13 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return nil
 	}
 
-	// Determine which mark snapshot epoch to query.
-	// Epochs 0 and 1 use the genesis distribution stored at epoch 0.
-	// Epoch e >= 2 uses the mark snapshot captured at epoch e-2.
-	snapshotEpoch := uint64(0)
-	if epochId >= 2 {
-		snapshotEpoch = epochId - 2
-	}
-
 	// Derive pool key hash from the block's issuer verification key.
 	issuerVkey := block.IssuerVkey()
 	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
 
-	// Look up the pool's stake in the mark snapshot.
-	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
-		snapshotEpoch,
-		"mark",
-		poolKeyHash[:],
-		nil,
-	)
+	poolStake, totalStake, snapshotEpoch, snapshotType, err := ls.leaderEligibilityStake(block, epochId, poolKeyHash)
 	if err != nil {
-		return fmt.Errorf(
-			"block header verification rejected at slot %d: "+
-				"lookup pool stake: %w",
-			block.SlotNumber(),
-			err,
-		)
-	}
-	if snapshot == nil || snapshot.TotalStake == 0 {
-		return fmt.Errorf(
-			"block header verification rejected at slot %d: "+
-				"producer pool %x has no stake in epoch %d snapshot",
-			block.SlotNumber(),
-			poolKeyHash[:],
-			snapshotEpoch,
-		)
-	}
-	poolStake := uint64(snapshot.TotalStake)
-
-	// Look up the total active stake for the threshold denominator.
-	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
-		snapshotEpoch,
-		"mark",
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"block header verification rejected at slot %d: "+
-				"lookup total active stake: %w",
-			block.SlotNumber(),
-			err,
-		)
+		return err
 	}
 	if totalStake == 0 {
 		// Genesis snapshot not yet written (very early bootstrap).
@@ -304,6 +262,8 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 			"skipping leader eligibility check: total active stake is zero",
 			"slot", block.SlotNumber(),
 			"epoch", epochId,
+			"snapshot_epoch", snapshotEpoch,
+			"snapshot_type", snapshotType,
 			"component", "ledger",
 		)
 		return nil
@@ -358,16 +318,128 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
 				"producer pool %x VRF leader value exceeds stake-derived threshold "+
-				"(pool stake: %d, total stake: %d, epoch: %d)",
+				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s)",
 			block.SlotNumber(),
 			poolKeyHash[:],
 			poolStake,
 			totalStake,
 			epochId,
+			snapshotEpoch,
+			snapshotType,
 		)
 	}
 
 	return nil
+}
+
+func (ls *LedgerState) leaderEligibilityStake(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (uint64, uint64, uint64, string, error) {
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+		block,
+		epochId,
+	)
+	if err != nil {
+		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, err
+	}
+	if useImportedActive {
+		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			poolKeyHash[:],
+			nil,
+		)
+		if err != nil {
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"lookup active pool distribution: %w",
+					block.SlotNumber(),
+					err,
+				)
+		}
+		if snapshot == nil ||
+			snapshot.TotalStake == 0 ||
+			snapshot.StakeDenominator == 0 {
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"producer pool %x missing from active pool distribution for epoch %d",
+					block.SlotNumber(),
+					poolKeyHash[:],
+					epochId,
+				)
+		}
+		return uint64(snapshot.TotalStake),
+			uint64(snapshot.StakeDenominator),
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			nil
+	}
+
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup pool stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	if snapshot == nil || snapshot.TotalStake == 0 {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"producer pool %x has no stake in epoch %d snapshot",
+				block.SlotNumber(),
+				poolKeyHash[:],
+				snapshotEpoch,
+			)
+	}
+	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
+		snapshotEpoch,
+		snapshotType,
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup total active stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType, nil
+}
+
+func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
+	block ledger.Block,
+	epochId uint64,
+) (bool, error) {
+	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
+		return false, nil
+	}
+	mithrilEpoch, err := ls.epochForSlot(ls.mithrilLedgerSlot)
+	if err != nil {
+		return false, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve Mithril trust boundary epoch: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	return epochId == mithrilEpoch.EpochId, nil
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
