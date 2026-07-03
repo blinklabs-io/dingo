@@ -294,6 +294,10 @@ func (n *Node) Run(ctx context.Context) error {
 		// dropped. Unset on other networks (fast dead-peer eviction retained).
 		KeepAliveTimeout: keepAliveTimeout,
 	})
+	// Stop the asynchronous Leios endorser-block persistence writer during
+	// shutdown so it drains queued blob writes and its goroutine exits cleanly.
+	// No-op when no endorser block was ever fetched (writer never started).
+	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{

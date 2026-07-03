@@ -103,6 +103,23 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+
+	// Asynchronous best-effort persistence of fetched endorser blocks to the
+	// blob store for historical serving. The blob write (CBOR encode + commit)
+	// is moved off the leios-fetch hot path onto a single background writer so
+	// it does not serialize against block application during catch-up. Jobs
+	// coalesce by EB hash — a complete job (with txs) supersedes a
+	// manifest-only one — which also elides the backfiller's duplicate manifest
+	// write. Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
+	leiosPersistOnce     sync.Once
+	leiosPersistStopOnce sync.Once
+	leiosPersistStarted  atomic.Bool
+	leiosPersistMu       sync.Mutex
+	leiosPersistPending  map[string]*leiosPersistJob
+	leiosPersistSignal   chan struct{}
+	leiosPersistStop     chan struct{}
+	leiosPersistDone     chan struct{}
+	leiosPersistDropped  atomic.Uint64
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.

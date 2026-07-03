@@ -50,6 +50,36 @@ const (
 	// This prevents us exceeding the configured recv queue size in the block-fetch protocol
 	blockfetchBatchSize = 500
 
+	// leiosBackfillBlockfetchBatchSize caps the per-batch blockfetch range
+	// while a Leios node (Musashi / leios run mode) is doing bulk catch-up. It
+	// is deliberately smaller than blockfetchBatchSize.
+	//
+	// EXPERIMENTAL muxer-contention lever (deep-backfill pacing). On the
+	// Musashi prototype network every mini-protocol (chainsync, blockfetch,
+	// leios-fetch, keepalive) shares one TCP connection / muxer to a single
+	// flaky relay. gouroboros' muxer demultiplexes with a single per-connection
+	// read loop whose per-protocol receive buffers are shallow; once blockfetch
+	// streams a long uninterrupted run of block segments that buffer fills and
+	// the read loop head-of-line blocks EVERY other protocol on the connection
+	// -- including the keepalive pong and the critical-path leios-fetch
+	// endorser-block fetches the ledger is waiting on to apply the current
+	// ranking block. Symmetrically it keeps the relay's send path saturated,
+	// delaying the pong the relay owes us. Capping each blockfetch burst
+	// shorter yields the shared muxer back more often so the pong and the
+	// endorser-block fetches interleave, which the hypothesis predicts reduces
+	// the relay resets / chainsync stalls / keepalive timeouts that dominate
+	// deep-backfill wall-clock.
+	//
+	// It only limits a batch while the header runway exceeds it (bulk
+	// catch-up); near the tip the runway is a handful of headers, so this cap
+	// is inert and the node fetches full small batches (self-reverting). Sweep
+	// candidates for the live experiment: 64 / 128 / 256 (vs the un-paced 500).
+	// Correctness is unaffected: the same blocks are fetched, in more but
+	// smaller spec-legal ranges; the pipeline never stalls (each BatchDone
+	// starts the next range); non-Leios networks are untouched (see
+	// effectiveBlockfetchBatchSize).
+	leiosBackfillBlockfetchBatchSize = 128
+
 	// When we're still meaningfully behind tip, wait for a header runway
 	// before starting blockfetch so each batch amortises peer round-trip
 	// and protocol overhead over many blocks instead of trickling 1-8
@@ -934,6 +964,22 @@ func desiredBlockfetchBatchHeaders(
 	}
 	minHeaders = min(minHeaders, blockfetchMaxBatchHeadersWhenBehind)
 	return min(minHeaders, maxHeaders)
+}
+
+// effectiveBlockfetchBatchSize returns the cap on the per-batch blockfetch
+// range span. On a Leios node (ls.leiosBackfill is non-nil only when an
+// endorser-block fetcher is wired, i.e. Musashi / leios run mode) it returns
+// the smaller leiosBackfillBlockfetchBatchSize so bulk catch-up streams
+// shorter block bursts and yields the shared relay muxer back to the
+// keepalive and critical-path leios-fetch traffic more often (see the const
+// doc). On every other network it returns the unchanged blockfetchBatchSize,
+// so this is inert outside the Leios prototype path. ls.leiosBackfill is set
+// once at construction and never mutated, so this read needs no lock.
+func (ls *LedgerState) effectiveBlockfetchBatchSize() int {
+	if ls.leiosBackfill == nil {
+		return blockfetchBatchSize
+	}
+	return leiosBackfillBlockfetchBatchSize
 }
 
 func (ls *LedgerState) requestChainsyncResync(
@@ -2429,7 +2475,22 @@ func (ls *LedgerState) startQueuedBlockfetchLocked(
 	ls.batchBlocksReceived = 0
 	ls.activeBlockfetchStart = time.Now()
 	ls.firstBlockReceived = false
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	batchSize := ls.effectiveBlockfetchBatchSize()
+	if ls.leiosBackfill != nil {
+		// Observe when the reduced Leios backfill cap actually limits this
+		// batch (header runway exceeds the cap == bulk catch-up) versus when it
+		// is inert (near tip, small runway). notePacing logs only the engage /
+		// disengage transitions so a live experiment can line the pacing
+		// windows up against relay-instability events (resets, chainsync
+		// stalls, keepalive timeouts) and slots/sec.
+		ls.leiosBackfill.notePacing(
+			ls.chain.HeaderCount() > batchSize,
+			ls.chain.HeaderCount(),
+			batchSize,
+			ls.chain.HeaderTip().Point.Slot,
+		)
+	}
+	headerStart, headerEnd := ls.chain.HeaderRange(batchSize)
 	if err := ls.blockfetchRequestRangeStart(
 		connId,
 		headerStart,
@@ -3816,7 +3877,9 @@ func (ls *LedgerState) handleBlockfetchTimeoutLocked(
 		return
 	}
 
-	headerStart, headerEnd := ls.chain.HeaderRange(blockfetchBatchSize)
+	headerStart, headerEnd := ls.chain.HeaderRange(
+		ls.effectiveBlockfetchBatchSize(),
+	)
 	retryConnId := ls.selectRetryBlockfetchConn(currentConnId)
 	ls.blockfetchRequestRangeCleanup()
 	ls.config.Logger.Warn(

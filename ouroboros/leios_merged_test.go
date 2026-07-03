@@ -302,6 +302,12 @@ func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
 	o := newTestOuroborosWithLeiosDB(t)
 	require.NoError(t, o.storeLeiosEndorserBlock(point, blockRaw, txsRaw))
 
+	// Endorser-block persistence is asynchronous: storeLeiosEndorserBlock
+	// queues the blob write on a background writer. Drain it so the blob store
+	// reflects the stored block before we force the DB-reload path by clearing
+	// the in-memory cache below.
+	o.StopLeiosPersistWriter()
+
 	o.leiosMu.Lock()
 	o.leiosEndorserBlocks = make(map[string]*leiosEndorserBlockData)
 	o.leiosMu.Unlock()

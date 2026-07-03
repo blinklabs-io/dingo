@@ -467,6 +467,13 @@ type leiosBackfiller struct {
 	logger   *slog.Logger
 	sem      chan struct{}
 	inflight sync.Map
+	// pacingMu guards pacingActive, the last-observed state of the
+	// deep-backfill blockfetch pacing knob. It is only ever touched from the
+	// blockfetch dispatch path (under the ledger's chainsyncBlockfetchMutex),
+	// so contention is nil; the mutex just keeps the field race-free relative
+	// to the backfill fetch goroutines that share this struct.
+	pacingMu     sync.Mutex
+	pacingActive bool
 }
 
 // newLeiosBackfiller returns a backfiller, or nil when no endorser-block fetcher
@@ -486,6 +493,48 @@ func newLeiosBackfiller(cfg LedgerStateConfig) *leiosBackfiller {
 		logger:   logger,
 		sem:      make(chan struct{}, leiosBackfillConcurrency),
 	}
+}
+
+// notePacing records whether the deep-backfill blockfetch pacing cap is
+// currently limiting batches (active) and logs only the engage / disengage
+// transitions. active is true while the header runway exceeds the reduced cap
+// (bulk catch-up) and false near the tip where the runway is a handful of
+// headers, so the log marks exactly the windows in which the smaller
+// blockfetch bursts are in effect. A live experiment lines those windows up
+// against relay-instability counts (resets, chainsync stalls, keepalive
+// timeouts) and observed slots/sec to test whether reducing muxer contention
+// helps. headerTipSlot is the fetched (not applied) header tip; pair it with
+// the existing tip-gap metric to gauge how far behind the node is.
+func (b *leiosBackfiller) notePacing(
+	active bool,
+	headerCount, batchCap int,
+	headerTipSlot uint64,
+) {
+	b.pacingMu.Lock()
+	changed := active != b.pacingActive
+	b.pacingActive = active
+	b.pacingMu.Unlock()
+	if !changed {
+		return
+	}
+	if active {
+		b.logger.Info(
+			"leios deep-backfill blockfetch pacing engaged",
+			"component", "ledger",
+			"header_count", headerCount,
+			"batch_cap", batchCap,
+			"full_batch", blockfetchBatchSize,
+			"header_tip_slot", headerTipSlot,
+		)
+		return
+	}
+	b.logger.Info(
+		"leios deep-backfill blockfetch pacing disengaged (near tip)",
+		"component", "ledger",
+		"header_count", headerCount,
+		"batch_cap", batchCap,
+		"header_tip_slot", headerTipSlot,
+	)
 }
 
 // spawn starts a background by-point fetch of the endorser block referenced by
