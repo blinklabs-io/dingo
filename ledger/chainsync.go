@@ -1325,6 +1325,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"hash", hex.EncodeToString(e.Point.Hash),
 				"connection_id", e.ConnectionId.String(),
 			)
+			// The per-connection loop detector cannot catch this: the
+			// reset below wipes rollbackHistory and the resync forces a
+			// fresh connection, so its counter never accumulates. Track
+			// the point itself so a persistently un-crossable rollback
+			// surfaces as an operator error + metric (see issue #2728).
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackNotFound,
+				e.ConnectionId,
+			)
 			ls.resetChainsyncResyncState()
 			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
@@ -1371,6 +1381,11 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"slot", e.Point.Slot,
 				"hash", hex.EncodeToString(e.Point.Hash),
 				"connection_id", e.ConnectionId.String(),
+			)
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackExceedsK,
+				e.ConnectionId,
 			)
 			// Restore state: no rollback actually occurred, so
 			// we are still syncing. Leaving RollbackChainsyncState
@@ -1435,6 +1450,11 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					"connection_id", e.ConnectionId.String(),
 				)
 			}
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				reason,
+				e.ConnectionId,
+			)
 			ls.resetChainsyncResyncState()
 			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
@@ -1453,6 +1473,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
+	// The rollback applied: we crossed to the peer's point, so any prior
+	// un-crossable-rollback tracking is stale. Clear it so a later,
+	// unrelated divergence starts counting from zero (see issue #2728).
+	ls.clearUnrecoverableRollbacks()
 	return nil
 }
 
