@@ -1,5 +1,65 @@
 # Dingo Releases
 
+## v0.61.1 (July 2, 2026)
+
+**Title:** Safer Mithril recovery, steadier Leios sync, and stronger ledger validation
+
+**Date:** July 2, 2026
+
+**Version:** v0.61.1
+
+Hi folks! Here’s what we shipped in v0.61.1.
+
+### ✨ What's New
+
+* Noted **this patch release has no new features:** This patch release focuses on reliability improvements, fixes, operator controls, and release history maintenance.
+
+### 💪 Improvements
+
+* Improved **isolate pooled Mithril archive download connections for steadier bootstrap and archive transfers:** Mithril bootstrap and archive recovery now keep pooled download connections isolated, which helps transfers stay steadier during recovery work.
+* Updated **disable Badger GC during Mithril snapshot load for steadier snapshot imports:** Mithril snapshot imports now disable Badger GC during loading, which helps snapshot recovery stay steadier.
+* Refined **fail fast on malformed database blob or metadata plugin configuration:** Malformed database blob or metadata plugin configuration now fails fast at startup instead of being silently ignored or continuing.
+* Enhanced **persist Leios endorser blocks for historical serving after cache expiry or restart:** Historical Leios serving now keeps endorser blocks available after cache expiry and after a restart.
+* Modernized **make tracing configurable through config, environment variables, and CLI flags:** Tracing behavior now follows configuration files, environment variables, and CLI flags, which gives operators clearer control.
+* Strengthened **make MySQL and Postgres metadata plugins an explicit `-tags dingo_extra_plugins` opt in while SQLite remains in the default build:** MySQL and Postgres metadata support now requires the explicit `-tags dingo_extra_plugins` opt in, while SQLite remains available in the default build.
+* Advanced **persist the full Mithril trust boundary point for better recovery intersections:** Mithril recovery now keeps the full trust boundary point, including its hash, which helps recovery intersections stay more accurate.
+* Polished **chunk large Leios transaction hash lookups and skip duplicate endorser block transactions:** Large Leios transaction lookups now run in smaller chunks and ignore duplicate endorser block transactions, which helps historical recovery stay steadier.
+* Sharpened **purge orphaned metadata rows before auto migrate so upgrades start more safely:** Metadata upgrades now clear orphaned rows before auto migration begins, which makes upgrades safer to start.
+* Updated **keep the in repository v0.61.0 release history current:** The repository release history now includes the v0.61.0 entry, which keeps recent release context current.
+
+### 🔧 Fixes
+
+* Fixed **preserve Mithril covered LAB and epoch nonces during ledger healing:** Ledger healing now preserves Mithril covered LAB and epoch nonces, which protects recovery correctness.
+* Corrected **normalize VRF key and result data from canonical header body CBOR during block verification:** Block verification now normalizes VRF key and result data from canonical header body CBOR, which improves validation accuracy.
+* Strengthened **tolerate speculative Leios endorser conflicts so ranking blocks can proceed without wedging sync:** Leios sync now tolerates speculative endorser conflicts so ranking block processing can keep moving.
+* Repaired **fix development transaction generation and chained forging so submitted transactions are accepted:** Development transaction generation and chained forging now use the expected submission behavior, and mempool eviction no longer blocks acceptance.
+* Stabilized **recover from wedged peers and persistent near tip validation failures by retrying and rotating to a fresh sync peer:** Sync now retries failed validation paths and rotates to a fresh sync peer, which helps recovery continue after a wedged connection.
+* Hardened **enforce slot leader eligibility against stake derived thresholds on inbound blocks:** Inbound block validation now checks slot leader eligibility against stake derived thresholds, which strengthens ledger validation.
+* Balanced **repair epoch boundary LAB nonce derivation and startup and rollback nonce recovery:** Nonce recovery now repairs epoch boundary LAB nonce derivation and startup and rollback nonce recovery, which keeps nonce handling more reliable.
+
+### 📋 What You Need to Know
+
+* Clarified **expect steadier Mithril bootstrap and snapshot recovery paths:** Mithril bootstrap transfers and snapshot imports should now recover more steadily during archive and snapshot work.
+* Highlighted **expect better Leios historical serving and steadier speculative conflict handling:** Historical Leios serving now stays available after cache expiry or restart, and speculative conflict handling now keeps ranking block processing moving.
+* Emphasized **build with the explicit `-tags dingo_extra_plugins` option when MySQL or Postgres metadata plugins are required:** MySQL and Postgres metadata support now requires the explicit `-tags dingo_extra_plugins` option, while SQLite remains in the default build.
+* Summarized **expect malformed database blob or metadata plugin configuration to fail fast at startup:** Malformed database blob or metadata plugin configuration now fails fast at startup instead of being silently ignored or continuing.
+* Reviewed **expect corrected development transaction generation and chained forging acceptance:** Development transaction generation, chained forging, and mempool handling now align so submitted transactions are accepted.
+* Noted **review the in repository release history for the current v0.61.0 entry:** The repository release history now includes the v0.61.0 entry for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.61.0 (June 30, 2026)
 
 **Title:** Midnight governance indexing, steadier Leios serving, and simpler example deployments
