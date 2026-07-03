@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"net"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
@@ -50,4 +51,36 @@ func TestKeepaliveClientResponsePublishesPeerActivity(t *testing.T) {
 	default:
 		t.Fatal("expected peer activity event")
 	}
+}
+
+// keepaliveTimeoutFor builds an Ouroboros with the given KeepAliveTimeout and
+// returns the pong-wait Timeout that its keepaliveConnOpts produce, resolved
+// through gouroboros' NewConfig (which starts from the 10s default).
+func keepaliveTimeoutFor(cfgTimeout time.Duration) time.Duration {
+	o := NewOuroboros(OuroborosConfig{KeepAliveTimeout: cfgTimeout})
+	return okeepalive.NewConfig(o.keepaliveConnOpts()...).Timeout
+}
+
+func TestKeepaliveConnOptsTimeout(t *testing.T) {
+	// Unset: gouroboros default (10s) is left in place.
+	assert.Equal(
+		t,
+		time.Duration(okeepalive.DefaultKeepAliveTimeout)*time.Second,
+		keepaliveTimeoutFor(0),
+	)
+	// Set below the spec maximum: applied verbatim.
+	belowServerTimeout := okeepalive.ServerTimeout / 2
+	assert.Equal(t, belowServerTimeout, keepaliveTimeoutFor(belowServerTimeout))
+	// The Musashi value (spec maximum) is applied.
+	assert.Equal(
+		t,
+		okeepalive.ServerTimeout,
+		keepaliveTimeoutFor(okeepalive.ServerTimeout),
+	)
+	// Above the spec maximum: clamped down to it.
+	assert.Equal(
+		t,
+		okeepalive.ServerTimeout,
+		keepaliveTimeoutFor(okeepalive.ServerTimeout+30*time.Second),
+	)
 }

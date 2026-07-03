@@ -23,11 +23,25 @@ import (
 )
 
 func (o *Ouroboros) keepaliveConnOpts() []okeepalive.KeepAliveOptionFunc {
-	return []okeepalive.KeepAliveOptionFunc{
+	opts := []okeepalive.KeepAliveOptionFunc{
 		okeepalive.WithKeepAliveResponseFunc(
 			o.instrumentKeepaliveResponse(o.keepaliveClientResponse),
 		),
 	}
+	// Raise the client's wait-for-pong deadline when configured (Musashi). The
+	// gouroboros default is a tight 10s (DefaultKeepAliveTimeout), so on a
+	// single relay whose shared muxer is saturated by block/EB traffic a pong
+	// delayed past 10s makes dingo drop the connection and pay a
+	// reconnect+fork-rollback — even though the relay is merely slow, not dead.
+	// The configured value is bounded to okeepalive.ServerTimeout, the longest
+	// a client may wait for a server pong, so dingo tolerates a muxer-delayed
+	// pong instead of a false-positive drop.
+	// Zero leaves the gouroboros default in place (unchanged on other networks).
+	if o.config.KeepAliveTimeout > 0 {
+		timeout := min(o.config.KeepAliveTimeout, okeepalive.ServerTimeout)
+		opts = append(opts, okeepalive.WithTimeout(timeout))
+	}
+	return opts
 }
 
 func (o *Ouroboros) instrumentKeepaliveResponse(

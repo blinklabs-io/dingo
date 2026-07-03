@@ -164,6 +164,15 @@ type OuroborosConfig struct {
 	// Zero disables tail-retry (fetch aborts on the first miss). Sourced from
 	// the Leios diffusion window in node.go.
 	LeiosTxFetchTailBudget time.Duration
+	// KeepAliveTimeout overrides how long the keep-alive client waits for a
+	// peer's pong before treating the connection as failed. Zero uses the
+	// gouroboros default (10s). It is raised on the Musashi prototype network
+	// (to okeepalive.ServerTimeout) so a pong delayed by the single relay's
+	// saturated shared muxer does not trigger a false-positive drop and an
+	// expensive reconnect + fork rollback; see keepaliveConnOpts. Values above
+	// that bound are clamped there. Unset (0) on other networks, so dead peers
+	// are still evicted quickly.
+	KeepAliveTimeout time.Duration
 }
 
 type blockfetchMetrics struct {
