@@ -380,6 +380,8 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		return
 	}
 	var replayConnId ouroboros.ConnectionId
+	effectiveConnId := e.NewConnectionId
+	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -402,6 +404,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 				)
 				if retryConnId, retryErr := ls.handoffPipelineOnSwitchLocked(*activeConnId); retryErr == nil {
 					replayConnId = retryConnId
+					effectiveConnId = *activeConnId
 					err = nil
 				}
 			}
@@ -420,8 +423,29 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 		}
 	}
+	if err == nil {
+		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
+			e,
+			effectiveConnId,
+		)
+	}
 	ls.chainsyncBlockfetchMutex.Unlock()
 	if err != nil {
+		return
+	}
+	if requestFreshCursor {
+		ls.config.Logger.Info(
+			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
+			"component", "ledger",
+			"connection_id", effectiveConnId.String(),
+			"switch_connection_id", e.NewConnectionId.String(),
+			"local_tip_slot", ls.PrimaryChainTip().Point.Slot,
+			"peer_tip_slot", e.NewTip.Point.Slot,
+		)
+		ls.requestChainsyncResync(
+			effectiveConnId,
+			event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		)
 		return
 	}
 	if connIdKey(replayConnId) != "" {
@@ -678,6 +702,31 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	}
 
 	return ouroboros.ConnectionId{}, nil
+}
+
+func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) bool {
+	if connIdKey(e.PreviousConnectionId) == "" ||
+		connIdKey(connId) == "" {
+		return false
+	}
+	if ls.chainsyncBlockfetchReadyChan != nil {
+		return false
+	}
+	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
+		return false
+	}
+	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
+		return false
+	}
+	localTip := ls.PrimaryChainTip()
+	if e.NewTip.BlockNumber > localTip.BlockNumber {
+		return true
+	}
+	return e.NewTip.BlockNumber == localTip.BlockNumber &&
+		e.NewTip.Point.Slot > localTip.Point.Slot
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {

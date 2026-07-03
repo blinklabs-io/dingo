@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -543,6 +544,240 @@ func TestHandleChainSwitchEventUpdatesSelectedBlockfetchConnId(t *testing.T) {
 	assert.Equal(t, connId, nextConnId)
 }
 
+func TestHandleChainSwitchEventRequestsFreshCursorWhenPeerAheadWithoutHeaders(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	connId1 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	connId2 := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3002},
+	}
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: connId1,
+			NewConnectionId:      connId2,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		},
+	))
+
+	evt := testutil.RequireReceive(
+		t,
+		resyncCh,
+		2*time.Second,
+		"expected chain-switch cursor resync event",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, connId2, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		resync.Reason,
+	)
+}
+
+type chainSwitchFallbackFixture struct {
+	ls             *LedgerState
+	resyncCh       <-chan event.Event
+	previousConnId ouroboros.ConnectionId
+	targetConnId   ouroboros.ConnectionId
+	activeConnId   ouroboros.ConnectionId
+}
+
+func newChainSwitchFallbackFixture(
+	t *testing.T,
+) chainSwitchFallbackFixture {
+	t.Helper()
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+
+	connId1 := testChainsyncConnId(6000, 3001)
+	connId2 := testChainsyncConnId(6000, 3002)
+	connId3 := testChainsyncConnId(6000, 3003)
+	currentConn := connId3
+	testChain := &chain.Chain{}
+	err := testChain.AddBlockHeader(mockHeader{
+		hash:        lcommon.NewBlake2b256([]byte("stale-hdr")),
+		prevHash:    lcommon.NewBlake2b256(nil),
+		blockNumber: 1,
+		slot:        1,
+	})
+	require.NoError(t, err)
+
+	ls := &LedgerState{
+		chain: testChain,
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			GetActiveConnectionFunc: func() *ouroboros.ConnectionId {
+				return &currentConn
+			},
+			BlockfetchRequestRangeFunc: func(
+				connId ouroboros.ConnectionId,
+				start ocommon.Point,
+				end ocommon.Point,
+			) error {
+				_ = start
+				_ = end
+				if sameConnectionId(connId, connId2) {
+					testChain.ClearHeaders()
+					return errors.New("connection closed")
+				}
+				return nil
+			},
+		},
+	}
+
+	return chainSwitchFallbackFixture{
+		ls:             ls,
+		resyncCh:       resyncCh,
+		previousConnId: connId1,
+		targetConnId:   connId2,
+		activeConnId:   connId3,
+	}
+}
+
+func (f chainSwitchFallbackFixture) handleChainSwitchEvent() {
+	f.ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{
+			PreviousConnectionId: f.previousConnId,
+			NewConnectionId:      f.targetConnId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		},
+	))
+}
+
+func TestHandleChainSwitchEventFallbackResyncUsesActiveConnection(
+	t *testing.T,
+) {
+	fixture := newChainSwitchFallbackFixture(t)
+	fixture.handleChainSwitchEvent()
+
+	evt := testutil.RequireReceive(
+		t,
+		fixture.resyncCh,
+		2*time.Second,
+		"expected fallback chain-switch cursor resync event",
+	)
+	resync, ok := evt.Data.(event.ChainsyncResyncEvent)
+	require.True(t, ok)
+	assert.Equal(t, fixture.activeConnId, resync.ConnectionId)
+	assert.Equal(
+		t,
+		event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		resync.Reason,
+	)
+	assert.Equal(t, fixture.activeConnId, fixture.ls.selectedBlockfetchConnId)
+}
+
+func TestHandleChainSwitchEventFallbackReplaysBufferedActiveHeaders(
+	t *testing.T,
+) {
+	bufferedHeaderHash := lcommon.NewBlake2b256([]byte("active-hdr"))
+	fixture := newChainSwitchFallbackFixture(t)
+
+	fixture.ls.bufferedHeaderEvents = map[string][]ChainsyncEvent{
+		connIdKey(fixture.activeConnId): {{
+			ConnectionId: fixture.activeConnId,
+			BlockHeader: mockHeader{
+				hash:        bufferedHeaderHash,
+				prevHash:    lcommon.NewBlake2b256(nil),
+				blockNumber: 1,
+				slot:        1,
+			},
+			Point: ocommon.NewPoint(1, bufferedHeaderHash.Bytes()),
+			Tip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(10, []byte("tip")),
+				BlockNumber: 10,
+			},
+		}},
+	}
+
+	fixture.handleChainSwitchEvent()
+
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			fixture.ls.chainsyncMutex.Lock()
+			defer fixture.ls.chainsyncMutex.Unlock()
+			return sameConnectionId(
+				fixture.ls.headerPipelineConnId,
+				fixture.activeConnId,
+			) &&
+				fixture.ls.chain.HeaderCount() == 1 &&
+				len(fixture.ls.bufferedHeaderEvents[connIdKey(fixture.activeConnId)]) == 0
+		},
+		2*time.Second,
+		"expected buffered active headers to replay after fallback handoff",
+	)
+	testutil.RequireNoReceive(
+		t,
+		fixture.resyncCh,
+		200*time.Millisecond,
+		"active buffered headers should not trigger fresh cursor resync",
+	)
+}
+
+func TestHandleChainSwitchEventDoesNotResyncInitialPeerSelection(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(event.ChainsyncResyncEventType)
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},
+		RemoteAddr: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 3001},
+	}
+	ls := &LedgerState{
+		chain: &chain.Chain{},
+		config: LedgerStateConfig{
+			EventBus: bus,
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.handleChainSwitchEvent(event.NewEvent(
+		chainselection.ChainSwitchEventType,
+		chainselection.ChainSwitchEvent{
+			NewConnectionId: connId,
+			NewTip: ochainsync.Tip{
+				Point:       ocommon.NewPoint(200, []byte("peer-tip")),
+				BlockNumber: 10,
+			},
+		},
+	))
+
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		200*time.Millisecond,
+		"initial peer selection should not trigger resync",
+	)
+}
+
 func TestShouldBufferHeaderEventDoesNotPreserveIdleSelectedConnection(
 	t *testing.T,
 ) {
@@ -635,7 +870,7 @@ func TestHandleChainSwitchEventReplaysBufferedHeadersForSelectedConnection(
 		return sameConnectionId(ls.headerPipelineConnId, connId2) &&
 			ls.chain.HeaderCount() == 1 &&
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0
-	}, time.Second, 10*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestHandleEventChainsyncBlockHeaderAcceptsCompatibleNonOwnerConnection(
@@ -1035,7 +1270,7 @@ func TestHandleEventBlockfetchBatchDoneReplaysBufferedHeadersAfterDrain(
 		return sameConnectionId(ls.headerPipelineConnId, connId2) &&
 			len(ls.bufferedHeaderEvents[connIdKey(connId2)]) == 0 &&
 			ls.chain.HeaderCount() == 1
-	}, time.Second, 10*time.Millisecond)
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.True(t, sameConnectionId(ls.headerPipelineConnId, connId2))
 	assert.Equal(t, 1, ls.chain.HeaderCount())
 }

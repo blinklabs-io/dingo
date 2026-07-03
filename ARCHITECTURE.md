@@ -1074,7 +1074,14 @@ The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
 
 The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
-connection when a better chain is found.
+connection when a better chain is found. A chain switch does not assume that the
+new peer's already-running ChainSync cursor is still contiguous with the local
+ledger. If the selected peer advertises a tip ahead of the primary chain and
+there are no queued headers, buffered headers, or active blockfetch work to
+bridge the gap, the ledger emits `chainsync.resync` with reason
+`chain switch cursor ahead of local tip`; Ouroboros then closes that connection
+for a fresh intersect from the current local tip instead of waiting for a cursor
+that has already moved past the missing blocks.
 
 Bootstrap topology peers remain chain-selection eligible after bootstrap exit
 as a fallback ingress source, but peer governance lowers their priority to zero.
