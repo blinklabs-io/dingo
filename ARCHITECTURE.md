@@ -1248,7 +1248,21 @@ upstream connection left, capped per cycle. This guarantees the node converges
 back to connected even when a close event cannot be attributed to its peer or
 a dial loop exited early. Gossip churn never demotes the peer holding the last
 eligible upstream connection, so routine churn cannot leave the node without a
-chainsync source.
+chainsync source. Each outbound dial attempt re-resolves a hostname-based
+peer's address fresh, narrows the records to the address families the local
+host can route to (detected once via `net.InterfaceAddrs` and cached, so a
+v4-only or v6-only host never dials a dead family), and picks one of the
+remaining records at random for that attempt (`resolveDialAddress`), so repeated
+attempts spread across every reachable backend behind a load-balancer hostname
+and a congested or half-dead backend is escaped on the next attempt rather than
+pinned until a process restart. If family detection is inconclusive or filters
+everything out, the full record set is used so a peer is never stranded. The
+re-resolution runs against `net.DefaultResolver` with a context bounded by a
+few seconds and tied to the governor context, so a hung or slow resolver
+cannot wedge the outbound-dial loop and a shutdown cancels an in-flight lookup
+promptly; on timeout or failure the attempt falls back to the unresolved
+address. IP-literal peers dial unchanged, and peer identity/dedup stays keyed
+on the stable `Address`/`NormalizedAddress`, not the rotating dial target.
 
 Reconnect backoff after short-lived sessions escalates exponentially. The
 reconnect goroutine consumes and zeroes the stored delay before dialing, so
