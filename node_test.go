@@ -16,6 +16,7 @@ package dingo
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"log/slog"
@@ -24,11 +25,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -48,6 +53,138 @@ func newNodeTestConnId(id uint) ouroboros.ConnectionId {
 			Port: int(id),
 		},
 	}
+}
+
+type nodeTestSecurityParamLedger struct {
+	securityParam int
+}
+
+func (m nodeTestSecurityParamLedger) SecurityParam() int {
+	return m.securityParam
+}
+
+func nodeTestHashBytes(seed string) []byte {
+	sum := sha256.Sum256([]byte(seed))
+	return append([]byte(nil), sum[:]...)
+}
+
+func newNodeTestCardanoNodeCfg(t testing.TB) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		"preview/config.json",
+		"preview",
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	return cfg
+}
+
+func newNodeTestDivergedLedger(
+	t *testing.T,
+) (*ledger.LedgerState, ochainsync.Tip, ochainsync.Tip, ochainsync.Tip) {
+	t.Helper()
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	require.NoError(t, cm.SetLedger(nodeTestSecurityParamLedger{securityParam: 432}))
+
+	ancestorHash := nodeTestHashBytes("node-recycler-ancestor")
+	currentHash := nodeTestHashBytes("node-recycler-current")
+	ancestorBlock := chain.RawBlock{
+		Slot:        10,
+		Hash:        ancestorHash,
+		BlockNumber: 1,
+		Type:        1,
+		Cbor:        []byte{0x80},
+	}
+	currentBlock := chain.RawBlock{
+		Slot:        20,
+		Hash:        currentHash,
+		BlockNumber: 2,
+		Type:        1,
+		PrevHash:    ancestorHash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		ancestorBlock,
+		currentBlock,
+	}))
+
+	ancestorTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(ancestorBlock.Slot, ancestorBlock.Hash),
+		BlockNumber: ancestorBlock.BlockNumber,
+	}
+	currentTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(currentBlock.Slot, currentBlock.Hash),
+		BlockNumber: currentBlock.BlockNumber,
+	}
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			ancestorTip.Point.Hash,
+			ancestorTip.Point.Slot,
+			[]byte("nonce-ancestor"),
+			true,
+			nil,
+		),
+	)
+	require.NoError(
+		t,
+		db.SetBlockNonce(
+			currentTip.Point.Hash,
+			currentTip.Point.Slot,
+			[]byte("nonce-current"),
+			false,
+			nil,
+		),
+	)
+	require.NoError(t, db.SetTip(currentTip, nil))
+
+	ledgerState, err := ledger.NewLedgerState(ledger.LedgerStateConfig{
+		Database:              db,
+		ChainManager:          cm,
+		CardanoNodeConfig:     newNodeTestCardanoNodeCfg(t),
+		Logger:                slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ManualBlockProcessing: true,
+		DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
+			WorkerPoolSize: 1,
+			TaskQueueSize:  1,
+			Disabled:       true,
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, ledgerState.Start(context.Background()))
+	t.Cleanup(func() {
+		if ledgerState.Scheduler != nil {
+			ledgerState.Scheduler.Stop()
+		}
+		require.NoError(t, ledgerState.Close())
+	})
+
+	forkBlock := chain.RawBlock{
+		Slot:        50,
+		Hash:        nodeTestHashBytes("node-recycler-fork"),
+		BlockNumber: currentBlock.BlockNumber + 1,
+		Type:        1,
+		PrevHash:    ancestorHash,
+		Cbor:        []byte{0x80},
+	}
+	require.NoError(t, ledgerState.Chain().Rollback(ancestorTip.Point))
+	require.NoError(t, ledgerState.Chain().AddRawBlocks([]chain.RawBlock{forkBlock}))
+	forkTip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(forkBlock.Slot, forkBlock.Hash),
+		BlockNumber: forkBlock.BlockNumber,
+	}
+	require.Equal(t, currentTip, ledgerState.Tip())
+	require.Equal(t, forkTip, ledgerState.PrimaryChainTip())
+	return ledgerState, ancestorTip, currentTip, forkTip
 }
 
 func TestHandleChainSwitchEventUpdatesActiveConnection(t *testing.T) {
@@ -179,6 +316,26 @@ func TestShouldRecycleLocalTipPlateau(t *testing.T) {
 		cooldown,
 		threshold,
 	))
+}
+
+func TestIsLedgerApplicationBacklog(t *testing.T) {
+	// Leios deep catch-up: header/primary chain caught up to the peer while
+	// the applied ledger tip lags far behind -> backlog (do not recycle).
+	assert.True(t, isLedgerApplicationBacklog(1_488_398, 3_082_751, 3_082_751))
+	// Primary chain slightly behind the peer but the residual header gap is
+	// tiny next to the apply backlog -> still a backlog.
+	assert.True(t, isLedgerApplicationBacklog(1_488_398, 3_082_700, 3_082_751))
+	// Genuine chainsync/header stall: nothing fetched beyond the applied tip
+	// while the peer is far ahead -> not a backlog (recycle path applies).
+	assert.False(t, isLedgerApplicationBacklog(1_488_398, 1_488_398, 3_082_751))
+	// Header chain lags: residual header gap dominates the apply backlog ->
+	// not a backlog (headers are actually missing).
+	assert.False(t, isLedgerApplicationBacklog(1_000, 1_100, 3_000))
+	// No primary-chain data (e.g. nil ledger state -> 0) -> not a backlog, so
+	// existing recycle behavior is preserved.
+	assert.False(t, isLedgerApplicationBacklog(100, 0, 120))
+	// Apply backlog exactly equals residual header gap -> treat as backlog.
+	assert.True(t, isLedgerApplicationBacklog(100, 150, 200))
 }
 
 func TestProcessChainsyncRecyclerTickKeepsStalledRecyclerRunning(
@@ -422,6 +579,84 @@ func TestProcessChainsyncRecyclerTickRecyclesLocalTipPlateau(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("expected plateau resync event")
 	}
+}
+
+func TestProcessChainsyncRecyclerTickReconcilesBeforeBacklogSuppression(
+	t *testing.T,
+) {
+	ledgerState, ancestorTip, currentTip, forkTip := newNodeTestDivergedLedger(t)
+	require.True(
+		t,
+		isLedgerApplicationBacklog(
+			currentTip.Point.Slot,
+			forkTip.Point.Slot,
+			forkTip.Point.Slot,
+		),
+		"fixture must look like a ledger application backlog",
+	)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+	_, resyncCh := bus.Subscribe(
+		event.ChainsyncResyncEventType,
+	)
+
+	connId := newNodeTestConnId(8)
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Hour,
+		},
+	)
+	require.True(t, state.AddClientConnId(connId))
+	state.SetClientConnId(connId)
+
+	selector := chainselection.NewChainSelector(
+		chainselection.ChainSelectorConfig{},
+	)
+	selector.UpdatePeerTip(connId, forkTip, nil)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		chainsyncState: state,
+		chainSelector:  selector,
+		eventBus:       bus,
+		ledgerState:    ledgerState,
+	}
+
+	now := time.Now()
+	lastProgressSlot := currentTip.Point.Slot
+	lastProgressAt := now.Add(-25 * time.Minute)
+	recycleAt := make(map[string]time.Time)
+	lastRecycled := make(map[string]time.Time)
+
+	n.processChainsyncRecyclerTick(
+		now,
+		currentTip.Point.Slot,
+		chainsync.Config{
+			MaxClients:   1,
+			StallTimeout: time.Hour,
+		},
+		recycleAt,
+		lastRecycled,
+		&lastProgressSlot,
+		&lastProgressAt,
+		4*time.Minute,
+		time.Second,
+		2*time.Minute,
+	)
+
+	assert.Equal(t, ancestorTip, ledgerState.Tip())
+	testutil.RequireNoReceive(
+		t,
+		resyncCh,
+		50*time.Millisecond,
+		"chainsync resync should not fire when ledger reconcile repairs the plateau",
+	)
 }
 
 // TestProcessChainsyncRecyclerTickResyncsPlateauOnlyPeer verifies the
