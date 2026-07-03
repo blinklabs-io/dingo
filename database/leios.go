@@ -131,3 +131,52 @@ func (d *Database) GetLeiosEBTxs(hash []byte) ([]cbor.RawMessage, error) {
 	}
 	return txsRaw, nil
 }
+
+// SetLeiosEB persists an endorser block's manifest and, when txsRaw is non-nil,
+// its transaction bodies in a SINGLE blob-store transaction (one commit),
+// merging what SetLeiosEBManifest + SetLeiosEBTxs do in two. The stored values
+// are byte-identical to those setters, so GetLeiosEBManifest / GetLeiosEBTxs
+// and the reload path are unchanged. Pass txsRaw==nil to write only the
+// manifest (an incomplete endorser block); pass the complete tx set otherwise.
+// Note the nil contract differs from SetLeiosEBTxs: SetLeiosEBTxs(nil) writes an
+// empty tx list under the "et" key, whereas SetLeiosEB(..., nil) omits the "et"
+// key entirely (manifest-only), so the two must not be treated as interchangeable
+// nil handlers.
+// Used by the asynchronous EB-persistence writer so historical-serving storage
+// costs one commit per endorser block off the leios-fetch hot path.
+func (d *Database) SetLeiosEB(
+	slot uint64,
+	hash []byte,
+	manifestRaw []byte,
+	txsRaw []cbor.RawMessage,
+) error {
+	blob := d.Blob()
+	if blob == nil {
+		return types.ErrBlobStoreUnavailable
+	}
+	txn := d.BlobTxn(true)
+	defer txn.Rollback() //nolint:errcheck
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return types.ErrNilTxn
+	}
+	manifestVal := make([]byte, 8+len(manifestRaw))
+	binary.BigEndian.PutUint64(manifestVal[:8], slot)
+	copy(manifestVal[8:], manifestRaw)
+	if err := blob.Set(blobTxn, types.LeiosEBManifestKey(hash), manifestVal); err != nil {
+		return fmt.Errorf("SetLeiosEB: manifest: %w", err)
+	}
+	if txsRaw != nil {
+		txsVal, err := cbor.Encode(txsRaw)
+		if err != nil {
+			return fmt.Errorf("SetLeiosEB: encode txs: %w", err)
+		}
+		if err := blob.Set(blobTxn, types.LeiosEBTxsKey(hash), txsVal); err != nil {
+			return fmt.Errorf("SetLeiosEB: txs: %w", err)
+		}
+	}
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("SetLeiosEB: commit: %w", err)
+	}
+	return nil
+}
