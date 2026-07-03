@@ -1121,15 +1121,11 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if pool == nil {
 		return [32]byte{}, false, nil
 	}
-	if len(pool.Registration) > 0 &&
-		len(pool.Registration[0].VrfKeyHash) == 32 {
-		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
-		return vrfHash, true, nil
-	}
-	if len(pool.VrfKeyHash) != 32 {
+	registeredVrfHash, ok := registeredPoolVrfKeyHash(pool)
+	if !ok {
 		return [32]byte{}, false, nil
 	}
-	copy(vrfHash[:], pool.VrfKeyHash)
+	copy(vrfHash[:], registeredVrfHash[:])
 	return vrfHash, true, nil
 }
 

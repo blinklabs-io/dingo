@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -83,6 +84,21 @@ func (c *Chain) HeaderTip() ochainsync.Tip {
 	c.mutex.RLock()
 	defer c.mutex.RUnlock()
 	return c.headerTip()
+}
+
+// blockNumberContiguous reports whether a block number legitimately follows its
+// parent's. Shelley-era and later increment by exactly one per block. Byron
+// epoch-boundary blocks reuse the parent's block number (they do not increment),
+// so in the Byron era both parentNumber and parentNumber+1 are valid. Any other
+// value (notably an inflated one) is non-contiguous and rejected.
+func blockNumberContiguous(eraId uint8, blockNumber, parentNumber uint64) bool {
+	if blockNumber == parentNumber+1 {
+		return true
+	}
+	if eraId == byron.EraIdByron && blockNumber == parentNumber {
+		return true
+	}
+	return false
 }
 
 func (c *Chain) headerTip() ochainsync.Tip {
@@ -146,6 +162,24 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 				headerHash.String(),
 				headerPrevHash.String(),
 				hex.EncodeToString(headerTip.Point.Hash),
+			)
+		}
+		// Bind the header's self-reported block number to the parent's. The
+		// header chains onto the tip (prev hash matched above), so its block
+		// number must be contiguous: exactly parent+1 for Shelley-era and
+		// later. Byron epoch-boundary blocks reuse the parent's number, so in
+		// the Byron era both parent and parent+1 are accepted. Rejecting a
+		// non-contiguous number stops a forged (inflated) block number from
+		// entering the chain and winning chain selection's longest-chain rule.
+		if !blockNumberContiguous(
+			header.Era().Id,
+			queued.blockNumber,
+			headerTip.BlockNumber,
+		) {
+			return NewBlockNumberNotContiguousError(
+				headerHash.String(),
+				queued.blockNumber,
+				headerTip.BlockNumber,
 			)
 		}
 	}
@@ -261,6 +295,20 @@ func (c *Chain) addBlockLocked(
 				hex.EncodeToString(blockHashBytes),
 				hex.EncodeToString(blockPrevHashBytes),
 				hex.EncodeToString(c.currentTip.Point.Hash),
+			)
+		}
+		// Bind the block number to the parent's (defense in depth alongside the
+		// header-ingestion check): a block that fits on the tip must carry a
+		// contiguous number so a forged number cannot enter the chain.
+		if !blockNumberContiguous(
+			block.Era().Id,
+			blockNumber,
+			c.currentTip.BlockNumber,
+		) {
+			return event.Event{}, NewBlockNumberNotContiguousError(
+				hex.EncodeToString(blockHashBytes),
+				blockNumber,
+				c.currentTip.BlockNumber,
 			)
 		}
 	}

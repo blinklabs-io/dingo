@@ -757,6 +757,19 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 0, poolKeyHash[:], 1_000_000_000)
 
+	// Register the pool with the block's actual VRF key hash so the
+	// registered-VRF-key binding check accepts the block. Without this the
+	// block is rejected before the nonce-selection logic under test runs.
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(tb.block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	seedPoolRegistration(
+		t,
+		db,
+		poolKeyHash[:],
+		lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	)
+
 	ls := &LedgerState{
 		db: db,
 		currentEpoch: models.Epoch{
@@ -958,6 +971,36 @@ func seedPoolStakeSnapshotOfType(
 			PoolKeyHash:      poolKeyHash,
 			TotalStake:       types.Uint64(totalStake),
 			StakeDenominator: types.Uint64(stakeDenominator),
+		},
+		nil,
+	)
+	require.NoError(t, err)
+}
+
+// seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)
+// returns a *models.Pool whose VrfKeyHash equals vrfKeyHash. It mirrors
+// seedPoolStakeSnapshot by persisting through the metadata store interface:
+// ImportPool upserts the Pool row (whose denormalized VrfKeyHash is what
+// verifyRegisteredVrfKey compares against) and creates a linked
+// PoolRegistration record, which GetPool requires before it treats the pool
+// as active. vrfKeyHash must be the 32-byte Blake2b256 of the block header's
+// VRF key bytes for verifyRegisteredVrfKey to accept the block.
+func seedPoolRegistration(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	vrfKeyHash []byte,
+) {
+	t.Helper()
+	err := db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  vrfKeyHash,
+		},
+		&models.PoolRegistration{
+			PoolKeyHash: poolKeyHash,
+			VrfKeyHash:  vrfKeyHash,
+			AddedSlot:   1,
 		},
 		nil,
 	)

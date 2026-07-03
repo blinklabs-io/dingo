@@ -212,6 +212,14 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		return err
 	}
 
+	// Bind the header's VRF key to the pool's on-chain registered VRF key.
+	// The crypto path above verifies the VRF proof only against the key carried
+	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
+	// check), so without this an attacker can grind VRF keys to win slots.
+	if err := ls.verifyRegisteredVrfKey(block); err != nil {
+		return err
+	}
+
 	return ls.verifyBlockLeaderEligibility(block, epoch.EpochId)
 }
 
@@ -440,6 +448,93 @@ func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
 		)
 	}
 	return epochId == mithrilEpoch.EpochId, nil
+}
+
+// verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
+// the header body) is not the VRF key the producing pool registered on-chain.
+// The block's VRF proof is validated only against this embedded key, and the
+// leader-eligibility threshold uses its output, so binding it to the pool's
+// registered VRF key is what prevents an attacker from grinding VRF keys to
+// win slots. Mirrors gouroboros VerifyBlock's stake-pool VRF-key check, which
+// dingo's crypto path skips via SkipStakePoolValidation.
+func (ls *LedgerState) verifyRegisteredVrfKey(
+	block ledger.Block,
+) error {
+	// Byron (PBFT) blocks have no pool-registered VRF key.
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF key: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfKey) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF key unavailable for registration check",
+			block.SlotNumber(),
+		)
+	}
+	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registration lookup failed: %w",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			err,
+		)
+	}
+	registeredVrfKeyHash, ok := registeredPoolVrfKeyHash(pool)
+	if !ok {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registered VRF key hash unavailable",
+			block.SlotNumber(),
+			poolKeyHash[:],
+		)
+	}
+	headerVrfKeyHash := lcommon.Blake2b256Hash(vrfKey)
+	if !bytes.Equal(registeredVrfKeyHash.Bytes(), headerVrfKeyHash.Bytes()) {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF key does not match registered VRF key "+
+				"(header %x, registered %x)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			headerVrfKeyHash.Bytes(),
+			registeredVrfKeyHash.Bytes(),
+		)
+	}
+	return nil
+}
+
+func registeredPoolVrfKeyHash(
+	pool *models.Pool,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	if len(pool.Registration) == 0 {
+		return vrfHash, false
+	}
+	if len(pool.Registration[0].VrfKeyHash) == len(vrfHash) {
+		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
+		return vrfHash, true
+	}
+	if len(pool.VrfKeyHash) != len(vrfHash) {
+		return vrfHash, false
+	}
+	copy(vrfHash[:], pool.VrfKeyHash)
+	return vrfHash, true
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {

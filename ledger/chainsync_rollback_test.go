@@ -355,7 +355,7 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 	header := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash),
 		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 1,
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 10,
 	}
 	err := fixture.ls.chain.AddBlockHeader(header)
@@ -370,12 +370,16 @@ func TestTryResolveForkSynchronizesLedgerTip(t *testing.T) {
 				header.Hash().Bytes(),
 			),
 			BlockHeader: header,
+			// The delivered header is the first block after the fork point and
+			// is contiguous with the common ancestor. The peer advertises a tip
+			// further ahead, so its chain is genuinely longer than ours and the
+			// fork is worth resolving.
 			Tip: ochainsync.Tip{
 				Point: ocommon.NewPoint(
-					header.SlotNumber(),
-					header.Hash().Bytes(),
+					header.SlotNumber()+10,
+					testHashBytes("fork-block-peer-tip-ahead"),
 				),
-				BlockNumber: header.BlockNumber(),
+				BlockNumber: header.BlockNumber() + 1,
 			},
 		},
 		notFitErr,
@@ -585,7 +589,7 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 	header := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash),
 		prevHash:    lcommon.NewBlake2b256(fixture.currentTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 2,
+		blockNumber: fixture.currentTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 20,
 	}
 	err := fixture.ls.chain.AddBlockHeader(header)
@@ -600,12 +604,15 @@ func TestTryResolveForkDoesNotAdvanceLaggingLedgerTip(t *testing.T) {
 				header.Hash().Bytes(),
 			),
 			BlockHeader: header,
+			// The delivered header forks off the current block and is contiguous
+			// with it. The peer advertises a tip further ahead, so its chain is
+			// longer than the local raw chain tip and the fork resolves.
 			Tip: ochainsync.Tip{
 				Point: ocommon.NewPoint(
-					header.SlotNumber(),
-					header.Hash().Bytes(),
+					header.SlotNumber()+10,
+					testHashBytes("ahead-raw-chain-fork-peer-tip-ahead"),
 				),
-				BlockNumber: header.BlockNumber(),
+				BlockNumber: header.BlockNumber() + 1,
 			},
 		},
 		notFitErr,
@@ -643,19 +650,19 @@ func TestTryResolveForkQueuesKnownPeerForkSegment(t *testing.T) {
 	header1 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash1),
 		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 1,
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	header2 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash2),
 		prevHash:    lcommon.NewBlake2b256(forkHash1),
-		blockNumber: fixture.currentTip.BlockNumber + 2,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
 		slot:        fixture.currentTip.Point.Slot + 2,
 	}
 	header3 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash3),
 		prevHash:    lcommon.NewBlake2b256(forkHash2),
-		blockNumber: fixture.currentTip.BlockNumber + 3,
+		blockNumber: fixture.ancestorTip.BlockNumber + 3,
 		slot:        fixture.currentTip.Point.Slot + 3,
 	}
 
@@ -709,19 +716,19 @@ func TestTryResolveForkUsesObservedPeerHistoryFallback(t *testing.T) {
 	header1 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash1),
 		prevHash:    lcommon.NewBlake2b256(fixture.ancestorTip.Point.Hash),
-		blockNumber: fixture.currentTip.BlockNumber + 1,
+		blockNumber: fixture.ancestorTip.BlockNumber + 1,
 		slot:        fixture.currentTip.Point.Slot + 1,
 	}
 	header2 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash2),
 		prevHash:    lcommon.NewBlake2b256(forkHash1),
-		blockNumber: fixture.currentTip.BlockNumber + 2,
+		blockNumber: fixture.ancestorTip.BlockNumber + 2,
 		slot:        fixture.currentTip.Point.Slot + 2,
 	}
 	header3 := mockHeader{
 		hash:        lcommon.NewBlake2b256(forkHash3),
 		prevHash:    lcommon.NewBlake2b256(forkHash2),
-		blockNumber: fixture.currentTip.BlockNumber + 3,
+		blockNumber: fixture.ancestorTip.BlockNumber + 3,
 		slot:        fixture.currentTip.Point.Slot + 3,
 	}
 
