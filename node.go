@@ -157,15 +157,16 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		DataDir:        n.config.dataDir,
-		Logger:         n.config.logger,
-		PromRegistry:   n.config.promRegistry,
-		BlobPlugin:     n.config.blobPlugin,
-		RunMode:        n.config.runMode,
-		MetadataPlugin: n.config.metadataPlugin,
-		MaxConnections: n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
-		StorageMode:    string(n.config.storageMode),
-		Network:        n.config.network,
+		DataDir:              n.config.dataDir,
+		Logger:               n.config.logger,
+		PromRegistry:         n.config.promRegistry,
+		BlobPlugin:           n.config.blobPlugin,
+		RunMode:              n.config.runMode,
+		MetadataPlugin:       n.config.metadataPlugin,
+		MaxConnections:       n.config.DatabaseWorkerPoolConfig.WorkerPoolSize,
+		StorageMode:          string(n.config.storageMode),
+		Network:              n.config.network,
+		StrictUtxoValidation: n.config.strictUtxoValidation,
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.cacheBlockLRUEntries,
 			HotUtxoEntries:  n.config.cacheHotUtxoEntries,

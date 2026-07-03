@@ -452,3 +452,75 @@ func TestSetTransactionRecoveryPopulatesProducerFK(t *testing.T) {
 		)
 	}
 }
+
+// TestEnsureTransactionConsumedUtxosStrictValidation covers issue #396:
+// when a consumed UTxO cannot be recovered from either the metadata store
+// or the blob store, StrictUtxoValidation controls whether that is a hard
+// error or a silently skipped condition, gated by the recorded Mithril
+// trust boundary (blocks past the boundary should have complete producer
+// history; blocks at or below it legitimately may not).
+func TestEnsureTransactionConsumedUtxosStrictValidation(t *testing.T) {
+	// Intentionally not t.Parallel(): database.New() writes to plugin
+	// option destination pointers via SetPluginOption, which the race
+	// detector flags when two tests build a Database concurrently.
+	candidate := findGapConsumeCandidateWithoutCertificates(t)
+
+	newTestDB := func(t *testing.T, strict bool) *Database {
+		t.Helper()
+		db, err := New(&Config{
+			DataDir:              t.TempDir(),
+			Logger:               slog.New(slog.NewTextHandler(io.Discard, nil)),
+			BlobPlugin:           "badger",
+			MetadataPlugin:       "sqlite",
+			StrictUtxoValidation: strict,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		// Intentionally do NOT persist candidate.producers, so the
+		// consumer's inputs exist in neither the metadata store nor the
+		// blob store and recovery is guaranteed to fail.
+		storeBlockOffsetsOnly(t, db, candidate.consumerBlock)
+		return db
+	}
+
+	setTransaction := func(t *testing.T, db *Database) error {
+		t.Helper()
+		return db.SetTransaction(
+			candidate.consumerTx,
+			candidate.consumerPoint,
+			0,
+			0,
+			nil,
+			nil,
+			mustBlockOffsets(t, candidate.consumerBlock),
+			nil,
+		)
+	}
+
+	t.Run("disabled preserves silent skip", func(t *testing.T) {
+		db := newTestDB(t, false)
+		require.NoError(t, setTransaction(t, db))
+	})
+
+	t.Run("enabled errors past an unset boundary", func(t *testing.T) {
+		db := newTestDB(t, true)
+		// No mithril_ledger_slot recorded (0): every slot above it is
+		// past the boundary, so the missing input must be a hard error.
+		err := setTransaction(t, db)
+		require.Error(t, err)
+		require.ErrorIs(t, err, ErrUtxoNotFound)
+	})
+
+	t.Run("enabled skips at or below the recorded boundary", func(t *testing.T) {
+		db := newTestDB(t, true)
+		require.NoError(
+			t,
+			db.SetSyncState(
+				mithrilLedgerSlotSyncKey,
+				fmt.Sprintf("%d", candidate.consumerPoint.Slot),
+				nil,
+			),
+		)
+		require.NoError(t, setTransaction(t, db))
+	})
+}

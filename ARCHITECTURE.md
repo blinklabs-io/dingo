@@ -1424,6 +1424,18 @@ still demands a rollback below it is rejected as genuinely divergent. Both
 classifications close the connection for a fresh intersect and deny the peer for
 a cooldown via peer governance.
 
+The same `mithril_ledger_slot` boundary gates how the database layer reacts to a
+consumed UTxO it cannot find or reconstruct from the blob store. By default
+(`StrictUtxoValidation: false`) `ensureTransactionConsumedUtxos` silently skips an
+unrecoverable input, which is expected when bootstrapping from a non-genesis
+chainsync intersect point without a Mithril snapshot import (pre-intersect UTxOs
+are never imported). With `StrictUtxoValidation: true`, a miss for a block past
+the recorded boundary — where the node should hold complete producer history —
+is treated as corruption or a bug and fails the ingest instead. Gap-block
+ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
+snapshot and the chain tip) is unconditionally strict already, since that range
+is always expected to be fully recoverable from the snapshot import.
+
 In API storage mode, the SQLite metadata plugin can defer selected query indexes
 during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries

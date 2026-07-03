@@ -365,6 +365,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				PermissionedCandidatePolicy: cfg.Midnight.PermissionedCandidatePolicy,
 			}),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
+			dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithStartEra(string(cfg.StartEra)),
 			dingo.WithShutdownTimeout(shutdownTimeout),

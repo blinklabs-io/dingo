@@ -145,6 +145,7 @@ type Config struct {
 	intersectTip             bool
 	peerSharing              bool
 	validateHistorical       bool
+	strictUtxoValidation     bool
 	tracing                  bool
 	tracingStdout            bool
 	runMode                  string
@@ -705,6 +706,15 @@ func WithStartEra(startEra string) ConfigOptionFunc {
 func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.validateHistorical = validate
+	}
+}
+
+// WithStrictUtxoValidation specifies whether an unrecoverable consumed UTxO
+// past the recorded Mithril sync boundary is a hard error rather than a
+// silently skipped condition. See database.Config.StrictUtxoValidation.
+func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.strictUtxoValidation = strict
 	}
 }
 
