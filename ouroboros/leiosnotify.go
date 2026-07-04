@@ -574,16 +574,44 @@ type leiosFetchGuard struct {
 	// timed-out fetch, so it prefers healthy connections instead of repeatedly
 	// retrying a stalled or flaky one.
 	cooledUntilNano atomic.Int64
+	// consecutiveFailures counts back-to-back failed/timed-out backfill
+	// fetches on this connection with no intervening success. It escalates the
+	// cooldown (see markFetchFailed) so a connection that repeatedly returns
+	// wrong (hash-mismatching) or unservable/stalling responses is
+	// deprioritized for progressively longer; markFetchOK resets it.
+	consecutiveFailures atomic.Int32
 }
 
-// markFetchFailed puts this connection on a short cooldown after a failed or
-// timed-out backfill fetch.
-func (g *leiosFetchGuard) markFetchFailed(now time.Time, d time.Duration) {
+// markFetchFailed puts this connection on a cooldown after a failed or
+// timed-out backfill fetch. Consecutive failures on the same connection
+// escalate the cooldown exponentially from base, capped at
+// leiosBackfillConnCooldownMax, so a connection that repeatedly returns wrong
+// (hash-mismatching) or unservable/stalling responses is deprioritized for
+// progressively longer and the backfill prefers other connections/backends.
+// The cooldown only reorders connection preference -- FetchEndorserBlockByPoint
+// still falls back to cooled connections when none are healthy -- so a
+// persistently-bad connection is deprioritized but never permanently starved.
+func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
+	n := g.consecutiveFailures.Add(1)
+	d := base
+	if n > 1 {
+		shift := n - 1
+		if shift > leiosBackfillConnCooldownMaxShift {
+			shift = leiosBackfillConnCooldownMaxShift
+		}
+		d = base << uint(shift)
+	}
+	// Guard against overflow (d <= 0) and clamp to the cap.
+	if d <= 0 || d > leiosBackfillConnCooldownMax {
+		d = leiosBackfillConnCooldownMax
+	}
 	g.cooledUntilNano.Store(now.Add(d).UnixNano())
 }
 
-// markFetchOK clears any cooldown after a successful fetch on this connection.
+// markFetchOK clears any cooldown and resets the failure escalation after a
+// successful fetch on this connection.
 func (g *leiosFetchGuard) markFetchOK() {
+	g.consecutiveFailures.Store(0)
 	g.cooledUntilNano.Store(0)
 }
 
