@@ -16,6 +16,7 @@ package ouroboros
 
 import (
 	"slices"
+	"time"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -28,6 +29,16 @@ import (
 // dropped block can be re-fetched and re-persisted later. It does not affect
 // UTxO correctness (that uses the ledger's own genesis-blob path).
 const leiosPersistMaxPending = 4096
+
+// leiosPersistShutdownDrainTimeout bounds how long StopLeiosPersistWriter waits
+// for the background writer to finish draining queued blob writes at shutdown.
+// The drain calls Database.SetLeiosEB, which can block indefinitely on a stuck
+// or slow blob store; persisting fetched endorser blocks for historical serving
+// is best-effort, so that must never hang a graceful shutdown. After this
+// timeout the wait is abandoned (a warning is logged, the writer goroutine is
+// left to exit on its own once the store unblocks). The stop channel is always
+// closed regardless, so the writer does exit; only the wait is bounded.
+const leiosPersistShutdownDrainTimeout = 5 * time.Second
 
 // leiosPersistJob is one endorser block queued for best-effort blob-store
 // persistence. txsRaw is nil for a manifest-only job (incomplete EB).
@@ -63,6 +74,22 @@ func (o *Ouroboros) enqueueLeiosPersist(
 	}
 	key := string(job.hash)
 	o.leiosPersistMu.Lock()
+	// Reject work once the writer is stopping. The shutdown drain runs only
+	// after leiosPersistStop is closed and reads the pending map under this same
+	// mutex; a job added after the drain has emptied the map would be stranded
+	// forever (silently dropped) and would make shutdown report completion while
+	// a freshly fetched endorser block was never persisted. Checking the stop
+	// signal here, under the lock, closes that race: a job added while stop is
+	// still open is committed before the drain's map read (which needs the lock)
+	// can observe an empty map, and any job attempted after stop is closed is
+	// rejected. Best-effort — a rejected block can be re-fetched and re-persisted
+	// after restart.
+	select {
+	case <-o.leiosPersistStop:
+		o.leiosPersistMu.Unlock()
+		return
+	default:
+	}
 	if existing := o.leiosPersistPending[key]; existing != nil {
 		// Never let a manifest-only job overwrite one that already carries
 		// txs — that would re-introduce the duplicate manifest write and lose
@@ -152,13 +179,37 @@ func (o *Ouroboros) drainLeiosPersist() {
 	}
 }
 
-// StopLeiosPersistWriter stops the background persistence writer and waits for
-// it to drain and exit. Safe to call when the writer never started (no endorser
-// block was ever fetched) and idempotent across multiple calls.
+// StopLeiosPersistWriter stops the background persistence writer and waits, up
+// to leiosPersistShutdownDrainTimeout, for it to drain queued writes and exit.
+// Safe to call when the writer never started (no endorser block was ever
+// fetched) and idempotent across multiple calls.
 func (o *Ouroboros) StopLeiosPersistWriter() {
+	o.stopLeiosPersistWriter(leiosPersistShutdownDrainTimeout)
+}
+
+// stopLeiosPersistWriter closes the stop channel and waits for the writer to
+// drain and exit, giving up after drainTimeout so a stuck blob store cannot
+// hang graceful shutdown. Split out from StopLeiosPersistWriter so tests can
+// exercise the bounded wait without the production timeout.
+func (o *Ouroboros) stopLeiosPersistWriter(drainTimeout time.Duration) {
 	if !o.leiosPersistStarted.Load() {
 		return
 	}
+	// Always close the stop channel so the writer observes the stop and exits,
+	// even if we stop waiting for it below.
 	o.leiosPersistStopOnce.Do(func() { close(o.leiosPersistStop) })
-	<-o.leiosPersistDone
+	timer := time.NewTimer(drainTimeout)
+	defer timer.Stop()
+	select {
+	case <-o.leiosPersistDone:
+	case <-timer.C:
+		// The drain is stuck (likely a slow/unavailable blob store). Abandon the
+		// wait: historical-serving persistence is best-effort and the writer
+		// goroutine will still exit once the store unblocks.
+		o.config.Logger.Warn(
+			"timed out waiting for leios EB persistence writer to drain; abandoning remaining historical-serving writes",
+			"component", "network",
+			"timeout", drainTimeout,
+		)
+	}
 }
