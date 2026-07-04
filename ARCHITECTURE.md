@@ -1262,6 +1262,19 @@ trust-boundary reasons) place the peer on the deny list for a cooldown in
 addition to closing the connection, so the node does not redial a peer that
 will deterministically be rejected again moments later.
 
+When the local chain has diverged from the network, an upstream peer can
+repeatedly ask us to roll back to a canonical point we cannot cross to
+(the block is missing below our diverged tip, the rollback exceeds K, or it
+sits below the Mithril trust boundary). Each attempt wipes `rollbackHistory`
+and forces a fresh connection, so the per-connection rollback loop detector
+never accumulates. A separate point-keyed tracker (`unrecoverableRollbacks`
+in `LedgerState`, deliberately not cleared by the resync reset) counts these
+un-crossable rollbacks; once the same point recurs past a threshold within a
+window it surfaces the stuck-divergence condition as a throttled operator
+error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
+node in this state cannot self-recover and needs operator intervention
+(e.g. re-bootstrapping from a Mithril snapshot).
+
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
 falling back to the legacy network bootstrap-peer list only when no embedded

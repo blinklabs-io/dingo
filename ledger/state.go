@@ -592,6 +592,20 @@ type LedgerState struct {
 
 	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
 
+	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
+	// us to cross to but that we cannot apply locally (block missing below
+	// our diverged tip, rollback exceeds K, or the point is below the
+	// Mithril trust boundary). Unlike rollbackHistory it is keyed on the
+	// rollback point alone (not the connection) and is deliberately NOT
+	// cleared by the resync reset, so it survives the reset+reconnect
+	// cycle. That cycle otherwise defeats the rollbackHistory-based loop
+	// detector: each un-crossable rollback calls resetChainsyncResyncState
+	// (which wipes rollbackHistory) and forces a fresh connection, and the
+	// detector keys on connection ID, so the per-connection counter never
+	// reaches its threshold across reconnects. See issue #2728.
+	unrecoverableRollbacks       map[string]unrecoverableRollbackRecord
+	lastUnrecoverableRollbackLog time.Time // throttles the stuck-divergence operator error
+
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
 	// Header mismatch tracking for fork detection and re-sync
