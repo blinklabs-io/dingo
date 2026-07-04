@@ -93,6 +93,45 @@ func (e BlockNotFitChainTipError) Error() string {
 	)
 }
 
+// BlockNumberNotContiguousError is returned when a block/header's self-reported
+// block number does not follow its parent's. The block number is a redundant
+// header field that chain selection uses to pick the longer chain, so it must
+// be bound to the actual chain length: a header that chains onto the tip
+// (matching prev hash) but claims a non-contiguous block number is rejected so
+// a forged (e.g. inflated) number cannot win chain selection.
+type BlockNumberNotContiguousError struct {
+	blockHash    string
+	blockNumber  uint64
+	parentNumber uint64
+}
+
+func NewBlockNumberNotContiguousError(
+	blockHash string,
+	blockNumber uint64,
+	parentNumber uint64,
+) BlockNumberNotContiguousError {
+	return BlockNumberNotContiguousError{
+		blockHash:    blockHash,
+		blockNumber:  blockNumber,
+		parentNumber: parentNumber,
+	}
+}
+
+func (e BlockNumberNotContiguousError) BlockHash() string   { return e.blockHash }
+func (e BlockNumberNotContiguousError) BlockNumber() uint64 { return e.blockNumber }
+func (e BlockNumberNotContiguousError) ParentNumber() uint64 {
+	return e.parentNumber
+}
+
+func (e BlockNumberNotContiguousError) Error() string {
+	return fmt.Sprintf(
+		"block %s claims block number %d that is not contiguous with parent %d",
+		e.blockHash,
+		e.blockNumber,
+		e.parentNumber,
+	)
+}
+
 type BlockNotMatchHeaderError struct {
 	blockHash  string
 	headerHash string
