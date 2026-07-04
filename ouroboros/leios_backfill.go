@@ -37,6 +37,18 @@ var leiosBackfillConnCursor atomic.Uint64
 // available, so every connection is still eventually tried.
 const leiosBackfillConnCooldown = 20 * time.Second
 
+// leiosBackfillConnCooldownMax caps the escalated per-connection backfill
+// cooldown so a persistently-failing connection is deprioritized aggressively
+// but its cooldown never grows without bound (it is still eventually retried
+// when no healthy connection is available).
+const leiosBackfillConnCooldownMax = 5 * time.Minute
+
+// leiosBackfillConnCooldownMaxShift bounds the exponential cooldown escalation
+// (base << shift) so the shift can never overflow the duration; the cap above
+// is reached well before this bound (20s << 4 = 320s > 5m), so this is only a
+// safety ceiling on the shift amount.
+const leiosBackfillConnCooldownMaxShift = 5
+
 // FetchEndorserBlockByPoint fetches the endorser block identified by
 // (ebSlot, ebHash) -- its manifest and all transaction bodies -- over
 // leios-fetch and caches it, so EndorserBlockTxsByHash subsequently returns it.
