@@ -118,10 +118,12 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
-	// Persist manifest and (when complete) txs to the blob store so they
-	// can be served to downstream peers after the in-memory cache expires.
-	// Best-effort: a storage failure does not affect in-memory serving.
-	o.persistLeiosEBToDB(point, blockRaw, data)
+	// Queue manifest and (when complete) txs for asynchronous persistence to
+	// the blob store so they can be served to downstream peers after the
+	// in-memory cache expires. Best-effort and off the hot path: the write
+	// happens on a background writer, not under the leios-fetch guard, so it
+	// does not serialize against block application during catch-up.
+	o.enqueueLeiosPersist(point, blockRaw, data)
 	// Trigger local vote emission for the stored block, outside the
 	// cache lock
 	if o.LeiosVotes != nil {
@@ -133,40 +135,6 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 		o.LeiosPipeline.ObserveEndorserBlock(point.Slot, blockHash)
 	}
 	return nil
-}
-
-// persistLeiosEBToDB writes the endorser-block manifest (always) and, when the
-// tx cache is complete, its raw transaction bodies to the blob store. Both
-// writes are best-effort: a failure is logged at Debug and does not affect the
-// in-memory serving path.
-func (o *Ouroboros) persistLeiosEBToDB(
-	point ocommon.Point,
-	blockRaw []byte,
-	data *leiosEndorserBlockData,
-) {
-	db := o.leiosDatabase()
-	if db == nil {
-		return
-	}
-	if err := db.SetLeiosEBManifest(point.Slot, point.Hash, blockRaw); err != nil {
-		o.config.Logger.Debug(
-			"failed to persist leios EB manifest to blob store",
-			"component", "network",
-			"slot", point.Slot,
-			"error", err,
-		)
-	}
-	if data == nil || !data.completeTxCache() || data.txCount == 0 {
-		return
-	}
-	if err := db.SetLeiosEBTxs(point.Hash, data.txsRaw); err != nil {
-		o.config.Logger.Debug(
-			"failed to persist leios EB txs to blob store",
-			"component", "network",
-			"slot", point.Slot,
-			"error", err,
-		)
-	}
 }
 
 // leiosDatabase returns the underlying Database when the LedgerState is wired

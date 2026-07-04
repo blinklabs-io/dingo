@@ -294,6 +294,18 @@ func (n *Node) Run(ctx context.Context) error {
 		// dropped. Unset on other networks (fast dead-peer eviction retained).
 		KeepAliveTimeout: keepAliveTimeout,
 	})
+	// Stop the asynchronous Leios endorser-block persistence writer during
+	// shutdown so it drains queued blob writes and its goroutine exits cleanly.
+	// No-op when no endorser block was ever fetched (writer never started), and
+	// idempotent, so registering it on both shutdown paths is safe.
+	//
+	// The `started` stack is only unwound on startup failure/panic; a graceful
+	// shutdown returns from Run via <-n.ctx.Done() without draining it. Register
+	// a defer as well so the writer is drained (before the process exits) on the
+	// normal shutdown path too. On the failure path the `started` entry keeps the
+	// LIFO ordering so the drain still runs before n.db.Close().
+	defer n.ouroboros.StopLeiosPersistWriter()
+	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
