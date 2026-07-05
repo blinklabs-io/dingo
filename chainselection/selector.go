@@ -108,6 +108,10 @@ type ChainSelectorConfig struct {
 	ConnectionEligible func(ouroboros.ConnectionId) bool
 	ConnectionPriority func(ouroboros.ConnectionId) int
 	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
+	// DisableEventSubscriptions leaves EventBus configured for publishing
+	// selector events but skips automatic input subscriptions. This is useful
+	// for deterministic replay harnesses that feed input events synchronously.
+	DisableEventSubscriptions bool
 	// BlockfetchLatency returns the EWMA first-block latency for a
 	// connection and whether any samples exist. Used only to choose a
 	// peer when two peers advertise the exact same selected block.
@@ -175,10 +179,10 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	if cfg.GenesisMode {
 		cs.mode = SelectionModeGenesis
 	}
-	if cfg.EventBus != nil {
+	if cfg.EventBus != nil && !cfg.DisableEventSubscriptions {
 		cfg.EventBus.SubscribeFunc(
 			PeerRollbackEventType,
-			cs.handlePeerRollbackEvent,
+			cs.HandlePeerRollbackEvent,
 		)
 	}
 	return cs
@@ -1362,9 +1366,9 @@ func (cs *ChainSelector) HandlePeerActivityEvent(evt event.Event) {
 	cs.TouchPeerActivity(e.ConnectionId)
 }
 
-// handlePeerRollbackEvent trims Genesis observed history and refreshes the
+// HandlePeerRollbackEvent trims Genesis observed history and refreshes the
 // tracked peer tip after a rollback.
-func (cs *ChainSelector) handlePeerRollbackEvent(evt event.Event) {
+func (cs *ChainSelector) HandlePeerRollbackEvent(evt event.Event) {
 	e, ok := evt.Data.(PeerRollbackEvent)
 	if !ok {
 		cs.config.Logger.Warn(

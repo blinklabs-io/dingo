@@ -7675,6 +7675,32 @@ func TestHandleInboundConnection_InboundDuplexFromEvent(t *testing.T) {
 		"event-derived duplex hint must be retained when connmanager is nil")
 }
 
+func TestHandleInboundConnection_DuplexMarksEverConnected(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+			IsDuplex:             true,
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.True(t, peers[0].EverConnected,
+		"inbound duplex connection must count as prior successful connectivity")
+}
+
 func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),

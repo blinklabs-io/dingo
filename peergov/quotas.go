@@ -74,6 +74,22 @@ func (p *PeerGovernor) isTopologyPeer(source PeerSource) bool {
 	}
 }
 
+// dropIfNeverConnected reports whether a peer from this source that has never
+// successfully connected should be dropped after a failed dial rather than
+// retried. It covers discovered peers (peer-share gossip and ledger) and
+// public-root topology peers. Local-root and bootstrap peers are trusted and
+// always retried; inbound peers are not dialed outbound.
+func dropIfNeverConnected(source PeerSource) bool {
+	switch source {
+	case PeerSourceTopologyPublicRoot,
+		PeerSourceP2PLedger,
+		PeerSourceP2PGossip:
+		return true
+	default:
+		return false
+	}
+}
+
 // countPeersBySourceAndState returns a map of peer source to peer counts by state.
 // This method must be called with p.mu held.
 // nolint:unused // Exported for tests and future use in Phase 3+ churn timers
