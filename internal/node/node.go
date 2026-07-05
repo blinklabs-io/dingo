@@ -329,6 +329,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithUtxorpcTlsCertFilePath(cfg.TlsCertFilePath),
 			dingo.WithUtxorpcTlsKeyFilePath(cfg.TlsKeyFilePath),
 			dingo.WithBarkBaseUrl(cfg.BarkBaseUrl),
+			dingo.WithBarkBlockDownloadHosts(cfg.BarkBlockDownloadHosts),
 			dingo.WithBarkPort(cfg.BarkPort),
 			dingo.WithHistoryExpiry(dingo.HistoryExpiryConfig{
 				Enabled:   cfg.HistoryExpiry.Enabled,

@@ -425,7 +425,8 @@ func (n *Node) Run(ctx context.Context) error {
 
 	if n.config.barkBaseUrl != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl: n.config.barkBaseUrl,
+			BaseUrl:                   n.config.barkBaseUrl,
+			BlockDownloadAllowedHosts: n.config.barkBlockDownloadHosts,
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},

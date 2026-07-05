@@ -407,33 +407,34 @@ func DefaultMidnightConfig() MidnightConfig {
 }
 
 type Config struct {
-	MetadataPlugin       string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath       string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology             string   `yaml:"topology"`
-	CardanoConfig        string   `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath         string   `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath           string   `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath      string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr             string   `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin           string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr      string   `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout      string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	LedgerCatchupTimeout string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network              string   `yaml:"network"`
-	NetworkMagic         uint32   `yaml:"networkMagic"                                                     split_words:"true"`
-	MempoolCapacity      int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark    float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark   float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort          uint     `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort            uint     `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl          string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
-	BarkPort             uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
-	UtxorpcPort          uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
-	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint     `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical   bool     `yaml:"validateHistorical"                                               split_words:"true"`
+	MetadataPlugin         string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath         string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string   `yaml:"topology"`
+	CardanoConfig          string   `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath           string   `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath             string   `yaml:"socketPath"                                                       split_words:"true"`
+	TlsCertFilePath        string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string   `yaml:"bindAddr"                                                         split_words:"true"`
+	BlobPlugin             string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
+	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string   `yaml:"network"`
+	NetworkMagic           uint32   `yaml:"networkMagic"                                                     split_words:"true"`
+	MempoolCapacity        int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	EvictionWatermark      float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark     float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
+	PrivatePort            uint     `yaml:"privatePort"                                                      split_words:"true"`
+	RelayPort              uint     `yaml:"relayPort"          envconfig:"port"`
+	BarkBaseUrl            string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
+	UtxorpcPort            uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	CORSAllowedOrigins     []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort            uint     `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort              uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip           bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical     bool     `yaml:"validateHistorical"                                               split_words:"true"`
 	// StrictUtxoValidation errors out (instead of silently skipping) when a
 	// consumed UTxO cannot be found or recovered for a block past the
 	// recorded Mithril sync boundary. Leave disabled when bootstrapping from

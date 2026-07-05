@@ -434,7 +434,11 @@ older than the ledger stability window:
   SQL metadata rows also remain. Blob readers return `types.ErrHistoryExpired`
   with the slot/hash. Without an archive wrapper this is the final read error;
   with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
-  preserving local block indexes and iteration semantics.
+  preserving local block indexes and iteration semantics. Bark validates archive
+  download URLs before fetching: they must be HTTPS, must not contain embedded
+  credentials, and must resolve to the `barkBaseUrl` hostname or a configured
+  `barkBlockDownloadHosts` entry; downloads are also size-limited to the archive
+  block response cap.
 
 ### Block Hash Index Contract
 

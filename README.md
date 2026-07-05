@@ -82,6 +82,9 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_BASE_URL`
   - Base URL of a remote Bark archive node used for archive fallback
     (default: empty, disabled)
+- `DINGO_BARK_BLOCK_DOWNLOAD_HOSTS`
+  - Comma-separated HTTPS hostnames allowed for Bark-supplied block download
+    URLs. Defaults to the `DINGO_BARK_BASE_URL` hostname.
 - `DINGO_HISTORY_EXPIRY_ENABLED`
   - Enable local expiry of immutable block CBOR older than the ledger stability
     window (default: `false`)
@@ -257,7 +260,13 @@ archive:
 
 ```yaml
 barkBaseUrl: "http://archive.example.internal:9091"
+barkBlockDownloadHosts:
+  - "dingo-archive.s3.us-east-1.amazonaws.com"
 ```
+
+Bark archive RPC may use the configured `barkBaseUrl`, but the block download
+URLs returned by that service must be HTTPS, must not contain credentials, and
+must match either the `barkBaseUrl` hostname or `barkBlockDownloadHosts`.
 
 The runnable demonstration in `internal/test/archive-demo/` brings up an S3
 compatible Minio archive node, a local Badger history-expiry node, and an end-to-end

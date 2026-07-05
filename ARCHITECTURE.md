@@ -858,8 +858,11 @@ fallback:
 - A node with `barkBaseUrl` is wired by `node.go` with a `bark.BlobStoreBark`
   wrapper. Normal block writes still go to the local blob plugin. Reads first
   check local storage; expired or missing historical blocks fall back to the
-  remote Bark archive and download the signed URL response. This wrapper can be
-  used with or without local History Expiry.
+  remote Bark archive and download the signed URL response. Block download URLs
+  are accepted only when they are HTTPS, credential-free, and hosted by the
+  expected archive hostname or a configured `barkBlockDownloadHosts` allowlist
+  entry; redirects are disabled and response bodies are capped before buffering.
+  This wrapper can be used with or without local History Expiry.
 
 ### Tiered CBOR Cache
 
