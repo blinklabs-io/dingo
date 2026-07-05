@@ -87,6 +87,16 @@ const (
 	reconnectBackoffFactor      = 2
 	inboundCheckDelay           = 30 * time.Second
 	minStableConnectionDuration = 30 * time.Second
+	// dialDNSResolveTimeout bounds the fresh per-attempt DNS resolution in
+	// resolveDialAddress. It is intentionally shorter than connmanager's 10s
+	// dial timeout so a hung or slow resolver cannot wedge the outbound-dial
+	// loop; on timeout the attempt falls back to the unresolved address and
+	// the dialer resolves it itself.
+	dialDNSResolveTimeout = 5 * time.Second
+	// dialFamilyCacheTTL limits how long local address-family detection can
+	// remain stale after interface or routing changes while avoiding a
+	// per-dial interface scan.
+	dialFamilyCacheTTL = 1 * time.Minute
 )
 
 // Peer source priority values for removal decisions.
@@ -120,7 +130,14 @@ type PeerGovernor struct {
 	// emitted only on entry (rising edge) to avoid indefinite log spam.
 	// Guarded by mu.
 	lastEligibleUpstreamSkipLogged bool
-	mu                             sync.Mutex
+	// Local address-family capability, detected periodically and consulted by
+	// resolveDialAddress to avoid dialing an unreachable family (e.g. an IPv6
+	// record on a v4-only host).
+	dialFamilyMu        sync.RWMutex
+	dialFamilyHasV4     bool
+	dialFamilyHasV6     bool
+	dialFamilyCheckedAt time.Time
+	mu                  sync.Mutex
 }
 
 type PeerGovernorConfig struct {

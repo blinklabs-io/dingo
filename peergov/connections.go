@@ -285,9 +285,15 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			continue
 		}
 
+		// Re-resolve hostname-based peers on every attempt and rotate the
+		// dial target across all resolved records so load spreads across
+		// load-balancer backends and a stuck/unhealthy backend is escaped
+		// on the next attempt without a process restart. IP-literal peers
+		// are returned unchanged. Peer identity/dedup is keyed on
+		// peer.Address / NormalizedAddress and is unaffected.
 		conn, err := p.config.ConnManager.CreateOutboundConn(
 			p.ctx,
-			peer.Address,
+			p.resolveDialAddress(p.ctx, peer.Address),
 		)
 		if err == nil {
 			connId := conn.Id()
