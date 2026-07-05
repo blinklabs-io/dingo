@@ -83,8 +83,9 @@ The following environment variables modify Dingo's behavior:
   - Base URL of a remote Bark archive node used for archive fallback
     (default: empty, disabled)
 - `DINGO_BARK_BLOCK_DOWNLOAD_HOSTS`
-  - Comma-separated HTTPS hostnames allowed for Bark-supplied block download
-    URLs. Defaults to the `DINGO_BARK_BASE_URL` hostname.
+  - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
+    block download URLs. The allowlist always includes the
+    `DINGO_BARK_BASE_URL` hostname.
 - `DINGO_HISTORY_EXPIRY_ENABLED`
   - Enable local expiry of immutable block CBOR older than the ledger stability
     window (default: `false`)
