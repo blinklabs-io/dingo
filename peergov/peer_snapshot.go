@@ -32,7 +32,7 @@ func (p *PeerGovernor) LoadPeerSnapshot(
 		return 0
 	}
 	relays := PoolRelaysFromPeerSnapshot(snapshot)
-	added := p.addLedgerRelays(relays)
+	added := p.addLedgerRelays(relays, 0)
 	p.config.Logger.Info(
 		"loaded peer snapshot",
 		"snapshot_slot", snapshot.Point.BlockPointSlot,
@@ -85,7 +85,9 @@ func poolRelayFromSnapshotAccessPoint(
 	}, true
 }
 
-func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay) int {
+// addLedgerRelays fills the configured ledger-peer target. extraAdds permits a
+// bounded emergency overfill after the target is already satisfied.
+func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay, extraAdds int) int {
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
 	rand.Shuffle(len(candidates), func(i, j int) {
 		candidates[i], candidates[j] = candidates[j], candidates[i]
@@ -93,7 +95,7 @@ func (p *PeerGovernor) addLedgerRelays(relays []PoolRelay) int {
 
 	added := 0
 	for _, addr := range candidates {
-		if p.ledgerPeerDeficit() <= 0 {
+		if p.ledgerPeerDeficit() <= 0 && added >= extraAdds {
 			break
 		}
 		if p.addLedgerPeer(addr) {

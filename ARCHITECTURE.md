@@ -1258,6 +1258,18 @@ dial capacity; local-root and bootstrap peers, and any peer that has connected
 at least once, keep retrying, and the drop is suppressed while the node has no
 eligible upstream so its last leads back onto the network are never discarded.
 
+Ledger-peer discovery is demand-driven so the pool never collapses in the
+first place. While the node has fewer chain-selection-eligible upstreams than
+its hot-peer target (`MinHotPeers`), replenishment is treated as urgent: a
+dedicated emergency ticker (default 30s via
+`EmergencyDiscoveryCheckInterval`, far more frequent than the 5-minute
+reconcile) pulls fresh stake-pool relays on a short emergency interval (default
+30s via `EmergencyLedgerPeerRefreshInterval`) instead of the normal hourly
+`LedgerPeerRefreshInterval`, so a run of dead or flaky relays can never wedge
+sync while the ledger still lists plenty of registered relays. Once the node is
+at its hot-peer target the emergency path is a no-op and the normal hourly
+cadence applies.
+
 Each outbound dial attempt re-resolves a hostname-based peer's address fresh,
 narrows the records to the address families the local host can route to
 (detected once via `net.InterfaceAddrs` and cached, so a v4-only or v6-only

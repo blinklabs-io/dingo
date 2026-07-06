@@ -21,8 +21,12 @@ import (
 // discoverLedgerPeers discovers peers from on-chain stake pool relay registrations.
 // This method is called during reconciliation if ledger peers are enabled.
 //
-// Selection is bounded: only enough peers are added to reach LedgerPeerTarget.
-// Candidates are shuffled uniformly so no single pool dominates across refreshes.
+// Selection is bounded: normal discovery adds only enough peers to reach
+// LedgerPeerTarget. Emergency discovery may add one target-sized batch even
+// when the known ledger-peer target is already satisfied, because stale or
+// unusable peers must not block fresh relay candidates while the node is short
+// of connected upstreams. Candidates are shuffled uniformly so no single pool
+// dominates across refreshes.
 func (p *PeerGovernor) discoverLedgerPeers() {
 	// Check if ledger peer provider is configured
 	if p.config.LedgerPeerProvider == nil {
@@ -32,12 +36,6 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 		)
 		return
 	}
-	p.config.Logger.Debug(
-		"ledger peer discovery starting",
-		"component", "peergov",
-		"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
-	)
-
 	// Check UseLedgerAfterSlot threshold first (before claiming refresh)
 	if p.config.UseLedgerAfterSlot < 0 {
 		// Ledger peers are disabled
@@ -58,20 +56,37 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 	}
 
 	// Count existing ledger peers to determine how many we need.
+	urgent := p.ledgerPeersUrgent()
 	needed := p.ledgerPeerDeficit()
-	if needed <= 0 {
+	p.config.Logger.Debug(
+		"ledger peer discovery starting",
+		"component", "peergov",
+		"use_ledger_after_slot", p.config.UseLedgerAfterSlot,
+		"needed", needed,
+		"emergency", urgent,
+	)
+	if needed <= 0 && !urgent {
 		p.config.Logger.Debug(
 			"ledger peer target already satisfied",
 			"target", p.config.LedgerPeerTarget,
+			"emergency", urgent,
 		)
 		return
 	}
 
 	// Atomically check and claim the refresh to prevent concurrent discoveries.
-	// Use CompareAndSwap to ensure only one goroutine proceeds.
+	// Use CompareAndSwap to ensure only one goroutine proceeds. The normal
+	// cadence is LedgerPeerRefreshInterval, but when the node is critically
+	// short of connected upstreams it replenishes on a much shorter emergency
+	// interval instead of waiting up to an hour: a node must never wedge on a
+	// collapsed peer pool while the ledger still lists plenty of relays.
+	refreshInterval := p.config.LedgerPeerRefreshInterval
+	if urgent {
+		refreshInterval = p.config.EmergencyLedgerPeerRefreshInterval
+	}
 	now := time.Now().UnixNano()
 	lastRefresh := p.lastLedgerPeerRefresh.Load()
-	if time.Duration(now-lastRefresh) < p.config.LedgerPeerRefreshInterval {
+	if time.Duration(now-lastRefresh) < refreshInterval {
 		return
 	}
 	if !p.lastLedgerPeerRefresh.CompareAndSwap(lastRefresh, now) {
@@ -85,6 +100,7 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 		p.config.Logger.Error(
 			"failed to get ledger peers",
 			"error", err,
+			"emergency", urgent,
 		)
 		// Reset timestamp to allow retry on next reconciliation cycle
 		// rather than waiting for the full refresh interval
@@ -93,7 +109,11 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 	}
 
 	candidates := dedupeRelayCandidates(flattenRelayCandidates(relays))
-	addedCount := p.addLedgerRelays(relays)
+	extraAdds := 0
+	if urgent && needed <= 0 {
+		extraAdds = p.config.LedgerPeerTarget
+	}
+	addedCount := p.addLedgerRelays(relays, extraAdds)
 
 	if addedCount > 0 {
 		p.config.Logger.Info(
@@ -101,14 +121,33 @@ func (p *PeerGovernor) discoverLedgerPeers() {
 			"added", addedCount,
 			"target", p.config.LedgerPeerTarget,
 			"candidates", len(candidates),
+			"emergency", urgent,
 		)
 	} else {
 		p.config.Logger.Debug(
 			"ledger peer discovery complete",
 			"candidates", len(candidates),
 			"new_peers", 0,
+			"emergency", urgent,
 		)
 	}
+}
+
+// ledgerPeersUrgent reports whether the node is critically short of connected
+// upstreams and must replenish ledger peers on the emergency cadence rather
+// than waiting for the normal refresh interval. Ledger discovery must be
+// enabled (target > 0) for this to apply. The threshold is the hot-peer
+// target: while the node has fewer eligible upstreams than it wants hot
+// peers, it keeps pulling fresh relays so it never gets stuck on a shrinking
+// pool of bad peers.
+func (p *PeerGovernor) ledgerPeersUrgent() bool {
+	if p.config.LedgerPeerTarget <= 0 {
+		return false
+	}
+	p.mu.Lock()
+	upstreams := p.countEligibleUpstreamsLocked()
+	p.mu.Unlock()
+	return upstreams < p.config.MinHotPeers
 }
 
 // ledgerPeerDeficit returns how many more ledger peers are needed to reach

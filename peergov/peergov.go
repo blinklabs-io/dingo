@@ -37,6 +37,15 @@ const (
 	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
 	defaultLedgerPeerTarget             = 20
 
+	// When the node is critically short of connected upstreams, ledger-peer
+	// discovery ignores the normal (hourly) refresh interval and replenishes
+	// on this much shorter emergency cadence, and a dedicated ticker checks
+	// for that condition far more often than the 5-minute reconcile. Together
+	// they ensure a collapsed peer pool recovers in seconds rather than
+	// wedging the node while the ledger still lists plenty of relays.
+	defaultEmergencyLedgerPeerRefreshInterval = 30 * time.Second
+	defaultEmergencyDiscoveryCheckInterval    = 30 * time.Second
+
 	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
 	defaultTargetNumberOfEstablishedPeers = 50
@@ -160,6 +169,9 @@ type PeerGovernorConfig struct {
 	UseLedgerAfterSlot        int64              // Slot after which to enable ledger peers (-1 = disabled)
 	LedgerPeerRefreshInterval time.Duration      // How often to refresh ledger peers
 	LedgerPeerTarget          int                // Negative disables ledger discovery, 0 uses defaultLedgerPeerTarget, positive uses that target
+	// Emergency ledger-peer discovery configuration
+	EmergencyLedgerPeerRefreshInterval time.Duration // Urgent ledger refresh cadence (0 = default 30s)
+	EmergencyDiscoveryCheckInterval    time.Duration // Urgent condition check cadence (0 = default 30s)
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	// These are goals the system works toward, not hard limits.
@@ -259,6 +271,12 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	if cfg.LedgerPeerRefreshInterval == 0 {
 		cfg.LedgerPeerRefreshInterval = defaultLedgerPeerRefreshInterval
+	}
+	if cfg.EmergencyLedgerPeerRefreshInterval <= 0 {
+		cfg.EmergencyLedgerPeerRefreshInterval = defaultEmergencyLedgerPeerRefreshInterval
+	}
+	if cfg.EmergencyDiscoveryCheckInterval <= 0 {
+		cfg.EmergencyDiscoveryCheckInterval = defaultEmergencyDiscoveryCheckInterval
 	}
 	// Ledger peer target mapping: negative disables discovery, 0 uses
 	// defaultLedgerPeerTarget, positive uses the explicit target.
@@ -446,6 +464,30 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 			}
 		}
 	}(publicRootChurnTicker, stopCh)
+
+	// Emergency ledger-peer discovery loop. When the node is critically short
+	// of connected upstreams, discoverLedgerPeers replenishes on the emergency
+	// cadence (see ledgerPeersUrgent). This ticker checks far more often than
+	// the 5-minute reconcile so a collapsed peer pool recovers in seconds. It
+	// is a no-op while the node has enough upstreams.
+	emergencyDiscoveryTicker := time.NewTicker(
+		p.config.EmergencyDiscoveryCheckInterval,
+	)
+	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if p.ledgerPeersUrgent() {
+					p.discoverLedgerPeers()
+				}
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(emergencyDiscoveryTicker, stopCh)
 
 	// Start outbound connections
 	p.startOutboundConnections()
