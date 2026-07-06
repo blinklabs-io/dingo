@@ -19,6 +19,8 @@ import (
 	"testing"
 
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -149,51 +151,80 @@ func TestVerifyOpCertHeaderCrypto_MaxKESEvolutionsZeroSkipsExpiry(t *testing.T) 
 	require.NoError(t, err)
 }
 
-// TestValidateOpCertCounter exercises the counter-monotonicity rule applied at
-// block-apply time.
+// TestValidateOpCertCounter exercises the counter rules applied at block-apply
+// time. The backward (stale) rule applies to every era; the no-gap
+// (over-increment) rule is Praos-only, so the gapped cases are split by
+// enforceNoGap: a TPraos block (enforceNoGap=false) accepts a jump, a Praos
+// block (enforceNoGap=true) rejects it.
 func TestValidateOpCertCounter(t *testing.T) {
 	tests := []struct {
-		name      string
-		stored    uint64
-		found     bool
-		candidate uint64
-		wantErr   string
+		name         string
+		stored       uint64
+		found        bool
+		candidate    uint64
+		enforceNoGap bool
+		wantErr      string
 	}{
 		{
-			name:      "first sighting accepts any counter",
-			found:     false,
-			candidate: 7,
+			name:         "first sighting accepts any counter",
+			found:        false,
+			candidate:    7,
+			enforceNoGap: true,
 		},
 		{
-			name:      "equal to last seen",
-			stored:    5,
-			found:     true,
-			candidate: 5,
+			name:         "equal to last seen",
+			stored:       5,
+			found:        true,
+			candidate:    5,
+			enforceNoGap: true,
 		},
 		{
-			name:      "exactly one greater",
-			stored:    5,
-			found:     true,
-			candidate: 6,
+			name:         "exactly one greater",
+			stored:       5,
+			found:        true,
+			candidate:    6,
+			enforceNoGap: true,
 		},
 		{
-			name:      "backward counter rejected",
-			stored:    5,
-			found:     true,
-			candidate: 4,
-			wantErr:   "below last seen",
+			name:         "backward counter rejected (praos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: true,
+			wantErr:      "below last seen",
 		},
 		{
-			name:      "gapped counter rejected",
-			stored:    5,
-			found:     true,
-			candidate: 7,
-			wantErr:   "skips ahead",
+			name:         "backward counter rejected (tpraos)",
+			stored:       5,
+			found:        true,
+			candidate:    4,
+			enforceNoGap: false,
+			wantErr:      "below last seen",
+		},
+		{
+			name:         "gapped counter rejected under praos",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: true,
+			wantErr:      "skips ahead",
+		},
+		{
+			name:         "gapped counter accepted under tpraos",
+			stored:       5,
+			found:        true,
+			candidate:    7,
+			enforceNoGap: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateOpCertCounter(tt.stored, tt.found, tt.candidate)
+			err := validateOpCertCounter(
+				tt.stored,
+				tt.found,
+				tt.candidate,
+				tt.enforceNoGap,
+			)
 			if tt.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -202,4 +233,19 @@ func TestValidateOpCertCounter(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
 	}
+}
+
+// TestOpCertNoGapRuleApplies pins the TPraos→Praos boundary: the opcert no-gap
+// rule is off through Alonzo (TPraos) and on from Babbage onward (Praos).
+func TestOpCertNoGapRuleApplies(t *testing.T) {
+	assert.False(
+		t,
+		opCertNoGapRuleApplies(alonzo.EraIdAlonzo),
+		"Alonzo runs TPraos; the no-gap rule must be off",
+	)
+	assert.True(
+		t,
+		opCertNoGapRuleApplies(babbage.EraIdBabbage),
+		"Babbage runs Praos; the no-gap rule must be on",
+	)
 }

@@ -3668,16 +3668,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
-		// block, inside the same validation transaction. The opcert counter
-		// must equal the last-seen counter or be exactly one greater. A
-		// backward counter signals a stale or stolen hot key; a gapped counter
-		// signals a skipped rotation. Both must be rejected. Only enforced
-		// under shouldValidate (live, current-era blocks): historical blocks
-		// were already network-validated, and the over-increment rule postdates
-		// the early eras replayed during sync. The counter is recorded once the
-		// block's transactions are processed (below); rollback safety is
-		// inherited from the per-(pool,slot) PoolOpCertSequence store, which
-		// drops rows past the rollback slot and recomputes the latest counter.
+		// block, inside the same validation transaction. A backward counter
+		// (below the last seen) signals a stale or stolen hot key and is
+		// rejected in every era. A gapped counter (more than one past the last
+		// seen) is the Praos over-increment case and is rejected only for Praos
+		// eras (Babbage onward); TPraos eras (Shelley–Alonzo) enforce only
+		// monotonicity, so the gap rule is scoped by era rather than by
+		// validation mode (shouldValidate can be true for historical or
+		// near-tip TPraos blocks). The counter is recorded once the block's
+		// transactions are processed (below); rollback safety is inherited from
+		// the per-(pool,slot) PoolOpCertSequence store, which drops rows past
+		// the rollback slot and recomputes the latest counter.
 		if shouldValidate {
 			stored, found, err := ls.db.LatestPoolOpCertSequence(
 				opCertPoolKeyHash,
@@ -3694,6 +3695,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 				stored,
 				found,
 				opCert.IssueNumber,
+				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
 				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
 			}

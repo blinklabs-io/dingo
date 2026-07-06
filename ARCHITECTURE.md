@@ -1050,15 +1050,20 @@ dependency across two points in the pipeline:
   here rejects forged or expired opcerts before the block body is fetched.
   These checks share the existing skip-during-historical-sync gating.
 - **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
-  from `ledgerProcessBlock` under `shouldValidate`): a read-before-write of the
-  pool's stored opcert counter inside the validation transaction. The counter
-  must equal the last-seen value or be exactly one greater; backward counters
-  (stale/stolen hot key) and gapped counters (skipped rotation) are rejected. A
-  pool with no recorded counter has no baseline (genuine first sighting, or a
-  Mithril-restored start) and is accepted as the baseline. Rollback safety is
-  inherited from the per-`(pool, slot)` `PoolOpCertSequence` store, which drops
-  rows past the rollback slot and recomputes the latest counter, so the counter
-  never advances for a block that is later rolled back.
+  from `ledgerProcessBlock` under `shouldValidate`, before the block's
+  transactions are validated): a read-before-write of the pool's stored opcert
+  counter inside the validation transaction. A backward counter (below the last
+  seen — stale/stolen hot key) is rejected in every era. A gapped counter (more
+  than one past the last seen) is the Praos over-increment case and is rejected
+  only for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos
+  eras (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by
+  era rather than by validation mode (`shouldValidate` can be true for
+  historical or near-tip TPraos blocks). A pool with no recorded counter has no
+  baseline (genuine first sighting, or a Mithril-restored start) and is accepted
+  as the baseline. Rollback safety is inherited from the per-`(pool, slot)`
+  `PoolOpCertSequence` store, which drops rows past the rollback slot and
+  recomputes the latest counter, so the counter never advances for a block that
+  is later rolled back.
 
 ### Epoch Nonce Computation
 

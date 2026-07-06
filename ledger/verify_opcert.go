@@ -102,11 +102,24 @@ func babbageOpCert(oc babbage.BabbageOpCert) *ledger.OpCert {
 	}
 }
 
-// validateOpCertCounter enforces operational-certificate counter monotonicity:
-// the candidate counter must equal the pool's last-seen counter or be exactly
-// one greater. A counter below the last-seen value signals a stale or stolen
-// hot key; a counter that skips ahead signals a gapped rotation. Both are
-// rejected.
+// opCertNoGapRuleApplies reports whether the operational-certificate
+// over-increment (no-gap) counter rule applies to a block in the given era.
+// That rule — reject a counter that skips ahead of the last seen by more than
+// one — is part of the Praos protocol (Babbage onward). TPraos eras
+// (Shelley–Alonzo) enforce only counter monotonicity, so a valid TPraos block
+// may advance its opcert counter by more than one.
+func opCertNoGapRuleApplies(eraId uint8) bool {
+	return eraId >= babbage.EraIdBabbage
+}
+
+// validateOpCertCounter enforces operational-certificate counter rules for the
+// pool's issuer. A counter below the last-seen value (candidate < stored)
+// signals a stale or stolen hot key and is rejected in every era. A counter
+// that skips ahead (candidate > stored+1) is the Praos over-increment case and
+// is rejected only when enforceNoGap is set — the rule is Praos-only (Babbage
+// onward); TPraos eras (Shelley–Alonzo) accept any candidate >= stored, so the
+// gap check must be scoped by era rather than by validation mode. See
+// opCertNoGapRuleApplies.
 //
 // When the pool has no recorded counter (found is false) there is no baseline
 // to compare against — a genuine first sighting, or a pool that last forged
@@ -115,26 +128,30 @@ func babbageOpCert(oc babbage.BabbageOpCert) *ledger.OpCert {
 // zero here would falsely reject a valid high-counter block and stall the
 // chain; the honest chain we follow already enforced monotonicity at that
 // pool's real baseline.
-func validateOpCertCounter(stored uint64, found bool, candidate uint64) error {
+func validateOpCertCounter(
+	stored uint64,
+	found bool,
+	candidate uint64,
+	enforceNoGap bool,
+) error {
 	if !found {
 		return nil
 	}
-	switch {
-	case candidate < stored:
+	if candidate < stored {
 		return fmt.Errorf(
 			"opcert counter %d is below last seen %d (stale or stolen hot key)",
 			candidate,
 			stored,
 		)
-	case candidate > stored+1:
+	}
+	if enforceNoGap && candidate > stored+1 {
 		return fmt.Errorf(
 			"opcert counter %d skips ahead of last seen %d (gapped rotation)",
 			candidate,
 			stored,
 		)
-	default:
-		return nil
 	}
+	return nil
 }
 
 const (
