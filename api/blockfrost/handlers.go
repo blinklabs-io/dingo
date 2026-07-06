@@ -466,6 +466,63 @@ func (b *Blockfrost) handleAsset(
 	})
 }
 
+// handleAssetAddresses handles GET /api/v0/assets/{asset}/addresses and
+// returns paginated addresses currently holding the given asset.
+func (b *Blockfrost) handleAssetAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	policyID, assetName, err := parseAssetIdentifier(
+		r.PathValue("asset"),
+	)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid asset identifier.",
+		)
+		return
+	}
+	holders, total, err := b.node.AssetAddresses(policyID, assetName, params)
+	if err != nil {
+		if errors.Is(err, ErrAssetNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested asset could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get asset addresses",
+			"asset", r.PathValue("asset"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve asset addresses",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AssetAddressResponse, 0, len(holders))
+	for _, h := range holders {
+		resp = append(resp, AssetAddressResponse{
+			Address:  h.Address,
+			Quantity: h.Quantity,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // handlePoolsExtended handles GET /api/v0/pools/extended
 // and returns active pools with extended details.
 func (b *Blockfrost) handlePoolsExtended(

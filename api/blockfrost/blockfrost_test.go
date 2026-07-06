@@ -63,6 +63,11 @@ type mockNode struct {
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
 	asset                         AssetInfo
+	assetHolders                  []AssetHolderInfo
+	assetHoldersTotal             int
+	assetAddressesPolicyID        string
+	assetAddressesAssetName       []byte
+	assetAddressesParams          PaginationParams
 	drep                          DRepInfo
 	drepCredential                DRepCredential
 	addressUTXOs                  []AddressUTXOInfo
@@ -104,6 +109,7 @@ type mockNode struct {
 	genesisErr                    error
 	poolsErr                      error
 	assetErr                      error
+	assetAddressesErr             error
 	drepErr                       error
 	addressUTXOsErr               error
 	addressTransactionsErr        error
@@ -201,6 +207,17 @@ func (m *mockNode) Asset(
 	_ []byte,
 ) (AssetInfo, error) {
 	return m.asset, m.assetErr
+}
+
+func (m *mockNode) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	m.assetAddressesPolicyID = policyID
+	m.assetAddressesAssetName = assetName
+	m.assetAddressesParams = params
+	return m.assetHolders, m.assetHoldersTotal, m.assetAddressesErr
 }
 
 func (m *mockNode) DRep(
@@ -691,6 +708,100 @@ func TestHandleAssetNotFound(t *testing.T) {
 	)
 	w := httptest.NewRecorder()
 	b.handleAsset(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestHandleAssetAddresses(t *testing.T) {
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e"
+	mock := &mockNode{
+		assetHolders: []AssetHolderInfo{
+			{Address: "addr1holder1", Quantity: "1"},
+			{Address: "addr1holder2", Quantity: "42"},
+		},
+		assetHoldersTotal: 12,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses?count=2&page=3&order=desc",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(
+		t,
+		"00112233445566778899aabbccddeeff00112233445566778899aabb",
+		mock.assetAddressesPolicyID,
+	)
+	assert.Equal(t, []byte("token"), mock.assetAddressesAssetName)
+	assert.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 3, Order: "desc"},
+		mock.assetAddressesParams,
+	)
+	assert.Equal(t, "12", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "6", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AssetAddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "addr1holder1", resp[0].Address)
+	assert.Equal(t, "1", resp[0].Quantity)
+	assert.Equal(t, "addr1holder2", resp[1].Address)
+	assert.Equal(t, "42", resp[1].Quantity)
+}
+
+func TestHandleAssetAddressesInvalidIdentifier(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/not-hex/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", "not-hex")
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid asset identifier.", resp.Message)
+}
+
+func TestHandleAssetAddressesNotFound(t *testing.T) {
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	mock := &mockNode{
+		assetAddressesErr: ErrAssetNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 

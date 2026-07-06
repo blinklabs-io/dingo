@@ -692,6 +692,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetAssetHoldersByPolicyAndName returns paginated address groups that
+	// currently hold at least one token of the specified asset, along with
+	// the total number of distinct holder addresses before pagination.
+	GetAssetHoldersByPolicyAndName(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		int,    // offset
+		int,    // limit
+		string, // order ("asc" or "desc")
+		types.Txn,
+	) ([]models.AssetHolderRow, int, error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,

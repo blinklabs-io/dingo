@@ -673,7 +673,7 @@ WHERE payment_script = true
   AND deleted_slot = 0;
 ```
 
-### `GetUtxosByAssets` and Asset Quantity
+### `GetUtxosByAssets`, Asset Quantity, and Asset Holders
 
 ```sql
 -- Live UTxOs containing a policy/name pair
@@ -696,6 +696,34 @@ JOIN utxo u ON u.id = a.utxo_id
 WHERE a.policy_id = decode($1, 'hex')
   AND a.name = decode($2, 'hex')
   AND u.deleted_slot = 0;
+```
+
+`GetAssetHoldersByPolicyAndName` powers the Blockfrost-compatible
+`GET /api/v0/assets/{asset}/addresses` endpoint. It groups live multi-asset
+UTxOs by the address credential columns, including `payment_script` and
+`credential_tag` so key/script payment and stake credentials can be
+reconstructed correctly:
+
+```sql
+-- Current holder addresses and quantities for a policy/name pair
+SELECT
+  u.payment_key,
+  u.staking_key,
+  u.credential_tag,
+  u.payment_script,
+  SUM(a.amount) AS quantity
+FROM asset a
+JOIN utxo u ON u.id = a.utxo_id
+WHERE a.policy_id = decode($1, 'hex')
+  AND a.name = decode($2, 'hex')
+  AND u.deleted_slot = 0
+GROUP BY
+  u.payment_key,
+  u.staking_key,
+  u.credential_tag,
+  u.payment_script
+ORDER BY quantity ASC
+LIMIT 100 OFFSET 0;
 ```
 
 ### `GetTransactionsByMetadataLabel`

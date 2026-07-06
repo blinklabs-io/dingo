@@ -77,6 +77,66 @@ func (d *MetadataStoreSqlite) GetAssetQuantityByPolicyAndName(
 	return total, nil
 }
 
+// GetAssetHoldersByPolicyAndName returns paginated address groups currently
+// holding the given asset, along with the total distinct holder count.
+func (d *MetadataStoreSqlite) GetAssetHoldersByPolicyAndName(
+	policyId lcommon.Blake2b224,
+	assetName []byte,
+	offset int,
+	limit int,
+	order string,
+	txn types.Txn,
+) ([]models.AssetHolderRow, int, error) {
+	query, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var total int64
+	result := query.Raw(
+		`SELECT COUNT(*) FROM (`+
+			`SELECT 1 FROM asset`+
+			` INNER JOIN utxo ON asset.utxo_id = utxo.id`+
+			` WHERE asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0`+
+			` GROUP BY utxo.payment_key, utxo.staking_key, utxo.credential_tag,`+
+			` utxo.payment_script) sub`,
+		policyId[:],
+		assetName,
+	).Scan(&total)
+	if result.Error != nil {
+		return nil, 0, result.Error
+	}
+
+	orderDir := "ASC"
+	if order == "desc" {
+		orderDir = "DESC"
+	}
+	var rows []models.AssetHolderRow
+	result = query.Model(&models.Asset{}).
+		Joins("INNER JOIN utxo ON asset.utxo_id = utxo.id").
+		Select(
+			"utxo.payment_key, utxo.staking_key, utxo.credential_tag,"+
+				" utxo.payment_script, SUM(asset.amount) AS quantity",
+		).
+		Where(
+			"asset.policy_id = ? AND asset.name = ? AND utxo.deleted_slot = 0",
+			policyId[:],
+			assetName,
+		).
+		Group(
+			"utxo.payment_key, utxo.staking_key, utxo.credential_tag," +
+				" utxo.payment_script",
+		).
+		Order("quantity " + orderDir).
+		Offset(offset).
+		Limit(limit).
+		Scan(&rows)
+	if result.Error != nil {
+		return nil, 0, result.Error
+	}
+	return rows, int(total), nil
+}
+
 // GetAssetsByPolicy returns all assets for a given policy ID
 func (d *MetadataStoreSqlite) GetAssetsByPolicy(
 	policyId lcommon.Blake2b224,

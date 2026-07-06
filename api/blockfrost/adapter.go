@@ -786,6 +786,116 @@ func (a *NodeAdapter) Asset(
 	}, nil
 }
 
+// AssetAddresses returns paginated addresses currently holding the given asset.
+func (a *NodeAdapter) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	policyIDBytes, err := hex.DecodeString(policyID)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"decode asset policy ID %q: %w",
+			policyID,
+			err,
+		)
+	}
+	policyHash := lcommon.NewBlake2b224(policyIDBytes)
+	offset := (params.Page - 1) * params.Count
+	rows, total, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetHoldersByPolicyAndName(
+			policyHash,
+			assetName,
+			offset,
+			params.Count,
+			params.Order,
+			nil,
+		)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get asset holders for %s%x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if total == 0 {
+		asset, assetErr := a.ledgerState.Database().
+			Metadata().
+			GetAssetByPolicyAndName(policyHash, assetName, nil)
+		if assetErr != nil || asset.ID == 0 {
+			return nil, 0, fmt.Errorf(
+				"asset %s%x: %w",
+				policyID,
+				assetName,
+				ErrAssetNotFound,
+			)
+		}
+	}
+	result := make([]AssetHolderInfo, 0, len(rows))
+	for _, row := range rows {
+		addr, addrErr := a.addressFromHolderRow(row)
+		if addrErr != nil {
+			return nil, 0, addrErr
+		}
+		result = append(result, AssetHolderInfo{
+			Address:  addr,
+			Quantity: strconv.FormatUint(row.Quantity, 10),
+		})
+	}
+	return result, total, nil
+}
+
+// addressFromHolderRow reconstructs a bech32 address string from the
+// payment/staking key bytes stored on a holder row.
+func (a *NodeAdapter) addressFromHolderRow(
+	row models.AssetHolderRow,
+) (string, error) {
+	networkID := a.networkID()
+	switch {
+	case len(row.PaymentKey) == lcommon.AddressHashSize &&
+		len(row.StakingKey) == lcommon.AddressHashSize:
+		addrType := uint8(lcommon.AddressTypeKeyKey)
+		if row.PaymentScript {
+			if row.CredentialTag == 1 {
+				addrType = lcommon.AddressTypeScriptScript
+			} else {
+				addrType = lcommon.AddressTypeScriptKey
+			}
+		} else if row.CredentialTag == 1 {
+			addrType = lcommon.AddressTypeKeyScript
+		}
+		addr, err := lcommon.NewAddressFromParts(
+			addrType,
+			networkID,
+			row.PaymentKey,
+			row.StakingKey,
+		)
+		if err == nil {
+			return addr.String(), nil
+		}
+	case len(row.PaymentKey) == lcommon.AddressHashSize:
+		addrType := uint8(lcommon.AddressTypeKeyNone)
+		if row.PaymentScript {
+			addrType = lcommon.AddressTypeScriptNone
+		}
+		addr, err := lcommon.NewAddressFromParts(
+			addrType,
+			networkID,
+			row.PaymentKey,
+			nil,
+		)
+		if err == nil {
+			return addr.String(), nil
+		}
+	}
+	return "", fmt.Errorf(
+		"address not resolvable for holder with payment key %x",
+		row.PaymentKey,
+	)
+}
+
 // DRep returns governance DRep information for the requested
 // credential.
 func (a *NodeAdapter) DRep(
