@@ -745,8 +745,14 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// For the initial epoch (no nonce yet), return genesis hash
-	// for both epoch nonce and initial evolving nonce.
+	// For the initial epoch (no nonce yet), the epoch/evolving/candidate nonces
+	// are all the genesis nonce, and the carried lastEpochBlockNonce is Neutral
+	// (nil): cardano-ledger initializes praosStateLastEpochBlockNonce to
+	// NeutralNonce at genesis, so the first from-genesis boundary uses the
+	// identity (eta = candidate ⭒ NeutralNonce = candidate). Do NOT seed this
+	// with the genesis nonce (#2734). Mirrors calculateEpochNonce; the Mithril
+	// bootstrap path imports a non-nil lastEpochBlockNonce and never takes this
+	// branch.
 	if len(prevEpoch.Nonce) == 0 {
 		return genesisHash, genesisHash, genesisHash, nil, nil
 	}
@@ -841,10 +847,19 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// Compute the lastEpochBlockNonce for the epoch being closed.
-	// This is the hash of the last block in prevEpoch, or the carried
-	// value when prevEpoch has no blocks.
-	lastEpochBlockNonce, err := ls.epochLabNonce(
+	// The epoch nonce mixes the frozen candidate with the CARRIED
+	// last-block-of-previous-epoch nonce (cardano-ledger
+	// praosStateLastEpochBlockNonce), i.e. prevEpoch.LastEpochBlockNonce — NOT
+	// the last block of the epoch being closed. This must match the rollover
+	// path (calculateEpochNonce); see #2734.
+	//   epochNonce(N+1) = candidateNonce(N) ⭒ prevEpoch(N).LastEpochBlockNonce
+	labForEta := cloneNonce(prevEpoch.LastEpochBlockNonce)
+
+	// The carried lab for the NEXT boundary is stored on the new epoch record:
+	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
+	// the epoch being closed (a one-block Praos lag), NOT the last block's own
+	// hash. See epochLabNonce and #2734 (eta_1349 wedge).
+	labNonceToSave, err := ls.epochLabNonce(
 		nil,
 		prevEpoch.StartSlot,
 		prevEpochEndSlot,
@@ -853,9 +868,8 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	labNonceToSave := lastEpochBlockNonce
 
-	if len(lastEpochBlockNonce) == 0 {
+	if len(labForEta) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -874,7 +888,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
-		lastEpochBlockNonce,
+		labForEta,
 		nil,
 	)
 	if err != nil {
@@ -887,8 +901,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		"computed epoch nonce for cache advance",
 		"new_epoch_start_slot", epochStartSlot,
 		"prev_epoch_id", prevEpoch.EpochId,
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_for_eta",
+		hex.EncodeToString(labForEta),
+		"lab_nonce_to_save",
+		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
 		"epoch_nonce", hex.EncodeToString(result.Bytes()),

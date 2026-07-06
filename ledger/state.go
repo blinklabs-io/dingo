@@ -757,9 +757,45 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.config.Logger.Info("database worker pool disabled")
 	}
 
-	// Setup event handlers. The chainsync/blockfetch/chain-update streams
-	// can burst at bulk-sync rates (#1556 / #1914), so they opt into the
-	// large EventQueueSize buffer. Sparser streams use the default.
+	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
+	ls.scheduleCleanupConsumedUtxos()
+	// Load epoch info from DB
+	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+		return ls.loadEpochs(txn)
+	}, true)
+	if err != nil {
+		return fmt.Errorf("failed to load epoch info: %w", err)
+	}
+	ls.checkpointWrittenForEpoch = false
+	// Load current protocol parameters from DB
+	if err := ls.loadPParams(); err != nil {
+		return fmt.Errorf("failed to load pparams: %w", err)
+	}
+	// Reconstruct TransitionInfo from loaded state.  After restart, the
+	// in-memory field is zero (TransitionUnknown), but if the node shut down
+	// while in the window between an epoch-boundary version bump and the first
+	// block of the new era, the pparams will report a major version that maps
+	// to a later era than currentEpoch.EraId.  Detecting this here restores
+	// the correct TransitionKnown state without persisting extra data.
+	ls.reconstructTransitionInfo()
+	// Load current tip
+	if err := ls.loadTip(); err != nil {
+		return fmt.Errorf("failed to load tip: %w", err)
+	}
+	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
+	// between the ledger-state snapshot slot and the trust boundary) that were
+	// imported without folding their VRF output. Must run after the tip and
+	// trust boundary are loaded and before any epoch nonce is computed by
+	// header verification, or the first post-bootstrap epoch boundary yields a
+	// wrong nonce and every leader-VRF check in that epoch fails.
+	if err := ls.healMithrilGapBlockNonces(ctx); err != nil {
+		return fmt.Errorf("failed to heal Mithril gap block nonces: %w", err)
+	}
+	// Setup event handlers only after startup nonce repair is complete, so a
+	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
+	// stale gap-block nonces. The chainsync/blockfetch/chain-update streams can
+	// burst at bulk-sync rates (#1556 / #1914), so they opt into the large
+	// EventQueueSize buffer. Sparser streams use the default.
 	if ls.config.EventBus != nil {
 		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			ChainsyncEventType,
@@ -788,31 +824,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ConnectionClosedEventType,
 			ls.handleConnectionClosedEvent,
 		)
-	}
-	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
-	ls.scheduleCleanupConsumedUtxos()
-	// Load epoch info from DB
-	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
-	}, true)
-	if err != nil {
-		return fmt.Errorf("failed to load epoch info: %w", err)
-	}
-	ls.checkpointWrittenForEpoch = false
-	// Load current protocol parameters from DB
-	if err := ls.loadPParams(); err != nil {
-		return fmt.Errorf("failed to load pparams: %w", err)
-	}
-	// Reconstruct TransitionInfo from loaded state.  After restart, the
-	// in-memory field is zero (TransitionUnknown), but if the node shut down
-	// while in the window between an epoch-boundary version bump and the first
-	// block of the new era, the pparams will report a major version that maps
-	// to a later era than currentEpoch.EraId.  Detecting this here restores
-	// the correct TransitionKnown state without persisting extra data.
-	ls.reconstructTransitionInfo()
-	// Load current tip
-	if err := ls.loadTip(); err != nil {
-		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -4621,26 +4632,45 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	return nil
 }
 
-// healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce was
-// persisted empty by pre-fix boundary block lookup bugs.
+// healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce or Nonce
+// was persisted empty or wrong by pre-fix boundary bugs.
 //
-// LastEpochBlockNonce is the hash of the last block of the previous epoch. It
-// feeds the current epoch's nonce as candidateNonce ⭒ lastEpochBlockNonce.
+// LastEpochBlockNonce is the Praos lab carried at this epoch's opening
+// boundary: the parent hash (PrevHash) of the last canonical block before the
+// boundary (cardano-ledger praosStateLastEpochBlockNonce). It feeds the NEXT
+// epoch's nonce: Nonce(E) = CandidateNonce(E) ⭒ LastEpochBlockNonce(E-1).
 // Earlier boundary lookups scanned block-blob keys, so they could return a
 // synthetic Leios endorser block or retained fork blob instead of the active
-// chain's real ranking block. Empty or wrong lab values diverge epoch nonces
-// from peers and break leader-VRF verification.
+// chain's real ranking block, and older releases stored the boundary block's
+// own hash instead of its parent hash. Empty or wrong lab values diverge epoch
+// nonces from peers and break leader-VRF verification.
 //
-// This runs once at startup over the loaded epoch cache. For each non-genesis
-// epoch whose lab is empty or differs from the boundary block resolved through
-// the canonical chain index, it restores the lab and recomputes the affected
-// epoch's nonce in the cache. It is a pure function of already-stored chain
-// data and is idempotent across restarts.
+// This runs once at startup over the loaded epoch cache, in ascending epoch
+// order. For each non-genesis epoch it independently (a) restores the lab from
+// the canonical chain index when it differs from the expected epochLabNonce
+// semantics, and (b) recomputes the epoch's nonce from its candidate and the
+// PREVIOUS epoch's (already repaired) carried lab when they disagree. The lab
+// repair needs no candidate; the nonce repair is skipped when the candidate is
+// missing/invalid or the previous epoch's lab could not be verified. It is a
+// pure function of already-stored chain data and is idempotent across restarts.
 func (ls *LedgerState) healEmptyLabNonces() {
 	if ls.healEmptyLabNoncesInPlace(ls.epochCache) {
 		clear(ls.epochNonceHexCache)
 	}
 }
+
+// healLabNonceRecentEpochs bounds the startup lab/nonce repair to the most
+// recent epochs. Epoch labs are immutable historical data, and only the
+// resume-tip epoch's lab feeds a nonce the node computes at runtime: the
+// current epoch nonce mixes the previous epoch's lab, forward boundaries
+// recompute labs fresh in calculateEpochNonce, and rollbacks are bounded by the
+// security parameter (well under one epoch on real networks). Re-deriving every
+// historical epoch's lab from the chain on every restart is one canonical-block
+// lookup per epoch, which on a large blob store costs many minutes for no
+// consensus benefit. This window comfortably covers the current epoch, the
+// bounded rollback window, and a margin; DBs with fewer epochs are fully
+// processed.
+const healLabNonceRecentEpochs = 8
 
 func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	repaired := false
@@ -4676,16 +4706,71 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			skippedMithrilTrusted++
 		}
 	)
-	for i := range epochs {
+	// labVerified[i] records that epochs[i].LastEpochBlockNonce is known to
+	// match the canonical lab semantics (verified against the chain, repaired,
+	// or Mithril-trusted), so it is safe to use as the eta input for
+	// epochs[i+1]'s nonce check.
+	// Verify/repair the recent window (see healLabNonceRecentEpochs), plus one
+	// predecessor epoch. The predecessor is scanned only so its lab is verified
+	// and repaired: the oldest in-window epoch's nonce check mixes the PREVIOUS
+	// epoch's LastEpochBlockNonce, so without a verified predecessor lab that
+	// first in-window nonce would be skipped and left stale. Epochs before the
+	// scan are immutable and never feed a runtime nonce, so re-deriving their
+	// labs from the chain on every restart is wasted work.
+	startIdx := 0
+	if scanEpochs := healLabNonceRecentEpochs + 1; len(epochs) > scanEpochs {
+		startIdx = len(epochs) - scanEpochs
+	}
+	labVerified := make([]bool, len(epochs))
+	for i := startIdx; i < len(epochs); i++ {
 		ep := &epochs[i]
 		// The genesis epoch legitimately carries no last block nonce.
 		if ep.StartSlot == 0 {
+			labVerified[i] = len(ep.LastEpochBlockNonce) == 0
 			continue
 		}
 		if ls.mithrilLedgerSlot > 0 &&
 			ep.StartSlot <= ls.mithrilLedgerSlot &&
 			len(ep.LastEpochBlockNonce) == lcommon.Blake2b256Size {
 			recordSkippedMithrilTrustedEpoch(ep.EpochId)
+			labVerified[i] = true
+			continue
+		}
+		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
+		if err != nil {
+			// A pre-Praos epoch carries no lab by definition, so its nil lab
+			// is verified even without chain data.
+			if len(ep.Nonce) == 0 && len(ep.LastEpochBlockNonce) == 0 {
+				labVerified[i] = true
+			}
+			continue
+		}
+		expectedLab, ok := ls.expectedEpochRepairLab(epochs, i, boundary)
+		if !ok {
+			continue
+		}
+		if !bytes.Equal(ep.LastEpochBlockNonce, expectedLab) {
+			previousLab := cloneNonce(ep.LastEpochBlockNonce)
+			ep.LastEpochBlockNonce = cloneNonce(expectedLab)
+			repaired = true
+			ls.config.Logger.Info(
+				"repaired epoch lastEpochBlockNonce",
+				"epoch", ep.EpochId,
+				"boundary_slot", boundary.Slot,
+				"previous_last_epoch_block_nonce",
+				hex.EncodeToString(previousLab),
+				"last_epoch_block_nonce",
+				hex.EncodeToString(ep.LastEpochBlockNonce),
+				"component", "ledger",
+			)
+		}
+		labVerified[i] = true
+		// The nonce check needs the PREVIOUS epoch's carried lab (already
+		// verified/repaired above, since the loop runs in ascending order):
+		//   Nonce(E) = CandidateNonce(E) ⭒ LastEpochBlockNonce(E-1)
+		// Mixing with this epoch's OWN lab instead would shift eta by one
+		// epoch — the exact #2734 divergence this heal exists to repair.
+		if i == 0 || !labVerified[i-1] {
 			continue
 		}
 		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
@@ -4697,53 +4782,41 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 			}
 			continue
 		}
-		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
-		if err != nil ||
-			len(boundary.Hash) != lcommon.Blake2b256Size {
-			continue
+		labForEta := epochs[i-1].LastEpochBlockNonce
+		var expectedNonce []byte
+		if len(labForEta) == 0 {
+			// NeutralNonce is the identity element of ⭒:
+			//   candidateNonce ⭒ NeutralNonce = candidateNonce
+			expectedNonce = cloneNonce(candidateNonce)
+		} else {
+			res, err := lcommon.CalculateEpochNonce(
+				candidateNonce,
+				labForEta,
+				nil,
+			)
+			if err != nil {
+				ls.config.Logger.Warn(
+					"failed to recompute epoch nonce during lab recovery",
+					"epoch", ep.EpochId,
+					"error", err,
+					"component", "ledger",
+				)
+				continue
+			}
+			expectedNonce = res.Bytes()
 		}
-		if bytes.Equal(ep.LastEpochBlockNonce, boundary.Hash) {
-			continue
-		}
-		// Recompute this epoch's nonce before mutating the record; the lab and
-		// nonce must be repaired together or not at all.
-		res, err := lcommon.CalculateEpochNonce(
-			candidateNonce,
-			boundary.Hash,
-			nil,
-		)
-		if err != nil {
-			ls.config.Logger.Warn(
-				"failed to recompute epoch nonce during lab recovery",
+		if !bytes.Equal(ep.Nonce, expectedNonce) {
+			previousNonce := cloneNonce(ep.Nonce)
+			ep.Nonce = expectedNonce
+			repaired = true
+			ls.config.Logger.Info(
+				"recomputed epoch nonce after lab recovery",
 				"epoch", ep.EpochId,
-				"error", err,
+				"previous_nonce", hex.EncodeToString(previousNonce),
+				"epoch_nonce", hex.EncodeToString(expectedNonce),
 				"component", "ledger",
 			)
-			continue
 		}
-		previousLab := cloneNonce(ep.LastEpochBlockNonce)
-		previousNonce := cloneNonce(ep.Nonce)
-		newNonce := res.Bytes()
-		ep.LastEpochBlockNonce = cloneNonce(boundary.Hash)
-		ep.Nonce = newNonce
-		repaired = true
-		ls.config.Logger.Info(
-			"repaired epoch lastEpochBlockNonce",
-			"epoch", ep.EpochId,
-			"boundary_slot", boundary.Slot,
-			"previous_last_epoch_block_nonce",
-			hex.EncodeToString(previousLab),
-			"last_epoch_block_nonce",
-			hex.EncodeToString(ep.LastEpochBlockNonce),
-			"component", "ledger",
-		)
-		ls.config.Logger.Info(
-			"recomputed epoch nonce after lab recovery",
-			"epoch", ep.EpochId,
-			"previous_nonce", hex.EncodeToString(previousNonce),
-			"epoch_nonce", hex.EncodeToString(newNonce),
-			"component", "ledger",
-		)
 	}
 	if skippedMithrilTrusted > 0 {
 		ls.config.Logger.Info(
@@ -4774,6 +4847,50 @@ func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 		)
 	}
 	return repaired
+}
+
+// expectedEpochRepairLab returns the canonical LastEpochBlockNonce for
+// epochs[idx], given the last canonical block before its start slot.
+//
+// Pre-Praos (Byron) epochs carry no lab, and the FIRST Praos epoch's carried
+// lab is NeutralNonce (nil): cardano-ledger initialChainDepState sets
+// csLabNonce = NeutralNonce, and the initial-epoch branch of
+// calculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
+// block's parent hash would diverge the next boundary's eta on any chain with
+// a Byron era. For every other epoch the carried lab is prevHashToNonce of the
+// boundary block — regardless of which epoch that block fell in, since an
+// empty closing epoch carries the same block's parent hash forward unchanged.
+// Consulting the stored previous-epoch lab instead could inject an unhealed
+// old-shape (own-hash) value, so the value is always derived from the chain.
+func (ls *LedgerState) expectedEpochRepairLab(
+	epochs []models.Epoch,
+	idx int,
+	boundary models.Block,
+) ([]byte, bool) {
+	if idx < 0 || idx >= len(epochs) {
+		return nil, false
+	}
+	// Pre-Praos epochs have no nonce and carry no lab.
+	if len(epochs[idx].Nonce) == 0 {
+		return nil, true
+	}
+	// The first Praos epoch (previous epoch is pre-Praos) carries NeutralNonce.
+	if idx > 0 && len(epochs[idx-1].Nonce) == 0 {
+		return nil, true
+	}
+	// Derive the boundary block's parent hash, decoding the block CBOR when
+	// the stored PrevHash is empty (legacy empty-PrevHash rows).
+	prevHash, err := blockPrevHash(boundary)
+	if err != nil || len(prevHash) != lcommon.Blake2b256Size {
+		return nil, false
+	}
+	// cardano-ledger's prevHashToNonce maps GenesisHash to NeutralNonce: a
+	// boundary block that is the chain's first block contributes no lab.
+	if genesisHash, gErr := GenesisBlockHash(ls.config.CardanoNodeConfig); gErr == nil &&
+		bytes.Equal(prevHash, genesisHash[:]) {
+		return nil, true
+	}
+	return cloneNonce(prevHash), true
 }
 
 func (ls *LedgerState) epochRepairCandidateNonce(

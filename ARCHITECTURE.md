@@ -641,13 +641,25 @@ When `Node.Run()` is called, components are initialized in this order:
     idempotent (ON CONFLICT DO NOTHING) so a
     crash-restart replay is safe.
  9. LedgerState start. Loading the epoch cache (`loadEpochs`) also runs
-    `healEmptyLabNonces`: it repairs any epoch record whose
-    `last_epoch_block_nonce` was persisted empty or stale by pre-fix boundary
-    lookup bugs, re-deriving the lab from the active chain's boundary block and
-    recomputing the affected epoch's nonce in the cache when that epoch has a
-    stored `candidate_nonce`, so leader-VRF verification matches the network.
-    If the candidate is missing, startup leaves the epoch unchanged rather than
-    substituting Shelley genesis for a candidate that may have evolved.
+    `healEmptyLabNonces`: in ascending epoch order over the most recent eight
+    epochs plus one predecessor (or the full cache when shorter), it repairs
+    records whose `last_epoch_block_nonce` was persisted empty or stale by
+    pre-fix boundary bugs, re-deriving the lab from the active chain boundary
+    block's `PrevHash` (nil for pre-Praos epochs and for the first Praos epoch,
+    whose carried lab is NeutralNonce), and independently recomputes each
+    scanned epoch's nonce as `candidate ⭒ previous epoch's carried lab` when
+    that epoch has a stored `candidate_nonce` and the previous epoch's lab was
+    verified — the same assembly the boundary rollover uses, so leader-VRF
+    verification matches the network. The predecessor is included so the oldest
+    in-window epoch can use a verified carried lab; older epochs are left as
+    persisted because they no longer feed a runtime nonce. The lab repair itself
+    does not need a candidate. If the candidate is missing, startup leaves the
+    epoch's nonce unchanged rather than substituting Shelley genesis for a
+    candidate that may have evolved. After the
+    tip loads, `healMithrilGapBlockNonces` reconstructs the evolving-nonce fold
+    across any Mithril "gap blocks" (see Mithril Bootstrap) before header
+    verification computes an epoch nonce; only then does LedgerState subscribe
+    to chainsync/blockfetch/chain-update EventBus events.
 10. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
 11. Mempool setup and injection into LedgerState/Ouroboros
@@ -1503,6 +1515,48 @@ ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
 snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
+The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
+`processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
+(the "gap blocks") for their transaction effects, including consumed-input
+reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. The trust
+boundary is then recorded at the post-gap chain tip (`mithril/sync_import.go`),
+ahead of the evolving nonce persisted at the ledger-state slot. Because live
+chainsync folds nonces only past the trust boundary, the candidate nonce carried
+into the first post-bootstrap epoch
+boundary would otherwise omit every gap block's VRF output, diverging the
+computed epoch nonce from the network and failing every leader-VRF check in that
+epoch (a node runs clean through the bootstrap epoch — whose nonce was imported,
+not computed — then wedges rejecting the first block of the next epoch).
+`LedgerState.healMithrilGapBlockNonces` closes this at startup: it re-folds the
+evolving nonce (the shared `foldBlockEtaV`, Byron-skipped) from the anchor
+block's stored `block_nonce` through every canonical-chain block up to the tip,
+persisting a corrected `block_nonce` for each and checkpointing the
+trust-boundary block. Blocks come from the primary chain index — a raw
+block-blob slot scan would also fold retained fork blobs and synthetic Leios
+endorser blobs, silently corrupting every subsequent nonce. Writes commit in
+batches, with the trust-boundary row committed last as the completion marker,
+so the heal is idempotent — once the recorded trust-boundary point carries a
+folded nonce it detects completion and no-ops — and a crash mid-heal resumes on
+the next start from the highest valid canonical row below the boundary. It
+repairs an already-bootstrapped node in place with no re-bootstrap and never
+reconstructs from an unknown seed: when no usable anchor nonce exists below the
+boundary, or no valid anchor candidate is on the primary chain, it declines
+rather than guess. If a higher valid nonce row below the boundary belongs to a
+retained fork, the heal falls back to the next lower canonical candidate instead
+of treating the fork row as the seed.
+
+The epoch nonce for the boundary into epoch N+1 is
+`candidateNonce(N) ⭒ epoch(N).LastEpochBlockNonce`, where the carried
+`LastEpochBlockNonce` is cardano-ledger's `praosStateLastEpochBlockNonce`:
+`prevHashToNonce(lastBlock.prevHash)` — the PARENT hash of the last block of the
+closing epoch (a one-block Praos lag), computed by `LedgerState.epochLabNonce`
+and stored on the new epoch record for the next boundary. Using the last block's
+own hash instead shifts the carried lab by one block and diverges the computed
+epoch nonce from the network at every self-computed boundary (only the imported
+bootstrap boundary escapes it), wedging the node at the tip of the following
+epoch. For an empty closing epoch (no blocks of its own) the previous carried
+nonce is passed through unchanged.
+
 In API storage mode, the SQLite metadata plugin can defer selected query indexes
 during bulk load. Deferred indexes are classified as critical or lazy in
 `database/plugin/metadata/deferred`: critical indexes cover startup API queries
@@ -1878,9 +1932,11 @@ On chain rollback past an epoch boundary:
 - Delete snapshots for epochs after rollback point
 - Recalculate affected snapshots on forward replay
 - Reload the remaining epoch rows into the in-memory cache and run the same
-  empty/stale `last_epoch_block_nonce` repair used at startup before publishing
-  the new cache. Epochs without a stored `candidate_nonce` are skipped because
-  their nonce cannot be safely recomputed from the lab alone.
+  bounded empty/stale `last_epoch_block_nonce` repair used at startup before
+  publishing the new cache. The scan covers the recent repair window plus one
+  predecessor; epochs without a stored `candidate_nonce` still have their lab
+  repaired when possible, but their nonce is left unchanged because it cannot be
+  safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
   writes (`network_state`) from governance refunds and POOLREAP deposit refunds
   are slot-keyed, so they are reverted by slot and re-derived on forward replay

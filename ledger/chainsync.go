@@ -3055,11 +3055,16 @@ func (ls *LedgerState) calculateEpochNonce(
 		)
 	}
 
-	// For the initial epoch creation (no blocks yet), the epoch
-	// nonce and initial evolving nonce are both the genesis hash.
-	// This matches cardano-node where the initial state sets
-	// epochNonce, candidateNonce, and evolvingNonce all to the
-	// genesis hash. lastEpochBlockNonce is nil (NeutralNonce).
+	// For the initial epoch creation (no blocks yet), the epoch nonce and
+	// initial evolving/candidate nonces are all the genesis nonce, and the
+	// carried lastEpochBlockNonce is Neutral (nil). At genesis cardano-ledger
+	// initializes praosStateLastEpochBlockNonce to NeutralNonce, so the FIRST
+	// from-genesis epoch boundary takes the identity branch: eta = candidate ⭒
+	// NeutralNonce = candidate. Devnet confirms cardano's epoch-1 epochNonce ==
+	// its candidate (identity). Do NOT seed this with the genesis nonce — that
+	// combines instead of using identity and diverges at the first boundary
+	// (#2734). The Mithril path never takes this branch (bootstrap epoch imports
+	// a non-nil lastEpochBlockNonce).
 	if len(currentEpoch.Nonce) == 0 {
 		return genesisHashBytes, genesisHashBytes, genesisHashBytes, nil, nil
 	}
@@ -3174,12 +3179,22 @@ func (ls *LedgerState) calculateEpochNonce(
 		)
 	}
 
-	// Compute the lastEpochBlockNonce for the epoch being closed.
-	// This is the hash of the last block of current epoch N, or the
-	// carried value when the epoch has no blocks. It will be stored on
-	// the new epoch record and used immediately in this boundary's
-	// epoch-nonce formula.
-	lastEpochBlockNonce, err := ls.epochLabNonce(
+	// The epoch nonce mixes the frozen candidate with the nonce derived from
+	// the last block of the PREVIOUS epoch. In cardano-ledger this is
+	// praosStateLastEpochBlockNonce: the value CARRIED in the closing epoch's
+	// state (set at the prior epoch boundary) — i.e. the hash of the last block
+	// of the epoch *before* the one closing here — NOT the last block of the
+	// closing epoch itself. Using the closing epoch's own last block shifts the
+	// lab by one epoch and diverges eta from the network, so every leader-VRF
+	// check in the new epoch fails (#2734):
+	//   epochNonce(N+1) = candidateNonce(N) ⭒ currentEpoch(N).LastEpochBlockNonce
+	labForEta := cloneNonce(currentEpoch.LastEpochBlockNonce)
+
+	// The carried lab for the NEXT boundary is stored on the new epoch record:
+	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
+	// the epoch being closed (a one-block Praos lag), NOT the last block's own
+	// hash. See epochLabNonce and #2734 (eta_1349 wedge).
+	labNonceToSave, err := ls.epochLabNonce(
 		txn,
 		currentEpoch.StartSlot,
 		epochEndSlot,
@@ -3188,11 +3203,10 @@ func (ls *LedgerState) calculateEpochNonce(
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	labNonceToSave := lastEpochBlockNonce
 
 	// If nil/empty, it's NeutralNonce (identity): result is
 	// just candidateNonce.
-	if len(lastEpochBlockNonce) == 0 {
+	if len(labForEta) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		// So the epoch nonce is just the candidate nonce.
@@ -3212,20 +3226,20 @@ func (ls *LedgerState) calculateEpochNonce(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	// candidateNonce ⭒ lastEpochBlockNonce
-	// = blake2b_256(candidateNonce || lastEpochBlockNonce)
+	// candidateNonce ⭒ labForEta
+	// = blake2b_256(candidateNonce || labForEta)
 	if len(candidateNonce) < 32 ||
-		len(lastEpochBlockNonce) < 32 {
+		len(labForEta) < 32 {
 		return nil, nil, nil, nil, fmt.Errorf(
 			"epoch nonce requires 32-byte inputs: "+
-				"candidateNonce=%d, lastEpochBlockNonce=%d",
+				"candidateNonce=%d, labForEta=%d",
 			len(candidateNonce),
-			len(lastEpochBlockNonce),
+			len(labForEta),
 		)
 	}
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
-		lastEpochBlockNonce,
+		labForEta,
 		nil,
 	)
 	if err != nil {
@@ -3238,8 +3252,8 @@ func (ls *LedgerState) calculateEpochNonce(
 		"component", "ledger",
 		"epoch_start_slot", epochStartSlot,
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_for_eta",
+		hex.EncodeToString(labForEta),
 		"lab_nonce_to_save",
 		hex.EncodeToString(labNonceToSave),
 		"epoch_nonce", hex.EncodeToString(result.Bytes()),
