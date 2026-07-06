@@ -160,8 +160,8 @@ erDiagram
 | `commit_timestamp` | `id`, `timestamp` | PK `id`; singleton row `id = 1` | Mirrored with the blob-store `metadata_commit_timestamp` key to detect partial commits. |
 | `node_settings` | `id`, `storage_mode`, `network` | PK `id`; singleton row `id = 1` | Immutable startup settings. Dingo rejects storage-mode or network changes after initialization. |
 | `tip` | `id`, `hash`, `slot`, `block_number` | PK `id` | Current metadata tip. Block CBOR is in the blob store, not SQL. |
-| `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
-| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)` | Per-block nonce history used by Praos nonce computation. |
+| `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. `last_epoch_block_nonce` is the Praos lab carried at the boundary: the previous epoch's last block `PrevHash`, or the previously carried lab when that epoch had no blocks. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
+| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)` | Per-block nonce history (cumulative evolving nonce through each block) used by Praos nonce computation. Must cover from the Mithril anchor through the trust boundary and beyond; when a usable anchor nonce exists below the boundary, `healMithrilGapBlockNonces` reconstructs missing gap-block rows at startup (see below). |
 | `network_state` | `id`, `treasury`, `reserves`, `slot` | PK `id`; unique `slot` | Treasury/reserves at a slot. |
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
@@ -379,11 +379,29 @@ synthetic endorser/genesis blob is never returned as the "previous block." This
 matters for storage callers, but it does not make a slot-key scan a canonical
 chain query: retained fork blobs can still sort before an epoch boundary.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
-ranking-block hash through the active chain index (`chain.BlockBeforeSlot`),
-not directly from `BlockBeforeSlotTxn`, so synthetic blobs and stored fork blobs
-cannot be mixed into the boundary nonce. Older PrevHash-based lab lookup also
-saved an empty lab here, collapsing the epoch's nonce to the NeutralNonce
-identity and failing leader-VRF checks. Each endorser transaction's `t` entry
+ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
+index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
+tooling that construct a ledger without a chain fall back to
+`BlockBeforeSlotTxn`/`BlockBeforeSlot`. That fallback still excludes synthetic
+`ID=0` blobs, but it is not a canonical fork filter in databases that retain
+same-slot fork blobs, so production ledger paths attach the chain index before
+using this lookup. Older blob-scan lab lookup could also save an empty lab here,
+collapsing the epoch's nonce to the NeutralNonce
+identity and failing leader-VRF checks. A related hazard is the candidate/evolving
+nonce input: Mithril import persists the evolving nonce only at the ledger-state
+slot and ingests the "gap blocks" up to the (later) trust boundary without folding
+their VRF output into `block_nonce`, so the frozen candidate for the first
+post-bootstrap epoch boundary would omit them. `healMithrilGapBlockNonces`
+re-folds the evolving nonce from the anchor `block_nonce` through every
+canonical-chain block to the tip (walking the primary chain index, not a `bp`
+slot scan, so retained fork blobs and synthetic endorser blobs are never
+folded) and writes a corrected `block_nonce` per block at startup. Writes
+commit in batches; the recorded trust-boundary point's row is the completion
+marker and commits last, so the heal is idempotent and a crash mid-heal resumes
+from the highest valid canonical row below the boundary. Fork rows at the
+boundary or below it do not mark completion or seed the fold when the canonical
+trust-boundary hash / primary-chain anchor is available. Each endorser
+transaction's `t` entry
 and its outputs' `u` entries store ordinary `DOFF` references whose
 `block_slot`/`block_hash` point at that endorser-block blob, so cold-extract
 resolution is identical to chain-block transactions. The transactions' metadata

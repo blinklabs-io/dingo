@@ -31,7 +31,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestEpochNonceUsesCurrentEpochLastBlockHash(t *testing.T) {
+// TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab verifies the
+// epoch-nonce assembly (#2734). The epoch nonce mixes the frozen candidate with
+// the CARRIED lastEpochBlockNonce (prevEpoch.LastEpochBlockNonce, == cardano-
+// ledger praosStateLastEpochBlockNonce; ouroboros-consensus Praos.hs
+// tickChainDepState uses candidateNonce ⭒ praosStateLastEpochBlockNonce). The
+// value stored on the NEW epoch record (the carried lab for the NEXT boundary)
+// is prevHashToNonce(lastBlock.prevHash) — the PARENT hash of the closing
+// epoch's last block, NOT the last block's OWN hash (a one-block Praos lag).
+// Confirmed on preview mainnet: koios eta_1348 =
+// blake2b(frozenCandidate || epoch1347.LastEpochBlockNonce); eta_1349 lab =
+// prevHash(94d3083a) = 08a8dd12.
+func TestEpochNonceStoresClosingEpochLastBlockPrevHashAsLab(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer db.Close()
@@ -126,7 +137,15 @@ func TestEpochNonceUsesCurrentEpochLastBlockHash(t *testing.T) {
 		return err
 	}))
 
-	expected, err := lcommon.CalculateEpochNonce(
+	// Correct assembly: eta = candidate ⭒ carried lastEpochBlockNonce.
+	wantEta, err := lcommon.CalculateEpochNonce(
+		nonceAtPreCut,
+		carriedLab,
+		nil,
+	)
+	require.NoError(t, err)
+	// Old (buggy) assembly used the closing epoch's own last block hash.
+	oldBuggyEta, err := lcommon.CalculateEpochNonce(
 		nonceAtPreCut,
 		hashAtPostCut,
 		nil,
@@ -135,25 +154,48 @@ func TestEpochNonceUsesCurrentEpochLastBlockHash(t *testing.T) {
 
 	require.Equal(t, hex.EncodeToString(nonceAtPreCut), hex.EncodeToString(rCandidate))
 	require.Equal(t, hex.EncodeToString(rCandidate), hex.EncodeToString(hvCandidate))
+	// The STORED lastEpochBlockNonce is the PARENT hash of the closing epoch's
+	// last block (prevHashToNonce(lastBlock.prevHash) == the post-cutoff block's
+	// PrevHash == hashAtPreCut), which becomes the carried lab at the NEXT
+	// boundary — a one-block Praos lag, NOT the last block's own hash.
 	require.Equal(
 		t,
-		hex.EncodeToString(hashAtPostCut),
+		hex.EncodeToString(hashAtPreCut),
 		hex.EncodeToString(rLab),
-		"lastEpochBlockNonce must be the current epoch's last block hash",
+		"stored lastEpochBlockNonce must be the closing epoch's last-block PrevHash (for the next boundary)",
 	)
 	require.Equal(t, hex.EncodeToString(rLab), hex.EncodeToString(hvLab))
 	require.NotEqual(
 		t,
-		hex.EncodeToString(hashAtPreCut),
+		hex.EncodeToString(hashAtPostCut),
 		hex.EncodeToString(rLab),
-		"lastEpochBlockNonce must not be the boundary block's PrevHash",
+		"stored lastEpochBlockNonce must NOT be the closing epoch's last block's own hash (the #2734 eta_1349 off-by-one)",
 	)
 	require.NotEqual(t, hex.EncodeToString(carriedLab), hex.EncodeToString(rLab))
-	require.Equal(t, expected.Bytes(), rNonce)
-	require.Equal(t, expected.Bytes(), hvNonce)
+	// The epoch nonce for THIS boundary uses the CARRIED lastEpochBlockNonce
+	// (#2734), not the closing epoch's own last block.
+	require.Equal(
+		t,
+		hex.EncodeToString(wantEta.Bytes()),
+		hex.EncodeToString(rNonce),
+		"epoch nonce must be candidate ⭒ carried lastEpochBlockNonce",
+	)
+	require.NotEqual(
+		t,
+		hex.EncodeToString(oldBuggyEta.Bytes()),
+		hex.EncodeToString(rNonce),
+		"epoch nonce must not use the closing epoch's own last block",
+	)
+	require.Equal(t, hex.EncodeToString(rNonce), hex.EncodeToString(hvNonce))
 }
 
-func TestEpochLabNonceNormalizesOldPrevHashCarryForEmptyEpoch(t *testing.T) {
+// TestEpochLabNonceEmptyEpochCarriesPrevNonceForward verifies that when the
+// closing epoch has NO blocks of its own, epochLabNonce carries the previous
+// boundary nonce forward UNCHANGED. Under the corrected Praos prevHash semantic
+// (#2734) the carried value is already a prevHash-shape nonce, so it must be
+// returned as-is — NOT converted to the boundary block's own hash (the old
+// "normalize PrevHash -> Hash" behavior was the eta_1349 off-by-one regression).
+func TestEpochLabNonceEmptyEpochCarriesPrevNonceForward(t *testing.T) {
 	db, err := database.New(&database.Config{DataDir: ""})
 	require.NoError(t, err)
 	defer db.Close()
@@ -163,6 +205,8 @@ func TestEpochLabNonceNormalizesOldPrevHashCarryForEmptyEpoch(t *testing.T) {
 		epochEnd   uint64 = 300
 	)
 
+	// Only block is at slot 150, BEFORE epochStart (200): the closing epoch
+	// [200,300) has no blocks of its own, so the carried nonce is preserved.
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	boundaryPrevHash := bytes.Repeat([]byte{0x02}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -174,10 +218,14 @@ func TestEpochLabNonceNormalizesOldPrevHashCarryForEmptyEpoch(t *testing.T) {
 		Type:     conway.BlockTypeConway,
 	}, nil))
 
+	carried := bytes.Repeat([]byte{0x03}, 32)
 	ls := &LedgerState{db: db}
-	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, boundaryPrevHash)
+	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, carried)
 	require.NoError(t, err)
-	require.Equal(t, boundaryHash, lab)
+	require.Equal(t, carried, lab,
+		"empty closing epoch must carry the previous (prevHash-shape) nonce forward unchanged")
+	require.NotEqual(t, boundaryHash, lab,
+		"empty closing epoch must NOT normalize the carried nonce to the boundary block's own hash")
 }
 
 func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) {
@@ -198,9 +246,14 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) 
 	)
 	require.NoError(t, err)
 	require.Len(t, canonicalBlocks, 2)
+	// canonicalBlocks[1] is the boundary (last) block; its PrevHash is
+	// canonicalBlocks[0].Hash. Under the corrected prevHash semantic (#2734)
+	// epochLabNonce returns the boundary block's PrevHash, so the fork blob is
+	// given a DISTINCT PrevHash to keep the canonical-vs-fork distinction sharp.
 	canonicalPrevHash := canonicalBlocks[0].Hash().Bytes()
 	canonicalBoundaryHash := canonicalBlocks[1].Hash().Bytes()
 	forkHash := bytes.Repeat([]byte{0xf0}, 32)
+	forkPrevHash := bytes.Repeat([]byte{0xfa}, 32)
 
 	require.NoError(t, canonicalChain.AddBlock(canonicalBlocks[0], nil))
 	require.NoError(t, canonicalChain.AddBlock(canonicalBlocks[1], nil))
@@ -208,7 +261,7 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) 
 		ID:       99,
 		Slot:     30,
 		Hash:     forkHash,
-		PrevHash: canonicalPrevHash,
+		PrevHash: forkPrevHash,
 		Cbor:     []byte{0x80},
 		Number:   99,
 		Type:     conway.BlockTypeConway,
@@ -224,5 +277,46 @@ func TestEpochLabNonceUsesCanonicalChainWhenForkBlobHasHigherSlot(t *testing.T) 
 	}
 	lab, err := ls.epochLabNonce(nil, 0, 40, nil)
 	require.NoError(t, err)
-	require.Equal(t, canonicalBoundaryHash, lab)
+	// Must be the canonical boundary block's PrevHash (from the canonical chain),
+	// NOT the higher-slot fork blob's PrevHash, and NOT the boundary block's own
+	// hash.
+	require.Equal(t, canonicalPrevHash, lab)
+	require.NotEqual(t, forkPrevHash, lab)
+	require.NotEqual(t, canonicalBoundaryHash, lab)
+}
+
+// TestEpochLabNonceReturnsPrevHashNotHash pins the #2734 eta_1349 root cause:
+// for a closing epoch with blocks, epochLabNonce returns the PARENT hash (the
+// last block's PrevHash), NOT the last block's own hash. cardano-ledger's
+// praosStateLastEpochBlockNonce = prevHashToNonce(lastBlock.prevHash), a
+// one-block lag. Using the last block's own hash shifts the carried lab by one
+// block and wedges every following epoch at the tip. koios preview:
+// eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12.
+func TestEpochLabNonceReturnsPrevHashNotHash(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	defer db.Close()
+
+	const (
+		epochStart uint64 = 1000
+		epochEnd   uint64 = 2000
+	)
+	parentHash := bytes.Repeat([]byte{0xa1}, 32) // second-to-last block
+	lastHash := bytes.Repeat([]byte{0xb2}, 32)   // last block of the closing epoch
+	require.NoError(t, db.BlockCreate(models.Block{
+		Slot:     1500,
+		Hash:     lastHash,
+		PrevHash: parentHash, // last block's parent == the carried lab
+		Cbor:     []byte{0x80},
+		Number:   2,
+		Type:     conway.BlockTypeConway,
+	}, nil))
+
+	ls := &LedgerState{db: db}
+	lab, err := ls.epochLabNonce(nil, epochStart, epochEnd, nil)
+	require.NoError(t, err)
+	require.Equal(t, parentHash, lab,
+		"epochLabNonce must return the last block's PrevHash (the parent hash)")
+	require.NotEqual(t, lastHash, lab,
+		"epochLabNonce must NOT return the last block's own hash (the eta_1349 off-by-one)")
 }

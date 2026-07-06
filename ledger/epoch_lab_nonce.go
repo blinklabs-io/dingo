@@ -21,12 +21,30 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
-// epochLabNonce returns the Praos lastEpochBlockNonce value for an epoch
-// boundary. If the epoch has at least one block, the nonce is the hash of the
-// last block before the boundary. If the epoch has no blocks, the consensus
-// state carries the previous value forward.
+// epochLabNonce returns the Praos lastEpochBlockNonce value to store on the new
+// epoch record at a boundary (it becomes the carried lab used at the NEXT
+// boundary). In cardano-ledger this is praosStateLastEpochBlockNonce, set at the
+// epoch transition to praosStateLabNonce, which is updated per block to
+// prevHashToNonce(block.prevHash). So when the closing epoch has at least one
+// block, the value is the PARENT hash of that epoch's last block (the last
+// block's prevHash), NOT the last block's own hash — a deliberate one-block lag.
+//
+// Using the last block's own hash shifts the carried lab by one block and
+// diverges the computed epoch nonce from the network at every self-computed
+// boundary, so every leader-VRF check in the following epoch fails with "issue
+// verifying proof" (#2734, eta_1349 wedge). koios preview proof:
+//
+//	eta_1348 lab = prevHash(04f75b4e, last block of 1346) = 43edf2  (imported, correct)
+//	eta_1349 lab = prevHash(94d3083a, last block of 1347) = 08a8dd12
+//	blake2b256(candidate_1348 1aee9a8d || 08a8dd12) = 294f4731 = koios eta_1349
+//
+// If the closing epoch has no blocks of its own (or the boundary block has no
+// parent — the genesis edge), the consensus state carries the previous value
+// forward unchanged; that value is already a prevHash-shape nonce (or, at
+// genesis, NeutralNonce/nil).
 func (ls *LedgerState) epochLabNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
@@ -40,36 +58,42 @@ func (ls *LedgerState) epochLabNonce(
 		}
 		return cloneNonce(carriedLabNonce), nil
 	}
-	if lastBlock.Slot >= epochStartSlot && len(lastBlock.Hash) > 0 {
-		return cloneNonce(lastBlock.Hash), nil
-	}
-	return ls.normalizeCarriedLabNonce(txn, epochStartSlot, carriedLabNonce)
-}
-
-// normalizeCarriedLabNonce upgrades the old persisted shape that stored the
-// boundary block's PrevHash instead of its Hash. This only applies when an
-// epoch has no blocks of its own and must carry the previous boundary nonce.
-func (ls *LedgerState) normalizeCarriedLabNonce(
-	txn *database.Txn,
-	epochStartSlot uint64,
-	carriedLabNonce []byte,
-) ([]byte, error) {
-	if len(carriedLabNonce) == 0 || epochStartSlot == 0 {
+	if lastBlock.Slot < epochStartSlot {
 		return cloneNonce(carriedLabNonce), nil
 	}
-	boundary, err := ls.canonicalBlockBeforeSlot(txn, epochStartSlot)
+	// Derive the parent hash, decoding the block CBOR when the stored
+	// PrevHash is empty (legacy rows from the empty-PrevHash storage bug that
+	// caused the Dijkstra at-tip wedge). Falling back to the carried value
+	// here would silently shift the lab by one epoch, so a block whose parent
+	// cannot be determined is an error, not a carry.
+	prevHash, err := blockPrevHash(lastBlock)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, fmt.Errorf("lookup carried boundary block: %w", err)
-		}
+		return nil, fmt.Errorf(
+			"derive boundary block parent hash at slot %d: %w",
+			lastBlock.Slot,
+			err,
+		)
+	}
+	if len(prevHash) == 0 {
+		// The boundary block has no parent: it is the chain's first block,
+		// so the carried value (NeutralNonce at genesis) is unchanged.
 		return cloneNonce(carriedLabNonce), nil
 	}
-	if len(boundary.Hash) > 0 &&
-		len(boundary.PrevHash) > 0 &&
-		bytes.Equal(carriedLabNonce, boundary.PrevHash) {
-		return cloneNonce(boundary.Hash), nil
+	if len(prevHash) != lcommon.Blake2b256Size {
+		return nil, fmt.Errorf(
+			"boundary block parent hash at slot %d has invalid length %d",
+			lastBlock.Slot,
+			len(prevHash),
+		)
 	}
-	return cloneNonce(carriedLabNonce), nil
+	// cardano-ledger's prevHashToNonce maps GenesisHash to NeutralNonce: when
+	// the closing epoch's last block is the chain's first block, the carried
+	// value is used, not the genesis hash bytes.
+	if genesisHash, gErr := GenesisBlockHash(ls.config.CardanoNodeConfig); gErr == nil &&
+		bytes.Equal(prevHash, genesisHash[:]) {
+		return cloneNonce(carriedLabNonce), nil
+	}
+	return cloneNonce(prevHash), nil
 }
 
 func (ls *LedgerState) canonicalBlockBeforeSlot(
@@ -81,6 +105,9 @@ func (ls *LedgerState) canonicalBlockBeforeSlot(
 	}
 	if ls.chain != nil {
 		return ls.chain.BlockBeforeSlot(slot)
+	}
+	if ls.db == nil && txn == nil {
+		return models.Block{}, models.ErrBlockNotFound
 	}
 	return lookupBlockBeforeSlot(ls.db, txn, slot)
 }

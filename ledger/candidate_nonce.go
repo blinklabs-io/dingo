@@ -266,6 +266,61 @@ func (ls *LedgerState) computeCandidateNonceFast(
 	return candidateNonce, evolvingNonce, nil
 }
 
+// foldBlockEtaV folds one block's VRF output into the evolving nonce via the
+// block era's CalculateEtaVFunc. Byron blocks carry no Praos VRF contribution:
+// the input nonce is returned unchanged with folded=false. This is the single
+// per-block fold used by both the boundary candidate computation and the
+// startup Mithril gap-nonce reconstruction, so the two can never drift.
+func (ls *LedgerState) foldBlockEtaV(
+	evolvingNonce []byte,
+	block models.Block,
+) (newNonce []byte, folded bool, err error) {
+	if block.Type == byron.BlockTypeByronEbb ||
+		block.Type == byron.BlockTypeByronMain {
+		return evolvingNonce, false, nil
+	}
+	parsedBlock, err := block.Decode()
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"decode block at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	eraId := uint(parsedBlock.Era().Id)
+	era, ok := ls.eraById(eraId)
+	if !ok || era == nil {
+		return nil, false, fmt.Errorf(
+			"fold etaV at slot %d block %x: unknown era ID %d",
+			block.Slot,
+			block.Hash,
+			eraId,
+		)
+	}
+	if era.CalculateEtaVFunc == nil {
+		return nil, false, fmt.Errorf(
+			"fold etaV at slot %d block %x: era ID %d (%s) has no etaV calculator",
+			block.Slot,
+			block.Hash,
+			eraId,
+			era.Name,
+		)
+	}
+	newNonce, err = era.CalculateEtaVFunc(
+		ls.config.CardanoNodeConfig,
+		evolvingNonce,
+		parsedBlock,
+	)
+	if err != nil {
+		return nil, false, fmt.Errorf(
+			"calculate etaV at slot %d: %w",
+			block.Slot,
+			err,
+		)
+	}
+	return newNonce, true, nil
+}
+
 // computeCandidateNonceSlow re-decodes every block in the epoch from CBOR
 // and recomputes VRF nonces. This is the fallback when pre-stored nonces
 // are not available.
@@ -290,49 +345,13 @@ func (ls *LedgerState) computeCandidateNonceSlow(
 	var blockCount, preCutoffCount int
 
 	iterFn := func(block models.Block) error {
-		// Byron blocks have no VRF contribution.
-		if block.Type == byron.BlockTypeByronEbb ||
-			block.Type == byron.BlockTypeByronMain {
+		newNonce, folded, err := ls.foldBlockEtaV(evolvingNonce, block)
+		if err != nil {
+			return fmt.Errorf("recompute candidate nonce: %w", err)
+		}
+		if !folded {
+			// Byron blocks have no VRF contribution.
 			return nil
-		}
-		parsedBlock, err := block.Decode()
-		if err != nil {
-			return fmt.Errorf(
-				"decode block at slot %d: %w",
-				block.Slot,
-				err,
-			)
-		}
-		eraId := uint(parsedBlock.Era().Id)
-		era, ok := ls.eraById(eraId)
-		if !ok || era == nil {
-			return fmt.Errorf(
-				"recompute candidate nonce at slot %d block %x: unknown era ID %d",
-				block.Slot,
-				block.Hash,
-				eraId,
-			)
-		}
-		if era.CalculateEtaVFunc == nil {
-			return fmt.Errorf(
-				"recompute candidate nonce at slot %d block %x: era ID %d (%s) has no etaV calculator",
-				block.Slot,
-				block.Hash,
-				eraId,
-				era.Name,
-			)
-		}
-		newNonce, err := era.CalculateEtaVFunc(
-			ls.config.CardanoNodeConfig,
-			evolvingNonce,
-			parsedBlock,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"calculate etaV at slot %d: %w",
-				block.Slot,
-				err,
-			)
 		}
 		evolvingNonce = newNonce
 		blockCount++
