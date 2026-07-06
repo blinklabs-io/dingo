@@ -515,10 +515,7 @@ func (b *Blockfrost) handleAssetAddresses(
 	SetPaginationHeaders(w, total, params)
 	resp := make([]AssetAddressResponse, 0, len(holders))
 	for _, h := range holders {
-		resp = append(resp, AssetAddressResponse{
-			Address:  h.Address,
-			Quantity: h.Quantity,
-		})
+		resp = append(resp, AssetAddressResponse(h))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

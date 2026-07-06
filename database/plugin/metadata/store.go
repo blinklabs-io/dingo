@@ -698,8 +698,8 @@ type MetadataStore interface {
 	GetAssetHoldersByPolicyAndName(
 		lcommon.Blake2b224,
 		[]byte, // assetName
-		int,    // offset
-		int,    // limit
+		int, // offset
+		int, // limit
 		string, // order ("asc" or "desc")
 		types.Txn,
 	) ([]models.AssetHolderRow, int, error)
