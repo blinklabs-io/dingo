@@ -8,15 +8,15 @@
 
 **Version:** v0.61.2
 
-This patch release focuses on ledger recovery, sync stability, peer governance, and maintenance updates.
+This release focuses on ledger recovery, sync stability, peer governance, and maintenance updates.
 
 ### ✨ What's New
 
-* Noted **this patch release does not introduce major new features:** Version v0.61.2 focuses on reliability, validation, peer management, and maintenance updates.
+* Noted **no major new features land in this patch release:** Version v0.61.2 focuses on reliability, validation, peer management, and maintenance updates.
 
 ### 💪 Improvements
 
-* Improved **keep Leios endorser block persistence responsive during catch-up:** A bounded coalescing writer now keeps catch-up responsive, and queued work drains safely on shutdown.
+* Improved **keep Leios endorser block persistence steady during catch-up:** A bounded coalescing writer now keeps catch-up responsive, and queued work drains safely on shutdown.
 * Enhanced **speed committee voting governance queries:** The database now picks the latest authorization per cold credential with a windowed lookup, which keeps long-running governance queries responsive.
 * Modernized **refresh `gouroboros` to v0.186.2:** The bundled protocol library now tracks the v0.186.2 maintenance release in `go.mod` and `go.sum`.
 * Refined **refresh `gouroboros` to v0.186.3:** The bundled protocol library now tracks the v0.186.3 maintenance release in `go.mod` and `go.sum`.
@@ -44,7 +44,7 @@ This patch release focuses on ledger recovery, sync stability, peer governance, 
 ### 📋 What You Need to Know
 
 * Clarified **configure `StrictUtxoValidation` when missing consumed inputs should stop recovery:** YAML, environment, and CLI settings now control whether missing consumed UTxOs become errors after the Mithril trust boundary, and strict mode fails unrecoverable misses.
-* Highlighted **expect Bark archive downloads to follow the allowlist and HTTPS rules:** Archive URLs now need HTTPS, embedded credentials are rejected, redirects stay disabled, and operators can extend the allowlist with explicit configuration.
+* Highlighted **require HTTPS and explicit host approval for Bark archive fallback:** Archive fallback now requires HTTPS, denies embedded credentials, keeps redirects disabled, and lets operators extend the allowlist with explicit configuration.
 * Emphasized **plan for more active peer discovery when upstreams fall below target:** The peer governor can now trigger emergency discovery on a faster cadence and may add an extra batch to recover more quickly from collapsed relay pools.
 * Summarized **expect stricter consensus and ledger validation around producer identity and block order:** Non-Byron headers with mismatched VRF keys or broken block-number continuity now fail validation, and ledger recovery will not rewind below the Mithril boundary.
 * Acknowledged **expect ChainSync to resync more directly after cursor drift, backlog draining, or unrecoverable rollbacks:** Switched peers, ledger-application backlog, and repeated rollback failures now push the node back toward a healthy sync path instead of recycling endlessly.
