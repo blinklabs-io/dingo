@@ -92,6 +92,7 @@ var flagSpecs = []flagSpec{
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
+	stringSliceFlag("BarkBlockDownloadHosts", "bark-block-download-hosts", "allowed HTTPS hostnames for Bark block downloads"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 
 	// History expiry

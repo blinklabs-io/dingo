@@ -42,6 +42,8 @@ type fakeArchive struct {
 	prevHash    []byte
 	height      uint64
 	blockType   archive.BlockType
+	redirectURL string
+	oversize    bool
 
 	fetchCalls int
 }
@@ -80,7 +82,7 @@ func (a *fakeArchive) FetchBlock(
 func startFakeArchive(
 	t *testing.T,
 	blocks map[string][]byte,
-) (string, *fakeArchive) {
+) (string, *fakeArchive, *http.Client) {
 	t.Helper()
 	mux := http.NewServeMux()
 	a := &fakeArchive{
@@ -93,6 +95,15 @@ func startFakeArchive(
 	mux.HandleFunc(
 		"/download",
 		func(w http.ResponseWriter, r *http.Request) {
+			if a.redirectURL != "" {
+				http.Redirect(w, r, a.redirectURL, http.StatusFound)
+				return
+			}
+			if a.oversize {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(bytes.Repeat([]byte{0xFF}, maxArchiveBlockSize+1))
+				return
+			}
 			hashHex := r.URL.Query().Get("hash")
 			cbor, ok := a.blocks[hashHex]
 			if !ok {
@@ -108,12 +119,12 @@ func startFakeArchive(
 	mux.Handle(archivePath, archiveHandler)
 
 	srv := httptest.NewUnstartedServer(mux)
-	srv.Config.Protocols = unencryptedHTTP2Protocols()
-	srv.Start()
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
 	t.Cleanup(srv.Close)
 
 	a.downloadURL = srv.URL + "/download"
-	return srv.URL, a
+	return srv.URL, a, srv.Client()
 }
 
 // newTestDB builds an in-memory dingo database for use as the upstream
@@ -134,16 +145,154 @@ func newTestDB(t *testing.T) *database.Database {
 // and pointed at baseURL. Direct struct construction lets the tests inject
 // a fake archive client while focusing on the iterator path.
 func newBarkBlobStoreForTest(
-	db *database.Database, baseURL string,
+	t *testing.T, db *database.Database, baseURL string, httpClient *http.Client,
 ) *BlobStoreBark {
-	httpClient := http.DefaultClient
-	return &BlobStoreBark{
-		archiveClient: archiveconnect.NewArchiveServiceClient(
-			httpClient, baseURL,
-		),
-		httpClient: httpClient,
-		upstream:   db.Blob(),
+	t.Helper()
+	store, err := NewBarkBlobStore(BlobStoreBarkConfig{
+		BaseUrl:    baseURL,
+		HTTPClient: httpClient,
+	}, db.Blob())
+	require.NoError(t, err)
+	return store
+}
+
+// TestValidateArchiveURL covers the URL security rules enforced before any
+// download is attempted: HTTPS-only, no credentials, and allowed host only.
+func TestValidateArchiveURL(t *testing.T) {
+	allowedHosts := archiveDownloadHosts(
+		"https://archive.example.com:9091",
+		[]string{"https://s3.example.com/block"},
+	)
+	cases := []struct {
+		name    string
+		url     string
+		wantErr string
+	}{
+		{name: "valid expected host", url: "https://archive.example.com/block?sig=abc"},
+		{name: "valid HTTPS", url: "https://s3.example.com/block?sig=abc"},
+		{name: "non-HTTPS external", url: "http://s3.example.com/block", wantErr: "HTTPS"},
+		{name: "FTP scheme", url: "ftp://s3.example.com/block", wantErr: "HTTPS"},
+		{name: "embedded credentials", url: "https://user:pass@s3.example.com/block", wantErr: "credential"},
+		{name: "missing host", url: "https:///block", wantErr: "host"},
+		{name: "disallowed host", url: "https://evil.example.com/block", wantErr: "not allowed"},
 	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := validateArchiveURL(c.url, allowedHosts)
+			if c.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), c.wantErr)
+			}
+		})
+	}
+}
+
+// TestGetBlock_RejectsNonHTTPS verifies that a non-HTTPS download URL returned
+// by the archive is rejected before any outbound dial is attempted.
+func TestGetBlock_RejectsNonHTTPS(t *testing.T) {
+	db := newTestDB(t)
+	const slot uint64 = 500
+	hash := bytes.Repeat([]byte{0x11}, 32)
+
+	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
+		hex.EncodeToString(hash): []byte("cbor"),
+	})
+	// Override to a non-HTTPS URL — validation fires before any dial.
+	fakeArch.downloadURL = "http://evil.example.com/block"
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTPS")
+}
+
+// TestGetBlock_RejectsEmbeddedCredentials verifies that an archive-supplied
+// URL containing user:password is rejected even when the scheme is HTTPS.
+func TestGetBlock_RejectsEmbeddedCredentials(t *testing.T) {
+	db := newTestDB(t)
+	const slot uint64 = 501
+	hash := bytes.Repeat([]byte{0x22}, 32)
+
+	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
+		hex.EncodeToString(hash): []byte("cbor"),
+	})
+	fakeArch.downloadURL = "https://user:pass@s3.example.com/block"
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential")
+}
+
+// TestGetBlock_RejectsUnconfiguredHost verifies that an HTTPS URL is still
+// rejected when it points at a host outside the expected/allowlisted set.
+func TestGetBlock_RejectsUnconfiguredHost(t *testing.T) {
+	db := newTestDB(t)
+	const slot uint64 = 504
+	hash := bytes.Repeat([]byte{0x55}, 32)
+
+	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
+		hex.EncodeToString(hash): []byte("cbor"),
+	})
+	fakeArch.downloadURL = "https://evil.example.com/block"
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+// TestGetBlock_RejectsRedirect verifies that the HTTP client does not follow
+// redirects returned by the download server.
+func TestGetBlock_RejectsRedirect(t *testing.T) {
+	db := newTestDB(t)
+	const slot uint64 = 502
+	hash := bytes.Repeat([]byte{0x33}, 32)
+
+	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
+		hex.EncodeToString(hash): []byte("cbor"),
+	})
+	fakeArch.redirectURL = "http://evil.example.com/block"
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect")
+}
+
+// TestGetBlock_CapsResponseSize verifies that a download response larger than
+// maxArchiveBlockSize is rejected rather than fully buffered into memory.
+func TestGetBlock_CapsResponseSize(t *testing.T) {
+	db := newTestDB(t)
+	const slot uint64 = 503
+	hash := bytes.Repeat([]byte{0x44}, 32)
+
+	baseURL, fakeArch, httpClient := startFakeArchive(t, map[string][]byte{
+		hex.EncodeToString(hash): []byte("placeholder"),
+	})
+	fakeArch.oversize = true
+
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
+	rTxn := store.NewTransaction(false)
+	t.Cleanup(func() { _ = rTxn.Rollback() })
+
+	_, _, err := store.GetBlock(rTxn, slot, hash)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "limit")
 }
 
 // TestBarkIterator_ResolvesExpiredHistoryViaArchive seeds the database with a
@@ -168,10 +317,10 @@ func TestBarkIterator_ResolvesExpiredHistoryViaArchive(t *testing.T) {
 		return db.Blob().TombstoneBlock(txn.Blob(), slot, hash)
 	}))
 
-	baseURL, archiveSrv := startFakeArchive(t, map[string][]byte{
+	baseURL, archiveSrv, httpClient := startFakeArchive(t, map[string][]byte{
 		hex.EncodeToString(hash): cbor,
 	})
-	store := newBarkBlobStoreForTest(db, baseURL)
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
 
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })
@@ -293,8 +442,8 @@ func TestBarkIterator_PassesThroughLiveValues(t *testing.T) {
 	}, nil))
 
 	// Empty block map — any archive call would fatal in the fake handler.
-	baseURL, archiveSrv := startFakeArchive(t, map[string][]byte{})
-	store := newBarkBlobStoreForTest(db, baseURL)
+	baseURL, archiveSrv, httpClient := startFakeArchive(t, map[string][]byte{})
+	store := newBarkBlobStoreForTest(t, db, baseURL, httpClient)
 
 	rTxn := store.NewTransaction(false)
 	t.Cleanup(func() { _ = rTxn.Rollback() })

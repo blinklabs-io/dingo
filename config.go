@@ -138,6 +138,7 @@ type Config struct {
 	outboundSourcePort       uint
 	utxorpcPort              uint
 	barkBaseUrl              string
+	barkBlockDownloadHosts   []string
 	barkPort                 uint
 	historyExpiry            HistoryExpiryConfig
 	corsAllowedOrigins       []string
@@ -980,6 +981,12 @@ func WithBlockfrostPort(port uint) ConfigOptionFunc {
 func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkBaseUrl = baseUrl
+	}
+}
+
+func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkBlockDownloadHosts = slices.Clone(hosts)
 	}
 }
 
