@@ -302,17 +302,13 @@ outer:
 	default:
 	}
 
-	// 3. Write pool rows, then epoch info.
+	// 3. Commit pool rows and epoch info atomically.
 	//
-	// Pool rows are replaced atomically (delete old set + insert new set in one
-	// transaction) so the checker never sees a partial or mixed state.
-	// Epoch info is written only after pool rows succeed, preserving the
-	// invariant that koios_epoch_info presence = fully cached epoch.
-	if err := cache.ReplaceEpochPoolRows(network, epoch, poolRows); err != nil {
-		return 0, fmt.Errorf("replace pool rows: %w", err)
-	}
-
-	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
+	// CommitEpochData deletes the old pool set, batch-inserts the new one,
+	// and upserts epoch info — all in one transaction. This ensures the
+	// freshness marker (fetched_at) is never left stale relative to the
+	// pool rows, which would suppress the automatic recheck.
+	if err := cache.CommitEpochData(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
 		ActiveStake:  activeStake,
@@ -320,8 +316,8 @@ outer:
 		TotalRewards: totalRewards,
 		EpochEndTime: epochEndTime,
 		FetchedAt:    now,
-	}); err != nil {
-		return 0, fmt.Errorf("upsert epoch info: %w", err)
+	}, poolRows); err != nil {
+		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
 
 	poolCount := len(poolRows)
