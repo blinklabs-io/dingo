@@ -354,17 +354,24 @@ func (d *MetadataStoreMysql) GetActiveCommitteeMembers(
 	if err != nil {
 		return nil, err
 	}
-	// Use a subquery to get only the latest authorization per cold_credential,
-	// then filter out members whose latest resignation is after their latest authorization.
-	// Uses (added_slot, certificate_id) for deterministic ordering based on global certificate order.
+	// Select the latest authorization per cold_credential with a window function
+	// (rn = 1), then exclude members whose latest resignation is after that
+	// authorization. Ordering is (added_slot DESC, certificate_id DESC) for
+	// deterministic global certificate order. This replaces a correlated NOT
+	// EXISTS self-join that was O(rows * rows-per-credential): auth_committee_hot
+	// accumulates every hot-key authorization ever seen (hundreds of thousands of
+	// rows on a long-lived chain), which stalled epoch rollover for hours (#2754).
 	if result := db.Raw(`
-		SELECT a.*
-		FROM auth_committee_hot a
-		WHERE NOT EXISTS (
-			SELECT 1 FROM auth_committee_hot a2
-			WHERE a2.cold_credential = a.cold_credential
-			AND (a2.added_slot > a.added_slot OR (a2.added_slot = a.added_slot AND a2.certificate_id > a.certificate_id))
-		)
+		SELECT a.cold_credential, a.host_credential, a.id, a.certificate_id, a.added_slot
+		FROM (
+			SELECT cold_credential, host_credential, id, certificate_id, added_slot,
+				ROW_NUMBER() OVER (
+					PARTITION BY cold_credential
+					ORDER BY added_slot DESC, certificate_id DESC
+				) AS rn
+			FROM auth_committee_hot
+		) a
+		WHERE a.rn = 1
 		AND NOT EXISTS (
 			SELECT 1 FROM resign_committee_cold r
 			WHERE r.cold_credential = a.cold_credential
