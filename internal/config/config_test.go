@@ -78,7 +78,6 @@ func resetGlobalConfig() {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-badgerCacheSize: 8388608
 mempoolCapacity: 2097152
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
@@ -827,7 +826,7 @@ database:
   metadata:
     plugin: "sqlite"
     sqlite:
-      db-path: "/tmp/test.db"
+      data-dir: "/tmp/test.db"
 `
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")

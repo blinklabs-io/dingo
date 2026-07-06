@@ -55,6 +55,17 @@ mithril:
 	assert.Equal(t, "v1", cfg.Mithril.Backend)
 }
 
+func TestMithrilBackendInvalidValueRejected(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := writeMithrilBackendTestConfig(t, `
+network: "preview"
+mithril:
+  backend: "v3"
+`)
+	_, err := LoadConfig(tmpFile)
+	require.Error(t, err, "invalid Mithril backend should be rejected at config load")
+}
+
 func TestMithrilBackendEnvOverride(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("DINGO_MITHRIL_BACKEND", "v1")

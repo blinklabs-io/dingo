@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
 	"slices"
@@ -1098,7 +1099,13 @@ func buildConwayScriptPurpose(
 	witnessDatums map[lcommon.Blake2b256]*lcommon.Datum,
 ) (purpose script.ScriptPurpose, ok bool) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			slog.Default().Error(
+				"panic building conway script purpose",
+				"panic", r,
+				"redeemer_tag", redeemerKey.Tag,
+				"redeemer_index", redeemerKey.Index,
+			)
 			purpose = nil
 			ok = false
 		}

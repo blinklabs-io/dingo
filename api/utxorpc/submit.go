@@ -398,6 +398,9 @@ func (s *submitServiceServer) WatchMempool(
 			}()
 			addEvt, ok := evt.Data.(mempool.AddTransactionEvent)
 			if !ok {
+				s.utxorpc.config.Logger.Warn(
+					"unexpected event data type in WatchMempool",
+				)
 				return
 			}
 			txRawBytes := addEvt.Body

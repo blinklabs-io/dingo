@@ -1359,6 +1359,73 @@ func TestDatabaseWorkerPoolBasic(t *testing.T) {
 	pool.Shutdown()
 }
 
+// TestDatabaseWorkerPoolRecoversFromPanic verifies that a panicking
+// operation is converted to an error result (not a crashed process) and
+// that the worker keeps serving subsequent operations afterward.
+func TestDatabaseWorkerPoolRecoversFromPanic(t *testing.T) {
+	// recover() suppresses the runtime's own stack trace, so
+	// executeOperation logs one explicitly via the default slog logger.
+	// Capture it here to verify it's actually present, not just the bare
+	// panic value. Not run in parallel, and restored before returning, so
+	// this doesn't race with other tests' use of the default logger.
+	var logBuf bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 1
+	config.TaskQueueSize = 5
+
+	pool := NewDatabaseWorkerPool(nil, config)
+	require.NotNil(t, pool)
+
+	panicChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			panic("boom")
+		},
+		ResultChan: panicChan,
+	})
+
+	select {
+	case result := <-panicChan:
+		require.Error(t, result.Error)
+		assert.Contains(t, result.Error.Error(), "panic")
+		assert.Contains(t, result.Error.Error(), "boom")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for panic result")
+	}
+
+	logOutput := logBuf.String()
+	assert.Contains(t, logOutput, "worker panic during operation")
+	assert.Contains(
+		t,
+		logOutput,
+		"goroutine",
+		"expected a captured stack trace in the panic log",
+	)
+
+	// Worker should still be alive and processing operations.
+	okChan := make(chan DatabaseResult, 1)
+	pool.Submit(DatabaseOperation{
+		OpFunc: func(db *database.Database) error {
+			return nil
+		},
+		ResultChan: okChan,
+	})
+	select {
+	case result := <-okChan:
+		assert.NoError(t, result.Error)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for post-panic operation result")
+	}
+
+	pool.Shutdown()
+}
+
 // TestDatabaseWorkerPoolInFlightOperations tests that shutdown waits for in-flight operations
 func TestDatabaseWorkerPoolInFlightOperations(t *testing.T) {
 	config := DefaultDatabaseWorkerPoolConfig()

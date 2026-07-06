@@ -16,6 +16,7 @@ package plugin
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/spf13/pflag"
@@ -85,18 +86,43 @@ func ProcessEnvVars() error {
 	return nil
 }
 
+// ProcessConfig applies plugin-specific config values from a parsed YAML
+// document. It rejects config keys that don't match any known option for
+// the targeted plugin, so a typo (e.g. "buckit" instead of "bucket") fails
+// config load instead of being silently ignored.
 func ProcessConfig(
 	pluginConfig map[string]map[string]map[string]any,
 ) error {
 	for _, plugin := range pluginEntries {
-		if pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]; ok {
-			if pluginData, ok := pluginTypeData[plugin.Name]; ok {
-				for _, option := range plugin.Options {
-					if err := option.ProcessConfig(pluginData); err != nil {
-						return err
-					}
-				}
+		pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]
+		if !ok {
+			continue
+		}
+		pluginData, ok := pluginTypeData[plugin.Name]
+		if !ok {
+			continue
+		}
+		known := make(map[string]struct{}, len(plugin.Options))
+		for _, option := range plugin.Options {
+			known[option.Name] = struct{}{}
+			if err := option.ProcessConfig(pluginData); err != nil {
+				return err
 			}
+		}
+		var unknown []string
+		for key := range pluginData {
+			if _, ok := known[key]; !ok {
+				unknown = append(unknown, key)
+			}
+		}
+		if len(unknown) > 0 {
+			slices.Sort(unknown)
+			return fmt.Errorf(
+				"unknown config key(s) %v for %s plugin %q",
+				unknown,
+				PluginTypeName(plugin.Type),
+				plugin.Name,
+			)
 		}
 	}
 	return nil

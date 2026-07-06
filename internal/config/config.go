@@ -15,18 +15,22 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
@@ -141,7 +145,11 @@ func (e StartEra) IsDijkstra() bool {
 }
 
 type tempConfig struct {
-	Config   *Config                   `yaml:"config,omitempty"`
+	// Config is decoded as a raw node (rather than *Config) so the
+	// wrapped "config:" section can later be strict-decoded directly,
+	// without a lossy round trip through a lenient decode first. Must
+	// be a value (not pointer) yaml.Node for yaml.v3 to populate it.
+	Config   yaml.Node                 `yaml:"config,omitempty"`
 	Database *databaseConfig           `yaml:"database,omitempty"`
 	Blob     map[string]map[string]any `yaml:"blob,omitempty"`
 	Metadata map[string]map[string]any `yaml:"metadata,omitempty"`
@@ -244,6 +252,88 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 func midnightYAMLFieldSet(field string) bool {
 	_, ok := midnightYAMLFields[field]
 	return ok
+}
+
+// removeMappingKeys deletes the given top-level keys from a YAML mapping
+// node in place. Used to strip sibling sections (blob/metadata/database)
+// that are handled separately, before strict-decoding the remainder into
+// Config.
+func removeMappingKeys(node *yaml.Node, keys []string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	remove := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		remove[k] = struct{}{}
+	}
+	filtered := make([]*yaml.Node, 0, len(node.Content))
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if _, ok := remove[node.Content[i].Value]; ok {
+			continue
+		}
+		filtered = append(filtered, node.Content[i], node.Content[i+1])
+	}
+	node.Content = filtered
+}
+
+// strictUnmarshalConfig decodes data into out, returning an error if the
+// document contains any field not present in the Config struct. An empty
+// document decodes as a no-op, matching yaml.Unmarshal's behavior for
+// empty input (yaml.Decoder.Decode returns io.EOF instead).
+func strictUnmarshalConfig(data []byte, out *Config) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+// validateLoggingChainsyncMithril validates fields whose invalid values were
+// historically only caught later (at logger setup, node startup, or by the
+// mithril subcommand) instead of at config load. Called from both LoadConfig
+// and ApplyFlags: CLI flags are applied after LoadConfig returns, so
+// validating only in LoadConfig would let a bad --logging-level,
+// --logging-format, --chainsync-strategy, or --mithril-backend flag
+// reintroduce a value already rejected for YAML/env.
+func validateLoggingChainsyncMithril(cfg *Config) error {
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
+	case "", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf(
+			"invalid logging.level: %q (must be one of debug, info, warn, error)",
+			cfg.Logging.Level,
+		)
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Format)) {
+	case "", "text", "json":
+	default:
+		return fmt.Errorf(
+			"invalid logging.format: %q (must be one of text, json)",
+			cfg.Logging.Format,
+		)
+	}
+	if _, err := chainsync.ParseHeaderSyncStrategy(cfg.Chainsync.Strategy); err != nil {
+		return err
+	}
+	// The valid values mirror mithril.BackendV1/BackendV2; the mithril
+	// package can't be imported here without an import cycle (mithril ->
+	// internal/node -> dingo -> internal/config).
+	const (
+		mithrilBackendV1 = "v1"
+		mithrilBackendV2 = "v2"
+	)
+	if cfg.Mithril.Backend != "" &&
+		cfg.Mithril.Backend != mithrilBackendV1 &&
+		cfg.Mithril.Backend != mithrilBackendV2 {
+		return fmt.Errorf(
+			"unsupported Mithril backend %q (expected %q or %q)",
+			cfg.Mithril.Backend,
+			mithrilBackendV1,
+			mithrilBackendV2,
+		)
+	}
+	return nil
 }
 
 // ChainsyncConfig holds configuration for the multi-client chainsync
@@ -865,21 +955,39 @@ func LoadConfig(configFile string) (*Config, error) {
 		}
 
 		// If config section exists, use it for main config
-		if tempCfg.Config != nil {
-			// Overlay config values onto existing defaults
-			configBytes, err := yaml.Marshal(tempCfg.Config)
+		if tempCfg.Config.Kind != 0 {
+			// Overlay config values onto existing defaults. Strict
+			// decoding here rejects unrecognized fields (e.g. typos)
+			// instead of silently ignoring them.
+			configBytes, err := yaml.Marshal(&tempCfg.Config)
 			if err != nil {
 				return nil, fmt.Errorf("error re-marshalling config: %w", err)
 			}
-			err = yaml.Unmarshal(configBytes, globalConfig)
-			if err != nil {
+			if err := strictUnmarshalConfig(configBytes, globalConfig); err != nil {
 				return nil, fmt.Errorf("error parsing config section: %w", err)
 			}
 		} else {
 			// Otherwise unmarshal the whole file as main config (backward
-			// compatibility)
-			err = yaml.Unmarshal(buf, globalConfig)
-			if err != nil {
+			// compatibility). The blob/metadata/database sections are
+			// sibling keys handled separately above, so strip them
+			// before strict-decoding the remainder into Config.
+			configBuf := buf
+			var root yaml.Node
+			if err := yaml.Unmarshal(buf, &root); err != nil {
+				return nil, fmt.Errorf("error parsing config file: %w", err)
+			}
+			if len(root.Content) > 0 {
+				removeMappingKeys(
+					root.Content[0],
+					[]string{"blob", "metadata", "database"},
+				)
+				stripped, err := yaml.Marshal(&root)
+				if err != nil {
+					return nil, fmt.Errorf("error re-marshalling config: %w", err)
+				}
+				configBuf = stripped
+			}
+			if err := strictUnmarshalConfig(configBuf, globalConfig); err != nil {
 				return nil, fmt.Errorf("error parsing config file: %w", err)
 			}
 		}
@@ -971,6 +1079,15 @@ func LoadConfig(configFile string) (*Config, error) {
 			"invalid startEra: %q (must be empty or 'dijkstra')",
 			globalConfig.StartEra,
 		)
+	}
+
+	// Validate logging/chainsync/mithril fields. Also re-run at the end
+	// of ApplyFlags: CLI flags are applied after LoadConfig returns, so
+	// validating only here would let a bad --logging-level, --logging-format,
+	// --chainsync-strategy, or --mithril-backend flag reintroduce a value
+	// this check already rejects for YAML/env.
+	if err := validateLoggingChainsyncMithril(globalConfig); err != nil {
+		return nil, err
 	}
 
 	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have

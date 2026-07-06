@@ -569,6 +569,12 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				}
 				respBlock, ok := resp.(*leiosfetch.MsgBlock)
 				if !ok {
+					o.config.Logger.Debug(
+						"unexpected leios-fetch Block response type on txs offer",
+						"type", fmt.Sprintf("%T", resp),
+						"connection_id", connId,
+						"slot", point.Slot,
+					)
 					return
 				}
 				if err := o.storeLeiosEndorserBlock(
@@ -671,6 +677,17 @@ func (o *Ouroboros) leiosnotifyClientNotification(
 				)
 			}
 		}
+	default:
+		// Unrecognized message type: log for observability, but don't
+		// tear down the connection. Matches this handler's existing
+		// best-effort philosophy for the leios-notify side channel.
+		o.config.Logger.Debug(
+			"received unexpected leios-notify message type",
+			"component", "network",
+			"protocol", "leios-notify",
+			"type", fmt.Sprintf("%T", m),
+			"connection_id", connId,
+		)
 	}
 	return nil
 }

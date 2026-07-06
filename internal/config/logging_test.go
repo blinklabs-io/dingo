@@ -49,6 +49,41 @@ func TestLoad_LoggingEnvVars(t *testing.T) {
 	}
 }
 
+func TestLoad_InvalidLoggingLevelRejected(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	yamlContent := "logging:\n  level: bogus\n"
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(tmpFile); err == nil {
+		t.Fatal("expected error for invalid logging.level, got nil")
+	}
+}
+
+func TestLoad_InvalidLoggingLevelViaEnvRejected(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_LOGGING_LEVEL", "bogus")
+	if _, err := LoadConfig(""); err == nil {
+		t.Fatal("expected error for invalid DINGO_LOGGING_LEVEL, got nil")
+	}
+}
+
+func TestLoad_InvalidLoggingFormatRejected(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	yamlContent := "logging:\n  format: bogus\n"
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(tmpFile); err == nil {
+		t.Fatal("expected error for invalid logging.format, got nil")
+	}
+}
+
 func TestLoad_LoggingFromYAML(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

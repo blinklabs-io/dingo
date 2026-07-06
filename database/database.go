@@ -164,9 +164,21 @@ func New(
 	// Apply defaults for empty fields
 	if configCopy.BlobPlugin == "" {
 		configCopy.BlobPlugin = DefaultConfig.BlobPlugin
+		if configCopy.Logger != nil {
+			configCopy.Logger.Debug(
+				"no blob plugin configured, using default",
+				"plugin", configCopy.BlobPlugin,
+			)
+		}
 	}
 	if configCopy.MetadataPlugin == "" {
 		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
+		if configCopy.Logger != nil {
+			configCopy.Logger.Debug(
+				"no metadata plugin configured, using default",
+				"plugin", configCopy.MetadataPlugin,
+			)
+		}
 	}
 	if configCopy.StorageMode == "" {
 		configCopy.StorageMode = types.StorageModeCore

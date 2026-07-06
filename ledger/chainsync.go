@@ -1931,6 +1931,14 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 					"error", err,
 				)
 			} else {
+				// Reviewed for issue #1649 (fail-fast audit): the error below
+				// is returned immediately (fail-fast for this header), but
+				// full connection teardown goes through this async recycle
+				// event rather than a synchronous close, leaving a small
+				// window where the peer could still be read from. Making
+				// teardown synchronous is a connection-lifecycle change that
+				// needs its own review plus DevNet validation; tracked as a
+				// follow-up rather than changed here.
 				if ls.config.EventBus != nil {
 					ls.config.Logger.Warn(
 						"recycling connection after header verification failure",

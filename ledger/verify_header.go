@@ -712,6 +712,14 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
 // slot coefficient is logged and skipped rather than rejecting, to tolerate
 // early-chain bootstrap states where the genesis snapshot is not yet written.
+//
+// Reviewed for issue #1649 (fail-fast audit) and intentionally kept as
+// warn-and-continue rather than fail-fast: rejecting here would reject
+// every block during the genesis bootstrap window on a fresh node, since
+// the stake snapshot and active slot coefficient aren't available yet.
+// Making this fail-fast would require distinguishing "genuinely missing
+// during bootstrap" from "unexpectedly missing after bootstrap" (e.g. by
+// block/epoch number), which needs DevNet validation before changing.
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,

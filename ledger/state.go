@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -158,7 +159,13 @@ func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 	defer func() {
 		if r := recover(); r != nil {
 			result.Error = fmt.Errorf("panic: %v", r)
-			slog.Error("worker panic during operation", "panic", r)
+			// recover() suppresses the runtime's own stack trace, so
+			// capture one here or the panic becomes undiagnosable.
+			slog.Error(
+				"worker panic during operation",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
 		}
 		p.sendResult(op, result)
 	}()
@@ -6568,6 +6575,11 @@ func (ls *LedgerState) validateTxCore(
 	snapshotPParams := ls.currentPParams
 	snapshotPrevEraPParams := ls.prevEraPParams
 	ls.RUnlock()
+	// Reviewed for issue #1649 (fail-fast audit) and kept as graceful
+	// degradation rather than fail-fast: this is monitored via the
+	// slotClockFallbacks metric (in addition to the debug log below), so
+	// sustained occurrences are visible to operators without failing tx
+	// validation on a transient clock read error.
 	currentSlot, currentSlotErr := ls.CurrentSlot()
 	if currentSlotErr != nil {
 		ls.config.Logger.Debug(
