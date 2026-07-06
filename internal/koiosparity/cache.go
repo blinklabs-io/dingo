@@ -190,19 +190,48 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 	}).Create(&info).Error
 }
 
-// ReplaceEpochPoolRows atomically replaces all pool rows for (network, epoch).
-// Deletes the existing set and inserts the new set in a single transaction so
-// the checker never observes a partial or mixed state for an epoch.
-func (c *Cache) ReplaceEpochPoolRows(network string, epoch uint64, rows []KoiosPoolEpoch) error {
+// sqlitePoolBatchSize caps rows per INSERT so the bound-parameter count stays
+// well under SQLite's 32766-parameter limit. KoiosPoolEpoch has 7 non-PK
+// columns, giving a per-statement max of ~4680 rows; 1000 is a safe margin.
+const sqlitePoolBatchSize = 1000
+
+// CommitEpochData atomically replaces all pool rows for the epoch and upserts
+// the epoch-info record in a single transaction. Committing both together means:
+//
+//   - The pool set and koios_epoch_info.fetched_at are always in sync.
+//     GetEpochsNeedingCheck uses fetched_at > last_checked_at to detect stale
+//     check results; a separate commit would leave fetched_at stale if the
+//     process died between the two writes, silently suppressing the recheck.
+//
+//   - Inserts are batched at sqlitePoolBatchSize rows per statement to stay
+//     within SQLite's host-parameter limit.
+//
+//   - Each pool row's Network and Epoch fields are normalised from info before
+//     insertion so a mismatched caller cannot corrupt a different epoch's data.
+func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch) error {
 	return c.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("network = ? AND epoch = ?", network, epoch).
+		if err := tx.Where("network = ? AND epoch = ?", info.Network, info.Epoch).
 			Delete(&KoiosPoolEpoch{}).Error; err != nil {
 			return err
 		}
-		if len(rows) == 0 {
-			return nil
+		if len(rows) > 0 {
+			for i := range rows {
+				rows[i].Network = info.Network
+				rows[i].Epoch = info.Epoch
+			}
+			if err := tx.CreateInBatches(rows, sqlitePoolBatchSize).Error; err != nil {
+				return err
+			}
 		}
-		return tx.Create(&rows).Error
+		return tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "network"},
+				{Name: "epoch"},
+			},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"active_stake", "fees", "total_rewards", "epoch_end_time", "fetched_at",
+			}),
+		}).Create(&info).Error
 	})
 }
 
