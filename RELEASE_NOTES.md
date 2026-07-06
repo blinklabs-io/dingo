@@ -17,7 +17,7 @@ This release focuses on ledger recovery, sync stability, peer governance, and ma
 ### 💪 Improvements
 
 * Improved **keep Leios endorser block persistence steady during catch-up:** A bounded coalescing writer now keeps catch-up responsive, and queued work drains safely on shutdown.
-* Enhanced **speed committee voting governance queries:** The database now picks the latest authorization per cold credential with a windowed lookup, which keeps long-running governance queries responsive.
+* Enhanced **speed committee voting lookups:** The database now picks the latest authorization per cold credential with a windowed lookup, which keeps long-running governance queries responsive.
 * Modernized **refresh `gouroboros` to v0.186.2:** The bundled protocol library now tracks the v0.186.2 maintenance release in `go.mod` and `go.sum`.
 * Refined **refresh `gouroboros` to v0.186.3:** The bundled protocol library now tracks the v0.186.3 maintenance release in `go.mod` and `go.sum`.
 * Strengthened **update the pinned golangci-lint GitHub Action to v9.3.0:** CI now uses the newer lint action release for routine validation runs.
@@ -35,15 +35,15 @@ This release focuses on ledger recovery, sync stability, peer governance, and ma
 * Improved **reject non-Byron headers with mismatched VRF keys and block numbers:** Consensus validation now checks the producing pool’s registered VRF key and enforces era-specific block-number continuity at header and block ingestion.
 * Updated **spread outbound dials across resolved backend addresses:** The peer governor now re-resolves hostname peers on each dial, filters to locally routable addresses, and chooses from reachable IPs so retries do not pin to one backend.
 * Enhanced **stop retrying peers that never connected successfully:** The peer governor now drops and deny-lists never-connected discovered and public-root peers after a failed dial, while keeping trusted, previously connected, client-capable, and last eligible upstream peers.
-* Balanced **replenish ledger peers more aggressively when upstreams run low:** Discovery can now run on a faster emergency cadence and may add an extra batch, which helps the node recover from collapsed relay pools sooner.
+* Balanced **replenish ledger peers aggressively when upstreams run low:** Discovery can now run on a faster emergency cadence and may add an extra batch, which helps the node recover from collapsed relay pools sooner.
 * Refined **cool down failing Leios backfill connections more aggressively:** Backfill retries now raise the per-connection cooldown with a cap and reset it after a successful fetch.
 * Expanded **treat empty Leios endorser block responses as point-hash mismatches:** The fetch path now checks the requested point hash before decoding, which surfaces wrong, empty, or truncated manifests as clearer mismatches.
-* Tuned **correct Praos epoch nonce assembly across Mithril and epoch boundaries:** Ledger nonce handling now carries the correct epoch nonce across bootstrap gaps and boundary changes, and startup repairs missing Mithril gap-block nonce history.
-* Streamlined **validate Bark archive fallback URLs and cap downloads:** Archive fallback now requires HTTPS, rejects embedded credentials, restricts hosts to an allowlist, disables redirects, and caps response bodies at 128 KiB.
+* Tuned **correct Praos epoch nonce handling across Mithril and epoch boundaries:** Ledger nonce handling now carries the correct epoch nonce across bootstrap gaps and boundary changes, and startup repairs missing Mithril gap-block nonce history.
+* Streamlined **validate and cap Bark archive fallback downloads:** Archive fallback now requires HTTPS, rejects embedded credentials, restricts hosts to an allowlist, disables redirects, and caps response bodies at 128 KiB.
 
 ### 📋 What You Need to Know
 
-* Clarified **configure `StrictUtxoValidation` when missing consumed inputs should stop recovery:** YAML, environment, and CLI settings now control whether missing consumed UTxOs become errors after the Mithril trust boundary, and strict mode fails unrecoverable misses.
+* Clarified **configure `StrictUtxoValidation` for consumed-input misses:** YAML, environment, and CLI settings now control whether missing consumed UTxOs become errors after the Mithril trust boundary, and strict mode fails unrecoverable misses.
 * Highlighted **require HTTPS and explicit host approval for Bark archive fallback:** Archive fallback now requires HTTPS, denies embedded credentials, keeps redirects disabled, and lets operators extend the allowlist with explicit configuration.
 * Emphasized **plan for more active peer discovery when upstreams fall below target:** The peer governor can now trigger emergency discovery on a faster cadence and may add an extra batch to recover more quickly from collapsed relay pools.
 * Summarized **expect stricter consensus and ledger validation around producer identity and block order:** Non-Byron headers with mismatched VRF keys or broken block-number continuity now fail validation, and ledger recovery will not rewind below the Mithril boundary.
