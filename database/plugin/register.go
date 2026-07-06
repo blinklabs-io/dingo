@@ -86,13 +86,29 @@ func ProcessEnvVars() error {
 	return nil
 }
 
+// buildTagGatedPluginNames lists plugin names that are valid but may not be
+// registered in this build because they're compiled in only under specific
+// build tags (e.g. -tags dingo_extra_plugins for gcs/s3/mysql/postgres).
+// Config sections for these names are tolerated even when the corresponding
+// plugin isn't compiled into this build; selecting one as the active
+// blob/metadata plugin still fails downstream via MissingPluginError.
+var buildTagGatedPluginNames = map[PluginType]map[string]struct{}{
+	PluginTypeBlob:     {"gcs": {}, "s3": {}},
+	PluginTypeMetadata: {"mysql": {}, "postgres": {}},
+}
+
 // ProcessConfig applies plugin-specific config values from a parsed YAML
 // document. It rejects config keys that don't match any known option for
-// the targeted plugin, so a typo (e.g. "buckit" instead of "bucket") fails
-// config load instead of being silently ignored.
+// the targeted plugin (e.g. "buckit" instead of "bucket") and config
+// sections whose plugin name doesn't match any known plugin (e.g. "badgre"
+// instead of "badger"), so typos fail config load instead of being
+// silently ignored. All keys for a plugin are validated before any of
+// its options are applied, so a config block mixing valid and invalid
+// keys never partially applies before the error is returned.
 func ProcessConfig(
 	pluginConfig map[string]map[string]map[string]any,
 ) error {
+	matched := make(map[PluginType]map[string]struct{})
 	for _, plugin := range pluginEntries {
 		pluginTypeData, ok := pluginConfig[PluginTypeName(plugin.Type)]
 		if !ok {
@@ -102,12 +118,14 @@ func ProcessConfig(
 		if !ok {
 			continue
 		}
+		if matched[plugin.Type] == nil {
+			matched[plugin.Type] = make(map[string]struct{})
+		}
+		matched[plugin.Type][plugin.Name] = struct{}{}
+
 		known := make(map[string]struct{}, len(plugin.Options))
 		for _, option := range plugin.Options {
 			known[option.Name] = struct{}{}
-			if err := option.ProcessConfig(pluginData); err != nil {
-				return err
-			}
 		}
 		var unknown []string
 		for key := range pluginData {
@@ -122,6 +140,31 @@ func ProcessConfig(
 				unknown,
 				PluginTypeName(plugin.Type),
 				plugin.Name,
+			)
+		}
+		for _, option := range plugin.Options {
+			if err := option.ProcessConfig(pluginData); err != nil {
+				return err
+			}
+		}
+	}
+	for _, pluginType := range []PluginType{PluginTypeBlob, PluginTypeMetadata} {
+		typeName := PluginTypeName(pluginType)
+		pluginTypeData, ok := pluginConfig[typeName]
+		if !ok {
+			continue
+		}
+		for name := range pluginTypeData {
+			if _, ok := matched[pluginType][name]; ok {
+				continue
+			}
+			if _, ok := buildTagGatedPluginNames[pluginType][name]; ok {
+				continue
+			}
+			return fmt.Errorf(
+				"unknown %s plugin %q in config",
+				typeName,
+				name,
 			)
 		}
 	}

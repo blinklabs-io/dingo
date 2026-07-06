@@ -30,7 +30,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/topology"
@@ -313,8 +312,18 @@ func validateLoggingChainsyncMithril(cfg *Config) error {
 			cfg.Logging.Format,
 		)
 	}
-	if _, err := chainsync.ParseHeaderSyncStrategy(cfg.Chainsync.Strategy); err != nil {
-		return err
+	// Validated locally, matching chainsync.ParseHeaderSyncStrategy's
+	// accepted values, rather than importing the chainsync package:
+	// internal/config is a foundational package imported by nearly
+	// everything, so it shouldn't depend on a runtime/protocol package
+	// for a single string switch.
+	switch strings.ToLower(strings.TrimSpace(cfg.Chainsync.Strategy)) {
+	case "", "primary", "parallel", "round-robin", "roundrobin", "round_robin":
+	default:
+		return fmt.Errorf(
+			"invalid header sync strategy %q (want primary, parallel, or round-robin)",
+			cfg.Chainsync.Strategy,
+		)
 	}
 	// The valid values mirror mithril.BackendV1/BackendV2; the mithril
 	// package can't be imported here without an import cycle (mithril ->

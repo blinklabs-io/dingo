@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -1100,11 +1101,14 @@ func buildConwayScriptPurpose(
 ) (purpose script.ScriptPurpose, ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			// recover() suppresses the runtime's own stack trace, so
+			// capture one here or the panic becomes undiagnosable.
 			slog.Default().Error(
 				"panic building conway script purpose",
 				"panic", r,
 				"redeemer_tag", redeemerKey.Tag,
 				"redeemer_index", redeemerKey.Index,
+				"stack", string(debug.Stack()),
 			)
 			purpose = nil
 			ok = false

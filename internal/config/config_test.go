@@ -403,6 +403,23 @@ chainsync:
 	}
 }
 
+func TestLoad_InvalidChainsyncStrategyRejected(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+chainsync:
+  strategy: bogus
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "chainsync-strategy.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	if _, err := LoadConfig(tmpFile); err == nil {
+		t.Fatal("expected error for invalid chainsync.strategy, got nil")
+	}
+}
+
 func TestLoad_ChainsyncStrategyEnvVar(t *testing.T) {
 	resetGlobalConfig()
 	globalConfig.RunMode = RunModeDev
