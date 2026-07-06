@@ -1,5 +1,68 @@
 # Dingo Releases
 
+## v0.61.2 (July 6, 2026)
+
+**Title:** Safer recovery, steadier peer governance, and tighter validation
+
+**Date:** July 6, 2026
+
+**Version:** v0.61.2
+
+This patch release focuses on ledger recovery, sync stability, peer governance, and maintenance updates.
+
+### ✨ What's New
+
+* Noted **this patch release does not introduce major new features:** Version v0.61.2 focuses on reliability, validation, peer management, and maintenance updates.
+
+### 💪 Improvements
+
+* Improved **keep Leios endorser block persistence responsive during catch-up:** A bounded coalescing writer now keeps catch-up responsive, and queued work drains safely on shutdown.
+* Enhanced **speed committee voting governance queries:** The database now picks the latest authorization per cold credential with a windowed lookup, which keeps long-running governance queries responsive.
+* Modernized **refresh `gouroboros` to v0.186.2:** The bundled protocol library now tracks the v0.186.2 maintenance release in `go.mod` and `go.sum`.
+* Refined **refresh `gouroboros` to v0.186.3:** The bundled protocol library now tracks the v0.186.3 maintenance release in `go.mod` and `go.sum`.
+* Strengthened **update the pinned golangci-lint GitHub Action to v9.3.0:** CI now uses the newer lint action release for routine validation runs.
+* Polished **refresh the `dingo-blockfrost-explorer` example type definitions to `@types/node` v26.1.0:** The example now uses the newer Node type definitions for local development.
+* Reviewed **keep the release history current with the v0.61.1 notes:** The repository release history now includes the previous release entry for easier review.
+
+### 🔧 Fixes
+
+* Fixed **encode chain block number queries with the correct `WithOrigin` shape:** Genesis and origin points now return `[0]`, non-genesis tips return `[1, blockNumber]`, and the first block at number `0` now reports correctly.
+* Corrected **keep at-tip recovery above the Mithril trust boundary:** Transaction validation recovery now stays at the current tip when the computed rewind would cross below `mithrilLedgerSlot`, and ChainSync now resets to `Syncing` with a `ChainsyncResync` event.
+* Hardened **make consumed UTxO validation configurable after the Mithril boundary:** `StrictUtxoValidation` now lets operators choose whether missing consumed UTxOs fail the run through YAML, environment variables, or the CLI, while non-strict mode keeps the current default behavior.
+* Repaired **realign switched peer cursors with the local tip:** When a switched peer already sits ahead of the local tip, ChainSync now requests resync on the effective connection instead of stalling without buffered headers or blockfetch.
+* Stabilized **avoid recycling ChainSync during ledger application backlog catch-up:** The recycler now checks ledger divergence first and suppresses recycle or resync when the primary chain is already caught up and the applied tip is still draining backlog.
+* Resolved **track unrecoverable rollbacks across reconnects:** The rollback tracker now remembers stuck points across reconnects, uses a 10-minute window and a 3-failure threshold, and surfaces the condition with a throttled error and Prometheus metric.
+* Improved **reject non-Byron headers with mismatched VRF keys and block numbers:** Consensus validation now checks the producing pool’s registered VRF key and enforces era-specific block-number continuity at header and block ingestion.
+* Updated **spread outbound dials across resolved backend addresses:** The peer governor now re-resolves hostname peers on each dial, filters to locally routable addresses, and chooses from reachable IPs so retries do not pin to one backend.
+* Enhanced **stop retrying peers that never connected successfully:** The peer governor now drops and deny-lists never-connected discovered and public-root peers after a failed dial, while keeping trusted, previously connected, client-capable, and last eligible upstream peers.
+* Balanced **replenish ledger peers more aggressively when upstreams run low:** Discovery can now run on a faster emergency cadence and may add an extra batch, which helps the node recover from collapsed relay pools sooner.
+* Refined **cool down failing Leios backfill connections more aggressively:** Backfill retries now raise the per-connection cooldown with a cap and reset it after a successful fetch.
+* Expanded **treat empty Leios endorser block responses as point-hash mismatches:** The fetch path now checks the requested point hash before decoding, which surfaces wrong, empty, or truncated manifests as clearer mismatches.
+* Tuned **correct Praos epoch nonce assembly across Mithril and epoch boundaries:** Ledger nonce handling now carries the correct epoch nonce across bootstrap gaps and boundary changes, and startup repairs missing Mithril gap-block nonce history.
+* Streamlined **validate Bark archive fallback URLs and cap downloads:** Archive fallback now requires HTTPS, rejects embedded credentials, restricts hosts to an allowlist, disables redirects, and caps response bodies at 128 KiB.
+
+### 📋 What You Need to Know
+
+* Clarified **configure `StrictUtxoValidation` when missing consumed inputs should stop recovery:** YAML, environment, and CLI settings now control whether missing consumed UTxOs become errors after the Mithril trust boundary, and strict mode fails unrecoverable misses.
+* Highlighted **expect Bark archive downloads to follow the allowlist and HTTPS rules:** Archive URLs now need HTTPS, embedded credentials are rejected, redirects stay disabled, and operators can extend the allowlist with explicit configuration.
+* Emphasized **plan for more active peer discovery when upstreams fall below target:** The peer governor can now trigger emergency discovery on a faster cadence and may add an extra batch to recover more quickly from collapsed relay pools.
+* Summarized **expect stricter consensus and ledger validation around producer identity and block order:** Non-Byron headers with mismatched VRF keys or broken block-number continuity now fail validation, and ledger recovery will not rewind below the Mithril boundary.
+* Acknowledged **expect ChainSync to resync more directly after cursor drift, backlog draining, or unrecoverable rollbacks:** Switched peers, ledger-application backlog, and repeated rollback failures now push the node back toward a healthy sync path instead of recycling endlessly.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.61.1 (July 2, 2026)
 
 **Title:** Safer Mithril recovery, steadier Leios sync, and stronger ledger validation
