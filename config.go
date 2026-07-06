@@ -1198,6 +1198,14 @@ func (c *Config) ShutdownTimeout() string {
 	return c.cfg.ShutdownTimeout
 }
 
+// ShutdownTimeoutDuration parses the configured graceful shutdown timeout.
+func (c *Config) ShutdownTimeoutDuration() (time.Duration, error) {
+	if c.cfg.ShutdownTimeout == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(c.cfg.ShutdownTimeout)
+}
+
 // LedgerCatchupTimeout returns the maximum wait time for ledger catchup.
 func (c *Config) LedgerCatchupTimeout() string {
 	return c.cfg.LedgerCatchupTimeout

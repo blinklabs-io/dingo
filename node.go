@@ -915,7 +915,7 @@ func (n *Node) Run(ctx context.Context) error {
 					"snapshot_peers_added",
 					added,
 					"bootstrap_peers_omitted",
-					len(topologyConfig.BootstrapPeers),
+					len(n.config.TopologyConfig().BootstrapPeers),
 				)
 			} else {
 				n.config.logger.Warn(
@@ -1069,14 +1069,13 @@ func (n *Node) Run(ctx context.Context) error {
 	// run.
 	if n.config.StorageModeEnum().IsAPI() && n.config.Midnight().Port > 0 {
 		var err error
-		// Parse shutdown timeout string into time.Duration for the midnight server.
 		shutdownTimeout := 30 * time.Second
-		if s := n.config.ShutdownTimeout(); s != "" {
-			if d, err := time.ParseDuration(s); err == nil {
+		if d, err := n.config.ShutdownTimeoutDuration(); err == nil {
+			if d > 0 {
 				shutdownTimeout = d
-			} else {
-				n.config.logger.Warn("invalid midnight shutdown timeout, using default", "value", s, "error", err)
 			}
+		} else {
+			n.config.logger.Warn("invalid midnight shutdown timeout, using default", "value", n.config.ShutdownTimeout(), "error", err)
 		}
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
