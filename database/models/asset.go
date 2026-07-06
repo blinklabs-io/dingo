@@ -35,16 +35,6 @@ func (Asset) TableName() string {
 	return "asset"
 }
 
-// AssetHolderRow is a query-result type used when grouping live UTxOs by
-// address to enumerate holders of a specific asset.
-type AssetHolderRow struct {
-	PaymentKey    []byte
-	StakingKey    []byte
-	CredentialTag uint8
-	PaymentScript bool
-	Quantity      uint64
-}
-
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
 // Each asset is populated with its name, hex-encoded name, policy ID, fingerprint, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.

@@ -512,6 +512,15 @@ func (b *Blockfrost) handleAssetAddresses(
 		)
 		return
 	}
+	if total == 0 {
+		writeError(
+			w,
+			http.StatusNotFound,
+			"Not Found",
+			"The requested asset could not be found.",
+		)
+		return
+	}
 	SetPaginationHeaders(w, total, params)
 	resp := make([]AssetAddressResponse, 0, len(holders))
 	for _, h := range holders {
