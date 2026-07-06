@@ -190,6 +190,22 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 	}).Create(&info).Error
 }
 
+// ReplaceEpochPoolRows atomically replaces all pool rows for (network, epoch).
+// Deletes the existing set and inserts the new set in a single transaction so
+// the checker never observes a partial or mixed state for an epoch.
+func (c *Cache) ReplaceEpochPoolRows(network string, epoch uint64, rows []KoiosPoolEpoch) error {
+	return c.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("network = ? AND epoch = ?", network, epoch).
+			Delete(&KoiosPoolEpoch{}).Error; err != nil {
+			return err
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Create(&rows).Error
+	})
+}
+
 // UpsertPoolEpoch idempotently inserts or updates a Koios pool epoch row.
 func (c *Cache) UpsertPoolEpoch(pe KoiosPoolEpoch) error {
 	return c.db.Clauses(clause.OnConflict{
