@@ -1794,6 +1794,14 @@ Configuration priority (highest to lowest):
 3. YAML config file (`dingo.yaml`)
 4. Hardcoded defaults
 
+After all sources are merged (including CLI flags), `Config.Validate()`
+(`internal/config`) checks the resulting configuration before any services
+start: mode enums, port ranges (privileged/out-of-range), load-mode
+`immutableDbPath` requirement, path-traversal guards, TLS cert/key pairing,
+mempool watermarks, block-producer credential paths, and duration/strategy
+strings that are otherwise only parsed at their point of use. All violations
+are reported together in a single startup error.
+
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)
 - Storage mode (`core` or `api`)

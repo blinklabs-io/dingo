@@ -307,12 +307,8 @@ DSN Override:
 			// When no subcommand given, check RunMode from config
 			switch cfg.RunMode {
 			case config.RunModeLoad:
-				if cfg.ImmutableDbPath == "" {
-					slog.Error(
-						"immutableDbPath must be set when runMode is 'load'",
-					)
-					os.Exit(1)
-				}
+				// Validate() has already enforced that ImmutableDbPath
+				// is set for load mode
 				loadRun(cmd.Context(), []string{cfg.ImmutableDbPath}, cfg)
 			case config.RunModeServe, config.RunModeDev, config.RunModeLeios:
 				// serve, dev, and leios modes all run the server
@@ -355,6 +351,18 @@ DSN Override:
 
 		if err := config.ApplyFlags(cmd, cfg); err != nil {
 			return fmt.Errorf("applying CLI flags: %w", err)
+		}
+
+		// `dingo load <path>`: the positional argument is the
+		// highest-precedence source for ImmutableDbPath; merge it before
+		// validation so a config with runMode "load" and no
+		// immutableDbPath doesn't fail spuriously.
+		if cmd.Name() == "load" && len(args) > 0 {
+			cfg.ImmutableDbPath = args[0]
+		}
+
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))

@@ -1,0 +1,297 @@
+// Copyright 2026 Blink Labs Software
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package config
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// validTestConfig returns a minimal configuration that passes
+// validation, mirroring the production defaults.
+func validTestConfig() *Config {
+	return &Config{
+		Network:              "preview",
+		RunMode:              RunModeServe,
+		StorageMode:          storageModeCore,
+		EvictionWatermark:    DefaultEvictionWatermark,
+		RejectionWatermark:   DefaultRejectionWatermark,
+		MempoolCapacity:      DefaultMempoolCapacityPraos,
+		RelayPort:            3001,
+		PrivatePort:          3002,
+		MetricsPort:          12798,
+		UtxorpcPort:          9090,
+		BlockfrostPort:       3000,
+		MeshPort:             8080,
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		Cache:                DefaultCacheConfig(),
+		Chainsync:            DefaultChainsyncConfig(),
+		Midnight:             DefaultMidnightConfig(),
+		Mithril: MithrilConfig{
+			Enabled: true,
+			Backend: "v2",
+		},
+	}
+}
+
+func TestValidateDefaultsPass(t *testing.T) {
+	assert.NoError(t, validTestConfig().validate(false))
+}
+
+func TestValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*Config)
+		wantErr string
+	}{
+		{
+			name:    "invalid run mode",
+			modify:  func(c *Config) { c.RunMode = "batch" },
+			wantErr: "invalid runMode",
+		},
+		{
+			name:    "invalid start era",
+			modify:  func(c *Config) { c.StartEra = "byron" },
+			wantErr: "invalid startEra",
+		},
+		{
+			name:    "invalid storage mode",
+			modify:  func(c *Config) { c.StorageMode = "full" },
+			wantErr: "invalid storageMode",
+		},
+		{
+			name:    "load mode without immutable db path",
+			modify:  func(c *Config) { c.RunMode = RunModeLoad },
+			wantErr: "requires immutableDbPath",
+		},
+		{
+			name: "load mode with immutable db path",
+			modify: func(c *Config) {
+				c.RunMode = RunModeLoad
+				c.ImmutableDbPath = "/data/immutable"
+			},
+		},
+		{
+			name:    "port above maximum",
+			modify:  func(c *Config) { c.UtxorpcPort = 99999999 },
+			wantErr: "invalid utxorpcPort: 99999999 (must be at most 65535)",
+		},
+		{
+			name:    "privileged port without privileges",
+			modify:  func(c *Config) { c.BlockfrostPort = 443 },
+			wantErr: "privileged port",
+		},
+		{
+			name:    "required port set to zero",
+			modify:  func(c *Config) { c.RelayPort = 0 },
+			wantErr: "port (relay/NtN) must be set",
+		},
+		{
+			name:    "metrics port set to zero",
+			modify:  func(c *Config) { c.MetricsPort = 0 },
+			wantErr: "metricsPort must be set",
+		},
+		{
+			name:   "optional port disabled with zero",
+			modify: func(c *Config) { c.UtxorpcPort = 0 },
+		},
+		{
+			name: "cardano config path traversal",
+			modify: func(c *Config) {
+				c.CardanoConfig = "configs/../../etc/passwd"
+			},
+			wantErr: "must not contain \"..\"",
+		},
+		{
+			name:    "cardano config bare parent reference",
+			modify:  func(c *Config) { c.CardanoConfig = ".." },
+			wantErr: "must not contain \"..\"",
+		},
+		{
+			name: "cardano config inner dotdot cleans away",
+			modify: func(c *Config) {
+				c.CardanoConfig = "/etc/dingo/../dingo/config.json"
+			},
+		},
+		{
+			name:   "cardano config absolute path",
+			modify: func(c *Config) { c.CardanoConfig = "/etc/dingo/config.json" },
+		},
+		{
+			name:    "tls cert without key",
+			modify:  func(c *Config) { c.TlsCertFilePath = "/certs/tls.crt" },
+			wantErr: "must both be set",
+		},
+		{
+			name:    "tls key without cert",
+			modify:  func(c *Config) { c.TlsKeyFilePath = "/certs/tls.key" },
+			wantErr: "must both be set",
+		},
+		{
+			name: "tls cert and key together",
+			modify: func(c *Config) {
+				c.TlsCertFilePath = "/certs/tls.crt"
+				c.TlsKeyFilePath = "/certs/tls.key"
+			},
+		},
+		{
+			name:    "negative mempool capacity",
+			modify:  func(c *Config) { c.MempoolCapacity = -1 },
+			wantErr: "invalid mempoolCapacity",
+		},
+		{
+			name:    "eviction watermark out of range",
+			modify:  func(c *Config) { c.EvictionWatermark = 1.5 },
+			wantErr: "invalid evictionWatermark",
+		},
+		{
+			name:    "rejection watermark out of range",
+			modify:  func(c *Config) { c.RejectionWatermark = 1.5 },
+			wantErr: "invalid rejectionWatermark",
+		},
+		{
+			name: "eviction above rejection",
+			modify: func(c *Config) {
+				c.EvictionWatermark = 0.95
+				c.RejectionWatermark = 0.90
+			},
+			wantErr: "must be less than rejectionWatermark",
+		},
+		{
+			name:    "block producer missing key paths",
+			modify:  func(c *Config) { c.BlockProducer = true },
+			wantErr: "missing required key paths",
+		},
+		{
+			name: "block producer with all key paths",
+			modify: func(c *Config) {
+				c.BlockProducer = true
+				c.ShelleyVRFKey = "/keys/vrf.skey"
+				c.ShelleyKESKey = "/keys/kes.skey"
+				c.ShelleyOperationalCertificate = "/keys/node.cert"
+			},
+		},
+		{
+			name: "no network and no magic",
+			modify: func(c *Config) {
+				c.Network = ""
+				c.NetworkMagic = 0
+			},
+			wantErr: "network or networkMagic must be set",
+		},
+		{
+			name: "network magic without network name",
+			modify: func(c *Config) {
+				c.Network = ""
+				c.NetworkMagic = 2
+			},
+		},
+		{
+			name:    "network name with traversal characters",
+			modify:  func(c *Config) { c.Network = "../mainnet" },
+			wantErr: "invalid network name",
+		},
+		{
+			name:    "unparseable shutdown timeout",
+			modify:  func(c *Config) { c.ShutdownTimeout = "thirty" },
+			wantErr: "invalid shutdownTimeout",
+		},
+		{
+			name:    "negative shutdown timeout",
+			modify:  func(c *Config) { c.ShutdownTimeout = "-5s" },
+			wantErr: "invalid shutdownTimeout \"-5s\": must be positive",
+		},
+		{
+			name:    "unparseable ledger catchup timeout",
+			modify:  func(c *Config) { c.LedgerCatchupTimeout = "1 hour" },
+			wantErr: "invalid ledgerCatchupTimeout",
+		},
+		{
+			name:    "unparseable chainsync stall timeout",
+			modify:  func(c *Config) { c.Chainsync.StallTimeout = "soon" },
+			wantErr: "invalid chainsync.stallTimeout",
+		},
+		{
+			name: "negative mithril idle timeout allowed",
+			modify: func(c *Config) {
+				c.Mithril.DownloadIdleTimeout = "-1s"
+			},
+		},
+		{
+			name: "unparseable mithril idle timeout",
+			modify: func(c *Config) {
+				c.Mithril.DownloadIdleTimeout = "later"
+			},
+			wantErr: "invalid mithril.downloadIdleTimeout",
+		},
+		{
+			name:    "invalid chainsync strategy",
+			modify:  func(c *Config) { c.Chainsync.Strategy = "fastest" },
+			wantErr: "invalid chainsync.strategy",
+		},
+		{
+			name:   "chainsync strategy round_robin alias",
+			modify: func(c *Config) { c.Chainsync.Strategy = "round_robin" },
+		},
+		{
+			name:    "negative chainsync max clients",
+			modify:  func(c *Config) { c.Chainsync.MaxClients = -1 },
+			wantErr: "invalid chainsync.maxClients",
+		},
+		{
+			name:    "invalid mithril backend",
+			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
+			wantErr: "invalid mithril.backend",
+		},
+		{
+			name:   "empty mithril backend",
+			modify: func(c *Config) { c.Mithril.Backend = "" },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			tt.modify(cfg)
+			err := cfg.validate(false)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestValidatePrivilegedPortAllowedAsRoot(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.BlockfrostPort = 443
+	assert.NoError(t, cfg.validate(true))
+}
+
+func TestValidateAggregatesAllErrors(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeLoad
+	cfg.UtxorpcPort = 70000
+	cfg.EvictionWatermark = 2.0
+	err := cfg.validate(false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires immutableDbPath")
+	assert.Contains(t, err.Error(), "invalid utxorpcPort")
+	assert.Contains(t, err.Error(), "invalid evictionWatermark")
+}
