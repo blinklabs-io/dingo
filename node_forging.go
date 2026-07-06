@@ -319,6 +319,7 @@ type mempoolTxView struct {
 
 type mempoolTransactionSource interface {
 	Transactions() []mempool.MempoolTransaction
+	RemoveTxsByHash(hashes []string)
 }
 
 func mempoolTransactions(source mempoolTransactionSource) []mempoolTxView {
@@ -350,6 +351,10 @@ func (a *ledgerMempoolAdapter) Transactions() []ledger.PendingTransaction {
 		}
 	}
 	return result
+}
+
+func (a *ledgerMempoolAdapter) RemoveTxsByHash(hashes []string) {
+	a.source.RemoveTxsByHash(hashes)
 }
 
 // forgingMempoolAdapter adapts mempool.Mempool to forging.MempoolProvider.

@@ -21,8 +21,9 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -103,11 +104,11 @@ func verifyBlockHeaderHex(
 		SkipStakePoolValidation:   true,
 	}
 
-	header, err := normalizeHeaderVrfResultFromBodyCbor(block.Header())
+	header, err := normalizeHeaderVrfFieldsFromBodyCbor(block.Header())
 	if err != nil {
 		return fmt.Errorf(
 			"block header verification failed at slot %d: "+
-				"normalize VRF result from header body CBOR: %w",
+				"normalize VRF fields from header body CBOR: %w",
 			block.SlotNumber(),
 			err,
 		)
@@ -203,11 +204,337 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		)
 	}
 
-	return verifyBlockHeaderHex(
+	if err := verifyBlockHeaderHex(
 		block,
 		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
 		slotsPerKesPeriod,
+	); err != nil {
+		return err
+	}
+
+	// Bind the header's VRF key to the pool's on-chain registered VRF key.
+	// The crypto path above verifies the VRF proof only against the key carried
+	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
+	// check), so without this an attacker can grind VRF keys to win slots.
+	if err := ls.verifyRegisteredVrfKey(block); err != nil {
+		return err
+	}
+
+	return ls.verifyBlockLeaderEligibility(block, epoch.EpochId)
+}
+
+// verifyBlockLeaderEligibility checks that the block's producer pool was
+// eligible to produce a block at this slot under the Praos stake-derived
+// leadership threshold. This enforces the Cardano Blueprint chain validity
+// requirement that header validation confirms slot-leader eligibility.
+//
+// The eligibility condition is:
+//
+//	vrfLeaderOutput < threshold(sigma, f)
+//
+// where sigma = poolStake / totalStake and f is the active slot coefficient
+// from Shelley genesis.
+//
+// Stake selection follows the ledger's active pool distribution. For the
+// epoch imported from a Mithril snapshot, NewEpochState.pool-distr is used
+// directly. Otherwise, the active distribution is the mark snapshot from
+// epoch-2, clamped to genesis for early epochs.
+//
+// TPraos (Shelley/Allegra/Mary/Alonzo) and CPraos (Babbage/Conway) differ in
+// how the VRF leader value is derived from the output bytes; ConsensusModeForEpoch
+// selects the correct path for the block's era.
+//
+// Byron blocks are skipped (PBFT). A missing total-stake or unavailable active
+// slot coefficient is logged and skipped rather than rejecting, to tolerate
+// early-chain bootstrap states where the genesis snapshot is not yet written.
+func (ls *LedgerState) verifyBlockLeaderEligibility(
+	block ledger.Block,
+	epochId uint64,
+) error {
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+
+	// Derive pool key hash from the block's issuer verification key.
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+
+	poolStake, totalStake, snapshotEpoch, snapshotType, err := ls.leaderEligibilityStake(block, epochId, poolKeyHash)
+	if err != nil {
+		return err
+	}
+	if totalStake == 0 {
+		// Genesis snapshot not yet written (very early bootstrap).
+		// Skip rather than reject.
+		ls.config.Logger.Warn(
+			"skipping leader eligibility check: total active stake is zero",
+			"slot", block.SlotNumber(),
+			"epoch", epochId,
+			"snapshot_epoch", snapshotEpoch,
+			"snapshot_type", snapshotType,
+			"component", "ledger",
+		)
+		return nil
+	}
+
+	// Use the genesis Rat directly to avoid a float64 precision roundtrip.
+	// A zero or negative coefficient would compute a zero threshold and
+	// reject every non-Byron block; treat it as unavailable.
+	activeSlotCoeffRat := ls.activeSlotCoeffRat()
+	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
+		ls.config.Logger.Warn(
+			"skipping leader eligibility check: active slot coefficient unavailable or non-positive",
+			"slot", block.SlotNumber(),
+			"component", "ledger",
+		)
+		return nil
+	}
+
+	// Consensus mode determines the VRF leader-value derivation path.
+	mode := ls.ConsensusModeForEpoch(epochId)
+
+	// Extract the VRF output from the header body CBOR.
+	vrfResult, ok, err := headerVrfResultFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF result: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfResult.Output) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF output unavailable for eligibility check",
+			block.SlotNumber(),
+		)
+	}
+
+	// Compute the Praos leadership threshold and compare.
+	threshold := consensus.CertifiedNatThresholdWithMode(
+		poolStake,
+		totalStake,
+		activeSlotCoeffRat,
+		mode,
 	)
+	if !consensus.IsVRFOutputBelowThresholdWithMode(
+		vrfResult.Output,
+		threshold,
+		mode,
+	) {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF leader value exceeds stake-derived threshold "+
+				"(pool stake: %d, total stake: %d, epoch: %d, snapshot_epoch: %d, snapshot_type: %s)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			poolStake,
+			totalStake,
+			epochId,
+			snapshotEpoch,
+			snapshotType,
+		)
+	}
+
+	return nil
+}
+
+func (ls *LedgerState) leaderEligibilityStake(
+	block ledger.Block,
+	epochId uint64,
+	poolKeyHash lcommon.PoolKeyHash,
+) (uint64, uint64, uint64, string, error) {
+	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
+		block,
+		epochId,
+	)
+	if err != nil {
+		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, err
+	}
+	if useImportedActive {
+		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			poolKeyHash[:],
+			nil,
+		)
+		if err != nil {
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"lookup active pool distribution: %w",
+					block.SlotNumber(),
+					err,
+				)
+		}
+		if snapshot == nil ||
+			snapshot.TotalStake == 0 ||
+			snapshot.StakeDenominator == 0 {
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+				fmt.Errorf(
+					"block header verification rejected at slot %d: "+
+						"producer pool %x missing from active pool distribution for epoch %d",
+					block.SlotNumber(),
+					poolKeyHash[:],
+					epochId,
+				)
+		}
+		return uint64(snapshot.TotalStake),
+			uint64(snapshot.StakeDenominator),
+			epochId,
+			models.PoolStakeSnapshotTypeActive,
+			nil
+	}
+
+	snapshotEpoch := praos.StakeSnapshotEpoch(epochId)
+	snapshotType := models.PoolStakeSnapshotTypeMark
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		snapshotType,
+		poolKeyHash[:],
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup pool stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	if snapshot == nil || snapshot.TotalStake == 0 {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"producer pool %x has no stake in epoch %d snapshot",
+				block.SlotNumber(),
+				poolKeyHash[:],
+				snapshotEpoch,
+			)
+	}
+	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
+		snapshotEpoch,
+		snapshotType,
+		nil,
+	)
+	if err != nil {
+		return 0, 0, snapshotEpoch, snapshotType,
+			fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"lookup total active stake: %w",
+				block.SlotNumber(),
+				err,
+			)
+	}
+	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType, nil
+}
+
+func (ls *LedgerState) shouldUseImportedActivePoolDistribution(
+	block ledger.Block,
+	epochId uint64,
+) (bool, error) {
+	if ls.mithrilLedgerSlot == 0 || block.SlotNumber() <= ls.mithrilLedgerSlot {
+		return false, nil
+	}
+	mithrilEpoch, err := ls.epochForSlot(ls.mithrilLedgerSlot)
+	if err != nil {
+		return false, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve Mithril trust boundary epoch: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	return epochId == mithrilEpoch.EpochId, nil
+}
+
+// verifyRegisteredVrfKey rejects a block whose VRF verification key (carried in
+// the header body) is not the VRF key the producing pool registered on-chain.
+// The block's VRF proof is validated only against this embedded key, and the
+// leader-eligibility threshold uses its output, so binding it to the pool's
+// registered VRF key is what prevents an attacker from grinding VRF keys to
+// win slots. Mirrors gouroboros VerifyBlock's stake-pool VRF-key check, which
+// dingo's crypto path skips via SkipStakePoolValidation.
+func (ls *LedgerState) verifyRegisteredVrfKey(
+	block ledger.Block,
+) error {
+	// Byron (PBFT) blocks have no pool-registered VRF key.
+	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+	issuerVkey := block.IssuerVkey()
+	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract VRF key: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfKey) == 0 {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"VRF key unavailable for registration check",
+			block.SlotNumber(),
+		)
+	}
+	pool, err := ls.db.GetPool(poolKeyHash, true, nil)
+	if err != nil {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registration lookup failed: %w",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			err,
+		)
+	}
+	registeredVrfKeyHash, ok := registeredPoolVrfKeyHash(pool)
+	if !ok {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x registered VRF key hash unavailable",
+			block.SlotNumber(),
+			poolKeyHash[:],
+		)
+	}
+	headerVrfKeyHash := lcommon.Blake2b256Hash(vrfKey)
+	if !bytes.Equal(registeredVrfKeyHash.Bytes(), headerVrfKeyHash.Bytes()) {
+		return fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"producer pool %x VRF key does not match registered VRF key "+
+				"(header %x, registered %x)",
+			block.SlotNumber(),
+			poolKeyHash[:],
+			headerVrfKeyHash.Bytes(),
+			registeredVrfKeyHash.Bytes(),
+		)
+	}
+	return nil
+}
+
+func registeredPoolVrfKeyHash(
+	pool *models.Pool,
+) (lcommon.Blake2b256, bool) {
+	var vrfHash lcommon.Blake2b256
+	if pool == nil {
+		return vrfHash, false
+	}
+	if len(pool.Registration) == 0 {
+		return vrfHash, false
+	}
+	if len(pool.Registration[0].VrfKeyHash) == len(vrfHash) {
+		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
+		return vrfHash, true
+	}
+	if len(pool.VrfKeyHash) != len(vrfHash) {
+		return vrfHash, false
+	}
+	copy(vrfHash[:], pool.VrfKeyHash)
+	return vrfHash, true
 }
 
 func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
@@ -393,7 +720,7 @@ func (ls *LedgerState) advanceEpochCache() error {
 }
 
 // computeEpochNonceForSlot computes the epoch nonce, evolving nonce,
-// and labNonce for a new epoch starting at epochStartSlot. This
+// and lastEpochBlockNonce for a new epoch starting at epochStartSlot. This
 // mirrors calculateEpochNonce but uses non-transactional DB lookups
 // since we're not inside the ledger processing pipeline.
 //
@@ -418,8 +745,14 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// For the initial epoch (no nonce yet), return genesis hash
-	// for both epoch nonce and initial evolving nonce.
+	// For the initial epoch (no nonce yet), the epoch/evolving/candidate nonces
+	// are all the genesis nonce, and the carried lastEpochBlockNonce is Neutral
+	// (nil): cardano-ledger initializes praosStateLastEpochBlockNonce to
+	// NeutralNonce at genesis, so the first from-genesis boundary uses the
+	// identity (eta = candidate ⭒ NeutralNonce = candidate). Do NOT seed this
+	// with the genesis nonce (#2734). Mirrors calculateEpochNonce; the Mithril
+	// bootstrap path imports a non-nil lastEpochBlockNonce and never takes this
+	// branch.
 	if len(prevEpoch.Nonce) == 0 {
 		return genesisHash, genesisHash, genesisHash, nil, nil
 	}
@@ -514,25 +847,29 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		)
 	}
 
-	// Compute the labNonce to SAVE for the next epoch's formula.
-	var labNonceToSave []byte
-	boundaryBlock, err := database.BlockBeforeSlot(
-		ls.db,
+	// The epoch nonce mixes the frozen candidate with the CARRIED
+	// last-block-of-previous-epoch nonce (cardano-ledger
+	// praosStateLastEpochBlockNonce), i.e. prevEpoch.LastEpochBlockNonce — NOT
+	// the last block of the epoch being closed. This must match the rollover
+	// path (calculateEpochNonce); see #2734.
+	//   epochNonce(N+1) = candidateNonce(N) ⭒ prevEpoch(N).LastEpochBlockNonce
+	labForEta := cloneNonce(prevEpoch.LastEpochBlockNonce)
+
+	// The carried lab for the NEXT boundary is stored on the new epoch record:
+	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
+	// the epoch being closed (a one-block Praos lag), NOT the last block's own
+	// hash. See epochLabNonce and #2734 (eta_1349 wedge).
+	labNonceToSave, err := ls.epochLabNonce(
+		nil,
+		prevEpoch.StartSlot,
 		prevEpochEndSlot,
+		prevEpoch.LastEpochBlockNonce,
 	)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"lookup boundary block: %w", err,
-			)
-		}
-	} else if len(boundaryBlock.PrevHash) > 0 {
-		labNonceToSave = boundaryBlock.PrevHash
+		return nil, nil, nil, nil, err
 	}
 
-	// Use the LAGGED lastEpochBlockNonce in the formula.
-	lastEpochBlockNonce := prevEpoch.LastEpochBlockNonce
-	if len(lastEpochBlockNonce) == 0 {
+	if len(labForEta) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		ls.config.Logger.Debug(
@@ -551,7 +888,7 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
-		lastEpochBlockNonce,
+		labForEta,
 		nil,
 	)
 	if err != nil {
@@ -564,8 +901,10 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 		"computed epoch nonce for cache advance",
 		"new_epoch_start_slot", epochStartSlot,
 		"prev_epoch_id", prevEpoch.EpochId,
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_for_eta",
+		hex.EncodeToString(labForEta),
+		"lab_nonce_to_save",
+		hex.EncodeToString(labNonceToSave),
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
 		"evolving_nonce", hex.EncodeToString(evolvingNonce),
 		"epoch_nonce", hex.EncodeToString(result.Bytes()),

@@ -173,6 +173,12 @@ done
 # discover the initial UTxOs from initialFunds and know the genesis start time.
 cp /configs/1/configs/shelley-genesis.json /configs/utxo-keys/
 
+# Expose genesis UTxO signing keys so txpump can sign transactions spending
+# the generated genesis enterprise addresses.
+cp /tmp/testnet/utxos/keys/genesis.*.skey /configs/utxo-keys/
+cp /tmp/testnet/utxos/keys/genesis.*.vkey /configs/utxo-keys/
+cp /tmp/testnet/utxos/keys/genesis.*.addr.info /configs/utxo-keys/
+
 # Test-only credentials: make config + genesis files world-readable so any
 # consuming container's user can read them.
 find /configs -type d -exec chmod 0755 {} +

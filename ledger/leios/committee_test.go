@@ -204,7 +204,7 @@ func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
 		testPoolHash(2): huge,
 	}
 	committee, err := ComputeCommittee(
-		1, 0, poolStakes, math.MaxUint64 - 1, big.NewRat(99, 100),
+		1, 0, poolStakes, math.MaxUint64-1, big.NewRat(99, 100),
 	)
 	require.NoError(t, err)
 	assert.Len(t, committee.Members, 2)
@@ -262,7 +262,6 @@ func TestCommitteeMemberLookups(t *testing.T) {
 }
 
 func TestCommitteeSnapshotEpoch(t *testing.T) {
-	// Must stay in lockstep with leader.scheduleSnapshotEpoch
 	for _, tc := range []struct{ epoch, want uint64 }{
 		{0, 0}, {1, 0}, {2, 0}, {3, 1}, {10, 8},
 	} {

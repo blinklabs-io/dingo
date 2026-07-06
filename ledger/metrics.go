@@ -39,6 +39,10 @@ type stateMetrics struct {
 	// decode during the mid-epoch ratifiability check, so the failures
 	// surface as a metric instead of just log volume.
 	governanceProposalDecodeFailures prometheus.Counter
+	// Incremented when a peer repeatedly asks us to roll back to a point
+	// we cannot cross to (local chain diverged), so a stuck node surfaces
+	// as a metric instead of only a WARN loop. See issue #2728.
+	unrecoverableRollbacks prometheus.Counter
 }
 
 func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
@@ -130,6 +134,12 @@ func (m *stateMetrics) init(promRegistry prometheus.Registerer) {
 		prometheus.CounterOpts{
 			Name: "dingo_governance_proposal_decode_failures_total",
 			Help: "stored governance proposals whose CBOR failed to decode during ratifiability checks",
+		},
+	)
+	m.unrecoverableRollbacks = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "dingo_chainsync_unrecoverable_rollback_total",
+			Help: "times a peer repeatedly requested a rollback we cannot cross to (local chain diverged, operator intervention required)",
 		},
 	)
 }

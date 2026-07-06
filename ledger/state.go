@@ -67,6 +67,8 @@ const (
 	ledgerIntersectDenseCount    = 32
 	ledgerAncestorSearchWindow   = 10_000
 	firstBlockIndex              = 1
+	mithrilLedgerSlotSyncKey     = "mithril_ledger_slot"
+	mithrilLedgerHashSyncKey     = "mithril_ledger_hash"
 )
 
 type metadataDbReader interface {
@@ -406,14 +408,24 @@ type LedgerStateConfig struct {
 	// is the bound for when it is actually available to fetch) rather than a
 	// hardcoded duration; the ledger converts it to wall-clock using the
 	// Shelley slot length. Zero disables the wait.
-	EndorserBlockWaitSlots   uint64
-	ValidateHistorical       bool
-	EnableDijkstra           bool
-	StartInDijkstra          bool
-	TrustedReplay            bool
-	ManualBlockProcessing    bool
-	ForgeBlocks              bool
-	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
+	EndorserBlockWaitSlots uint64
+	// LeiosTolerateEndorserConflicts enables endorser-block conflict resolution
+	// for the Musashi prototype network, where successive endorser blocks carry
+	// mutually-conflicting, never-confirmed mempool transactions. When set, an
+	// endorser-block transaction whose inputs are already spent is skipped
+	// (best-effort) rather than aborting, and an authoritative ranking-block
+	// transaction that needs an input a speculative endorser-block transaction
+	// already spent revokes that endorser-block transaction instead of wedging
+	// the ledger with "UTxO already spent" (issue #2699). Off on every other
+	// network, where endorser-block transactions are applied unconditionally.
+	LeiosTolerateEndorserConflicts bool
+	ValidateHistorical             bool
+	EnableDijkstra                 bool
+	StartInDijkstra                bool
+	TrustedReplay                  bool
+	ManualBlockProcessing          bool
+	ForgeBlocks                    bool
+	DatabaseWorkerPoolConfig       DatabaseWorkerPoolConfig
 }
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
@@ -468,6 +480,9 @@ type PendingTransaction struct {
 // MempoolProvider provides pending transactions without exposing mempool DTOs.
 type MempoolProvider interface {
 	Transactions() []PendingTransaction
+	// RemoveTxsByHash removes confirmed transactions without cascading to
+	// chained descendants, which remain valid against the updated ledger.
+	RemoveTxsByHash(hashes []string)
 }
 type rollbackRecord struct {
 	point     ocommon.Point
@@ -539,6 +554,7 @@ type LedgerState struct {
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
 	lastAtTipRecovery             *atTipRecoveryAttempt
 	mithrilLedgerSlot             uint64 // blocks at or below this slot are Mithril-verified; skip validation
+	mithrilLedgerHash             []byte // hash for mithrilLedgerSlot, used as a stable chainsync intersect point
 	lastLocalRollbackSeq          uint64
 	lastLocalRollbackPoint        ocommon.Point
 
@@ -575,6 +591,20 @@ type LedgerState struct {
 	dropRollbackCount   int64     // count of suppressed drop rollbacks since last log
 
 	rollbackHistory []rollbackRecord // recent rollback slot+time pairs for loop detection
+
+	// unrecoverableRollbacks tracks rollback points a peer repeatedly asks
+	// us to cross to but that we cannot apply locally (block missing below
+	// our diverged tip, rollback exceeds K, or the point is below the
+	// Mithril trust boundary). Unlike rollbackHistory it is keyed on the
+	// rollback point alone (not the connection) and is deliberately NOT
+	// cleared by the resync reset, so it survives the reset+reconnect
+	// cycle. That cycle otherwise defeats the rollbackHistory-based loop
+	// detector: each un-crossable rollback calls resetChainsyncResyncState
+	// (which wipes rollbackHistory) and forces a fresh connection, and the
+	// detector keys on connection ID, so the per-connection counter never
+	// reaches its threshold across reconnects. See issue #2728.
+	unrecoverableRollbacks       map[string]unrecoverableRollbackRecord
+	lastUnrecoverableRollbackLog time.Time // throttles the stuck-divergence operator error
 
 	lastActiveConnId *ouroboros.ConnectionId // tracks active connection for switch detection
 
@@ -710,37 +740,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.metrics.epochLengthSlots.Set(float64(ls.currentEpoch.LengthInSlots))
 	}
 
-	// Read Mithril ledger state slot if present. Blocks at or below
-	// this slot were verified by the Mithril certificate chain during
-	// import and must not be re-validated during chainsync replay.
-	if mithrilSlotStr, err := ls.db.GetSyncState(
-		"mithril_ledger_slot", nil,
-	); err != nil {
-		ls.config.Logger.Warn(
-			"failed to read Mithril trust boundary from database",
-			"component", "ledger",
-			"error", err,
-		)
-	} else if mithrilSlotStr != "" {
-		mls, parseErr := strconv.ParseUint(
-			mithrilSlotStr, 10, 64,
-		)
-		if parseErr != nil {
-			ls.config.Logger.Warn(
-				"malformed mithril_ledger_slot value, ignoring",
-				"component", "ledger",
-				"value", mithrilSlotStr,
-				"error", parseErr,
-			)
-		} else {
-			ls.mithrilLedgerSlot = mls
-			ls.config.Logger.Info(
-				"loaded Mithril trust boundary",
-				"component", "ledger",
-				"mithril_ledger_slot", mls,
-			)
-		}
-	}
+	ls.loadMithrilTrustBoundary()
 
 	// Initialize database worker pool for async operations
 	if !ls.config.DatabaseWorkerPoolConfig.Disabled {
@@ -757,9 +757,45 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.config.Logger.Info("database worker pool disabled")
 	}
 
-	// Setup event handlers. The chainsync/blockfetch/chain-update streams
-	// can burst at bulk-sync rates (#1556 / #1914), so they opt into the
-	// large EventQueueSize buffer. Sparser streams use the default.
+	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
+	ls.scheduleCleanupConsumedUtxos()
+	// Load epoch info from DB
+	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
+		return ls.loadEpochs(txn)
+	}, true)
+	if err != nil {
+		return fmt.Errorf("failed to load epoch info: %w", err)
+	}
+	ls.checkpointWrittenForEpoch = false
+	// Load current protocol parameters from DB
+	if err := ls.loadPParams(); err != nil {
+		return fmt.Errorf("failed to load pparams: %w", err)
+	}
+	// Reconstruct TransitionInfo from loaded state.  After restart, the
+	// in-memory field is zero (TransitionUnknown), but if the node shut down
+	// while in the window between an epoch-boundary version bump and the first
+	// block of the new era, the pparams will report a major version that maps
+	// to a later era than currentEpoch.EraId.  Detecting this here restores
+	// the correct TransitionKnown state without persisting extra data.
+	ls.reconstructTransitionInfo()
+	// Load current tip
+	if err := ls.loadTip(); err != nil {
+		return fmt.Errorf("failed to load tip: %w", err)
+	}
+	// Reconstruct the evolving-nonce fold across Mithril "gap blocks" (blocks
+	// between the ledger-state snapshot slot and the trust boundary) that were
+	// imported without folding their VRF output. Must run after the tip and
+	// trust boundary are loaded and before any epoch nonce is computed by
+	// header verification, or the first post-bootstrap epoch boundary yields a
+	// wrong nonce and every leader-VRF check in that epoch fails.
+	if err := ls.healMithrilGapBlockNonces(ctx); err != nil {
+		return fmt.Errorf("failed to heal Mithril gap block nonces: %w", err)
+	}
+	// Setup event handlers only after startup nonce repair is complete, so a
+	// Mithril-bootstrapped node cannot process chainsync/blockfetch events with
+	// stale gap-block nonces. The chainsync/blockfetch/chain-update streams can
+	// burst at bulk-sync rates (#1556 / #1914), so they opt into the large
+	// EventQueueSize buffer. Sparser streams use the default.
 	if ls.config.EventBus != nil {
 		ls.chainsyncSubID = ls.config.EventBus.SubscribeFuncWithBuffer(
 			ChainsyncEventType,
@@ -788,31 +824,6 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 			ConnectionClosedEventType,
 			ls.handleConnectionClosedEvent,
 		)
-	}
-	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
-	ls.scheduleCleanupConsumedUtxos()
-	// Load epoch info from DB
-	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
-		return ls.loadEpochs(txn)
-	}, true)
-	if err != nil {
-		return fmt.Errorf("failed to load epoch info: %w", err)
-	}
-	ls.checkpointWrittenForEpoch = false
-	// Load current protocol parameters from DB
-	if err := ls.loadPParams(); err != nil {
-		return fmt.Errorf("failed to load pparams: %w", err)
-	}
-	// Reconstruct TransitionInfo from loaded state.  After restart, the
-	// in-memory field is zero (TransitionUnknown), but if the node shut down
-	// while in the window between an epoch-boundary version bump and the first
-	// block of the new era, the pparams will report a major version that maps
-	// to a later era than currentEpoch.EraId.  Detecting this here restores
-	// the correct TransitionKnown state without persisting extra data.
-	ls.reconstructTransitionInfo()
-	// Load current tip
-	if err := ls.loadTip(); err != nil {
-		return fmt.Errorf("failed to load tip: %w", err)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
 	// already covers the epoch end (TransitionImpossible).  This handles the
@@ -848,6 +859,76 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		go ls.ledgerProcessBlocks(ctx)
 	}
 	return nil
+}
+
+func (ls *LedgerState) loadMithrilTrustBoundary() {
+	// Read Mithril ledger state point if present. Blocks at or below
+	// this point were verified by the Mithril certificate chain during
+	// import and must not be re-validated during chainsync replay.
+	mithrilSlotStr, err := ls.db.GetSyncState(
+		mithrilLedgerSlotSyncKey,
+		nil,
+	)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read Mithril trust boundary from database",
+			"component", "ledger",
+			"error", err,
+		)
+		return
+	}
+	if mithrilSlotStr == "" {
+		return
+	}
+	mls, parseErr := strconv.ParseUint(mithrilSlotStr, 10, 64)
+	if parseErr != nil {
+		ls.config.Logger.Warn(
+			"malformed mithril_ledger_slot value, ignoring",
+			"component", "ledger",
+			"value", mithrilSlotStr,
+			"error", parseErr,
+		)
+		return
+	}
+
+	ls.mithrilLedgerSlot = mls
+	hashStr, err := ls.db.GetSyncState(mithrilLedgerHashSyncKey, nil)
+	if err != nil {
+		ls.config.Logger.Warn(
+			"failed to read Mithril trust boundary hash from database",
+			"component", "ledger",
+			"mithril_ledger_slot", mls,
+			"error", err,
+		)
+		return
+	}
+	if hashStr != "" {
+		hash, decodeErr := hex.DecodeString(hashStr)
+		if decodeErr != nil || len(hash) != lcommon.Blake2b256Size {
+			ls.config.Logger.Warn(
+				"malformed mithril_ledger_hash value, ignoring hash",
+				"component", "ledger",
+				"mithril_ledger_slot", mls,
+				"value", hashStr,
+				"error", decodeErr,
+			)
+		} else {
+			ls.mithrilLedgerHash = hash
+		}
+	}
+
+	attrs := []any{
+		"component", "ledger",
+		"mithril_ledger_slot", mls,
+	}
+	if len(ls.mithrilLedgerHash) > 0 {
+		attrs = append(
+			attrs,
+			"mithril_ledger_hash",
+			hex.EncodeToString(ls.mithrilLedgerHash),
+		)
+	}
+	ls.config.Logger.Info("loaded Mithril trust boundary", attrs...)
 }
 
 func (ls *LedgerState) RecoverCommitTimestampConflict() error {
@@ -1065,15 +1146,11 @@ func (ls *LedgerState) PoolRegistrationVRFKeyHash(
 	if pool == nil {
 		return [32]byte{}, false, nil
 	}
-	if len(pool.Registration) > 0 &&
-		len(pool.Registration[0].VrfKeyHash) == 32 {
-		copy(vrfHash[:], pool.Registration[0].VrfKeyHash)
-		return vrfHash, true, nil
-	}
-	if len(pool.VrfKeyHash) != 32 {
+	registeredVrfHash, ok := registeredPoolVrfKeyHash(pool)
+	if !ok {
 		return [32]byte{}, false, nil
 	}
-	copy(vrfHash[:], pool.VrfKeyHash)
+	copy(vrfHash[:], registeredVrfHash[:])
 	return vrfHash, true, nil
 }
 
@@ -1849,12 +1926,13 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	// then applied atomically under a single Lock to avoid data
 	// races with concurrent readers.
 	var (
-		newEpochs       []models.Epoch
-		newCurrentEpoch models.Epoch
-		newCurrentEra   eras.EraDesc
-		newPParams      lcommon.ProtocolParameters
-		newPrevPParams  lcommon.ProtocolParameters
-		eraResolved     bool
+		newEpochs         []models.Epoch
+		newEpochsRepaired bool
+		newCurrentEpoch   models.Epoch
+		newCurrentEra     eras.EraDesc
+		newPParams        lcommon.ProtocolParameters
+		newPrevPParams    lcommon.ProtocolParameters
+		eraResolved       bool
 	)
 	// Snapshot current era under read lock for fallback
 	ls.RLock()
@@ -1872,6 +1950,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	}
 	if epochs != nil {
 		newEpochs = epochs
+		// Keep rollback reloads consistent with startup reloads: a
+		// persisted empty lab must not re-enter the in-memory cache.
+		newEpochsRepaired = ls.healEmptyLabNoncesInPlace(newEpochs)
 		// Reset currentEpoch to the last remaining epoch so
 		// that ledgerProcessBlocks correctly detects the next
 		// epoch boundary and EpochNonce() returns the right
@@ -1933,6 +2014,9 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	ls.Lock()
 	if newEpochs != nil {
 		ls.epochCache = newEpochs
+		if newEpochsRepaired {
+			clear(ls.epochNonceHexCache)
+		}
 
 		if len(newEpochs) > 0 {
 			ls.currentEpoch = newCurrentEpoch
@@ -2632,21 +2716,25 @@ func (ls *LedgerState) ledgerProcessBlocks(ctx context.Context) {
 		if err == nil || ctx.Err() != nil {
 			return
 		}
-		if errors.Is(err, errRestartLedgerPipeline) {
-			continue
-		}
-		if errors.Is(err, errHaltLedgerPipeline) {
-			ls.config.Logger.Error(
-				"block processing halted after persistent validation failure",
-				"error", err,
-			)
-			return
-		}
+		ls.handleLedgerProcessBlocksError(err)
+	}
+}
+
+func (ls *LedgerState) handleLedgerProcessBlocksError(err error) {
+	if errors.Is(err, errRestartLedgerPipeline) {
+		return
+	}
+	if errors.Is(err, errHaltLedgerPipeline) {
 		ls.config.Logger.Warn(
-			"block processing failed, restarting pipeline",
+			"block processing hit persistent validation failure, restarting pipeline",
 			"error", err,
 		)
+		return
 	}
+	ls.config.Logger.Warn(
+		"block processing failed, restarting pipeline",
+		"error", err,
+	)
 }
 
 // ProcessTrustedBlockBatches processes already-decoded trusted block batches
@@ -4467,9 +4555,7 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Recover epoch records whose LastEpochBlockNonce was persisted empty
-		// by the pre-fix BlockBeforeSlot endorser-block collision (see
-		// healEmptyLabNonces). New syncs are unaffected now that
-		// BlockBeforeSlotTxn skips synthetic blobs.
+		// or stale by pre-fix boundary lookup bugs (see healEmptyLabNonces).
 		ls.healEmptyLabNonces()
 		// Set current epoch and era after healing so currentEpoch reflects
 		// any repaired nonce in epochCache.
@@ -4546,81 +4632,280 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	return nil
 }
 
-// healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce was
-// persisted empty by the pre-fix BlockBeforeSlot endorser-block collision.
+// healEmptyLabNonces repairs epoch records whose LastEpochBlockNonce or Nonce
+// was persisted empty or wrong by pre-fix boundary bugs.
 //
-// LastEpochBlockNonce is the lagged "prevHash of the last block of the previous
-// epoch" that feeds the next epoch's nonce as candidateNonce ⭒ labNonce. Before
-// BlockBeforeSlotTxn was taught to skip synthetic blobs, the labNonce lookup at
-// an epoch transition could return a Leios endorser block (persisted at a
-// block-blob key via SetGenesisCbor with an empty PrevHash) instead of the real
-// ranking block, saving an empty lab. An empty lab collapses the next epoch's
-// nonce to the NeutralNonce identity (η = candidateNonce, skipping the labNonce
-// mix), so every leader-VRF check in that epoch fails and the node wedges at
-// the first block it must verify live.
+// LastEpochBlockNonce is the Praos lab carried at this epoch's opening
+// boundary: the parent hash (PrevHash) of the last canonical block before the
+// boundary (cardano-ledger praosStateLastEpochBlockNonce). It feeds the NEXT
+// epoch's nonce: Nonce(E) = CandidateNonce(E) ⭒ LastEpochBlockNonce(E-1).
+// Earlier boundary lookups scanned block-blob keys, so they could return a
+// synthetic Leios endorser block or retained fork blob instead of the active
+// chain's real ranking block, and older releases stored the boundary block's
+// own hash instead of its parent hash. Empty or wrong lab values diverge epoch
+// nonces from peers and break leader-VRF verification.
 //
-// This runs once at startup over the loaded epoch cache. For each non-genesis
-// epoch with an empty lab whose boundary block (now resolved to the real
-// ranking block) carries a valid PrevHash, it restores the lab and recomputes
-// the affected next epoch's nonce in the cache. It is a pure function of
-// already-stored chain data and is idempotent across restarts.
+// This runs once at startup over the loaded epoch cache, in ascending epoch
+// order. For each non-genesis epoch it independently (a) restores the lab from
+// the canonical chain index when it differs from the expected epochLabNonce
+// semantics, and (b) recomputes the epoch's nonce from its candidate and the
+// PREVIOUS epoch's (already repaired) carried lab when they disagree. The lab
+// repair needs no candidate; the nonce repair is skipped when the candidate is
+// missing/invalid or the previous epoch's lab could not be verified. It is a
+// pure function of already-stored chain data and is idempotent across restarts.
 func (ls *LedgerState) healEmptyLabNonces() {
+	if ls.healEmptyLabNoncesInPlace(ls.epochCache) {
+		clear(ls.epochNonceHexCache)
+	}
+}
+
+// healLabNonceRecentEpochs bounds the startup lab/nonce repair to the most
+// recent epochs. Epoch labs are immutable historical data, and only the
+// resume-tip epoch's lab feeds a nonce the node computes at runtime: the
+// current epoch nonce mixes the previous epoch's lab, forward boundaries
+// recompute labs fresh in calculateEpochNonce, and rollbacks are bounded by the
+// security parameter (well under one epoch on real networks). Re-deriving every
+// historical epoch's lab from the chain on every restart is one canonical-block
+// lookup per epoch, which on a large blob store costs many minutes for no
+// consensus benefit. This window comfortably covers the current epoch, the
+// bounded rollback window, and a margin; DBs with fewer epochs are fully
+// processed.
+const healLabNonceRecentEpochs = 8
+
+func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	repaired := false
-	for i := range ls.epochCache {
-		ep := &ls.epochCache[i]
-		// The genesis epoch legitimately carries no lagged block nonce.
-		if len(ep.LastEpochBlockNonce) != 0 || ep.StartSlot == 0 {
-			continue
-		}
-		boundary, err := database.BlockBeforeSlot(ls.db, ep.StartSlot)
-		if err != nil ||
-			len(boundary.PrevHash) != lcommon.Blake2b256Size {
-			continue
-		}
-		ep.LastEpochBlockNonce = boundary.PrevHash
-		repaired = true
-		ls.config.Logger.Info(
-			"recovered empty epoch lastEpochBlockNonce",
-			"epoch", ep.EpochId,
-			"boundary_slot", boundary.Slot,
-			"last_epoch_block_nonce",
-			hex.EncodeToString(ep.LastEpochBlockNonce),
-			"component", "ledger",
-		)
-		// Recompute the next epoch's nonce: it used this lab in its formula
-		// and would otherwise be the NeutralNonce-collapsed (η=candidate) value.
-		for j := range ls.epochCache {
-			nxt := &ls.epochCache[j]
-			if nxt.EpochId != ep.EpochId+1 ||
-				len(nxt.CandidateNonce) != lcommon.Blake2b256Size {
-				continue
+	var (
+		skippedMissingCandidate            int
+		firstMissingCandidateEpoch         uint64
+		lastMissingCandidateEpoch          uint64
+		skippedInvalidCandidate            int
+		firstInvalidCandidateEpoch         uint64
+		lastInvalidCandidateEpoch          uint64
+		skippedMithrilTrusted              int
+		firstMithrilTrustedEpoch           uint64
+		lastMithrilTrustedEpoch            uint64
+		recordSkippedMissingCandidateEpoch = func(epoch uint64) {
+			if skippedMissingCandidate == 0 {
+				firstMissingCandidateEpoch = epoch
 			}
+			lastMissingCandidateEpoch = epoch
+			skippedMissingCandidate++
+		}
+		recordSkippedInvalidCandidateEpoch = func(epoch uint64) {
+			if skippedInvalidCandidate == 0 {
+				firstInvalidCandidateEpoch = epoch
+			}
+			lastInvalidCandidateEpoch = epoch
+			skippedInvalidCandidate++
+		}
+		recordSkippedMithrilTrustedEpoch = func(epoch uint64) {
+			if skippedMithrilTrusted == 0 {
+				firstMithrilTrustedEpoch = epoch
+			}
+			lastMithrilTrustedEpoch = epoch
+			skippedMithrilTrusted++
+		}
+	)
+	// labVerified[i] records that epochs[i].LastEpochBlockNonce is known to
+	// match the canonical lab semantics (verified against the chain, repaired,
+	// or Mithril-trusted), so it is safe to use as the eta input for
+	// epochs[i+1]'s nonce check.
+	// Verify/repair the recent window (see healLabNonceRecentEpochs), plus one
+	// predecessor epoch. The predecessor is scanned only so its lab is verified
+	// and repaired: the oldest in-window epoch's nonce check mixes the PREVIOUS
+	// epoch's LastEpochBlockNonce, so without a verified predecessor lab that
+	// first in-window nonce would be skipped and left stale. Epochs before the
+	// scan are immutable and never feed a runtime nonce, so re-deriving their
+	// labs from the chain on every restart is wasted work.
+	startIdx := 0
+	if scanEpochs := healLabNonceRecentEpochs + 1; len(epochs) > scanEpochs {
+		startIdx = len(epochs) - scanEpochs
+	}
+	labVerified := make([]bool, len(epochs))
+	for i := startIdx; i < len(epochs); i++ {
+		ep := &epochs[i]
+		// The genesis epoch legitimately carries no last block nonce.
+		if ep.StartSlot == 0 {
+			labVerified[i] = len(ep.LastEpochBlockNonce) == 0
+			continue
+		}
+		if ls.mithrilLedgerSlot > 0 &&
+			ep.StartSlot <= ls.mithrilLedgerSlot &&
+			len(ep.LastEpochBlockNonce) == lcommon.Blake2b256Size {
+			recordSkippedMithrilTrustedEpoch(ep.EpochId)
+			labVerified[i] = true
+			continue
+		}
+		boundary, err := ls.canonicalBlockBeforeSlot(nil, ep.StartSlot)
+		if err != nil {
+			// A pre-Praos epoch carries no lab by definition, so its nil lab
+			// is verified even without chain data.
+			if len(ep.Nonce) == 0 && len(ep.LastEpochBlockNonce) == 0 {
+				labVerified[i] = true
+			}
+			continue
+		}
+		expectedLab, ok := ls.expectedEpochRepairLab(epochs, i, boundary)
+		if !ok {
+			continue
+		}
+		if !bytes.Equal(ep.LastEpochBlockNonce, expectedLab) {
+			previousLab := cloneNonce(ep.LastEpochBlockNonce)
+			ep.LastEpochBlockNonce = cloneNonce(expectedLab)
+			repaired = true
+			ls.config.Logger.Info(
+				"repaired epoch lastEpochBlockNonce",
+				"epoch", ep.EpochId,
+				"boundary_slot", boundary.Slot,
+				"previous_last_epoch_block_nonce",
+				hex.EncodeToString(previousLab),
+				"last_epoch_block_nonce",
+				hex.EncodeToString(ep.LastEpochBlockNonce),
+				"component", "ledger",
+			)
+		}
+		labVerified[i] = true
+		// The nonce check needs the PREVIOUS epoch's carried lab (already
+		// verified/repaired above, since the loop runs in ascending order):
+		//   Nonce(E) = CandidateNonce(E) ⭒ LastEpochBlockNonce(E-1)
+		// Mixing with this epoch's OWN lab instead would shift eta by one
+		// epoch — the exact #2734 divergence this heal exists to repair.
+		if i == 0 || !labVerified[i-1] {
+			continue
+		}
+		candidateNonce, err := ls.epochRepairCandidateNonce(*ep)
+		if err != nil {
+			if len(ep.CandidateNonce) == 0 {
+				recordSkippedMissingCandidateEpoch(ep.EpochId)
+			} else {
+				recordSkippedInvalidCandidateEpoch(ep.EpochId)
+			}
+			continue
+		}
+		labForEta := epochs[i-1].LastEpochBlockNonce
+		var expectedNonce []byte
+		if len(labForEta) == 0 {
+			// NeutralNonce is the identity element of ⭒:
+			//   candidateNonce ⭒ NeutralNonce = candidateNonce
+			expectedNonce = cloneNonce(candidateNonce)
+		} else {
 			res, err := lcommon.CalculateEpochNonce(
-				nxt.CandidateNonce,
-				ep.LastEpochBlockNonce,
+				candidateNonce,
+				labForEta,
 				nil,
 			)
 			if err != nil {
 				ls.config.Logger.Warn(
 					"failed to recompute epoch nonce during lab recovery",
-					"epoch", nxt.EpochId,
+					"epoch", ep.EpochId,
 					"error", err,
 					"component", "ledger",
 				)
 				continue
 			}
+			expectedNonce = res.Bytes()
+		}
+		if !bytes.Equal(ep.Nonce, expectedNonce) {
+			previousNonce := cloneNonce(ep.Nonce)
+			ep.Nonce = expectedNonce
+			repaired = true
 			ls.config.Logger.Info(
 				"recomputed epoch nonce after lab recovery",
-				"epoch", nxt.EpochId,
-				"previous_nonce", hex.EncodeToString(nxt.Nonce),
-				"epoch_nonce", hex.EncodeToString(res.Bytes()),
+				"epoch", ep.EpochId,
+				"previous_nonce", hex.EncodeToString(previousNonce),
+				"epoch_nonce", hex.EncodeToString(expectedNonce),
 				"component", "ledger",
 			)
-			nxt.Nonce = res.Bytes()
 		}
 	}
-	if repaired {
-		clear(ls.epochNonceHexCache)
+	if skippedMithrilTrusted > 0 {
+		ls.config.Logger.Info(
+			"skipped epoch lab recovery for epochs covered by Mithril trust boundary",
+			"count", skippedMithrilTrusted,
+			"first_epoch", firstMithrilTrustedEpoch,
+			"last_epoch", lastMithrilTrustedEpoch,
+			"mithril_ledger_slot", ls.mithrilLedgerSlot,
+			"component", "ledger",
+		)
+	}
+	if skippedMissingCandidate > 0 {
+		ls.config.Logger.Info(
+			"skipped epoch lab recovery for epochs without stored candidate nonce",
+			"count", skippedMissingCandidate,
+			"first_epoch", firstMissingCandidateEpoch,
+			"last_epoch", lastMissingCandidateEpoch,
+			"component", "ledger",
+		)
+	}
+	if skippedInvalidCandidate > 0 {
+		ls.config.Logger.Warn(
+			"skipped epoch lab recovery for epochs with invalid candidate nonce",
+			"count", skippedInvalidCandidate,
+			"first_epoch", firstInvalidCandidateEpoch,
+			"last_epoch", lastInvalidCandidateEpoch,
+			"component", "ledger",
+		)
+	}
+	return repaired
+}
+
+// expectedEpochRepairLab returns the canonical LastEpochBlockNonce for
+// epochs[idx], given the last canonical block before its start slot.
+//
+// Pre-Praos (Byron) epochs carry no lab, and the FIRST Praos epoch's carried
+// lab is NeutralNonce (nil): cardano-ledger initialChainDepState sets
+// csLabNonce = NeutralNonce, and the initial-epoch branch of
+// calculateEpochNonce stores a nil lab. "Repairing" it to the last pre-Praos
+// block's parent hash would diverge the next boundary's eta on any chain with
+// a Byron era. For every other epoch the carried lab is prevHashToNonce of the
+// boundary block — regardless of which epoch that block fell in, since an
+// empty closing epoch carries the same block's parent hash forward unchanged.
+// Consulting the stored previous-epoch lab instead could inject an unhealed
+// old-shape (own-hash) value, so the value is always derived from the chain.
+func (ls *LedgerState) expectedEpochRepairLab(
+	epochs []models.Epoch,
+	idx int,
+	boundary models.Block,
+) ([]byte, bool) {
+	if idx < 0 || idx >= len(epochs) {
+		return nil, false
+	}
+	// Pre-Praos epochs have no nonce and carry no lab.
+	if len(epochs[idx].Nonce) == 0 {
+		return nil, true
+	}
+	// The first Praos epoch (previous epoch is pre-Praos) carries NeutralNonce.
+	if idx > 0 && len(epochs[idx-1].Nonce) == 0 {
+		return nil, true
+	}
+	// Derive the boundary block's parent hash, decoding the block CBOR when
+	// the stored PrevHash is empty (legacy empty-PrevHash rows).
+	prevHash, err := blockPrevHash(boundary)
+	if err != nil || len(prevHash) != lcommon.Blake2b256Size {
+		return nil, false
+	}
+	// cardano-ledger's prevHashToNonce maps GenesisHash to NeutralNonce: a
+	// boundary block that is the chain's first block contributes no lab.
+	if genesisHash, gErr := GenesisBlockHash(ls.config.CardanoNodeConfig); gErr == nil &&
+		bytes.Equal(prevHash, genesisHash[:]) {
+		return nil, true
+	}
+	return cloneNonce(prevHash), true
+}
+
+func (ls *LedgerState) epochRepairCandidateNonce(
+	ep models.Epoch,
+) ([]byte, error) {
+	switch len(ep.CandidateNonce) {
+	case lcommon.Blake2b256Size:
+		return cloneNonce(ep.CandidateNonce), nil
+	case 0:
+		return nil, errors.New("candidate nonce not stored")
+	default:
+		return nil, fmt.Errorf(
+			"invalid candidate nonce length %d",
+			len(ep.CandidateNonce),
+		)
 	}
 }
 
@@ -5036,7 +5321,7 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 	points []ocommon.Point,
 	count int,
 ) []ocommon.Point {
-	if count <= 0 || len(points) == 0 {
+	if count <= 0 {
 		return points
 	}
 	point, ok := ls.mithrilTrustBoundaryPoint()
@@ -5076,10 +5361,17 @@ func (ls *LedgerState) mithrilTrustBoundaryPoint() (ocommon.Point, bool) {
 	}
 	ls.RLock()
 	boundarySlot := ls.mithrilLedgerSlot
+	boundaryHash := append([]byte(nil), ls.mithrilLedgerHash...)
 	currentTip := ls.currentTip
 	ls.RUnlock()
 	if boundarySlot == 0 || boundarySlot == ^uint64(0) {
 		return ocommon.Point{}, false
+	}
+	if len(boundaryHash) > 0 {
+		if len(boundaryHash) != lcommon.Blake2b256Size {
+			return ocommon.Point{}, false
+		}
+		return ocommon.NewPoint(boundarySlot, boundaryHash), true
 	}
 	if currentTip.Point.Slot == 0 && len(currentTip.Point.Hash) == 0 {
 		return ocommon.Point{}, false
@@ -5644,7 +5936,8 @@ func (ls *LedgerState) nextEpochNonceReadyCutoffSlot(
 
 // computeNextEpochNonce speculatively computes the epoch nonce for the
 // next epoch (currentEpoch.EpochId + 1) using data from the current epoch.
-// Uses the lagged lastEpochBlockNonce from the current epoch record.
+// Uses the current epoch's last block hash, carrying the stored
+// lastEpochBlockNonce only when the epoch has no blocks.
 //
 // Returns nil if the nonce cannot be computed (e.g., missing block data,
 // Byron era, or missing genesis config).
@@ -5702,6 +5995,9 @@ func (ls *LedgerState) SlotsPerEpoch() uint64 {
 // ActiveSlotCoeff returns the active slot coefficient (f parameter).
 // This is used in the Ouroboros Praos leader election probability.
 func (ls *LedgerState) ActiveSlotCoeff() float64 {
+	if ls.config.CardanoNodeConfig == nil {
+		return 0
+	}
 	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
 	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
 		return 0
@@ -5713,6 +6009,20 @@ func (ls *LedgerState) ActiveSlotCoeff() float64 {
 		return 0
 	}
 	return float64(num) / float64(denom)
+}
+
+// activeSlotCoeffRat returns the active slot coefficient as a *big.Rat,
+// preserving the full precision from the Shelley genesis without a
+// float64 roundtrip. Returns nil when the genesis is unavailable.
+func (ls *LedgerState) activeSlotCoeffRat() *big.Rat {
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || shelleyGenesis.ActiveSlotsCoeff.Rat == nil {
+		return nil
+	}
+	return shelleyGenesis.ActiveSlotsCoeff.Rat
 }
 
 // Database returns the underlying database for transaction operations.
@@ -6384,6 +6694,7 @@ func (ls *LedgerState) forgeBlock() {
 		transactionBodies      []conway.ConwayTransactionBody
 		transactionWitnessSets []conway.ConwayTransactionWitnessSet
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
+		includedTxHashes       []string
 		blockSize              uint64
 		totalExUnits           lcommon.ExUnits
 		maxTxSize              = uint64(conwayPParams.MaxTxSize)
@@ -6522,6 +6833,7 @@ func (ls *LedgerState) forgeBlock() {
 			}
 
 			// Add transaction to our lists for later block creation
+			includedTxHashes = append(includedTxHashes, mempoolTx.Hash)
 			transactionBodies = append(transactionBodies, fullTx.Body)
 			transactionWitnessSets = append(
 				transactionWitnessSets,
@@ -6644,6 +6956,13 @@ func (ls *LedgerState) forgeBlock() {
 			"error", err,
 		)
 		return
+	}
+
+	// Synchronously evict confirmed transactions so the next forging slot
+	// sees a clean mempool without waiting for the async ChainUpdateEvent
+	// rebuild cycle.
+	if ls.mempool != nil && len(includedTxHashes) > 0 {
+		ls.mempool.RemoveTxsByHash(includedTxHashes)
 	}
 
 	// Wake chainsync server iterators so connected peers discover

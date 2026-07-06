@@ -102,6 +102,39 @@ func shouldRecycleLocalTipPlateau(
 	return true
 }
 
+// isLedgerApplicationBacklog reports whether a local-tip plateau is caused by
+// the ledger pipeline replaying a backlog of already-fetched blocks rather than
+// by a stalled chainsync stream.
+//
+// A plateau only means the APPLIED ledger tip stopped advancing while a peer is
+// ahead. That is a chainsync problem only when headers are actually missing. On
+// Leios (and any deep catch-up) the header/primary chain routinely runs far
+// ahead of the applied ledger tip while the ledger pipeline replays a large
+// backlog of blocks it has already fetched. When the primary chain has covered
+// the bulk of the distance to the best peer and the remaining gap is dominated
+// by downloaded-but-not-yet-applied blocks, the chainsync stream is healthy and
+// caught up: recycling it cannot advance the applied tip and only churns the
+// connection. Requiring the apply backlog to be at least as large as the
+// residual header gap keeps a genuinely lagging header chain (headers missing,
+// nothing applied) on the recycle path.
+func isLedgerApplicationBacklog(
+	appliedTipSlot uint64,
+	primaryChainTipSlot uint64,
+	bestPeerTipSlot uint64,
+) bool {
+	if primaryChainTipSlot <= appliedTipSlot {
+		// Header chain is not ahead of the applied tip, so there is no
+		// backlog to drain: any plateau here is an upstream/header stall.
+		return false
+	}
+	var headerGap uint64
+	if bestPeerTipSlot > primaryChainTipSlot {
+		headerGap = bestPeerTipSlot - primaryChainTipSlot
+	}
+	applyBacklog := primaryChainTipSlot - appliedTipSlot
+	return applyBacklog >= headerGap
+}
+
 func (n *Node) processChainsyncRecyclerTick(
 	now time.Time,
 	localTipSlot uint64,
@@ -201,12 +234,14 @@ func (n *Node) processChainsyncRecyclerTick(
 					// upstream (e.g. a one-relay devnet/leios topology),
 					// which would otherwise wedge here permanently.
 					reconciledByLedger := false
+					reconcileFailed := false
 					if n.ledgerState != nil {
 						reconciled, err := n.ledgerState.ReconcileLivePrimaryChainLedgerDivergence(
 							"local tip plateau",
 							*targetConn,
 						)
 						if err != nil {
+							reconcileFailed = true
 							n.config.logger.Warn(
 								"plateau reconcile failed",
 								"connection_id", connKey,
@@ -229,7 +264,53 @@ func (n *Node) processChainsyncRecyclerTick(
 							reconciledByLedger = true
 						}
 					}
-					if !reconciledByLedger {
+					// A local-tip plateau on Leios is usually the ledger
+					// pipeline replaying a backlog of already-fetched blocks,
+					// not a stalled header stream. When the primary chain is
+					// already caught up to the peer, recycling the (healthy)
+					// chainsync connection cannot advance the applied tip and
+					// only churns the connection -- dropped pipelines,
+					// MustReply timeouts from ingress backpressure, and
+					// TIME_WAIT/goroutine growth. Only trust this heuristic
+					// after the local reconcile had a chance to repair, or at
+					// least rule out, a primary-chain / ledger divergence.
+					var primaryChainTipSlot uint64
+					if n.ledgerState != nil {
+						primaryChainTipSlot = n.ledgerState.PrimaryChainTipSlot()
+					}
+					isBacklog := isLedgerApplicationBacklog(
+						localTipSlot,
+						primaryChainTipSlot,
+						bestPeerTip.Tip.Point.Slot,
+					)
+					if reconciledByLedger {
+						// Reconciliation already reset the plateau clock and
+						// recorded cooldown. Give ledger replay a chance to
+						// resume from the repaired tip before trying any
+						// connection-level recovery.
+					} else if isBacklog && !reconcileFailed {
+						// The header chain is already caught up to the peer;
+						// the plateau is the ledger pipeline draining a
+						// backlog of already-fetched blocks. Recycling the
+						// chainsync stream cannot help and only churns the
+						// connection, so leave it running and let the pipeline
+						// advance. Surfacing this at INFO also stops a wedged
+						// ledger pipeline from being masked as a chainsync
+						// stall.
+						n.config.logger.Info(
+							"local tip plateau is a ledger-application backlog; header chain already caught up, not recycling chainsync",
+							"connection_id", connKey,
+							"applied_tip_slot", localTipSlot,
+							"primary_chain_tip_slot", primaryChainTipSlot,
+							"best_peer_tip_slot", bestPeerTip.Tip.Point.Slot,
+							"plateau_duration", now.Sub(*lastProgressAt),
+						)
+						// Reset the plateau clock so we re-evaluate only after
+						// another full plateau window instead of every tick
+						// while the ledger pipeline drains.
+						*lastProgressAt = now
+						delete(recycleAt, connKey)
+					} else {
 						// The local reconcile found nothing to repair (or
 						// failed), so the stall is in the upstream chainsync
 						// stream itself: the active peer's server-side cursor

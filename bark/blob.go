@@ -20,7 +20,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -36,16 +39,89 @@ import (
 // per-item expired-history resolution.
 const archiveFetchTimeout = 20 * time.Second
 
+// maxArchiveBlockSize caps archive download responses to guard against
+// memory exhaustion from a malicious or misconfigured archive service.
+// 128 KiB covers the current Cardano max block body size (~90 KiB) plus
+// header/CBOR overhead while keeping malicious archive responses small.
+const maxArchiveBlockSize = 128 * 1024
+
+// validateArchiveURL rejects download URLs that could enable SSRF, credential
+// leakage, or TLS-downgrade attacks.
+func validateArchiveURL(rawURL string, allowedHosts map[string]struct{}) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+	if u.User != nil {
+		return errors.New("URL must not contain embedded credentials")
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("URL must use HTTPS, got scheme %q", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("URL must include a host")
+	}
+	normalizedHost := strings.ToLower(host)
+	if _, ok := allowedHosts[normalizedHost]; !ok {
+		return fmt.Errorf("URL host %q is not allowed", host)
+	}
+	return nil
+}
+
+func archiveDownloadHosts(baseURL string, allowlist []string) map[string]struct{} {
+	hosts := map[string]struct{}{}
+	if u, err := url.Parse(baseURL); err == nil {
+		addArchiveDownloadHost(hosts, u.Hostname())
+	}
+	for _, host := range allowlist {
+		addArchiveDownloadHost(hosts, host)
+	}
+	return hosts
+}
+
+func addArchiveDownloadHost(hosts map[string]struct{}, host string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return
+	}
+	if u, err := url.Parse(host); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	} else if splitHost, _, err := net.SplitHostPort(host); err == nil {
+		host = splitHost
+	}
+	host = strings.Trim(host, "[]")
+	host = strings.ToLower(host)
+	if host != "" {
+		hosts[host] = struct{}{}
+	}
+}
+
+func archiveHTTPClient(client *http.Client) *http.Client {
+	if client == nil {
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+		}
+	}
+	secured := *client
+	secured.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("bark: redirects are not permitted for archive downloads")
+	}
+	return &secured
+}
+
 type BlobStoreBarkConfig struct {
-	BaseUrl    string
-	HTTPClient *http.Client
+	BaseUrl                   string
+	HTTPClient                *http.Client
+	BlockDownloadAllowedHosts []string
 }
 
 type BlobStoreBark struct {
-	config        BlobStoreBarkConfig
-	archiveClient archiveconnect.ArchiveServiceClient
-	httpClient    *http.Client
-	upstream      blob.BlobStore
+	config                    BlobStoreBarkConfig
+	archiveClient             archiveconnect.ArchiveServiceClient
+	httpClient                *http.Client
+	blockDownloadAllowedHosts map[string]struct{}
+	upstream                  blob.BlobStore
 }
 
 func NewBarkBlobStore(
@@ -56,12 +132,7 @@ func NewBarkBlobStore(
 		return nil, errors.New("bark: upstream blob store is required")
 	}
 
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 30 * time.Second,
-		}
-	}
+	httpClient := archiveHTTPClient(config.HTTPClient)
 
 	return &BlobStoreBark{
 		config: config,
@@ -69,8 +140,9 @@ func NewBarkBlobStore(
 			httpClient,
 			config.BaseUrl,
 		),
-		httpClient: httpClient,
-		upstream:   upstream,
+		httpClient:                httpClient,
+		blockDownloadAllowedHosts: archiveDownloadHosts(config.BaseUrl, config.BlockDownloadAllowedHosts),
+		upstream:                  upstream,
 	}, nil
 }
 
@@ -274,6 +346,11 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 
 	block := blocks[0]
 
+	if err := validateArchiveURL(block.GetUrl(), b.blockDownloadAllowedHosts); err != nil {
+		return nil, types.BlockMetadata{},
+			fmt.Errorf("bark: archive returned unsafe download URL: %w", err)
+	}
+
 	blockReq, err := http.NewRequestWithContext(
 		ctx,
 		http.MethodGet,
@@ -301,10 +378,15 @@ func (b *BlobStoreBark) fetchBlockFromArchive(
 				blockResp.StatusCode)
 	}
 
-	blockBody, err := io.ReadAll(blockResp.Body)
+	lr := io.LimitReader(blockResp.Body, maxArchiveBlockSize+1)
+	blockBody, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, types.BlockMetadata{},
 			fmt.Errorf("failed reading block body: %w", err)
+	}
+	if int64(len(blockBody)) > maxArchiveBlockSize {
+		return nil, types.BlockMetadata{},
+			fmt.Errorf("bark: archive response exceeds %d-byte limit", maxArchiveBlockSize)
 	}
 
 	prevHash, err := hex.DecodeString(block.GetMeta().GetPrevHash())

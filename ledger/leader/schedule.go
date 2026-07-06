@@ -44,8 +44,8 @@ type Schedule struct {
 	FormatVersion int                 // Snapshot of ScheduleFormatVersion at compute time
 	Epoch         uint64              // Epoch this schedule is for
 	PoolId        lcommon.PoolKeyHash // Pool key hash
-	PoolStake     uint64              // Pool's stake from Go snapshot
-	TotalStake    uint64              // Total active stake from Go snapshot
+	PoolStake     uint64              // Pool's stake from active snapshot
+	TotalStake    uint64              // Total active stake from active snapshot
 	EpochNonce    []byte              // Epoch nonce for VRF
 	LeaderSlots   []uint64            // Slots where pool is leader, ascending-sorted
 

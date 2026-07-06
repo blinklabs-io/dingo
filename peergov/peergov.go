@@ -37,6 +37,15 @@ const (
 	defaultLedgerPeerRefreshInterval    = 1 * time.Hour
 	defaultLedgerPeerTarget             = 20
 
+	// When the node is critically short of connected upstreams, ledger-peer
+	// discovery ignores the normal (hourly) refresh interval and replenishes
+	// on this much shorter emergency cadence, and a dedicated ticker checks
+	// for that condition far more often than the 5-minute reconcile. Together
+	// they ensure a collapsed peer pool recovers in seconds rather than
+	// wedging the node while the ledger still lists plenty of relays.
+	defaultEmergencyLedgerPeerRefreshInterval = 30 * time.Second
+	defaultEmergencyDiscoveryCheckInterval    = 30 * time.Second
+
 	// Default peer targets match cardano-node config.json defaults.
 	defaultTargetNumberOfKnownPeers       = 150
 	defaultTargetNumberOfEstablishedPeers = 50
@@ -87,6 +96,16 @@ const (
 	reconnectBackoffFactor      = 2
 	inboundCheckDelay           = 30 * time.Second
 	minStableConnectionDuration = 30 * time.Second
+	// dialDNSResolveTimeout bounds the fresh per-attempt DNS resolution in
+	// resolveDialAddress. It is intentionally shorter than connmanager's 10s
+	// dial timeout so a hung or slow resolver cannot wedge the outbound-dial
+	// loop; on timeout the attempt falls back to the unresolved address and
+	// the dialer resolves it itself.
+	dialDNSResolveTimeout = 5 * time.Second
+	// dialFamilyCacheTTL limits how long local address-family detection can
+	// remain stale after interface or routing changes while avoiding a
+	// per-dial interface scan.
+	dialFamilyCacheTTL = 1 * time.Minute
 )
 
 // Peer source priority values for removal decisions.
@@ -120,7 +139,14 @@ type PeerGovernor struct {
 	// emitted only on entry (rising edge) to avoid indefinite log spam.
 	// Guarded by mu.
 	lastEligibleUpstreamSkipLogged bool
-	mu                             sync.Mutex
+	// Local address-family capability, detected periodically and consulted by
+	// resolveDialAddress to avoid dialing an unreachable family (e.g. an IPv6
+	// record on a v4-only host).
+	dialFamilyMu        sync.RWMutex
+	dialFamilyHasV4     bool
+	dialFamilyHasV6     bool
+	dialFamilyCheckedAt time.Time
+	mu                  sync.Mutex
 }
 
 type PeerGovernorConfig struct {
@@ -143,6 +169,9 @@ type PeerGovernorConfig struct {
 	UseLedgerAfterSlot        int64              // Slot after which to enable ledger peers (-1 = disabled)
 	LedgerPeerRefreshInterval time.Duration      // How often to refresh ledger peers
 	LedgerPeerTarget          int                // Negative disables ledger discovery, 0 uses defaultLedgerPeerTarget, positive uses that target
+	// Emergency ledger-peer discovery configuration
+	EmergencyLedgerPeerRefreshInterval time.Duration // Urgent ledger refresh cadence (0 = default 30s)
+	EmergencyDiscoveryCheckInterval    time.Duration // Urgent condition check cadence (0 = default 30s)
 
 	// Peer targets (0 = use default, -1 = unlimited)
 	// These are goals the system works toward, not hard limits.
@@ -242,6 +271,12 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	if cfg.LedgerPeerRefreshInterval == 0 {
 		cfg.LedgerPeerRefreshInterval = defaultLedgerPeerRefreshInterval
+	}
+	if cfg.EmergencyLedgerPeerRefreshInterval <= 0 {
+		cfg.EmergencyLedgerPeerRefreshInterval = defaultEmergencyLedgerPeerRefreshInterval
+	}
+	if cfg.EmergencyDiscoveryCheckInterval <= 0 {
+		cfg.EmergencyDiscoveryCheckInterval = defaultEmergencyDiscoveryCheckInterval
 	}
 	// Ledger peer target mapping: negative disables discovery, 0 uses
 	// defaultLedgerPeerTarget, positive uses the explicit target.
@@ -429,6 +464,30 @@ func (p *PeerGovernor) Start(ctx context.Context) error {
 			}
 		}
 	}(publicRootChurnTicker, stopCh)
+
+	// Emergency ledger-peer discovery loop. When the node is critically short
+	// of connected upstreams, discoverLedgerPeers replenishes on the emergency
+	// cadence (see ledgerPeersUrgent). This ticker checks far more often than
+	// the 5-minute reconcile so a collapsed peer pool recovers in seconds. It
+	// is a no-op while the node has enough upstreams.
+	emergencyDiscoveryTicker := time.NewTicker(
+		p.config.EmergencyDiscoveryCheckInterval,
+	)
+	go func(t *time.Ticker, stop <-chan struct{}) {
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if p.ledgerPeersUrgent() {
+					p.discoverLedgerPeers()
+				}
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(emergencyDiscoveryTicker, stopCh)
 
 	// Start outbound connections
 	p.startOutboundConnections()

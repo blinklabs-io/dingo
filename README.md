@@ -82,6 +82,10 @@ The following environment variables modify Dingo's behavior:
 - `DINGO_BARK_BASE_URL`
   - Base URL of a remote Bark archive node used for archive fallback
     (default: empty, disabled)
+- `DINGO_BARK_BLOCK_DOWNLOAD_HOSTS`
+  - Comma-separated HTTPS hostnames additionally allowed for Bark-supplied
+    block download URLs. The allowlist always includes the
+    `DINGO_BARK_BASE_URL` hostname.
 - `DINGO_HISTORY_EXPIRY_ENABLED`
   - Enable local expiry of immutable block CBOR older than the ledger stability
     window (default: `false`)
@@ -221,6 +225,10 @@ returning a signed object-storage URL plus block metadata. Badger is valid for a
 normal local blob store, but it does not provide signed URLs and should not be
 used as the Bark archive backend.
 
+For local source builds, the `s3` and `gcs` blob plugins require
+`-tags dingo_extra_plugins` or `make build`. Official release binaries include
+the extra plugin tag.
+
 ```yaml
 storageMode: "core"
 database:
@@ -253,7 +261,13 @@ archive:
 
 ```yaml
 barkBaseUrl: "http://archive.example.internal:9091"
+barkBlockDownloadHosts:
+  - "dingo-archive.s3.us-east-1.amazonaws.com"
 ```
+
+Bark archive RPC may use the configured `barkBaseUrl`, but the block download
+URLs returned by that service must be HTTPS, must not contain credentials, and
+must match either the `barkBaseUrl` hostname or `barkBlockDownloadHosts`.
 
 The runnable demonstration in `internal/test/archive-demo/` brings up an S3
 compatible Minio archive node, a local Badger history-expiry node, and an end-to-end
@@ -363,6 +377,11 @@ These are approximate values that grow over time. The snapshot can be deleted af
 Dingo supports pluggable storage backends for both blob storage (blocks, transactions) and metadata storage. This allows you to choose the best storage solution for your use case.
 
 ### Available Plugins
+
+For local source builds, `badger` is always available. The `gcs` and `s3` blob
+plugins require `-tags dingo_extra_plugins` or `make build`. `postgres` and
+`mysql` are still compiled into plain builds on current `main`; issue #2586
+tracks moving them behind the same tag.
 
 Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)

@@ -127,6 +127,38 @@ func (t *Txn) IsReadWrite() bool {
 	return t.readWrite
 }
 
+type savepointTxn interface {
+	SavePoint(string) error
+	RollbackTo(string) error
+}
+
+// SavePoint creates a metadata transaction savepoint. Blob stores do not expose
+// savepoints, so callers that write blob keys before rolling back to a savepoint
+// must explicitly clean those keys up.
+func (t *Txn) SavePoint(name string) error {
+	if t.metadataTxn == nil {
+		return types.ErrNilTxn
+	}
+	savepointer, ok := t.metadataTxn.(savepointTxn)
+	if !ok {
+		return types.ErrTxnWrongType
+	}
+	return savepointer.SavePoint(name)
+}
+
+// RollbackTo rolls the metadata transaction back to a previous savepoint. Blob
+// writes are unaffected; see SavePoint.
+func (t *Txn) RollbackTo(name string) error {
+	if t.metadataTxn == nil {
+		return types.ErrNilTxn
+	}
+	savepointer, ok := t.metadataTxn.(savepointTxn)
+	if !ok {
+		return types.ErrTxnWrongType
+	}
+	return savepointer.RollbackTo(name)
+}
+
 // Do executes the specified function in the context of the transaction. Any errors returned will result
 // in the transaction being rolled back. If the function panics, the transaction is rolled back and the
 // panic is re-raised after logging.

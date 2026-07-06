@@ -1777,6 +1777,16 @@ func TestChainsyncResyncMithrilReasonsDenyPeerAndRequireFreshConnection(
 			wantFresh:      true,
 			wantDeniesPeer: false,
 		},
+		{
+			reason:         event.ChainsyncResyncReasonLiveTxValidationRecovery,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
+		{
+			reason:         event.ChainsyncResyncReasonChainSwitchCursorAhead,
+			wantFresh:      true,
+			wantDeniesPeer: false,
+		},
 	}
 	for _, tt := range tests {
 		if got := chainsyncResyncRequiresFreshConnection(tt.reason); got != tt.wantFresh {

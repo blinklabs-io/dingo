@@ -122,6 +122,51 @@ func (ls *LedgerState) applyEndorserBlock(
 		bodyCbors = append(bodyCbors, []byte(elems[0]))
 	}
 
+	// Deduplicate against the ledger and within this endorser block. The
+	// Leios prototype re-includes unconfirmed mempool transactions in
+	// successive endorser blocks, so a transaction here may already have been
+	// applied by an earlier endorser block in this batch (visible through the
+	// open txn's read-your-writes), by a committed block, or repeated in this
+	// raw transaction list. Re-applying it would double-spend its inputs and
+	// wedge the ledger in a permanent "UTxO already spent" retry loop
+	// (issue #2699), so drop duplicates before building the blob and delta.
+	if len(txs) > 0 {
+		hashes := make([][]byte, len(txs))
+		for i, tx := range txs {
+			hashes[i] = tx.Hash().Bytes()
+		}
+		existing, err := ls.db.GetExistingTransactionHashes(hashes, txn)
+		if err != nil {
+			return 0, fmt.Errorf("dedup endorser transactions: %w", err)
+		}
+		skip := make(map[string]struct{}, len(existing))
+		for _, h := range existing {
+			skip[string(h)] = struct{}{}
+		}
+		seen := make(map[string]struct{}, len(txs))
+		keptTxs := txs[:0]
+		keptBodies := bodyCbors[:0]
+		for i, tx := range txs {
+			hashKey := string(tx.Hash().Bytes())
+			if _, dup := skip[hashKey]; dup {
+				continue
+			}
+			if _, dup := seen[hashKey]; dup {
+				continue
+			}
+			seen[hashKey] = struct{}{}
+			keptTxs = append(keptTxs, tx)
+			keptBodies = append(keptBodies, bodyCbors[i])
+		}
+		txs = keptTxs
+		bodyCbors = keptBodies
+	}
+	if len(txs) == 0 {
+		// Every transaction was already applied by an earlier endorser block
+		// (or a committed block); nothing new to store or apply.
+		return 0, nil
+	}
+
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
@@ -140,6 +185,12 @@ func (ls *LedgerState) applyEndorserBlock(
 	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
 	defer delta.Release()
 	delta.Offsets = offsets
+	// These are speculative endorser-block transactions: on the Musashi network
+	// (LeiosTolerateEndorserConflicts) delta.apply skips any whose inputs are
+	// already spent instead of aborting, and records the ones it applies so a
+	// later authoritative ranking-block transaction can revoke them (issue
+	// #2699). On every other network this flag is inert.
+	delta.Speculative = true
 	for i, tx := range txs {
 		delta.addTransaction(tx, i)
 	}
@@ -149,6 +200,49 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 	return len(txs), nil
+}
+
+// revokeConflictingEndorserSpends resolves a "UTxO already spent" conflict for
+// an authoritative ranking-block transaction (Musashi network) by revoking the
+// speculative endorser-block transactions that already spent the inputs this
+// transaction needs, together with their endorser-on-endorser closure. It
+// returns the number of endorser-block transactions revoked; the caller retries
+// applying the ranking-block transaction when that is non-zero.
+//
+// Inputs spent by a non-endorser (ranking-block) transaction are not revoked —
+// FilterEndorserTransactions inside the closure ignores them — so a genuine
+// ranking-block-vs-ranking-block double-spend still surfaces the original error
+// rather than being masked. It walks tx.Consumed() (the regular inputs for a
+// valid transaction, the collateral inputs for a phase-2 failed one).
+func (ls *LedgerState) revokeConflictingEndorserSpends(
+	tx lcommon.Transaction,
+	txn *database.Txn,
+) (int, error) {
+	seen := make(map[string]struct{})
+	var spenders [][]byte
+	for _, input := range tx.Consumed() {
+		utxo, err := ls.db.Metadata().GetUtxoIncludingSpent(
+			input.Id().Bytes(),
+			input.Index(),
+			txn.Metadata(),
+		)
+		if err != nil {
+			return 0, fmt.Errorf("look up conflicting input: %w", err)
+		}
+		if utxo == nil || len(utxo.SpentAtTxId) == 0 {
+			continue
+		}
+		key := string(utxo.SpentAtTxId)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		spenders = append(spenders, []byte(utxo.SpentAtTxId))
+	}
+	if len(spenders) == 0 {
+		return 0, nil
+	}
+	return ls.db.RevokeEndorserTransactionClosure(spenders, txn)
 }
 
 type leiosEndorserBlockStorageError struct {

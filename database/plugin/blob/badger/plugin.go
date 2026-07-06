@@ -64,6 +64,7 @@ var (
 		compressionLevel      uint64
 		blockCacheSizeSet     bool
 		indexCacheSizeSet     bool
+		gcEnabledSet          bool
 		compressionEnabledSet bool
 	}
 	cmdlineOptionsMutex sync.RWMutex
@@ -102,6 +103,19 @@ func applyStorageModeDefaults(
 	}
 }
 
+func applyRunModeDefaults(
+	runMode string,
+	gcEnabled *bool,
+	gcEnabledSet bool,
+) {
+	if gcEnabledSet {
+		return
+	}
+	if runMode == "load" {
+		*gcEnabled = false
+	}
+}
+
 func useCompactBlockMetadata(runMode, storageMode string) bool {
 	return (runMode == "serve" || runMode == "leios") &&
 		storageMode == "core"
@@ -123,6 +137,7 @@ func initCmdlineOptions() {
 	cmdlineOptions.compressionLevel = DefaultCompressionLevel
 	cmdlineOptions.blockCacheSizeSet = false
 	cmdlineOptions.indexCacheSizeSet = false
+	cmdlineOptions.gcEnabledSet = false
 	cmdlineOptions.compressionEnabledSet = false
 	cmdlineOptions.dataDir = ".dingo"
 }
@@ -180,6 +195,7 @@ func init() {
 					Description:  "Enable garbage collection",
 					DefaultValue: true,
 					Dest:         &(cmdlineOptions.gcEnabled),
+					SetIndicator: &(cmdlineOptions.gcEnabledSet),
 				},
 				{
 					Name:         "value-log-file-size",
@@ -227,6 +243,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 	blockCacheSize := cmdlineOptions.blockCacheSize
 	indexCacheSize := cmdlineOptions.indexCacheSize
 	memTableSize := cmdlineOptions.memTableSize
+	gcEnabled := cmdlineOptions.gcEnabled
 	compressionEnabled := cmdlineOptions.compressionEnabled
 	applyStorageModeDefaults(
 		cmdlineOptions.storageMode,
@@ -236,6 +253,11 @@ func NewFromCmdlineOptions() plugin.Plugin {
 		cmdlineOptions.blockCacheSizeSet,
 		cmdlineOptions.indexCacheSizeSet,
 		cmdlineOptions.compressionEnabledSet,
+	)
+	applyRunModeDefaults(
+		cmdlineOptions.runMode,
+		&gcEnabled,
+		cmdlineOptions.gcEnabledSet,
 	)
 	// Safe conversion from uint64 to int64 with bounds checking
 	valueLogFileSize := min(
@@ -268,7 +290,7 @@ func NewFromCmdlineOptions() plugin.Plugin {
 			),
 		),
 		WithValueThreshold(int64(valueThreshold)),
-		WithGc(cmdlineOptions.gcEnabled),
+		WithGc(gcEnabled),
 		WithCompressionEnabled(compressionEnabled),
 		WithCompressionLevel(int(compressionLevel)),
 		WithDeferOpen(),

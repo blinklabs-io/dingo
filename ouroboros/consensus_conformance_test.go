@@ -163,8 +163,9 @@ func newReplayAdapter(
 	// default for older vectors — reproduces the prior k-disabled
 	// behaviour.
 	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
-		EventBus:      bus,
-		SecurityParam: capture.SecurityParam,
+		EventBus:                  bus,
+		SecurityParam:             capture.SecurityParam,
+		DisableEventSubscriptions: true,
 	})
 	if capture.LocalTip != nil {
 		// Arms the implausibility-guard catch-up relaxation so a peer
@@ -223,14 +224,28 @@ func (a *replayAdapter) RollForward(
 func (a *replayAdapter) RollBackward(
 	peerID uint64, point format.Point, tip format.Tip,
 ) error {
-	return a.o.chainsyncClientRollBackward(
-		ochainsync.CallbackContext{ConnectionId: a.connFor(peerID)},
-		ocommon.Point{
-			Slot: point.Slot,
-			Hash: append([]byte(nil), point.Hash...),
+	connId := a.connFor(peerID)
+	rollbackPoint := ocommon.Point{
+		Slot: point.Slot,
+		Hash: append([]byte(nil), point.Hash...),
+	}
+	rollbackTip := toGouroborosTip(tip)
+	if err := a.o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: connId},
+		rollbackPoint,
+		rollbackTip,
+	); err != nil {
+		return err
+	}
+	a.cs.HandlePeerRollbackEvent(event.NewEvent(
+		chainselection.PeerRollbackEventType,
+		chainselection.PeerRollbackEvent{
+			ConnectionId: connId,
+			Point:        rollbackPoint,
+			Tip:          rollbackTip,
 		},
-		toGouroborosTip(tip),
-	)
+	))
+	return nil
 }
 
 func (a *replayAdapter) Stabilize() {

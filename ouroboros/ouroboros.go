@@ -103,6 +103,23 @@ type Ouroboros struct {
 
 	// Locally-forged EB broadcast log (cursors are owned by the log).
 	leiosEBLog *leiosForgedEBLog
+
+	// Asynchronous best-effort persistence of fetched endorser blocks to the
+	// blob store for historical serving. The blob write (CBOR encode + commit)
+	// is moved off the leios-fetch hot path onto a single background writer so
+	// it does not serialize against block application during catch-up. Jobs
+	// coalesce by EB hash — a complete job (with txs) supersedes a
+	// manifest-only one — which also elides the backfiller's duplicate manifest
+	// write. Lazily started on first enqueue; stopped via StopLeiosPersistWriter.
+	leiosPersistOnce     sync.Once
+	leiosPersistStopOnce sync.Once
+	leiosPersistStarted  atomic.Bool
+	leiosPersistMu       sync.Mutex
+	leiosPersistPending  map[string]*leiosPersistJob
+	leiosPersistSignal   chan struct{}
+	leiosPersistStop     chan struct{}
+	leiosPersistDone     chan struct{}
+	leiosPersistDropped  atomic.Uint64
 }
 
 // chainsyncPeerStats tracks ChainSync performance metrics per peer connection.
@@ -164,6 +181,15 @@ type OuroborosConfig struct {
 	// Zero disables tail-retry (fetch aborts on the first miss). Sourced from
 	// the Leios diffusion window in node.go.
 	LeiosTxFetchTailBudget time.Duration
+	// KeepAliveTimeout overrides how long the keep-alive client waits for a
+	// peer's pong before treating the connection as failed. Zero uses the
+	// gouroboros default (10s). It is raised on the Musashi prototype network
+	// (to okeepalive.ServerTimeout) so a pong delayed by the single relay's
+	// saturated shared muxer does not trigger a false-positive drop and an
+	// expensive reconnect + fork rollback; see keepaliveConnOpts. Values above
+	// that bound are clamped there. Unset (0) on other networks, so dead peers
+	// are still evicted quickly.
+	KeepAliveTimeout time.Duration
 }
 
 type blockfetchMetrics struct {

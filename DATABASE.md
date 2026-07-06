@@ -2,10 +2,10 @@
 
 Dingo stores chain state in two sibling stores:
 
-- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. The always-built plugin is `sqlite`; `postgres` and `mysql` are optional and are built only with the `dingo_extra_plugins` build tag.
+- The metadata store is a relational SQL database managed by the metadata plugins in `database/plugin/metadata/`. `sqlite` is the default plugin; `postgres` and `mysql` are non-default plugins that are still compiled into plain builds on current `main`. Issue #2586 tracks moving them behind the `dingo_extra_plugins` build tag.
 - The blob store is a key/value object store managed by the blob plugins in `database/plugin/blob/`. The always-built plugin is `badger`; `gcs` and `s3` are optional and are built only with the `dingo_extra_plugins` build tag.
 
-The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin.
+The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin. The SQLite plugin migrates the full model set in one pass after its compatibility migrations so GORM-declared relationships and cascade constraints are present on fresh SQLite databases. On a database created before auto-migrate was enabled, adding a missing `OnDelete:CASCADE` foreign key rebuilds the child table with the constraint enforced; because those older databases never enforced the cascade, orphaned child rows may have accumulated (for example `asset` rows left behind when their `utxo` was deleted) and would fail the rebuild with `FOREIGN KEY constraint failed (787)`. To avoid this, every plugin purges orphaned rows whose cascade-FK parent no longer exists before running `AutoMigrate` (`models.PurgeOrphanedCascadeRows` in `database/models/purge_orphans.go`); this is a no-op once the foreign keys exist, since the constraint then prevents orphans.
 
 The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns.
 
@@ -48,7 +48,7 @@ flowchart LR
 - `types.Uint64` values such as `amount`, `reward`, `pledge`, `cost`, treasury/reserves, and stake totals are persisted as unsigned decimal values through the Go SQL driver. Use numeric casts if your SQL client reports them as text in a specific backend.
 - Quote the `transaction` table in SQL examples because it is a keyword-adjacent identifier: `"transaction"` in Postgres, `` `transaction` `` in MySQL.
 - `id` is the normal auto-increment primary key. Tables with ledger identifiers also have unique indexes such as `hash`, `(credential_tag, staking_key)`, `(tx_id, output_idx)`, or `(epoch, snapshot_type, pool_key_hash)`.
-- Many relations are logical joins rather than explicit foreign keys. Certificate rows have two logical pointers: each specialized certificate table has `certificate_id -> certs.id`, and `certs.certificate_id` is the polymorphic back-pointer to that specialized row chosen by `certs.cert_type`.
+- Relationships declared on GORM models may be enforced as backend foreign keys, especially on fresh SQLite databases where startup enables `foreign_keys(1)` and migrates the model set together. Hash-based joins and polymorphic relationships remain logical joins rather than explicit foreign keys. Certificate rows have two logical pointers: each specialized certificate table has `certificate_id -> certs.id`, and `certs.certificate_id` is the polymorphic back-pointer to that specialized row chosen by `certs.cert_type`.
 - Live UTxOs have `utxo.deleted_slot = 0`. Governance/committee/constitution soft deletes use nullable `deleted_slot`; `NULL` means active.
 - Certificate history ordering must use `added_slot DESC`, the producing transaction's `block_index DESC`, and `cert_index DESC`. `cert_index` resets per transaction.
 - Storage mode is persisted in `node_settings.storage_mode`. `core` mode stores consensus and ledger state. `api` mode additionally populates address, witness, datum, redeemer, script, metadata-label indexes, and the best-effort `offchain_metadata` cache. API-only tables are still migrated in `core` mode but may be empty.
@@ -160,13 +160,13 @@ erDiagram
 | `commit_timestamp` | `id`, `timestamp` | PK `id`; singleton row `id = 1` | Mirrored with the blob-store `metadata_commit_timestamp` key to detect partial commits. |
 | `node_settings` | `id`, `storage_mode`, `network` | PK `id`; singleton row `id = 1` | Immutable startup settings. Dingo rejects storage-mode or network changes after initialization. |
 | `tip` | `id`, `hash`, `slot`, `block_number` | PK `id` | Current metadata tip. Block CBOR is in the blob store, not SQL. |
-| `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
-| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)` | Per-block nonce history used by Praos nonce computation. |
+| `epoch` | `id`, `epoch_id`, `start_slot`, `era_id`, `slot_length`, `length_in_slots`, `nonce`, `evolving_nonce`, `candidate_nonce`, `last_epoch_block_nonce` | PK `id`; unique `epoch_id` | Epoch nonce and era boundary state. `last_epoch_block_nonce` is the Praos lab carried at the boundary: the previous epoch's last block `PrevHash`, or the previously carried lab when that epoch had no blocks. Join snapshots and rewards with `epoch.epoch_id = ... .epoch`. |
+| `block_nonce` | `id`, `hash`, `slot`, `nonce`, `is_checkpoint` | PK `id`; unique `(hash, slot)` | Per-block nonce history (cumulative evolving nonce through each block) used by Praos nonce computation. Must cover from the Mithril anchor through the trust boundary and beyond; when a usable anchor nonce exists below the boundary, `healMithrilGapBlockNonces` reconstructs missing gap-block rows at startup (see below). |
 | `network_state` | `id`, `treasury`, `reserves`, `slot` | PK `id`; unique `slot` | Treasury/reserves at a slot. |
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
-| `sync_state` | `sync_key`, `value` | PK `sync_key` | Ephemeral key/value state for one-time sync/load work. |
+| `sync_state` | `sync_key`, `value` | PK `sync_key` | Ephemeral key/value state for one-time sync/load work. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | API-mode historical metadata backfill progress. |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. |
 
@@ -186,6 +186,7 @@ erDiagram
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
+| `endorser_transaction` | `id`, `hash`, `rb_slot` | PK `id`; unique `hash`; index `rb_slot` | Leios endorser-block conflict-resolution provenance (issue #2699), populated only on the Musashi prototype network; empty on every other network. One row per applied endorser-block (speculative) transaction, keyed by the same `transaction.hash` recorded in `utxo.tx_id` (its outputs) and `utxo.spent_at_tx_id` (its spends). `rb_slot` is the referencing ranking block's slot, used to prune on rollback (`rb_slot > slot`). Its presence marks a spend as a revocable speculative spend: when an authoritative ranking-block transaction needs an input a speculative endorser-block transaction already spent, that endorser transaction (and its endorser-on-endorser closure) is revoked — inputs restored via `spent_at_tx_id`, produced outputs deleted by `tx_id` — instead of wedging on "UTxO already spent". A conflict whose prior spender is not present here is a genuine ranking-block double-spend and still errors. |
 
 ### Midnight Indexer
 
@@ -307,7 +308,7 @@ process the same pointer unless the claim expires before a result is recorded.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool mark/set/go stake snapshots. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
+| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. `"mark"` rows store lovelace stake totals and are used by the normal Praos epoch-2 rotation. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state. |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots at an epoch boundary. |
 | `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward-calculation snapshot metadata. |
@@ -346,6 +347,8 @@ flowchart LR
 | `bh` + block hash bytes | The corresponding `bp...` block key | Fast block-by-hash lookup |
 | `u` + tx hash bytes + big-endian output index `uint32` | UTxO CBOR or a 52-byte `DOFF` CBOR-offset reference into a block | UTxO resolution and history expiry |
 | `t` + tx hash bytes | Transaction CBOR offset bytes. Current writers store 52-byte `DOFF`; readers also support 69-byte `DTXP` tx-part offsets. | Transaction CBOR lookup |
+| `em` + endorser-block hash bytes (32) | Big-endian slot `uint64` (8 bytes) followed by the raw endorser-block manifest CBOR received over leios-fetch `MsgBlock`. Written by `Database.SetLeiosEB` (the merged manifest+txs single-commit writer) on the asynchronous background persistence writer, off the leios-fetch hot path; the granular `Database.SetLeiosEBManifest` remains available. Read by `Database.GetLeiosEBManifest`. Used so a synced node can serve historical EB manifests to downstream peers via leios-fetch `MsgBlockRequest` after the in-memory 10-minute TTL has expired. | Leios EB manifest serving |
+| `et` + endorser-block hash bytes (32) | CBOR-encoded `[]cbor.RawMessage` — the complete transaction-body list from leios-fetch `MsgBlockTxs` (CBOR-in-CBOR wrapped, matching the wire format). Written by `Database.SetLeiosEB` in the same blob transaction as the `em` manifest, only when the tx cache is complete (`txCount` txs fetched), on the asynchronous background persistence writer; the granular `Database.SetLeiosEBTxs` remains available. Missing key means txs were never fully fetched, the best-effort historical-serving write was dropped under a full queue, or the node predates this key. Read by `Database.GetLeiosEBTxs`. Used so a synced node can serve historical EB transactions to downstream peers via leios-fetch `MsgBlockTxsRequest`. | Leios EB tx-body serving |
 | `metadata_commit_timestamp` | Big-endian timestamp integer bytes | Commit consistency check with SQL `commit_timestamp` |
 
 `DOFF` references are 52 bytes:
@@ -373,19 +376,58 @@ it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
 created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
 scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
 synthetic endorser/genesis blob is never returned as the "previous block." This
-matters for the epoch-nonce computation — the lagged `last_epoch_block_nonce`
-(lab) is derived from the previous epoch's last block's `PrevHash`; returning an
-endorser blob there (its `PrevHash` is empty) saves an empty lab, collapsing the
-next epoch's nonce to the NeutralNonce identity and failing every leader-VRF
-check in that epoch. Each endorser transaction's `t` entry and its outputs' `u`
-entries store ordinary `DOFF` references whose `block_slot`/`block_hash` point at
-that endorser-block blob, so cold-extract resolution is identical to chain-block
-transactions. The transactions' metadata rows, however, are recorded under the
-referencing ranking block's point, so a rollback of the ranking block removes
-them (the orphaned endorser-block blob is harmless and re-created on reprocess).
+matters for storage callers, but it does not make a slot-key scan a canonical
+chain query: retained fork blobs can still sort before an epoch boundary.
+Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
+ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
+index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
+tooling that construct a ledger without a chain fall back to
+`BlockBeforeSlotTxn`/`BlockBeforeSlot`. That fallback still excludes synthetic
+`ID=0` blobs, but it is not a canonical fork filter in databases that retain
+same-slot fork blobs, so production ledger paths attach the chain index before
+using this lookup. Older blob-scan lab lookup could also save an empty lab here,
+collapsing the epoch's nonce to the NeutralNonce
+identity and failing leader-VRF checks. A related hazard is the candidate/evolving
+nonce input: Mithril import persists the evolving nonce only at the ledger-state
+slot and ingests the "gap blocks" up to the (later) trust boundary without folding
+their VRF output into `block_nonce`, so the frozen candidate for the first
+post-bootstrap epoch boundary would omit them. `healMithrilGapBlockNonces`
+re-folds the evolving nonce from the anchor `block_nonce` through every
+canonical-chain block to the tip (walking the primary chain index, not a `bp`
+slot scan, so retained fork blobs and synthetic endorser blobs are never
+folded) and writes a corrected `block_nonce` per block at startup. Writes
+commit in batches; the recorded trust-boundary point's row is the completion
+marker and commits last, so the heal is idempotent and a crash mid-heal resumes
+from the highest valid canonical row below the boundary. Fork rows at the
+boundary or below it do not mark completion or seed the fold when the canonical
+trust-boundary hash / primary-chain anchor is available. Each endorser
+transaction's `t` entry
+and its outputs' `u` entries store ordinary `DOFF` references whose
+`block_slot`/`block_hash` point at that endorser-block blob, so cold-extract
+resolution is identical to chain-block transactions. The transactions' metadata
+rows, however, are recorded under the referencing ranking block's point, so a
+rollback of the ranking block
+removes them (the orphaned endorser-block blob is harmless and re-created on
+reprocess).
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.
+
+On the Musashi prototype network (where successive endorser blocks carry
+mutually-conflicting, never-confirmed mempool transactions) endorser-block
+application is additionally conflict-tolerant (issue #2699): an endorser
+transaction whose input is already spent is skipped rather than aborting the
+batch; any staged tx/UTxO blob offsets and metadata rows from the failed
+attempt are cleaned before continuing, so skipped transactions do not contribute
+donations, events, spend links, outputs, or API indexes. Each applied endorser
+transaction is recorded in `endorser_transaction` as a revocable speculative
+spend. When a later authoritative ranking-block transaction needs an input such
+a speculative transaction spent, the endorser transaction (and any endorser
+transaction that spent one of its outputs, transitively) is revoked — its
+consumed inputs restored through `utxo.spent_at_tx_id`, produced `utxo.tx_id`
+outputs deleted, and non-cascaded address and metadata-label index rows removed
+— before the ranking-block transaction is applied. This is gated off on every
+other network, where endorser-block transactions are applied unconditionally.
 
 ### Archive And History Expiry Contract
 
@@ -410,7 +452,11 @@ older than the ledger stability window:
   SQL metadata rows also remain. Blob readers return `types.ErrHistoryExpired`
   with the slot/hash. Without an archive wrapper this is the final read error;
   with `barkBaseUrl` configured, Bark fetches the CBOR from the archive while
-  preserving local block indexes and iteration semantics.
+  preserving local block indexes and iteration semantics. Bark validates archive
+  download URLs before fetching: they must be HTTPS, must not contain embedded
+  credentials, and must resolve to the `barkBaseUrl` hostname or a configured
+  `barkBlockDownloadHosts` entry; downloads are also size-limited to the archive
+  block response cap.
 
 ### Block Hash Index Contract
 

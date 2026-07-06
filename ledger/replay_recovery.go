@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -34,7 +35,7 @@ var errRestartLedgerPipeline = errors.New(
 )
 
 var errHaltLedgerPipeline = errors.New(
-	"halt ledger pipeline after persistent tx validation failure",
+	"persistent tx validation failure after recovery attempts",
 )
 
 // errStaleChainIterator is returned by ledgerProcessBlock when a block's
@@ -65,12 +66,11 @@ func (e *txValidationError) Unwrap() error {
 	return e.Cause
 }
 
-// maxAtTipRecoveryAttempts caps how many times the ledger will try to
-// recover from the same persistent at-tip validation failure before
-// halting. Each attempt rewinds the primary chain progressively
-// deeper to give chainselection room to pick a different fork. We
-// only halt when even a deep rewind to security-param-sized depth
-// has not let a different chain win.
+// maxAtTipRecoveryAttempts caps the depth schedule for recovering from the
+// same persistent at-tip validation failure. Each attempt rewinds the primary
+// chain progressively deeper to give chainselection room to pick a different
+// fork. After the cap, recovery keeps retrying at the deepest rewind depth and
+// relies on ChainSync peer rotation to find a valid candidate chain.
 const maxAtTipRecoveryAttempts = 3
 
 type atTipRecoveryAttempt struct {
@@ -183,7 +183,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 		"rollback_slot", candidate.RollbackPoint.Slot,
 		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
 	)
-	if ls.replayRecoveryRollbackExceedsMithrilBoundary(candidate.RollbackPoint) {
+	if ls.recoveryRollbackExceedsMithrilBoundary(candidate.RollbackPoint) {
 		if err := ls.rejectReplayRecoveryAtMithrilBoundary(
 			validationErr,
 			candidate,
@@ -202,7 +202,7 @@ func (ls *LedgerState) tryRecoverFromTxValidationError(
 	return true, nil
 }
 
-func (ls *LedgerState) replayRecoveryRollbackExceedsMithrilBoundary(
+func (ls *LedgerState) recoveryRollbackExceedsMithrilBoundary(
 	point ocommon.Point,
 ) bool {
 	ls.RLock()
@@ -215,62 +215,26 @@ func (ls *LedgerState) rejectReplayRecoveryAtMithrilBoundary(
 	candidate *replayRecoveryCandidate,
 	producerTxHash string,
 ) error {
-	ls.RLock()
-	mithrilLedgerSlot := ls.mithrilLedgerSlot
-	rewindPoint := ls.currentTip.Point
-	ls.RUnlock()
-	if ls.config.ChainManager == nil {
-		return fmt.Errorf(
-			"replay recovery rollback exceeds Mithril trust boundary: %w",
-			ErrRollbackExceedsMithrilBoundary,
-		)
-	}
-	ls.config.Logger.Warn(
-		"detected replay recovery below Mithril trust boundary, rejecting peer chain",
-		"component", "ledger",
-		"recovery_strategy", candidate.Strategy,
-		"tx_hash", hex.EncodeToString(validationErr.TxHash),
-		"failing_block_slot", validationErr.BlockPoint.Slot,
-		"missing_input", candidate.Input.String(),
-		"producer_tx_hash", producerTxHash,
-		"producer_block_slot", candidate.ProducerBlock.Slot,
-		"rollback_slot", candidate.RollbackPoint.Slot,
-		"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
-		"mithril_ledger_slot", mithrilLedgerSlot,
-		"rewind_target_slot", rewindPoint.Slot,
-		"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+	return ls.rejectRecoveryAtMithrilBoundary(
+		"replay recovery rollback exceeds Mithril trust boundary",
+		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
+			ls.config.Logger.Warn(
+				"detected replay recovery below Mithril trust boundary, rejecting peer chain",
+				"component", "ledger",
+				"recovery_strategy", candidate.Strategy,
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"missing_input", candidate.Input.String(),
+				"producer_tx_hash", producerTxHash,
+				"producer_block_slot", candidate.ProducerBlock.Slot,
+				"rollback_slot", candidate.RollbackPoint.Slot,
+				"rollback_hash", hex.EncodeToString(candidate.RollbackPoint.Hash),
+				"mithril_ledger_slot", mithrilLedgerSlot,
+				"rewind_target_slot", rewindPoint.Slot,
+				"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+			)
+		},
 	)
-	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(rewindPoint); err != nil {
-		return fmt.Errorf(
-			"rewind primary chain to Mithril trust boundary: %w",
-			err,
-		)
-	}
-	ls.chainsyncMutex.Lock()
-	ls.resetChainsyncResyncState()
-	ls.setChainsyncState(SyncingChainsyncState)
-	ls.chainsyncMutex.Unlock()
-	if ls.config.EventBus != nil {
-		var activeConnId ouroboros.ConnectionId
-		if ls.config.GetActiveConnectionFunc != nil {
-			if connId := ls.config.GetActiveConnectionFunc(); connId != nil {
-				activeConnId = *connId
-			}
-		}
-		ls.config.EventBus.Publish(
-			event.ChainsyncResyncEventType,
-			event.NewEvent(
-				event.ChainsyncResyncEventType,
-				event.ChainsyncResyncEvent{
-					ConnectionId: activeConnId,
-					Reason: event.
-						ChainsyncResyncReasonRollbackExceedsMithril,
-					Point: rewindPoint,
-				},
-			),
-		)
-	}
-	return nil
 }
 
 func (ls *LedgerState) recoverAtTipFromTxValidationError(
@@ -293,8 +257,8 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		ls.lastAtTipRecovery.matches(validationErr) {
 		attempts = ls.lastAtTipRecovery.Attempts + 1
 		if attempts > maxAtTipRecoveryAttempts {
-			ls.config.Logger.Error(
-				"at-tip recovery exhausted attempts, halting to avoid infinite loop",
+			ls.config.Logger.Warn(
+				"at-tip recovery exhausted scheduled rewind attempts, retrying with deepest rewind",
 				"component", "ledger",
 				"failing_slot", validationErr.BlockPoint.Slot,
 				"failing_block_hash", hex.EncodeToString(
@@ -303,11 +267,7 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 				"tx_hash", hex.EncodeToString(validationErr.TxHash),
 				"attempts", attempts,
 			)
-			return false, fmt.Errorf(
-				"%w: %w",
-				errHaltLedgerPipeline,
-				validationErr,
-			)
+			attempts = maxAtTipRecoveryAttempts
 		}
 	}
 	ls.lastAtTipRecovery = newAtTipRecoveryAttempt(validationErr)
@@ -339,6 +299,18 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 				)
 			}
 		}
+	}
+	if ls.recoveryRollbackExceedsMithrilBoundary(rewindPoint) {
+		if err := ls.rejectAtTipRecoveryAtMithrilBoundary(
+			validationErr,
+			ledgerTip,
+			chainTip,
+			rewindPoint,
+			attempts,
+		); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	ls.config.Logger.Warn(
 		"validation failure after reaching tip, rewinding primary chain",
@@ -389,6 +361,86 @@ func (ls *LedgerState) recoverAtTipFromTxValidationError(
 		)
 	}
 	return true, nil
+}
+
+func (ls *LedgerState) rejectAtTipRecoveryAtMithrilBoundary(
+	validationErr *txValidationError,
+	ledgerTip ochainsync.Tip,
+	chainTip ochainsync.Tip,
+	requestedRewindPoint ocommon.Point,
+	attempts int,
+) error {
+	return ls.rejectRecoveryAtMithrilBoundary(
+		"at-tip recovery rollback exceeds Mithril trust boundary",
+		func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point) {
+			ls.config.Logger.Warn(
+				"at-tip validation recovery would cross Mithril trust boundary, rejecting peer chain",
+				"component", "ledger",
+				"tx_hash", hex.EncodeToString(validationErr.TxHash),
+				"failing_block_slot", validationErr.BlockPoint.Slot,
+				"failing_block_hash", hex.EncodeToString(validationErr.BlockPoint.Hash),
+				"ledger_tip_slot", ledgerTip.Point.Slot,
+				"ledger_tip_hash", hex.EncodeToString(ledgerTip.Point.Hash),
+				"primary_chain_tip_slot", chainTip.Point.Slot,
+				"primary_chain_tip_hash", hex.EncodeToString(chainTip.Point.Hash),
+				"requested_rewind_slot", requestedRewindPoint.Slot,
+				"requested_rewind_hash", hex.EncodeToString(requestedRewindPoint.Hash),
+				"mithril_ledger_slot", mithrilLedgerSlot,
+				"rewind_target_slot", rewindPoint.Slot,
+				"rewind_target_hash", hex.EncodeToString(rewindPoint.Hash),
+				"attempt", attempts,
+			)
+		},
+	)
+}
+
+func (ls *LedgerState) rejectRecoveryAtMithrilBoundary(
+	errContext string,
+	logRejection func(mithrilLedgerSlot uint64, rewindPoint ocommon.Point),
+) error {
+	ls.RLock()
+	mithrilLedgerSlot := ls.mithrilLedgerSlot
+	rewindPoint := ls.currentTip.Point
+	ls.RUnlock()
+	if ls.config.ChainManager == nil {
+		return fmt.Errorf(
+			"%s: %w",
+			errContext,
+			ErrRollbackExceedsMithrilBoundary,
+		)
+	}
+	logRejection(mithrilLedgerSlot, rewindPoint)
+	if err := ls.config.ChainManager.RewindPrimaryChainToPoint(rewindPoint); err != nil {
+		return fmt.Errorf(
+			"rewind primary chain to Mithril trust boundary: %w",
+			err,
+		)
+	}
+	ls.chainsyncMutex.Lock()
+	ls.resetChainsyncResyncState()
+	ls.setChainsyncState(SyncingChainsyncState)
+	ls.chainsyncMutex.Unlock()
+	if ls.config.EventBus != nil {
+		var activeConnId ouroboros.ConnectionId
+		if ls.config.GetActiveConnectionFunc != nil {
+			if connId := ls.config.GetActiveConnectionFunc(); connId != nil {
+				activeConnId = *connId
+			}
+		}
+		ls.config.EventBus.Publish(
+			event.ChainsyncResyncEventType,
+			event.NewEvent(
+				event.ChainsyncResyncEventType,
+				event.ChainsyncResyncEvent{
+					ConnectionId: activeConnId,
+					Reason: event.
+						ChainsyncResyncReasonRollbackExceedsMithril,
+					Point: rewindPoint,
+				},
+			),
+		)
+	}
+	return nil
 }
 
 // findRewindPoint returns the highest committed chain point at or

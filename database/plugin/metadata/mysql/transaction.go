@@ -12,6 +12,8 @@
 // either express or implied. See the License for the specific language
 // governing permissions and limitations under the License.
 
+//go:build dingo_extra_plugins
+
 package mysql
 
 import (
@@ -78,6 +80,28 @@ func (d *MetadataStoreMysql) resolveReadDB(
 	txn types.Txn,
 ) (*gorm.DB, error) {
 	return d.resolveDB(txn)
+}
+
+// ExistingTransactionHashes returns transaction hashes already recorded.
+func (d *MetadataStoreMysql) ExistingTransactionHashes(
+	hashes [][]byte,
+	txn types.Txn,
+) ([][]byte, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var existing [][]byte
+	result := db.Model(&models.Transaction{}).
+		Where("hash IN ?", hashes).
+		Pluck("hash", &existing)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return existing, nil
 }
 
 // GetTransactionByHash returns a transaction by its hash

@@ -55,7 +55,7 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 	txs := make([]cbor.RawMessage, 0, n)
 	for k := 0; k < n; k++ {
 		idx := requested[k]
-		served[uint16(idx/64)] |= 1 << uint(idx%64)
+		served[uint16(idx/64)] |= 1 << uint(63-(idx%64)) // MSB-first, see leiosWindowNeededMask
 		enc, err := cbor.Encode(idx)
 		if err != nil {
 			return nil, err
@@ -153,8 +153,11 @@ func TestFetchLeiosEbTxsBatchedRejectsUnrepresentableWindowCount(
 }
 
 func TestLeiosBitmapTxIndices(t *testing.T) {
-	// window 0 bits 0,1; window 2 bit 3 -> indices 0,1,131 ascending.
-	got := leiosBitmapTxIndices(map[uint16]uint64{0: 0b11, 2: 1 << 3})
+	// MSB-first: window 0 offsets 0,1 are bits 63,62; window 2 offset 3 is
+	// bit 60 -> indices 0,1,131 ascending.
+	got := leiosBitmapTxIndices(
+		map[uint16]uint64{0: (1 << 63) | (1 << 62), 2: 1 << 60},
+	)
 	require.Equal(t, []int{0, 1, 131}, got)
 	require.Nil(t, leiosBitmapTxIndices(nil))
 }
@@ -163,13 +166,55 @@ func TestLeiosWindowNeededMask(t *testing.T) {
 	result := make([]cbor.RawMessage, 70)
 	result[0] = cbor.RawMessage{0x00} // present
 	result[2] = cbor.RawMessage{0x00} // present
-	// window 0: bits 1 and 3..63 needed (0 and 2 present), capped at txCount 70.
+	// MSB-first: offset o is bit 63-o. Offsets 0 and 2 are present (bits 63
+	// and 61 clear); offset 1 is needed (bit 62 set), capped at txCount 70.
 	mask := leiosWindowNeededMask(result, 0, 70)
-	require.Equal(t, uint64(0), mask&(1<<0))
-	require.NotEqual(t, uint64(0), mask&(1<<1))
-	require.Equal(t, uint64(0), mask&(1<<2))
-	// window 1: only indices 64..69 exist (6 bits), all needed.
-	require.Equal(t, uint64(0b111111), leiosWindowNeededMask(result, 1, 70))
+	require.Equal(t, uint64(0), mask&(1<<63))    // offset 0 present
+	require.NotEqual(t, uint64(0), mask&(1<<62)) // offset 1 needed
+	require.Equal(t, uint64(0), mask&(1<<61))    // offset 2 present
+	// window 1: only indices 64..69 exist (offsets 0..5), all needed -> the
+	// top 6 bits (63..58) set.
+	require.Equal(
+		t,
+		uint64(0b111111)<<58,
+		leiosWindowNeededMask(result, 1, 70),
+	)
+}
+
+// TestLeiosBitmapMSBFirstWireConvention pins the bitmap bit ordering to
+// MSB-first, matching the IOG Leios relay: the transaction at window offset 0
+// is the most-significant bit (bit 63). Encoding it LSB-first round-tripped
+// fine against a dingo peer but made the relay serve only the high-index
+// transactions of a partial window -- and nothing at all for a final window of
+// <=32 txs -- so from-genesis catch-up stalled mid-epoch (issue #2656). This
+// guards the request encode, the decode, and the server serve/validate paths
+// against silently reverting to LSB (which a self-consistent mock would miss).
+func TestLeiosBitmapMSBFirstWireConvention(t *testing.T) {
+	// 131 txs: windows 0,1 full; final window 2 holds just offsets 0,1,2
+	// (indices 128,129,130) -- the small-final-window the LSB bug never served.
+	const txCount = 131
+	result := make([]cbor.RawMessage, txCount)
+	mask := leiosWindowNeededMask(result, 2, txCount)
+	// Offsets 0,1,2 must be the TOP bits 63,62,61 (what the relay reads), not
+	// the bottom bits an LSB encoding would set.
+	require.Equal(t, uint64(0b111)<<61, mask)
+	// Decoding the same window yields the absolute indices in ascending order.
+	require.Equal(
+		t,
+		[]int{128, 129, 130},
+		leiosBitmapTxIndices(map[uint16]uint64{2: mask}),
+	)
+	// Server side: the bitmap is in range and selects exactly those txs.
+	txs := make([]cbor.RawMessage, txCount)
+	for i := range txs {
+		txs[i] = cbor.RawMessage{byte(i)}
+	}
+	require.NoError(t, validateLeiosTxBitmap(txCount, map[uint16]uint64{2: mask}))
+	require.Equal(
+		t,
+		[]cbor.RawMessage{txs[128], txs[129], txs[130]},
+		leiosTxsFromBitmap(txs, map[uint16]uint64{2: mask}),
+	)
 }
 
 func TestLeiosNeededBitmap(t *testing.T) {
@@ -216,7 +261,7 @@ func (r *servingBlockTxsRequester) BlockTxsRequest(
 	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, len(requested))
 	for _, idx := range requested {
-		served[uint16(idx/64)] |= 1 << uint(idx%64)
+		served[uint16(idx/64)] |= 1 << uint(63-(idx%64)) // MSB-first, see leiosWindowNeededMask
 		enc, err := cbor.Encode(idx)
 		if err != nil {
 			return nil, err

@@ -61,6 +61,9 @@ var flagSpecs = []flagSpec{
 	stringFlag("ImmutableDbPath", "immutable-db-path", "", "path to ImmutableDB for load mode"),
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
+	boolFlag("StrictUtxoValidation", "strict-utxo-validation", "error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered"),
+	boolFlag("Tracing", "tracing", "enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)"),
+	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
 	// Networking
 	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", ValidateNetworkName),
@@ -89,6 +92,7 @@ var flagSpecs = []flagSpec{
 
 	// Bark
 	stringFlag("BarkBaseUrl", "bark-url", "", "Bark archive fallback base URL"),
+	stringSliceFlag("BarkBlockDownloadHosts", "bark-block-download-hosts", "allowed HTTPS hostnames for Bark block downloads"),
 	uintFlag("BarkPort", "bark-port", "Bark RPC port"),
 
 	// History expiry

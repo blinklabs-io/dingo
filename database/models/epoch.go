@@ -28,12 +28,12 @@ type Epoch struct {
 	// candidate nonce across epochs so it can seed the next
 	// epoch's computation correctly.
 	CandidateNonce []byte
-	// LastEpochBlockNonce holds the prevHash of the last applied
-	// block from the PREVIOUS epoch transition (praosStateLabNonce
-	// in Haskell). In Ouroboros Praos, the epoch nonce formula uses
-	// a lagged lab nonce: at the N→N+1 transition, the nonce saved
-	// at N-1→N is used. This field is nil for epoch 0 (equivalent
-	// to NeutralNonce / identity).
+	// LastEpochBlockNonce holds the Praos lab carried at this epoch's
+	// boundary: the parent hash (PrevHash) of the previous epoch's last
+	// block, or the previously carried lab when that epoch had no blocks.
+	// In Ouroboros Praos, the epoch nonce formula mixes CandidateNonce with
+	// this value. This field is nil for epoch 0 (equivalent to NeutralNonce /
+	// identity).
 	LastEpochBlockNonce []byte
 	ID                  uint `gorm:"primarykey"`
 	// NOTE: we would normally use this as the primary key, but GORM doesn't

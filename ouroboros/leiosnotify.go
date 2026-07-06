@@ -574,16 +574,44 @@ type leiosFetchGuard struct {
 	// timed-out fetch, so it prefers healthy connections instead of repeatedly
 	// retrying a stalled or flaky one.
 	cooledUntilNano atomic.Int64
+	// consecutiveFailures counts back-to-back failed/timed-out backfill
+	// fetches on this connection with no intervening success. It escalates the
+	// cooldown (see markFetchFailed) so a connection that repeatedly returns
+	// wrong (hash-mismatching) or unservable/stalling responses is
+	// deprioritized for progressively longer; markFetchOK resets it.
+	consecutiveFailures atomic.Int32
 }
 
-// markFetchFailed puts this connection on a short cooldown after a failed or
-// timed-out backfill fetch.
-func (g *leiosFetchGuard) markFetchFailed(now time.Time, d time.Duration) {
+// markFetchFailed puts this connection on a cooldown after a failed or
+// timed-out backfill fetch. Consecutive failures on the same connection
+// escalate the cooldown exponentially from base, capped at
+// leiosBackfillConnCooldownMax, so a connection that repeatedly returns wrong
+// (hash-mismatching) or unservable/stalling responses is deprioritized for
+// progressively longer and the backfill prefers other connections/backends.
+// The cooldown only reorders connection preference -- FetchEndorserBlockByPoint
+// still falls back to cooled connections when none are healthy -- so a
+// persistently-bad connection is deprioritized but never permanently starved.
+func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
+	n := g.consecutiveFailures.Add(1)
+	d := base
+	if n > 1 {
+		shift := n - 1
+		if shift > leiosBackfillConnCooldownMaxShift {
+			shift = leiosBackfillConnCooldownMaxShift
+		}
+		d = base << uint(shift)
+	}
+	// Guard against overflow (d <= 0) and clamp to the cap.
+	if d <= 0 || d > leiosBackfillConnCooldownMax {
+		d = leiosBackfillConnCooldownMax
+	}
 	g.cooledUntilNano.Store(now.Add(d).UnixNano())
 }
 
-// markFetchOK clears any cooldown after a successful fetch on this connection.
+// markFetchOK clears any cooldown and resets the failure escalation after a
+// successful fetch on this connection.
 func (g *leiosFetchGuard) markFetchOK() {
+	g.consecutiveFailures.Store(0)
 	g.cooledUntilNano.Store(0)
 }
 
@@ -771,19 +799,28 @@ func leiosNeededBitmap(
 
 // leiosWindowNeededMask returns the bitmap of transaction indices in 64-tx
 // window w that are within txCount and not yet present in result.
+//
+// The bitmap is numbered MSB-first: the transaction at window offset 0 is bit
+// 63, offset 1 is bit 62, ..., offset 63 is bit 0. This matches the IOG Leios
+// relay (the big-endian reading of CIP-0164's per-chunk 8-octet bitmap). An
+// LSB-first mask only round-trips for full (all-64-bit) windows; for a partial
+// window of k<64 txs it made the relay serve just max(0, 2k-64) of them (the
+// relay read the high bits), so a final window of <=32 txs was never served
+// and from-genesis catch-up stalled mid-epoch (issue #2656).
 func leiosWindowNeededMask(result []cbor.RawMessage, w, txCount int) uint64 {
 	var mask uint64
 	base := w * 64
-	for bit := 0; bit < 64 && base+bit < txCount; bit++ {
-		if result[base+bit] == nil {
-			mask |= 1 << uint(bit)
+	for off := 0; off < 64 && base+off < txCount; off++ {
+		if result[base+off] == nil {
+			mask |= 1 << uint(63-off)
 		}
 	}
 	return mask
 }
 
-// leiosBitmapTxIndices returns the transaction indices (window*64 + bit) of all
-// set bits across the bitmap windows, in ascending index order.
+// leiosBitmapTxIndices returns the transaction indices of all set bits across
+// the bitmap windows, in ascending index order. Bits are numbered MSB-first to
+// match leiosWindowNeededMask: bit 63 is window offset 0, bit 0 is offset 63.
 func leiosBitmapTxIndices(bitmaps map[uint16]uint64) []int {
 	windows := make([]uint16, 0, len(bitmaps))
 	for w := range bitmaps {
@@ -793,9 +830,11 @@ func leiosBitmapTxIndices(bitmaps map[uint16]uint64) []int {
 	var idx []int
 	for _, w := range windows {
 		mask := bitmaps[w]
-		for bit := range 64 {
+		// Iterate high bit to low so the decoded indices come out ascending,
+		// matching the relay serving transactions in ascending index order.
+		for bit := 63; bit >= 0; bit-- {
 			if mask&(1<<uint(bit)) != 0 {
-				idx = append(idx, int(w)*64+bit)
+				idx = append(idx, int(w)*64+(63-bit))
 			}
 		}
 	}

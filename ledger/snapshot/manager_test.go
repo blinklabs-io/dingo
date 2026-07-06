@@ -28,9 +28,7 @@ import (
 
 // TestCaptureGenesisSnapshot_PostMithril verifies that after a Mithril
 // bootstrap (where slot 0 has no pools but later epochs exist), the
-// snapshot manager seeds the Mark/Set/Go window for the current epoch.
-// Without this, leader election at epoch N queries epoch N-2 and finds
-// pool_stake=0.
+// snapshot manager seeds the recent historical window for the current epoch.
 func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	db, sqliteStore := setupTestDB(t)
 	gormDB := sqliteStore.DB()
@@ -64,8 +62,7 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	err := mgr.CaptureGenesisSnapshot(context.Background())
 	require.NoError(t, err)
 
-	// Leader election for epoch 150 queries epoch 148 (N-2).
-	// Verify that mark snapshots exist for the full window.
+	// Verify that mark snapshots exist for the full recent window.
 	for _, epoch := range []uint64{0, 148, 149, 150} {
 		snapshot, sErr := db.Metadata().GetPoolStakeSnapshot(
 			epoch, "mark", poolHash, nil,

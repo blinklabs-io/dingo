@@ -67,6 +67,9 @@ type RawLedgerState struct {
 	PParamsData cbor.RawMessage
 	// SnapShotsData is the deferred CBOR for mark/set/go stake snapshots.
 	SnapShotsData cbor.RawMessage
+	// PoolDistrData is the deferred CBOR for the active consensus pool
+	// distribution in NewEpochState.pool-distr.
+	PoolDistrData cbor.RawMessage
 	// EraBounds holds the start boundaries of all eras extracted
 	// from the telescope. Each entry gives the (Slot, Epoch) at
 	// which that era began. Used to generate the full epoch
@@ -91,8 +94,8 @@ type RawLedgerState struct {
 	// tip. This is required to correctly continue nonce accumulation
 	// from snapshot tip to epoch boundary.
 	CandidateNonce []byte
-	// LastEpochBlockNonce is the lagged lab nonce from consensus
-	// state (used in epoch nonce calculation).
+	// LastEpochBlockNonce is the Praos last applied block hash from
+	// consensus state (used in epoch nonce calculation).
 	LastEpochBlockNonce []byte
 	// EraBoundsWarning holds a non-fatal error from era bounds
 	// extraction. When set, epoch generation falls back to
@@ -231,6 +234,16 @@ type ParsedSnapShot struct {
 	Delegations map[string][]byte
 	// PoolParams maps pool-hex to pool parameters.
 	PoolParams map[string]*ParsedPool
+}
+
+// ParsedActivePoolStake represents one pool in NewEpochState.pool-distr.
+// StakeNumerator/StakeDenominator are the exact sigma fraction used by
+// Praos leader eligibility.
+type ParsedActivePoolStake struct {
+	PoolKeyHash      []byte
+	StakeNumerator   uint64
+	StakeDenominator uint64
+	VrfKeyHash       []byte
 }
 
 // ImportProgress reports progress during ledger state import.
@@ -1219,6 +1232,52 @@ func importSnapShots(
 		})
 	}
 
+	if cfg.State.PoolDistrData != nil {
+		activePoolDistr, err := ParseActivePoolDistribution(
+			cfg.State.PoolDistrData,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"parsing active pool distribution: %w",
+				err,
+			)
+		}
+		activeSnapshots := ActivePoolDistributionSnapshots(
+			activePoolDistr,
+			epoch,
+			slot,
+		)
+		if err := persistImportedActivePoolDistribution(
+			cfg,
+			activeSnapshots,
+		); err != nil {
+			return fmt.Errorf(
+				"importing active pool distribution: %w",
+				err,
+			)
+		}
+
+		cfg.Logger.Info(
+			"imported active pool distribution",
+			"snapshot", "pool-distr",
+			"stored_as", models.PoolStakeSnapshotTypeActive,
+			"target_epoch", epoch,
+			"pools", len(activeSnapshots),
+			"component", "ledgerstate",
+		)
+
+		progress(ImportProgress{
+			Stage:   "snapshots",
+			Current: len(activeSnapshots),
+			Total:   len(activeSnapshots),
+			Percent: 100,
+			Description: fmt.Sprintf(
+				"active pool distribution: %d pools",
+				len(activeSnapshots),
+			),
+		})
+	}
+
 	return nil
 }
 
@@ -1331,6 +1390,45 @@ func persistImportedSnapshot(
 	return nil
 }
 
+func persistImportedActivePoolDistribution(
+	cfg ImportConfig,
+	poolSnapshots []*models.PoolStakeSnapshot,
+) error {
+	store := cfg.Database.Metadata()
+	txn := cfg.Database.MetadataTxn(true)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	if err := store.DeletePoolStakeSnapshotsForEpoch(
+		cfg.State.Epoch,
+		models.PoolStakeSnapshotTypeActive,
+		metaTxn,
+	); err != nil {
+		return fmt.Errorf(
+			"deleting existing active pool distribution for epoch %d: %w",
+			cfg.State.Epoch,
+			err,
+		)
+	}
+
+	if len(poolSnapshots) > 0 {
+		if err := store.SavePoolStakeSnapshots(
+			poolSnapshots, metaTxn,
+		); err != nil {
+			return fmt.Errorf(
+				"saving active pool distribution for epoch %d: %w",
+				cfg.State.Epoch,
+				err,
+			)
+		}
+	}
+
+	if err := txn.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	return nil
+}
+
 type snapshotImportTarget struct {
 	name        string
 	targetEpoch uint64
@@ -1382,6 +1480,31 @@ func importedEpochSummary(
 		summary.EpochNonce = slices.Clone(existing.EpochNonce)
 	}
 	return summary
+}
+
+// ActivePoolDistributionSnapshots converts NewEpochState.pool-distr entries
+// into pool_stake_snapshot rows under the "actv" type. TotalStake stores the
+// rational numerator and StakeDenominator stores the matching denominator.
+func ActivePoolDistributionSnapshots(
+	pools []ParsedActivePoolStake,
+	epoch uint64,
+	capturedSlot uint64,
+) []*models.PoolStakeSnapshot {
+	snapshots := make([]*models.PoolStakeSnapshot, 0, len(pools))
+	for _, pool := range pools {
+		if pool.StakeNumerator == 0 || pool.StakeDenominator == 0 {
+			continue
+		}
+		snapshots = append(snapshots, &models.PoolStakeSnapshot{
+			Epoch:            epoch,
+			SnapshotType:     models.PoolStakeSnapshotTypeActive,
+			PoolKeyHash:      slices.Clone(pool.PoolKeyHash),
+			TotalStake:       types.Uint64(pool.StakeNumerator),
+			StakeDenominator: types.Uint64(pool.StakeDenominator),
+			CapturedSlot:     capturedSlot,
+		})
+	}
+	return snapshots
 }
 
 func snapshotImportTargets(

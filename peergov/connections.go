@@ -285,9 +285,15 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			continue
 		}
 
+		// Re-resolve hostname-based peers on every attempt and rotate the
+		// dial target across all resolved records so load spreads across
+		// load-balancer backends and a stuck/unhealthy backend is escaped
+		// on the next attempt without a process restart. IP-literal peers
+		// are returned unchanged. Peer identity/dedup is keyed on
+		// peer.Address / NormalizedAddress and is unaffected.
 		conn, err := p.config.ConnManager.CreateOutboundConn(
 			p.ctx,
-			peer.Address,
+			p.resolveDialAddress(p.ctx, peer.Address),
 		)
 		if err == nil {
 			connId := conn.Id()
@@ -319,6 +325,7 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			oldSource := currentPeer.Source
 			oldConn := clonePeerConnection(currentPeer.Connection)
 			currentPeer.ConnectedAt = time.Now()
+			currentPeer.EverConnected = true
 			currentPeer.setConnection(conn, true)
 			p.recordPeerStateChange(currentPeer.State, PeerStateWarm)
 			currentPeer.State = PeerStateWarm
@@ -448,6 +455,40 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		peerSource := currentPeer.Source
 		peerAddress := currentPeer.Address
 		peerNormalizedAddress := currentPeer.NormalizedAddress
+		// Discovered (peer-share gossip, ledger) and public-root peers that
+		// have never successfully connected are dropped after a failed dial
+		// rather than retried indefinitely: a peer we cannot reach even once
+		// is almost certainly unreachable, and redialing it forever wastes
+		// dial capacity. Exceptions that keep their existing retry behavior:
+		//   - local-root and bootstrap peers (operator-configured, trusted);
+		//   - any peer that connected at least once (a transient loss is
+		//     worth recovering);
+		//   - when the node has no eligible upstream left, these peers are the
+		//     only leads back onto the network, so they are kept and
+		//     emergency-redialed rather than dropped (avoids self-stranding,
+		//     matching redialCandidatesLocked's emergency budget).
+		if p.shouldDropNeverConnectedPeerAfterDialFailureLocked(currentPeer) {
+			p.denyList[peerNormalizedAddress] = time.Now().Add(
+				p.config.DenyDuration,
+			)
+			p.peers = append(p.peers[:peerIdx], p.peers[peerIdx+1:]...)
+			p.updatePeerMetrics()
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: dropping never-connected discovered/public-root peer after failed connection",
+				"address", peerAddress,
+				"source", peerSource.String(),
+				"deny_duration", p.config.DenyDuration,
+			)
+			p.publishEvent(
+				PeerRemovedEventType,
+				PeerStateChangeEvent{
+					Address: peerAddress,
+					Reason:  "never-connected discovered or public-root peer",
+				},
+			)
+			return
+		}
 		if !p.isTopologyPeer(peerSource) &&
 			reconnectCount > p.config.MaxReconnectFailureThreshold {
 			// Fail fast for non-topology peers. Waiting for the long
@@ -503,6 +544,21 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 		case <-time.After(reconnectDelay):
 		}
 	}
+}
+
+// shouldDropNeverConnectedPeerAfterDialFailureLocked reports whether a failed
+// outbound dial should retire the peer instead of retrying. Must be called with
+// p.mu held.
+func (p *PeerGovernor) shouldDropNeverConnectedPeerAfterDialFailureLocked(
+	peer *Peer,
+) bool {
+	if peer == nil ||
+		peer.EverConnected ||
+		peer.hasClientConnection() ||
+		!dropIfNeverConnected(peer.Source) {
+		return false
+	}
+	return p.countEligibleUpstreamsLocked() > 0
 }
 
 func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
@@ -630,6 +686,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			// available, treat it as authoritative for inbound duplex metadata.
 			tmpPeer.InboundDuplex = inboundIsClient
 		}
+	}
+	if tmpPeer.hasClientConnection() || tmpPeer.InboundDuplex {
+		tmpPeer.EverConnected = true
 	}
 	// Reset outbound backoff when an inbound connection from a
 	// topology peer succeeds. The inbound proves the peer is

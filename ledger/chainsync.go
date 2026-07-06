@@ -380,6 +380,8 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 		return
 	}
 	var replayConnId ouroboros.ConnectionId
+	effectiveConnId := e.NewConnectionId
+	var requestFreshCursor bool
 	ls.chainsyncMutex.Lock()
 	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
@@ -402,6 +404,7 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 				)
 				if retryConnId, retryErr := ls.handoffPipelineOnSwitchLocked(*activeConnId); retryErr == nil {
 					replayConnId = retryConnId
+					effectiveConnId = *activeConnId
 					err = nil
 				}
 			}
@@ -420,8 +423,29 @@ func (ls *LedgerState) handleChainSwitchEvent(evt event.Event) {
 			ls.selectedBlockfetchConnId = ouroboros.ConnectionId{}
 		}
 	}
+	if err == nil {
+		requestFreshCursor = ls.chainSwitchNeedsFreshCursorLocked(
+			e,
+			effectiveConnId,
+		)
+	}
 	ls.chainsyncBlockfetchMutex.Unlock()
 	if err != nil {
+		return
+	}
+	if requestFreshCursor {
+		ls.config.Logger.Info(
+			"chain switch selected peer is ahead without queued headers, requesting fresh chainsync cursor",
+			"component", "ledger",
+			"connection_id", effectiveConnId.String(),
+			"switch_connection_id", e.NewConnectionId.String(),
+			"local_tip_slot", ls.PrimaryChainTip().Point.Slot,
+			"peer_tip_slot", e.NewTip.Point.Slot,
+		)
+		ls.requestChainsyncResync(
+			effectiveConnId,
+			event.ChainsyncResyncReasonChainSwitchCursorAhead,
+		)
 		return
 	}
 	if connIdKey(replayConnId) != "" {
@@ -678,6 +702,31 @@ func (ls *LedgerState) handoffPipelineOnSwitchLocked(
 	}
 
 	return ouroboros.ConnectionId{}, nil
+}
+
+func (ls *LedgerState) chainSwitchNeedsFreshCursorLocked(
+	e chainselection.ChainSwitchEvent,
+	connId ouroboros.ConnectionId,
+) bool {
+	if connIdKey(e.PreviousConnectionId) == "" ||
+		connIdKey(connId) == "" {
+		return false
+	}
+	if ls.chainsyncBlockfetchReadyChan != nil {
+		return false
+	}
+	if ls.chain != nil && ls.chain.HeaderCount() > 0 {
+		return false
+	}
+	if len(ls.bufferedHeaderEvents[connIdKey(connId)]) > 0 {
+		return false
+	}
+	localTip := ls.PrimaryChainTip()
+	if e.NewTip.BlockNumber > localTip.BlockNumber {
+		return true
+	}
+	return e.NewTip.BlockNumber == localTip.BlockNumber &&
+		e.NewTip.Point.Slot > localTip.Point.Slot
 }
 
 func (ls *LedgerState) bufferHeaderEvent(e ChainsyncEvent) {
@@ -1276,6 +1325,16 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"hash", hex.EncodeToString(e.Point.Hash),
 				"connection_id", e.ConnectionId.String(),
 			)
+			// The per-connection loop detector cannot catch this: the
+			// reset below wipes rollbackHistory and the resync forces a
+			// fresh connection, so its counter never accumulates. Track
+			// the point itself so a persistently un-crossable rollback
+			// surfaces as an operator error + metric (see issue #2728).
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackNotFound,
+				e.ConnectionId,
+			)
 			ls.resetChainsyncResyncState()
 			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
@@ -1322,6 +1381,11 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				"slot", e.Point.Slot,
 				"hash", hex.EncodeToString(e.Point.Hash),
 				"connection_id", e.ConnectionId.String(),
+			)
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackExceedsK,
+				e.ConnectionId,
 			)
 			// Restore state: no rollback actually occurred, so
 			// we are still syncing. Leaving RollbackChainsyncState
@@ -1386,6 +1450,11 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 					"connection_id", e.ConnectionId.String(),
 				)
 			}
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				reason,
+				e.ConnectionId,
+			)
 			ls.resetChainsyncResyncState()
 			ls.setChainsyncState(SyncingChainsyncState)
 			if ls.config.EventBus != nil {
@@ -1404,6 +1473,10 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 		}
 		return fmt.Errorf("chain rollback failed: %w", err)
 	}
+	// The rollback applied: we crossed to the peer's point, so any prior
+	// un-crossable-rollback tracking is stale. Clear it so a later,
+	// unrelated divergence starts counting from zero (see issue #2728).
+	ls.clearUnrecoverableRollbacks()
 	return nil
 }
 
@@ -2933,16 +3006,16 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 }
 
 // calculateEpochNonce computes the epoch nonce for epoch N+1, the
-// end-of-epoch evolving nonce, and the labNonce to save for epoch
-// N+2's computation.
+// end-of-epoch evolving nonce, and the lastEpochBlockNonce to carry
+// into epoch N+1.
 //
 // The Ouroboros Praos formula is:
 //
 //	epochNonce(N+1) = candidateNonce(N) ⭒ lastEpochBlockNonce(N)
 //
-// where lastEpochBlockNonce(N) was saved at the N-1→N transition
-// (it's the prevHash of the last block of epoch N-1). This value
-// is stored in currentEpoch.LastEpochBlockNonce.
+// where lastEpochBlockNonce(N) is the hash of the last block in epoch N.
+// If epoch N has no blocks, the consensus state carries the previous
+// lastEpochBlockNonce forward.
 //
 // The ⭒ operator has NeutralNonce as identity:
 //
@@ -2953,8 +3026,8 @@ func writeCborMajorType(buf *bytes.Buffer, majorType, n int) {
 //
 // Returns (epochNonce, evolvingNonce, candidateNonce, labNonce, error).
 // The caller must store candidateNonce as the new epoch's CandidateNonce
-// and labNonce as the new epoch's LastEpochBlockNonce so the next
-// transition can use them.
+// and labNonce as the new epoch's LastEpochBlockNonce so an empty next
+// epoch can carry it forward.
 func (ls *LedgerState) calculateEpochNonce(
 	txn *database.Txn,
 	epochStartSlot uint64,
@@ -2982,11 +3055,16 @@ func (ls *LedgerState) calculateEpochNonce(
 		)
 	}
 
-	// For the initial epoch creation (no blocks yet), the epoch
-	// nonce and initial evolving nonce are both the genesis hash.
-	// This matches cardano-node where the initial state sets
-	// epochNonce, candidateNonce, and evolvingNonce all to the
-	// genesis hash. lastEpochBlockNonce is nil (NeutralNonce).
+	// For the initial epoch creation (no blocks yet), the epoch nonce and
+	// initial evolving/candidate nonces are all the genesis nonce, and the
+	// carried lastEpochBlockNonce is Neutral (nil). At genesis cardano-ledger
+	// initializes praosStateLastEpochBlockNonce to NeutralNonce, so the FIRST
+	// from-genesis epoch boundary takes the identity branch: eta = candidate ⭒
+	// NeutralNonce = candidate. Devnet confirms cardano's epoch-1 epochNonce ==
+	// its candidate (identity). Do NOT seed this with the genesis nonce — that
+	// combines instead of using identity and diverges at the first boundary
+	// (#2734). The Mithril path never takes this branch (bootstrap epoch imports
+	// a non-nil lastEpochBlockNonce).
 	if len(currentEpoch.Nonce) == 0 {
 		return genesisHashBytes, genesisHashBytes, genesisHashBytes, nil, nil
 	}
@@ -3101,32 +3179,34 @@ func (ls *LedgerState) calculateEpochNonce(
 		)
 	}
 
-	// Compute the labNonce to SAVE for epoch N+2's computation.
-	// This is prevHashToNonce(prevHash of last block of current
-	// epoch N). It will be stored as LastEpochBlockNonce on the
-	// new epoch record.
-	var labNonceToSave []byte
-	blockLastCurrentEpoch, err := database.BlockBeforeSlotTxn(
+	// The epoch nonce mixes the frozen candidate with the nonce derived from
+	// the last block of the PREVIOUS epoch. In cardano-ledger this is
+	// praosStateLastEpochBlockNonce: the value CARRIED in the closing epoch's
+	// state (set at the prior epoch boundary) — i.e. the hash of the last block
+	// of the epoch *before* the one closing here — NOT the last block of the
+	// closing epoch itself. Using the closing epoch's own last block shifts the
+	// lab by one epoch and diverges eta from the network, so every leader-VRF
+	// check in the new epoch fails (#2734):
+	//   epochNonce(N+1) = candidateNonce(N) ⭒ currentEpoch(N).LastEpochBlockNonce
+	labForEta := cloneNonce(currentEpoch.LastEpochBlockNonce)
+
+	// The carried lab for the NEXT boundary is stored on the new epoch record:
+	// prevHashToNonce(lastBlock.prevHash) = the PARENT hash of the last block of
+	// the epoch being closed (a one-block Praos lag), NOT the last block's own
+	// hash. See epochLabNonce and #2734 (eta_1349 wedge).
+	labNonceToSave, err := ls.epochLabNonce(
 		txn,
+		currentEpoch.StartSlot,
 		epochEndSlot,
+		currentEpoch.LastEpochBlockNonce,
 	)
 	if err != nil {
-		if !errors.Is(err, models.ErrBlockNotFound) {
-			return nil, nil, nil, nil, fmt.Errorf(
-				"lookup block before slot: %w", err,
-			)
-		}
-		// No block — labNonceToSave stays nil (NeutralNonce)
-	} else if len(blockLastCurrentEpoch.PrevHash) > 0 {
-		labNonceToSave = blockLastCurrentEpoch.PrevHash
+		return nil, nil, nil, nil, err
 	}
 
-	// Use the LAGGED lastEpochBlockNonce from the current epoch
-	// record (set at the PREVIOUS transition) in the formula.
 	// If nil/empty, it's NeutralNonce (identity): result is
 	// just candidateNonce.
-	lastEpochBlockNonce := currentEpoch.LastEpochBlockNonce
-	if len(lastEpochBlockNonce) == 0 {
+	if len(labForEta) == 0 {
 		// NeutralNonce is the identity element of ⭒:
 		//   candidateNonce ⭒ NeutralNonce = candidateNonce
 		// So the epoch nonce is just the candidate nonce.
@@ -3146,20 +3226,20 @@ func (ls *LedgerState) calculateEpochNonce(
 		return candidateNonce, evolvingNonce, candidateNonce, labNonceToSave, nil
 	}
 
-	// candidateNonce ⭒ lastEpochBlockNonce
-	// = blake2b_256(candidateNonce || lastEpochBlockNonce)
+	// candidateNonce ⭒ labForEta
+	// = blake2b_256(candidateNonce || labForEta)
 	if len(candidateNonce) < 32 ||
-		len(lastEpochBlockNonce) < 32 {
+		len(labForEta) < 32 {
 		return nil, nil, nil, nil, fmt.Errorf(
 			"epoch nonce requires 32-byte inputs: "+
-				"candidateNonce=%d, lastEpochBlockNonce=%d",
+				"candidateNonce=%d, labForEta=%d",
 			len(candidateNonce),
-			len(lastEpochBlockNonce),
+			len(labForEta),
 		)
 	}
 	result, err := lcommon.CalculateEpochNonce(
 		candidateNonce,
-		lastEpochBlockNonce,
+		labForEta,
 		nil,
 	)
 	if err != nil {
@@ -3172,8 +3252,8 @@ func (ls *LedgerState) calculateEpochNonce(
 		"component", "ledger",
 		"epoch_start_slot", epochStartSlot,
 		"candidate_nonce", hex.EncodeToString(candidateNonce),
-		"last_epoch_block_nonce",
-		hex.EncodeToString(lastEpochBlockNonce),
+		"lab_for_eta",
+		hex.EncodeToString(labForEta),
 		"lab_nonce_to_save",
 		hex.EncodeToString(labNonceToSave),
 		"epoch_nonce", hex.EncodeToString(result.Bytes()),

@@ -734,7 +734,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 
 	if isAPIMode(cfg.StorageMode) {
 		if err := updateMithrilReadyState(
-			db, logger, loadResult, ledgerStateSlot,
+			db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 			syncStatusBackfill, false,
 		); err != nil {
 			return SyncResult{}, err
@@ -799,7 +799,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	)
 
 	if err := updateMithrilReadyState(
-		db, logger, loadResult, ledgerStateSlot,
+		db, logger, loadResult, ledgerStateSlot, ledgerStateHash,
 		"", true,
 	); err != nil {
 		return SyncResult{}, err

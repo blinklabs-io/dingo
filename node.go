@@ -52,6 +52,7 @@ import (
 	"github.com/blinklabs-io/dingo/peergov"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	okeepalive "github.com/blinklabs-io/gouroboros/protocol/keepalive"
 )
 
 type Node struct {
@@ -157,15 +158,16 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load database
 	dbNeedsRecovery := false
 	dbConfig := &database.Config{
-		DataDir:        n.config.DatabasePath(),
-		Logger:         n.config.logger,
-		PromRegistry:   n.config.PrometheusRegistry(),
-		BlobPlugin:     n.config.BlobPlugin(),
-		RunMode:        string(n.config.RunMode()),
-		MetadataPlugin: n.config.MetadataPlugin(),
-		MaxConnections: n.config.DatabaseWorkers(),
-		StorageMode:    n.config.StorageMode(),
-		Network:        n.config.Network(),
+		DataDir:              n.config.DatabasePath(),
+		Logger:               n.config.logger,
+		PromRegistry:         n.config.PrometheusRegistry(),
+		BlobPlugin:           n.config.BlobPlugin(),
+		RunMode:              string(n.config.RunMode()),
+		MetadataPlugin:       n.config.MetadataPlugin(),
+		MaxConnections:       n.config.DatabaseWorkers(),
+		StorageMode:          n.config.StorageMode(),
+		Network:              n.config.Network(),
+		StrictUtxoValidation: n.config.StrictUtxoValidation(),
 		CacheConfig: database.CborCacheConfig{
 			BlockLRUEntries: n.config.Cache().BlockLRUEntries,
 			HotUtxoEntries:  n.config.Cache().HotUtxoEntries,
@@ -249,6 +251,13 @@ func (n *Node) Run(ctx context.Context) error {
 			}
 		}
 	}
+	// On Musashi wait up to the same keep-alive server timeout bound that the
+	// ouroboros layer enforces; elsewhere leave it 0 so gouroboros keeps its
+	// default.
+	var keepAliveTimeout time.Duration
+	if n.config.isMusashiNetwork() {
+		keepAliveTimeout = okeepalive.ServerTimeout
+	}
 	n.ouroboros = ouroborosPkg.NewOuroboros(ouroborosPkg.OuroborosConfig{
 		Logger:                n.config.logger,
 		EventBus:              n.eventBus,
@@ -277,7 +286,26 @@ func (n *Node) Run(ctx context.Context) error {
 		EnableLeiosTxFetch:       enableLeiosNetworking,
 		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
+		// On the Musashi prototype network every mini-protocol shares one muxer
+		// to a single relay; block/EB traffic can delay the relay's keep-alive
+		// pong past the tight 10s gouroboros default, making dingo drop the
+		// only relay and pay a reconnect + fork rollback. Wait up to the
+		// keep-alive server timeout there so a slow-but-alive relay is not
+		// dropped. Unset on other networks (fast dead-peer eviction retained).
+		KeepAliveTimeout: keepAliveTimeout,
 	})
+	// Stop the asynchronous Leios endorser-block persistence writer during
+	// shutdown so it drains queued blob writes and its goroutine exits cleanly.
+	// No-op when no endorser block was ever fetched (writer never started), and
+	// idempotent, so registering it on both shutdown paths is safe.
+	//
+	// The `started` stack is only unwound on startup failure/panic; a graceful
+	// shutdown returns from Run via <-n.ctx.Done() without draining it. Register
+	// a defer as well so the writer is drained (before the process exits) on the
+	// normal shutdown path too. On the failure path the `started` entry keeps the
+	// LIFO ordering so the drain still runs before n.db.Close().
+	defer n.ouroboros.StopLeiosPersistWriter()
+	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
@@ -291,6 +319,12 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.ValidateHistorical(),
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.StartEra().IsDijkstra(),
+			// The Musashi prototype network's successive endorser blocks carry
+			// mutually-conflicting, never-confirmed mempool transactions, so
+			// tolerate and resolve those conflicts (skip conflicting endorser
+			// spends, let authoritative ranking-block spends revoke them)
+			// instead of wedging on "UTxO already spent" (issue #2699).
+			LeiosTolerateEndorserConflicts: n.config.isMusashiNetwork(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -422,7 +456,8 @@ func (n *Node) Run(ctx context.Context) error {
 
 	if n.config.BarkBaseUrl() != "" {
 		barkBlobStore, err := bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
-			BaseUrl: n.config.BarkBaseUrl(),
+			BaseUrl:                   n.config.BarkBaseUrl(),
+			BlockDownloadAllowedHosts: n.config.BarkBlockDownloadHosts(),
 			HTTPClient: &http.Client{
 				Timeout: 30 * time.Second,
 			},

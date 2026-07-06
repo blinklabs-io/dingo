@@ -118,6 +118,7 @@ func TestDiscoverLedgerPeers_TargetAlreadySatisfied(t *testing.T) {
 		Logger:             slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		EventBus:           newMockEventBus(),
 		UseLedgerAfterSlot: 0,
+		MinHotPeers:        2,
 		LedgerPeerTarget:   2,
 		LedgerPeerProvider: &mockLedgerPeerProvider{
 			relays: func() []PoolRelay {
@@ -135,6 +136,12 @@ func TestDiscoverLedgerPeers_TargetAlreadySatisfied(t *testing.T) {
 	// First discovery: adds 2 to reach target
 	pg.discoverLedgerPeers()
 	assert.Len(t, pg.peers, 2)
+	pg.mu.Lock()
+	for _, peer := range pg.peers {
+		peer.State = PeerStateHot
+		peer.Connection = &PeerConnection{IsClient: true}
+	}
+	pg.mu.Unlock()
 
 	// Reset refresh timestamp
 	pg.lastLedgerPeerRefresh.Store(

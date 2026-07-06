@@ -154,6 +154,58 @@ type databaseConfig struct {
 
 var midnightYAMLFields map[string]struct{}
 
+func databasePluginConfig(
+	pluginType string,
+	data map[string]any,
+) (string, map[string]map[string]any, error) {
+	pluginConfig := make(map[string]map[string]any)
+	var pluginName string
+	if pluginVal, exists := data["plugin"]; exists {
+		var ok bool
+		pluginName, ok = pluginVal.(string)
+		if !ok {
+			return "", nil, fmt.Errorf(
+				"%s plugin name must be a string, got %T",
+				pluginType,
+				pluginVal,
+			)
+		}
+	}
+	for k, v := range data {
+		if k == "plugin" {
+			continue
+		}
+		if val, ok := v.(map[string]any); ok {
+			pluginConfig[k] = val
+			continue
+		}
+		if val, ok := v.(map[any]any); ok {
+			stringAnyMap := make(map[string]any)
+			for vk, vv := range val {
+				keyStr, ok := vk.(string)
+				if !ok {
+					return "", nil, fmt.Errorf(
+						"%s plugin config %q key must be a string, got %T",
+						pluginType,
+						k,
+						vk,
+					)
+				}
+				stringAnyMap[keyStr] = vv
+			}
+			pluginConfig[k] = stringAnyMap
+			continue
+		}
+		return "", nil, fmt.Errorf(
+			"%s plugin config %q must be a map, got %T",
+			pluginType,
+			k,
+			v,
+		)
+	}
+	return pluginName, pluginConfig, nil
+}
+
 func collectMidnightYAMLFields(buf []byte) map[string]struct{} {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(buf, &doc); err != nil {
@@ -355,36 +407,50 @@ func DefaultMidnightConfig() MidnightConfig {
 }
 
 type Config struct {
-	MetadataPlugin       string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
-	TlsKeyFilePath       string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
-	Topology             string   `yaml:"topology"`
-	CardanoConfig        string   `yaml:"cardanoConfig"      envconfig:"config"`
-	DatabasePath         string   `yaml:"databasePath"                                                     split_words:"true"`
-	SocketPath           string   `yaml:"socketPath"                                                       split_words:"true"`
-	TlsCertFilePath      string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
-	BindAddr             string   `yaml:"bindAddr"                                                         split_words:"true"`
-	BlobPlugin           string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
-	PrivateBindAddr      string   `yaml:"privateBindAddr"                                                  split_words:"true"`
-	ShutdownTimeout      string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
-	LedgerCatchupTimeout string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
-	Network              string   `yaml:"network"`
-	NetworkMagic         uint32   `yaml:"networkMagic"                                                     split_words:"true"`
-	MempoolCapacity      int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
-	EvictionWatermark    float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
-	RejectionWatermark   float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
-	PrivatePort          uint     `yaml:"privatePort"                                                      split_words:"true"`
-	RelayPort            uint     `yaml:"relayPort"          envconfig:"port"`
-	BarkBaseUrl          string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
-	BarkPort             uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
-	UtxorpcPort          uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
-	CORSAllowedOrigins   []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
-	MetricsPort          uint     `yaml:"metricsPort"                                                      split_words:"true"`
-	DebugPort            uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
-	IntersectTip         bool     `yaml:"intersectTip"                                                     split_words:"true"`
-	ValidateHistorical   bool     `yaml:"validateHistorical"                                               split_words:"true"`
-	RunMode              RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
-	StartEra             StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
-	ImmutableDbPath      string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
+	MetadataPlugin         string   `yaml:"metadataPlugin"     envconfig:"DINGO_DATABASE_METADATA_PLUGIN"`
+	TlsKeyFilePath         string   `yaml:"tlsKeyFilePath"     envconfig:"TLS_KEY_FILE_PATH"`
+	Topology               string   `yaml:"topology"`
+	CardanoConfig          string   `yaml:"cardanoConfig"      envconfig:"config"`
+	DatabasePath           string   `yaml:"databasePath"                                                     split_words:"true"`
+	SocketPath             string   `yaml:"socketPath"                                                       split_words:"true"`
+	TlsCertFilePath        string   `yaml:"tlsCertFilePath"    envconfig:"TLS_CERT_FILE_PATH"`
+	BindAddr               string   `yaml:"bindAddr"                                                         split_words:"true"`
+	BlobPlugin             string   `yaml:"blobPlugin"         envconfig:"DINGO_DATABASE_BLOB_PLUGIN"`
+	PrivateBindAddr        string   `yaml:"privateBindAddr"                                                  split_words:"true"`
+	ShutdownTimeout        string   `yaml:"shutdownTimeout"                                                  split_words:"true"`
+	LedgerCatchupTimeout   string   `yaml:"ledgerCatchupTimeout"  envconfig:"DINGO_LEDGER_CATCHUP_TIMEOUT"`
+	Network                string   `yaml:"network"`
+	NetworkMagic           uint32   `yaml:"networkMagic"                                                     split_words:"true"`
+	MempoolCapacity        int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	EvictionWatermark      float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
+	RejectionWatermark     float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
+	PrivatePort            uint     `yaml:"privatePort"                                                      split_words:"true"`
+	RelayPort              uint     `yaml:"relayPort"          envconfig:"port"`
+	BarkBaseUrl            string   `yaml:"barkBaseUrl"        envconfig:"DINGO_BARK_BASE_URL"`
+	BarkBlockDownloadHosts []string `yaml:"barkBlockDownloadHosts" envconfig:"DINGO_BARK_BLOCK_DOWNLOAD_HOSTS"`
+	BarkPort               uint     `yaml:"barkPort"           envconfig:"DINGO_BARK_PORT"`
+	UtxorpcPort            uint     `yaml:"utxorpcPort"        envconfig:"DINGO_UTXORPC_PORT"`
+	CORSAllowedOrigins     []string `yaml:"corsAllowedOrigins" envconfig:"DINGO_CORS_ALLOWED_ORIGINS"`
+	MetricsPort            uint     `yaml:"metricsPort"                                                      split_words:"true"`
+	DebugPort              uint     `yaml:"debugPort"          envconfig:"DINGO_DEBUG_PORT"`
+	IntersectTip           bool     `yaml:"intersectTip"                                                     split_words:"true"`
+	ValidateHistorical     bool     `yaml:"validateHistorical"                                               split_words:"true"`
+	// StrictUtxoValidation errors out (instead of silently skipping) when a
+	// consumed UTxO cannot be found or recovered for a block past the
+	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
+	// a non-genesis chainsync intersect point without a Mithril snapshot.
+	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
+	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
+	// collector listening, the OTLP exporter logs noisy connection errors.
+	// Spans are sent via OTLP HTTP; configure the destination with the
+	// standard OTEL_EXPORTER_OTLP_* env vars.
+	Tracing bool `yaml:"tracing" envconfig:"DINGO_TRACING_ENABLED"`
+	// TracingStdout redirects spans to stdout instead of OTLP. Requires
+	// Tracing to also be enabled. Mostly useful for local debugging.
+	TracingStdout   bool     `yaml:"tracingStdout" envconfig:"DINGO_TRACING_STDOUT"`
+	RunMode         RunMode  `yaml:"runMode"            envconfig:"DINGO_RUN_MODE"`
+	StartEra        StartEra `yaml:"startEra"           envconfig:"DINGO_START_ERA"`
+	ImmutableDbPath string   `yaml:"immutableDbPath"    envconfig:"DINGO_IMMUTABLE_DB_PATH"`
 	// Database worker pool tuning (worker count and task queue size)
 	DatabaseWorkers   int `yaml:"databaseWorkers"    envconfig:"DINGO_DATABASE_WORKERS"`
 	DatabaseQueueSize int `yaml:"databaseQueueSize"  envconfig:"DINGO_DATABASE_QUEUE_SIZE"`
@@ -704,6 +770,9 @@ var globalConfig = &Config{
 	SocketPath:           "dingo.socket",
 	IntersectTip:         false,
 	ValidateHistorical:   false,
+	StrictUtxoValidation: false,
+	Tracing:              false,
+	TracingStdout:        false,
 	Network:              "preview",
 	NetworkMagic:         0,
 	MetricsPort:          12798,
@@ -826,32 +895,15 @@ func LoadConfig(configFile string) (*Config, error) {
 		// Handle database section if present
 		if tempCfg.Database != nil {
 			if tempCfg.Database.Blob != nil {
-				// Extract plugin name if specified
-				if pluginVal, exists := tempCfg.Database.Blob["plugin"]; exists {
-					if pluginName, ok := pluginVal.(string); ok {
-						globalConfig.BlobPlugin = pluginName
-						// Remove plugin from config map
-						delete(tempCfg.Database.Blob, "plugin")
-					}
+				pluginName, blobConfig, err := databasePluginConfig(
+					"blob",
+					tempCfg.Database.Blob,
+				)
+				if err != nil {
+					return nil, err
 				}
-				// Build plugin config map
-				blobConfig := make(map[string]map[string]any)
-				for k, v := range tempCfg.Database.Blob {
-					if val, ok := v.(map[string]any); ok {
-						blobConfig[k] = val
-					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]any
-						stringAnyMap := make(map[string]any)
-						for vk, vv := range val {
-							if keyStr, ok := vk.(string); ok {
-								stringAnyMap[keyStr] = vv
-							}
-						}
-						blobConfig[k] = stringAnyMap
-					} else {
-						// Log skipped non-map config entries
-						fmt.Fprintf(os.Stderr, "warning: skipping blob config entry %q: expected map, got %T\n", k, v)
-					}
+				if pluginName != "" {
+					globalConfig.BlobPlugin = pluginName
 				}
 				// Merge with existing blob config instead of overwriting
 				if pluginConfig["blob"] == nil {
@@ -861,32 +913,15 @@ func LoadConfig(configFile string) (*Config, error) {
 				}
 			}
 			if tempCfg.Database.Metadata != nil {
-				// Extract plugin name if specified
-				if pluginVal, exists := tempCfg.Database.Metadata["plugin"]; exists {
-					if pluginName, ok := pluginVal.(string); ok {
-						globalConfig.MetadataPlugin = pluginName
-						// Remove plugin from config map
-						delete(tempCfg.Database.Metadata, "plugin")
-					}
+				pluginName, metadataConfig, err := databasePluginConfig(
+					"metadata",
+					tempCfg.Database.Metadata,
+				)
+				if err != nil {
+					return nil, err
 				}
-				// Build plugin config map
-				metadataConfig := make(map[string]map[string]any)
-				for k, v := range tempCfg.Database.Metadata {
-					if val, ok := v.(map[string]any); ok {
-						metadataConfig[k] = val
-					} else if val, ok := v.(map[any]any); ok {
-						// Convert map[any]any to map[string]any
-						stringAnyMap := make(map[string]any)
-						for vk, vv := range val {
-							if keyStr, ok := vk.(string); ok {
-								stringAnyMap[keyStr] = vv
-							}
-						}
-						metadataConfig[k] = stringAnyMap
-					} else {
-						// Log skipped non-map config entries
-						fmt.Fprintf(os.Stderr, "warning: skipping metadata config entry %q: expected map, got %T\n", k, v)
-					}
+				if pluginName != "" {
+					globalConfig.MetadataPlugin = pluginName
 				}
 				// Merge with existing metadata config instead of overwriting
 				if pluginConfig["metadata"] == nil {

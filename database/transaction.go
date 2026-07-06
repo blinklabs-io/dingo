@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
@@ -27,6 +28,46 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
+
+// mithrilLedgerSlotSyncKey mirrors the sync-state key written by the ledger
+// and mithril packages when a Mithril snapshot is imported: blocks at or
+// below this slot are Mithril-verified, so the node is not expected to have
+// complete pre-boundary UTxO history. Duplicated here (rather than imported)
+// because the database package cannot depend on ledger, which depends on it.
+const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+
+// mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
+// or 0 if none is recorded (genesis sync, or a non-genesis chainsync
+// intersect point with no snapshot import). A failure to read the sync
+// state is logged and also treated as 0 (the caller cannot distinguish it
+// from "no boundary recorded" by return value alone), but the log lets an
+// operator tell a transient storage problem apart from a genuinely
+// unrecoverable UTxO when StrictUtxoValidation turns the latter into an
+// ingest error.
+func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
+	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
+	if err != nil {
+		d.logger.Warn(
+			"failed to read Mithril trust boundary from sync state; "+
+				"treating consumed-utxo recovery failures as past the boundary",
+			"error", err,
+		)
+		return 0
+	}
+	if val == "" {
+		return 0
+	}
+	slot, err := strconv.ParseUint(val, 10, 64)
+	if err != nil {
+		d.logger.Warn(
+			"malformed mithril_ledger_slot sync state value, ignoring",
+			"value", val,
+			"error", err,
+		)
+		return 0
+	}
+	return slot
+}
 
 func ledgerHashBytes(hash lcommon.Blake2b256) []byte {
 	return hash[:]
@@ -370,6 +411,21 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			txn,
 		)
 		if err != nil {
+			// Past the Mithril trust boundary the node should have complete
+			// producer history for every input it is asked to spend, so an
+			// unrecoverable UTxO there indicates real corruption or a bug
+			// rather than an expected gap. Below the boundary (or when none
+			// is recorded and we did not sync from genesis) the UTxO may
+			// legitimately predate the data we imported.
+			if d.config.StrictUtxoValidation &&
+				point.Slot > d.mithrilTrustBoundarySlot(txn) {
+				return fmt.Errorf(
+					"consumed utxo %s not found at slot %d and could not be recovered: %w",
+					input.String(),
+					point.Slot,
+					err,
+				)
+			}
 			d.logger.Debug(
 				"skipping unrecoverable transaction input utxo repair",
 				"input",
@@ -823,6 +879,37 @@ func (d *Database) GetTransactionByHash(
 		defer txn.Release()
 	}
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
+}
+
+// GetExistingTransactionHashes returns the subset of the provided hashes that
+// are already recorded in the ledger. It is lightweight (hash column only) and
+// chunked to keep the IN clause within backend parameter limits. Used to skip
+// re-applying transactions an earlier endorser block already applied
+// (issue #2699).
+func (d *Database) GetExistingTransactionHashes(
+	hashes [][]byte,
+	txn *Txn,
+) ([][]byte, error) {
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	const chunk = 900
+	var existing [][]byte
+	for i := 0; i < len(hashes); i += chunk {
+		end := min(i+chunk, len(hashes))
+		part, err := d.metadata.ExistingTransactionHashes(
+			hashes[i:end], txn.Metadata(),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("get existing tx hashes: %w", err)
+		}
+		existing = append(existing, part...)
+	}
+	return existing, nil
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -1298,6 +1385,18 @@ func (d *Database) TransactionsDeleteRolledback(
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete transactions after slot %d: %w",
+			slot,
+			err,
+		)
+	}
+
+	// Drop endorser-transaction provenance for the undone spends (empty on
+	// networks that do not apply endorser blocks).
+	if err := d.metadata.DeleteEndorserTransactionsAfterSlot(
+		slot, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"failed to delete endorser transactions after slot %d: %w",
 			slot,
 			err,
 		)

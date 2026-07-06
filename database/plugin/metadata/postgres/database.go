@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build dingo_extra_plugins
+
 package postgres
 
 import (
@@ -82,6 +84,26 @@ func (t *postgresTxn) Rollback() error {
 	}
 	t.finished = true
 	return nil
+}
+
+func (t *postgresTxn) SavePoint(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.SavePoint(name).Error
+}
+
+func (t *postgresTxn) RollbackTo(name string) error {
+	if t.beginErr != nil {
+		return t.beginErr
+	}
+	if t.finished || t.db == nil {
+		return types.ErrNilTxn
+	}
+	return t.db.RollbackTo(name).Error
 }
 
 // MetadataStorePostgres stores metadata in Postgres.
@@ -311,6 +333,18 @@ func (d *MetadataStorePostgres) Start() error {
 	); err != nil {
 		return fmt.Errorf(
 			"account reward delta slot index migration failed: %w", err,
+		)
+	}
+	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
+	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
+	// was enabled never enforced these cascades, so orphaned children
+	// accumulated and would fail the constrained table rebuild with
+	// "FOREIGN KEY constraint failed (787)". See issue #2696.
+	if err := models.PurgeOrphanedCascadeRows(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
 	// Create table schemas

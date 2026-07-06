@@ -1,5 +1,179 @@
 # Dingo Releases
 
+## v0.61.2 (July 6, 2026)
+
+**Title:** Safer recovery, steadier peer governance, and tighter validation
+
+**Date:** July 6, 2026
+
+**Version:** v0.61.2
+
+This release focuses on ledger recovery, sync stability, peer governance, and maintenance updates.
+
+### ✨ What's New
+
+* Noted **no major new features land in this patch release:** Version v0.61.2 focuses on reliability, validation, peer management, and maintenance updates.
+
+### 💪 Improvements
+
+* Improved **keep Leios endorser block persistence steady during catch-up:** A bounded coalescing writer now keeps catch-up responsive, and queued work drains safely on shutdown.
+* Enhanced **speed committee voting lookups:** The database now picks the latest authorization per cold credential with a windowed lookup, which keeps long-running governance queries responsive.
+* Modernized **refresh `gouroboros` to v0.186.2:** The bundled protocol library now tracks the v0.186.2 maintenance release in `go.mod` and `go.sum`.
+* Refined **refresh `gouroboros` to v0.186.3:** The bundled protocol library now tracks the v0.186.3 maintenance release in `go.mod` and `go.sum`.
+* Strengthened **update the pinned golangci-lint GitHub Action to v9.3.0:** CI now uses the newer lint action release for routine validation runs.
+* Polished **refresh the `dingo-blockfrost-explorer` example type definitions to `@types/node` v26.1.0:** The example now uses the newer Node type definitions for local development.
+* Reviewed **keep the release history current with the v0.61.1 notes:** The repository release history now includes the previous release entry for easier review.
+
+### 🔧 Fixes
+
+* Fixed **encode chain block number queries with the correct `WithOrigin` shape:** Genesis and origin points now return `[0]`, non-genesis tips return `[1, blockNumber]`, and the first block at number `0` now reports correctly.
+* Corrected **keep at-tip recovery above the Mithril trust boundary:** Transaction validation recovery now stays at the current tip when the computed rewind would cross below `mithrilLedgerSlot`, and ChainSync now resets to `Syncing` with a `ChainsyncResync` event.
+* Hardened **make consumed UTxO validation configurable after the Mithril boundary:** `StrictUtxoValidation` now lets operators choose whether missing consumed UTxOs fail the run through YAML, environment variables, or the CLI, while non-strict mode keeps the current default behavior.
+* Repaired **realign switched peer cursors with the local tip:** When a switched peer already sits ahead of the local tip, ChainSync now requests resync on the effective connection instead of stalling without buffered headers or blockfetch.
+* Stabilized **avoid recycling ChainSync during ledger application backlog catch-up:** The recycler now checks ledger divergence first and suppresses recycle or resync when the primary chain is already caught up and the applied tip is still draining backlog.
+* Resolved **track unrecoverable rollbacks across reconnects:** The rollback tracker now remembers stuck points across reconnects, uses a 10-minute window and a 3-failure threshold, and surfaces the condition with a throttled error and Prometheus metric.
+* Improved **reject non-Byron headers with mismatched VRF keys and block numbers:** Consensus validation now checks the producing pool’s registered VRF key and enforces era-specific block-number continuity at header and block ingestion.
+* Updated **spread outbound dials across resolved backend addresses:** The peer governor now re-resolves hostname peers on each dial, filters to locally routable addresses, and chooses from reachable IPs so retries do not pin to one backend.
+* Enhanced **stop retrying peers that never connected successfully:** The peer governor now drops and deny-lists never-connected discovered and public-root peers after a failed dial, while keeping trusted, previously connected, client-capable, and last eligible upstream peers.
+* Balanced **replenish ledger peers aggressively when upstreams run low:** Discovery can now run on a faster emergency cadence and may add an extra batch, which helps the node recover from collapsed relay pools sooner.
+* Refined **cool down failing Leios backfill connections more aggressively:** Backfill retries now raise the per-connection cooldown with a cap and reset it after a successful fetch.
+* Expanded **treat empty Leios endorser block responses as point-hash mismatches:** The fetch path now checks the requested point hash before decoding, which surfaces wrong, empty, or truncated manifests as clearer mismatches.
+* Tuned **correct Praos epoch nonce handling across Mithril and epoch boundaries:** Ledger nonce handling now carries the correct epoch nonce across bootstrap gaps and boundary changes, and startup repairs missing Mithril gap-block nonce history.
+* Streamlined **validate and cap Bark archive fallback downloads:** Archive fallback now requires HTTPS, rejects embedded credentials, restricts hosts to an allowlist, disables redirects, and caps response bodies at 128 KiB.
+
+### 📋 What You Need to Know
+
+* Clarified **configure `StrictUtxoValidation` for consumed-input misses:** YAML, environment, and CLI settings now control whether missing consumed UTxOs become errors after the Mithril trust boundary, and strict mode fails unrecoverable misses.
+* Highlighted **require HTTPS and explicit host approval for Bark archive fallback:** Archive fallback now requires HTTPS, denies embedded credentials, keeps redirects disabled, and lets operators extend the allowlist with explicit configuration.
+* Emphasized **plan for more active peer discovery when upstreams fall below target:** The peer governor can now trigger emergency discovery on a faster cadence and may add an extra batch to recover more quickly from collapsed relay pools.
+* Summarized **expect stricter consensus and ledger validation around producer identity and block order:** Non-Byron headers with mismatched VRF keys or broken block-number continuity now fail validation, and ledger recovery will not rewind below the Mithril boundary.
+* Acknowledged **expect ChainSync to resync more directly after cursor drift, backlog draining, or unrecoverable rollbacks:** Switched peers, ledger-application backlog, and repeated rollback failures now push the node back toward a healthy sync path instead of recycling endlessly.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.61.1 (July 2, 2026)
+
+**Title:** Safer Mithril recovery, steadier Leios sync, and stronger ledger validation
+
+**Date:** July 2, 2026
+
+**Version:** v0.61.1
+
+Hi folks! Here’s what we shipped in v0.61.1.
+
+### ✨ What's New
+
+* Noted **this patch release has no new features:** This patch release focuses on reliability improvements, fixes, operator controls, and release history maintenance.
+
+### 💪 Improvements
+
+* Improved **isolate pooled Mithril archive download connections for steadier bootstrap and archive transfers:** Mithril bootstrap and archive recovery now keep pooled download connections isolated, which helps transfers stay steadier during recovery work.
+* Updated **disable Badger GC during Mithril snapshot load for steadier snapshot imports:** Mithril snapshot imports now disable Badger GC during loading, which helps snapshot recovery stay steadier.
+* Refined **fail fast on malformed database blob or metadata plugin configuration:** Malformed database blob or metadata plugin configuration now fails fast at startup instead of being silently ignored or continuing.
+* Enhanced **persist Leios endorser blocks for historical serving after cache expiry or restart:** Historical Leios serving now keeps endorser blocks available after cache expiry and after a restart.
+* Modernized **make tracing configurable through config, environment variables, and CLI flags:** Tracing behavior now follows configuration files, environment variables, and CLI flags, which gives operators clearer control.
+* Strengthened **make MySQL and Postgres metadata plugins an explicit `-tags dingo_extra_plugins` opt in while SQLite remains in the default build:** MySQL and Postgres metadata support now requires the explicit `-tags dingo_extra_plugins` opt in, while SQLite remains available in the default build.
+* Advanced **persist the full Mithril trust boundary point for better recovery intersections:** Mithril recovery now keeps the full trust boundary point, including its hash, which helps recovery intersections stay more accurate.
+* Polished **chunk large Leios transaction hash lookups and skip duplicate endorser block transactions:** Large Leios transaction lookups now run in smaller chunks and ignore duplicate endorser block transactions, which helps historical recovery stay steadier.
+* Sharpened **purge orphaned metadata rows before auto migrate so upgrades start more safely:** Metadata upgrades now clear orphaned rows before auto migration begins, which makes upgrades safer to start.
+* Updated **keep the in repository v0.61.0 release history current:** The repository release history now includes the v0.61.0 entry, which keeps recent release context current.
+
+### 🔧 Fixes
+
+* Fixed **preserve Mithril covered LAB and epoch nonces during ledger healing:** Ledger healing now preserves Mithril covered LAB and epoch nonces, which protects recovery correctness.
+* Corrected **normalize VRF key and result data from canonical header body CBOR during block verification:** Block verification now normalizes VRF key and result data from canonical header body CBOR, which improves validation accuracy.
+* Strengthened **tolerate speculative Leios endorser conflicts so ranking blocks can proceed without wedging sync:** Leios sync now tolerates speculative endorser conflicts so ranking block processing can keep moving.
+* Repaired **fix development transaction generation and chained forging so submitted transactions are accepted:** Development transaction generation and chained forging now use the expected submission behavior, and mempool eviction no longer blocks acceptance.
+* Stabilized **recover from wedged peers and persistent near tip validation failures by retrying and rotating to a fresh sync peer:** Sync now retries failed validation paths and rotates to a fresh sync peer, which helps recovery continue after a wedged connection.
+* Hardened **enforce slot leader eligibility against stake derived thresholds on inbound blocks:** Inbound block validation now checks slot leader eligibility against stake derived thresholds, which strengthens ledger validation.
+* Balanced **repair epoch boundary LAB nonce derivation and startup and rollback nonce recovery:** Nonce recovery now repairs epoch boundary LAB nonce derivation and startup and rollback nonce recovery, which keeps nonce handling more reliable.
+
+### 📋 What You Need to Know
+
+* Clarified **expect steadier Mithril bootstrap and snapshot recovery paths:** Mithril bootstrap transfers and snapshot imports should now recover more steadily during archive and snapshot work.
+* Highlighted **expect better Leios historical serving and steadier speculative conflict handling:** Historical Leios serving now stays available after cache expiry or restart, and speculative conflict handling now keeps ranking block processing moving.
+* Emphasized **build with the explicit `-tags dingo_extra_plugins` option when MySQL or Postgres metadata plugins are required:** MySQL and Postgres metadata support now requires the explicit `-tags dingo_extra_plugins` option, while SQLite remains in the default build.
+* Summarized **expect malformed database blob or metadata plugin configuration to fail fast at startup:** Malformed database blob or metadata plugin configuration now fails fast at startup instead of being silently ignored or continuing.
+* Reviewed **expect corrected development transaction generation and chained forging acceptance:** Development transaction generation, chained forging, and mempool handling now align so submitted transactions are accepted.
+* Noted **review the in repository release history for the current v0.61.0 entry:** The repository release history now includes the v0.61.0 entry for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.61.0 (June 30, 2026)
+
+**Title:** Midnight governance indexing, steadier Leios serving, and simpler example deployments
+
+**Date:** June 30, 2026
+
+**Version:** v0.61.0
+
+Hi folks! Here’s what we shipped in v0.61.0.
+
+### ✨ What's New
+
+* Added **expand Midnight indexing for governance, Ariadne, and committee candidate scans:** Midnight deployments can now capture broader governance related data, keep rollback safe persistence, and rely on steadier startup and backfill behavior.
+
+### 💪 Improvements
+
+* Improved **simplify local example deployments with a shared Docker Compose stack:** Example deployments can now run through a single workflow in `examples/docker-compose.yml`, and the renamed environment variables and paths make that setup easier to follow.
+* Updated **refresh the bundled protocol library to the current upstream patch release:** This release now includes the current upstream protocol library patch, which keeps protocol handling aligned with the latest maintenance updates.
+* Refined **refresh the bundled service library with current upstream JSON and host validation fixes:** Service integrations now benefit from upstream fixes for JSON document encoding and endpoint host label validation, which improves compatibility and request handling reliability.
+* Enhanced **align the documentation with current storage plugin builds and implemented MidnightState support:** The documentation now reflects the current storage plugin build tag behavior and the implemented MidnightState compatibility surface, which reduces build and integration confusion.
+* Modernized **keep the in repository release history current with the latest patch notes:** The release history now includes the published v0.60.1 entry, which keeps recent release context easier to review.
+
+### 🔧 Fixes
+
+* Fixed **steady BlockFetch serving with send queue backpressure during large range transfers:** Large range serving now applies send queue backpressure more effectively, which helps downstream catch up work stay stable under load.
+* Corrected **keep Leios endorser block fetch and backfill moving through partial and final windows:** Leios bitmap handling now follows the correct MSB first order, which prevents endorser block fetch and historical backfill from stalling in affected windows.
+* Strengthened **start SQLite metadata deployments with full schema setup automatically:** SQLite backed metadata deployments now create schema objects and foreign key setup automatically at startup, which makes fresh and upgraded databases easier to bring online.
+
+### 📋 What You Need to Know
+
+* Clarified **expect broader Midnight governance coverage and steadier rollback recovery:** Midnight deployments should expect broader governance, Ariadne, and committee candidate indexing coverage with more reliable restart and rollback handling.
+* Highlighted **expect steadier BlockFetch behavior while serving large Leios ranges:** Operators serving large Leios ranges should now see more stable downstream catch up behavior under load.
+* Emphasized **expect historical Leios sync to avoid bitmap related backfill stalls:** From genesis and historical Leios syncs should now keep endorser block backfill moving instead of stalling in partial or final windows.
+* Summarized **expect SQLite schema setup to happen automatically at startup:** SQLite backed deployments should now create schema and foreign key setup automatically when they start on fresh databases.
+* Reviewed **switch local examples to the shared Docker Compose workflow and updated names:** Local example deployments should move to `examples/docker-compose.yml` and follow the renamed environment variables.
+* Noted **review the published v0.60.1 notes in the in repository release history:** The repository release history now includes the published v0.60.1 notes for recent release review.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.60.1 (June 29, 2026)
 
 **Title:** Faster Mithril bootstrap, safer at-tip nonce handling, and refreshed dependencies

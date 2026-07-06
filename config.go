@@ -680,6 +680,15 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	}
 }
 
+// WithStrictUtxoValidation specifies whether an unrecoverable consumed UTxO
+// past the recorded Mithril sync boundary is a hard error rather than a
+// silently skipped condition. See database.Config.StrictUtxoValidation.
+func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.strictUtxoValidation = strict
+	}
+}
+
 // WithDatabaseWorkerPoolConfig specifies the database worker pool configuration
 func WithDatabaseWorkerPoolConfig(
 	cfg ledger.DatabaseWorkerPoolConfig,
@@ -946,6 +955,12 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	}
 }
 
+func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
+	return func(c *Config) {
+		c.barkBlockDownloadHosts = slices.Clone(hosts)
+	}
+}
+
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cfg.BarkPort = port
@@ -1173,6 +1188,11 @@ func (c *Config) BarkBaseUrl() string {
 	return c.cfg.BarkBaseUrl
 }
 
+// BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
+func (c *Config) BarkBlockDownloadHosts() []string {
+	return c.cfg.BarkBlockDownloadHosts
+}
+
 // TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
 func (c *Config) TlsCertFilePath() string {
 	return c.cfg.TlsCertFilePath
@@ -1191,6 +1211,11 @@ func (c *Config) IntersectTip() bool {
 // ValidateHistorical returns whether to validate all historical blocks.
 func (c *Config) ValidateHistorical() bool {
 	return c.cfg.ValidateHistorical
+}
+
+// StrictUtxoValidation returns whether to error out when a consumed UTxO cannot be found.
+func (c *Config) StrictUtxoValidation() bool {
+	return c.cfg.StrictUtxoValidation
 }
 
 // ShutdownTimeout returns the graceful shutdown timeout as a string duration.

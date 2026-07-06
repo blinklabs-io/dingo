@@ -15,7 +15,9 @@
 package peergov
 
 import (
+	"context"
 	"errors"
+	"math/rand/v2"
 	"net"
 	"strings"
 	"time"
@@ -33,6 +35,24 @@ const defaultMinPeerListCap = 200
 var ErrPeerListFull = errors.New("peer list at capacity")
 
 var lookupIP = net.LookupIP
+
+// lookupIPAddr resolves a hostname to its IP records while honoring the
+// provided context, so a hung or slow resolver cannot block the caller past
+// the context deadline or a governor shutdown. Unlike the bare net.LookupIP
+// used by resolveAddress, this path runs on the hot outbound-dial loop and
+// must never wedge the peer governor. It is a package var so tests can inject
+// a deterministic, host-independent resolver.
+var lookupIPAddr = func(ctx context.Context, host string) ([]net.IP, error) {
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	ips := make([]net.IP, len(addrs))
+	for i := range addrs {
+		ips[i] = addrs[i].IP
+	}
+	return ips, nil
+}
 
 // maxPeerListSize returns the hard cap for the total number of peers.
 // This prevents unbounded growth between reconciliation cycles.
@@ -254,6 +274,161 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 
 	// Use first resolved IP for normalization
 	return net.JoinHostPort(ips[0].String(), port)
+}
+
+// resolveDialAddress returns the concrete transport target to dial for an
+// outbound connection attempt against the given peer address.
+//
+// For IP-literal addresses it returns the address unchanged: there is
+// nothing to resolve and behavior is identical to callers that dial the
+// address directly.
+//
+// For hostname-based addresses it performs a FRESH DNS resolution on every
+// call and returns a single, randomly-selected resolved IP:port. This
+// spreads repeated (re)connect attempts across every record the hostname
+// currently resolves to — e.g. all backends behind a load-balancer
+// hostname — instead of pinning to whichever address the dialer happens to
+// try first. A stuck or unhealthy backend is therefore escaped on the next
+// attempt without a process restart.
+//
+// Peer identity and deduplication are intentionally unaffected: callers
+// keep using the stable peer.Address / peer.NormalizedAddress for all
+// bookkeeping (dedup, deny lists, reconnect lookup, peer sharing). Only the
+// transport dial target rotates per attempt.
+//
+// On resolution failure (or a malformed address) it falls back to the
+// original address so the dialer can resolve the hostname itself,
+// preserving prior behavior.
+//
+// The DNS lookup is bounded by dialDNSResolveTimeout and tied to the passed
+// context, so a hung or slow resolver cannot block the outbound-dial loop and
+// a governor shutdown cancels an in-flight resolution promptly. It performs a
+// blocking DNS lookup for hostnames and must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveDialAddress(
+	ctx context.Context,
+	address string,
+) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return address
+	}
+	// IP literals dial exactly as before: no re-resolution, no rotation.
+	if net.ParseIP(host) != nil {
+		return address
+	}
+	// Bound the fresh resolution so a hung or slow resolver cannot wedge the
+	// dial loop, and cancel it if the governor is shutting down.
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil || len(ips) == 0 {
+		// Can't resolve (or timed out); let the dialer resolve the hostname
+		// itself so behavior matches the pre-spread code path.
+		return address
+	}
+	// Filter the resolved records to the address families the local host can
+	// actually route to, so a single-stack host never wastes a dial (and a
+	// backoff cycle) on an unreachable family — e.g. an IPv6 record on a
+	// v4-only host. The primary goal remains spreading across load-balancer
+	// backends; this just keeps that spread inside the reachable families.
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	// Spread the dial across all currently-returned (reachable) records.
+	// Random selection is stateless and, unlike a shared round-robin counter,
+	// does not synchronize the fleet onto a single backend; a congested or
+	// half-dead backend is escaped on the next attempt.
+	ip := ips[rand.IntN(len(ips))] //nolint:gosec // load-balancing spread, not security-sensitive
+	return net.JoinHostPort(ip.String(), port)
+}
+
+// localAddrFamilies detects which IP families the local host can route to.
+// It is a package var so tests can inject a deterministic result independent
+// of the host's real network interfaces.
+var localAddrFamilies = detectLocalAddrFamilies
+
+// detectLocalAddrFamilies reports whether the local host has at least one
+// non-loopback, non-link-local global-unicast IPv4 and/or IPv6 address, i.e.
+// which families it can plausibly originate traffic on. On any error it
+// reports (false, false), which the callers treat as "inconclusive" and fall
+// back to the full record set rather than filtering.
+func detectLocalAddrFamilies() (hasV4, hasV6 bool) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false, false
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		default:
+			continue
+		}
+		// Skip loopback/link-local and anything that is not a usable global
+		// unicast address; those do not indicate real routability. (Private
+		// RFC1918 / RFC4193 addresses are global-unicast and count, since a
+		// host on such a network can route that family.)
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
+			!ip.IsGlobalUnicast() {
+			continue
+		}
+		if ip.To4() != nil {
+			hasV4 = true
+		} else {
+			hasV6 = true
+		}
+	}
+	return hasV4, hasV6
+}
+
+// supportedDialFamilies returns the local host's routable IP families,
+// cached briefly to avoid a per-dial interface-scan syscall storm while still
+// picking up later interface or routing changes.
+func (p *PeerGovernor) supportedDialFamilies() (hasV4, hasV6 bool) {
+	now := time.Now()
+	p.dialFamilyMu.RLock()
+	if !p.dialFamilyCheckedAt.IsZero() &&
+		now.Sub(p.dialFamilyCheckedAt) < dialFamilyCacheTTL {
+		hasV4, hasV6 = p.dialFamilyHasV4, p.dialFamilyHasV6
+		p.dialFamilyMu.RUnlock()
+		return hasV4, hasV6
+	}
+	p.dialFamilyMu.RUnlock()
+
+	p.dialFamilyMu.Lock()
+	defer p.dialFamilyMu.Unlock()
+	now = time.Now()
+	if !p.dialFamilyCheckedAt.IsZero() &&
+		now.Sub(p.dialFamilyCheckedAt) < dialFamilyCacheTTL {
+		return p.dialFamilyHasV4, p.dialFamilyHasV6
+	}
+	p.dialFamilyHasV4, p.dialFamilyHasV6 = localAddrFamilies()
+	p.dialFamilyCheckedAt = now
+	return p.dialFamilyHasV4, p.dialFamilyHasV6
+}
+
+// filterDialFamilies returns the subset of ips whose address family the host
+// supports. SAFETY FALLBACK: if detection was inconclusive (neither family
+// supported) or nothing matches a supported family, it returns the original
+// ips unchanged so a peer is never stranded by over-filtering.
+func filterDialFamilies(ips []net.IP, hasV4, hasV6 bool) []net.IP {
+	if !hasV4 && !hasV6 {
+		// Detection inconclusive — do not filter.
+		return ips
+	}
+	filtered := make([]net.IP, 0, len(ips))
+	for _, ip := range ips {
+		if (ip.To4() != nil && hasV4) || (ip.To4() == nil && hasV6) {
+			filtered = append(filtered, ip)
+		}
+	}
+	if len(filtered) == 0 {
+		// No record matches a supported family; never strand the peer.
+		return ips
+	}
+	return filtered
 }
 
 func (p *PeerGovernor) publishEvent(eventType event.EventType, data any) {

@@ -89,11 +89,13 @@ func TestNewPeerGovernor(t *testing.T) {
 				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			},
 			expected: PeerGovernorConfig{
-				ReconcileInterval:            defaultReconcileInterval,
-				MaxReconnectFailureThreshold: defaultMaxReconnectFailureThreshold,
-				MinHotPeers:                  defaultMinHotPeers,
-				InactivityTimeout:            defaultInactivityTimeout,
-				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
+				ReconcileInterval:                  defaultReconcileInterval,
+				MaxReconnectFailureThreshold:       defaultMaxReconnectFailureThreshold,
+				MinHotPeers:                        defaultMinHotPeers,
+				InactivityTimeout:                  defaultInactivityTimeout,
+				BootstrapRecoveryCooldown:          defaultBootstrapRecoveryCooldown,
+				EmergencyLedgerPeerRefreshInterval: defaultEmergencyLedgerPeerRefreshInterval,
+				EmergencyDiscoveryCheckInterval:    defaultEmergencyDiscoveryCheckInterval,
 			},
 		},
 		{
@@ -102,16 +104,20 @@ func TestNewPeerGovernor(t *testing.T) {
 				Logger: slog.New(
 					slog.NewJSONHandler(io.Discard, nil),
 				),
-				ReconcileInterval:            10 * time.Minute,
-				MaxReconnectFailureThreshold: 10,
-				MinHotPeers:                  5,
+				ReconcileInterval:                  10 * time.Minute,
+				MaxReconnectFailureThreshold:       10,
+				MinHotPeers:                        5,
+				EmergencyLedgerPeerRefreshInterval: 10 * time.Second,
+				EmergencyDiscoveryCheckInterval:    15 * time.Second,
 			},
 			expected: PeerGovernorConfig{
-				ReconcileInterval:            10 * time.Minute,
-				MaxReconnectFailureThreshold: 10,
-				MinHotPeers:                  5,
-				InactivityTimeout:            defaultInactivityTimeout,
-				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
+				ReconcileInterval:                  10 * time.Minute,
+				MaxReconnectFailureThreshold:       10,
+				MinHotPeers:                        5,
+				InactivityTimeout:                  defaultInactivityTimeout,
+				BootstrapRecoveryCooldown:          defaultBootstrapRecoveryCooldown,
+				EmergencyLedgerPeerRefreshInterval: 10 * time.Second,
+				EmergencyDiscoveryCheckInterval:    15 * time.Second,
 			},
 		},
 		{
@@ -126,11 +132,13 @@ func TestNewPeerGovernor(t *testing.T) {
 				InactivityTimeout:            -3 * time.Minute,
 			},
 			expected: PeerGovernorConfig{
-				ReconcileInterval:            defaultReconcileInterval,
-				MaxReconnectFailureThreshold: defaultMaxReconnectFailureThreshold,
-				MinHotPeers:                  defaultMinHotPeers,
-				InactivityTimeout:            defaultInactivityTimeout,
-				BootstrapRecoveryCooldown:    defaultBootstrapRecoveryCooldown,
+				ReconcileInterval:                  defaultReconcileInterval,
+				MaxReconnectFailureThreshold:       defaultMaxReconnectFailureThreshold,
+				MinHotPeers:                        defaultMinHotPeers,
+				InactivityTimeout:                  defaultInactivityTimeout,
+				BootstrapRecoveryCooldown:          defaultBootstrapRecoveryCooldown,
+				EmergencyLedgerPeerRefreshInterval: defaultEmergencyLedgerPeerRefreshInterval,
+				EmergencyDiscoveryCheckInterval:    defaultEmergencyDiscoveryCheckInterval,
 			},
 		},
 	}
@@ -160,6 +168,16 @@ func TestNewPeerGovernor(t *testing.T) {
 				t,
 				tt.expected.BootstrapRecoveryCooldown,
 				pg.config.BootstrapRecoveryCooldown,
+			)
+			assert.Equal(
+				t,
+				tt.expected.EmergencyLedgerPeerRefreshInterval,
+				pg.config.EmergencyLedgerPeerRefreshInterval,
+			)
+			assert.Equal(
+				t,
+				tt.expected.EmergencyDiscoveryCheckInterval,
+				pg.config.EmergencyDiscoveryCheckInterval,
 			)
 			assert.NotNil(t, pg.config.BootstrapPromotionEnabled)
 			assert.True(t, *pg.config.BootstrapPromotionEnabled)
@@ -7673,6 +7691,32 @@ func TestHandleInboundConnection_InboundDuplexFromEvent(t *testing.T) {
 	require.Len(t, peers, 1)
 	assert.True(t, peers[0].InboundDuplex,
 		"event-derived duplex hint must be retained when connmanager is nil")
+}
+
+func TestHandleInboundConnection_DuplexMarksEverConnected(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+			IsDuplex:             true,
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.True(t, peers[0].EverConnected,
+		"inbound duplex connection must count as prior successful connectivity")
 }
 
 func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {

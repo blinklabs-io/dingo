@@ -106,6 +106,11 @@ type Peer struct {
 	// so this counter is what carries the backoff rung across sessions.
 	OutboundShortLivedCount uint32
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer
+	// EverConnected records whether this peer has ever established a
+	// client-capable connection. Discovered (peer-share/ledger) and
+	// public-root peers that have never connected are dropped after a failed
+	// dial instead of being retried indefinitely.
+	EverConnected           bool
 	State                   PeerState
 	Source                  PeerSource
 	Sharable                bool

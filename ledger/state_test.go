@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -71,6 +72,44 @@ func TestLedgerProcessBlocksFromSourceReturnsNilWhenReaderCloses(
 		readChainResultCh,
 	)
 	require.NoError(t, err)
+}
+
+func TestHandleLedgerProcessBlocksErrorLogsPersistentValidationFailure(
+	t *testing.T,
+) {
+	haltErr := fmt.Errorf("process block batch: %w", errHaltLedgerPipeline)
+	fatalCalled := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			FatalErrorFunc: func(error) {
+				fatalCalled = true
+			},
+		},
+	}
+
+	ls.handleLedgerProcessBlocksError(haltErr)
+	require.False(t, fatalCalled)
+}
+
+func TestHandleLedgerProcessBlocksErrorDoesNotReportFatalErrors(
+	t *testing.T,
+) {
+	fatalCalled := false
+	ls := &LedgerState{
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			FatalErrorFunc: func(error) {
+				fatalCalled = true
+			},
+		},
+	}
+
+	ls.handleLedgerProcessBlocksError(errRestartLedgerPipeline)
+	require.False(t, fatalCalled)
+
+	ls.handleLedgerProcessBlocksError(errors.New("transient"))
+	require.False(t, fatalCalled)
 }
 
 // It verifies that calculating the stability window is synchronized with
@@ -2564,6 +2603,50 @@ func TestIntersectPointsReturnsNoPointsWhenLedgerTipIsEmpty(
 	points, err := ls.IntersectPoints(4)
 	require.NoError(t, err)
 	assert.Nil(t, points)
+}
+
+func TestLoadMithrilTrustBoundaryLoadsPersistedHash(t *testing.T) {
+	db := newTestDB(t)
+	boundaryHash := bytes.Repeat([]byte{0x42}, 32)
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerSlotSyncKey,
+		"42",
+		nil,
+	))
+	require.NoError(t, db.SetSyncState(
+		mithrilLedgerHashSyncKey,
+		fmt.Sprintf("%x", boundaryHash),
+		nil,
+	))
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+
+	ls.loadMithrilTrustBoundary()
+
+	require.Equal(t, uint64(42), ls.mithrilLedgerSlot)
+	require.Equal(t, boundaryHash, ls.mithrilLedgerHash)
+}
+
+func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	boundaryHash := bytes.Repeat([]byte{0x24}, 32)
+	ls := &LedgerState{
+		db:                db,
+		mithrilLedgerSlot: 42,
+		mithrilLedgerHash: boundaryHash,
+	}
+
+	points, err := ls.IntersectPoints(4)
+	require.NoError(t, err)
+	require.Len(t, points, 1)
+	assert.Equal(t, uint64(42), points[0].Slot)
+	assert.Equal(t, boundaryHash, points[0].Hash)
 }
 
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {

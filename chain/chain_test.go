@@ -224,6 +224,57 @@ func TestChainBasic(t *testing.T) {
 	}
 }
 
+func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
+	db, err := database.New(dbConfig)
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	if err := c.AddBlock(testBlocks[0], nil); err != nil {
+		t.Fatalf("unexpected error adding block 0: %s", err)
+	}
+	if err := c.AddBlock(testBlocks[1], nil); err != nil {
+		t.Fatalf("unexpected error adding block 1: %s", err)
+	}
+
+	forkHash := decodeHex(testHashPrefix + "00ff")
+	if err := db.BlockCreate(models.Block{
+		ID:       99,
+		Slot:     30,
+		Hash:     forkHash,
+		PrevHash: decodeHex(testBlocks[0].MockHash),
+		Cbor:     []byte{0x80},
+		Number:   99,
+		Type:     uint(testBlocks[1].Type()), //nolint:gosec
+	}, nil); err != nil {
+		t.Fatalf("unexpected error adding fork block blob: %s", err)
+	}
+	rawBlock, err := database.BlockBeforeSlot(db, 40)
+	if err != nil {
+		t.Fatalf("unexpected error looking up raw block before slot: %s", err)
+	}
+	if !bytes.Equal(rawBlock.Hash, forkHash) {
+		t.Fatalf("raw lookup did not expose fork block: got %x", rawBlock.Hash)
+	}
+
+	block, err := c.BlockBeforeSlot(40)
+	if err != nil {
+		t.Fatalf("unexpected error looking up canonical block before slot: %s", err)
+	}
+	if got, want := block.Slot, testBlocks[1].MockSlot; got != want {
+		t.Fatalf("unexpected canonical block slot: got %d, want %d", got, want)
+	}
+	if got, want := hex.EncodeToString(block.Hash), testBlocks[1].MockHash; got != want {
+		t.Fatalf("unexpected canonical block hash: got %s, want %s", got, want)
+	}
+}
+
 func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {

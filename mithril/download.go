@@ -17,6 +17,7 @@ package mithril
 import (
 	"archive/tar"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -364,6 +365,22 @@ func newPooledDownloadTransport(maxConns int) *http.Transport {
 	transport.MaxIdleConnsPerHost = maxConns
 	transport.MaxConnsPerHost = maxConns
 	transport.IdleConnTimeout = 90 * time.Second
+	// The immutable archive pool intentionally uses one HTTP/1.1
+	// connection per worker. HTTP/2 multiplexes every worker through the
+	// same TLS connection for Google Cloud Storage; after an idle stream
+	// timeout, retries can be routed back onto that poisoned connection and
+	// stall in lock-step. Keeping pooled downloads on separate HTTP/1.1
+	// connections preserves keep-alive without sharing stream fate.
+	transport.ForceAttemptHTTP2 = false
+	transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+	if transport.TLSClientConfig != nil {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	} else {
+		transport.TLSClientConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+	transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	return transport
 }
 
