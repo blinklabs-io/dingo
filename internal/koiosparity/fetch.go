@@ -86,11 +86,9 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	}
 
 	// Collect every pool that has ever been registered on chain, including
-	// retired pools. /pool_registrations is the authoritative certificate
-	// history; deduplicating its pool_id_bech32 column gives the complete set.
-	// We hoist this once per Fetch run rather than once per epoch because the
-	// list grows monotonically and fetching it once is far cheaper on wide
-	// backfills.
+	// retired pools. /pool_list is the authoritative source; we hoist this once
+	// per Fetch run rather than once per epoch because the list grows
+	// monotonically and fetching it once is far cheaper on wide backfills.
 	poolIDs, err := koios.GetAllHistoricalPoolIDs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("get historical pool IDs: %w", err)
@@ -207,12 +205,42 @@ func fetchEpoch(
 		return 0, fmt.Errorf("get epoch info: %w", err)
 	}
 
+	// Validate all rejection conditions before any DB writes so an incomplete
+	// or pre-staking epoch response never partially modifies the cache.
+
+	// active_stake null means this epoch predates staking (e.g. epoch 0 on
+	// preview). Without a reference value the comparison would be meaningless,
+	// so reject the epoch here so it stays uncached and is never checked.
+	if info.ActiveStake == nil {
+		return 0, fmt.Errorf("epoch %d: koios returned null active_stake — epoch predates staking and cannot be compared", epoch)
+	}
+	activeStake := *info.ActiveStake
+
+	// end_time 0 means the epoch is not yet fully closed in Koios. Reject now
+	// rather than after pool rows have been written to the cache.
+	if info.EndTime == 0 {
+		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
+	}
+	epochEndTime := time.Unix(info.EndTime, 0).UTC()
+
+	// fees and total_rewards may also be null for early epochs; store as ""
+	// so the cache constraint is satisfied. The comparer skips fees comparison
+	// when koios.Fees is "".
+	var fees, totalRewards string
+	if info.Fees != nil {
+		fees = *info.Fees
+	}
+	if info.TotalRewards != nil {
+		totalRewards = *info.TotalRewards
+	}
+
 	now := time.Now()
 
 	// 2. Fetch per-pool epoch history rows in parallel.
-	// _pool_bech32 is a required Koios parameter; _epoch_no filters server-side
-	// so each call returns at most one row instead of the full pool history.
-	poolCount := 0
+	// Pool rows are accumulated in memory and written atomically at the end so
+	// that a force-refresh or partial failure cannot leave a mixed old+new set
+	// in the cache for this epoch.
+	var poolRows []KoiosPoolEpoch
 	poolSem := make(chan struct{}, 5)
 	var poolWg sync.WaitGroup
 	var poolMu sync.Mutex
@@ -220,7 +248,7 @@ func fetchEpoch(
 
 	// Use a labeled break so that on cancellation we stop spawning new workers
 	// but still drain already-started goroutines via poolWg.Wait() below.
-	// An early return here would let running goroutines race the cache after
+	// An early return here would let running goroutines race poolRows after
 	// the caller proceeds.
 outer:
 	for _, poolID := range poolIDs {
@@ -247,7 +275,8 @@ outer:
 				return // Pool wasn't active this epoch.
 			}
 
-			if upsertErr := cache.UpsertPoolEpoch(KoiosPoolEpoch{
+			poolMu.Lock()
+			poolRows = append(poolRows, KoiosPoolEpoch{
 				Network:     network,
 				Epoch:       epoch,
 				PoolBech32:  id,
@@ -255,15 +284,7 @@ outer:
 				BlockCnt:    item.BlockCnt,
 				Delegators:  item.DelegatorCnt,
 				FetchedAt:   now,
-			}); upsertErr != nil {
-				select {
-				case poolErrCh <- fmt.Errorf("upsert pool %s: %w", id, upsertErr):
-				default:
-				}
-				return
-			}
-			poolMu.Lock()
-			poolCount++
+			})
 			poolMu.Unlock()
 		}(poolID)
 	}
@@ -272,39 +293,38 @@ outer:
 
 	// If context was cancelled, report that rather than any pool error.
 	if ctx.Err() != nil {
-		return poolCount, ctx.Err()
+		return 0, ctx.Err()
 	}
 
 	select {
 	case err := <-poolErrCh:
-		return poolCount, err
+		return 0, err
 	default:
 	}
 
-	// 3. Write epoch info only after all pool rows have succeeded.
+	// 3. Write pool rows, then epoch info.
 	//
-	// Reject epochs where Koios returned no end_time. All closed epochs should
-	// have a valid Unix timestamp; a zero means the response is incomplete.
-	// Rather than cache broken data that permanently disables the grace-window
-	// logic, return an error so the epoch stays uncached and is retried on the
-	// next fetch run.
-	if info.EndTime == 0 {
-		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
+	// Pool rows are replaced atomically (delete old set + insert new set in one
+	// transaction) so the checker never sees a partial or mixed state.
+	// Epoch info is written only after pool rows succeed, preserving the
+	// invariant that koios_epoch_info presence = fully cached epoch.
+	if err := cache.ReplaceEpochPoolRows(network, epoch, poolRows); err != nil {
+		return 0, fmt.Errorf("replace pool rows: %w", err)
 	}
-	epochEndTime := time.Unix(info.EndTime, 0).UTC()
 
 	if err := cache.UpsertEpochInfo(KoiosEpochInfo{
 		Network:      network,
 		Epoch:        epoch,
-		ActiveStake:  info.ActiveStake,
-		Fees:         info.Fees,
-		TotalRewards: info.TotalRewards,
+		ActiveStake:  activeStake,
+		Fees:         fees,
+		TotalRewards: totalRewards,
 		EpochEndTime: epochEndTime,
 		FetchedAt:    now,
 	}); err != nil {
 		return 0, fmt.Errorf("upsert epoch info: %w", err)
 	}
 
+	poolCount := len(poolRows)
 	logger.Debug("koiosparity: epoch fetched",
 		"network", network,
 		"epoch", epoch,

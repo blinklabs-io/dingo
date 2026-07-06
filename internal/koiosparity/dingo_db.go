@@ -160,6 +160,14 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 		return nil, fmt.Errorf("epoch_summary epoch %d: %w", epoch, err)
 	}
 
+	// SnapshotReady = false means Dingo has written a partial or placeholder row
+	// that will be repaired later. Treat it as not-yet-ready so the checker
+	// classifies this as a transient state rather than comparing in-progress
+	// values against Koios's final reward data.
+	if !summary.SnapshotReady {
+		return nil, nil
+	}
+
 	data := &DingoEpochData{
 		TotalActiveStake: strconv.FormatUint(uint64(summary.TotalActiveStake), 10),
 	}

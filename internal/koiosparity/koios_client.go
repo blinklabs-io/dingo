@@ -40,12 +40,13 @@ var koiosBaseURLs = map[string]string{
 
 // KoiosEpochInfoResp is the Koios /epoch_info response shape.
 // Note: pool_cnt and delegator_cnt are not returned by preview/preprod and are omitted.
+// active_stake, fees, and total_rewards are nullable on early epochs (pre-staking, pre-rewards).
 type KoiosEpochInfoResp struct {
-	EpochNo      uint64 `json:"epoch_no"`
-	EndTime      int64  `json:"end_time"` // Unix timestamp of epoch boundary
-	ActiveStake  string `json:"active_stake"`
-	Fees         string `json:"fees"`
-	TotalRewards string `json:"total_rewards"`
+	EpochNo      uint64  `json:"epoch_no"`
+	EndTime      int64   `json:"end_time"` // Unix timestamp of epoch boundary
+	ActiveStake  *string `json:"active_stake"`
+	Fees         *string `json:"fees"`
+	TotalRewards *string `json:"total_rewards"`
 }
 
 // KoiosPoolHistoryItem is one epoch entry from /pool_history.

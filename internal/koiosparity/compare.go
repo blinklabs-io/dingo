@@ -111,34 +111,37 @@ func CompareEpochAggregates(
 		})
 	}
 
-	// fees — sourced from reward_ada_pots, which may not be present for every epoch.
-	if dingoEpoch.Fees == "" {
-		// No reward_ada_pots row: the epoch should have one; flag it explicitly
-		// so the epoch is never silently classified as PASS without fees checked.
-		cat := CategoryDBMissing
-		if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
-			now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
-			cat = CategoryReferenceLag
+	// fees — sourced from reward_ada_pots. Koios returns null (stored as "") for
+	// early epochs that predate fee accounting; skip if there is no reference value.
+	if koios.Fees != "" {
+		if dingoEpoch.Fees == "" {
+			// No reward_ada_pots row: the epoch should have one; flag it explicitly
+			// so the epoch is never silently classified as PASS without fees checked.
+			cat := CategoryDBMissing
+			if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
+				now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "epoch_fees",
+				DingoValue: "",
+				KoiosValue: koios.Fees,
+				Category:   cat,
+				CheckedAt:  now,
+			})
+		} else if dingoEpoch.Fees != koios.Fees {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "epoch_fees",
+				DingoValue: dingoEpoch.Fees,
+				KoiosValue: koios.Fees,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
 		}
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "epoch_fees",
-			DingoValue: "",
-			KoiosValue: koios.Fees,
-			Category:   cat,
-			CheckedAt:  now,
-		})
-	} else if dingoEpoch.Fees != koios.Fees {
-		out = append(out, CheckMismatch{
-			Network:    network,
-			Epoch:      epoch,
-			Field:      "epoch_fees",
-			DingoValue: dingoEpoch.Fees,
-			KoiosValue: koios.Fees,
-			Category:   CategoryValueMismatch,
-			CheckedAt:  now,
-		})
 	}
 
 	return out
