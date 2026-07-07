@@ -82,7 +82,7 @@ This release improves recovery speed, peer stability, historical stake correctne
 ### 🔧 Fixes
 
 * Fixed Mark snapshots to use historical stake at the snapshot slot, which keeps epoch-2 Praos leader election and VRF-based header validation aligned with the delegation, registration, and UTxO state at the snapshot boundary.
-* Fixed chain heal to use a binary search over the canonical chain index, which shortens startup recovery when the header chain tip runs far ahead of the ledger tip while preserving canonical chain behavior.
+* Corrected chain heal to use a binary search over the canonical chain index, which shortens startup recovery when the header chain tip runs far ahead of the ledger tip while preserving canonical chain behavior.
 
 ### ⚠️ Breaking Changes
 
