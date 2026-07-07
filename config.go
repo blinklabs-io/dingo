@@ -685,7 +685,7 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 // silently skipped condition. See database.Config.StrictUtxoValidation.
 func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.strictUtxoValidation = strict
+		c.cfg.StrictUtxoValidation = strict
 	}
 }
 
@@ -957,7 +957,7 @@ func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkBlockDownloadHosts = slices.Clone(hosts)
+		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
 	}
 }
 
