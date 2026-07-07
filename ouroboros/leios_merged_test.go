@@ -82,11 +82,8 @@ func testDijkstraBlockRaw(
 ) (ocommon.Point, cbor.RawMessage) {
 	t.Helper()
 	blockBody := gdijkstra.DijkstraBlockBody{
-		TransactionBodies:      []gdijkstra.DijkstraTransactionBody{},
-		TransactionWitnessSets: []gdijkstra.DijkstraTransactionWitnessSet{},
-		InvalidTransactions:    []uint{},
-		LeiosCertificate:       &gdijkstra.DijkstraLeiosCertificate{},
-		PerasCertificate:       &gdijkstra.DijkstraPerasCertificate{},
+		InvalidTransactions: []uint{},
+		Transactions:        []gdijkstra.DijkstraTransaction{},
 	}
 	block := gdijkstra.DijkstraBlock{
 		BlockHeader: &gdijkstra.DijkstraBlockHeader{

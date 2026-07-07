@@ -25,19 +25,13 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
-
-// leiosEndorserBlockReferencer is implemented by a block header that references
-// a Leios endorser block via its header extension (the Dijkstra
-// [eb_hash, eb_size] pair).
-type leiosEndorserBlockReferencer interface {
-	LeiosEndorserBlockRef() (lcommon.Blake2b256, uint64, bool)
-}
 
 // applyEndorserBlock decodes a Leios endorser block's standalone transactions
 // and applies them to the ledger ahead of the ranking block that references it,
@@ -376,11 +370,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 	var backfill []leiosEbRef
 	var tipWait []leiosEbRef
 	for _, blk := range blocks {
-		ref, ok := blk.Header().(leiosEndorserBlockReferencer)
-		if !ok {
-			continue
-		}
-		ebHash, _, ok := ref.LeiosEndorserBlockRef()
+		ebHash, _, ok := leiosheader.ReferencedEndorserBlock(blk.Header())
 		if !ok {
 			continue
 		}

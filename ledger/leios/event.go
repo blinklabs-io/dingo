@@ -21,8 +21,8 @@ import (
 
 // EbQuorumEventType is emitted once per endorser block when collected
 // verified votes meet the stake quorum and a certificate has been built.
-// This is the hook for embedding certificates into ranking blocks once
-// the Dijkstra CDDL defines the leios_cert payload.
+// This is the hook for future forge-loop integration that embeds certificates
+// into Dijkstra ranking block bodies.
 const EbQuorumEventType event.EventType = "leios.eb_quorum"
 
 // EbQuorumEvent carries the certificate built when an endorser block

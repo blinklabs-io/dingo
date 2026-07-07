@@ -54,7 +54,7 @@ func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 	for _, input := range []string{
 		"",
 		"zz",
-		"0102",                      // too short
+		"0102",                     // too short
 		fmt.Sprintf("%066x", 1234), // too long
 	} {
 		_, err := ParseVoteSigningKey(input)
