@@ -765,9 +765,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		// so we don't waste time validating TXs that will be rejected.
 		txSize := int64(len(txBytes))
 		newSize := m.currentSizeBytes + txSize
-		rejectionThreshold := int64(
-			float64(m.config.MempoolCapacity) * m.rejectionWatermark,
-		)
+		rejectionThreshold := m.maxAdmissionHeadroomBytesLocked()
 		if newSize > rejectionThreshold {
 			err = &MempoolFullError{
 				CurrentSize: int(m.currentSizeBytes),
