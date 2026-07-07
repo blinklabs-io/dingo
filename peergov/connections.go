@@ -71,6 +71,18 @@ func shortLivedReconnectDelay(count uint32) time.Duration {
 	return delay
 }
 
+// countHotPeersLocked returns the number of peers currently in the hot state.
+// Callers must hold p.mu.
+func (p *PeerGovernor) countHotPeersLocked() int {
+	n := 0
+	for _, peer := range p.peers {
+		if peer != nil && peer.State == PeerStateHot {
+			n++
+		}
+	}
+	return n
+}
+
 // isAddrInUseError returns true if the error is a "cannot assign
 // requested address" or EADDRINUSE, indicating a TCP 4-tuple collision.
 func isAddrInUseError(err error) bool {
@@ -827,12 +839,29 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 							peer.ReconnectDelay = maxReconnectDelay
 						}
 					}
-					p.config.Logger.Warn(
-						"short-lived connection detected, applying backoff",
-						"address", peer.Address,
-						"connection_duration", connDur,
-						"next_delay", peer.ReconnectDelay,
-					)
+					// When the hot pool is critically low, cap the backoff so we
+					// keep reconnecting to known peers instead of locking them
+					// out for minutes and collapsing to a single stalled
+					// upstream. On a network of few flaky relays every session
+					// is short-lived, so the escalating backoff would otherwise
+					// erode the pool to one. See issue #2765.
+					if peer.ReconnectDelay > emergencyReconnectDelay &&
+						p.countHotPeersLocked() <= criticalHotPeerThreshold {
+						peer.ReconnectDelay = emergencyReconnectDelay
+						p.config.Logger.Warn(
+							"hot peer pool critically low; capping reconnect backoff to replenish faster",
+							"address", peer.Address,
+							"capped_delay", peer.ReconnectDelay,
+							"component", "peergov",
+						)
+					} else {
+						p.config.Logger.Warn(
+							"short-lived connection detected, applying backoff",
+							"address", peer.Address,
+							"connection_duration", connDur,
+							"next_delay", peer.ReconnectDelay,
+						)
+					}
 				}
 			}
 			peer.ConnectedAt = time.Time{} // Reset for next connection
