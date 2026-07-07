@@ -156,6 +156,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 		}
 		var consecutiveRateLimits int
 		var rateLimitTotal int
+		var consecutiveImpossibleOffers int
 		backoffTimer := time.NewTimer(0)
 		backoffTimer.Stop()
 		defer backoffTimer.Stop()
@@ -268,6 +269,7 @@ func (o *Ouroboros) txsubmissionServerInit(
 					consecutiveRateLimits = 0
 				}
 				availableBytes := o.Mempool.AdmissionHeadroomBytes()
+				maxHeadroomBytes := o.Mempool.MaxAdmissionHeadroomBytes()
 				if availableBytes <= 0 {
 					continue
 				}
@@ -277,19 +279,43 @@ func (o *Ouroboros) txsubmissionServerInit(
 				)
 				if len(requestTxIds) == 0 {
 					if nextHeadroomBytes > availableBytes {
-						minHeadroomBytes = nextHeadroomBytes
-						o.config.Logger.Debug(
-							"deferring tx offer until mempool headroom increases",
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-							"required_headroom_bytes", nextHeadroomBytes,
-							"available_bytes", availableBytes,
-						)
+						if nextHeadroomBytes > maxHeadroomBytes {
+							consecutiveImpossibleOffers++
+							o.config.Logger.Debug(
+								"skipping impossible tx offer under mempool admission limits",
+								"component", "network",
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+								"required_headroom_bytes", nextHeadroomBytes,
+								"max_headroom_bytes", maxHeadroomBytes,
+							)
+							wait := txsubmissionBackoffDuration(
+								consecutiveImpossibleOffers,
+							)
+							backoffTimer.Reset(wait)
+							select {
+							case <-backoffTimer.C:
+							case <-conn.ErrorChan():
+								return
+							}
+						} else {
+							consecutiveImpossibleOffers = 0
+							minHeadroomBytes = nextHeadroomBytes
+							o.config.Logger.Debug(
+								"deferring tx offer until mempool headroom increases",
+								"component", "network",
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+								"required_headroom_bytes", nextHeadroomBytes,
+								"available_bytes", availableBytes,
+							)
+						}
 					}
 					continue
 				}
+				consecutiveImpossibleOffers = 0
 				// Request TX content for TxIds from above
 				txs, err := ctx.Server.RequestTxs(requestTxIds)
 				if err != nil {

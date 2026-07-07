@@ -891,6 +891,12 @@ func (m *Mempool) AdmissionHeadroomBytes() int64 {
 	return m.admissionHeadroomBytesLocked()
 }
 
+func (m *Mempool) MaxAdmissionHeadroomBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.maxAdmissionHeadroomBytesLocked()
+}
+
 func (m *Mempool) WaitForAdmissionHeadroom(
 	minBytes int64,
 	done <-chan error,
@@ -924,14 +930,21 @@ func (m *Mempool) WaitForAdmissionHeadroom(
 }
 
 func (m *Mempool) admissionHeadroomBytesLocked() int64 {
-	rejectionThreshold := int64(
-		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
-	)
-	headroom := rejectionThreshold - m.currentSizeBytes
+	headroom := m.maxAdmissionHeadroomBytesLocked() - m.currentSizeBytes
 	if headroom < 0 {
 		return 0
 	}
 	return headroom
+}
+
+func (m *Mempool) maxAdmissionHeadroomBytesLocked() int64 {
+	rejectionThreshold := int64(
+		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+	)
+	if rejectionThreshold < 0 {
+		return 0
+	}
+	return rejectionThreshold
 }
 
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {

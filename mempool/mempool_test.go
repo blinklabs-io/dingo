@@ -2044,6 +2044,7 @@ func TestMempool_AdmissionHeadroomBytes(t *testing.T) {
 	m := newTestMempoolWithCapacity(t, 1000, 0, 1.0)
 	defer m.Stop(context.Background())
 
+	assert.Equal(t, int64(1000), m.MaxAdmissionHeadroomBytes())
 	assert.Equal(t, int64(1000), m.AdmissionHeadroomBytes())
 	addMockTransactionsOfSize(t, m, 3, 100)
 	assert.Equal(t, int64(700), m.AdmissionHeadroomBytes())
