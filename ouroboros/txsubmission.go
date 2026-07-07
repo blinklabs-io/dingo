@@ -161,6 +161,9 @@ func (o *Ouroboros) txsubmissionServerInit(
 		defer backoffTimer.Stop()
 
 		for {
+			if !o.Mempool.WaitForAdmissionHeadroom(1, conn.ErrorChan()) {
+				return
+			}
 			done := make(chan struct{})
 			var txIds []txsubmission.TxIdAndSize
 			var err error
@@ -259,10 +262,27 @@ func (o *Ouroboros) txsubmissionServerInit(
 				} else {
 					consecutiveRateLimits = 0
 				}
-				// Unwrap inner TxId from TxIdAndSize
-				var requestTxIds []txsubmission.TxId
-				for _, txId := range txIds {
-					requestTxIds = append(requestTxIds, txId.TxId)
+				availableBytes := o.Mempool.AdmissionHeadroomBytes()
+				if availableBytes <= 0 {
+					continue
+				}
+				requestTxIds := requestableTxIdsWithinHeadroom(
+					txIds,
+					availableBytes,
+				)
+				if len(requestTxIds) == 0 {
+					if len(txIds) > 0 && int64(txIds[0].Size) > availableBytes {
+						o.config.Logger.Debug(
+							"skipping oversized tx offer due to mempool backpressure",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"tx_size", txIds[0].Size,
+							"available_bytes", availableBytes,
+						)
+					}
+					continue
 				}
 				// Request TX content for TxIds from above
 				txs, err := ctx.Server.RequestTxs(requestTxIds)
@@ -329,6 +349,26 @@ func (o *Ouroboros) txsubmissionServerInit(
 		}
 	}()
 	return nil
+}
+
+func requestableTxIdsWithinHeadroom(
+	txIds []txsubmission.TxIdAndSize,
+	availableBytes int64,
+) []txsubmission.TxId {
+	if availableBytes <= 0 {
+		return nil
+	}
+	ret := make([]txsubmission.TxId, 0, len(txIds))
+	var requestedBytes int64
+	for _, txId := range txIds {
+		txSize := int64(txId.Size)
+		if txSize > availableBytes || requestedBytes+txSize > availableBytes {
+			break
+		}
+		ret = append(ret, txId.TxId)
+		requestedBytes += txSize
+	}
+	return ret
 }
 
 func (o *Ouroboros) txsubmissionClientRequestTxIds(

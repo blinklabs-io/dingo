@@ -80,8 +80,8 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultMetadataPlugin              = "sqlite"
-	DefaultEvictionWatermark           = 0.90
-	DefaultRejectionWatermark          = 0.95
+	DefaultEvictionWatermark           = 0.0
+	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
@@ -1004,20 +1004,15 @@ func LoadConfig(configFile string) (*Config, error) {
 		}
 	}
 
-	// Default unset watermarks. In Go, unset float64 fields are 0,
-	// which is indistinguishable from an explicit 0. We default 0 to
-	// the standard value; the subsequent validation rejects any value
-	// that ends up <= 0 after defaulting.
-	if globalConfig.EvictionWatermark == 0 {
-		globalConfig.EvictionWatermark = DefaultEvictionWatermark
-	}
+	// Default unset rejection watermark. Eviction watermark 0 is valid
+	// and disables eviction, so we preserve it as-is.
 	if globalConfig.RejectionWatermark == 0 {
 		globalConfig.RejectionWatermark = DefaultRejectionWatermark
 	}
-	if globalConfig.EvictionWatermark <= 0 ||
+	if globalConfig.EvictionWatermark < 0 ||
 		globalConfig.EvictionWatermark >= 1.0 {
 		return nil, fmt.Errorf(
-			"invalid evictionWatermark: %f (must be in range (0, 1))",
+			"invalid evictionWatermark: %f (must be in range [0, 1))",
 			globalConfig.EvictionWatermark,
 		)
 	}
@@ -1028,7 +1023,8 @@ func LoadConfig(configFile string) (*Config, error) {
 			globalConfig.RejectionWatermark,
 		)
 	}
-	if globalConfig.EvictionWatermark >= globalConfig.RejectionWatermark {
+	if globalConfig.EvictionWatermark > 0 &&
+		globalConfig.EvictionWatermark >= globalConfig.RejectionWatermark {
 		return nil, fmt.Errorf(
 			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
 			globalConfig.EvictionWatermark,

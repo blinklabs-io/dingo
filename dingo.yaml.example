@@ -305,6 +305,17 @@ intersectTip: false
 # CLI: --mempool-capacity
 # mempoolCapacity: 1048576
 
+# Fraction of mempool capacity at which Dingo starts evicting older
+# transactions to make room for new ones. 0 disables eviction.
+# Default: 0 (disabled).
+# CLI: --eviction-watermark  Env: DINGO_MEMPOOL_EVICTION_WATERMARK
+# evictionWatermark: 0
+
+# Fraction of mempool capacity at which Dingo rejects new transactions.
+# Default: 1.0 (full configured admission capacity).
+# CLI: --rejection-watermark  Env: DINGO_MEMPOOL_REJECTION_WATERMARK
+# rejectionWatermark: 1.0
+
 # Forging tolerances (0 = defaults)
 # forgeSyncToleranceSlots controls how far the local chain can lag the upstream
 # tip before forging is skipped. forgeStaleGapThresholdSlots controls when to
