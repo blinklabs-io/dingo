@@ -1212,11 +1212,17 @@ func (c *Config) StrictUtxoValidation() bool {
 
 // ShutdownTimeout returns the graceful shutdown timeout as a string duration.
 func (c *Config) ShutdownTimeout() string {
+	if c.cfg == nil {
+		return ""
+	}
 	return c.cfg.ShutdownTimeout
 }
 
 // ShutdownTimeoutDuration parses the configured graceful shutdown timeout.
 func (c *Config) ShutdownTimeoutDuration() (time.Duration, error) {
+	if c.cfg == nil {
+		return 0, nil
+	}
 	if c.cfg.ShutdownTimeout == "" {
 		return 0, nil
 	}
