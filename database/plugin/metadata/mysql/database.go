@@ -47,7 +47,7 @@ var validDatabaseNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // CREATE DATABASE statement or fall outside the conservative identifier set.
 func validateDatabaseName(name string) error {
 	if name == "" {
-		return fmt.Errorf("database name must not be empty")
+		return errors.New("database name must not be empty")
 	}
 	if strings.ContainsRune(name, '`') {
 		return fmt.Errorf(
