@@ -964,6 +964,29 @@ func seedPoolStakeSnapshotOfType(
 	stakeDenominator uint64,
 ) {
 	t.Helper()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		epoch,
+		snapshotType,
+		poolKeyHash,
+		totalStake,
+		stakeDenominator,
+		0,
+	)
+}
+
+func seedPoolStakeSnapshotOfTypeAtSlot(
+	t *testing.T,
+	db *database.Database,
+	epoch uint64,
+	snapshotType string,
+	poolKeyHash []byte,
+	totalStake uint64,
+	stakeDenominator uint64,
+	capturedSlot uint64,
+) {
+	t.Helper()
 	err := db.Metadata().SavePoolStakeSnapshot(
 		&models.PoolStakeSnapshot{
 			Epoch:            epoch,
@@ -971,6 +994,7 @@ func seedPoolStakeSnapshotOfType(
 			PoolKeyHash:      poolKeyHash,
 			TotalStake:       types.Uint64(totalStake),
 			StakeDenominator: types.Uint64(stakeDenominator),
+			CapturedSlot:     capturedSlot,
 		},
 		nil,
 	)
@@ -1142,6 +1166,89 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 	dummyHash := make([]byte, 28)
 	dummyHash[0] = 0xFF
 	seedPoolStakeSnapshot(t, db, 3, dummyHash, 1_000_000_000_000_000_000)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+}
+
+func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = 450
+	tb.block.slot = 550
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		3,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		450,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		3,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		450,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	assert.NoError(t, err)
+}
+
+func TestVerifyBlockLeaderEligibility_MithrilBoundaryMarkStillChecks(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.epochCache = []models.Epoch{
+		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
+		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
+	}
+	ls.mithrilLedgerSlot = 450
+	tb.block.slot = 550
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		3,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		1,
+		0,
+		299,
+	)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshotOfTypeAtSlot(
+		t,
+		db,
+		3,
+		models.PoolStakeSnapshotTypeMark,
+		dummyHash,
+		1_000_000_000_000_000_000,
+		0,
+		299,
+	)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)

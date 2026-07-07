@@ -414,6 +414,20 @@ func (ls *LedgerState) leaderEligibilityStake(
 				snapshotEpoch,
 			)
 	}
+	if ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch) {
+		if ls.config.Logger != nil {
+			ls.config.Logger.Warn(
+				"skipping leader eligibility check: mark snapshot captured after target epoch start",
+				"slot", block.SlotNumber(),
+				"epoch", epochId,
+				"snapshot_epoch", snapshotEpoch,
+				"snapshot_type", snapshotType,
+				"captured_slot", snapshot.CapturedSlot,
+				"component", "ledger",
+			)
+		}
+		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType, nil
+	}
 	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
 		snapshotEpoch,
 		snapshotType,
@@ -429,6 +443,31 @@ func (ls *LedgerState) leaderEligibilityStake(
 			)
 	}
 	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType, nil
+}
+
+func (ls *LedgerState) isMithrilImportedMarkSnapshot(
+	snapshot *models.PoolStakeSnapshot,
+	snapshotEpoch uint64,
+) bool {
+	if snapshot == nil ||
+		snapshot.SnapshotType != models.PoolStakeSnapshotTypeMark ||
+		snapshot.CapturedSlot == 0 {
+		return false
+	}
+
+	ls.RLock()
+	defer ls.RUnlock()
+
+	if ls.mithrilLedgerSlot == 0 {
+		return false
+	}
+	for _, ep := range ls.epochCache {
+		if ep.EpochId != snapshotEpoch || ep.LengthInSlots == 0 {
+			continue
+		}
+		return snapshot.CapturedSlot >= ep.StartSlot
+	}
+	return false
 }
 
 func (ls *LedgerState) shouldUseImportedActivePoolDistribution(

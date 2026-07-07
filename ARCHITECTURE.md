@@ -1382,7 +1382,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake from the Mark snapshot two epochs back. Header validation uses the same epoch-2 Mark source except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake from the Mark snapshot two epochs back. Header validation uses the same epoch-2 Mark source except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. If a post-Mithril historical Mark row was captured at or after the target snapshot epoch's start slot, header validation treats that row as an import artifact and skips only the stake-threshold eligibility check rather than rejecting a canonical block.
 
 ### Block Forging (`ledger/forging/`)
 
@@ -1484,7 +1484,11 @@ Those rows store the consensus stake fraction as `total_stake /
 stake_denominator` and are required for block-header leader eligibility checks
 until the node leaves the imported epoch. The regular Mark snapshot window is
 kept for epoch-offset consumers, but it does not substitute for `"actv"` rows in
-the imported epoch.
+the imported epoch. Historical Mark rows imported from the same ledger-state
+bundle can have a `captured_slot` after their target epoch's boundary; inbound
+header validation recognizes that shape as unsuitable for hard stake-threshold
+rejection and skips that portion of validation until live boundary-captured Mark
+rows are available.
 
 The Mithril snapshot also acts as the local trust anchor during live
 chainsync. The ledger refuses any rollback below the imported ledger slot
