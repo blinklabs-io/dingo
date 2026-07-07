@@ -56,7 +56,7 @@ jobs:
       # dingo-antithesis — instrumented dingo binary
       # -----------------------------------------------------------------------
       - id: antithesis-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -87,7 +87,7 @@ jobs:
       # configurator — generates pool keys and genesis files
       # -----------------------------------------------------------------------
       - id: configurator-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-configurator
@@ -116,7 +116,7 @@ jobs:
       # txpump — submits transactions to the network under test
       # -----------------------------------------------------------------------
       - id: txpump-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-txpump
@@ -145,7 +145,7 @@ jobs:
       # analysis — reads logs and evaluates safety/liveness properties
       # -----------------------------------------------------------------------
       - id: analysis-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-analysis
