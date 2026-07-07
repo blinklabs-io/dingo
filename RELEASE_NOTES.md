@@ -63,6 +63,33 @@ Thank you for trying!
 
 ---
 
+## v0.61.4 (July 7, 2026)
+
+**Title:** Faster peer recovery, historical stake validation, and heal performance
+
+**Date:** July 7, 2026
+
+**Version:** v0.61.4
+
+This release improves peer recovery, stake correctness, and startup heal performance while keeping the release history current and the internal SSH test dependency set aligned with upstream fixes.
+
+### 💪 Improvements
+
+* Improved the internal SSH crypto test dependency set to newer upstream releases, which keeps automated coverage aligned with fixes for unexpected response deadlocks, large channel write loops, key verification limits, and nil callback panics.
+* Improved peer replenishment when the hot peer pool drops to a critical level, which helps the node recover faster after short-lived disconnects and reduces the risk of running with too few healthy upstream peers.
+* Updated the release history to keep the previous release entry current.
+
+### 🔧 Fixes
+
+* Fixed Mark snapshots to use historical stake at the snapshot slot, which keeps epoch-2 Praos leader election and VRF-based header validation aligned with the delegation, registration, and UTxO state at the snapshot boundary.
+* Fixed chain heal to use a binary search over the canonical chain index, which shortens startup recovery when the header chain tip runs far ahead of the ledger tip while preserving canonical chain behavior.
+
+### ⚠️ Breaking Changes
+
+* Added a required `GetStakeByPoolsAtSlot` method to metadata plugins so historical stake lookups can use slot-aware stake state during snapshot calculation.
+
+---
+
 ## v0.61.3 (July 7, 2026)
 
 **Title:** Mithril leader eligibility fix and dependency refreshes
