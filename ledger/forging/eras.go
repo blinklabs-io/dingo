@@ -89,8 +89,8 @@ func extractPParamsLimits(p lcommon.ProtocolParameters) (pparamsLimits, error) {
 	}
 	switch pp := p.(type) {
 	case *dijkstra.DijkstraProtocolParameters:
-		// Dijkstra shares Conway's Praos block/header layout; the
-		// Leios header extension lives in the header, not these limits.
+		// Dijkstra shares Conway's Praos header/pparam limits; its
+		// block-body layout is handled later by the era-specific encoder.
 		return pparamsLimits{
 			era:          eraDijkstra,
 			maxTxSize:    uint64(pp.MaxTxSize),
@@ -189,6 +189,49 @@ func splitTxCbor(txCbor []byte) (body, witnesses cbor.RawMessage, err error) {
 		)
 	}
 	return parts[0], parts[1], nil
+}
+
+// dijkstraBlockTransactionCbor returns the Dijkstra block-body form of a
+// transaction. Local tx submission may admit the 4-field mempool shape
+// [body, witnesses, is_valid, aux], but Dijkstra blocks store inline
+// transactions as [body, witnesses, aux] and express phase-2 failures through
+// the block body's invalid_transactions set.
+func dijkstraBlockTransactionCbor(
+	txCbor []byte,
+) (cbor.RawMessage, error) {
+	var parts []cbor.RawMessage
+	if _, decErr := cbor.Decode(txCbor, &parts); decErr != nil {
+		return nil, fmt.Errorf("decode Dijkstra tx as array: %w", decErr)
+	}
+	switch len(parts) {
+	case 3:
+		return cbor.RawMessage(txCbor), nil
+	case 4:
+		var isValid bool
+		if _, decErr := cbor.Decode(parts[2], &isValid); decErr != nil {
+			return nil, fmt.Errorf("decode Dijkstra is_valid: %w", decErr)
+		}
+		if !isValid {
+			return nil, errors.New("dijkstra admitted transaction has is_valid=false")
+		}
+		blockTxCbor, err := cbor.Encode([]cbor.RawMessage{
+			parts[0],
+			parts[1],
+			parts[3],
+		})
+		if err != nil {
+			return nil, fmt.Errorf(
+				"encode Dijkstra block transaction: %w",
+				err,
+			)
+		}
+		return cbor.RawMessage(blockTxCbor), nil
+	default:
+		return nil, fmt.Errorf(
+			"expected 3-4 element Dijkstra tx array, got %d",
+			len(parts),
+		)
+	}
 }
 
 // decodeBlockFromCbor re-decodes a freshly-encoded block via the

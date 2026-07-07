@@ -194,6 +194,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// is era-agnostic at the slice level. Initialize as non-nil
 		// empty so encoding emits 0x80 (empty array), not 0xF6 (null);
 		// the Cardano CDDL requires arrays here.
+		transactions           = []cbor.RawMessage{}
 		transactionBodies      = []cbor.RawMessage{}
 		transactionWitnessSets = []cbor.RawMessage{}
 		transactionMetadataSet = make(map[uint]cbor.RawMessage)
@@ -245,8 +246,10 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			continue
 		}
 
-		// Check MaxBlockSize limit
-		if blockSize+txSize > maxBlockSize {
+		// Check MaxBlockSize limit. Dijkstra's block body is not the
+		// segmented tx-body/witness/metadata layout, so it gets an exact
+		// candidate block-body size check after tx decoding below.
+		if limits.era != eraDijkstra && blockSize+txSize > maxBlockSize {
 			b.logger.Debug(
 				"block size limit reached",
 				"component", "forging",
@@ -391,7 +394,9 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		// agnostic: we don't need typed body / witness slices once
 		// we have the canonical encoded forms. fullTx.Cbor() returns
 		// the original mempool bytes (preserved via the gouroboros
-		// types' DecodeStoreCbor / SetCborReference machinery).
+		// types' DecodeStoreCbor / SetCborReference machinery);
+		// Dijkstra normalizes those bytes before placing the tx inline
+		// in the block body.
 		fullTxCbor := fullTx.Cbor()
 		bodyBytes, witnessBytes, extractErr := splitTxCbor(fullTxCbor)
 		if extractErr != nil {
@@ -403,8 +408,56 @@ func (b *DefaultBlockBuilder) BuildBlock(
 			)
 			continue
 		}
+		blockTxCbor := cbor.RawMessage(fullTxCbor)
+		if limits.era == eraDijkstra {
+			var normalizeErr error
+			blockTxCbor, normalizeErr = dijkstraBlockTransactionCbor(
+				fullTxCbor,
+			)
+			if normalizeErr != nil {
+				b.logger.Debug(
+					"failed to encode Dijkstra transaction block form, skipping",
+					"component", "forging",
+					"tx_hash", mempoolTx.Hash,
+					"error", normalizeErr,
+				)
+				continue
+			}
+			candidateTransactions := make(
+				[]cbor.RawMessage,
+				0,
+				len(transactions)+1,
+			)
+			candidateTransactions = append(candidateTransactions, transactions...)
+			candidateTransactions = append(
+				candidateTransactions,
+				blockTxCbor,
+			)
+			candidateBodyCbor, encodeErr := encodeDijkstraBlockBodyCbor(
+				candidateTransactions,
+				[]uint{},
+			)
+			if encodeErr != nil {
+				return nil, nil, fmt.Errorf(
+					"failed to encode candidate Dijkstra block body: %w",
+					encodeErr,
+				)
+			}
+			candidateBodySize := uint64(len(candidateBodyCbor))
+			if candidateBodySize > maxBlockSize {
+				b.logger.Debug(
+					"block body size limit reached",
+					"component", "forging",
+					"candidate_body_size", candidateBodySize,
+					"tx_size", txSize,
+					"max_block_body_size", maxBlockSize,
+				)
+				break
+			}
+		}
 		transactionBodies = append(transactionBodies, bodyBytes)
 		transactionWitnessSets = append(transactionWitnessSets, witnessBytes)
+		transactions = append(transactions, blockTxCbor)
 		if metadataCbor != nil {
 			transactionMetadataSet[uint(len(transactionBodies))-1] = metadataCbor
 		}
@@ -454,12 +507,11 @@ func (b *DefaultBlockBuilder) BuildBlock(
 		)
 	}
 
-	// Compute block body hash: blake2b_256(hash_tx || hash_wit || hash_aux [|| hash_invalid]).
-	// The invalid-transactions hash component is included from Alonzo
-	// onward (the era that introduced Plutus, and with it the
-	// invalid_transactions list).
+	// Compute the era-specific block body hash. Shelley through Conway hash
+	// body components; Dijkstra hashes the encoded block_body CBOR directly.
 	bodyHash, actualBlockBodySize, err := computeBlockBodyHash(
 		limits.era,
+		transactions,
 		transactionBodies,
 		transactionWitnessSets,
 		metadataSet,
@@ -467,6 +519,13 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to compute block body hash: %w", err)
+	}
+	if actualBlockBodySize > maxBlockSize {
+		return nil, nil, fmt.Errorf(
+			"block body size %d exceeds MaxBlockBodySize %d",
+			actualBlockBodySize,
+			maxBlockSize,
+		)
 	}
 
 	// Get VRF key from credentials
@@ -663,6 +722,7 @@ func (b *DefaultBlockBuilder) BuildBlock(
 	blockCbor, err := encodeBlockCbor(
 		limits.era,
 		cbor.RawMessage(headerCbor),
+		transactions,
 		transactionBodies,
 		transactionWitnessSets,
 		metadataSet,
@@ -725,24 +785,39 @@ func (b *DefaultBlockBuilder) BuildBlock(
 //
 //	blake2b_256(hash_tx || hash_wit || hash_aux)
 //
-// Alonzo and later add a fourth, the invalid_transactions list:
+// Alonzo through Conway add a fourth, the invalid_transactions list:
 //
 //	blake2b_256(hash_tx || hash_wit || hash_aux || hash_invalid)
 //
+// Dijkstra hashes the encoded block_body CBOR directly.
+//
 // Each component is the blake2b_256 hash of its CBOR-encoded data.
 // Returns the body hash and the total body size (sum of all
-// component encoding sizes), which the header records.
+// component encoding sizes, or the Dijkstra block_body size), which the header
+// records.
 //
 // txBodies and witnessSets are raw, era-specific transaction-CBOR
 // slices; the slice envelopes themselves encode identically across
 // eras.
 func computeBlockBodyHash(
 	era eraKind,
+	transactions []cbor.RawMessage,
 	txBodies []cbor.RawMessage,
 	witnessSets []cbor.RawMessage,
 	metadataSet lcommon.TransactionMetadataSet,
 	invalidTxs []uint,
 ) (lcommon.Blake2b256, uint64, error) {
+	if era == eraDijkstra {
+		bodyCbor, err := encodeDijkstraBlockBodyCbor(
+			transactions,
+			invalidTxs,
+		)
+		if err != nil {
+			return lcommon.Blake2b256{}, 0, err
+		}
+		return lcommon.Blake2b256Hash(bodyCbor), uint64(len(bodyCbor)), nil
+	}
+
 	// Normalize nil slices to empty so CBOR encodes as 0x80 (empty
 	// array) rather than 0xf6 (null). This must match the encoding
 	// in the era's Block.MarshalCBOR, which applies the same
@@ -823,28 +898,6 @@ func computeBlockBodyHash(
 		invalidHash := blake2b.Sum256(invalidCbor)
 		bodyHashes = append(bodyHashes, invalidHash[:]...)
 		totalSize += uint64(len(invalidCbor))
-	}
-
-	if era == eraDijkstra {
-		// Dijkstra blocks append two nullable certificate fields after
-		// invalid_transactions — leios_cert then peras_cert (CDDL
-		// "<cert> / nil"). A producer that forges no endorser block emits
-		// both as CBOR null, and DijkstraBlockBody.Hash hashes all six body
-		// components, so the header body hash must include both null-cert
-		// components or the forged block fails body-hash validation. The
-		// same null encoding is emitted by encodeBlockCbor.
-		nullCert, err := cbor.Encode(nil)
-		if err != nil {
-			return lcommon.Blake2b256{}, 0, fmt.Errorf(
-				"failed to encode null Dijkstra certificate: %w",
-				err,
-			)
-		}
-		nullHash := blake2b.Sum256(nullCert)
-		// leios_cert, then peras_cert.
-		bodyHashes = append(bodyHashes, nullHash[:]...)
-		bodyHashes = append(bodyHashes, nullHash[:]...)
-		totalSize += 2 * uint64(len(nullCert))
 	}
 
 	// Final hash of concatenated hashes
@@ -935,19 +988,23 @@ type rawBabbageEraBlock struct {
 	InvalidTransactions    []uint
 }
 
-// rawDijkstraBlock encodes a Dijkstra block: 7 elements — the
-// Babbage/Conway five plus the two trailing nullable certificate fields
-// leios_cert and peras_cert (CDDL "<cert> / nil"). The forge produces no
-// endorser block, so both certificates are CBOR null.
+// rawDijkstraBlockBody encodes the prototype-2026w27 Dijkstra block_body:
+// [invalid_transactions / nil, [* transaction], leios_certificate / nil,
+// peras_certificate / nil]. The forge emits no certificates, so both
+// certificate fields are CBOR null.
+type rawDijkstraBlockBody struct {
+	cbor.StructAsArray
+	InvalidTransactions cbor.RawMessage
+	Transactions        []cbor.RawMessage
+	LeiosCertificate    cbor.RawMessage
+	PerasCertificate    cbor.RawMessage
+}
+
+// rawDijkstraBlock encodes a Dijkstra block as [header, block_body].
 type rawDijkstraBlock struct {
 	cbor.StructAsArray
-	Header                 cbor.RawMessage
-	TransactionBodies      []cbor.RawMessage
-	TransactionWitnessSets []cbor.RawMessage
-	TransactionMetadataSet lcommon.TransactionMetadataSet
-	InvalidTransactions    []uint
-	LeiosCertificate       cbor.RawMessage
-	PerasCertificate       cbor.RawMessage
+	Header    cbor.RawMessage
+	BlockBody rawDijkstraBlockBody
 }
 
 // encodeBlockCbor selects the era-correct raw-block envelope and
@@ -957,30 +1014,22 @@ type rawDijkstraBlock struct {
 func encodeBlockCbor(
 	era eraKind,
 	header cbor.RawMessage,
+	transactions []cbor.RawMessage,
 	txBodies []cbor.RawMessage,
 	witnessSets []cbor.RawMessage,
 	metadataSet lcommon.TransactionMetadataSet,
 ) ([]byte, error) {
 	if era == eraDijkstra {
-		// Dijkstra appends leios_cert and peras_cert after
-		// invalid_transactions; both are CBOR null when no endorser
-		// block is forged. The same null encoding feeds the body hash
-		// in computeBlockBodyHash, so they stay consistent.
-		nullCert, err := cbor.Encode(nil)
+		body, err := rawDijkstraBlockBodyForEncoding(
+			transactions,
+			nil,
+		)
 		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to encode null Dijkstra certificate: %w",
-				err,
-			)
+			return nil, err
 		}
 		return cbor.Encode(rawDijkstraBlock{
-			Header:                 header,
-			TransactionBodies:      txBodies,
-			TransactionWitnessSets: witnessSets,
-			TransactionMetadataSet: metadataSet,
-			InvalidTransactions:    []uint{},
-			LeiosCertificate:       cbor.RawMessage(nullCert),
-			PerasCertificate:       cbor.RawMessage(nullCert),
+			Header:    header,
+			BlockBody: body,
 		})
 	}
 	if !era.hasInvalidTxs() {
@@ -1007,4 +1056,62 @@ func encodeBlockCbor(
 		TransactionMetadataSet: metadataSet,
 		InvalidTransactions:    []uint{},
 	})
+}
+
+func encodeDijkstraBlockBodyCbor(
+	transactions []cbor.RawMessage,
+	invalidTxs []uint,
+) ([]byte, error) {
+	body, err := rawDijkstraBlockBodyForEncoding(transactions, invalidTxs)
+	if err != nil {
+		return nil, err
+	}
+	return cbor.Encode(body)
+}
+
+func rawDijkstraBlockBodyForEncoding(
+	transactions []cbor.RawMessage,
+	invalidTxs []uint,
+) (rawDijkstraBlockBody, error) {
+	if transactions == nil {
+		transactions = []cbor.RawMessage{}
+	}
+	invalidTxsField, err := encodeDijkstraInvalidTransactions(invalidTxs)
+	if err != nil {
+		return rawDijkstraBlockBody{}, err
+	}
+	nullCert, err := encodeCborNull("Dijkstra certificate")
+	if err != nil {
+		return rawDijkstraBlockBody{}, err
+	}
+	return rawDijkstraBlockBody{
+		InvalidTransactions: invalidTxsField,
+		Transactions:        transactions,
+		LeiosCertificate:    nullCert,
+		PerasCertificate:    nullCert,
+	}, nil
+}
+
+func encodeDijkstraInvalidTransactions(
+	invalidTxs []uint,
+) (cbor.RawMessage, error) {
+	if len(invalidTxs) == 0 {
+		return encodeCborNull("Dijkstra invalid transactions")
+	}
+	raw, err := cbor.Encode(invalidTxs)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"failed to encode Dijkstra invalid transactions: %w",
+			err,
+		)
+	}
+	return cbor.RawMessage(raw), nil
+}
+
+func encodeCborNull(field string) (cbor.RawMessage, error) {
+	raw, err := cbor.Encode(nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode null %s: %w", field, err)
+	}
+	return cbor.RawMessage(raw), nil
 }

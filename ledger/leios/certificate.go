@@ -40,9 +40,8 @@ type VerifiedVote struct {
 // aggregated -- including an unverified signature would silently produce a
 // certificate that fails verification.
 //
-// NOTE: the Dijkstra block's leios_cert slot is an empty placeholder in
-// gouroboros v0.180.0, so certificates built here are not yet embedded in
-// blocks; this is the aggregation path for when the CDDL lands.
+// NOTE: certificates built here are not yet embedded in forged blocks; this is
+// the aggregation path consumed by future forge-loop certificate integration.
 func BuildEbCertificate(
 	slotNo uint64,
 	ebHash lcommon.Blake2b256,

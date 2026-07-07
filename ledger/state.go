@@ -39,6 +39,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/governance"
@@ -3671,67 +3672,62 @@ func (ls *LedgerState) ledgerProcessBlock(
 	endorserBlockApplied := false
 	if currentEra.Id == dijkstra.EraIdDijkstra &&
 		ls.config.EndorserBlockProvider != nil {
-		if ref, ok := block.Header().(leiosEndorserBlockReferencer); ok {
-			if ebHash, ebSize, ok := ref.LeiosEndorserBlockRef(); ok {
-				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+		ebHash, ebSize, ok := leiosheader.ReferencedEndorserBlock(
+			block.Header(),
+		)
+		if ok {
+			if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+				ebHash.Bytes(),
+			); ok {
+				applied, err := ls.applyEndorserBlock(
+					txn,
+					point,
+					block.BlockNumber(),
+					ebSlot,
 					ebHash.Bytes(),
-				); ok {
-					applied, err := ls.applyEndorserBlock(
-						txn,
-						point,
-						block.BlockNumber(),
-						ebSlot,
-						ebHash.Bytes(),
-						ebTxs,
-					)
-					var storageErr *leiosEndorserBlockStorageError
-					switch {
-					case errors.As(err, &storageErr):
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block after storage mutation",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-						return nil, err
-					case err != nil:
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block transactions",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-					default:
-						endorserBlockApplied = true
-						ls.config.Logger.Info(
-							"applied Leios endorser block transactions",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"eb_txs", applied,
-						)
-					}
-				} else {
-					ls.config.Logger.Debug(
-						"ranking block references an endorser block not yet cached",
+					ebTxs,
+				)
+				var storageErr *leiosEndorserBlockStorageError
+				switch {
+				case errors.As(err, &storageErr):
+					ls.config.Logger.Warn(
+						"failed to apply Leios endorser block after storage mutation",
 						"component", "ledger",
 						"slot", point.Slot,
-						"eb_hash", ebHash.String(),
-						"eb_size", ebSize,
+						"eb_slot", ebSlot,
+						"error", err,
+					)
+					return nil, err
+				case err != nil:
+					ls.config.Logger.Warn(
+						"failed to apply Leios endorser block transactions",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_slot", ebSlot,
+						"error", err,
+					)
+				default:
+					endorserBlockApplied = true
+					ls.config.Logger.Info(
+						"applied Leios endorser block transactions",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_slot", ebSlot,
+						"eb_txs", applied,
 					)
 				}
 			} else {
 				ls.config.Logger.Debug(
-					"dijkstra block has no Leios endorser-block reference",
+					"ranking block references an endorser block not yet cached",
 					"component", "ledger",
 					"slot", point.Slot,
+					"eb_hash", ebHash.String(),
+					"eb_size", ebSize,
 				)
 			}
 		} else {
 			ls.config.Logger.Debug(
-				"dijkstra block header is not a Leios endorser-block referencer",
+				"dijkstra block has no Leios endorser-block reference",
 				"component", "ledger",
 				"slot", point.Slot,
 			)

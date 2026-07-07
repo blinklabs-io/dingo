@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
@@ -379,8 +380,7 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 // leiosEndorserTxCountForRankingBlock resolves the endorser block referenced
 // by a Dijkstra ranking block and returns its cached transaction count. The
 // ranking block references its endorser block through the Leios header
-// extension ([eb_hash, eb_size]) — NOT the block-level leios_cert, which is an
-// empty placeholder in the current Dijkstra CDDL. ok is true only when the
+// extension, not the block-level leios certificate. ok is true only when the
 // endorser block has been fetched and its full transaction set is cached.
 func (o *Ouroboros) leiosEndorserTxCountForRankingBlock(
 	blockCbor []byte,
@@ -393,7 +393,7 @@ func (o *Ouroboros) leiosEndorserTxCountForRankingBlock(
 	if _, err := cbor.Decode(top[0], &header); err != nil {
 		return lcommon.Blake2b256{}, 0, false
 	}
-	ebHash, _, ok := header.LeiosEndorserBlockRef()
+	ebHash, _, ok := leiosheader.ReferencedEndorserBlock(&header)
 	if !ok {
 		return lcommon.Blake2b256{}, 0, false
 	}
@@ -412,8 +412,7 @@ func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	blockCbor []byte,
 ) ([]byte, bool, error) {
 	// A Dijkstra ranking block references its endorser block via the Leios
-	// header extension ([eb_hash, eb_size]); the block-level leios_cert is an
-	// empty placeholder in the current Dijkstra CDDL and carries no reference.
+	// header extension; the block-level leios certificate carries no cache key.
 	// When the referenced endorser block (and its transactions) has been
 	// fetched, its transactions are the endorser-resident transactions whose
 	// outputs the ranking-block transactions spend.

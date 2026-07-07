@@ -27,10 +27,10 @@ import (
 func TestBlockNumberContiguous(t *testing.T) {
 	const parent = uint64(100)
 	tests := []struct {
-		name    string
-		eraId   uint8
-		number  uint64
-		wantOK  bool
+		name   string
+		eraId  uint8
+		number uint64
+		wantOK bool
 	}{
 		{"shelley parent+1 ok", shelley.EraIdShelley, parent + 1, true},
 		{"shelley same as parent rejected", shelley.EraIdShelley, parent, false},
