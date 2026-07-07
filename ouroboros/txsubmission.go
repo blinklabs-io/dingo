@@ -159,11 +159,16 @@ func (o *Ouroboros) txsubmissionServerInit(
 		backoffTimer := time.NewTimer(0)
 		backoffTimer.Stop()
 		defer backoffTimer.Stop()
+		minHeadroomBytes := int64(1)
 
 		for {
-			if !o.Mempool.WaitForAdmissionHeadroom(1, conn.ErrorChan()) {
+			if !o.Mempool.WaitForAdmissionHeadroom(
+				minHeadroomBytes,
+				conn.ErrorChan(),
+			) {
 				return
 			}
+			minHeadroomBytes = 1
 			done := make(chan struct{})
 			var txIds []txsubmission.TxIdAndSize
 			var err error
@@ -266,19 +271,20 @@ func (o *Ouroboros) txsubmissionServerInit(
 				if availableBytes <= 0 {
 					continue
 				}
-				requestTxIds := requestableTxIdsWithinHeadroom(
+				requestTxIds, nextHeadroomBytes := requestableTxIdsWithinHeadroom(
 					txIds,
 					availableBytes,
 				)
 				if len(requestTxIds) == 0 {
-					if len(txIds) > 0 && int64(txIds[0].Size) > availableBytes {
+					if nextHeadroomBytes > availableBytes {
+						minHeadroomBytes = nextHeadroomBytes
 						o.config.Logger.Debug(
-							"skipping oversized tx offer due to mempool backpressure",
+							"deferring tx offer until mempool headroom increases",
 							"component", "network",
 							"protocol", "tx-submission",
 							"role", "server",
 							"connection_id", ctx.ConnectionId.String(),
-							"tx_size", txIds[0].Size,
+							"required_headroom_bytes", nextHeadroomBytes,
 							"available_bytes", availableBytes,
 						)
 					}
@@ -354,21 +360,28 @@ func (o *Ouroboros) txsubmissionServerInit(
 func requestableTxIdsWithinHeadroom(
 	txIds []txsubmission.TxIdAndSize,
 	availableBytes int64,
-) []txsubmission.TxId {
+) ([]txsubmission.TxId, int64) {
 	if availableBytes <= 0 {
-		return nil
+		return nil, 0
 	}
 	ret := make([]txsubmission.TxId, 0, len(txIds))
 	var requestedBytes int64
+	var nextHeadroomBytes int64
 	for _, txId := range txIds {
 		txSize := int64(txId.Size)
 		if txSize > availableBytes || requestedBytes+txSize > availableBytes {
-			break
+			if nextHeadroomBytes == 0 || txSize < nextHeadroomBytes {
+				nextHeadroomBytes = txSize
+			}
+			continue
 		}
 		ret = append(ret, txId.TxId)
 		requestedBytes += txSize
 	}
-	return ret
+	if len(ret) > 0 {
+		return ret, 0
+	}
+	return ret, nextHeadroomBytes
 }
 
 func (o *Ouroboros) txsubmissionClientRequestTxIds(

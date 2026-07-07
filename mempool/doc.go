@@ -28,15 +28,16 @@
 //
 // The pool uses a two-level watermark scheme:
 //
-//   - EvictionWatermark  — above this fill level, lowest-priority txs
-//     are evicted to make room for higher-priority ones; a value of 0
+//   - EvictionWatermark  — above this fill level, oldest pending txs are
+//     evicted from the front of the queue; a value of 0
 //     disables eviction entirely
 //   - RejectionWatermark — above this fill level, new submissions are
 //     rejected outright
 //
-// When eviction is enabled, it is driven by transaction priority (fee density),
-// not arrival order. With the default configuration, Dingo instead applies
-// backpressure at full mempool capacity.
+// When eviction is enabled, it is FIFO/oldest-first rather than priority-
+// based. With the default configuration, Dingo instead applies backpressure at
+// full mempool capacity and removes transactions only when they are confirmed,
+// invalidated, or expired.
 //
 // # Events
 //

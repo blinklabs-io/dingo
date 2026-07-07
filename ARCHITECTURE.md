@@ -1364,7 +1364,9 @@ The `Mempool` (`mempool/mempool.go`) manages pending transactions:
     | Transaction Management                         |
     |   Validation on add (Phase 1 + Phase 2)        |
     |   Capacity limits (configurable)               |
-    |   Watermark-based eviction and rejection       |
+    |   Optional FIFO eviction and rejection         |
+    |   Default backpressure at full capacity        |
+    |   TTL expiry of stale pending transactions     |
     |   Automatic purging on chain updates           |
     |                                                |
     | Consumer Tracking                              |

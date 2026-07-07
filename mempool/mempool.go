@@ -899,15 +899,16 @@ func (m *Mempool) WaitForAdmissionHeadroom(
 		return true
 	}
 	for {
-		if m.AdmissionHeadroomBytes() >= minBytes {
-			return true
-		}
 		if m.eventBus == nil {
-			return false
+			return m.AdmissionHeadroomBytes() >= minBytes
 		}
 		subId, subCh := m.eventBus.Subscribe(RemoveTransactionEventType)
 		if subCh == nil {
-			return false
+			return m.AdmissionHeadroomBytes() >= minBytes
+		}
+		if m.AdmissionHeadroomBytes() >= minBytes {
+			m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+			return true
 		}
 		select {
 		case <-subCh:

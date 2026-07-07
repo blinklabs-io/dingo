@@ -31,34 +31,50 @@ func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
 		availableBytes int64
 		txIds          []txsubmission.TxIdAndSize
 		want           []txsubmission.TxId
+		wantNext       int64
 	}{
 		{
 			name:           "takes full prefix that fits",
 			availableBytes: 300,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 150}, {TxId: tx3, Size: 75}},
 			want:           []txsubmission.TxId{tx1, tx2},
+			wantNext:       0,
 		},
 		{
-			name:           "skips all when first tx is too large",
+			name:           "skips oversized first tx and still takes later fit tx",
 			availableBytes: 90,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}},
-			want:           []txsubmission.TxId{},
+			want:           []txsubmission.TxId{tx2},
+			wantNext:       0,
 		},
 		{
-			name:           "stops at first tx that would overflow remaining headroom",
+			name:           "skips overflowing middle tx and keeps later smaller tx",
 			availableBytes: 160,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 70}, {TxId: tx3, Size: 20}},
-			want:           []txsubmission.TxId{tx1},
+			want:           []txsubmission.TxId{tx1, tx3},
+			wantNext:       0,
+		},
+		{
+			name:           "returns next headroom target when no tx fits",
+			availableBytes: 40,
+			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}, {TxId: tx3, Size: 75}},
+			want:           []txsubmission.TxId{},
+			wantNext:       50,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			got, gotNext := requestableTxIdsWithinHeadroom(
+				test.txIds,
+				test.availableBytes,
+			)
 			assert.Equal(
 				t,
 				test.want,
-				requestableTxIdsWithinHeadroom(test.txIds, test.availableBytes),
+				got,
 			)
+			assert.Equal(t, test.wantNext, gotNext)
 		})
 	}
 }
