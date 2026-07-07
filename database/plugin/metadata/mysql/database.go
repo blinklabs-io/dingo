@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,31 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 	"gorm.io/plugin/opentelemetry/tracing"
 )
+
+// validDatabaseNameRe matches the conservative identifier set allowed for MySQL
+// database names: letters, digits, underscores, and hyphens only.
+var validDatabaseNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// validateDatabaseName rejects names that would break backtick quoting in the
+// CREATE DATABASE statement or fall outside the conservative identifier set.
+func validateDatabaseName(name string) error {
+	if name == "" {
+		return fmt.Errorf("database name must not be empty")
+	}
+	if strings.ContainsRune(name, '`') {
+		return fmt.Errorf(
+			"invalid database name %q: must not contain backticks",
+			name,
+		)
+	}
+	if !validDatabaseNameRe.MatchString(name) {
+		return fmt.Errorf(
+			"invalid database name %q: must contain only letters, digits, underscores, or hyphens",
+			name,
+		)
+	}
+	return nil
+}
 
 // mysqlTxn wraps a gorm transaction and implements types.Txn
 type mysqlTxn struct {
@@ -139,6 +165,11 @@ func New(
 	logger *slog.Logger,
 	promRegistry prometheus.Registerer,
 ) (*MetadataStoreMysql, error) {
+	if database != "" {
+		if err := validateDatabaseName(database); err != nil {
+			return nil, fmt.Errorf("mysql config: %w", err)
+		}
+	}
 	return NewWithOptions(
 		WithHost(host),
 		WithPort(port),
@@ -173,6 +204,11 @@ func NewWithOptions(opts ...MysqlOptionFunc) (*MetadataStoreMysql, error) {
 	}
 	if db.database == "" {
 		db.database = "mysql"
+	}
+	if strings.TrimSpace(db.dsn) == "" {
+		if err := validateDatabaseName(db.database); err != nil {
+			return nil, fmt.Errorf("mysql config: %w", err)
+		}
 	}
 	if db.sslMode == "" {
 		db.sslMode = ""
@@ -234,6 +270,9 @@ func (d *MetadataStoreMysql) Start() error {
 	logDatabase := d.database
 
 	if dsn == "" {
+		if err := validateDatabaseName(d.database); err != nil {
+			return fmt.Errorf("mysql config: %w", err)
+		}
 		cfg := mysql.Config{
 			User:   d.user,
 			Passwd: d.password,
@@ -265,7 +304,12 @@ func (d *MetadataStoreMysql) Start() error {
 			cfg.Params["tls"] = d.sslMode
 		}
 		dsn = cfg.FormatDSN()
-	} else if parsedDB, ok := parseMysqlDatabaseFromDSN(dsn); ok {
+	} else if parsedDB, ok, err := parseMysqlDatabaseFromDSN(dsn); err != nil {
+		return err
+	} else if ok {
+		if err := validateDatabaseName(parsedDB); err != nil {
+			return fmt.Errorf("mysql config dsn: %w", err)
+		}
 		logDatabase = parsedDB
 	}
 
@@ -422,6 +466,9 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 	if dbName == "" {
 		return false, nil
 	}
+	if err := validateDatabaseName(dbName); err != nil {
+		return false, fmt.Errorf("cannot create database: %w", err)
+	}
 	adminDsn, ok := stripDatabaseFromDSN(dsn)
 	if !ok {
 		return false, nil
@@ -448,16 +495,15 @@ func (d *MetadataStoreMysql) ensureDatabaseExists(
 	return true, nil
 }
 
-func parseMysqlDatabaseFromDSN(dsn string) (string, bool) {
-	base := dsn
-	if before, _, found := strings.Cut(base, "?"); found {
-		base = before
+func parseMysqlDatabaseFromDSN(dsn string) (string, bool, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return "", false, fmt.Errorf("parse mysql dsn: %w", err)
 	}
-	slash := strings.LastIndex(base, "/")
-	if slash < 0 || slash == len(base)-1 {
-		return "", false
+	if cfg.DBName == "" {
+		return "", false, nil
 	}
-	return base[slash+1:], true
+	return cfg.DBName, true, nil
 }
 
 func stripDatabaseFromDSN(dsn string) (string, bool) {
