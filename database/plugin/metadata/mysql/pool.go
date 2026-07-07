@@ -28,6 +28,32 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	poolRegistrationPreloadOrderSQL = "pool_registration.added_slot DESC, " +
+		"COALESCE(`transaction`.block_index, 0) DESC, " +
+		"COALESCE(certs.cert_index, 0) DESC, " +
+		"pool_registration.id DESC"
+	poolRetirementPreloadOrderSQL = "pool_retirement.added_slot DESC, " +
+		"CASE WHEN pool_retirement.certificate_id = 0 THEN 1 ELSE 0 END DESC, " +
+		"COALESCE(`transaction`.block_index, 0) DESC, " +
+		"COALESCE(certs.cert_index, 0) DESC, " +
+		"pool_retirement.id DESC"
+)
+
+func poolRegistrationPreloadOrder(db *gorm.DB) *gorm.DB {
+	return db.Select("pool_registration.*").
+		Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
+		Joins("LEFT JOIN `transaction` ON `transaction`.id = certs.transaction_id").
+		Order(poolRegistrationPreloadOrderSQL)
+}
+
+func poolRetirementPreloadOrder(db *gorm.DB) *gorm.DB {
+	return db.Select("pool_retirement.*").
+		Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
+		Joins("LEFT JOIN `transaction` ON `transaction`.id = certs.transaction_id").
+		Order(poolRetirementPreloadOrderSQL)
+}
+
 // GetPool gets a pool
 func (d *MetadataStoreMysql) GetPool(
 	pkh lcommon.PoolKeyHash,
@@ -43,18 +69,16 @@ func (d *MetadataStoreMysql) GetPool(
 		Preload(
 			"Registration",
 			func(db *gorm.DB) *gorm.DB {
-				return db.Select("pool_registration.*").
-					Joins("LEFT JOIN certs ON certs.id = pool_registration.certificate_id").
-					Joins("LEFT JOIN transaction ON transaction.id = certs.transaction_id").
-					Order("pool_registration.added_slot DESC, COALESCE(transaction.block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
-					Limit(1)
+				return poolRegistrationPreloadOrder(db).Limit(1)
 			},
 		).
 		Preload("Registration.Owners").
 		Preload("Registration.Relays").
 		Preload(
 			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC").Limit(1) },
+			func(db *gorm.DB) *gorm.DB {
+				return poolRetirementPreloadOrder(db).Limit(1)
+			},
 		).
 		First(
 			ret,
@@ -81,15 +105,19 @@ func (d *MetadataStoreMysql) GetPool(
 			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
 			shouldCheckRetirement = true
 		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
-			regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
-			if err != nil {
-				return nil, err
-			}
-			// Compare block_index first, then cert_index (cert_index resets per tx)
-			if retInfo.blockIndex > regInfo.blockIndex {
+			if ret.Retirement[0].CertificateID == 0 {
 				shouldCheckRetirement = true
-			} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
-				shouldCheckRetirement = true
+			} else {
+				regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
+				if err != nil {
+					return nil, err
+				}
+				// Compare block_index first, then cert_index (cert_index resets per tx)
+				if retInfo.blockIndex > regInfo.blockIndex {
+					shouldCheckRetirement = true
+				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+					shouldCheckRetirement = true
+				}
 			}
 		}
 		if shouldCheckRetirement {
@@ -260,13 +288,13 @@ func (d *MetadataStoreMysql) GetPools(
 	result := db.
 		Preload(
 			"Registration",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC") },
+			poolRegistrationPreloadOrder,
 		).
 		Preload("Registration.Owners").
 		Preload("Registration.Relays").
 		Preload(
 			"Retirement",
-			func(db *gorm.DB) *gorm.DB { return db.Order("added_slot DESC, id DESC") },
+			poolRetirementPreloadOrder,
 		).
 		Where("pool_key_hash IN ?", hashes).
 		Find(&ret)
@@ -544,11 +572,11 @@ func (d *MetadataStoreMysql) GetActivePoolRelays(
 	var pools []models.Pool
 	result := db.
 		Preload("Registration", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
+			return poolRegistrationPreloadOrder(db)
 		}).
 		Preload("Registration.Relays").
 		Preload("Retirement", func(db *gorm.DB) *gorm.DB {
-			return db.Order("added_slot DESC, id DESC")
+			return poolRetirementPreloadOrder(db)
 		}).
 		Find(&pools)
 	if result.Error != nil {
@@ -575,20 +603,24 @@ func (d *MetadataStoreMysql) GetActivePoolRelays(
 			if latestRet.AddedSlot > latestReg.AddedSlot {
 				shouldCheckRetirement = true
 			} else if latestRet.AddedSlot == latestReg.AddedSlot {
-				// Same-slot case: fetch block_index and cert_index for precedence
-				regInfo, retInfo, err := fetchPoolCertOrderInfo(
-					db,
-					latestReg.ID,
-					latestRet.ID,
-				)
-				if err != nil {
-					return nil, err
-				}
-				// Compare block_index first, then cert_index (cert_index resets per tx)
-				if retInfo.blockIndex > regInfo.blockIndex {
+				if latestRet.CertificateID == 0 {
 					shouldCheckRetirement = true
-				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
-					shouldCheckRetirement = true
+				} else {
+					// Same-slot case: fetch block_index and cert_index for precedence
+					regInfo, retInfo, err := fetchPoolCertOrderInfo(
+						db,
+						latestReg.ID,
+						latestRet.ID,
+					)
+					if err != nil {
+						return nil, err
+					}
+					// Compare block_index first, then cert_index (cert_index resets per tx)
+					if retInfo.blockIndex > regInfo.blockIndex {
+						shouldCheckRetirement = true
+					} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+						shouldCheckRetirement = true
+					}
 				}
 			}
 			// If retirement takes precedence and epoch has passed, pool is retired
@@ -937,11 +969,12 @@ func (d *MetadataStoreMysql) GetActivePoolKeyHashesAtSlot(
 		),
 		latest_ret AS (
 			SELECT rt.pool_id, rt.added_slot, rt.epoch,
+				CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END as synthetic_ret,
 				COALESCE(t.block_index, 0) as blk_idx,
 				COALESCE(c.cert_index, 0) as cert_idx,
 				ROW_NUMBER() OVER (
 					PARTITION BY rt.pool_id
-					ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+					ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM pool_retirement rt
 			LEFT JOIN certs c ON c.id = rt.certificate_id
@@ -954,8 +987,8 @@ func (d *MetadataStoreMysql) GetActivePoolKeyHashesAtSlot(
 		LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 		WHERE lrt.pool_id IS NULL
 			OR lrt.added_slot < lr.added_slot
-			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
-			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
 			OR lrt.epoch > ?`
 
 	if err := db.Raw(query, slot, slot, epochAtSlot.EpochId).Scan(&results).Error; err != nil {

@@ -208,7 +208,7 @@ func (d *MetadataStoreSqlite) GetPool(
 			return db.Select("pool_retirement.*").
 				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
 				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
-				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
+				Order("pool_retirement.added_slot DESC, CASE WHEN pool_retirement.certificate_id = 0 THEN 1 ELSE 0 END DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC").
 				Limit(1)
 		}).
 		First(
@@ -236,15 +236,19 @@ func (d *MetadataStoreSqlite) GetPool(
 			ret.Retirement[0].AddedSlot > ret.Registration[0].AddedSlot {
 			shouldCheckRetirement = true
 		} else if hasRet && ret.Retirement[0].AddedSlot == ret.Registration[0].AddedSlot {
-			regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
-			if err != nil {
-				return nil, err
-			}
-			// Compare block_index first, then cert_index (cert_index resets per tx)
-			if retInfo.blockIndex > regInfo.blockIndex {
+			if ret.Retirement[0].CertificateID == 0 {
 				shouldCheckRetirement = true
-			} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
-				shouldCheckRetirement = true
+			} else {
+				regInfo, retInfo, err := fetchPoolCertOrderInfo(db, ret.Registration[0].ID, ret.Retirement[0].ID)
+				if err != nil {
+					return nil, err
+				}
+				// Compare block_index first, then cert_index (cert_index resets per tx)
+				if retInfo.blockIndex > regInfo.blockIndex {
+					shouldCheckRetirement = true
+				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+					shouldCheckRetirement = true
+				}
 			}
 		}
 		if shouldCheckRetirement {
@@ -425,7 +429,7 @@ func (d *MetadataStoreSqlite) GetPools(
 			return db.Select("pool_retirement.*").
 				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
 				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
-				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+				Order("pool_retirement.added_slot DESC, CASE WHEN pool_retirement.certificate_id = 0 THEN 1 ELSE 0 END DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
 		}).
 		Where("pool_key_hash IN ?", hashes).
 		Find(&ret)
@@ -806,7 +810,7 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 			return db.Select("pool_retirement.*").
 				Joins("LEFT JOIN certs ON certs.id = pool_retirement.certificate_id").
 				Joins("LEFT JOIN \"transaction\" ON \"transaction\".id = certs.transaction_id").
-				Order("pool_retirement.added_slot DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
+				Order("pool_retirement.added_slot DESC, CASE WHEN pool_retirement.certificate_id = 0 THEN 1 ELSE 0 END DESC, COALESCE(\"transaction\".block_index, 0) DESC, COALESCE(certs.cert_index, 0) DESC")
 		}).
 		Find(&pools)
 	if result.Error != nil {
@@ -823,7 +827,8 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 		if len(pool.Registration) == 0 || len(pool.Retirement) == 0 {
 			continue
 		}
-		if pool.Retirement[0].AddedSlot == pool.Registration[0].AddedSlot {
+		if pool.Retirement[0].AddedSlot == pool.Registration[0].AddedSlot &&
+			pool.Retirement[0].CertificateID != 0 {
 			certIDs = append(
 				certIDs,
 				pool.Registration[0].CertificateID,
@@ -897,21 +902,25 @@ func (d *MetadataStoreSqlite) GetActivePoolRelays(
 			if latestRet.AddedSlot > latestReg.AddedSlot {
 				shouldCheckRetirement = true
 			} else if latestRet.AddedSlot == latestReg.AddedSlot {
-				// Same-slot case: use block_index then cert_index for on-chain ordering
-				// Higher block_index/cert_index means it came later in the block
-				// Disambiguate by cert_type to handle potential CertificateID collisions
-				retInfo := certInfoMap[certInfoKey{
-					certID:   latestRet.CertificateID,
-					certType: uint(lcommon.CertificateTypePoolRetirement),
-				}]
-				regInfo := certInfoMap[certInfoKey{
-					certID:   latestReg.CertificateID,
-					certType: uint(lcommon.CertificateTypePoolRegistration),
-				}]
-				if retInfo.blockIndex > regInfo.blockIndex {
+				if latestRet.CertificateID == 0 {
 					shouldCheckRetirement = true
-				} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
-					shouldCheckRetirement = true
+				} else {
+					// Same-slot case: use block_index then cert_index for on-chain ordering
+					// Higher block_index/cert_index means it came later in the block
+					// Disambiguate by cert_type to handle potential CertificateID collisions
+					retInfo := certInfoMap[certInfoKey{
+						certID:   latestRet.CertificateID,
+						certType: uint(lcommon.CertificateTypePoolRetirement),
+					}]
+					regInfo := certInfoMap[certInfoKey{
+						certID:   latestReg.CertificateID,
+						certType: uint(lcommon.CertificateTypePoolRegistration),
+					}]
+					if retInfo.blockIndex > regInfo.blockIndex {
+						shouldCheckRetirement = true
+					} else if retInfo.blockIndex == regInfo.blockIndex && retInfo.certIndex > regInfo.certIndex {
+						shouldCheckRetirement = true
+					}
 				}
 			}
 			// If retirement takes precedence and epoch has passed, pool is retired
@@ -1050,11 +1059,12 @@ func (d *MetadataStoreSqlite) GetActivePoolKeyHashesAtSlot(
 		),
 		latest_ret AS (
 			SELECT rt.pool_id, rt.added_slot, rt.epoch,
+				CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END as synthetic_ret,
 				COALESCE(t.block_index, 0) as blk_idx,
 				COALESCE(c.cert_index, 0) as cert_idx,
 				ROW_NUMBER() OVER (
 					PARTITION BY rt.pool_id
-					ORDER BY rt.added_slot DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
+					ORDER BY rt.added_slot DESC, CASE WHEN rt.certificate_id = 0 THEN 1 ELSE 0 END DESC, COALESCE(t.block_index, 0) DESC, COALESCE(c.cert_index, 0) DESC
 				) as rn
 			FROM pool_retirement rt
 			LEFT JOIN certs c ON c.id = rt.certificate_id
@@ -1067,8 +1077,8 @@ func (d *MetadataStoreSqlite) GetActivePoolKeyHashesAtSlot(
 		LEFT JOIN latest_ret lrt ON lrt.pool_id = p.id AND lrt.rn = 1
 		WHERE lrt.pool_id IS NULL
 			OR lrt.added_slot < lr.added_slot
-			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx < lr.blk_idx)
-			OR (lrt.added_slot = lr.added_slot AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx < lr.blk_idx)
+			OR (lrt.added_slot = lr.added_slot AND lrt.synthetic_ret = 0 AND lrt.blk_idx = lr.blk_idx AND lrt.cert_idx < lr.cert_idx)
 			OR lrt.epoch > ?`
 
 	if err := db.Raw(query, slot, slot, epochAtSlot.EpochId).Scan(&results).Error; err != nil {

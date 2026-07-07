@@ -35,16 +35,30 @@ type inOrderSequencer struct {
 }
 
 // newInOrderSequencer starts a consumer goroutine that processes the
-// contiguous prefix of completed items in order. process is invoked
-// outside the lock so producers may keep calling Complete concurrently.
+// contiguous prefix of completed items in order from index 0. process is
+// invoked outside the lock so producers may keep calling Complete
+// concurrently.
 func newInOrderSequencer(
 	total uint64,
+	process func(num uint64) error,
+) *inOrderSequencer {
+	return newInOrderSequencerFrom(0, total, process)
+}
+
+// newInOrderSequencerFrom is like newInOrderSequencer but begins the
+// contiguous processing window at start instead of 0, so only indices
+// [start..total-1] are expected and processed in order. This supports
+// download loops that skip an already-present prefix while still requiring
+// ordered processing for the remaining range.
+func newInOrderSequencerFrom(
+	start, total uint64,
 	process func(num uint64) error,
 ) *inOrderSequencer {
 	s := &inOrderSequencer{
 		total:   total,
 		process: process,
 		done:    make(map[uint64]bool),
+		next:    start,
 	}
 	s.cond = sync.NewCond(&s.mu)
 	go s.run()

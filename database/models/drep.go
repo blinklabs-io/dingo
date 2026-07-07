@@ -43,7 +43,7 @@ type Drep struct {
 	LastActivityEpoch uint64 `gorm:"index;default:0"`
 	// Epoch when DRep expires (activity + inactivity).
 	ExpiryEpoch uint64 `gorm:"index;default:0"`
-	Active      bool   `gorm:"default:true"`
+	Active      bool   `gorm:"default:true;index:idx_drep_active"`
 }
 
 // MigrateDrepCredentialTagIndex drops the legacy hash-only DRep uniqueness

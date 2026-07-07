@@ -57,4 +57,10 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 	need, err = NeedsSync(cfg)
 	require.NoError(t, err)
 	require.False(t, need, "backfill should not need a full resync")
+
+	// Unknown non-empty statuses are treated as incomplete.
+	setSyncStatus("unknown_interrupted_phase")
+	need, err = NeedsSync(cfg)
+	require.NoError(t, err)
+	require.True(t, need, "unknown sync_status should need a sync")
 }

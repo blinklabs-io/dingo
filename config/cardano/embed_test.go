@@ -62,6 +62,20 @@ func TestNewCardanoNodeConfigFromEmbedFS_InvalidPath(t *testing.T) {
 	}
 }
 
+func TestLoadCardanoNodeConfigWithFallbackNormalizesEmbedPath(t *testing.T) {
+	cfg, err := LoadCardanoNodeConfigWithFallback(
+		`preview\config.json`,
+		"preview",
+		EmbeddedConfigFS,
+	)
+	if err != nil {
+		t.Fatalf("failed to load cardano config from embedded FS: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config")
+	}
+}
+
 func TestEmbedFS_ListFiles(t *testing.T) {
 	// Test that embedded FS contains expected files in preview directory
 	previewEntries, err := EmbeddedConfigFS.ReadDir("preview")
