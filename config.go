@@ -43,14 +43,6 @@ import (
 
 type ListenerConfig = connmanager.ListenerConfig
 
-// runMode constants for operational mode configuration
-const (
-	runModeServe = "serve"
-	runModeLoad  = "load"
-	runModeDev   = "dev"
-	runModeLeios = "leios"
-)
-
 // StorageMode controls how much data the metadata store persists.
 type StorageMode string
 
@@ -1055,7 +1047,7 @@ func WithChainsyncHeaderStrategy(
 	strategy chainsync.HeaderSyncStrategy,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cfg.Chainsync.Strategy = string(strategy)
+		c.cfg.Chainsync.Strategy = strategy.String()
 	}
 }
 
