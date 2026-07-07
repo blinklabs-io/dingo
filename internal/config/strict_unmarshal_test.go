@@ -61,6 +61,31 @@ config:
 	}
 }
 
+// TestLoad_UnknownTopLevelSiblingOfWrappedConfigRejected guards against a
+// typo'd root-level sibling (e.g. "databse" instead of "database") next to
+// a valid "config:" section silently vanishing. Before this check, only
+// tempCfg.Config was strict-decoded; the root document itself was decoded
+// leniently, so an unrecognized sibling was dropped with no error and the
+// intended section (e.g. database plugin settings) silently fell back to
+// defaults instead of applying.
+func TestLoad_UnknownTopLevelSiblingOfWrappedConfigRejected(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := writeStrictTestConfig(t, `
+config:
+  network: "preview"
+databse:
+  blob:
+    plugin: badger
+`)
+	_, err := LoadConfig(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for unknown top-level sibling of config:, got nil")
+	}
+	if !strings.Contains(err.Error(), "databse") {
+		t.Errorf("error %q does not mention the unknown sibling key", err.Error())
+	}
+}
+
 func TestLoad_FlatSiblingPluginSectionsStillLoad(t *testing.T) {
 	resetGlobalConfig()
 	tmpFile := writeStrictTestConfig(t, `

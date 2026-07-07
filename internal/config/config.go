@@ -27,6 +27,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -275,6 +276,41 @@ func removeMappingKeys(node *yaml.Node, keys []string) {
 	node.Content = filtered
 }
 
+// wrappedModeRootKeys are the only top-level keys allowed in a config file
+// that uses a wrapped "config:" section. database/blob/metadata are
+// handled as siblings of "config" (see LoadConfig); anything else at the
+// root in wrapped mode is either a typo (e.g. "databse") or a field that
+// belongs nested inside "config:" instead.
+var wrappedModeRootKeys = map[string]struct{}{
+	"config":   {},
+	"database": {},
+	"blob":     {},
+	"metadata": {},
+}
+
+// validateWrappedRootKeys returns an error if the root mapping node
+// contains any key outside wrappedModeRootKeys.
+func validateWrappedRootKeys(root *yaml.Node) error {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	var unknown []string
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		if _, ok := wrappedModeRootKeys[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return fmt.Errorf(
+			"unknown top-level key(s) %v (expected only config, database, blob, or metadata when using a wrapped \"config:\" section)",
+			unknown,
+		)
+	}
+	return nil
+}
+
 // strictUnmarshalConfig decodes data into out, returning an error if the
 // document contains any field not present in the Config struct. An empty
 // document decodes as a no-op, matching yaml.Unmarshal's behavior for
@@ -288,14 +324,26 @@ func strictUnmarshalConfig(data []byte, out *Config) error {
 	return nil
 }
 
-// validateLoggingChainsyncMithril validates fields whose invalid values were
-// historically only caught later (at logger setup, node startup, or by the
-// mithril subcommand) instead of at config load. Called from both LoadConfig
-// and ApplyFlags: CLI flags are applied after LoadConfig returns, so
-// validating only in LoadConfig would let a bad --logging-level,
-// --logging-format, --chainsync-strategy, or --mithril-backend flag
-// reintroduce a value already rejected for YAML/env.
-func validateLoggingChainsyncMithril(cfg *Config) error {
+// validateRuntimeConfig validates fields whose invalid values were
+// historically only caught later (at logger setup, node startup, by the
+// mithril subcommand, or as a silent runtime fallback) instead of at
+// config load. Called from both LoadConfig and ApplyFlags: CLI flags are
+// applied after LoadConfig returns, so validating only in LoadConfig
+// would let a bad --logging-level, --logging-format, --chainsync-strategy,
+// --mithril-backend, or --port flag reintroduce a value already rejected
+// for YAML/env.
+func validateRuntimeConfig(cfg *Config) error {
+	// RelayPort doubles as the outbound source port (see
+	// internal/node/node.go's WithOutboundSourcePort(cfg.RelayPort)),
+	// used for peer-sharing-friendly source-port reuse. An out-of-range
+	// value used to only be caught when dialing, where it silently fell
+	// back to dialing without source-port reuse; catch it here instead.
+	if cfg.RelayPort > 65535 {
+		return fmt.Errorf(
+			"invalid relayPort: %d (must be 0 to disable, or 1-65535)",
+			cfg.RelayPort,
+		)
+	}
 	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
 	case "", "debug", "info", "warn", "warning", "error":
 	default:
@@ -963,8 +1011,24 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 
+		var root yaml.Node
+		if err := yaml.Unmarshal(buf, &root); err != nil {
+			return nil, fmt.Errorf("error parsing config file: %w", err)
+		}
+
 		// If config section exists, use it for main config
 		if tempCfg.Config.Kind != 0 {
+			// Wrapped mode: the root document may only contain
+			// config/database/blob/metadata. Without this check, a
+			// typo'd sibling (e.g. "databse" instead of "database")
+			// would silently vanish, since only tempCfg.Config below
+			// gets strict-decoded -- the initial lenient unmarshal above
+			// just drops anything it doesn't recognize.
+			if len(root.Content) > 0 {
+				if err := validateWrappedRootKeys(root.Content[0]); err != nil {
+					return nil, err
+				}
+			}
 			// Overlay config values onto existing defaults. Strict
 			// decoding here rejects unrecognized fields (e.g. typos)
 			// instead of silently ignoring them.
@@ -981,10 +1045,6 @@ func LoadConfig(configFile string) (*Config, error) {
 			// sibling keys handled separately above, so strip them
 			// before strict-decoding the remainder into Config.
 			configBuf := buf
-			var root yaml.Node
-			if err := yaml.Unmarshal(buf, &root); err != nil {
-				return nil, fmt.Errorf("error parsing config file: %w", err)
-			}
 			if len(root.Content) > 0 {
 				removeMappingKeys(
 					root.Content[0],
@@ -1090,12 +1150,13 @@ func LoadConfig(configFile string) (*Config, error) {
 		)
 	}
 
-	// Validate logging/chainsync/mithril fields. Also re-run at the end
-	// of ApplyFlags: CLI flags are applied after LoadConfig returns, so
-	// validating only here would let a bad --logging-level, --logging-format,
-	// --chainsync-strategy, or --mithril-backend flag reintroduce a value
-	// this check already rejects for YAML/env.
-	if err := validateLoggingChainsyncMithril(globalConfig); err != nil {
+	// Validate relayPort/logging/chainsync/mithril fields. Also re-run at
+	// the end of ApplyFlags: CLI flags are applied after LoadConfig
+	// returns, so validating only here would let a bad --port,
+	// --logging-level, --logging-format, --chainsync-strategy, or
+	// --mithril-backend flag reintroduce a value this check already
+	// rejects for YAML/env.
+	if err := validateRuntimeConfig(globalConfig); err != nil {
 		return nil, err
 	}
 

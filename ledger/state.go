@@ -6579,7 +6579,10 @@ func (ls *LedgerState) validateTxCore(
 	// degradation rather than fail-fast: this is monitored via the
 	// slotClockFallbacks metric (in addition to the debug log below), so
 	// sustained occurrences are visible to operators without failing tx
-	// validation on a transient clock read error.
+	// validation on a transient clock read error. An operator-controlled
+	// strict mode that rejects instead of falling back is a reasonable
+	// follow-up but needs its own validation-behavior review; left as
+	// remaining #1649 work rather than done here.
 	currentSlot, currentSlotErr := ls.CurrentSlot()
 	if currentSlotErr != nil {
 		ls.config.Logger.Debug(

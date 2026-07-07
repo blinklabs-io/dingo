@@ -29,6 +29,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// DefaultConfig is the source of truth for New's plugin defaulting below,
+// used by direct callers of this package (library usage, tests) that
+// don't go through internal/config. The CLI path resolves BlobPlugin/
+// MetadataPlugin earlier via internal/config.DefaultConfig, which is kept
+// in sync with these values by
+// TestDatabaseDefaultsMatchInternalConfigDefaults in internal/config.
 var DefaultConfig = &Config{
 	BlobPlugin:     "badger",
 	DataDir:        ".dingo",

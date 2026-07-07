@@ -719,7 +719,8 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // the stake snapshot and active slot coefficient aren't available yet.
 // Making this fail-fast would require distinguishing "genuinely missing
 // during bootstrap" from "unexpectedly missing after bootstrap" (e.g. by
-// block/epoch number), which needs DevNet validation before changing.
+// block/epoch number), which needs dedicated tests plus DevNet coverage
+// before changing. Left as remaining #1649 work rather than done here.
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,

@@ -15,6 +15,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -23,7 +25,41 @@ import (
 // These tests guard against CLI flags reintroducing a value that
 // LoadConfig's YAML/env validation already rejects. ApplyFlags runs after
 // LoadConfig returns, so validation must be re-run at the end of
-// ApplyFlags too -- see validateLoggingChainsyncMithril.
+// ApplyFlags too -- see validateRuntimeConfig.
+
+// TestLoad_InvalidRelayPortRejected verifies that an out-of-range
+// relayPort is rejected at config load, rather than only surfacing later
+// as a silent "dial without source-port reuse" fallback in
+// connmanager's outbound dialer (relayPort doubles as the outbound
+// source port).
+func TestLoad_InvalidRelayPortRejected(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte("relayPort: 99999999\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if _, err := LoadConfig(tmpFile); err == nil {
+		t.Fatal("expected error for out-of-range relayPort, got nil")
+	}
+}
+
+func TestApplyFlags_InvalidRelayPortRejected(t *testing.T) {
+	resetGlobalConfig()
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--port=99999999"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err == nil {
+		t.Fatal("expected error for --port=99999999, got nil")
+	}
+}
 
 func TestApplyFlags_InvalidLoggingLevelRejected(t *testing.T) {
 	resetGlobalConfig()
