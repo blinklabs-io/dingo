@@ -65,7 +65,7 @@ Thank you for trying!
 
 ## v0.61.4 (July 7, 2026)
 
-**Title:** Improve peer recovery, historical stake validation, and heal performance
+**Title:** Strengthen peer recovery, historical stake validation, and heal performance
 
 **Date:** July 7, 2026
 
@@ -86,14 +86,14 @@ This release improves recovery speed, peer stability, historical stake correctne
 
 ### ⚠️ Breaking Changes
 
-* Added a required `GetStakeByPoolsAtSlot` method to metadata plugins so historical stake lookups can use slot-aware stake state during snapshot calculation.
+* Added a required `GetStakeByPoolsAtSlot` method to metadata plugins, and third-party implementations must add it before upgrading to this release.
 
 ### 📋 What You Need to Know
 
 * Clarified that operators can expect faster peer replenishment after short-lived disconnects when the hot peer pool becomes critically low.
 * Highlighted that Mark snapshots now follow historical stake at the snapshot boundary instead of live chain state.
 * Emphasized that startup heal now reaches the canonical chain tip faster when the header chain runs far ahead of the ledger tip.
-* Noted that third-party metadata plugins need the new `GetStakeByPoolsAtSlot` method before this release.
+* Noted that third-party metadata plugins must implement `GetStakeByPoolsAtSlot` before this release.
 
 ### Recommended Network Compatibility ⚠️
 
