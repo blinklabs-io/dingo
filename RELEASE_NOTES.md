@@ -63,6 +63,28 @@ Thank you for trying!
 
 ---
 
+## v0.61.3 (July 7, 2026)
+
+**Title:** Mithril leader eligibility fix and patch-level dependency refreshes
+
+**Date:** July 7, 2026
+
+**Version:** v0.61.3
+
+This release focuses on a narrowly scoped Mithril bootstrap recovery fix and patch-level dependency and workflow updates across the node, examples, and CI pipelines.
+
+### 💪 Improvements
+
+* Improved **skip the imported Mithril Mark stake threshold check when the snapshot is historical:** Fresh Mithril bootstraps and catch-up runs now avoid rejecting canonical blocks when an imported historical Mark snapshot would otherwise produce an incorrect VRF leader threshold.
+* Updated **the dingo-sundae-preview example to Vite 8.1.3:** The example now picks up patch fixes for nested dynamic import CSS preload handling, inline CSS injection after a shebang, and SSR stacktrace column positions.
+* Refreshed **the AWS SDK for Go to v1.42.1:** Builds and runtime paths that depend on the AWS SDK now use the newer upstream module version and regenerated endpoint and API models.
+* Strengthened **the `docker/setup-buildx-action` workflow to v4.2.0:** Antithesis, CI Docker, and publish workflows now run on the newer Buildx action release.
+* Polished **`@types/node` in the dingo-sundae-preview example to v26.1.0:** TypeScript checks in the example now use the newer Node type definitions.
+
+### 🔧 Fixes
+
+* Fixed **skip the Mithril imported historical Mark stake threshold check when the snapshot is out of epoch bounds:** `verifyBlockLeaderEligibility` now skips only the stake-threshold eligibility check for imported historical Mark snapshots captured after the target epoch start, while normal checks continue to run for boundary-captured snapshots and non-Mithril nodes.
+
 ## v0.61.1 (July 2, 2026)
 
 **Title:** Safer Mithril recovery, steadier Leios sync, and stronger ledger validation
