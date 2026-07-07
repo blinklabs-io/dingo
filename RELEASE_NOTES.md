@@ -65,19 +65,19 @@ Thank you for trying!
 
 ## v0.61.4 (July 7, 2026)
 
-**Title:** Faster peer recovery, historical stake validation, and heal performance
+**Title:** Improve peer recovery, historical stake validation, and heal performance
 
 **Date:** July 7, 2026
 
 **Version:** v0.61.4
 
-This release improves peer recovery, stake correctness, and startup heal performance while keeping the release history current and the internal SSH test dependency set aligned with upstream fixes.
+This release improves recovery speed, peer stability, historical stake correctness, and startup heal performance while keeping operator guidance current.
 
 ### 💪 Improvements
 
-* Improved the internal SSH crypto test dependency set to newer upstream releases, which keeps automated coverage aligned with fixes for unexpected response deadlocks, large channel write loops, key verification limits, and nil callback panics.
+* Updated the internal SSH crypto test dependency set to newer upstream releases, which keeps automated coverage aligned with fixes for unexpected response deadlocks, large channel write loops, key verification limits, and nil callback panics.
 * Improved peer replenishment when the hot peer pool drops to a critical level, which helps the node recover faster after short-lived disconnects and reduces the risk of running with too few healthy upstream peers.
-* Updated the release history to keep the previous release entry current.
+* Reviewed the release history to keep the previous release entry current.
 
 ### 🔧 Fixes
 
