@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"io"
@@ -23,11 +24,15 @@ import (
 	"math/big"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/kes"
@@ -1001,6 +1006,130 @@ func seedPoolStakeSnapshotOfTypeAtSlot(
 	require.NoError(t, err)
 }
 
+func seedEligibilityEpochs(
+	t *testing.T,
+	db *database.Database,
+	epochs []models.Epoch,
+) {
+	t.Helper()
+	for _, epoch := range epochs {
+		require.NoError(t, db.SetEpoch(
+			epoch.StartSlot,
+			epoch.EpochId,
+			epoch.Nonce,
+			epoch.EvolvingNonce,
+			epoch.CandidateNonce,
+			epoch.LastEpochBlockNonce,
+			epoch.EraId,
+			epoch.SlotLength,
+			epoch.LengthInSlots,
+			nil,
+		))
+	}
+}
+
+func seedLiveDelegatedPoolStake(
+	t *testing.T,
+	db *database.Database,
+	poolKeyHash []byte,
+	totalStake uint64,
+	slot uint64,
+	discriminator byte,
+) {
+	t.Helper()
+	margin := &types.Rat{Rat: big.NewRat(1, 100)}
+	err := db.Metadata().ImportPool(
+		&models.Pool{
+			PoolKeyHash:   poolKeyHash,
+			VrfKeyHash:    make([]byte, 32),
+			Pledge:        types.Uint64(1_000_000),
+			Cost:          types.Uint64(340_000_000),
+			Margin:        margin,
+			RewardAccount: make([]byte, 28),
+		},
+		&models.PoolRegistration{
+			PoolKeyHash:   poolKeyHash,
+			VrfKeyHash:    make([]byte, 32),
+			AddedSlot:     slot,
+			Pledge:        types.Uint64(1_000_000),
+			Cost:          types.Uint64(340_000_000),
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+			RewardAccount: make([]byte, 28),
+		},
+		nil,
+	)
+	require.NoError(t, err)
+
+	stakingKey := make([]byte, 28)
+	copy(stakingKey, poolKeyHash)
+	stakingKey[27] ^= discriminator
+	err = db.Metadata().CreateAccount(nil, &models.Account{
+		StakingKey: stakingKey,
+		Pool:       poolKeyHash,
+		AddedSlot:  slot,
+		Active:     true,
+	})
+	require.NoError(t, err)
+
+	txId := make([]byte, 32)
+	copy(txId, poolKeyHash)
+	txId[28] = discriminator
+	txId[31] = discriminator + 1
+	err = db.Metadata().CreateUtxo(nil, &models.Utxo{
+		TxId:       txId,
+		OutputIdx:  uint32(discriminator),
+		StakingKey: stakingKey,
+		Amount:     types.Uint64(totalStake),
+		AddedSlot:  slot,
+	})
+	require.NoError(t, err)
+}
+
+func captureLiveMarkSnapshot(
+	t *testing.T,
+	db *database.Database,
+	newEpoch uint64,
+	boundarySlot uint64,
+	snapshotSlot uint64,
+	poolKeyHash []byte,
+) {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	eventBus := event.NewEventBus(nil, logger)
+	t.Cleanup(eventBus.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr := ledgersnapshot.NewManager(db, eventBus, logger)
+	require.NoError(t, mgr.Start(ctx))
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, mgr.Stop())
+	})
+
+	epochEvent := event.EpochTransitionEvent{
+		PreviousEpoch: newEpoch - 1,
+		NewEpoch:      newEpoch,
+		BoundarySlot:  boundarySlot,
+		SnapshotSlot:  snapshotSlot,
+	}
+	eventBus.Publish(
+		event.EpochTransitionEventType,
+		event.NewEvent(event.EpochTransitionEventType, epochEvent),
+	)
+
+	testutil.WaitForCondition(t, func() bool {
+		snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+			newEpoch,
+			models.PoolStakeSnapshotTypeMark,
+			poolKeyHash,
+			nil,
+		)
+		return err == nil &&
+			snapshot != nil &&
+			snapshot.CapturedSlot == snapshotSlot
+	}, 2*time.Second, "live mark snapshot should be captured")
+}
+
 // seedPoolRegistration registers a pool so that db.GetPool(poolKeyHash)
 // returns a *models.Pool whose VrfKeyHash equals vrfKeyHash. It mirrors
 // seedPoolStakeSnapshot by persisting through the metadata store interface:
@@ -1177,13 +1306,16 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 ) {
 	tb := createTestBlock(t, [32]byte{38}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(&logBuf, nil))
 	ls.epochCache = []models.Epoch{
 		{EpochId: 3, StartSlot: 300, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
 	}
-	ls.mithrilLedgerSlot = 450
-	tb.block.slot = 550
+	importedCaptureSlot := ls.epochCache[1].StartSlot + 50
+	ls.mithrilLedgerSlot = importedCaptureSlot
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
@@ -1194,7 +1326,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 		poolKeyHash[:],
 		1,
 		0,
-		450,
+		importedCaptureSlot,
 	)
 	dummyHash := make([]byte, 28)
 	dummyHash[0] = 0xFF
@@ -1206,14 +1338,24 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 		dummyHash,
 		1_000_000_000_000_000_000,
 		0,
-		450,
+		importedCaptureSlot,
 	)
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		3,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		nil,
+	)
+	require.NoError(t, err)
+	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 3))
 
-	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
+	assert.Contains(t, logBuf.String(), "mark snapshot captured after target epoch start")
+	assert.NotContains(t, logBuf.String(), "total active stake is zero")
 }
 
-func TestVerifyBlockLeaderEligibility_MithrilBoundaryMarkStillChecks(
+func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	t *testing.T,
 ) {
 	tb := createTestBlock(t, [32]byte{39}, 0, tamperNone)
@@ -1223,34 +1365,37 @@ func TestVerifyBlockLeaderEligibility_MithrilBoundaryMarkStillChecks(
 		{EpochId: 4, StartSlot: 400, LengthInSlots: 100, Nonce: tb.epochNonce},
 		{EpochId: 5, StartSlot: 500, LengthInSlots: 100, Nonce: tb.epochNonce},
 	}
-	ls.mithrilLedgerSlot = 450
-	tb.block.slot = 550
+	ls.mithrilLedgerSlot = ls.epochCache[1].StartSlot + 50
+	tb.block.slot = ls.epochCache[2].StartSlot + 50
+	seedEligibilityEpochs(t, db, append([]models.Epoch{
+		{EpochId: 2, StartSlot: 200, LengthInSlots: 100},
+	}, ls.epochCache...))
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshotOfTypeAtSlot(
-		t,
-		db,
-		3,
-		models.PoolStakeSnapshotTypeMark,
-		poolKeyHash[:],
-		1,
-		0,
-		299,
-	)
 	dummyHash := make([]byte, 28)
 	dummyHash[0] = 0xFF
-	seedPoolStakeSnapshotOfTypeAtSlot(
-		t,
-		db,
-		3,
-		models.PoolStakeSnapshotTypeMark,
-		dummyHash,
-		1_000_000_000_000_000_000,
-		0,
-		299,
+	snapshotEpoch := uint64(3)
+	boundarySlot := ls.epochCache[0].StartSlot
+	snapshotSlot := boundarySlot - 1
+	seedLiveDelegatedPoolStake(
+		t, db, poolKeyHash[:], 1, snapshotSlot, 1,
 	)
+	seedLiveDelegatedPoolStake(
+		t, db, dummyHash, 1_000_000_000_000_000_000, snapshotSlot, 2,
+	)
+	captureLiveMarkSnapshot(
+		t, db, snapshotEpoch, boundarySlot, snapshotSlot, poolKeyHash[:],
+	)
+	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		snapshotEpoch,
+		models.PoolStakeSnapshotTypeMark,
+		poolKeyHash[:],
+		nil,
+	)
+	require.NoError(t, err)
+	require.False(t, ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch))
 
-	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
 }

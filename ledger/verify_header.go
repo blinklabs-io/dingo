@@ -259,9 +259,12 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	issuerVkey := block.IssuerVkey()
 	poolKeyHash := lcommon.PoolKeyHash(issuerVkey.Hash())
 
-	poolStake, totalStake, snapshotEpoch, snapshotType, err := ls.leaderEligibilityStake(block, epochId, poolKeyHash)
+	poolStake, totalStake, snapshotEpoch, snapshotType, skipEligibility, err := ls.leaderEligibilityStake(block, epochId, poolKeyHash)
 	if err != nil {
 		return err
+	}
+	if skipEligibility {
+		return nil
 	}
 	if totalStake == 0 {
 		// Genesis snapshot not yet written (very early bootstrap).
@@ -344,13 +347,13 @@ func (ls *LedgerState) leaderEligibilityStake(
 	block ledger.Block,
 	epochId uint64,
 	poolKeyHash lcommon.PoolKeyHash,
-) (uint64, uint64, uint64, string, error) {
+) (uint64, uint64, uint64, string, bool, error) {
 	useImportedActive, err := ls.shouldUseImportedActivePoolDistribution(
 		block,
 		epochId,
 	)
 	if err != nil {
-		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, err
+		return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false, err
 	}
 	if useImportedActive {
 		snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
@@ -360,7 +363,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 			nil,
 		)
 		if err != nil {
-			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
 				fmt.Errorf(
 					"block header verification rejected at slot %d: "+
 						"lookup active pool distribution: %w",
@@ -371,7 +374,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 		if snapshot == nil ||
 			snapshot.TotalStake == 0 ||
 			snapshot.StakeDenominator == 0 {
-			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive,
+			return 0, 0, epochId, models.PoolStakeSnapshotTypeActive, false,
 				fmt.Errorf(
 					"block header verification rejected at slot %d: "+
 						"producer pool %x missing from active pool distribution for epoch %d",
@@ -384,6 +387,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 			uint64(snapshot.StakeDenominator),
 			epochId,
 			models.PoolStakeSnapshotTypeActive,
+			false,
 			nil
 	}
 
@@ -396,7 +400,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 		nil,
 	)
 	if err != nil {
-		return 0, 0, snapshotEpoch, snapshotType,
+		return 0, 0, snapshotEpoch, snapshotType, false,
 			fmt.Errorf(
 				"block header verification rejected at slot %d: "+
 					"lookup pool stake: %w",
@@ -405,7 +409,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 			)
 	}
 	if snapshot == nil || snapshot.TotalStake == 0 {
-		return 0, 0, snapshotEpoch, snapshotType,
+		return 0, 0, snapshotEpoch, snapshotType, false,
 			fmt.Errorf(
 				"block header verification rejected at slot %d: "+
 					"producer pool %x has no stake in epoch %d snapshot",
@@ -426,7 +430,8 @@ func (ls *LedgerState) leaderEligibilityStake(
 				"component", "ledger",
 			)
 		}
-		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType, nil
+		return uint64(snapshot.TotalStake), 0, snapshotEpoch, snapshotType,
+			true, nil
 	}
 	totalStake, err := ls.db.Metadata().GetTotalActiveStake(
 		snapshotEpoch,
@@ -434,7 +439,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 		nil,
 	)
 	if err != nil {
-		return 0, 0, snapshotEpoch, snapshotType,
+		return 0, 0, snapshotEpoch, snapshotType, false,
 			fmt.Errorf(
 				"block header verification rejected at slot %d: "+
 					"lookup total active stake: %w",
@@ -442,7 +447,8 @@ func (ls *LedgerState) leaderEligibilityStake(
 				err,
 			)
 	}
-	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType, nil
+	return uint64(snapshot.TotalStake), totalStake, snapshotEpoch, snapshotType,
+		false, nil
 }
 
 func (ls *LedgerState) isMithrilImportedMarkSnapshot(
