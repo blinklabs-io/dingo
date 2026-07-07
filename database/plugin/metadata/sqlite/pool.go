@@ -20,6 +20,7 @@ import (
 	"math"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/stakequery"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
@@ -1193,4 +1194,29 @@ func (d *MetadataStoreSqlite) GetStakeByPools(
 	}
 
 	return stakeMap, delegatorMap, nil
+}
+
+// GetStakeByPoolsAtSlot returns delegated stake for multiple pools at a
+// historical slot.
+func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
+	poolKeyHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, map[string]uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf(
+			"GetStakeByPoolsAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	stakes, delegators, err := stakequery.GetStakeByPoolsAtSlot(
+		db,
+		poolKeyHashes,
+		slot,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
+	}
+	return stakes, delegators, nil
 }

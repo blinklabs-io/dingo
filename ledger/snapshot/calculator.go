@@ -112,6 +112,7 @@ func (c *Calculator) calculateFromAccounts(
 		meta,
 		metaTxn,
 		pools,
+		slot,
 	)
 	if err != nil {
 		return fmt.Errorf("get batch pools delegated stake: %w", err)
@@ -164,18 +165,14 @@ func (c *Calculator) getActivePoolsAtSlot(
 
 // getBatchPoolsDelegatedStake returns stake for all pools in a single batch
 // query. Returns maps of pool hash -> total stake and pool hash -> delegator
-// count. Stake is computed by joining active accounts with their live UTxOs
-// (deleted_slot = 0) and summing the amounts per pool.
-//
-// NOTE: This currently uses the live UTxO set rather than a historical
-// snapshot. A future slot-aware GetStakeByPoolsAtSlot method could filter
-// by created_slot <= slot AND (deleted_slot = 0 OR deleted_slot > slot)
-// for full consensus-grade accuracy at historical points.
+// count. Stake is computed at the requested snapshot slot using historical
+// registration/delegation certificate state and slot-aware UTxO liveness.
 func (c *Calculator) getBatchPoolsDelegatedStake(
 	_ context.Context,
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
+	slot uint64,
 ) (map[lcommon.PoolKeyHash]uint64, map[lcommon.PoolKeyHash]uint64, error) {
 	// Initialize result maps
 	stakeMap := make(map[lcommon.PoolKeyHash]uint64, len(pools))
@@ -194,7 +191,11 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	}
 
 	// Batch query delegator counts for all pools
-	stakes, delegators, err := meta.GetStakeByPools(poolKeyHashBytes, metaTxn)
+	stakes, delegators, err := meta.GetStakeByPoolsAtSlot(
+		poolKeyHashBytes,
+		slot,
+		metaTxn,
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get stake by pools: %w", err)
 	}

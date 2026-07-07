@@ -1382,7 +1382,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake from the Mark snapshot two epochs back. Header validation uses the same epoch-2 Mark source except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. If a post-Mithril historical Mark row was captured at or after the target snapshot epoch's start slot, header validation treats that row as an import artifact and skips only the stake-threshold eligibility check rather than rejecting a canonical block.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake from the Mark snapshot two epochs back. Header validation uses the same epoch-2 Mark source except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures remain hard validation rejects. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
 
 ### Block Forging (`ledger/forging/`)
 
@@ -1814,7 +1814,7 @@ Key configuration areas:
 
 ## Stake Snapshots
 
-Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
+Stake snapshots capture the stake distribution at epoch boundaries for use in Ouroboros Praos leader election. The block producer must know the Mark distribution from two epochs ago to determine if it is the slot leader. Mark captures use slot-aware delegation and UTxO liveness at the boundary slot instead of the current live UTxO set. When bootstrapping from Mithril, the imported epoch also needs the active `pool-distr` fraction from the certified ledger state for header validation.
 
 ### Ouroboros Praos Snapshot Model
 
