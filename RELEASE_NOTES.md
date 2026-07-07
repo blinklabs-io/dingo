@@ -80,10 +80,30 @@ This release focuses on a narrowly scoped Mithril bootstrap recovery fix and pat
 * Refreshed **the AWS SDK for Go to v1.42.1:** Builds and runtime paths that depend on the AWS SDK now use the newer upstream module version and regenerated endpoint and API models.
 * Strengthened **the `docker/setup-buildx-action` workflow to v4.2.0:** Antithesis, CI Docker, and publish workflows now run on the newer Buildx action release.
 * Polished **`@types/node` in the dingo-sundae-preview example to v26.1.0:** TypeScript checks in the example now use the newer Node type definitions.
+* Enhanced **the `docker/build-push-action` workflow to v7.3.0:** Antithesis, CI Docker, and publish workflows now use the newer Docker build and push action implementation.
+* Modernized **the AWS SDK for Go S3 service module to v1.105.0:** S3 related builds now use the updated service implementation and related transitive modules.
+* Refined **the `docker/metadata-action` workflow to v6.2.0:** Docker image tag and label metadata generation now uses the newer action release.
+* Sharpened **the AWS SDK for Go config module to v1.32.28:** Builds and runtime paths that depend on AWS configuration now use the newer upstream module version.
+* Balanced **gRPC to v1.82.0:** Services built from this repository now inherit the newer gRPC behavior, including the removal of `GRPC_GO_EXPERIMENTAL_DISABLE_STRICT_PATH_CHECKING` support and case-sensitive load balancing registry lookup.
+* Expanded **Google API dependencies to v0.287.0:** Rebuilds now pick up the newer upstream dependency versions.
 
 ### 🔧 Fixes
 
 * Fixed **skip the Mithril imported historical Mark stake threshold check when the snapshot is out of epoch bounds:** `verifyBlockLeaderEligibility` now skips only the stake-threshold eligibility check for imported historical Mark snapshots captured after the target epoch start, while normal checks continue to run for boundary-captured snapshots and non-Mithril nodes.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
 
 ## v0.61.1 (July 2, 2026)
 
