@@ -1043,7 +1043,12 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 The previous epoch's last-block hash is resolved through the active chain index
 (`chain.BlockBeforeSlot`), not a raw blob-store slot scan. Blob storage can
 retain synthetic endorser/genesis blobs and fork blobs that are useful for other
-storage paths but are not part of the selected chain.
+storage paths but are not part of the selected chain. Because block slots are
+strictly increasing with block index on the canonical chain, `BlockBeforeSlot`
+binary-searches the chain index for the boundary (O(log n) block reads) rather
+than walking backward from the tip; the walk previously scanned the entire
+header-ahead gap during catch-up and made the startup epoch-lab-nonce heal wedge
+large-DB startup for minutes (#2771).
 
 ### Ledger View
 

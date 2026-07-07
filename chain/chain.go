@@ -1208,19 +1208,41 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	if c.tipBlockIndex < initialBlockIndex {
 		return models.Block{}, models.ErrBlockNotFound
 	}
-	for blockIndex := c.tipBlockIndex; blockIndex >= initialBlockIndex; blockIndex-- {
-		block, err := c.blockByIndex(blockIndex)
+	// Block slots are strictly increasing with block index on the canonical
+	// chain, so binary-search for the highest index whose slot is below
+	// slotNumber rather than walking backward from the tip. The old linear walk
+	// cost O(tip - boundary) block reads; during catch-up the header chain runs
+	// far ahead of the ledger tip, so a boundary near the ledger tip made every
+	// lookup scan the entire header-ahead gap (the epoch-lab-nonce heal ran this
+	// per recent epoch, wedging large-DB startup for minutes — #2771). The
+	// search still resolves each candidate via blockByIndex (the active chain),
+	// so retained fork or synthetic blobs are never returned.
+	lo, hi := initialBlockIndex, c.tipBlockIndex
+	var (
+		result models.Block
+		found  bool
+	)
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		block, err := c.blockByIndex(mid)
 		if err != nil {
 			return models.Block{}, err
 		}
 		if block.Slot < slotNumber {
-			return block, nil
-		}
-		if blockIndex == initialBlockIndex {
-			break
+			result = block
+			found = true
+			lo = mid + 1
+		} else {
+			if mid == initialBlockIndex {
+				break
+			}
+			hi = mid - 1
 		}
 	}
-	return models.Block{}, models.ErrBlockNotFound
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return result, nil
 }
 
 func (c *Chain) blockByIndex(
