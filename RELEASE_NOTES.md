@@ -65,7 +65,7 @@ Thank you for trying!
 
 ## v0.61.3 (July 7, 2026)
 
-**Title:** Mithril leader eligibility fix and patch-level dependency refreshes
+**Title:** Mithril leader eligibility fix and dependency refreshes
 
 **Date:** July 7, 2026
 
@@ -84,7 +84,7 @@ This release focuses on a narrowly scoped Mithril bootstrap recovery fix togethe
 * Modernized **the AWS SDK for Go S3 service module to v1.105.0:** S3 related builds now use the updated service implementation and related transitive modules.
 * Refined **the `docker/metadata-action` workflow to v6.2.0:** Docker image tag and label metadata generation now uses the newer action release.
 * Sharpened **the AWS SDK for Go config module to v1.32.28:** Builds and runtime paths that depend on AWS configuration now use the newer upstream module version.
-* Balanced **gRPC to v1.82.0:** Services built from this repository now inherit the newer gRPC behavior, including the removal of `GRPC_GO_EXPERIMENTAL_DISABLE_STRICT_PATH_CHECKING` support and case-sensitive load balancing registry lookup.
+* Balanced **gRPC to v1.82.0:** Services built from this repository now inherit the newer gRPC behavior, including the removal of `GRPC_GO_EXPERIMENTAL_DISABLE_STRICT_PATH_CHECKING` support and case-sensitive lookup in the load balancing registry.
 * Expanded **Google API dependencies to v0.287.0:** Rebuilds now pick up the newer upstream dependency versions.
 
 ### 🔧 Fixes
