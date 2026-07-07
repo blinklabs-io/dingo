@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo"
-	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
@@ -256,26 +255,6 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 		if err != nil {
 			return fmt.Errorf("invalid shutdown timeout: %w", err)
 		}
-	}
-	// Use the package-level default to avoid drift.
-	chainsyncStallTimeout := chainsync.DefaultStallTimeout
-	if cfg.Chainsync.StallTimeout != "" {
-		var err error
-		chainsyncStallTimeout, err = time.ParseDuration(
-			cfg.Chainsync.StallTimeout,
-		)
-		if err != nil {
-			return fmt.Errorf(
-				"invalid chainsync stall timeout: %w",
-				err,
-			)
-		}
-	}
-	chainsyncStrategy, err := chainsync.ParseHeaderSyncStrategy(
-		cfg.Chainsync.Strategy,
-	)
-	if err != nil {
-		return fmt.Errorf("invalid chainsync strategy: %w", err)
 	}
 
 	// Validate storage mode
