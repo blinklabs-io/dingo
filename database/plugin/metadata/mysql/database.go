@@ -49,6 +49,12 @@ func validateDatabaseName(name string) error {
 	if name == "" {
 		return errors.New("database name must not be empty")
 	}
+	if len(name) > 64 {
+		return fmt.Errorf(
+			"invalid database name %q: must be 64 characters or fewer",
+			name,
+		)
+	}
 	if strings.ContainsRune(name, '`') {
 		return fmt.Errorf(
 			"invalid database name %q: must not contain backticks",

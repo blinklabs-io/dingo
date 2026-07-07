@@ -1498,6 +1498,7 @@ func TestValidateDatabaseName(t *testing.T) {
 		"db123",
 		"UPPER",
 		"Mixed_Case-1",
+		strings.Repeat("a", 64),
 	}
 	for _, name := range valid {
 		if err := validateDatabaseName(name); err != nil {
@@ -1518,6 +1519,7 @@ func TestValidateDatabaseName(t *testing.T) {
 		{"db/name", "slash in name"},
 		{"db\\name", "backslash in name"},
 		{"db\x00name", "null byte"},
+		{strings.Repeat("a", 65), "over MySQL identifier length limit"},
 	}
 	for _, tc := range invalid {
 		if err := validateDatabaseName(tc.name); err == nil {
