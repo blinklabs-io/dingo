@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"gorm.io/gorm"
 )
 
 // setupTestDB creates a database.Database backed by in-memory SQLite for
@@ -119,6 +120,37 @@ func seedPoolAndDelegations(
 	}
 }
 
+func seedCertificate(
+	t *testing.T,
+	gormDB *gorm.DB,
+	slot uint64,
+	blockIndex uint32,
+	certIndex uint,
+	certType lcommon.CertificateType,
+) uint {
+	t.Helper()
+	txHash := make([]byte, 32)
+	txHash[0] = byte(slot)
+	txHash[1] = byte(slot >> 8)
+	txHash[2] = byte(blockIndex)
+	txHash[3] = byte(certIndex)
+	txHash[4] = byte(certType)
+	tx := models.Transaction{
+		Hash:       txHash,
+		Slot:       slot,
+		BlockIndex: blockIndex,
+	}
+	require.NoError(t, gormDB.Create(&tx).Error, "create tx for cert")
+	cert := models.Certificate{
+		TransactionID: tx.ID,
+		Slot:          slot,
+		CertIndex:     certIndex,
+		CertType:      uint(certType),
+	}
+	require.NoError(t, gormDB.Create(&cert).Error, "create cert")
+	return cert.ID
+}
+
 // TestCalculateStakeDistribution_NonZeroStake verifies that the calculator
 // returns non-zero stake values when delegation data and live UTxOs exist.
 // This is a regression test for the critical bug where GetStakeByPools
@@ -208,9 +240,177 @@ func TestCalculateStakeDistribution_NonZeroStake(t *testing.T) {
 		"pool B should have 1 delegator")
 }
 
-// TestCalculateStakeDistribution_SpentUtxosExcluded verifies that spent
-// UTxOs (deleted_slot != 0) are not counted in the stake distribution.
-func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
+func TestCalculateStakeDistribution_UsesHistoricalDelegationAndRegistration(
+	t *testing.T,
+) {
+	db, sqliteStore := setupTestDB(t)
+	gormDB := sqliteStore.DB()
+
+	require.NoError(t, gormDB.Create(&models.Epoch{
+		EpochId:       10,
+		StartSlot:     0,
+		LengthInSlots: 432000,
+	}).Error, "create epoch")
+
+	poolAHash := []byte("poolA_hist_12345678901234567")
+	poolBHash := []byte("poolB_hist_12345678901234567")
+	stakeKey := []byte("hist__staking_key_1234567890")
+
+	for _, poolHash := range [][]byte{poolAHash, poolBHash} {
+		pool := models.Pool{PoolKeyHash: poolHash}
+		require.NoError(t, gormDB.Create(&pool).Error, "create pool")
+		require.NoError(t, gormDB.Create(&models.PoolRegistration{
+			PoolID:        pool.ID,
+			PoolKeyHash:   poolHash,
+			AddedSlot:     50,
+			Pledge:        1000000,
+			Cost:          340000000,
+			Margin:        &types.Rat{Rat: big.NewRat(1, 100)},
+			VrfKeyHash:    make([]byte, 32),
+			RewardAccount: make([]byte, 28),
+		}).Error, "create pool registration")
+	}
+
+	regCertID := seedCertificate(
+		t,
+		gormDB,
+		100,
+		0,
+		0,
+		lcommon.CertificateTypeStakeRegistration,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     100,
+		CertificateID: regCertID,
+	}).Error, "create stake registration")
+
+	delegationACertID := seedCertificate(
+		t,
+		gormDB,
+		100,
+		0,
+		1,
+		lcommon.CertificateTypeStakeDelegation,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		PoolKeyHash:   poolAHash,
+		AddedSlot:     100,
+		CertificateID: delegationACertID,
+	}).Error, "create pool A delegation")
+
+	delegationBCertID := seedCertificate(
+		t,
+		gormDB,
+		300,
+		0,
+		0,
+		lcommon.CertificateTypeStakeDelegation,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeDelegation{
+		StakingKey:    stakeKey,
+		PoolKeyHash:   poolBHash,
+		AddedSlot:     300,
+		CertificateID: delegationBCertID,
+	}).Error, "create pool B delegation")
+
+	deregCertID := seedCertificate(
+		t,
+		gormDB,
+		500,
+		0,
+		0,
+		lcommon.CertificateTypeStakeDeregistration,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeDeregistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     500,
+		CertificateID: deregCertID,
+	}).Error, "create deregistration")
+
+	reregCertID := seedCertificate(
+		t,
+		gormDB,
+		600,
+		0,
+		0,
+		lcommon.CertificateTypeStakeRegistration,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+		StakingKey:    stakeKey,
+		AddedSlot:     600,
+		CertificateID: reregCertID,
+	}).Error, "create plain re-registration")
+
+	require.NoError(t, gormDB.Create(&models.Utxo{
+		TxId:       []byte("tx_hist_123456789012345678901234"),
+		OutputIdx:  0,
+		StakingKey: stakeKey,
+		Amount:     10000000,
+		AddedSlot:  100,
+	}).Error, "create delegated utxo")
+	require.NoError(t, gormDB.Create(&models.Account{
+		StakingKey: stakeKey,
+		Pool:       poolBHash,
+		AddedSlot:  600,
+		Active:     true,
+	}).Error, "create current account row")
+
+	bootstrapKey := []byte("hist_bootstrap_key_123456789")
+	bootstrapRegCertID := seedCertificate(
+		t,
+		gormDB,
+		610,
+		0,
+		0,
+		lcommon.CertificateTypeStakeRegistration,
+	)
+	require.NoError(t, gormDB.Create(&models.StakeRegistration{
+		StakingKey:    bootstrapKey,
+		AddedSlot:     610,
+		CertificateID: bootstrapRegCertID,
+	}).Error, "create bootstrap plain registration")
+	require.NoError(t, gormDB.Create(&models.Account{
+		StakingKey: bootstrapKey,
+		Pool:       poolBHash,
+		AddedSlot:  610,
+		Active:     true,
+	}).Error, "create bootstrap current account row")
+	require.NoError(t, gormDB.Create(&models.Utxo{
+		TxId:       []byte("tx_boot_123456789012345678901234"),
+		OutputIdx:  0,
+		StakingKey: bootstrapKey,
+		Amount:     20000000,
+		AddedSlot:  100,
+	}).Error, "create bootstrap utxo")
+
+	calc := NewCalculator(db)
+
+	dist, err := calc.CalculateStakeDistribution(context.Background(), 200)
+	require.NoError(t, err)
+	var poolAKey lcommon.PoolKeyHash
+	copy(poolAKey[:], poolAHash)
+	require.Equal(t, uint64(10000000), dist.PoolStakes[poolAKey])
+	require.Equal(t, uint64(10000000), dist.TotalStake)
+
+	dist, err = calc.CalculateStakeDistribution(context.Background(), 400)
+	require.NoError(t, err)
+	var poolBKey lcommon.PoolKeyHash
+	copy(poolBKey[:], poolBHash)
+	require.Equal(t, uint64(10000000), dist.PoolStakes[poolBKey])
+	require.Equal(t, uint64(10000000), dist.TotalStake)
+
+	dist, err = calc.CalculateStakeDistribution(context.Background(), 650)
+	require.NoError(t, err)
+	require.Zero(t, dist.TotalStake)
+	require.Empty(t, dist.PoolStakes)
+}
+
+// TestCalculateStakeDistribution_HistoricalUtxoLiveness verifies that stake
+// distribution uses UTxO liveness at the snapshot slot rather than today's live
+// UTxO set.
+func TestCalculateStakeDistribution_HistoricalUtxoLiveness(t *testing.T) {
 	db, sqliteStore := setupTestDB(t)
 	gormDB := sqliteStore.DB()
 
@@ -250,7 +450,8 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 	}
 	require.NoError(t, gormDB.Create(&account).Error)
 
-	// Create one live UTxO (5 ADA) and one spent UTxO (10 ADA)
+	// Create one live UTxO (5 ADA), one UTxO spent after the earlier
+	// snapshot slot (10 ADA), and one UTxO created after that slot (20 ADA).
 	liveUtxo := models.Utxo{
 		TxId:        []byte("tx_live_34567890123456789012345678901234"),
 		OutputIdx:   0,
@@ -271,19 +472,38 @@ func TestCalculateStakeDistribution_SpentUtxosExcluded(t *testing.T) {
 	}
 	require.NoError(t, gormDB.Create(&spentUtxo).Error)
 
-	// Calculate stake distribution
-	calc := NewCalculator(db)
-	dist, err := calc.CalculateStakeDistribution(context.Background(), 1000)
-	require.NoError(t, err)
+	lateUtxo := models.Utxo{
+		TxId:        []byte("tx_late_4567890123456789012345678901234"),
+		OutputIdx:   0,
+		StakingKey:  stakeKey,
+		Amount:      20000000,
+		AddedSlot:   700,
+		DeletedSlot: 0,
+	}
+	require.NoError(t, gormDB.Create(&lateUtxo).Error)
 
+	calc := NewCalculator(db)
 	var poolKey lcommon.PoolKeyHash
 	copy(poolKey[:], poolHash)
 
-	// Only the live UTxO (5 ADA) should be counted
-	require.Equal(t, uint64(5000000), dist.PoolStakes[poolKey],
-		"only live UTxOs should contribute to stake")
-	require.Equal(t, uint64(5000000), dist.TotalStake,
-		"total stake should exclude spent UTxOs")
+	dist, err := calc.CalculateStakeDistribution(context.Background(), 400)
+	require.NoError(t, err)
+
+	// At slot 400 the spent-at-500 UTxO is still live, while the
+	// added-at-700 UTxO does not exist yet.
+	require.Equal(t, uint64(15000000), dist.PoolStakes[poolKey],
+		"snapshot before spend should include UTxOs live at that slot only")
+	require.Equal(t, uint64(15000000), dist.TotalStake,
+		"total stake should use snapshot-slot UTxO liveness")
+
+	dist, err = calc.CalculateStakeDistribution(context.Background(), 1000)
+	require.NoError(t, err)
+
+	// At slot 1000 the spent UTxO is gone and the late UTxO is live.
+	require.Equal(t, uint64(25000000), dist.PoolStakes[poolKey],
+		"later snapshot should exclude spent UTxOs and include later outputs")
+	require.Equal(t, uint64(25000000), dist.TotalStake,
+		"total stake should reflect the later slot")
 }
 
 // TestCalculateStakeDistribution_InactiveAccountsExcluded verifies that

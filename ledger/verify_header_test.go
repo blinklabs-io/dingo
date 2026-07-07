@@ -1252,6 +1252,38 @@ func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
 	assert.NoError(t, err)
 }
 
+func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{40}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	if tb.block.slot <= 1 {
+		tb.block.slot = 2
+	}
+	ls.currentEpoch = models.Epoch{
+		EpochId:       5,
+		StartSlot:     0,
+		LengthInSlots: 1_000_000,
+		Nonce:         tb.epochNonce,
+	}
+	ls.mithrilLedgerSlot = tb.block.slot - 1
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshotOfType(
+		t,
+		db,
+		5,
+		models.PoolStakeSnapshotTypeActive,
+		poolKeyHash[:],
+		1,
+		1_000_000_000_000_000_000,
+	)
+
+	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+}
+
 // TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails verifies that a block
 // from a pool absent from the epoch-2 mark snapshot is rejected.
 func TestVerifyBlockLeaderEligibility_PoolNotInSnapshotFails(t *testing.T) {

@@ -328,6 +328,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetStakeByPoolsAtSlot returns delegated stake for multiple pools at a
+	// historical slot. It uses certificate history plus slot-aware UTxO
+	// liveness so epoch-boundary stake snapshots do not read current live
+	// stake for an older boundary.
+	GetStakeByPoolsAtSlot(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(

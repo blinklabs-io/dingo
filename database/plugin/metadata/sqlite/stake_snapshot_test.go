@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -705,6 +706,71 @@ func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
 		"pool A should have 2 delegators")
 	require.Equal(t, uint64(1), delegators[string(poolB)],
 		"pool B should have 1 delegator")
+}
+
+func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	poolA := bytes.Repeat([]byte{0xA1}, 28)
+	poolB := bytes.Repeat([]byte{0xB1}, 28)
+	poolEmpty := bytes.Repeat([]byte{0xE1}, 28)
+	stakeA1 := bytes.Repeat([]byte{0x01}, 28)
+	stakeA2 := bytes.Repeat([]byte{0x02}, 28)
+	stakeB1 := bytes.Repeat([]byte{0x03}, 28)
+
+	accounts := []models.Account{
+		{StakingKey: stakeA1, Pool: poolA, AddedSlot: 10, Active: true},
+		{StakingKey: stakeA2, Pool: poolA, AddedSlot: 10, Active: true},
+		{StakingKey: stakeB1, Pool: poolB, AddedSlot: 10, Active: true},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x11}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 5, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x12}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 7, AddedSlot: 30,
+			DeletedSlot: 90,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x13}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 11, AddedSlot: 90,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x14}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 13, AddedSlot: 5,
+			DeletedSlot: 70,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x15}, 32), OutputIdx: 0,
+			StakingKey: stakeB1, Amount: 17, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{poolA, poolB, poolEmpty},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(12), stakes[string(poolA)])
+	require.Equal(t, uint64(2), delegators[string(poolA)])
+	require.Equal(t, uint64(17), stakes[string(poolB)])
+	require.Equal(t, uint64(1), delegators[string(poolB)])
+	require.Equal(t, uint64(0), stakes[string(poolEmpty)])
+	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
 }
 
 func TestGetStakeByPoolsUsesStakeCredentialUtxoIndex(t *testing.T) {
