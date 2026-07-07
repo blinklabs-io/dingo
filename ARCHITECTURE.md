@@ -1473,10 +1473,11 @@ everything downstream of `Bootstrap()` is backend-agnostic.
 the database state alone, so the operator never needs to know it:
 
 - empty database -> full bootstrap
-- `sync_status` = `in_progress`/`backfill` -> resume the existing path, except
-  an interrupted v2 core catch-up (import marker present, or the ephemeral
-  `mithril_catchup_active` flag for a markerless catch-up) re-runs as a
-  catch-up so the reconcile pass repairs the partial import
+- non-empty `sync_status` (`in_progress`, `backfill`, or an unknown future
+  value) -> resume the existing path, except an interrupted v2 core catch-up
+  (import marker present, or the ephemeral `mithril_catchup_active` flag for a
+  markerless catch-up) re-runs as a catch-up so the reconcile pass repairs the
+  partial import
 - complete database (chain data present, `sync_status` clear), v2 backend, core
   storage mode -> catch-up/reconcile (from the marker when present, otherwise
   from immutable 0)
@@ -1492,9 +1493,10 @@ above it (`BootstrapConfig.StartImmutable`). Markerless complete core databases
 still use catch-up semantics, but over the full artifact range, so a re-import
 cannot overwrite live state without reconciliation. Before any mutation, catch-up
 confirms either that the local chain tip is an ancestor of the target artifact's
-chain, or that the local chain is already ahead and contains the artifact tip;
-divergence aborts untouched. An ahead local chain short-circuits as up-to-date
-(advancing the marker) only when no sync is in progress. While resuming an
+chain, or that the local chain is already ahead and its tip descends from the
+artifact tip; divergence aborts untouched. An ahead local chain short-circuits
+as up-to-date (advancing the marker) only when no sync is in progress. While
+resuming an
 interrupted catch-up, an ahead local chain is expected — the interrupted run's
 volatile gap-fill stored blocks past the artifact's sealed range — so the
 import proceeds instead of returning early, letting the idempotent pipeline

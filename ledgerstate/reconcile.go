@@ -179,6 +179,10 @@ func reconcileStaleLedgerState(
 			return fmt.Errorf("listing active accounts: %w", err)
 		}
 		for _, a := range accts {
+			if err := ctx.Err(); err != nil {
+				rtxn.Release()
+				return fmt.Errorf("scanning active accounts: %w", err)
+			}
 			if _, ok := keys.accounts[a.MapKey()]; !ok {
 				staleAccts = append(staleAccts, models.StakeCredentialRef{
 					Tag: a.Tag,
@@ -197,6 +201,10 @@ func reconcileStaleLedgerState(
 			return fmt.Errorf("listing active DReps: %w", err)
 		}
 		for _, d := range dreps {
+			if err := ctx.Err(); err != nil {
+				rtxn.Release()
+				return fmt.Errorf("scanning active DReps: %w", err)
+			}
 			ref := models.NewStakeCredentialRef(d.CredentialTag, d.Credential)
 			if _, ok := keys.dreps[ref.MapKey()]; !ok {
 				staleDreps = append(staleDreps, models.StakeCredentialRef{
@@ -216,6 +224,10 @@ func reconcileStaleLedgerState(
 			return fmt.Errorf("listing active pools: %w", err)
 		}
 		for _, p := range pools {
+			if err := ctx.Err(); err != nil {
+				rtxn.Release()
+				return fmt.Errorf("scanning active pools: %w", err)
+			}
 			if _, ok := keys.pools[string(p)]; !ok {
 				stalePools = append(stalePools, bytes.Clone(p))
 			}

@@ -90,7 +90,7 @@ func verifyCatchupBeforeImport(
 //
 // When the local tip is above the target's sealed immutable range (its block is
 // not yet in an immutable file of the artifact), the check is reversed: the
-// artifact's tip block must be present on the local chain, proving the local
+// artifact's tip block must be an ancestor of the local tip, proving the local
 // chain a strict descendant with nothing to catch up (errCatchUpLocalAhead).
 // Anything else is a divergence. Importing would otherwise apply an OLDER
 // snapshot over a newer database: the reconcile pass would tombstone every
@@ -162,8 +162,13 @@ func verifyLocalAheadOfArtifactTip(
 	if artifactTip == nil {
 		return errors.New("catch-up: target immutable DB has no chain tip")
 	}
-	_, err = database.BlockByPoint(db, *artifactTip)
-	if err == nil {
+	containsArtifactTip, err := localChainDescendsFromPoint(
+		db, localTip, *artifactTip,
+	)
+	if err != nil {
+		return fmt.Errorf("checking local chain ancestry: %w", err)
+	}
+	if containsArtifactTip {
 		logger.Info(
 			"catch-up: local chain is ahead of the target artifact",
 			"component", "mithril",
@@ -172,14 +177,50 @@ func verifyLocalAheadOfArtifactTip(
 		)
 		return errCatchUpLocalAhead
 	}
-	if !errors.Is(err, models.ErrBlockNotFound) {
-		return fmt.Errorf("looking up target immutable tip locally: %w", err)
-	}
 	return fmt.Errorf(
 		"local chain diverges from the target Mithril v2 artifact above "+
 			"slot %d (local tip slot %d block %x; artifact tip block %x "+
-			"is not present locally); perform a full Mithril resync "+
+			"is not an ancestor of the local tip); perform a full Mithril resync "+
 			"(remove the database and run `dingo mithril sync` again)",
 		artifactTip.Slot, localTip.Slot, localTip.Hash, artifactTip.Hash,
 	)
+}
+
+func localChainDescendsFromPoint(
+	db *database.Database,
+	localTip models.Block,
+	ancestor ocommon.Point,
+) (bool, error) {
+	seen := make(map[string]struct{})
+	for cur := localTip; ; {
+		if cur.Slot < ancestor.Slot {
+			return false, nil
+		}
+		if cur.Slot == ancestor.Slot && bytes.Equal(cur.Hash, ancestor.Hash) {
+			return true, nil
+		}
+		if len(cur.PrevHash) == 0 {
+			return false, nil
+		}
+		key := string(cur.Hash)
+		if _, ok := seen[key]; ok {
+			return false, fmt.Errorf(
+				"cycle while walking back from local tip slot %d block %x",
+				localTip.Slot, localTip.Hash,
+			)
+		}
+		seen[key] = struct{}{}
+
+		prev, err := database.BlockByHash(db, cur.PrevHash)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				return false, nil
+			}
+			return false, fmt.Errorf(
+				"looking up parent block %x for slot %d block %x: %w",
+				cur.PrevHash, cur.Slot, cur.Hash, err,
+			)
+		}
+		cur = prev
+	}
 }

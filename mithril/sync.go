@@ -53,8 +53,10 @@ const (
 	// syncModeBootstrap is a fresh database with no chain data: run a full
 	// from-scratch bootstrap.
 	syncModeBootstrap syncMode = iota
-	// syncModeResume is an interrupted (in_progress) or still-backfilling
-	// (backfill) sync: re-run the existing bootstrap/backfill path.
+	// syncModeResume is an interrupted (in_progress), still-backfilling
+	// (backfill), or otherwise non-empty/unknown sync_status: re-run the
+	// existing bootstrap/backfill path rather than treating the database as
+	// complete.
 	syncModeResume
 	// syncModeCatchUp is a complete database (chain data present, sync_status
 	// clear): a candidate for advancing to a newer artifact. The advance vs.
@@ -71,7 +73,7 @@ func determineSyncMode(db *database.Database) (syncMode, error) {
 	if err != nil {
 		return syncModeBootstrap, fmt.Errorf("reading sync_status: %w", err)
 	}
-	if status == syncStatusInProgress || status == syncStatusBackfill {
+	if status != "" {
 		return syncModeResume, nil
 	}
 	// sync_status is clear: distinguish a fresh database (no blocks) from a

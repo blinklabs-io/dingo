@@ -122,6 +122,15 @@ func TestReconcileStaleLedgerState(t *testing.T) {
 	staleU, err := rstore.GetUtxo(staleTxId, 0, read.Metadata())
 	require.NoError(t, err)
 	require.Nil(t, staleU, "stale UTxO should no longer be live")
+	staleUSpent, err := rstore.GetUtxoIncludingSpent(
+		staleTxId, 0, read.Metadata(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, staleUSpent, "stale UTxO should be tombstoned, not deleted")
+	require.EqualValues(
+		t, tipSlot, staleUSpent.DeletedSlot,
+		"stale UTxO should be tombstoned at the reconcile tip slot",
+	)
 
 	// Account: keep active, stale inactive.
 	keepA, err := rstore.GetAccountByCredential(0, keepStake, true, read.Metadata())

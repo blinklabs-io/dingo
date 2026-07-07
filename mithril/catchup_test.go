@@ -96,44 +96,46 @@ func artifactTipBlock(t *testing.T) (uint64, []byte) {
 	return tip.Slot, bytes.Clone(tip.Hash)
 }
 
+func catchupTestBlock(
+	slot uint64,
+	hash []byte,
+	prevHash []byte,
+	number uint64,
+) models.Block {
+	return models.Block{
+		Slot:     slot,
+		Hash:     bytes.Clone(hash),
+		PrevHash: bytes.Clone(prevHash),
+		Cbor:     []byte{0x80},
+		Number:   number,
+		Type:     6,
+	}
+}
+
 // TestVerifyCatchupIntersectionLocalAhead pins the fail-closed behavior when
 // the local chain tip is above the target artifact's sealed range: catch-up
 // must never import an older snapshot over a newer database. A local chain
-// containing the artifact's tip block is a strict descendant, so there is
-// nothing to catch up (errCatchUpLocalAhead); a local chain on which the
-// artifact tip block cannot be found diverges and must abort.
-//
-// The subtests share one database (database.New is expensive) and are
-// order-dependent: each rebuilds the chain shape it needs via
-// deleteBlobBlocksAboveSlot + BlockCreate. Run the whole function, not
-// individual subtests.
+// descended from the artifact's tip block has nothing to catch up
+// (errCatchUpLocalAhead); any other ahead chain diverges and must abort.
 func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	artSlot, artHash := artifactTipBlock(t)
-	db := newSyncModeTestDB(t)
-
-	aheadBlock := models.Block{
-		Slot:     artSlot + 5000,
-		Hash:     bytes.Repeat([]byte{0xcc}, 32),
-		PrevHash: bytes.Repeat([]byte{0xcd}, 32),
-		Cbor:     []byte{0x80},
-		Number:   99,
-		Type:     6,
-	}
+	aheadHash := bytes.Repeat([]byte{0xcc}, 32)
 	atArtifactTip := func(hash []byte) models.Block {
-		return models.Block{
-			Slot:     artSlot,
-			Hash:     hash,
-			PrevHash: bytes.Repeat([]byte{0x01}, 32),
-			Cbor:     []byte{0x80},
-			Number:   98,
-			Type:     6,
-		}
+		return catchupTestBlock(
+			artSlot, hash, bytes.Repeat([]byte{0x01}, 32), 98,
+		)
 	}
 
 	t.Run("ahead chain with no block at or below the artifact tip diverges",
 		func(t *testing.T) {
-			require.NoError(t, db.BlockCreate(aheadBlock, nil))
+			db := newSyncModeTestDB(t)
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot+5000,
+				aheadHash,
+				bytes.Repeat([]byte{0xcd}, 32),
+				99,
+			), nil))
 			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
@@ -142,9 +144,31 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 
 	t.Run("ahead chain without the artifact tip block diverges",
 		func(t *testing.T) {
+			db := newSyncModeTestDB(t)
 			wrong := bytes.Clone(artHash)
 			wrong[0] ^= 0xff
 			require.NoError(t, db.BlockCreate(atArtifactTip(wrong), nil))
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot+5000, aheadHash, wrong, 99,
+			), nil))
+			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
+			require.Error(t, err)
+			require.NotErrorIs(t, err, errCatchUpLocalAhead)
+			require.ErrorContains(t, err, "diverges")
+		})
+
+	t.Run("ahead chain with artifact tip only on stale fork diverges",
+		func(t *testing.T) {
+			db := newSyncModeTestDB(t)
+			wrong := bytes.Clone(artHash)
+			wrong[0] ^= 0xff
+			require.NoError(t, db.BlockCreate(atArtifactTip(artHash), nil))
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot, wrong, bytes.Repeat([]byte{0x02}, 32), 98,
+			), nil))
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot+5000, aheadHash, wrong, 99,
+			), nil))
 			err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
 			require.Error(t, err)
 			require.NotErrorIs(t, err, errCatchUpLocalAhead)
@@ -152,10 +176,11 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 		})
 
 	t.Run("descendant chain is reported ahead", func(t *testing.T) {
-		// Replace the wrong-hash block at the artifact tip slot.
-		require.NoError(t, deleteBlobBlocksAboveSlot(db, artSlot-1))
+		db := newSyncModeTestDB(t)
 		require.NoError(t, db.BlockCreate(atArtifactTip(artHash), nil))
-		require.NoError(t, db.BlockCreate(aheadBlock, nil))
+		require.NoError(t, db.BlockCreate(catchupTestBlock(
+			artSlot+5000, aheadHash, artHash, 99,
+		), nil))
 		err := verifyCatchupIntersection(db, immutableTestdataDir, discard)
 		require.ErrorIs(t, err, errCatchUpLocalAhead)
 	})
@@ -166,23 +191,17 @@ func TestVerifyCatchupIntersectionLocalAhead(t *testing.T) {
 // the marker, a strictly-ahead local chain is reported up-to-date and the
 // import marker advances to the target (so later runs no-op without
 // re-downloading), and a divergent chain aborts.
-//
-// The subtests share one database and are order-dependent (see
-// TestVerifyCatchupIntersectionLocalAhead). Run the whole function.
 func TestVerifyCatchupBeforeImport(t *testing.T) {
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
 	artSlot, artHash := artifactTipBlock(t)
-	db := newSyncModeTestDB(t)
+	aheadHash := bytes.Repeat([]byte{0xcc}, 32)
+	artBlock := catchupTestBlock(
+		artSlot, artHash, bytes.Repeat([]byte{0x01}, 32), 98,
+	)
 
 	t.Run("ancestor tip proceeds with the import", func(t *testing.T) {
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:     artSlot,
-			Hash:     artHash,
-			PrevHash: bytes.Repeat([]byte{0x01}, 32),
-			Cbor:     []byte{0x80},
-			Number:   98,
-			Type:     6,
-		}, nil))
+		db := newSyncModeTestDB(t)
+		require.NoError(t, db.BlockCreate(artBlock, nil))
 		upToDate, err := verifyCatchupBeforeImport(
 			db, immutableTestdataDir, 42, false, discard,
 		)
@@ -195,14 +214,11 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 
 	t.Run("local-ahead marks up to date and records the marker",
 		func(t *testing.T) {
-			require.NoError(t, db.BlockCreate(models.Block{
-				Slot:     artSlot + 5000,
-				Hash:     bytes.Repeat([]byte{0xcc}, 32),
-				PrevHash: bytes.Repeat([]byte{0xcd}, 32),
-				Cbor:     []byte{0x80},
-				Number:   99,
-				Type:     6,
-			}, nil))
+			db := newSyncModeTestDB(t)
+			require.NoError(t, db.BlockCreate(artBlock, nil))
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot+5000, aheadHash, artHash, 99,
+			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
 				db, immutableTestdataDir, 42, false, discard,
 			)
@@ -221,7 +237,11 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 	// runs. The marker must not move either — completion records it.
 	t.Run("local-ahead while resuming proceeds without moving the marker",
 		func(t *testing.T) {
-			require.NoError(t, db.DeleteSyncState(syncKeyImmutableMax, nil))
+			db := newSyncModeTestDB(t)
+			require.NoError(t, db.BlockCreate(artBlock, nil))
+			require.NoError(t, db.BlockCreate(catchupTestBlock(
+				artSlot+5000, aheadHash, artHash, 99,
+			), nil))
 			upToDate, err := verifyCatchupBeforeImport(
 				db, immutableTestdataDir, 43, true, discard,
 			)
@@ -239,18 +259,12 @@ func TestVerifyCatchupBeforeImport(t *testing.T) {
 		})
 
 	t.Run("divergent tip aborts", func(t *testing.T) {
-		// Rebuild the chain with a wrong-hash block at the artifact tip.
-		require.NoError(t, deleteBlobBlocksAboveSlot(db, artSlot-1))
+		db := newSyncModeTestDB(t)
 		wrong := bytes.Clone(artHash)
 		wrong[0] ^= 0xff
-		require.NoError(t, db.BlockCreate(models.Block{
-			Slot:     artSlot,
-			Hash:     wrong,
-			PrevHash: bytes.Repeat([]byte{0x01}, 32),
-			Cbor:     []byte{0x80},
-			Number:   98,
-			Type:     6,
-		}, nil))
+		require.NoError(t, db.BlockCreate(catchupTestBlock(
+			artSlot, wrong, bytes.Repeat([]byte{0x01}, 32), 98,
+		), nil))
 		_, err := verifyCatchupBeforeImport(
 			db, immutableTestdataDir, 42, false, discard,
 		)

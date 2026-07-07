@@ -160,6 +160,24 @@ func TestDeactivateAccountsChunked(t *testing.T) {
 		"all tag-0 credentials must be deactivated across chunk "+
 			"boundaries; the tag-1 row must remain active",
 	)
+	var activeOtherTagCount int64
+	require.NoError(t, store.DB().
+		Model(&models.Account{}).
+		Where(
+			"credential_tag = ? AND staking_key = ? AND active = ?",
+			1, otherTagKey, true,
+		).
+		Count(&activeOtherTagCount).Error)
+	require.EqualValues(
+		t, 1, activeOtherTagCount,
+		"the row with the same key bytes under credential tag 1 must remain active",
+	)
+	var activeTag0Count int64
+	require.NoError(t, store.DB().
+		Model(&models.Account{}).
+		Where("credential_tag = ? AND active = ?", 0, true).
+		Count(&activeTag0Count).Error)
+	require.Zero(t, activeTag0Count, "no tag-0 rows should remain active")
 }
 
 // TestDeactivateDrepsChunked mirrors TestDeactivateAccountsChunked for the

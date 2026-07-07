@@ -56,6 +56,24 @@ func TestDetermineSyncMode(t *testing.T) {
 		require.Equal(t, syncModeResume, mode)
 	})
 
+	t.Run("unknown non-empty status is resume", func(t *testing.T) {
+		db := newSyncModeTestDB(t)
+		require.NoError(t, db.BlockCreate(models.Block{
+			Slot:     42,
+			Hash:     bytes.Repeat([]byte{0xaa}, 32),
+			PrevHash: bytes.Repeat([]byte{0xbb}, 32),
+			Cbor:     []byte{0x80},
+			Number:   7,
+			Type:     6,
+		}, nil))
+		require.NoError(
+			t, db.SetSyncState("sync_status", "unknown_interrupted_phase", nil),
+		)
+		mode, err := determineSyncMode(db)
+		require.NoError(t, err)
+		require.Equal(t, syncModeResume, mode)
+	})
+
 	t.Run("complete database with blocks is catch-up", func(t *testing.T) {
 		db := newSyncModeTestDB(t)
 		block := models.Block{
