@@ -63,6 +63,52 @@ Thank you for trying!
 
 ---
 
+## v0.61.4 (July 7, 2026)
+
+**Title:** Strengthen peer recovery, historical stake validation, and heal performance
+
+**Date:** July 7, 2026
+
+**Version:** v0.61.4
+
+This release improves recovery speed, peer stability, historical stake correctness, and startup heal performance while keeping operator guidance current.
+
+### 💪 Improvements
+
+* Updated the internal SSH crypto test dependency set to newer upstream releases, which keeps automated coverage aligned with fixes for unexpected response deadlocks, large channel write loops, key verification limits, and nil callback panics.
+* Improved peer replenishment when the hot peer pool drops to a critical level, which helps the node recover faster after short-lived disconnects and reduces the risk of running with too few healthy upstream peers.
+* Reviewed the release history to keep the previous release entry current.
+
+### 🔧 Fixes
+
+* Fixed Mark snapshots to use historical stake at the snapshot slot, which keeps epoch-2 Praos leader election and VRF-based header validation aligned with the delegation, registration, and UTxO state at the snapshot boundary.
+* Corrected chain heal to use a binary search over the canonical chain index, which shortens startup recovery when the header chain tip runs far ahead of the ledger tip while preserving canonical chain behavior.
+
+### ⚠️ Breaking Changes
+
+* Added a required `GetStakeByPoolsAtSlot` method to metadata plugins, and third-party implementations must add it before upgrading to this release.
+
+### 📋 What You Need to Know
+
+* Clarified that operators can expect faster peer replenishment after short-lived disconnects when the hot peer pool becomes critically low.
+* Highlighted that Mark snapshots now follow historical stake at the snapshot boundary instead of live chain state.
+* Emphasized that startup heal now reaches the canonical chain tip faster when the header chain runs far ahead of the ledger tip.
+* Noted that third-party metadata plugins must implement `GetStakeByPoolsAtSlot` before this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.61.3 (July 7, 2026)
 
 **Title:** Mithril leader eligibility fix and dependency refreshes
