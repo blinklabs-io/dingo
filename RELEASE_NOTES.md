@@ -71,11 +71,11 @@ Thank you for trying!
 
 **Version:** v0.61.3
 
-This release focuses on a narrowly scoped Mithril bootstrap recovery fix and patch-level dependency and workflow updates across the node, examples, and CI pipelines.
+This release focuses on a narrowly scoped Mithril bootstrap recovery fix together with dependency and workflow updates across the node, examples, and CI pipelines.
 
 ### 💪 Improvements
 
-* Improved **skip the imported Mithril Mark stake threshold check when the snapshot is historical:** Fresh Mithril bootstraps and catch-up runs now avoid rejecting canonical blocks when an imported historical Mark snapshot would otherwise produce an incorrect VRF leader threshold.
+* Improved **skip the stake-threshold check for imported historical Mithril Mark snapshots:** Fresh Mithril bootstraps and catch-up runs now avoid rejecting canonical blocks when an imported historical Mark snapshot would otherwise misstate the VRF leader threshold.
 * Updated **the dingo-sundae-preview example to Vite 8.1.3:** The example now picks up patch fixes for nested dynamic import CSS preload handling, inline CSS injection after a shebang, and SSR stacktrace column positions.
 * Refreshed **the AWS SDK for Go to v1.42.1:** Builds and runtime paths that depend on the AWS SDK now use the newer upstream module version and regenerated endpoint and API models.
 * Strengthened **the `docker/setup-buildx-action` workflow to v4.2.0:** Antithesis, CI Docker, and publish workflows now run on the newer Buildx action release.
