@@ -50,7 +50,8 @@ func validTestConfig() *Config {
 }
 
 func TestValidateDefaultsPass(t *testing.T) {
-	assert.NoError(t, validTestConfig().validate(false))
+	cfg := validTestConfig()
+	assert.NoError(t, cfg.validate(cfg.RunMode, false))
 }
 
 func TestValidate(t *testing.T) {
@@ -294,7 +295,7 @@ func TestValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validTestConfig()
 			tt.modify(cfg)
-			err := cfg.validate(false)
+			err := cfg.validate(cfg.RunMode, false)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
 				return
@@ -308,7 +309,20 @@ func TestValidate(t *testing.T) {
 func TestValidatePrivilegedPortAllowedAsRoot(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.BlockfrostPort = 443
-	assert.NoError(t, cfg.validate(true))
+	assert.NoError(t, cfg.validate(cfg.RunMode, true))
+}
+
+// TestValidateUtilityModeRelaxesListenerAndSource verifies that a
+// one-shot utility invocation (sync, mithril) neither requires the
+// serving listener ports nor an ImmutableDB source, even though the
+// configured runMode is the default serve.
+func TestValidateUtilityModeRelaxesListenerAndSource(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RelayPort = 0
+	cfg.PrivatePort = 0
+	cfg.MetricsPort = 0
+	cfg.ImmutableDbPath = ""
+	assert.NoError(t, cfg.validate(RunModeUtility, false))
 }
 
 func TestValidateAggregatesAllErrors(t *testing.T) {
@@ -316,7 +330,7 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg.RunMode = RunModeLoad
 	cfg.UtxorpcPort = 70000
 	cfg.EvictionWatermark = 2.0
-	err := cfg.validate(false)
+	err := cfg.validate(cfg.RunMode, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
 	assert.Contains(t, err.Error(), "invalid utxorpcPort")

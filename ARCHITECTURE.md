@@ -1800,11 +1800,14 @@ start: mode enums, port ranges (privileged/out-of-range/duplicate), load-mode
 `immutableDbPath` requirement, path-traversal guards, TLS cert/key pairing,
 mempool watermarks, block-producer credential paths, and duration/strategy
 strings that are otherwise only parsed at their point of use. The relay,
-private, and metrics listener ports are required for the serving modes but not
-for `load`, which starts none of them. All violations are reported together in
-a single startup error. Validation runs for every service-starting command;
-the informational `version` and `list` subcommands are exempt so they still
-run against an otherwise-invalid config.
+private, and metrics listener ports are required only for the serving modes;
+the one-shot subcommands (`load`, `sync`, `mithril`) start none of them. Because
+those subcommands run a fixed operation regardless of the configured `runMode`
+(which defaults to `serve`), `cmd/dingo` passes `Validate()` an *effective* run
+mode derived from the invoked command, so listener and ImmutableDB-source
+requirements match what the command actually does. All violations are reported
+together in a single startup error. The informational `version` and `list`
+subcommands are exempt so they still run against an otherwise-invalid config.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)

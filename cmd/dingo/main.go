@@ -189,6 +189,61 @@ func listAllPlugins() string {
 	return buf.String()
 }
 
+// topLevelCommand returns the top-level subcommand under root for cmd
+// (walking up past any nested subcommands such as `mithril list`), or
+// nil when cmd is the bare root command itself.
+func topLevelCommand(cmd *cobra.Command) *cobra.Command {
+	if !cmd.HasParent() {
+		return nil
+	}
+	top := cmd
+	for top.Parent().HasParent() {
+		top = top.Parent()
+	}
+	return top
+}
+
+// effectiveRunMode reports the run mode a command invocation will
+// actually execute, which governs the config it requires. Only the bare
+// `dingo` process honors the configured runMode; each explicit
+// subcommand runs a fixed operation, so its listener/source
+// requirements come from the command rather than cfg.RunMode.
+func effectiveRunMode(top *cobra.Command, cfg *config.Config) config.RunMode {
+	if top == nil {
+		// Bare root command: dispatches on the configured run mode,
+		// defaulting to serve.
+		if cfg.RunMode == "" {
+			return config.RunModeServe
+		}
+		return cfg.RunMode
+	}
+	switch top.Name() {
+	case "serve":
+		return config.RunModeServe
+	case "load":
+		return config.RunModeLoad
+	default:
+		// sync, mithril (and its subcommands): one-shot utilities that
+		// start no listeners and need no ImmutableDB source.
+		return config.RunModeUtility
+	}
+}
+
+// isInformationalCommand reports whether a top-level command only prints
+// static information (version, list) and therefore needs no valid
+// runtime configuration.
+func isInformationalCommand(top *cobra.Command) bool {
+	if top == nil {
+		return false
+	}
+	switch top.Name() {
+	case "version", "list":
+		return true
+	default:
+		return false
+	}
+}
+
 func listCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -304,8 +359,11 @@ DSN Override:
 				os.Exit(1)
 			}
 
-			// When no subcommand given, check RunMode from config
-			switch cfg.RunMode {
+			// When no subcommand given, check RunMode from config.
+			// cfg.RunMode is a configured mode (validated by
+			// RunMode.Valid); the effective-only RunModeUtility never
+			// reaches here.
+			switch cfg.RunMode { //nolint:exhaustive // RunModeUtility is effective-only, never configured
 			case config.RunModeLoad:
 				// Validate() has already enforced that ImmutableDbPath
 				// is set for load mode
@@ -353,20 +411,20 @@ DSN Override:
 			return fmt.Errorf("applying CLI flags: %w", err)
 		}
 
+		top := topLevelCommand(cmd)
+
 		// `dingo load <path>`: the positional argument is the
 		// highest-precedence source for ImmutableDbPath; merge it before
 		// validation so a config with runMode "load" and no
 		// immutableDbPath doesn't fail spuriously.
-		if cmd.Name() == "load" && len(args) > 0 {
+		if top != nil && top.Name() == "load" && len(args) > 0 {
 			cfg.ImmutableDbPath = args[0]
 		}
 
 		// version and list are informational and start no services, so
 		// they must still run even when the merged config is invalid.
-		switch cmd.Name() {
-		case "version", "list":
-		default:
-			if err := cfg.Validate(); err != nil {
+		if !isInformationalCommand(top) {
+			if err := cfg.Validate(effectiveRunMode(top, cfg)); err != nil {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
 		}

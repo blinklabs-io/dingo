@@ -50,19 +50,25 @@ var AcceptedMithrilBackends = []string{"", "v1", "v2"}
 // error, so the operator can fix them all in one pass. It is called
 // from cmd/dingo after CLI flags have been applied, before any
 // services start; LoadConfig alone does not see CLI flag values.
-func (c *Config) Validate() error {
+//
+// effectiveMode is the run mode the invocation will actually execute.
+// For the bare `dingo` process it is c.RunMode, but the one-shot
+// subcommands (load, sync, mithril) run a fixed operation regardless of
+// the configured runMode, so cmd/dingo passes the mode reflecting what
+// the command does. It governs which listeners and sources are required.
+func (c *Config) Validate(effectiveMode RunMode) error {
 	// The privileged-port restriction is Unix-specific. os.Geteuid
 	// returns -1 on Windows, which would otherwise misclassify every
 	// Windows process as unprivileged and reject sub-1024 ports there.
 	privileged := runtime.GOOS == "windows" || os.Geteuid() == 0
-	return c.validate(privileged)
+	return c.validate(effectiveMode, privileged)
 }
 
 // validate is the deterministic core of Validate. privileged reports
 // whether the process may bind ports below 1024 (i.e. running as
 // root); it is a parameter so tests do not depend on the effective
 // UID of the test runner.
-func (c *Config) validate(privileged bool) error {
+func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 	var errs []error
 
 	// Mode enums
@@ -88,17 +94,18 @@ func (c *Config) validate(privileged bool) error {
 	}
 
 	// Load mode requires a source ImmutableDB
-	if c.RunMode == RunModeLoad && c.ImmutableDbPath == "" {
+	if effectiveMode == RunModeLoad && c.ImmutableDbPath == "" {
 		errs = append(errs, errors.New(
 			"runMode \"load\" requires immutableDbPath to be set "+
 				"(config, DINGO_IMMUTABLE_DB_PATH, or --immutable-db-path)",
 		))
 	}
 
-	// Ports. The relay, private, and metrics listeners are required for
-	// the serving modes but not started by "load", so they may be unset
-	// (0) in a load-only config.
-	listenersRequired := c.RunMode != RunModeLoad
+	// Ports. The relay, private, and metrics listeners are required only
+	// for the serving modes; the load and one-shot utility (sync,
+	// mithril) invocations start none of them, so those ports may be
+	// unset (0).
+	listenersRequired := effectiveMode.RequiresListeners()
 	ports := []struct {
 		setting  string
 		port     uint

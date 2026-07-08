@@ -103,6 +103,13 @@ const (
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 )
 
+// RunModeUtility is an effective run mode used only for validation, not
+// a configurable runMode (RunMode.Valid rejects it). The one-shot
+// utility subcommands (sync, mithril) start no listeners and need no
+// ImmutableDB source regardless of the configured runMode; cmd/dingo
+// passes this mode to Config.Validate for them.
+const RunModeUtility RunMode = "utility"
+
 // StartEra controls experimental direct startup in a later ledger era.
 type StartEra string
 
@@ -116,6 +123,9 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
+	case RunModeUtility:
+		// Effective-only mode used for validation; never a configurable runMode.
+		return false
 	default:
 		return false
 	}
@@ -125,6 +135,21 @@ func (m RunMode) Valid() bool {
 // (forge blocks, disable outbound, skip topology)
 func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
+}
+
+// RequiresListeners reports whether an (effective) run mode starts the
+// relay, private, and metrics listeners. The serving modes (serve, dev,
+// leios, and the empty default) do; the load and utility one-shot modes
+// do not.
+func (m RunMode) RequiresListeners() bool {
+	switch m {
+	case RunModeServe, RunModeDev, RunModeLeios, "":
+		return true
+	case RunModeLoad, RunModeUtility:
+		return false
+	default:
+		return false
+	}
 }
 
 func (e StartEra) Valid() bool {
