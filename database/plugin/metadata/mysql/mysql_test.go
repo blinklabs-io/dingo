@@ -508,6 +508,32 @@ func TestMysqlSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
 
 	// Build a transaction containing multiple items in every input class.
 	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x91}, 32))
+	defer func() {
+		cleanupDB := store.DB()
+		for i := 0; i < 7; i++ {
+			seedTxID := makeTxID(byte(0x60 + i))
+			if result := cleanupDB.Model(&models.Utxo{}).
+				Where("tx_id = ?", seedTxID).
+				Updates(map[string]any{
+					"collateral_by_tx_id": nil,
+					"referenced_by_tx_id": nil,
+					"spent_at_tx_id":      nil,
+					"deleted_slot":        0,
+				}); result.Error != nil {
+				t.Errorf("cleanup utxo refs: %v", result.Error)
+			}
+			if result := cleanupDB.
+				Where("tx_id = ?", seedTxID).
+				Delete(&models.Utxo{}); result.Error != nil {
+				t.Errorf("cleanup utxo: %v", result.Error)
+			}
+		}
+		if result := cleanupDB.
+			Where("hash = ?", txHash.Bytes()).
+			Delete(&models.Transaction{}); result.Error != nil {
+			t.Errorf("cleanup transaction: %v", result.Error)
+		}
+	}()
 	tx := &mockTransaction{
 		hash:    txHash,
 		isValid: true,
