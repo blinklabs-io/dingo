@@ -153,6 +153,29 @@ func (d *MetadataStoreSqlite) GetExpiringGovernanceProposals(
 	return proposals, nil
 }
 
+// GetExpiredGovernanceProposalsAt returns proposals that were expired at the
+// given epoch-boundary slot. Used at epoch replay to reapply deposit returns
+// after stake reward pot reset is replayed.
+func (d *MetadataStoreSqlite) GetExpiredGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"expired_epoch = ? AND expired_slot = ? AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+		epoch,
+		slot,
+	).Order(governanceProposalOrder).Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
 // governanceProposalOrder is the stable row order used when iterating
 // active/expiring proposals at epoch boundaries. Consensus-critical:
 // the epoch tick enforces at-most-one ratification per purpose, so
@@ -173,6 +196,29 @@ func (d *MetadataStoreSqlite) GetRatifiedGovernanceProposals(
 	}
 	if result := db.Where(
 		"ratified_epoch IS NOT NULL AND enacted_epoch IS NULL AND deleted_slot IS NULL",
+	).Order(ratifiedGovernanceProposalOrder).Find(&proposals); result.Error != nil {
+		return nil, result.Error
+	}
+	return proposals, nil
+}
+
+// GetEnactedGovernanceProposalsAt returns proposals that were enacted at the
+// given epoch-boundary slot. Used at epoch replay to reapply enactment side
+// effects after stake reward pot reset is replayed.
+func (d *MetadataStoreSqlite) GetEnactedGovernanceProposalsAt(
+	epoch uint64,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.GovernanceProposal, error) {
+	var proposals []*models.GovernanceProposal
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	if result := db.Where(
+		"ratified_epoch IS NOT NULL AND enacted_epoch = ? AND enacted_slot = ? AND deleted_slot IS NULL",
+		epoch,
+		slot,
 	).Order(ratifiedGovernanceProposalOrder).Find(&proposals); result.Error != nil {
 		return nil, result.Error
 	}

@@ -17,14 +17,18 @@
 package mysql
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
 	"github.com/blinklabs-io/dingo/database/types"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
+
+// rewardStakeInputPoolBatchSize bounds how many pool key hashes are placed
+// in a single IN (?) clause per GetRewardStakeInputsAtSlot query. mysql has
+// no equivalent to sqlite's much lower SQLITE_MAX_VARIABLE_NUMBER, so a
+// larger chunk size is safe here.
+const rewardStakeInputPoolBatchSize = 1000
 
 // SaveRewardAdaPots saves reward-related ADA pots for an epoch.
 func (d *MetadataStoreMysql) SaveRewardAdaPots(
@@ -35,21 +39,7 @@ func (d *MetadataStoreMysql) SaveRewardAdaPots(
 	if err != nil {
 		return err
 	}
-	if err := db.Clauses(
-		clause.OnConflict{
-			Columns: []clause.Column{{Name: "epoch"}},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"treasury",
-				"reserves",
-				"fees",
-				"rewards",
-				"captured_slot",
-			}),
-		},
-	).Create(pots).Error; err != nil {
-		return fmt.Errorf("save reward ADA pots: %w", err)
-	}
-	return nil
+	return rewardstate.SaveAdaPots(db, pots)
 }
 
 // GetRewardAdaPots retrieves reward-related ADA pots for an epoch.
@@ -57,19 +47,11 @@ func (d *MetadataStoreMysql) GetRewardAdaPots(
 	epoch uint64,
 	txn types.Txn,
 ) (*models.RewardAdaPots, error) {
-	var pots models.RewardAdaPots
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	result := db.Where("epoch = ?", epoch).First(&pots)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, result.Error
-	}
-	return &pots, nil
+	return rewardstate.GetAdaPots(db, epoch)
 }
 
 // SaveRewardSnapshot saves reward snapshot metadata for an epoch.
@@ -81,26 +63,7 @@ func (d *MetadataStoreMysql) SaveRewardSnapshot(
 	if err != nil {
 		return err
 	}
-	if err := db.Clauses(
-		clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "epoch"},
-				{Name: "snapshot_type"},
-			},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"total_active_stake",
-				"total_pool_count",
-				"total_delegators",
-				"captured_slot",
-				"boundary_slot",
-				"epoch_nonce",
-				"protocol_version",
-			}),
-		},
-	).Create(snapshot).Error; err != nil {
-		return fmt.Errorf("save reward snapshot: %w", err)
-	}
-	return nil
+	return rewardstate.SaveSnapshot(db, snapshot)
 }
 
 // GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
@@ -109,23 +72,11 @@ func (d *MetadataStoreMysql) GetRewardSnapshot(
 	snapshotType string,
 	txn types.Txn,
 ) (*models.RewardSnapshot, error) {
-	var snapshot models.RewardSnapshot
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	result := db.Where(
-		"epoch = ? AND snapshot_type = ?",
-		epoch,
-		snapshotType,
-	).First(&snapshot)
-	if result.Error != nil {
-		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, result.Error
-	}
-	return &snapshot, nil
+	return rewardstate.GetSnapshot(db, epoch, snapshotType)
 }
 
 // SaveRewardPoolInputs saves per-pool reward inputs for an epoch.
@@ -140,28 +91,7 @@ func (d *MetadataStoreMysql) SaveRewardPoolInputs(
 	if err != nil {
 		return err
 	}
-	if err := db.Clauses(
-		clause.OnConflict{
-			Columns: []clause.Column{
-				{Name: "epoch"},
-				{Name: "pool_key_hash"},
-			},
-			DoUpdates: clause.AssignmentColumns([]string{
-				"blocks_produced",
-				"total_blocks_in_epoch",
-				"pledge",
-				"delegated_stake",
-				"cost",
-				"margin",
-				"delegator_count",
-				"captured_slot",
-				"boundary_slot",
-			}),
-		},
-	).Create(inputs).Error; err != nil {
-		return fmt.Errorf("save reward pool inputs: %w", err)
-	}
-	return nil
+	return rewardstate.SavePoolInputs(db, inputs)
 }
 
 // GetRewardPoolInputs retrieves all per-pool reward inputs for an epoch.
@@ -169,18 +99,142 @@ func (d *MetadataStoreMysql) GetRewardPoolInputs(
 	epoch uint64,
 	txn types.Txn,
 ) ([]*models.RewardPoolInput, error) {
-	var inputs []*models.RewardPoolInput
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, err
 	}
-	result := db.Where("epoch = ?", epoch).
-		Order("pool_key_hash ASC").
-		Find(&inputs)
-	if result.Error != nil {
-		return nil, result.Error
+	return rewardstate.GetPoolInputs(db, epoch)
+}
+
+// GetRewardStakeInputsAtSlot returns positive per-account delegated stake for
+// pools from the live reward stake aggregate. The slot parameter identifies the
+// caller's snapshot boundary but does not drive a historical UTxO scan.
+func (d *MetadataStoreMysql) GetRewardStakeInputsAtSlot(
+	poolKeyHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"GetRewardStakeInputsAtSlot: resolve db: %w",
+			err,
+		)
+	}
+	inputs, err := rewardstate.StakeInputsAtSlot(
+		db,
+		poolKeyHashes,
+		rewardStakeInputPoolBatchSize,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: %w", err)
 	}
 	return inputs, nil
+}
+
+// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+func (d *MetadataStoreMysql) SaveRewardStakeInputs(
+	inputs []*models.RewardStakeInput,
+	txn types.Txn,
+) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveStakeInputs(db, inputs)
+}
+
+// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+func (d *MetadataStoreMysql) GetRewardStakeInputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetStakeInputs(db, epoch)
+}
+
+// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+func (d *MetadataStoreMysql) DeleteRewardInputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward inputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteInputsForEpoch(db, epoch, txn)
+}
+
+// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+func (d *MetadataStoreMysql) DeleteRewardOutputsForEpoch(
+	epoch uint64,
+	txn types.Txn,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward outputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteOutputsForEpoch(db, epoch, txn)
+}
+
+// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+func (d *MetadataStoreMysql) SaveRewardPoolOutputs(
+	outputs []*models.RewardPoolOutput,
+	txn types.Txn,
+) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SavePoolOutputs(db, outputs)
+}
+
+// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+func (d *MetadataStoreMysql) GetRewardPoolOutputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardPoolOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetPoolOutputs(db, epoch)
+}
+
+// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+func (d *MetadataStoreMysql) SaveRewardAccountOutputs(
+	outputs []*models.RewardAccountOutput,
+	txn types.Txn,
+) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveAccountOutputs(db, outputs)
+}
+
+// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+func (d *MetadataStoreMysql) GetRewardAccountOutputs(
+	epoch uint64,
+	txn types.Txn,
+) ([]*models.RewardAccountOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetAccountOutputs(db, epoch)
 }
 
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
@@ -193,35 +247,7 @@ func (d *MetadataStoreMysql) DeleteRewardStateAfterSlot(
 	if err != nil {
 		return fmt.Errorf("delete reward state after slot: resolve db: %w", err)
 	}
-
-	deleteRows := func(tx *gorm.DB) error {
-		if err := tx.Where(
-			"captured_slot > ?",
-			slot,
-		).Delete(&models.RewardAdaPots{}).Error; err != nil {
-			return fmt.Errorf("delete reward ADA pots after slot: %w", err)
-		}
-		if err := tx.Where(
-			"captured_slot > ? OR boundary_slot > ?",
-			slot,
-			slot,
-		).Delete(&models.RewardSnapshot{}).Error; err != nil {
-			return fmt.Errorf("delete reward snapshots after slot: %w", err)
-		}
-		if err := tx.Where(
-			"captured_slot > ? OR boundary_slot > ?",
-			slot,
-			slot,
-		).Delete(&models.RewardPoolInput{}).Error; err != nil {
-			return fmt.Errorf("delete reward pool inputs after slot: %w", err)
-		}
-		return nil
-	}
-
-	if txn != nil {
-		return deleteRows(db)
-	}
-	return db.Transaction(deleteRows)
+	return rewardstate.DeleteStateAfterSlot(db, slot, txn)
 }
 
 // DeleteRewardStateBeforeEpoch deletes reward-state rows older than the
@@ -234,25 +260,5 @@ func (d *MetadataStoreMysql) DeleteRewardStateBeforeEpoch(
 	if err != nil {
 		return fmt.Errorf("delete reward state before epoch: resolve db: %w", err)
 	}
-
-	deleteRows := func(tx *gorm.DB) error {
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardAdaPots{}).Error; err != nil {
-			return fmt.Errorf("delete reward ADA pots before epoch: %w", err)
-		}
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardSnapshot{}).Error; err != nil {
-			return fmt.Errorf("delete reward snapshots before epoch: %w", err)
-		}
-		if err := tx.Where("epoch < ?", epoch).
-			Delete(&models.RewardPoolInput{}).Error; err != nil {
-			return fmt.Errorf("delete reward pool inputs before epoch: %w", err)
-		}
-		return nil
-	}
-
-	if txn != nil {
-		return deleteRows(db)
-	}
-	return db.Transaction(deleteRows)
+	return rewardstate.DeleteStateBeforeEpoch(db, epoch, txn)
 }

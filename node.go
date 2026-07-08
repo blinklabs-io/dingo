@@ -306,19 +306,29 @@ func (n *Node) Run(ctx context.Context) error {
 	// LIFO ordering so the drain still runs before n.db.Close().
 	defer n.ouroboros.StopLeiosPersistWriter()
 	started = append(started, func() { n.ouroboros.StopLeiosPersistWriter() })
+	// Create the snapshot manager before LedgerState so ledger can capture the
+	// epoch-boundary Mark snapshot inside the same rollover transaction. The
+	// manager's event loop is still started after the ledger starts.
+	n.snapshotMgr = snapshot.NewManager(
+		n.db,
+		n.eventBus,
+		n.config.logger,
+	)
+	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			ChainManager:       n.chainManager,
-			Database:           n.db,
-			EventBus:           n.eventBus,
-			Logger:             n.config.logger,
-			CardanoNodeConfig:  n.config.cardanoNodeConfig,
-			PromRegistry:       n.config.promRegistry,
-			ForgeBlocks:        n.config.isDevMode(),
-			ValidateHistorical: n.config.validateHistorical,
-			EnableDijkstra:     enableDijkstra,
-			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			ChainManager:              n.chainManager,
+			Database:                  n.db,
+			EventBus:                  n.eventBus,
+			Logger:                    n.config.logger,
+			EpochBoundarySnapshotFunc: n.snapshotMgr.CaptureEpochBoundarySnapshot,
+			CardanoNodeConfig:         n.config.cardanoNodeConfig,
+			PromRegistry:              n.config.promRegistry,
+			ForgeBlocks:               n.config.isDevMode(),
+			ValidateHistorical:        n.config.validateHistorical,
+			EnableDijkstra:            enableDijkstra,
+			StartInDijkstra:           n.config.startEra.IsDijkstra(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -572,13 +582,14 @@ func (n *Node) Run(ctx context.Context) error {
 	if n.midnightIndexer != nil {
 		started = append(started, func() { n.midnightIndexer.Stop() })
 	}
-	// Initialize and start snapshot manager for stake snapshot capture
-	n.snapshotMgr = snapshot.NewManager(
-		n.db,
-		n.eventBus,
-		n.config.logger,
-	)
-	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// One-time backfill for a database that synced before the
+	// reward_live_stake aggregate existed (#1959): must complete before the
+	// genesis snapshot capture below and before chainsync/mempool resume,
+	// since both the mark/set/go snapshot rotation and the epoch-boundary
+	// snapshot read the aggregate exclusively.
+	if err := n.backfillRewardLiveStakeIfNeeded(); err != nil {
+		return fmt.Errorf("failed to backfill reward live stake: %w", err)
+	}
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -1328,6 +1339,57 @@ func (n *Node) Run(ctx context.Context) error {
 
 	// Wait for shutdown signal
 	<-n.ctx.Done()
+	return nil
+}
+
+// backfillRewardLiveStakeIfNeeded runs a one-time RebuildRewardLiveStake pass
+// when this database already has synced account rows but the
+// reward_live_stake aggregate table is empty. That combination only occurs
+// on a database that synced on a build predating the aggregate and then
+// upgraded straight into this one: normal incremental metadata writes only
+// touch credentials referenced by post-upgrade transactions, so without this
+// backfill the aggregate stays near-empty and the next epoch-boundary mark
+// snapshot (which now reads the aggregate exclusively) would capture garbage
+// stake, corrupting leader election and rewards two-to-three epochs later
+// (#1959).
+//
+// A fresh, empty database has no account rows and is skipped, and a database
+// where the aggregate is already populated is also skipped, so this check
+// and the rebuild it triggers are both safe to run unconditionally on every
+// startup.
+func (n *Node) backfillRewardLiveStakeIfNeeded() error {
+	tipSlot := n.ledgerState.Tip().Point.Slot
+	return n.backfillRewardLiveStakeAtSlot(tipSlot)
+}
+
+// backfillRewardLiveStakeAtSlot contains the check-and-rebuild logic for
+// backfillRewardLiveStakeIfNeeded, split out so it can run (and be tested)
+// against an explicit slot without needing a started ledger state.
+func (n *Node) backfillRewardLiveStakeAtSlot(tipSlot uint64) error {
+	needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	if err != nil {
+		return fmt.Errorf("checking reward live stake backfill: %w", err)
+	}
+	if !needed {
+		return nil
+	}
+	n.config.logger.Info(
+		"reward_live_stake aggregate is empty on an already-synced "+
+			"database; running a one-time backfill before resuming chain "+
+			"following (this may take a while on large databases)",
+		"component", "node",
+		"tip_slot", tipSlot,
+	)
+	start := time.Now()
+	if err := n.db.RebuildRewardLiveStake(tipSlot, nil); err != nil {
+		return fmt.Errorf("rebuilding reward live stake: %w", err)
+	}
+	n.config.logger.Info(
+		"reward_live_stake backfill complete",
+		"component", "node",
+		"tip_slot", tipSlot,
+		"duration", time.Since(start),
+	)
 	return nil
 }
 

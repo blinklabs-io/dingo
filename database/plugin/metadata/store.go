@@ -282,6 +282,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
+	// rows in the inclusive slot range, ordered by slot and pool key hash.
+	GetPoolBlockIssuersInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) ([]models.PoolOpCertSequence, error)
+
 	// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 	// inclusive slot range, grouped by pool key hash. The total return value
 	// counts all observed pool blocks in the range, not only the requested
@@ -292,6 +300,15 @@ type MetadataStore interface {
 		uint64, // endSlot
 		types.Txn,
 	) (map[string]uint64, uint64, error)
+
+	// SumTransactionFeesInSlotRange sums the fee-pot contributions in the
+	// inclusive slot range: declared fees of valid transactions plus
+	// consumed collateral of phase-2-invalid transactions.
+	SumTransactionFeesInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, error)
 
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
@@ -306,6 +323,20 @@ type MetadataStore interface {
 	GetPoolRegistrationsAtSlot(
 		[]lcommon.PoolKeyHash,
 		uint64, // slot
+		types.Txn,
+	) ([]models.PoolRegistration, error)
+
+	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
+	// the registration whose parameters the ledger's pool-params map held
+	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
+	// submitted during that epoch are future params (promoted after SNAP)
+	// and excluded; pools that freshly entered the params map during the
+	// epoch use their earliest in-epoch certificate.
+	GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash,
+		uint64, // epochStartSlot
+		uint64, // endedEpoch
+		uint64, // snapshotSlot
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
@@ -390,6 +421,30 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetRewardStakeInputsAtSlot returns positive per-account delegated stake
+	// for pools from the live reward stake aggregate. Callers use it at epoch
+	// boundaries, where the aggregate has already been maintained by block
+	// application and rollback repair. The slot is copied to captured fields
+	// by callers; this method does not scan historical UTxOs.
+	GetRewardStakeInputsAtSlot(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+	// canonical account and live UTxO metadata. It is used after bulk ledger
+	// state import and as deterministic rollback/repair backstop.
+	RebuildRewardLiveStake(uint64, types.Txn) error
+
+	// RewardLiveStakeNeedsBackfill reports whether the reward_live_stake
+	// aggregate needs a one-time RebuildRewardLiveStake pass: true when the
+	// account table already has rows but the aggregate is completely empty.
+	// This detects an upgraded database that predates the aggregate and
+	// never received the backfill (see #1959), without misfiring on a
+	// legitimately fresh, empty database.
+	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(
@@ -417,6 +472,15 @@ type MetadataStore interface {
 		bool, // includeInactive
 		types.Txn,
 	) (map[string]*models.Account, error)
+
+	// GetAccountsActiveAtSlot returns the subset of stake credentials that
+	// were registered and not subsequently deregistered at or before the given
+	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
+	GetAccountsActiveAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]struct{}, error)
 
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
 	// validated transaction withdrawal and records rollback state.
@@ -854,6 +918,19 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// RecomputeGapCollateralFee recomputes and persists the collateral fee
+	// for a phase-2-invalid gap-block transaction after its consumed
+	// collateral inputs have been recovered into the metadata UTxO table.
+	// SetGapBlockTransaction computes the collateral fee before those inputs
+	// exist, so for a transaction that declares no total collateral the fee
+	// is undercounted until this recompute runs. It is a no-op for valid
+	// transactions (which have no collateral fee).
+	RecomputeGapCollateralFee(
+		lcommon.Transaction,
+		ocommon.Point,
+		types.Txn,
+	) error
+
 	// SetGenesisTransaction stores a genesis transaction record.
 	// Genesis transactions have no inputs, witnesses, or fees - just outputs.
 	SetGenesisTransaction(
@@ -1067,6 +1144,48 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
 
+	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+	SaveRewardStakeInputs(
+		[]*models.RewardStakeInput,
+		types.Txn,
+	) error
+
+	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+	GetRewardStakeInputs(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+
+	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
+
+	// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+	SaveRewardPoolOutputs(
+		[]*models.RewardPoolOutput,
+		types.Txn,
+	) error
+
+	// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+	GetRewardPoolOutputs(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.RewardPoolOutput, error)
+
+	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+	SaveRewardAccountOutputs(
+		[]*models.RewardAccountOutput,
+		types.Txn,
+	) error
+
+	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+	GetRewardAccountOutputs(
+		uint64, // epoch
+		types.Txn,
+	) ([]*models.RewardAccountOutput, error)
+
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.
 	DeleteRewardStateAfterSlot(uint64, types.Txn) error
@@ -1184,12 +1303,30 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
+	// the given epoch-boundary slot. Used to replay enactment side effects when
+	// stake reward pot reset is reapplied after a boundary commit crash.
+	GetEnactedGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark expired proposals and return deposits.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
+	// the given epoch-boundary slot. Used to replay deposit-return side effects
+	// when stake reward pot reset is reapplied after a boundary commit crash.
+	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 

@@ -29,7 +29,6 @@ import (
 
 func TestSetGapBlockTransactionHydratesSnapshotUtxoPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
 
 	txHash := lcommon.NewBlake2b256(
 		[]byte("pg-gap-hydrate-snapshot-utxo-1"),
@@ -62,7 +61,10 @@ func TestSetGapBlockTransactionHydratesSnapshotUtxoPostgres(t *testing.T) {
 			Delete(&models.Transaction{}).Error
 	}
 	cleanup()
-	t.Cleanup(cleanup)
+	t.Cleanup(func() {
+		cleanup()
+		_ = store.Close()
+	})
 
 	require.NoError(t, store.DB().Create(&models.Utxo{
 		TxId:      txHash.Bytes(),

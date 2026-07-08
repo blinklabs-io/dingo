@@ -78,6 +78,22 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
+// ImportPool upserts a pool and creates a registration record. When txn is nil
+// a write transaction is opened, committed on success and rolled back on error
+// via Txn.Do.
+func (d *Database) ImportPool(
+	txn *Txn,
+	pool *models.Pool,
+	reg *models.PoolRegistration,
+) error {
+	if txn != nil {
+		return d.metadata.ImportPool(pool, reg, txn.Metadata())
+	}
+	return d.MetadataTxn(true).Do(func(t *Txn) error {
+		return d.metadata.ImportPool(pool, reg, t.Metadata())
+	})
+}
+
 // UpdatePoolOpCertSequence records an observed op-cert sequence for a pool
 // and updates the pool's denormalized maximum.
 func (d *Database) UpdatePoolOpCertSequence(

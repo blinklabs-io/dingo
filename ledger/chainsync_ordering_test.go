@@ -45,13 +45,17 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 	// Each entry is the trailing identifier of a SelectorExpr (or a bare
 	// Ident for unqualified calls).
 	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
-		"applyMIRCerts",                // (3) Shelley-era INSTANT rule
-		"ProcessEpoch",                 // (4) Conway-style governance enact
-		"SetPParams",                   // (5) persist enacted pparams
-		"isHardForkTransition",         // (6) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (7) per-major-version HARDFORK rule
+		"applyStakeRewards",            // (1) delayed stake reward update
+		"applyMIRCerts",                // (2) Shelley-era INSTANT rule
+		"EpochBoundarySnapshotFunc",    // (3) cardano-ledger SNAP point
+		"applyPoolRetirements",         // (4) embedded POOLREAP deposit refunds
+		"ComputeAndApplyPParamUpdates", // (5) Shelley-style pparam updates
+		"ProcessEpoch",                 // (6) Conway-style governance enact
+		"applyEpochDonations",          // (7) Conway treasury donations
+		"SetPParams",                   // (8) persist enacted pparams
+		"isHardForkTransition",         // (9) inter-era boundary detection
+		"applyIntraEraHardForkRule",    // (10) per-major-version HARDFORK rule
+		"saveRewardAdaPotsForEpoch",    // (11) post-boundary ADA pot capture
 	}
 
 	fset := token.NewFileSet()

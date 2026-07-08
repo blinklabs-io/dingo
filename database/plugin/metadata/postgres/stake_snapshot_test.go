@@ -26,12 +26,12 @@ import (
 
 func TestSaveEpochSummaryUpsertSnapshotReadyPostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
-	defer store.Close() //nolint:errcheck
 
 	const epoch = uint64(424242)
 	require.NoError(t, store.DB().Where("epoch = ?", epoch).Delete(&models.EpochSummary{}).Error)
 	t.Cleanup(func() {
 		_ = store.DB().Where("epoch = ?", epoch).Delete(&models.EpochSummary{}).Error
+		_ = store.Close()
 	})
 
 	initial := &models.EpochSummary{

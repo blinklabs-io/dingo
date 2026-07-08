@@ -1420,7 +1420,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			}
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x31}, 28)
 		poolHash1 := []byte("pool_hash_1_12345678901234567890123456789012")
 		poolHash2 := []byte("pool_hash_2_12345678901234567890123456789012")
 
@@ -1549,7 +1549,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_active_test_12345678901234567890")
+			stakingKey := bytes.Repeat([]byte{0x32}, 28)
 
 			// Create an account that is currently inactive (deregistered at slot 2000)
 			account := models.Account{
@@ -1649,7 +1649,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_inactive_test_123456789012345678")
+			stakingKey := bytes.Repeat([]byte{0x33}, 28)
 
 			// Create an account that was re-registered at slot 2000 (currently active)
 			account := models.Account{
@@ -1768,7 +1768,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x34}, 28)
 
 		// Create an account registered at slot 2000 (after rollback point)
 		account := models.Account{
@@ -3012,16 +3012,18 @@ func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
 				PoolID:        pool.ID,
 				PoolKeyHash:   poolHash,
 				AddedSlot:     1000,
-				CertificateID: 200,
+				CertificateID: regCert.ID,
 			}
 			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
 				t.Fatalf("failed to create pool registration: %v", result.Error)
 			}
+
 			poolRet := models.PoolRetirement{
-				PoolID:      pool.ID,
-				PoolKeyHash: poolHash,
-				AddedSlot:   1000,
-				Epoch:       10,
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10,
+				CertificateID: 0,
 			}
 			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
 				t.Fatalf("failed to create pool retirement: %v", result.Error)

@@ -19,6 +19,7 @@ package postgres
 import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm"
 )
 
 // CreateDrep inserts a Drep row directly. See the MetadataStore
@@ -40,11 +41,27 @@ func (d *MetadataStorePostgres) CreateAccount(
 	txn types.Txn,
 	account *models.Account,
 ) error {
+	create := func(db *gorm.DB) error {
+		if err := db.Create(account).Error; err != nil {
+			return err
+		}
+		return refreshRewardLiveStakeAggregate(
+			db,
+			models.NewStakeCredentialRef(
+				account.CredentialTag,
+				account.StakingKey,
+			),
+			account.AddedSlot,
+		)
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
-	return db.Create(account).Error
+	if txn == nil {
+		return db.Transaction(create)
+	}
+	return create(db)
 }
 
 // CreateUtxo inserts a Utxo row directly. See the MetadataStore
@@ -53,9 +70,21 @@ func (d *MetadataStorePostgres) CreateUtxo(
 	txn types.Txn,
 	utxo *models.Utxo,
 ) error {
+	create := func(db *gorm.DB) error {
+		if err := db.Create(utxo).Error; err != nil {
+			return err
+		}
+		return refreshRewardLiveStakeAggregates(
+			db,
+			rewardStakeRefsFromUtxos([]models.Utxo{*utxo}),
+		)
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
-	return db.Create(utxo).Error
+	if txn == nil {
+		return db.Transaction(create)
+	}
+	return create(db)
 }

@@ -16,10 +16,13 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/hex"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/stretchr/testify/require"
 )
 
@@ -151,4 +154,54 @@ func TestSqliteSetGenesisTransactionIdempotent(t *testing.T) {
 		store.DB().Model(&models.Utxo{}).Count(&utxoCount).Error,
 	)
 	require.Equal(t, int64(3), utxoCount, "no duplicate genesis UTxOs")
+}
+
+func TestSqliteGenesisStakingRefreshesRewardLiveStake(t *testing.T) {
+	t.Parallel()
+	store := setupFileTestStore(t)
+
+	stakingKey := bytes.Repeat([]byte{0x11}, 28)
+	poolKey := lcommon.PoolKeyHash(bytes.Repeat([]byte{0x22}, 28))
+	txHash := bytes.Repeat([]byte{0xaa}, 32)
+	blockHash := bytes.Repeat([]byte{0xbb}, 32)
+	outputs := genesisOutputs(1)
+	outputs[0].TxId = txHash
+	outputs[0].OutputIdx = 0
+	outputs[0].StakingKey = stakingKey
+	outputs[0].CredentialTag = 0
+	outputs[0].Amount = 42
+
+	require.NoError(t, store.SetGenesisTransaction(
+		txHash,
+		blockHash,
+		outputs,
+		nil,
+	))
+
+	pools := map[string]lcommon.PoolRegistrationCertificate{
+		hex.EncodeToString(poolKey[:]): {
+			Operator:      poolKey,
+			VrfKeyHash:    lcommon.VrfKeyHash(bytes.Repeat([]byte{0x33}, 32)),
+			Pledge:        1,
+			Cost:          1,
+			Margin:        lcommon.GenesisRat{Rat: big.NewRat(0, 1)},
+			RewardAccount: lcommon.AddrKeyHash(bytes.Repeat([]byte{0x44}, 28)),
+		},
+	}
+	stakeDelegations := map[string]string{
+		hex.EncodeToString(stakingKey): hex.EncodeToString(poolKey[:]),
+	}
+	require.NoError(t, store.SetGenesisStaking(
+		pools,
+		stakeDelegations,
+		blockHash,
+		nil,
+	))
+
+	inputs, err := store.GetRewardStakeInputsAtSlot([][]byte{poolKey[:]}, 0, nil)
+	require.NoError(t, err)
+	require.Len(t, inputs, 1)
+	require.Equal(t, uint64(42), uint64(inputs[0].Stake))
+	require.Equal(t, poolKey[:], inputs[0].PoolKeyHash)
+	require.True(t, inputs[0].Registered)
 }

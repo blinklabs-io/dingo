@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"errors"
@@ -31,6 +32,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -1144,4 +1147,139 @@ func TestNodePeerPriorityEventUpdatesChainSelector(t *testing.T) {
 		return best != nil && *best == highPrioConn
 	}, time.Second, 5*time.Millisecond,
 		"higher-priority peer must win equal-tip selection after priority event")
+}
+
+// newNodeTestRewardLiveStakeDB creates a fresh in-memory database for
+// exercising backfillRewardLiveStakeAtSlot (#1959 finding A) without a full
+// node/ledger startup.
+func newNodeTestRewardLiveStakeDB(t *testing.T) *database.Database {
+	t.Helper()
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	return db
+}
+
+// TestBackfillRewardLiveStakeAtSlot_SkipsFreshEmptyDatabase verifies a truly
+// fresh database (no account rows yet) is left alone: there is nothing to
+// backfill, and the check itself must not misfire just because the
+// aggregate is empty.
+func TestBackfillRewardLiveStakeAtSlot_SkipsFreshEmptyDatabase(t *testing.T) {
+	db := newNodeTestRewardLiveStakeDB(t)
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+
+	require.NoError(t, n.backfillRewardLiveStakeAtSlot(100))
+
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(
+		t,
+		needed,
+		"a fresh empty database must never report needing a backfill",
+	)
+}
+
+// TestBackfillRewardLiveStakeAtSlot_RebuildsForUpgradedDatabase simulates the
+// upgraded-database scenario from #1959 finding A: account rows exist (as if
+// synced before the reward_live_stake aggregate existed) but the aggregate
+// itself is empty. backfillRewardLiveStakeAtSlot must detect this and run a
+// real RebuildRewardLiveStake pass that populates the aggregate from the
+// account table.
+func TestBackfillRewardLiveStakeAtSlot_RebuildsForUpgradedDatabase(t *testing.T) {
+	db := newNodeTestRewardLiveStakeDB(t)
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "metadata store should be sqlite")
+
+	stakingKey := bytes.Repeat([]byte{0x11}, 28)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakingKey,
+		CredentialTag: 0,
+		Active:        false,
+		AddedSlot:     5,
+	}).Error)
+
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(
+		t,
+		needed,
+		"account rows with an empty aggregate must need a backfill",
+	)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStakeAtSlot(42))
+
+	var rows []models.RewardLiveStake
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Len(t, rows, 1, "rebuild must populate one row for the account")
+	require.Equal(t, stakingKey, rows[0].StakingKey)
+
+	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(
+		t,
+		needed,
+		"the aggregate must be populated after the backfill runs",
+	)
+}
+
+// TestBackfillRewardLiveStakeAtSlot_SkipsAlreadyPopulatedDatabase verifies a
+// database where the aggregate is already populated is left untouched. A
+// sentinel row for a credential with no backing account is seeded directly;
+// a real RebuildRewardLiveStake pass unconditionally clears and regenerates
+// the whole table from canonical account/UTxO state, so the sentinel
+// surviving the call proves the rebuild did not run.
+func TestBackfillRewardLiveStakeAtSlot_SkipsAlreadyPopulatedDatabase(t *testing.T) {
+	db := newNodeTestRewardLiveStakeDB(t)
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "metadata store should be sqlite")
+
+	stakingKey := bytes.Repeat([]byte{0x22}, 28)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey:    stakingKey,
+		CredentialTag: 0,
+		Active:        false,
+		AddedSlot:     5,
+	}).Error)
+
+	sentinelKey := bytes.Repeat([]byte{0x33}, 28)
+	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
+		StakingKey:    sentinelKey,
+		CredentialTag: 0,
+		TotalStake:    999,
+		UpdatedSlot:   1,
+	}).Error)
+
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(t, needed, "a populated aggregate must not need a backfill")
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStakeAtSlot(42))
+
+	var row models.RewardLiveStake
+	require.NoError(
+		t,
+		store.DB().Where("staking_key = ?", sentinelKey).First(&row).Error,
+		"sentinel row must survive: an already-populated aggregate is left untouched",
+	)
 }

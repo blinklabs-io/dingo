@@ -790,6 +790,186 @@ func (d *MetadataStoreSqlite) GetAccountsByCredential(
 	return ret, nil
 }
 
+// fallbackAccountState is the per-account information the no-registration
+// fallback in GetAccountsActiveAtSlot needs: the immutable createdSlot (when the
+// row first existed) and the current active flag.
+type fallbackAccountState struct {
+	createdSlot uint64
+	active      bool
+}
+
+// fetchFallbackAccountState returns, for each ref that has an account row, its
+// immutable created_slot and current active flag. Row existence establishes
+// that the account was created (e.g. Shelley-genesis delegated stake);
+// created_slot answers whether it existed as of the queried slot without
+// consulting the mutable added_slot. See GetAccountsActiveAtSlot.
+func fetchFallbackAccountState(
+	db *gorm.DB,
+	refs []models.StakeCredentialRef,
+) (map[string]fallbackAccountState, error) {
+	ret := make(map[string]fallbackAccountState, len(refs))
+	if len(refs) == 0 {
+		return ret, nil
+	}
+	pairs := make([][]any, 0, len(refs))
+	for _, ref := range refs {
+		pairs = append(pairs, []any{ref.Tag, ref.Key})
+	}
+	for chunk := range slices.Chunk(pairs, 400) {
+		var rows []models.Account
+		if result := db.Model(&models.Account{}).
+			Select("credential_tag", "staking_key", "created_slot", "active").
+			Where("(credential_tag, staking_key) IN ?", chunk).
+			Find(&rows); result.Error != nil {
+			return nil, result.Error
+		}
+		for _, row := range rows {
+			key := models.StakeCredentialRef{
+				Tag: row.CredentialTag,
+				Key: row.StakingKey,
+			}.MapKey()
+			ret[key] = fallbackAccountState{
+				createdSlot: row.CreatedSlot,
+				active:      row.Active,
+			}
+		}
+	}
+	return ret, nil
+}
+
+// fetchCredentialsEverDeregistered returns the subset of refs that have at least
+// one deregistration certificate at any slot. Having ever been deregistered
+// proves a credential was active beforehand (an inactive credential cannot be
+// deregistered), which — for a fallback account with no registration
+// certificate — identifies it as a genesis-delegated account whose point-in-time
+// activity is governed by deregistration history rather than the current active
+// flag. See GetAccountsActiveAtSlot.
+func fetchCredentialsEverDeregistered(
+	db *gorm.DB,
+	refs []models.StakeCredentialRef,
+) (map[string]struct{}, error) {
+	ret := make(map[string]struct{}, len(refs))
+	if len(refs) == 0 {
+		return ret, nil
+	}
+	pairs := make([][]any, 0, len(refs))
+	for _, ref := range refs {
+		pairs = append(pairs, []any{ref.Tag, ref.Key})
+	}
+	scan := func(model any) error {
+		for chunk := range slices.Chunk(pairs, 400) {
+			var rows []struct {
+				CredentialTag uint8
+				StakingKey    []byte
+			}
+			if err := db.Model(model).
+				Select("credential_tag", "staking_key").
+				Where("(credential_tag, staking_key) IN ?", chunk).
+				Find(&rows).Error; err != nil {
+				return err
+			}
+			for _, r := range rows {
+				ret[models.StakeCredentialRef{
+					Tag: r.CredentialTag,
+					Key: r.StakingKey,
+				}.MapKey()] = struct{}{}
+			}
+		}
+		return nil
+	}
+	if err := scan(&models.StakeDeregistration{}); err != nil {
+		return nil, err
+	}
+	if err := scan(&models.Deregistration{}); err != nil {
+		return nil, err
+	}
+	return ret, nil
+}
+
+// GetAccountsActiveAtSlot returns the requested credentials that were active
+// according to certificate history at or before the given slot. Accounts with
+// no registration certificate, such as Shelley-genesis delegated accounts, are
+// active from chain start and deactivated only by a deregistration certificate;
+// their activity is decided from the account row's active flag plus
+// deregistration history (for point-in-time accuracy), never from the mutable
+// added_slot column, which a later re-delegation bumps without changing
+// activity.
+func (d *MetadataStoreSqlite) GetAccountsActiveAtSlot(
+	refs []models.StakeCredentialRef,
+	slot uint64,
+	txn types.Txn,
+) (map[string]struct{}, error) {
+	ret := make(map[string]struct{}, len(refs))
+	if len(refs) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	cache, err := batchFetchCerts(db, refs, slot)
+	if err != nil {
+		return nil, err
+	}
+	accountRowFallbackRefs := make([]models.StakeCredentialRef, 0)
+	for _, ref := range refs {
+		key := accountCertCacheKey(ref.Tag, ref.Key)
+		latestReg, hasReg := cache.latestReg[key], cache.hasReg[key]
+		if !hasReg {
+			accountRowFallbackRefs = append(accountRowFallbackRefs, ref)
+			continue
+		}
+		latestDereg, hasDereg := cache.latestDereg[key], cache.hasDereg[key]
+		if !hasDereg || latestReg.isMoreRecent(latestDereg) {
+			ret[key] = struct{}{}
+		}
+	}
+	// Fallback accounts have no registration certificate (e.g. Shelley-genesis
+	// delegated stake). They are active from chain start and deactivated only by
+	// a deregistration certificate.
+	fallbackState, err := fetchFallbackAccountState(db, accountRowFallbackRefs)
+	if err != nil {
+		return nil, err
+	}
+	fallbackDeregistered, err := fetchCredentialsEverDeregistered(
+		db,
+		accountRowFallbackRefs,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range accountRowFallbackRefs {
+		key := accountCertCacheKey(ref.Tag, ref.Key)
+		state, exists := fallbackState[key]
+		if !exists {
+			continue
+		}
+		// The account must have existed as of the queried slot. created_slot is
+		// immutable (unlike added_slot, which a later re-delegation bumps), so an
+		// account first created after slot — e.g. a reward account registered
+		// after the reward's RUPD slot — is correctly treated as absent.
+		if state.createdSlot > slot {
+			continue
+		}
+		_, everDeregistered := fallbackDeregistered[key]
+		// Genesis-delegated accounts are active from chain start; recognize one
+		// as either currently active or previously active enough to have a
+		// deregistration certificate. A row that is inactive with no
+		// deregistration history was never activated and stays inactive.
+		if !state.active && !everDeregistered {
+			continue
+		}
+		// Point-in-time deregistration: inactive once a deregistration
+		// certificate at or before the slot exists (bounded in batchFetchCerts),
+		// regardless of the row's current active flag.
+		if cache.hasDereg[key] {
+			continue
+		}
+		ret[key] = struct{}{}
+	}
+	return ret, nil
+}
+
 // AddAccountRewardByCredential credits a registered reward account.
 func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
 	credentialTag uint8,
@@ -867,15 +1047,6 @@ func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
 				stakeKey,
 			)
 		}
-		result := tx.Model(&models.Account{}).
-			Where("id = ?", account.ID).
-			Update("reward", types.Uint64(current+amount))
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return models.ErrAccountNotFound
-		}
 		delta := &models.AccountRewardDelta{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
@@ -883,10 +1054,12 @@ func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
 			Amount:        types.Uint64(amount),
 			AddedSlot:     slot,
 		}
+		// Insert the unique journal row before mutating account.reward.
 		// OnConflict backstops the read-check above against a writer racing
-		// in between the SELECT and INSERT. DoNothing leaves the existing
-		// row intact.
-		return tx.Clauses(clause.OnConflict{
+		// in between the SELECT and INSERT. If another writer already inserted
+		// the same event, this call affects zero rows and the replay/racer is
+		// a no-op: the existing row already represents the credited reward.
+		result := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "withdrawal"},
 				{Name: "tx_hash"},
@@ -895,7 +1068,36 @@ func (d *MetadataStoreSqlite) AddAccountRewardByCredential(
 				{Name: "added_slot"},
 			},
 			DoNothing: true,
-		}).Create(delta).Error
+		}).Create(delta)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		result = tx.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Update("reward", types.Uint64(current+amount))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return models.ErrAccountNotFound
+		}
+		ref := models.NewStakeCredentialRef(credentialTag, stakeKey)
+		// Epoch-boundary rollover credits ~every delegator's account, each
+		// of which would otherwise trigger a full reward_live_stake refresh
+		// (account SELECT + full UTxO SUM + upsert). Since only reward_stake
+		// changed by a known amount, apply it as a single delta UPDATE and
+		// only fall back to the full refresh if the row doesn't exist yet.
+		updated, err := creditRewardLiveStakeDelta(tx, ref, amount, slot)
+		if err != nil {
+			return err
+		}
+		if updated {
+			return nil
+		}
+		return refreshRewardLiveStakeAggregate(tx, ref, slot)
 	}
 	if txn != nil {
 		return credit(db)
@@ -980,7 +1182,21 @@ func (d *MetadataStoreSqlite) ApplyAccountRewardWithdrawal(
 			},
 			DoNothing: true,
 		}).Create(delta)
-		return result.Error
+		if result.Error != nil {
+			return result.Error
+		}
+		// A duplicate/replayed withdrawal is a DoNothing no-op: the existing
+		// delta row already represents the cleared balance, and whoever
+		// inserted it also refreshed reward_live_stake, so skip the redundant
+		// refresh (mirrors the AddAccountRewardByCredential credit path).
+		if result.RowsAffected == 0 {
+			return nil
+		}
+		return refreshRewardLiveStakeAggregate(
+			tx,
+			models.NewStakeCredentialRef(credentialTag, stakeKey),
+			slot,
+		)
 	}
 	if txn != nil {
 		return withdraw(db)
@@ -1006,6 +1222,7 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 		).Order("added_slot DESC, id DESC").Find(&deltas); result.Error != nil {
 			return result.Error
 		}
+		refs := make(map[string]rewardCredentialSlotRef)
 		for _, delta := range deltas {
 			var account models.Account
 			if result := tx.Where(
@@ -1027,6 +1244,14 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 					); result.Error != nil {
 					return result.Error
 				}
+				addRewardStakeRef(
+					refs,
+					models.NewStakeCredentialRef(
+						delta.CredentialTag,
+						delta.StakingKey,
+					),
+					slot,
+				)
 				continue
 			}
 			current := uint64(account.Reward)
@@ -1042,6 +1267,14 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 				Update("reward", types.Uint64(current-amount)); result.Error != nil {
 				return result.Error
 			}
+			addRewardStakeRef(
+				refs,
+				models.NewStakeCredentialRef(
+					delta.CredentialTag,
+					delta.StakingKey,
+				),
+				slot,
+			)
 		}
 		if result := tx.Where(
 			"added_slot > ?",
@@ -1049,7 +1282,7 @@ func (d *MetadataStoreSqlite) DeleteAccountRewardsAfterSlot(
 		).Delete(&models.AccountRewardDelta{}); result.Error != nil {
 			return result.Error
 		}
-		return nil
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
 	if txn != nil {
 		return rollback(db)
@@ -1069,10 +1302,13 @@ func (d *MetadataStoreSqlite) SetAccount(
 		StakingKey:    stakeKey,
 		CredentialTag: credentialTag,
 		AddedSlot:     slot,
+		CreatedSlot:   slot,
 		Pool:          pkh,
 		Drep:          drep,
 		Active:        active,
 	}
+	// created_slot is intentionally omitted from DoUpdates so it stays immutable
+	// on update; it is only written by the insert branch above.
 	onConflict := clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "credential_tag"},
@@ -1086,10 +1322,23 @@ func (d *MetadataStoreSqlite) SetAccount(
 	if err != nil {
 		return err
 	}
-	if result := db.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
-		return result.Error
+	set := func(tx *gorm.DB) error {
+		if result := tx.Clauses(onConflict).Create(&tmpItem); result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregate(
+			tx,
+			models.NewStakeCredentialRef(credentialTag, stakeKey),
+			slot,
+		)
 	}
-	return nil
+	// Wrap the upsert and the reward_live_stake refresh in one transaction so
+	// the aggregate can't be left stale by a crash/error between them, matching
+	// the other account mutators.
+	if txn != nil {
+		return set(db)
+	}
+	return db.Transaction(set)
 }
 
 // RestoreAccountStateAtSlot reverts account delegation state to the given slot.
@@ -1131,6 +1380,7 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 	if err != nil {
 		return err
 	}
+	rewardRefs := make(map[string]rewardCredentialSlotRef, len(refs))
 
 	// Process each account using the cached certificate data
 	for _, account := range accountsToRestore {
@@ -1144,6 +1394,14 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 			if result := db.Delete(&account); result.Error != nil {
 				return result.Error
 			}
+			addRewardStakeRef(
+				rewardRefs,
+				models.NewStakeCredentialRef(
+					account.CredentialTag,
+					account.StakingKey,
+				),
+				slot,
+			)
 			continue
 		}
 
@@ -1172,6 +1430,15 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 		// - There is no deregistration, or
 		// - The most recent registration is after the most recent deregistration
 		active := !hasDereg || latestReg.isMoreRecent(latestDereg)
+		if hasDereg {
+			if !active || latestDereg.isMoreRecent(poolRec) {
+				pool = nil
+			}
+			if !active || latestDereg.isMoreRecent(drepRec) {
+				drep = nil
+				drepType = 0
+			}
+		}
 
 		// Compute the actual last modification slot as the max of all relevant events
 		lastModSlot := latestReg.addedSlot
@@ -1198,9 +1465,17 @@ func (d *MetadataStoreSqlite) RestoreAccountStateAtSlot(
 		}); result.Error != nil {
 			return result.Error
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				account.CredentialTag,
+				account.StakingKey,
+			),
+			slot,
+		)
 	}
 
-	return nil
+	return refreshRewardLiveStakeAggregates(db, rewardRefs)
 }
 
 // ClearDanglingDRepDelegations implements the Conway HARDFORK rule for

@@ -371,6 +371,7 @@ type LedgerStateConfig struct {
 	Database                    *database.Database
 	ChainManager                *chain.ChainManager
 	EventBus                    *event.EventBus
+	EpochBoundarySnapshotFunc   EpochBoundarySnapshotFunc
 	CardanoNodeConfig           *cardano.CardanoNodeConfig
 	BlockfetchRequestRangeFunc  BlockfetchRequestRangeFunc
 	PeersWithBlockFunc          PeersWithBlockFunc
@@ -460,6 +461,14 @@ type LedgerStateConfig struct {
 	ForgeBlocks              bool
 	DatabaseWorkerPoolConfig DatabaseWorkerPoolConfig
 }
+
+// EpochBoundarySnapshotFunc captures the epoch-boundary Mark snapshot inside
+// the ledger rollover transaction at the cardano-ledger SNAP point.
+type EpochBoundarySnapshotFunc func(
+	context.Context,
+	*database.Txn,
+	event.EpochTransitionEvent,
+) error
 
 // EndorserBlockProviderFunc returns the slot and the complete set of standalone
 // transaction CBORs of the Leios endorser block identified by ebHash, when it
@@ -599,6 +608,7 @@ type LedgerState struct {
 	chainUpdateSubID         event.EventSubscriberId
 	chainSwitchSubID         event.EventSubscriberId
 	connClosedSubID          event.EventSubscriberId
+	rewardPrecomputeSubID    event.EventSubscriberId
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
@@ -612,13 +622,19 @@ type LedgerState struct {
 	replayMu sync.Mutex
 	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
 	// Close can drain them before the database is closed (issue #2107).
-	replayWG          sync.WaitGroup
-	validationEnabled bool
+	replayWG sync.WaitGroup
+	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
+	// rewardPrecomputeWG.Wait so Close cannot return while precompute is still
+	// issuing database reads/writes.
+	rewardPrecomputeMu sync.Mutex
+	rewardPrecomputeWG sync.WaitGroup
+	validationEnabled  bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
 	syncUpstreamTipSlot  atomic.Uint64 // upstream peer's tip slot
 	nextNonceReadyEpoch  atomic.Uint64 // last ready epoch emitted for next-epoch nonce stability
+	rewardPrecomputeBusy atomic.Bool
 
 	// Rate-limiting for non-active rollback drop messages
 	dropRollbackLastLog time.Time // last time we logged a drop rollback
@@ -794,6 +810,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
+	//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		return ls.loadEpochs(txn)
 	}, true)
@@ -857,6 +874,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.connClosedSubID = ls.config.EventBus.SubscribeFunc(
 			ConnectionClosedEventType,
 			ls.handleConnectionClosedEvent,
+		)
+		ls.rewardPrecomputeSubID = ls.config.EventBus.SubscribeFunc(
+			event.EpochTransitionEventType,
+			ls.handleRewardPrecomputeEpochTransition,
 		)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
@@ -1241,6 +1262,10 @@ func (ls *LedgerState) Close() error {
 			ConnectionClosedEventType,
 			ls.connClosedSubID,
 		)
+		ls.config.EventBus.Unsubscribe(
+			event.EpochTransitionEventType,
+			ls.rewardPrecomputeSubID,
+		)
 	}
 
 	// Wait for in-flight rollback event emission goroutines.
@@ -1284,6 +1309,16 @@ func (ls *LedgerState) Close() error {
 	ls.config.Logger.Info(
 		"header replay goroutines finished",
 		"elapsed", time.Since(replayStart).Round(time.Millisecond),
+	)
+
+	ls.config.Logger.Info("waiting for in-flight reward precompute handlers")
+	rewardStart := time.Now()
+	ls.rewardPrecomputeMu.Lock()
+	ls.rewardPrecomputeWG.Wait()
+	ls.rewardPrecomputeMu.Unlock()
+	ls.config.Logger.Info(
+		"reward precompute handlers finished",
+		"elapsed", time.Since(rewardStart).Round(time.Millisecond),
 	)
 
 	// Stop slot clock
@@ -1427,6 +1462,7 @@ func (ls *LedgerState) handleSlotTicks() {
 		ls.RLock()
 		currentEpoch := ls.currentEpoch
 		currentEra := ls.currentEra
+		currentPParams := ls.currentPParams
 		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
 
@@ -1510,7 +1546,7 @@ func (ls *LedgerState) handleSlotTicks() {
 				NewEpoch:        tick.Epoch,
 				BoundarySlot:    tick.Slot,
 				EpochNonce:      nil,
-				ProtocolVersion: currentEra.Id,
+				ProtocolVersion: ls.protocolMajorForEvent(currentPParams, currentEra),
 				SnapshotSlot:    snapshotSlot,
 			}
 			ls.config.EventBus.Publish(
@@ -1588,6 +1624,26 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 
 func (ls *LedgerState) resetNextEpochNonceReady() {
 	ls.nextNonceReadyEpoch.Store(0)
+}
+
+func (ls *LedgerState) protocolMajorForEvent(
+	pparams lcommon.ProtocolParameters,
+	era eras.EraDesc,
+) uint {
+	pv, err := GetProtocolVersion(pparams)
+	if err == nil {
+		return pv.Major
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version for epoch event",
+			"error", err,
+			"pparams_type", fmt.Sprintf("%T", pparams),
+			"fallback_era_id", era.Id,
+			"component", "ledger",
+		)
+	}
+	return era.Id
 }
 
 // isNearTip returns true when the given slot is inside the current era's
@@ -2868,6 +2924,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var eraTransitions []*EraTransitionResult
 
 			// Execute transaction WITHOUT holding ls.Lock()
+			//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id
@@ -3029,12 +3086,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						snapshotSlot--
 					}
 					epochTransitionEvent := event.EpochTransitionEvent{
-						PreviousEpoch:   snapshotEpoch.EpochId,
-						NewEpoch:        newEpochId,
-						BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
-						EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
-						ProtocolVersion: rolloverResult.NewCurrentEra.Id,
-						SnapshotSlot:    snapshotSlot,
+						PreviousEpoch: snapshotEpoch.EpochId,
+						NewEpoch:      newEpochId,
+						BoundarySlot:  rolloverResult.NewCurrentEpoch.StartSlot,
+						EpochNonce:    rolloverResult.NewCurrentEpoch.Nonce,
+						ProtocolVersion: ls.protocolMajorForEvent(
+							rolloverResult.NewCurrentPParams,
+							rolloverResult.NewCurrentEra,
+						),
+						SnapshotSlot: snapshotSlot,
 					}
 					ls.config.EventBus.Publish(
 						event.EpochTransitionEventType,

@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -132,6 +133,29 @@ func (d *MetadataStorePostgres) GetTransactionSlotByHash(
 		return 0, false, result.Error
 	}
 	return row.Slot, true, nil
+}
+
+// SumTransactionFeesInSlotRange sums the fee-pot contributions in an
+// inclusive slot range: declared fees of valid transactions plus consumed
+// collateral of phase-2-invalid transactions, per the Alonzo/Babbage UTXOS
+// rule.
+func (d *MetadataStorePostgres) SumTransactionFeesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	if err := db.Model(&models.Transaction{}).
+		Select("COALESCE(SUM(CASE WHEN valid THEN CAST(fee AS BIGINT) ELSE CAST(collateral_fee AS BIGINT) END), 0)").
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
+	}
+	return total, nil
 }
 
 // GetTransactionIDByHash returns the primary-key ID of the transaction
@@ -750,9 +774,13 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 		tmpAccount = &models.Account{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
+			CreatedSlot:   models.AccountCreatedSlotUnset,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
+		tmpAccount.Pool = nil
+		tmpAccount.Drep = nil
+		tmpAccount.DrepType = 0
 	}
 	return tmpAccount, nil
 }
@@ -760,7 +788,18 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 // saveAccount persists the account to the database. It creates a new
 // record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
-func saveAccount(account *models.Account, db *gorm.DB) error {
+func saveAccount(
+	account *models.Account,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
+	// Resolve the create-helper sentinel to the account's creation slot. For a
+	// freshly built account CreatedSlot==AddedSlot; an existing row loaded from
+	// the DB carries its real (never-sentinel) CreatedSlot and is left as-is,
+	// and no upsert DoUpdates list includes created_slot, so it stays immutable.
+	if account.CreatedSlot == models.AccountCreatedSlotUnset {
+		account.CreatedSlot = account.AddedSlot
+	}
 	if account.ID == 0 {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
@@ -789,13 +828,75 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 			return result.Error
 		}
 	}
-	return nil
+	ref := models.NewStakeCredentialRef(
+		account.CredentialTag,
+		account.StakingKey,
+	)
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, account.AddedSlot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, account.AddedSlot)
 }
 
 // saveCertRecord saves a certificate record and returns any error
-func saveCertRecord(record any, db *gorm.DB) error {
+func saveCertRecord(
+	record any,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
 	result := db.Create(record)
-	return result.Error
+	if result.Error != nil {
+		return result.Error
+	}
+	ref, slot, ok := rewardLiveStakeRefFromCertRecord(record)
+	if !ok {
+		return nil
+	}
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, slot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, slot)
+}
+
+func rewardLiveStakeRefFromCertRecord(
+	record any,
+) (models.StakeCredentialRef, uint64, bool) {
+	switch r := record.(type) {
+	case *models.StakeRegistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDeregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Registration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Deregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	default:
+		return models.StakeCredentialRef{}, 0, false
+	}
 }
 
 // SetGapBlockTransaction stores a transaction record and its produced
@@ -821,15 +922,31 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
@@ -887,6 +1004,7 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 			)
 		}
 	}
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
 	if tmpTx.CollateralReturn != nil {
 		tmpTx.CollateralReturn.ID = 0
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
@@ -899,9 +1017,62 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 				txHash, err,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
 	}
 	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
 		return err
+	}
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf("refresh reward live stake for gap tx %x: %w", txHash, err)
+	}
+	return nil
+}
+
+// RecomputeGapCollateralFee recomputes and persists the collateral fee for a
+// phase-2-invalid gap-block transaction after ensureGapConsumedUtxos has
+// materialized its consumed collateral inputs in the utxo table. See the
+// interface docs on metadata.MetadataStore.
+func (d *MetadataStorePostgres) RecomputeGapCollateralFee(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	if tx.IsValid() {
+		return nil
+	}
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
+	if err := db.Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Update("collateral_fee", types.Uint64(collateralFee)).Error; err != nil {
+		return fmt.Errorf(
+			"update collateral fee for gap tx %x: %w", txHash, err,
+		)
 	}
 	return nil
 }
@@ -928,15 +1099,31 @@ func (d *MetadataStorePostgres) SetTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -997,6 +1184,22 @@ func (d *MetadataStorePostgres) SetTransaction(
 			return fmt.Errorf("transaction not found after upsert: %x", txHash)
 		}
 		tmpTx.ID = existingTx.ID
+	}
+	// rewardRefs accumulates every stake-credential ref touched by this
+	// transaction (outputs, collateral return, spent UTxOs, and account/cert
+	// saves below) so the full reward_live_stake recompute for a credential
+	// runs exactly once at the end of SetTransaction, instead of once per
+	// trigger. See addRewardStakeRef / refreshRewardLiveStakeAggregates.
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
+	if tmpTx.CollateralReturn != nil {
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
 	}
 	if tx.IsValid() {
 		if err := d.applyTransactionRewardWithdrawals(
@@ -1213,7 +1416,8 @@ func (d *MetadataStorePostgres) SetTransaction(
 		}
 	}
 
-	// Consume UTxOs
+	// Consume UTxOs using optimistic locking to prevent race conditions.
+	// The atomic update ensures only one transaction can successfully mark a UTXO as spent.
 	if len(tx.Consumed()) > 0 {
 		type consumedUtxoRef struct {
 			txID []byte
@@ -1306,6 +1510,24 @@ func (d *MetadataStorePostgres) SetTransaction(
 						ref.idx,
 					)
 				}
+			}
+			consumedUtxoIDs := make([]models.UtxoId, 0, len(consumedRefs))
+			for _, ref := range consumedRefs {
+				consumedUtxoIDs = append(consumedUtxoIDs, models.UtxoId{
+					Hash: ref.txID,
+					Idx:  ref.idx,
+				})
+			}
+			spendRefs, err := rewardStakeRefsFromUtxoIDs(
+				db,
+				consumedUtxoIDs,
+				point.Slot,
+			)
+			if err != nil {
+				return fmt.Errorf("query reward live stake spend refs: %w", err)
+			}
+			for _, item := range spendRefs {
+				addRewardStakeRef(rewardRefs, item.ref, item.slot)
 			}
 		}
 	}
@@ -1554,6 +1776,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 			// Create unified certificate records first (idempotent with ON CONFLICT DO NOTHING)
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint) // unifiedID -> specializedID
+			// certRewardRefs aliases the same underlying map as rewardRefs
+			// (maps are reference types) so account/cert saves below merge
+			// into the single end-of-transaction refresh instead of
+			// triggering their own.
+			certRewardRefs := rewardRefs
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -1833,11 +2060,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1885,7 +2112,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1906,6 +2133,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -1929,11 +2157,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1954,6 +2182,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -1978,11 +2207,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						Amount:        types.Uint64(deposit),
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2010,11 +2239,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2043,11 +2272,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2088,11 +2317,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2121,11 +2350,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2222,7 +2451,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2261,7 +2490,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2303,11 +2532,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2347,11 +2576,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2390,11 +2619,11 @@ func (d *MetadataStorePostgres) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2411,7 +2640,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						AddedSlot:      point.Slot,
 					}
 
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2430,7 +2659,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
 
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2475,6 +2704,9 @@ func (d *MetadataStorePostgres) SetTransaction(
 				}
 			}
 
+			// certRewardRefs merges into rewardRefs above; the combined set
+			// is refreshed exactly once at the end of SetTransaction.
+
 			// Batch update unified certificates with specialized record IDs
 			if len(certIDUpdates) > 0 {
 				// Build CASE statement for batch update
@@ -2512,6 +2744,17 @@ func (d *MetadataStorePostgres) SetTransaction(
 				return fmt.Errorf("store datums failed: %w", err)
 			}
 		}
+	}
+
+	// Single end-of-transaction refresh for every credential touched above
+	// (outputs, collateral return, spent UTxOs, account/cert saves), instead
+	// of once per trigger.
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for tx %x: %w",
+			txHash,
+			err,
+		)
 	}
 
 	return nil
@@ -2608,15 +2851,31 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, batch.InFlightProducerAmount,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -3097,6 +3356,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 			}
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint)
+			certRewardRefs := make(map[string]rewardCredentialSlotRef)
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -3373,10 +3633,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3420,7 +3680,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						PoolID:        tmpPool.ID,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3438,6 +3698,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						r := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -3458,10 +3719,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3479,6 +3740,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						r := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -3500,10 +3762,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3526,10 +3788,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3553,10 +3815,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3592,10 +3854,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3620,10 +3882,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if tmpAccount.ID == 0 {
 						tmpAccount.CertificateID = certIDMap[i]
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3705,7 +3967,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
@@ -3741,7 +4003,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
@@ -3778,10 +4040,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3816,10 +4078,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3853,10 +4115,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3869,7 +4131,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpAuth.ID
@@ -3884,7 +4146,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpResign.AnchorURL = c.Anchor.Url
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpResign.ID
@@ -3920,6 +4182,16 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						cert,
 					)
 				}
+			}
+
+			if err := refreshRewardLiveStakeAggregates(
+				db,
+				certRewardRefs,
+			); err != nil {
+				return fmt.Errorf(
+					"refresh reward live stake for certificates (batched): %w",
+					err,
+				)
 			}
 
 			if len(certIDUpdates) > 0 {
@@ -4009,6 +4281,15 @@ func (d *MetadataStorePostgres) SetGenesisTransaction(
 		}).Create(&outputs)
 		if result.Error != nil {
 			return fmt.Errorf("create genesis utxos: %w", result.Error)
+		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardStakeRefsFromUtxos(outputs),
+		); err != nil {
+			return fmt.Errorf(
+				"refresh reward live stake for genesis utxos: %w",
+				err,
+			)
 		}
 	}
 
@@ -4108,8 +4389,48 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 
 	// NULL out UTXO references to transactions being deleted
 	// These fields reference transaction hashes, not IDs, so CASCADE doesn't handle them
+	rewardRefs := make(map[string]rewardCredentialSlotRef)
 	if len(txHashes) > 0 {
+		// Transaction deletion cascades outputs and collateral returns, so
+		// collect their stake refs before the rows disappear.
+		txIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		collateralReturnTxIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		var outputRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where(
+				"transaction_id IN (?) OR collateral_return_for_tx_id IN (?)",
+				txIDQuery,
+				collateralReturnTxIDQuery,
+			).
+			Select("credential_tag", "staking_key").
+			Find(&outputRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for deleted transaction outputs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(outputRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
+
 		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
+		var spentRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where("spent_at_tx_id IN ?", txHashes).
+			Select("credential_tag", "staking_key").
+			Find(&spentRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for restored UTxOs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(spentRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
 		if result := db.Model(&models.Utxo{}).
 			Where("spent_at_tx_id IN ?", txHashes).
 			Updates(map[string]any{
@@ -4163,6 +4484,13 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 		return result.Error
 	}
 
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for rolled back transactions: %w",
+			err,
+		)
+	}
+
 	return nil
 }
 
@@ -4195,6 +4523,11 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(
+		map[string]rewardCredentialSlotRef,
+		len(stakeDelegations),
+	)
 
 	// Batch fetch all existing pools to avoid N+1 queries
 	poolKeyHashes := make([][]byte, 0, len(pools))
@@ -4355,6 +4688,18 @@ func (d *MetadataStorePostgres) SetGenesisStaking(
 				result.Error,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(0, stakerBytes),
+			0,
+		)
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis staking: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -4374,6 +4719,8 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(map[string]rewardCredentialSlotRef, len(delegs))
 
 	for cred, state := range initialDReps {
 		if cred == nil {
@@ -4500,7 +4847,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
 			account.Pool = delegatee.PoolId[:]
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake delegatee account: %w", err,
 				)
@@ -4523,7 +4870,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 		case conway.ConwayGenesisDelegateeTypeVote:
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis vote delegatee account: %w", err,
 				)
@@ -4548,7 +4895,7 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 			account.Pool = delegatee.PoolId[:]
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake/vote delegatee account: %w", err,
 				)
@@ -4576,6 +4923,13 @@ func (d *MetadataStorePostgres) SetGenesisGovernance(
 				delegatee.Type,
 			)
 		}
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis governance: %w",
+			err,
+		)
 	}
 
 	return nil

@@ -42,6 +42,26 @@ type UtxoAddressKeys struct {
 	OutputIdx     uint32 `gorm:"column:output_idx"`
 }
 
+type utxoRewardStakeRef struct {
+	CredentialTag uint8  `gorm:"column:credential_tag"`
+	StakingKey    []byte `gorm:"column:staking_key"`
+	AddedSlot     uint64 `gorm:"column:added_slot"`
+}
+
+func rewardStakeRefsFromUtxoRewardStakeRefs(
+	rows []utxoRewardStakeRef,
+) map[string]rewardCredentialSlotRef {
+	refs := make(map[string]rewardCredentialSlotRef)
+	for _, row := range rows {
+		addRewardStakeRef(
+			refs,
+			models.NewStakeCredentialRef(row.CredentialTag, row.StakingKey),
+			row.AddedSlot,
+		)
+	}
+	return refs
+}
+
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreSqlite) GetUtxo(
 	txId []byte,
@@ -644,12 +664,20 @@ func (d *MetadataStoreSqlite) DeleteUtxo(
 	if err != nil {
 		return err
 	}
+	refs, err := rewardStakeRefsFromUtxoIDs(
+		db,
+		[]models.UtxoId{utxoId},
+		0,
+	)
+	if err != nil {
+		return err
+	}
 	result := db.Where("tx_id = ? AND output_idx = ?", utxoId.Hash, utxoId.Idx).
 		Delete(&models.Utxo{})
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxos(
@@ -660,6 +688,10 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 		return nil
 	}
 	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	refs, err := rewardStakeRefsFromUtxoIDs(db, utxos, 0)
 	if err != nil {
 		return err
 	}
@@ -681,7 +713,7 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 			return result.Error
 		}
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
@@ -692,12 +724,26 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	if err != nil {
 		return err
 	}
+	var rows []utxoRewardStakeRef
+	if err := db.Model(&models.Utxo{}).
+		Where("added_slot > ?", slot).
+		Select("credential_tag", "staking_key").
+		Group("credential_tag, staking_key").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+	// Pin the recompute slot to the rollback target rather than the deleted
+	// UTxOs' own added_slot (which is > slot), mirroring
+	// SetUtxosNotDeletedAfterSlot, so the live-stake refresh resolves
+	// delegation state as of the rollback boundary.
+	pinRewardStakeRefsToSlot(refs, slot)
 	result := db.Where("added_slot > ?", slot).
 		Delete(&models.Utxo{})
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // AddUtxos saves a batch of UTxOs directly
@@ -723,7 +769,13 @@ func (d *MetadataStoreSqlite) AddUtxos(
 		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
 		DoNothing: true,
 	}).Create(&items)
-	return result.Error
+	if result.Error != nil {
+		return result.Error
+	}
+	return refreshRewardLiveStakeAggregates(
+		db,
+		rewardStakeRefsFromUtxos(items),
+	)
 }
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot and
@@ -789,7 +841,18 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 			input.Index(),
 		)
 	}
-	return nil
+	refs, err := rewardStakeRefsFromUtxoIDs(
+		db,
+		[]models.UtxoId{{
+			Hash: input.Id().Bytes(),
+			Idx:  input.Index(),
+		}},
+		slot,
+	)
+	if err != nil {
+		return err
+	}
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
@@ -804,6 +867,16 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	if err != nil {
 		return err
 	}
+	var rows []utxoRewardStakeRef
+	if err := db.Model(&models.Utxo{}).
+		Where("deleted_slot > ?", slot).
+		Select("credential_tag", "staking_key").
+		Group("credential_tag, staking_key").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+	pinRewardStakeRefsToSlot(refs, slot)
 	result := db.Model(models.Utxo{}).
 		Where("deleted_slot > ?", slot).
 		Updates(map[string]any{
@@ -813,7 +886,7 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // liveUtxoIterPageSize bounds how many rows are fetched per page from
@@ -878,6 +951,17 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 	if err != nil {
 		return err
 	}
+	utxoIDs := make([]models.UtxoId, 0, len(refs))
+	for _, ref := range refs {
+		utxoIDs = append(utxoIDs, models.UtxoId{
+			Hash: ref.TxId,
+			Idx:  ref.OutputIdx,
+		})
+	}
+	rewardRefs, err := rewardStakeRefsFromUtxoIDs(db, utxoIDs, atSlot)
+	if err != nil {
+		return err
+	}
 	for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
 		end := min(start+markUtxosDeletedChunkSize, len(refs))
 		chunk := refs[start:end]
@@ -906,5 +990,5 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 			return result.Error
 		}
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, rewardRefs)
 }

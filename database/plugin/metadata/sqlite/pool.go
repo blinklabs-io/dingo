@@ -340,6 +340,33 @@ func (d *MetadataStoreSqlite) LatestPoolOpCertSequence(
 	return ret.Sequence, ret.Count > 0, nil
 }
 
+// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer rows in
+// the inclusive slot range.
+func (d *MetadataStoreSqlite) GetPoolBlockIssuersInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]models.PoolOpCertSequence, error) {
+	if endSlot < startSlot {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.PoolOpCertSequence
+	if err := db.Where(
+		"slot >= ? AND slot <= ?",
+		startSlot,
+		endSlot,
+	).
+		Order("slot ASC, pool_key_hash ASC").
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get pool block issuers in slot range: %w", err)
+	}
+	return rows, nil
+}
+
 // CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 // inclusive slot range, grouped by pool key hash.
 func (d *MetadataStoreSqlite) CountPoolBlocksInSlotRange(
@@ -488,7 +515,84 @@ func (d *MetadataStoreSqlite) GetPoolRegistrationsAtSlot(
 		registrations = append(registrations, chunk...)
 	}
 
+	if err := d.populatePoolRegistrationOwners(db, registrations); err != nil {
+		return nil, err
+	}
+
 	return registrations, nil
+}
+
+func (d *MetadataStoreSqlite) populatePoolRegistrationOwners(
+	db *gorm.DB,
+	registrations []models.PoolRegistration,
+) error {
+	if len(registrations) == 0 {
+		return nil
+	}
+	ids := make([]uint, 0, len(registrations))
+	for _, registration := range registrations {
+		ids = append(ids, registration.ID)
+	}
+	var owners []models.PoolRegistrationOwner
+	for start := 0; start < len(ids); start += sqliteBindVarLimit {
+		end := min(start+sqliteBindVarLimit, len(ids))
+		var chunkOwners []models.PoolRegistrationOwner
+		if err := db.Where(
+			"pool_registration_id IN ?",
+			ids[start:end],
+		).Find(&chunkOwners).Error; err != nil {
+			return fmt.Errorf(
+				"GetPoolRegistrationsAtSlot: query owners: %w",
+				err,
+			)
+		}
+		owners = append(owners, chunkOwners...)
+	}
+	ownersByRegistration := make(
+		map[uint][]models.PoolRegistrationOwner,
+		len(registrations),
+	)
+	for _, owner := range owners {
+		ownersByRegistration[owner.PoolRegistrationID] = append(
+			ownersByRegistration[owner.PoolRegistrationID],
+			owner,
+		)
+	}
+	for i := range registrations {
+		registrations[i].Owners = ownersByRegistration[registrations[i].ID]
+	}
+	return nil
+}
+
+// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool, the
+// registration whose parameters the ledger's pool-params map held during the
+// ended epoch [epochStartSlot, snapshotSlot]. See
+// stakequery.EffectivePoolRegistrationsForEpoch for the selection rules.
+func (d *MetadataStoreSqlite) GetPoolRegistrationsEffectiveForEpoch(
+	pkhs []lcommon.PoolKeyHash,
+	epochStartSlot uint64,
+	endedEpoch uint64,
+	snapshotSlot uint64,
+	txn types.Txn,
+) ([]models.PoolRegistration, error) {
+	if len(pkhs) == 0 {
+		return []models.PoolRegistration{}, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+	return stakequery.EffectivePoolRegistrationsForEpoch(
+		db,
+		hashes,
+		epochStartSlot,
+		endedEpoch,
+		snapshotSlot,
+	)
 }
 
 // GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.

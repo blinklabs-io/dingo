@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,14 +11,19 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
@@ -431,6 +437,166 @@ func TestCopyBlocksRawWithCallback_BackfillsWhenChainTipPastImmutableTip(
 	assert.Equal(t, 0, blocksCopied)
 	assert.Equal(t, immutableTipSlot, resumedImmutableTipSlot)
 	assert.Greater(t, offsetsStored, 0)
+}
+
+func TestLoadWithDBWiresEpochBoundarySnapshotFunc(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	stopAfterCapture := errors.New("stop after ledger config capture")
+	var captured ledger.LedgerStateConfig
+	oldNewLedgerStateForLoad := newLedgerStateForLoad
+	newLedgerStateForLoad = func(
+		cfg ledger.LedgerStateConfig,
+	) (*ledger.LedgerState, error) {
+		captured = cfg
+		return nil, stopAfterCapture
+	}
+	t.Cleanup(func() {
+		newLedgerStateForLoad = oldNewLedgerStateForLoad
+	})
+
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{Network: "preview"},
+		logger,
+		"unused",
+		db,
+	)
+	require.ErrorIs(t, err, stopAfterCapture)
+	require.Same(t, db, captured.Database)
+	require.NotNil(t, captured.ChainManager)
+	require.NotNil(t, captured.EpochBoundarySnapshotFunc)
+	require.True(t, captured.TrustedReplay)
+	require.True(t, captured.ManualBlockProcessing)
+}
+
+// TestCaptureLoadGenesisSnapshot_BlockProducerFatal verifies that
+// captureLoadGenesisSnapshot returns a fatal, wrapped error for a
+// block-producer load when the underlying capture fails, mirroring
+// node.go's handleGenesisSnapshotError guard for the normal Run path.
+func TestCaptureLoadGenesisSnapshot_BlockProducerFatal(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := snapshot.NewManager(db, nil, logger)
+
+	// Close the database so the capture call fails deterministically.
+	require.NoError(t, db.Close())
+
+	err := captureLoadGenesisSnapshot(
+		context.Background(),
+		mgr,
+		&config.Config{BlockProducer: true},
+		logger,
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed to capture genesis snapshot")
+}
+
+// TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues verifies that a
+// non-block-producer load only warns and continues when the capture fails,
+// matching the relay behavior of node.go's handleGenesisSnapshotError.
+func TestCaptureLoadGenesisSnapshot_RelayWarnsAndContinues(t *testing.T) {
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	mgr := snapshot.NewManager(db, nil, logger)
+
+	require.NoError(t, db.Close())
+
+	err := captureLoadGenesisSnapshot(
+		context.Background(),
+		mgr,
+		&config.Config{BlockProducer: false},
+		logger,
+	)
+	require.NoError(t, err)
+}
+
+// TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking verifies
+// finding B (#1959): replaying a genesis with Shelley-genesis staking (as
+// devnets configure) through `dingo load` must seed the epoch-0 "mark"
+// RewardSnapshot the same way the normal node.Run startup path does via
+// CaptureGenesisSnapshot, or the first reward round applied at the epoch-3
+// boundary is silently skipped.
+//
+// The chain tip is advanced past the immutable testdata tip before calling
+// LoadWithDB so copyBlocksDirect takes its "chain tip already beyond
+// immutable DB tip" short-circuit (see load.go) and skips decoding the real
+// mainnet blocks in testdata, which are unrelated to the devnet genesis
+// configured here. This isolates the test to the genesis-application and
+// genesis-snapshot-capture behavior that finding B is about.
+func TestLoadWithDBCapturesGenesisMarkSnapshotForShelleyGenesisStaking(
+	t *testing.T,
+) {
+	// No t.Parallel(): newTestDB shares process-wide plugin state (see
+	// database.go:164), so concurrent test runs race on SetPluginOption and
+	// the in-memory schema migration.
+	immutableDir := filepath.Join(
+		"..",
+		"..",
+		"database",
+		"immutable",
+		"testdata",
+	)
+	imm, err := immutable.New(immutableDir)
+	require.NoError(t, err)
+	immutableTip, err := imm.GetTip()
+	require.NoError(t, err)
+	require.NotNil(t, immutableTip)
+
+	db := newTestDB(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	cm, err := chain.NewManager(db, nil)
+	require.NoError(t, err)
+	currentTip := cm.PrimaryChain().Tip()
+	stubSlot := immutableTip.Slot + 5
+	stubHash := bytes.Repeat([]byte{0xAB}, 32)
+	require.NoError(t, cm.PrimaryChain().AddRawBlocks([]chain.RawBlock{
+		{
+			Slot:        stubSlot,
+			Hash:        stubHash,
+			BlockNumber: currentTip.BlockNumber + 1,
+			Type:        0,
+			PrevHash:    currentTip.Point.Hash,
+			Cbor:        []byte{0x80},
+		},
+	}))
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point:       ocommon.NewPoint(stubSlot, stubHash),
+		BlockNumber: currentTip.BlockNumber + 1,
+	}, nil))
+
+	cfg := &config.Config{
+		Network:       "devnet",
+		CardanoConfig: "devnet/config.json",
+	}
+
+	err = LoadWithDB(context.Background(), cfg, logger, immutableDir, db)
+	require.NoError(t, err)
+
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cfg.CardanoConfig,
+		cfg.Network,
+		cardano.EmbeddedConfigFS,
+	)
+	require.NoError(t, err)
+	shelleyGenesis := nodeCfg.ShelleyGenesis()
+	require.NotNil(t, shelleyGenesis)
+	require.NotEmpty(
+		t,
+		shelleyGenesis.Staking.Pools,
+		"devnet genesis fixture must declare staking for this test to be meaningful",
+	)
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(0, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(
+		t,
+		rewardSnapshot,
+		"expected epoch-0 mark RewardSnapshot after loading a genesis "+
+			"with Shelley staking via `dingo load`",
+	)
 }
 
 func decodeImmutableBlockHeader(

@@ -16,6 +16,7 @@ package ledger
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -3577,38 +3578,114 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// EPOCH→HARDFORK ordering invariant.
 	//
-	// The remainder of this function mirrors the sequencing of cardano-
-	// ledger's Conway/Rules/Epoch.hs:374-379 (EPOCH STS), which dispatches
-	// HARDFORK only after enactment + pparams write. The relative order
-	// matters because the HARDFORK rule branch is selected from the new
-	// pparams' major version — a HARDFORK rule that ran before enactment
-	// would observe stale pparams and pick the wrong branch.
+	// The reward/snapshot prefix mirrors cardano-ledger's NEWEPOCH/EPOCH
+	// sequence: apply the delayed reward update, apply MIR, take SNAP, then
+	// run POOLREAP and UPEC/governance. The later HARDFORK dispatch still runs
+	// only after enactment + pparams write. The relative order matters because
+	// the Mark snapshot must not observe pool-reap refunds or later governance
+	// accounting, while HARDFORK must observe the final enacted pparams major
+	// version.
 	//
 	// The order, asserted by TestProcessEpochRollover_OrderingInvariant in
 	// chainsync_ordering_test.go, is:
 	//
-	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
-	//      voting path; produces newPParams from on-chain pparam-update
-	//      proposals.
-	//   2. applyPoolRetirements          — embedded Shelley POOLREAP: refund
-	//      deposits of pools whose retirement epoch is the new epoch. Runs
-	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in step 3.
-	//   3. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//   1. applyStakeRewards             — apply the delayed reward update
+	//      computed from the Go snapshot and previous block-production
+	//      epoch.
+	//   2. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   4. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   3. EpochBoundarySnapshotFunc     — cardano-ledger SNAP: capture the
+	//      Mark snapshot using the post-reward/post-MIR, pre-POOLREAP ledger
+	//      state.
+	//   4. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//      deposits of pools whose retirement epoch is the new epoch. Runs
+	//      before enactment so any deposit landing in the treasury is visible
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   5. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//      voting path; produces newPParams from on-chain pparam-update
+	//      proposals.
+	//   6. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   5. SetPParams                    — persist the enacted pparams.
-	//   6. IsHardForkTransition check    — detect inter-era boundary from
+	//   7. applyEpochDonations           — add Conway treasury donations
+	//      after enacted treasury withdrawals.
+	//   8. SetPParams                    — persist the enacted pparams.
+	//   9. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   7. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//  10. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
+	//  11. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//      after all boundary treasury/reserves mutations.
 	//
-	// Steps 5 and 6 must observe the post-enactment major version. Step 6
+	// Steps 6 and 8 must observe the post-enactment major version. Step 10
 	// must observe the persisted pparams (not just the in-memory ones)
 	// because its body issues SQL within `txn` that may join against
 	// `pparams` rows.
+	if err := ls.applyStakeRewards(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply stake rewards: %w", err)
+	}
+
+	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
+	// accumulated during the ended epoch to registered reward accounts, and
+	// apply pot-to-pot transfers between treasury and reserves. This is a
+	// no-op for Conway+ epochs because MIR certs are not valid there and no
+	// DB rows exist for those slots.
+	if err := ls.applyMIRCerts(
+		txn, currentEpoch.StartSlot, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply MIR certs: %w", err)
+	}
+
+	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
+		txn,
+		epochStartSlot,
+		currentEra,
+		currentEpoch,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
+	}
+	if ls.config.EpochBoundarySnapshotFunc != nil {
+		snapshotSlot := epochStartSlot
+		if snapshotSlot > 0 {
+			snapshotSlot--
+		}
+		snapshotCtx := ls.ctx
+		if snapshotCtx == nil {
+			snapshotCtx = context.Background()
+		}
+		if err := ls.config.EpochBoundarySnapshotFunc(
+			snapshotCtx,
+			txn,
+			event.EpochTransitionEvent{
+				PreviousEpoch: currentEpoch.EpochId,
+				NewEpoch:      currentEpoch.EpochId + 1,
+				BoundarySlot:  epochStartSlot,
+				EpochNonce:    tmpNonce,
+				ProtocolVersion: ls.protocolMajorForEvent(
+					currentPParams,
+					currentEra,
+				),
+				SnapshotSlot: snapshotSlot,
+			},
+		); err != nil {
+			return nil, fmt.Errorf("capture epoch-boundary snapshot: %w", err)
+		}
+	}
+
+	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
+	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
+	// this runs before governance enactment and treasury accounting, so any
+	// deposit that lands in the treasury (unregistered/inactive reward account)
+	// is visible to the withdrawals checked in governance.ProcessEpoch below.
+	if err := ls.applyPoolRetirements(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply pool retirements: %w", err)
+	}
+
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -3625,28 +3702,6 @@ func (ls *LedgerState) processEpochRollover(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("apply pparam updates: %w", err)
-	}
-
-	// Apply the embedded Shelley POOLREAP transition: refund the deposits of
-	// pools whose retirement epoch is the new epoch. Per the Conway EPOCH rule
-	// this runs before governance enactment and treasury accounting, so any
-	// deposit that lands in the treasury (unregistered/inactive reward account)
-	// is visible to the withdrawals checked in governance.ProcessEpoch below.
-	if err := ls.applyPoolRetirements(
-		txn, currentEpoch.EpochId+1, epochStartSlot,
-	); err != nil {
-		return nil, fmt.Errorf("apply pool retirements: %w", err)
-	}
-
-	// Apply the Shelley-era INSTANT rule: credit MIR certificate rewards
-	// accumulated during the ended epoch to registered reward accounts, and
-	// apply pot-to-pot transfers between treasury and reserves. This is a
-	// no-op for Conway+ epochs because MIR certs are not valid there and no
-	// DB rows exist for those slots.
-	if err := ls.applyMIRCerts(
-		txn, currentEpoch.StartSlot, epochStartSlot,
-	); err != nil {
-		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
 	// Run the CIP-1694 governance tick: enact proposals ratified in the
@@ -3777,21 +3832,21 @@ func (ls *LedgerState) processEpochRollover(
 		}
 	}
 
+	if err := ls.saveRewardAdaPotsForEpoch(
+		txn,
+		currentEpoch.EpochId+1,
+		currentEpoch,
+		epochStartSlot,
+	); err != nil {
+		return nil, err
+	}
+
 	// Create next epoch record
 	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("calculate epoch length: %w", err)
-	}
-	tmpNonce, tmpEvolvingNonce, tmpCandidateNonce, tmpLabNonce, err := ls.calculateEpochNonce(
-		txn,
-		epochStartSlot,
-		currentEra,
-		currentEpoch,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("calculate epoch nonce: %w", err)
 	}
 	err = ls.db.SetEpoch(
 		epochStartSlot,

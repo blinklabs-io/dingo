@@ -67,6 +67,27 @@ func TestSqliteSetGenesisGovernance(t *testing.T) {
 	stakeVoteCred := makeCred(0x44)
 	poolA := makePoolId(0xaa)
 	poolB := makePoolId(0xbb)
+	txHash := bytes.Repeat([]byte{0xee}, 32)
+	blockHash := bytes.Repeat([]byte{0xff}, 32)
+
+	outputs := genesisOutputs(2)
+	outputs[0].TxId = txHash
+	outputs[0].OutputIdx = 0
+	outputs[0].StakingKey = stakeCred.Credential[:]
+	outputs[0].CredentialTag = 0
+	outputs[0].Amount = 42
+	outputs[1].TxId = txHash
+	outputs[1].OutputIdx = 1
+	outputs[1].StakingKey = stakeVoteCred.Credential[:]
+	outputs[1].CredentialTag = 0
+	outputs[1].Amount = 58
+
+	require.NoError(t, store.SetGenesisTransaction(
+		txHash,
+		blockHash,
+		outputs,
+		nil,
+	))
 
 	delegs := conway.ConwayGenesisDelegs{
 		stakeCred: conway.ConwayGenesisDelegatee{
@@ -95,6 +116,8 @@ func TestSqliteSetGenesisGovernance(t *testing.T) {
 		[]byte("genesis-hash"),
 		nil,
 	))
+	requireRewardStatePoolRegistration(t, store, poolA[:], 0)
+	requireRewardStatePoolRegistration(t, store, poolB[:], 0)
 
 	// DRep row exists at slot 0 with anchor and expiry.
 	var drep models.Drep
@@ -193,6 +216,19 @@ func TestSqliteSetGenesisGovernance(t *testing.T) {
 	assert.Equal(t, poolB[:], stakeVoteRow.PoolKeyHash)
 	assert.Nil(t, stakeVoteRow.Drep)
 	assert.Equal(t, models.DrepTypeAlwaysAbstain, stakeVoteRow.DrepType)
+
+	inputs, err := store.GetRewardStakeInputsAtSlot(
+		[][]byte{poolA[:], poolB[:]},
+		0,
+		nil,
+	)
+	require.NoError(t, err)
+	stakes := make(map[string]uint64, len(inputs))
+	for _, input := range inputs {
+		stakes[string(input.PoolKeyHash)] += uint64(input.Stake)
+	}
+	assert.Equal(t, uint64(42), stakes[string(poolA[:])])
+	assert.Equal(t, uint64(58), stakes[string(poolB[:])])
 }
 
 func TestSqliteSetGenesisGovernanceIdempotent(t *testing.T) {

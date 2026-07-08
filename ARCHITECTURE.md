@@ -628,7 +628,10 @@ When `Node.Run()` is called, components are initialized in this order:
  2. Database loading (blob + metadata plugins)
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
- 5. LedgerState creation (UTXO tracking, validation)
+ 5. Snapshot manager construction, then LedgerState creation (UTXO tracking,
+    validation). The snapshot manager is created before LedgerState so ledger
+    can call it through a narrow epoch-boundary callback inside the rollover
+    transaction; its EventBus loop is still started later.
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
@@ -664,23 +667,34 @@ When `Node.Run()` is called, components are initialized in this order:
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
     verification computes an epoch nonce; only then does LedgerState subscribe
     to chainsync/blockfetch/chain-update EventBus events.
-10. Snapshot manager start (captures genesis snapshot, or reuses an existing
+10. One-time `reward_live_stake` backfill (`Node.backfillRewardLiveStakeIfNeeded`,
+    #1959): `MetadataStore.RewardLiveStakeNeedsBackfill` checks whether the
+    `account` table has rows while the aggregate is completely empty — an
+    upgraded database that synced before the aggregate existed, where only
+    post-upgrade credentials got incremental rows. When true, runs
+    `RebuildRewardLiveStake` at the ledger's current tip slot before the
+    genesis snapshot capture below, since both it and the epoch-boundary mark
+    snapshot read the aggregate exclusively. No-ops on a fresh, empty database
+    and on a database where the aggregate is already populated. `dingo load`
+    (`internal/node/load.go`) has no equivalent step: it only ever replays
+    into a fresh database, so the upgraded-database gap does not apply there.
+11. Snapshot manager start (captures genesis snapshot, or reuses an existing
     post-Mithril Mark snapshot window)
-11. Mempool setup and injection into LedgerState/Ouroboros
-12. ChainsyncState (multi-client tracking, stall detection)
-13. ChainSelector (genesis/Praos comparison) start
-14. ConnectionManager creation and event wiring
-15. PeerGovernor creation/start (topology + churn + ledger peers)
-16. ConnectionManager listener start
-17. Stalled client recycler (background goroutine)
-18. UTxO RPC server (if API storage mode and port configured)
-19. Bark C2/archive server (if port configured)
-20. Midnight gRPC server (if API storage mode and midnight port configured)
-21. Blockfrost API (if API storage mode and port configured)
-22. Mesh API (if API storage mode and port configured)
-23. Off-chain metadata fetcher (if API storage mode)
-24. Block forger + leader election (if block producer mode)
-25. Wait for shutdown signal
+12. Mempool setup and injection into LedgerState/Ouroboros
+13. ChainsyncState (multi-client tracking, stall detection)
+14. ChainSelector (genesis/Praos comparison) start
+15. ConnectionManager creation and event wiring
+16. PeerGovernor creation/start (topology + churn + ledger peers)
+17. ConnectionManager listener start
+18. Stalled client recycler (background goroutine)
+19. UTxO RPC server (if API storage mode and port configured)
+20. Bark C2/archive server (if port configured)
+21. Midnight gRPC server (if API storage mode and midnight port configured)
+22. Blockfrost API (if API storage mode and port configured)
+23. Mesh API (if API storage mode and port configured)
+24. Off-chain metadata fetcher (if API storage mode)
+25. Block forger + leader election (if block producer mode)
+26. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -1643,6 +1657,18 @@ The `mithril/` package itself has no internal Dingo imports. Database import,
 ledger-state import, ImmutableDB loading, and API-mode metadata backfill are
 orchestrated by `cmd/dingo` and `internal/node`. This is exposed via the
 `dingo mithril` CLI subcommand and the `dingo load` command.
+ImmutableDB loading constructs the snapshot manager as composition-local wiring
+and passes its epoch-boundary callback into `LedgerState`, so replayed epoch
+boundaries persist the same Mark and reward input snapshots as live block
+processing without starting the manager's asynchronous event loop. After
+`LedgerState.Start` applies genesis (including any Shelley-genesis staking),
+`LoadWithDB` also calls `CaptureGenesisSnapshot` before any epoch boundary is
+processed, mirroring `Node.Run`'s startup capture (#1959): without it, replaying
+a chain with genesis staking (as devnets configure) through `dingo load` would
+never create the epoch-0 Mark `reward_snapshot` row, silently skipping the
+first reward round applied at the epoch-3 boundary. The guard mirrors
+`Node.handleGenesisSnapshotError`: a capture failure is fatal for a
+block-producer load and only warned about otherwise.
 
 During API-mode startup after a Mithril bootstrap, `Node.Run()` asks the
 snapshot manager to ensure the initial stake snapshot state before starting the
@@ -1694,7 +1720,12 @@ is always expected to be fully recoverable from the snapshot import.
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
 (the "gap blocks") for their transaction effects, including consumed-input
-reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. The trust
+reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. Because a
+phase-2-invalid transaction's collateral fee is computed from the metadata UTxO
+rows and those consumed inputs are only recovered by `ensureGapConsumedUtxos`
+after the transaction row is created, `SetGapBlockTransaction` then calls
+`RecomputeGapCollateralFee` to recompute and persist `transaction.collateral_fee`
+once the inputs exist, so the epoch fee pot is not undercounted. The trust
 boundary is then recorded at the post-gap chain tip (`mithril/sync_import.go`),
 ahead of the evolving nonce persisted at the ledger-state slot. Because live
 chainsync folds nonces only past the trust boundary, the candidate nonce carried
@@ -2073,21 +2104,25 @@ dingo storage indexing: dingo stores one `mark` row per epoch, indexed by the ep
 Block Processing
      |
      v
-LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
-                Detection                        |
-                                                 v
-                                         SnapshotManager
-                                         (Subscribe)
-                                                 |
-              -----------------------------------+------
-              |                                  |     |
-              v                                  v     v
-    Calculate Stake              Rotate Snapshots   Cleanup
-    Distribution                 Mark -> Set -> Go
-              |                                  |
-              v                                  v
+LedgerState --> Epoch Rollover Transaction
+                |
+                v
+          SnapshotManager
+          (SNAP callback)
+                |
+                v
+       Copy Live Stake Aggregate
+                |
+                v
+LedgerState --> EventBus (EpochTransitionEvent) --> SnapshotManager
+                Detection                          (Rotate/Cleanup,
+                                                    skip existing Mark)
+                |
+                v
                         Database
+         RewardLiveStake
          PoolStakeSnapshot    EpochSummary
+         RewardSnapshot       Reward*Input
 ```
 
 ### Database Models
@@ -2096,8 +2131,72 @@ LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
 |-------|---------|
 | `PoolStakeSnapshot` | Per-pool stake snapshot (epoch, type, pool hash, stake numerator, optional denominator, delegator count) |
 | `EpochSummary` | Network-wide aggregates (total stake, pool count, delegator count, epoch nonce) |
+| `RewardLiveStake` | Live per-stake-credential reward aggregate maintained by metadata writes |
+| `RewardSnapshot` / `RewardPoolInput` / `RewardStakeInput` | Frozen reward-calculation snapshot inputs captured at epoch boundaries |
 
 Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
+
+Reward snapshots must not scan the full UTxO table at the epoch boundary. On
+mainnet, doing that work synchronously during rollover can starve block
+production and make a producer miss leader slots near the boundary. The
+metadata store keeps `RewardLiveStake` aligned as blocks are applied and rolled
+back: UTxO creates/spends, stake account registration/delegation changes, and
+reward-account credits/withdrawals refresh only the touched stake credentials.
+Mithril ledger-state import rebuilds the aggregate once after UTxOs,
+cert-state accounts, and optional stale-state reconcile finish; rebuild
+includes UTxO-only credentials as unregistered, undelegated rows so the
+aggregate has the same shape as incremental block application. Incremental
+refresh and full rebuild reject
+non-empty source stake credentials unless they are 28-byte key/script
+credentials, so malformed metadata rows cannot reach the reward snapshot copier.
+The aggregate also stores the certificate order for each row's current pool
+delegation for rollback and rebuild fidelity. Reward snapshot capture preserves
+that live delegation across later pool parameter registrations, then filters by
+the active pool input set, registered account state, and positive total stake.
+The snapshot manager then copies the registered
+delegated subset of this live aggregate into `reward_stake_input` and derives
+per-pool reward inputs, keeping epoch-boundary work bounded by the delegating
+account set rather than the full UTxO set. Those reward input rows freeze stake
+and pool parameters; block performance is read later from op-cert history for
+the delayed performance epoch. After a block-based epoch transition, ledger
+also attempts to precompute the next delayed reward update into
+`reward_pool_output` and
+`reward_account_output`; the following boundary applies those persisted outputs
+directly and falls back to synchronous calculation only if precompute data is
+missing. The fast path still verifies that the frozen pool input rows have the
+same captured and boundary slots as their owning `RewardSnapshot`, so a mixed
+or stale input bundle cannot be admitted without recalculation. It also admits
+precomputed output rows only when their `boundary_slot` is the application
+boundary and their `captured_slot` is no later than that boundary, so ambiguous
+or future output rows cannot be applied near a leader slot. For
+pre-Babbage protocol versions, this precompute is intentionally
+deferred until the RUPD prefilter slot has passed; Babbage and later can
+precompute immediately because they forgo that prefilter. This is not yet the
+final pulsed mainnet calculation path, but it moves the boundary-critical
+application step onto a cheap persisted-output path.
+
+This precompute runs off the `EpochTransitionEvent` EventBus handler, not the
+rollover transaction itself, and its calculation (scanning every pool/stake
+reward input for the mark snapshot epoch plus per-credential cert-history
+prefilter queries) is split from its persistence so it never holds SQLite's
+single writer for the whole thing: the calculation runs in a read-only
+transaction, then a separate, short write transaction re-verifies the result
+before persisting the output rows and the ADA-pots rewards total. That
+write-phase guard re-reads the mark `RewardSnapshot` row and drops the
+computed result (logging at debug and leaving nothing written) if its
+captured/boundary slots no longer match what the calculation consumed, or if
+a complete precomputed (or already-applied) result now exists for the epoch
+— both signal that a rollback replaced the snapshot or the synchronous
+boundary path already ran between the two phases, and either way the
+boundary path recomputes authoritatively regardless.
+
+Post-Mithril bootstrap also seeds recent historical `pool_stake_snapshot` Mark
+rows so leader-election and governance snapshot consumers have the expected
+nearby window. Those synthetic historical rows do not automatically get
+`RewardSnapshot` / `Reward*Input` bundles: the reward inputs are persisted only
+when the live aggregate matches the target boundary. Without a separate
+historical backfill, reward application skips a missing input bundle rather than
+using current live stake as if it were exact historical reward state.
 
 ### Query Interface
 
@@ -2114,9 +2213,49 @@ poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
 totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 ```
 
-### Event-Driven Capture
+### Boundary Capture And Events
 
-`EpochTransitionEvent` triggers snapshot capture:
+Ledger wires `snapshot.Manager.CaptureEpochBoundarySnapshot` through
+`LedgerStateConfig.EpochBoundarySnapshotFunc`. During block-based epoch
+rollover, ledger invokes that callback inside the open database transaction at
+the cardano-ledger SNAP point: after delayed stake rewards and MIR, before
+POOLREAP, pparam updates, governance enactment, donation accounting, and the
+new `epoch` row write. The callback replaces the epoch's Mark
+`PoolStakeSnapshot` rows and reward input bundle, then copies `RewardLiveStake`
+into `EpochSummary`, `RewardSnapshot`, `RewardPoolInput`, and
+`RewardStakeInput` rows using the same transaction view as the boundary state
+changes. The copied per-credential reward stake rows must sum exactly to the
+per-pool delegated stake totals, and every pool input must have a slot-valid
+registration with a valid reward account, valid owner key hashes, and non-null
+margin, before they are persisted.
+Replacement writes keep a refreshed snapshot from retaining stale pools or
+stake credentials captured by an earlier provisional event, and invalidate
+precomputed reward outputs for that snapshot epoch so the boundary cannot apply
+outputs derived from replaced inputs.
+
+A pool can be "active" (has delegated stake in `PoolStakeSnapshot`/
+`EpochSummary`) without having registration data usable for reward
+calculation — a missing registration row for the reward-snapshot epoch, a
+malformed reward account or credential tag, a missing margin, or a malformed
+owner key hash, any of which can occur with legacy/partial imports or a
+Mithril bootstrap gap. `rewardInputs` still reports these as a typed,
+pool-identifying error, but its caller
+(`saveRewardStateInputs`/`rewardInputsSkippingDegradedPools`) excludes just
+that one pool — and only its own delegators — from the reward-input working
+copy of the stake distribution, logs a `Warn`, and retries, rather than
+failing epoch-boundary snapshot capture (and therefore epoch rollover) for
+every pool over one pool's bad data. `RewardSnapshot.TotalActiveStake` /
+`TotalPoolCount` / `TotalDelegators` are derived from that same reduced,
+reward-eligible distribution, so they stay exactly consistent with the
+`RewardPoolInput`/`RewardStakeInput` rows actually persisted and with the
+totals-matching invariants `ledger/reward_calculation.go` checks before
+applying or reusing precomputed rewards. This exclusion only affects reward
+participation: `PoolStakeSnapshot` and `EpochSummary`, replaced earlier in the
+same call using the original, unfiltered distribution, keep reporting the
+pool's real observed stake for leader election and other consumers.
+
+`EpochTransitionEvent` is still emitted after rollover for asynchronous
+subscribers:
 
 ```go
 type EpochTransitionEvent struct {
@@ -2132,22 +2271,93 @@ type EpochTransitionEvent struct {
 Epoch transition events may come from block processing or the slot clock. The
 slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
-block processing owns historical epoch transitions during catch-up.
+block processing owns historical epoch transitions during catch-up. The
+snapshot manager's event loop treats an existing Mark `RewardSnapshot` as
+authoritative for that epoch: it skips recalculating capture and continues with
+rotation/cleanup so a later event cannot overwrite the transaction-phase SNAP
+view with post-POOLREAP live state.
+
+That event-loop check (`authoritativeMarkRewardSnapshotExists`) is a fresh,
+out-of-transaction read, so it is racy on its own: near the tip, a slot-clock
+event can pass it before `CaptureEpochBoundarySnapshot` commits, then the
+fallback capture (`captureMarkSnapshot`) spends time computing the live
+distribution while that commit lands, and its write would otherwise land
+afterward and clobber the authoritative rows. `saveSnapshot`/
+`saveSnapshotInTxn` close this by re-running the same
+`authoritativeMarkRewardSnapshotExists` predicate — scoped to the fallback
+write's own transaction via `checkAuthoritativeMark` — as the first statement
+before any delete/rewrite, and aborting (rollback, no error) the fallback
+write if an authoritative row already landed. The authoritative capture path
+itself never sets this guard, so it can always overwrite fallback-written
+rows; only the reverse direction is blocked.
 
 ### Epoch Boundary State Transitions
 
-`processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
-a fixed order, mirroring `cardano-ledger`'s sequencing:
+`processEpochRollover` (ledger) applies epoch-boundary state changes in a fixed
+order, mirroring `cardano-ledger`'s sequencing:
 
-1. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
-2. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+1. Delayed stake rewards (`applyStakeRewards`): use the Go reward snapshot
+   captured three epochs back, the block-production epoch two epochs back, and
+   the ADA pots captured one epoch back. If `reward_*_output` rows were
+   precomputed during the prior epoch, the boundary applies them without
+   rescanning reward stake inputs; the precomputed path is admitted only when
+   the frozen `reward_pool_input` bundle is structurally valid, carries the
+   same captured/boundary slots as `reward_snapshot`, and still sums to
+   `reward_snapshot.total_active_stake`, the pool output set exactly matches
+   that bundle, output rows target the application boundary and are not captured
+   after it, leader account outputs target the frozen pool reward accounts, and
+   the persisted reward pot is internally possible; otherwise it computes and
+   persists outputs as a fallback. Reward protocol parameters and epoch length
+   come from the RUPD calculation epoch, while block-production counts still use
+   the delayed performance epoch. Block-performance counts follow cardano-ledger
+   `incrBlocks`: TPraos overlay slots are excluded when decentralization is
+   non-zero, and the aggregate metadata count is used directly once `d=0`.
+   The reward formula rejects inconsistent explicit epoch block totals and
+   overflow when deriving the total from per-pool counts.
+   Recalculation revalidates the persisted pool/stake input bundle before
+   invoking the pure reward formula, rejecting stake rows for unknown pools and
+   pool counts, captured/boundary slots, malformed reward accounts, margins
+   outside `[0,1]`, owner stake above delegated stake, or per-pool stake,
+   owner-stake, or delegator-count totals that no longer match the frozen pool
+   inputs.
+   Whenever the calculator persists reward outputs, it first replaces the full
+   `reward_pool_output` / `reward_account_output` set for that snapshot epoch so
+   a recalculation that produces fewer rows cannot leave stale rewards behind.
+   Spendable rewards are credited through `account_reward_delta`.
+   Pre-Babbage calculation resolves the Haskell reward prefilter from
+   stake-account certificate history immediately before the first reward-update
+   slot, using the RUPD randomness-stabilisation window (`4k/f`) rather than
+   Dingo's era-specific nonce-freeze window; rewards omitted there return to
+   reserves.
+   Rewards that survive calculation but fail the application-time
+   account-registration check are unspendable and go to treasury.
+2. Shelley-era MIR certificates (`applyMIRCerts`): credit registered reward
+   accounts and apply treasury/reserves pot-to-pot transfers for MIR certs from
+   the ended epoch. This is a no-op for Conway and later epochs.
+3. Mark snapshot capture (`EpochBoundarySnapshotFunc`): copy the live reward
+   aggregate and freeze reward inputs at the same point as cardano-ledger SNAP,
+   after rewards/MIR and before POOLREAP/UPEC side effects. Per-credential
+   reward input totals are checked against the per-pool delegated totals, and
+   pool registrations, reward accounts, and stake credential identities are
+   checked for completeness before persistence; a pool whose own registration
+   data fails that check is excluded (with a warning) from the reward-input
+   bundle rather than aborting capture for every pool, and `RewardSnapshot`'s
+   totals are derived from that same reduced set. `PoolStakeSnapshot` and
+   `EpochSummary`, replaced just before this step from the unfiltered
+   distribution, are unaffected.
+4. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. Each deposit is credited to the
    pool's registered, active reward account, or added to the treasury when that
    account is missing or inactive. Active pool membership itself is query-derived
    (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
    the retirement certificate rows remain for rollback safety.
-3. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
-   proposal-deposit returns, which observe the post-POOLREAP treasury. The
+5. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+6. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+   proposal-deposit returns, which observe the post-POOLREAP treasury. If a
+   restart replays an already-committed boundary after stake rewards have reset
+   the same boundary `network_state` row, governance replays proposals already
+   enacted or expired at that exact epoch/slot so treasury withdrawals and
+   deposit returns are restored without re-ratifying old proposals. The
    proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
    stake snapshot (`LoadSPOVotingState`), and committee state
@@ -2159,11 +2369,18 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    thus the whole ledger pipeline, for hours.) A `slowGovernanceTallyThreshold`
    warning surfaces an unexpectedly slow tally rather than letting it present as
    a silent stalled rollover.
-4. Treasury donations (`applyEpochDonations`), added after withdrawals.
+7. Treasury donations (`applyEpochDonations`), added after withdrawals.
+8. Reward ADA pots for the new epoch (`saveRewardAdaPotsForEpoch`) are captured
+   after the boundary mutations, with transaction fees summed for the epoch that
+   just ended.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 3. The ordering is locked in by
+visible to the withdrawals checked in governance. The ordering is locked in by
 `TestProcessEpochRollover_OrderingInvariant`.
+
+Reward output rows are keyed by the reward snapshot epoch because that is the
+input bundle replay needs. For external reward-history comparison, snapshot
+epoch `S` corresponds to earned epoch `S+1` and spendable epoch `S+3`.
 
 ### Rollback Support
 
@@ -2177,5 +2394,10 @@ On chain rollback past an epoch boundary:
   repaired when possible, but their nonce is left unchanged because it cannot be
   safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
-  writes (`network_state`) from governance refunds and POOLREAP deposit refunds
-  are slot-keyed, so they are reverted by slot and re-derived on forward replay
+  writes (`network_state`) from stake rewards, governance refunds, MIR certs,
+  and POOLREAP deposit refunds are slot-keyed, so they are reverted by slot and
+  re-derived on forward replay
+- Precomputed reward output rows are deleted by captured/boundary slot. When
+  those rows are removed, their derived `reward_ada_pots.rewards` value is reset
+  for the corresponding pot epoch so reward calculation is re-derived on forward
+  replay

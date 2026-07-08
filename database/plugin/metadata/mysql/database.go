@@ -437,6 +437,14 @@ func (d *MetadataStoreMysql) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Attempt the one-time account.created_slot backfill whenever the account
+	// table predates this process. BackfillAccountCreatedSlot is gated
+	// internally on a durable backfill_checkpoint marker, so it scans once and
+	// is crash-safe: an interrupted run (column added but backfill unfinished)
+	// is retried on the next startup instead of silently stranding rows at 0.
+	// On a fresh database the account table does not exist yet, so there is
+	// nothing to backfill.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -460,6 +468,13 @@ func (d *MetadataStoreMysql) Start() error {
 		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
+		}
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf(
+				"account created_slot backfill failed: %w", err,
+			)
 		}
 	}
 	return nil

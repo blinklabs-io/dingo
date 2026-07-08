@@ -16,6 +16,21 @@ package database
 
 import "fmt"
 
+// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+// canonical account and live UTxO metadata.
+func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
+	if txn == nil {
+		return d.metadata.RebuildRewardLiveStake(slot, nil)
+	}
+	if err := txn.db.metadata.RebuildRewardLiveStake(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("rebuild reward live stake at slot %d: %w", slot, err)
+	}
+	return nil
+}
+
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.
 func (d *Database) DeleteRewardStateAfterSlot(

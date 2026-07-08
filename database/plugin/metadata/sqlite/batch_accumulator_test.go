@@ -202,6 +202,58 @@ func TestBatchAccumulator_InFlightProducerIndex(t *testing.T) {
 	assert.True(t, ba.HasInFlightProducer(producerTx, 3))
 }
 
+func TestBatchAccumulator_ZeroValueInFlightProducerIndex(t *testing.T) {
+	t.Parallel()
+	var ba BatchAccumulator
+
+	producerTx := bytes.Repeat([]byte{0xaa}, 32)
+	paymentKey := []byte{0x11}
+	stakingKey := []byte{0x22}
+	ba.AddUtxoOutput(models.Utxo{
+		TxId:       producerTx,
+		OutputIdx:  3,
+		PaymentKey: paymentKey,
+		StakingKey: stakingKey,
+		Amount:     123,
+	})
+
+	assert.True(t, ba.HasInFlightProducer(producerTx, 3))
+	keys, ok := ba.InFlightAddressKeys(producerTx, 3)
+	require.True(t, ok)
+	assert.Equal(t, paymentKey, keys.PaymentKey)
+	assert.Equal(t, stakingKey, keys.StakingKey)
+	amount, ok := ba.InFlightProducerAmount(producerTx, 3)
+	require.True(t, ok)
+	assert.Equal(t, uint64(123), amount)
+
+	ba.Reset()
+	assert.False(t, ba.HasInFlightProducer(producerTx, 3))
+
+	colRetTx := bytes.Repeat([]byte{0xcc}, 32)
+	ba.AddCollateralReturn(models.Utxo{
+		TxId:      colRetTx,
+		OutputIdx: 0,
+		Amount:    456,
+	})
+	amount, ok = ba.InFlightProducerAmount(colRetTx, 0)
+	require.True(t, ok)
+	assert.Equal(t, uint64(456), amount)
+
+	var dst BatchAccumulator
+	var src BatchAccumulator
+	srcTx := bytes.Repeat([]byte{0xdd}, 32)
+	src.AddUtxoOutput(models.Utxo{
+		TxId:      srcTx,
+		OutputIdx: 1,
+		Amount:    789,
+	})
+
+	dst.MergeFrom(&src)
+	amount, ok = dst.InFlightProducerAmount(srcTx, 1)
+	require.True(t, ok)
+	assert.Equal(t, uint64(789), amount)
+}
+
 func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
 	t.Parallel()
 	dst := NewBatchAccumulator()

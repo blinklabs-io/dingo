@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/sqldialect"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -34,7 +35,7 @@ type registrationSource struct {
 }
 
 const (
-	defaultPoolQueryChunkSize = 800
+	defaultPoolQueryChunkSize = 400
 	largePoolQueryChunkSize   = 5000
 )
 
@@ -290,28 +291,14 @@ active_delegation AS (
 }
 
 func transactionTableName(db *gorm.DB) string {
-	if db == nil {
-		return `"transaction"`
-	}
-	if strings.EqualFold(db.Name(), "mysql") {
-		return "`transaction`"
-	}
-	return `"transaction"`
+	return sqldialect.TransactionTableName(db)
 }
 
 // utxoAmountCastType returns the backend-native integer type used to cast the
 // text-encoded utxo.amount column before summation. Matches the casts used by
-// the DRep voting-power queries in each plugin.
+// the DRep voting-power queries in each plugin. See sqldialect.IntegerCastType.
 func utxoAmountCastType(db *gorm.DB) string {
-	if db != nil {
-		switch {
-		case strings.EqualFold(db.Name(), "postgres"):
-			return "BIGINT"
-		case strings.EqualFold(db.Name(), "mysql"):
-			return "UNSIGNED"
-		}
-	}
-	return "INTEGER"
+	return sqldialect.IntegerCastType(db)
 }
 
 func delegationFallbackBlockTables(
