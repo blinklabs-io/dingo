@@ -43,14 +43,6 @@ import (
 
 type ListenerConfig = connmanager.ListenerConfig
 
-// runMode constants for operational mode configuration
-const (
-	runModeServe = "serve"
-	runModeLoad  = "load"
-	runModeDev   = "dev"
-	runModeLeios = "leios"
-)
-
 // StorageMode controls how much data the metadata store persists.
 type StorageMode string
 
@@ -119,117 +111,37 @@ type MidnightConfig struct {
 }
 
 type Config struct {
-	promRegistry             prometheus.Registerer
-	topologyConfig           *topology.TopologyConfig
-	logger                   *slog.Logger
-	cardanoNodeConfig        *cardano.CardanoNodeConfig
-	dataDir                  string
-	bindAddr                 string
-	blobPlugin               string
-	metadataPlugin           string
-	network                  string
-	tlsCertFilePath          string
-	tlsKeyFilePath           string
-	intersectPoints          []ocommon.Point
-	listeners                []ListenerConfig
-	mempoolCapacity          int64
-	evictionWatermark        float64
-	rejectionWatermark       float64
-	outboundSourcePort       uint
-	utxorpcPort              uint
-	barkBaseUrl              string
-	barkBlockDownloadHosts   []string
-	barkPort                 uint
-	historyExpiry            HistoryExpiryConfig
-	corsAllowedOrigins       []string
-	networkMagic             uint32
-	intersectTip             bool
-	peerSharing              bool
-	validateHistorical       bool
-	strictUtxoValidation     bool
-	tracing                  bool
-	tracingStdout            bool
-	runMode                  string
-	startEra                 internalconfig.StartEra
-	shutdownTimeout          time.Duration
-	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
-	// Peer targets (0 = use default, -1 = unlimited)
-	targetNumberOfKnownPeers       int
-	targetNumberOfEstablishedPeers int
-	targetNumberOfActivePeers      int
-	// Per-source quotas for active peers (0 = use default)
-	activePeersTopologyQuota int
-	activePeersGossipQuota   int
-	activePeersLedgerQuota   int
-	// Ledger peer discovery (negative = disabled, 0 = use
-	// defaultLedgerPeerTarget, positive = target)
-	ledgerPeerTarget int
-	// Peer governor tuning (0 = use default)
-	minHotPeers                          int
-	reconcileInterval                    time.Duration
-	inactivityTimeout                    time.Duration
-	bootstrapPromotionMinDiversityGroups int
-	inboundWarmTarget                    int
-	inboundHotQuota                      int
-	inboundMinTenure                     time.Duration
-	inboundHotScoreThreshold             float64
-	inboundPruneAfter                    time.Duration
-	inboundDuplexOnlyForHot              bool
-	inboundCooldown                      time.Duration
-	maxConnectionsPerIP                  int
-	maxInboundConns                      int
-	genesisBootstrap                     bool
-	genesisWindowSlots                   uint64
-	// Block production configuration (SPO mode)
-	// Field names match cardano-node environment variable naming convention
-	blockProducer                 bool
-	shelleyVRFKey                 string
-	shelleyKESKey                 string
-	shelleyOperationalCertificate string
-	// Forging tolerances (0 = use defaults)
-	forgeSyncToleranceSlots     uint64
-	forgeStaleGapThresholdSlots uint64
-	// validateForgedBlock enables self-validation of locally-forged blocks
-	// (VRF/KES header crypto, body-hash, per-tx ledger rules) before the
-	// block is adopted onto the chain and diffused to peers.
-	validateForgedBlock bool
-	// Leios voting configuration (experimental)
-	leiosVoteSigningKeyFile string
-	leiosVoterPublicKeys    map[string]string
-	// Leios pipeline timing override (experimental, provisional). Nil
-	// uses leios.DefaultPipelineTiming.
+	// cfg holds the internal configuration that was parsed from YAML/env/CLI.
+	// This is the single source of truth for all configuration fields.
+	cfg *internalconfig.Config
+
+	// Runtime-only fields that are not loaded from YAML/env:
+	promRegistry      prometheus.Registerer
+	topologyConfig    *topology.TopologyConfig
+	logger            *slog.Logger
+	cardanoNodeConfig *cardano.CardanoNodeConfig
+	intersectPoints   []ocommon.Point
+	listeners         []ListenerConfig
+
+	// Programmatic API-only fields (not in YAML/env):
+	tracing             bool
+	tracingStdout       bool
+	ledgerPeerTarget    int
 	leiosPipelineTiming *leios.PipelineTiming
-	// Blockfrost API port (0 = disabled)
-	blockfrostPort uint
-	// Off-chain metadata fetcher configuration
+	// Runtime-only, programmatic offchain metadata config (preserves HTTPClient)
 	offchainMetadata OffchainMetadataConfig
-	// Midnight indexer and gRPC API configuration
-	midnight MidnightConfig
-	// Chainsync multi-client configuration
-	chainsyncMaxClients   int
+	// Parsed duration for chainsync stall timeout (runtime convenience)
 	chainsyncStallTimeout time.Duration
-	chainsyncStrategy     chainsync.HeaderSyncStrategy
-	// Mesh API port (0 = disabled)
-	meshPort uint
-	// Storage mode: "core" or "api"
-	storageMode StorageMode
-	// CBOR cache configuration
-	cacheBlockLRUEntries int
-	cacheHotUtxoEntries  int
-	cacheHotTxEntries    int
-	cacheHotTxMaxBytes   int64
 }
 
 // configPopulateNetworkMagic uses the named network (if specified) to determine the network magic value (if not specified)
 func (n *Node) configPopulateNetworkMagic() error {
-	if n.config.networkMagic == 0 && n.config.network != "" {
-		tmpCfg := n.config
-		tmpNetwork, ok := ouroboros.NetworkByName(n.config.network)
+	if n.config.cfg.NetworkMagic == 0 && n.config.cfg.Network != "" {
+		tmpNetwork, ok := ouroboros.NetworkByName(n.config.cfg.Network)
 		if !ok {
-			return fmt.Errorf("unknown network name: %s", n.config.network)
+			return fmt.Errorf("unknown network name: %s", n.config.cfg.Network)
 		}
-		tmpCfg.networkMagic = tmpNetwork.NetworkMagic
-		n.config = tmpCfg
+		n.config.cfg.NetworkMagic = tmpNetwork.NetworkMagic
 	}
 	return nil
 }
@@ -242,12 +154,12 @@ func (n *Node) configWrapPromRegistry() {
 	}
 	// Determine the network name: prefer the configured name, fall back to
 	// reverse-lookup by network magic.
-	networkName := n.config.network
+	networkName := n.config.cfg.Network
 	if networkName == "" {
-		if net, ok := ouroboros.NetworkByNetworkMagic(n.config.networkMagic); ok {
+		if net, ok := ouroboros.NetworkByNetworkMagic(n.config.cfg.NetworkMagic); ok {
 			networkName = net.String()
 		} else {
-			networkName = strconv.FormatUint(uint64(n.config.networkMagic), 10)
+			networkName = strconv.FormatUint(uint64(n.config.cfg.NetworkMagic), 10)
 		}
 	}
 	if networkName == "" {
@@ -374,7 +286,7 @@ func (n *Node) runRTSMetricsUpdater(
 
 // isDevMode returns true if running in development mode
 func (c *Config) isDevMode() bool {
-	return c.runMode == runModeDev
+	return c.cfg.RunMode == internalconfig.RunModeDev
 }
 
 // isMusashiNetwork reports whether the configured network is the experimental
@@ -384,8 +296,8 @@ func (c *Config) isDevMode() bool {
 // regardless of the configured run mode. This lets `dingo -n musashi` follow
 // the chain without also requiring `--run-mode leios`.
 func (c *Config) isMusashiNetwork() bool {
-	return c.network == ouroboros.NetworkCardanoMusashi.Name ||
-		c.networkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
+	return c.cfg.Network == ouroboros.NetworkCardanoMusashi.Name ||
+		c.cfg.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic
 }
 
 // experimentalLeiosNetworkingEnabled reports whether the Leios node-to-node
@@ -402,8 +314,8 @@ func (c *Config) isMusashiNetwork() bool {
 // so the Leios protocols can stay active on the Musashi testnet.
 func (c *Config) experimentalLeiosNetworkingEnabled() bool {
 	return c.isMusashiNetwork() ||
-		c.runMode == runModeLeios ||
-		c.startEra.IsDijkstra()
+		c.cfg.RunMode == internalconfig.RunModeLeios ||
+		c.cfg.StartEra.IsDijkstra()
 }
 
 // experimentalDijkstraEnabled reports whether the Dijkstra ledger era is
@@ -416,31 +328,33 @@ func (c *Config) experimentalDijkstraEnabled() bool {
 
 func (n *Node) configValidate() error {
 	// Default storageMode to "core" when unset, and validate.
-	if n.config.storageMode == "" {
-		n.config.storageMode = StorageModeCore
+	storageMode := StorageMode(n.config.cfg.StorageMode)
+	if storageMode == "" {
+		storageMode = StorageModeCore
+		n.config.cfg.StorageMode = string(storageMode)
 	}
-	if !n.config.storageMode.Valid() {
+	if !storageMode.Valid() {
 		return fmt.Errorf(
 			"invalid storage mode %q: must be %q or %q",
-			n.config.storageMode,
+			storageMode,
 			StorageModeCore,
 			StorageModeAPI,
 		)
 	}
-	if !n.config.startEra.Valid() {
+	if !n.config.cfg.StartEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
-			n.config.startEra,
+			n.config.cfg.StartEra,
 			internalconfig.StartEraDijkstra,
 		)
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
 	// This lets defaults stay non-zero without requiring core-mode users
 	// to explicitly disable each one.
-	if n.config.networkMagic == 0 {
+	if n.config.cfg.NetworkMagic == 0 {
 		return fmt.Errorf(
 			"invalid network magic value: %d",
-			n.config.networkMagic,
+			n.config.cfg.NetworkMagic,
 		)
 	}
 	if len(n.config.listeners) == 0 {
@@ -457,15 +371,15 @@ func (n *Node) configValidate() error {
 			"listener must provide net.Listener or listen network/address values",
 		)
 	}
-	if n.config.cardanoNodeConfig != nil {
-		shelleyGenesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if n.config.CardanoNodeConfig() != nil {
+		shelleyGenesis := n.config.CardanoNodeConfig().ShelleyGenesis()
 		if shelleyGenesis == nil {
 			return errors.New("unable to get Shelley genesis information")
 		}
-		if n.config.networkMagic != shelleyGenesis.NetworkMagic {
+		if n.config.cfg.NetworkMagic != shelleyGenesis.NetworkMagic {
 			return fmt.Errorf(
 				"network magic (%d) doesn't match value from Shelley genesis (%d)",
-				n.config.networkMagic,
+				n.config.cfg.NetworkMagic,
 				shelleyGenesis.NetworkMagic,
 			)
 		}
@@ -476,29 +390,76 @@ func (n *Node) configValidate() error {
 // ConfigOptionFunc is a type that represents functions that modify the Connection config
 type ConfigOptionFunc func(*Config)
 
-// NewConfig creates a new dingo config with the specified options
+// NewConfig creates a new dingo config with the specified options.
+// This is primarily for programmatic use (library API).
 func NewConfig(opts ...ConfigOptionFunc) Config {
+	// Start with a default internal config
 	c := Config{
+		cfg: &internalconfig.Config{
+			EvictionWatermark:  internalconfig.DefaultEvictionWatermark,
+			RejectionWatermark: internalconfig.DefaultRejectionWatermark,
+			BindAddr:           "0.0.0.0",
+			StorageMode:        string(StorageModeCore),
+			RunMode:            internalconfig.RunModeServe,
+			Cache:              internalconfig.DefaultCacheConfig(),
+			Chainsync:          internalconfig.DefaultChainsyncConfig(),
+			GenesisBootstrap:   internalconfig.DefaultGenesisBootstrapConfig(),
+			HistoryExpiry:      internalconfig.DefaultHistoryExpiryConfig(),
+			Logging:            internalconfig.DefaultLoggingConfig(),
+			Midnight:           internalconfig.DefaultMidnightConfig(),
+			CORSAllowedOrigins: []string{"*"},
+		},
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		genesisBootstrap: true,
-		historyExpiry: HistoryExpiryConfig{
-			Frequency: time.Hour,
-		},
-		midnight: MidnightConfig{
-			Port: 50051,
-			Host: "0.0.0.0",
-		},
-		corsAllowedOrigins: []string{
-			"*",
-		},
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 	}
 	// Apply options
 	for _, opt := range opts {
 		opt(&c)
 	}
 	return c
+}
+
+// NewConfigFromInternal creates a Config from an already-loaded internal
+// configuration, along with runtime-only dependencies (logger, cardano
+// config, topology). This is the main path for the dingo CLI and node
+// startup, eliminating manual field-by-field mapping.
+func NewConfigFromInternal(
+	cfg *internalconfig.Config,
+	logger *slog.Logger,
+	cardanoCfg *cardano.CardanoNodeConfig,
+	topoCfg *topology.TopologyConfig,
+	promRegistry prometheus.Registerer,
+) Config {
+	if logger == nil {
+		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
+	// If caller did not provide an internal config, seed defaults so accessors
+	// and consumers never hit a nil pointer. This mirrors NewConfig's default
+	// internal configuration.
+	if cfg == nil {
+		tmp := NewConfig()
+		cfg = tmp.cfg
+	}
+	// Parse chainsync stall timeout for runtime use. Fall back to 2m on error.
+	var chainsyncDur time.Duration
+	if cfg.Chainsync.StallTimeout != "" {
+		if d, err := time.ParseDuration(cfg.Chainsync.StallTimeout); err == nil {
+			chainsyncDur = d
+		} else {
+			chainsyncDur = 2 * time.Minute
+		}
+	} else {
+		chainsyncDur = 2 * time.Minute
+	}
+	return Config{
+		cfg:                   cfg,
+		logger:                logger,
+		cardanoNodeConfig:     cardanoCfg,
+		topologyConfig:        topoCfg,
+		promRegistry:          promRegistry,
+		chainsyncStallTimeout: chainsyncDur,
+	}
 }
 
 // WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is mostly used for loading genesis config files
@@ -515,28 +476,28 @@ func WithCardanoNodeConfig(
 // (Blockfrost, Mesh, UTxO RPC). The default is "0.0.0.0" (all interfaces).
 func WithBindAddr(addr string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.bindAddr = addr
+		c.cfg.BindAddr = addr
 	}
 }
 
 // WithDatabasePath specifies the persistent data directory to use. The default is to store everything in memory
 func WithDatabasePath(dataDir string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.dataDir = dataDir
+		c.cfg.DatabasePath = dataDir
 	}
 }
 
 // WithBlobPlugin specifies the blob storage plugin to use.
 func WithBlobPlugin(plugin string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.blobPlugin = plugin
+		c.cfg.BlobPlugin = plugin
 	}
 }
 
 // WithMetadataPlugin specifies the metadata storage plugin to use.
 func WithMetadataPlugin(plugin string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.metadataPlugin = plugin
+		c.cfg.MetadataPlugin = plugin
 	}
 }
 
@@ -550,7 +511,7 @@ func WithIntersectPoints(points []ocommon.Point) ConfigOptionFunc {
 // WithIntersectTip specifies whether to start the initial chainsync at the current tip. The default is to start at chain genesis
 func WithIntersectTip(intersectTip bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.intersectTip = intersectTip
+		c.cfg.IntersectTip = intersectTip
 	}
 }
 
@@ -571,49 +532,50 @@ func WithListeners(listeners ...ListenerConfig) ConfigOptionFunc {
 // WithNetwork specifies the named network to operate on. This will automatically set the appropriate network magic value
 func WithNetwork(network string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.network = network
+		c.cfg.Network = network
 	}
 }
 
 // WithNetworkMagic specifies the network magic value to use. This will override any named network specified
 func WithNetworkMagic(networkMagic uint32) ConfigOptionFunc {
 	return func(c *Config) {
-		c.networkMagic = networkMagic
+		c.cfg.NetworkMagic = networkMagic
 	}
 }
 
 // WithOutboundSourcePort specifies the source port to use for outbound connections. This defaults to dynamic source ports
 func WithOutboundSourcePort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.outboundSourcePort = port
+		c.cfg.RelayPort = port
 	}
 }
 
 // WithUtxorpcTlsCertFilePath specifies the path to the TLS certificate for the gRPC API listener. This defaults to empty
 func WithUtxorpcTlsCertFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.tlsCertFilePath = path
+		c.cfg.TlsCertFilePath = path
 	}
 }
 
 // WithUtxorpcTlsKeyFilePath specifies the path to the TLS key for the gRPC API listener. This defaults to empty
 func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.tlsKeyFilePath = path
+		c.cfg.TlsKeyFilePath = path
 	}
 }
 
 // WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
 func WithUtxorpcPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.utxorpcPort = port
+		c.cfg.UtxorpcPort = port
 	}
 }
 
 // WithPeerSharing specifies whether to enable peer sharing. This is disabled by default
 func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.peerSharing = peerSharing
+		ps := peerSharing
+		c.cfg.PeerSharing = &ps
 	}
 }
 
@@ -652,14 +614,14 @@ func WithTracingStdout(stdout bool) ConfigOptionFunc {
 // WithShutdownTimeout specifies the timeout for graceful shutdown. The default is 30 seconds
 func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
-		c.shutdownTimeout = timeout
+		c.cfg.ShutdownTimeout = timeout.String()
 	}
 }
 
 // WithMempoolCapacity sets the mempool capacity (in bytes)
 func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.mempoolCapacity = capacity
+		c.cfg.MempoolCapacity = capacity
 	}
 }
 
@@ -671,7 +633,7 @@ func WithEvictionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.evictionWatermark = watermark
+		c.cfg.EvictionWatermark = watermark
 	}
 }
 
@@ -683,7 +645,7 @@ func WithRejectionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.rejectionWatermark = watermark
+		c.cfg.RejectionWatermark = watermark
 	}
 }
 
@@ -691,7 +653,7 @@ func WithRejectionWatermark(
 // "dev" mode enables development behaviors (forge blocks, disable outbound).
 func WithRunMode(mode string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.runMode = mode
+		c.cfg.RunMode = internalconfig.RunMode(mode)
 	}
 }
 
@@ -699,14 +661,14 @@ func WithRunMode(mode string) ConfigOptionFunc {
 // genesis protocol version; "dijkstra" starts directly in the Dijkstra era.
 func WithStartEra(startEra string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.startEra = internalconfig.StartEra(startEra)
+		c.cfg.StartEra = internalconfig.StartEra(startEra)
 	}
 }
 
 // WithValidateHistorical specifies whether to validate all historical blocks during ledger processing
 func WithValidateHistorical(validate bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.validateHistorical = validate
+		c.cfg.ValidateHistorical = validate
 	}
 }
 
@@ -715,7 +677,7 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 // silently skipped condition. See database.Config.StrictUtxoValidation.
 func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.strictUtxoValidation = strict
+		c.cfg.StrictUtxoValidation = strict
 	}
 }
 
@@ -724,7 +686,8 @@ func WithDatabaseWorkerPoolConfig(
 	cfg ledger.DatabaseWorkerPoolConfig,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.DatabaseWorkerPoolConfig = cfg
+		c.cfg.DatabaseWorkers = cfg.WorkerPoolSize
+		c.cfg.DatabaseQueueSize = cfg.TaskQueueSize
 	}
 }
 
@@ -735,9 +698,9 @@ func WithPeerTargets(
 	targetKnown, targetEstablished, targetActive int,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.targetNumberOfKnownPeers = targetKnown
-		c.targetNumberOfEstablishedPeers = targetEstablished
-		c.targetNumberOfActivePeers = targetActive
+		c.cfg.TargetNumberOfKnownPeers = targetKnown
+		c.cfg.TargetNumberOfEstablishedPeers = targetEstablished
+		c.cfg.TargetNumberOfActivePeers = targetActive
 	}
 }
 
@@ -748,9 +711,9 @@ func WithActivePeersQuotas(
 	topologyQuota, gossipQuota, ledgerQuota int,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.activePeersTopologyQuota = topologyQuota
-		c.activePeersGossipQuota = gossipQuota
-		c.activePeersLedgerQuota = ledgerQuota
+		c.cfg.ActivePeersTopologyQuota = topologyQuota
+		c.cfg.ActivePeersGossipQuota = gossipQuota
+		c.cfg.ActivePeersLedgerQuota = ledgerQuota
 	}
 }
 
@@ -769,7 +732,7 @@ func WithLedgerPeerTarget(n int) ConfigOptionFunc {
 func WithMinHotPeers(n int) ConfigOptionFunc {
 	return func(c *Config) {
 		if n > 0 {
-			c.minHotPeers = n
+			c.cfg.MinHotPeers = n
 		}
 	}
 }
@@ -779,7 +742,7 @@ func WithMinHotPeers(n int) ConfigOptionFunc {
 // score ordering. Non-positive values use the peer-governor default.
 func WithBootstrapPromotionMinDiversityGroups(n int) ConfigOptionFunc {
 	return func(c *Config) {
-		c.bootstrapPromotionMinDiversityGroups = n
+		c.cfg.GenesisBootstrap.PromotionMinDiversityGroups = n
 	}
 }
 
@@ -788,7 +751,7 @@ func WithBootstrapPromotionMinDiversityGroups(n int) ConfigOptionFunc {
 func WithReconcileInterval(d time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		if d > 0 {
-			c.reconcileInterval = d
+			c.cfg.ReconcileInterval = d
 		}
 	}
 }
@@ -798,7 +761,7 @@ func WithReconcileInterval(d time.Duration) ConfigOptionFunc {
 func WithInactivityTimeout(d time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		if d > 0 {
-			c.inactivityTimeout = d
+			c.cfg.InactivityTimeout = d
 		}
 	}
 }
@@ -816,23 +779,23 @@ func WithInboundPeerGovernance(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		if warmTarget > 0 {
-			c.inboundWarmTarget = warmTarget
+			c.cfg.InboundWarmTarget = warmTarget
 		}
 		if hotQuota > 0 {
-			c.inboundHotQuota = hotQuota
+			c.cfg.InboundHotQuota = hotQuota
 		}
 		if minTenure > 0 {
-			c.inboundMinTenure = minTenure
+			c.cfg.InboundMinTenure = minTenure
 		}
 		if hotScoreThreshold > 0 {
-			c.inboundHotScoreThreshold = hotScoreThreshold
+			c.cfg.InboundHotScoreThreshold = hotScoreThreshold
 		}
 		if pruneAfter > 0 {
-			c.inboundPruneAfter = pruneAfter
+			c.cfg.InboundPruneAfter = pruneAfter
 		}
-		c.inboundDuplexOnlyForHot = duplexOnlyForHot
+		c.cfg.InboundDuplexOnlyForHot = duplexOnlyForHot
 		if cooldown > 0 {
-			c.inboundCooldown = cooldown
+			c.cfg.InboundCooldown = cooldown
 		}
 	}
 }
@@ -842,7 +805,7 @@ func WithInboundPeerGovernance(
 func WithMaxConnectionsPerIP(n int) ConfigOptionFunc {
 	return func(c *Config) {
 		if n > 0 {
-			c.maxConnectionsPerIP = n
+			c.cfg.MaxConnectionsPerIP = n
 		}
 	}
 }
@@ -852,7 +815,7 @@ func WithMaxConnectionsPerIP(n int) ConfigOptionFunc {
 func WithMaxInboundConns(n int) ConfigOptionFunc {
 	return func(c *Config) {
 		if n > 0 {
-			c.maxInboundConns = n
+			c.cfg.MaxInboundConns = n
 		}
 	}
 }
@@ -862,7 +825,7 @@ func WithMaxInboundConns(n int) ConfigOptionFunc {
 // configured Genesis window of the best known peer tip.
 func WithGenesisBootstrap(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.genesisBootstrap = enabled
+		c.cfg.GenesisBootstrap.Enabled = enabled
 	}
 }
 
@@ -871,7 +834,7 @@ func WithGenesisBootstrap(enabled bool) ConfigOptionFunc {
 // using 3k/f.
 func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.genesisWindowSlots = slots
+		c.cfg.GenesisBootstrap.WindowSlots = slots
 	}
 }
 
@@ -879,7 +842,7 @@ func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
 // When enabled, the node will attempt to produce blocks using the configured credentials.
 func WithBlockProducer(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.blockProducer = enabled
+		c.cfg.BlockProducer = enabled
 	}
 }
 
@@ -887,7 +850,7 @@ func WithBlockProducer(enabled bool) ConfigOptionFunc {
 // Required for block production.
 func WithShelleyVRFKey(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.shelleyVRFKey = path
+		c.cfg.ShelleyVRFKey = path
 	}
 }
 
@@ -895,7 +858,7 @@ func WithShelleyVRFKey(path string) ConfigOptionFunc {
 // Required for block production.
 func WithShelleyKESKey(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.shelleyKESKey = path
+		c.cfg.ShelleyKESKey = path
 	}
 }
 
@@ -903,7 +866,7 @@ func WithShelleyKESKey(path string) ConfigOptionFunc {
 // (CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE). Required for block production.
 func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.shelleyOperationalCertificate = path
+		c.cfg.ShelleyOperationalCertificate = path
 	}
 }
 
@@ -913,7 +876,7 @@ func WithShelleyOperationalCertificate(path string) ConfigOptionFunc {
 // votes for endorser blocks. Experimental, leios runMode only.
 func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.leiosVoteSigningKeyFile = path
+		c.cfg.LeiosVoteSigningKeyFile = path
 	}
 }
 
@@ -925,7 +888,7 @@ func WithLeiosVoteSigningKeyFile(path string) ConfigOptionFunc {
 func WithLeiosVoterPublicKeys(keys map[string]string) ConfigOptionFunc {
 	return func(c *Config) {
 		// Copy so later caller mutations cannot change live config
-		c.leiosVoterPublicKeys = maps.Clone(keys)
+		c.cfg.LeiosVoterPublicKeys = maps.Clone(keys)
 	}
 }
 
@@ -945,7 +908,7 @@ func WithLeiosPipelineTiming(timing leios.PipelineTiming) ConfigOptionFunc {
 // Use 0 to fall back to the built-in default.
 func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.forgeSyncToleranceSlots = slots
+		c.cfg.ForgeSyncToleranceSlots = slots
 	}
 }
 
@@ -953,7 +916,7 @@ func WithForgeSyncToleranceSlots(slots uint64) ConfigOptionFunc {
 // Use 0 to fall back to the built-in default.
 func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.forgeStaleGapThresholdSlots = slots
+		c.cfg.ForgeStaleGapThresholdSlots = slots
 	}
 }
 
@@ -964,7 +927,7 @@ func WithForgeStaleGapThresholdSlots(slots uint64) ConfigOptionFunc {
 // being adopted or diffused. Disabled by default.
 func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
-		c.validateForgedBlock = enabled
+		c.cfg.ValidateForgedBlock = enabled
 	}
 }
 
@@ -974,32 +937,35 @@ func WithValidateForgedBlock(enabled bool) ConfigOptionFunc {
 // server (default).
 func WithBlockfrostPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.blockfrostPort = port
+		c.cfg.BlockfrostPort = port
 	}
 }
 
 func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkBaseUrl = baseUrl
+		c.cfg.BarkBaseUrl = baseUrl
 	}
 }
 
 func WithBarkBlockDownloadHosts(hosts []string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkBlockDownloadHosts = slices.Clone(hosts)
+		c.cfg.BarkBlockDownloadHosts = slices.Clone(hosts)
 	}
 }
 
 func WithBarkPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.barkPort = port
+		c.cfg.BarkPort = port
 	}
 }
 
 // WithHistoryExpiry configures local immutable block history expiry.
 func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 	return func(c *Config) {
-		c.historyExpiry = cfg
+		c.cfg.HistoryExpiry = internalconfig.HistoryExpiryConfig{
+			Enabled:   cfg.Enabled,
+			Frequency: cfg.Frequency,
+		}
 	}
 }
 
@@ -1008,7 +974,7 @@ func WithHistoryExpiry(cfg HistoryExpiryConfig) ConfigOptionFunc {
 // disable CORS headers.
 func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 	return func(c *Config) {
-		c.corsAllowedOrigins = slices.Clone(origins)
+		c.cfg.CORSAllowedOrigins = slices.Clone(origins)
 	}
 }
 
@@ -1016,14 +982,38 @@ func WithCORSAllowedOrigins(origins []string) ConfigOptionFunc {
 // fetcher. Zero values use the fetcher's internal defaults.
 func WithOffchainMetadataConfig(cfg OffchainMetadataConfig) ConfigOptionFunc {
 	return func(c *Config) {
+		// Preserve the programmatic runtime-only HTTPClient and full cfg
 		c.offchainMetadata = cfg
+		c.cfg.OffchainMetadata = internalconfig.OffchainMetadataConfig{
+			Interval:              cfg.Interval,
+			RequestTimeout:        cfg.RequestTimeout,
+			UserAgent:             cfg.UserAgent,
+			IPFSGatewayURL:        cfg.IPFSGatewayURL,
+			BatchSize:             cfg.BatchSize,
+			MaxBytes:              cfg.MaxBytes,
+			AllowPrivateAddresses: cfg.AllowPrivateAddresses,
+		}
 	}
 }
 
 // WithMidnightConfig configures the Midnight indexer and optional gRPC API.
 func WithMidnightConfig(cfg MidnightConfig) ConfigOptionFunc {
 	return func(c *Config) {
-		c.midnight = cfg
+		c.cfg.Midnight = internalconfig.MidnightConfig{
+			Port:                        cfg.Port,
+			Host:                        cfg.Host,
+			CNightPolicyID:              cfg.CNightPolicyID,
+			CNightAssetName:             cfg.CNightAssetName,
+			MappingValidatorAddress:     cfg.MappingValidatorAddress,
+			AuthTokenPolicyID:           cfg.AuthTokenPolicyID,
+			AuthTokenAssetName:          cfg.AuthTokenAssetName,
+			CommitteeCandidateAddress:   cfg.CommitteeCandidateAddress,
+			TechnicalCommitteeAddress:   cfg.TechnicalCommitteeAddress,
+			TechnicalCommitteePolicyID:  cfg.TechnicalCommitteePolicyID,
+			CouncilAddress:              cfg.CouncilAddress,
+			CouncilPolicyID:             cfg.CouncilPolicyID,
+			PermissionedCandidatePolicy: cfg.PermissionedCandidatePolicy,
+		}
 	}
 }
 
@@ -1033,7 +1023,7 @@ func WithChainsyncMaxClients(
 	maxClients int,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.chainsyncMaxClients = maxClients
+		c.cfg.Chainsync.MaxClients = maxClients
 	}
 }
 
@@ -1044,6 +1034,7 @@ func WithChainsyncStallTimeout(
 	timeout time.Duration,
 ) ConfigOptionFunc {
 	return func(c *Config) {
+		c.cfg.Chainsync.StallTimeout = timeout.String()
 		c.chainsyncStallTimeout = timeout
 	}
 }
@@ -1056,7 +1047,7 @@ func WithChainsyncHeaderStrategy(
 	strategy chainsync.HeaderSyncStrategy,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.chainsyncStrategy = strategy
+		c.cfg.Chainsync.Strategy = strategy.String()
 	}
 }
 
@@ -1066,7 +1057,7 @@ func WithChainsyncHeaderStrategy(
 // server (default).
 func WithMeshPort(port uint) ConfigOptionFunc {
 	return func(c *Config) {
-		c.meshPort = port
+		c.cfg.MeshPort = port
 	}
 }
 
@@ -1075,7 +1066,7 @@ func WithMeshPort(port uint) ConfigOptionFunc {
 // transaction metadata for API queries.
 func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 	return func(c *Config) {
-		c.storageMode = mode
+		c.cfg.StorageMode = string(mode)
 	}
 }
 
@@ -1083,9 +1074,499 @@ func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 // hot UTxO, and hot TX caches.
 func WithCacheConfig(blockLRU, hotUtxo, hotTx int, hotTxMaxBytes int64) ConfigOptionFunc {
 	return func(c *Config) {
-		c.cacheBlockLRUEntries = blockLRU
-		c.cacheHotUtxoEntries = hotUtxo
-		c.cacheHotTxEntries = hotTx
-		c.cacheHotTxMaxBytes = hotTxMaxBytes
+		c.cfg.Cache.BlockLRUEntries = blockLRU
+		c.cfg.Cache.HotUtxoEntries = hotUtxo
+		c.cfg.Cache.HotTxEntries = hotTx
+		c.cfg.Cache.HotTxMaxBytes = hotTxMaxBytes
 	}
+}
+
+// Accessor methods for reading config values.
+// These provide the single public interface for accessing configuration fields,
+// eliminating direct access to the internal config struct.
+
+// Network returns the configured network name.
+func (c *Config) Network() string {
+	return c.cfg.Network
+}
+
+// NetworkMagic returns the configured network magic value.
+func (c *Config) NetworkMagic() uint32 {
+	return c.cfg.NetworkMagic
+}
+
+// DatabasePath returns the persistent data directory path.
+func (c *Config) DatabasePath() string {
+	return c.cfg.DatabasePath
+}
+
+// SocketPath returns the path to the UNIX domain socket for local client API.
+func (c *Config) SocketPath() string {
+	return c.cfg.SocketPath
+}
+
+// CardanoConfig returns the path to the cardano-node config JSON file.
+func (c *Config) CardanoConfig() string {
+	return c.cfg.CardanoConfig
+}
+
+// Topology returns the topology file path.
+func (c *Config) Topology() string {
+	return c.cfg.Topology
+}
+
+// BlobPlugin returns the configured blob storage plugin name.
+func (c *Config) BlobPlugin() string {
+	return c.cfg.BlobPlugin
+}
+
+// MetadataPlugin returns the configured metadata storage plugin name.
+func (c *Config) MetadataPlugin() string {
+	return c.cfg.MetadataPlugin
+}
+
+// BindAddr returns the IP address for API listeners.
+func (c *Config) BindAddr() string {
+	return c.cfg.BindAddr
+}
+
+// PrivateBindAddr returns the IP address for the private NtC listener.
+func (c *Config) PrivateBindAddr() string {
+	return c.cfg.PrivateBindAddr
+}
+
+// RelayPort returns the source port for outbound connections.
+func (c *Config) RelayPort() uint {
+	return c.cfg.RelayPort
+}
+
+// PrivatePort returns the port for the private NtC listener.
+func (c *Config) PrivatePort() uint {
+	return c.cfg.PrivatePort
+}
+
+// MetricsPort returns the Prometheus metrics endpoint port.
+func (c *Config) MetricsPort() uint {
+	return c.cfg.MetricsPort
+}
+
+// DebugPort returns the pprof debug endpoint port. 0 disables the endpoint.
+func (c *Config) DebugPort() uint {
+	return c.cfg.DebugPort
+}
+
+// BlockfrostPort returns the Blockfrost API port. 0 disables the server.
+func (c *Config) BlockfrostPort() uint {
+	return c.cfg.BlockfrostPort
+}
+
+// UtxorpcPort returns the UTxO RPC gRPC API port. 0 disables the server.
+func (c *Config) UtxorpcPort() uint {
+	return c.cfg.UtxorpcPort
+}
+
+// MeshPort returns the Mesh (Rosetta) API port. 0 disables the server.
+func (c *Config) MeshPort() uint {
+	return c.cfg.MeshPort
+}
+
+// BarkPort returns the Bark API port. 0 disables the server.
+func (c *Config) BarkPort() uint {
+	return c.cfg.BarkPort
+}
+
+// BarkBaseUrl returns the base URL for the Bark service.
+func (c *Config) BarkBaseUrl() string {
+	return c.cfg.BarkBaseUrl
+}
+
+// BarkBlockDownloadHosts returns the list of allowed hosts for block downloads via Bark.
+func (c *Config) BarkBlockDownloadHosts() []string {
+	return c.cfg.BarkBlockDownloadHosts
+}
+
+// TlsCertFilePath returns the path to the TLS certificate for gRPC APIs.
+func (c *Config) TlsCertFilePath() string {
+	return c.cfg.TlsCertFilePath
+}
+
+// TlsKeyFilePath returns the path to the TLS key for gRPC APIs.
+func (c *Config) TlsKeyFilePath() string {
+	return c.cfg.TlsKeyFilePath
+}
+
+// IntersectTip returns whether to start chainsync at the current chain tip.
+func (c *Config) IntersectTip() bool {
+	return c.cfg.IntersectTip
+}
+
+// ValidateHistorical returns whether to validate all historical blocks.
+func (c *Config) ValidateHistorical() bool {
+	return c.cfg.ValidateHistorical
+}
+
+// StrictUtxoValidation returns whether to error out when a consumed UTxO cannot be found.
+func (c *Config) StrictUtxoValidation() bool {
+	return c.cfg.StrictUtxoValidation
+}
+
+// ShutdownTimeout returns the graceful shutdown timeout as a string duration.
+func (c *Config) ShutdownTimeout() string {
+	if c.cfg == nil {
+		return ""
+	}
+	return c.cfg.ShutdownTimeout
+}
+
+// ShutdownTimeoutDuration parses the configured graceful shutdown timeout.
+func (c *Config) ShutdownTimeoutDuration() (time.Duration, error) {
+	if c.cfg == nil {
+		return 0, nil
+	}
+	if c.cfg.ShutdownTimeout == "" {
+		return 0, nil
+	}
+	return time.ParseDuration(c.cfg.ShutdownTimeout)
+}
+
+// LedgerCatchupTimeout returns the maximum wait time for ledger catchup.
+func (c *Config) LedgerCatchupTimeout() string {
+	return c.cfg.LedgerCatchupTimeout
+}
+
+// MempoolCapacity returns the mempool capacity in bytes.
+func (c *Config) MempoolCapacity() int64 {
+	return c.cfg.MempoolCapacity
+}
+
+// EvictionWatermark returns the mempool eviction watermark (0.0-1.0).
+func (c *Config) EvictionWatermark() float64 {
+	return c.cfg.EvictionWatermark
+}
+
+// RejectionWatermark returns the mempool rejection watermark (0.0-1.0).
+func (c *Config) RejectionWatermark() float64 {
+	return c.cfg.RejectionWatermark
+}
+
+// RunMode returns the operational mode (serve, load, dev, or leios).
+func (c *Config) RunMode() internalconfig.RunMode {
+	return c.cfg.RunMode
+}
+
+// StartEra returns the experimental direct startup era.
+func (c *Config) StartEra() internalconfig.StartEra {
+	return c.cfg.StartEra
+}
+
+// ImmutableDbPath returns the path to an external ImmutableDB for load mode.
+func (c *Config) ImmutableDbPath() string {
+	return c.cfg.ImmutableDbPath
+}
+
+// StorageMode returns the storage mode (core or api).
+func (c *Config) StorageMode() string {
+	return c.cfg.StorageMode
+}
+
+// StorageModeEnum returns the storage mode as the typed StorageMode.
+func (c *Config) StorageModeEnum() StorageMode {
+	return StorageMode(c.cfg.StorageMode)
+}
+
+// SetStorageMode updates the storage mode. This is used during validation
+// when a mode-specific default must be applied.
+func (c *Config) SetStorageMode(mode string) {
+	c.cfg.StorageMode = mode
+}
+
+// DatabaseWorkers returns the number of database worker goroutines.
+func (c *Config) DatabaseWorkers() int {
+	return c.cfg.DatabaseWorkers
+}
+
+// DatabaseQueueSize returns the database task queue size.
+func (c *Config) DatabaseQueueSize() int {
+	return c.cfg.DatabaseQueueSize
+}
+
+// BackfillBatchSize returns the batch size for database backfill operations.
+func (c *Config) BackfillBatchSize() int {
+	return c.cfg.BackfillBatchSize
+}
+
+// TargetNumberOfKnownPeers returns the target number of known peers.
+func (c *Config) TargetNumberOfKnownPeers() int {
+	return c.cfg.TargetNumberOfKnownPeers
+}
+
+// SetTargetNumberOfKnownPeers updates the known peers target.
+// This is used when applying cardano-node config fallbacks.
+func (c *Config) SetTargetNumberOfKnownPeers(n int) {
+	c.cfg.TargetNumberOfKnownPeers = n
+}
+
+// TargetNumberOfEstablishedPeers returns the target number of established peers.
+func (c *Config) TargetNumberOfEstablishedPeers() int {
+	return c.cfg.TargetNumberOfEstablishedPeers
+}
+
+// SetTargetNumberOfEstablishedPeers updates the established peers target.
+// This is used when applying cardano-node config fallbacks.
+func (c *Config) SetTargetNumberOfEstablishedPeers(n int) {
+	c.cfg.TargetNumberOfEstablishedPeers = n
+}
+
+// TargetNumberOfActivePeers returns the target number of active peers.
+func (c *Config) TargetNumberOfActivePeers() int {
+	return c.cfg.TargetNumberOfActivePeers
+}
+
+// SetTargetNumberOfActivePeers updates the active peers target.
+// This is used when applying cardano-node config fallbacks.
+func (c *Config) SetTargetNumberOfActivePeers(n int) {
+	c.cfg.TargetNumberOfActivePeers = n
+}
+
+// ActivePeersTopologyQuota returns the per-source quota for topology peers.
+func (c *Config) ActivePeersTopologyQuota() int {
+	return c.cfg.ActivePeersTopologyQuota
+}
+
+// ActivePeersGossipQuota returns the per-source quota for gossip peers.
+func (c *Config) ActivePeersGossipQuota() int {
+	return c.cfg.ActivePeersGossipQuota
+}
+
+// ActivePeersLedgerQuota returns the per-source quota for ledger peers.
+func (c *Config) ActivePeersLedgerQuota() int {
+	return c.cfg.ActivePeersLedgerQuota
+}
+
+// MinHotPeers returns the minimum hot peers before aggressive promotion.
+func (c *Config) MinHotPeers() int {
+	return c.cfg.MinHotPeers
+}
+
+// ReconcileInterval returns the peer governor reconciliation interval.
+func (c *Config) ReconcileInterval() time.Duration {
+	return c.cfg.ReconcileInterval
+}
+
+// InactivityTimeout returns the hot peer inactivity timeout.
+func (c *Config) InactivityTimeout() time.Duration {
+	return c.cfg.InactivityTimeout
+}
+
+// InboundWarmTarget returns the inbound warm peer target.
+func (c *Config) InboundWarmTarget() int {
+	return c.cfg.InboundWarmTarget
+}
+
+// InboundHotQuota returns the inbound hot peer quota.
+func (c *Config) InboundHotQuota() int {
+	return c.cfg.InboundHotQuota
+}
+
+// InboundMinTenure returns the minimum tenure before inbound promotion.
+func (c *Config) InboundMinTenure() time.Duration {
+	return c.cfg.InboundMinTenure
+}
+
+// InboundHotScoreThreshold returns the score threshold for inbound hot promotion.
+func (c *Config) InboundHotScoreThreshold() float64 {
+	return c.cfg.InboundHotScoreThreshold
+}
+
+// InboundPruneAfter returns the duration before pruning idle inbound connections.
+func (c *Config) InboundPruneAfter() time.Duration {
+	return c.cfg.InboundPruneAfter
+}
+
+// InboundDuplexOnlyForHot returns whether duplex is required for hot inbound.
+func (c *Config) InboundDuplexOnlyForHot() bool {
+	return c.cfg.InboundDuplexOnlyForHot
+}
+
+// InboundCooldown returns the cooldown period after inbound demotion.
+func (c *Config) InboundCooldown() time.Duration {
+	return c.cfg.InboundCooldown
+}
+
+// MaxConnectionsPerIP returns the max concurrent inbound connections per IP.
+func (c *Config) MaxConnectionsPerIP() int {
+	return c.cfg.MaxConnectionsPerIP
+}
+
+// MaxInboundConns returns the maximum total inbound connections.
+func (c *Config) MaxInboundConns() int {
+	return c.cfg.MaxInboundConns
+}
+
+// Cache returns the cache configuration.
+func (c *Config) Cache() internalconfig.CacheConfig {
+	return c.cfg.Cache
+}
+
+// Chainsync returns the chainsync configuration.
+func (c *Config) Chainsync() internalconfig.ChainsyncConfig {
+	return c.cfg.Chainsync
+}
+
+// ChainsyncStallTimeoutDuration returns the parsed chainsync stall timeout.
+func (c *Config) ChainsyncStallTimeoutDuration() time.Duration {
+	if c.chainsyncStallTimeout != 0 {
+		return c.chainsyncStallTimeout
+	}
+	if c.cfg.Chainsync.StallTimeout != "" {
+		if d, err := time.ParseDuration(c.cfg.Chainsync.StallTimeout); err == nil {
+			return d
+		}
+	}
+	return 2 * time.Minute
+}
+
+// GenesisBootstrap returns the Genesis bootstrap configuration.
+func (c *Config) GenesisBootstrap() internalconfig.GenesisBootstrapConfig {
+	return c.cfg.GenesisBootstrap
+}
+
+// HistoryExpiry returns the history expiry configuration.
+func (c *Config) HistoryExpiry() internalconfig.HistoryExpiryConfig {
+	return c.cfg.HistoryExpiry
+}
+
+// OffchainMetadata returns the off-chain metadata fetcher configuration.
+func (c *Config) OffchainMetadata() internalconfig.OffchainMetadataConfig {
+	return c.cfg.OffchainMetadata
+}
+
+// Logging returns the logging configuration.
+func (c *Config) Logging() internalconfig.LoggingConfig {
+	return c.cfg.Logging
+}
+
+// Midnight returns the Midnight indexer configuration.
+func (c *Config) Midnight() internalconfig.MidnightConfig {
+	return c.cfg.Midnight
+}
+
+// CORSAllowedOrigins returns the CORS allowed origins list.
+func (c *Config) CORSAllowedOrigins() []string {
+	return c.cfg.CORSAllowedOrigins
+}
+
+// SlotsPerKESPeriod returns the number of slots per KES period.
+func (c *Config) SlotsPerKESPeriod() uint64 {
+	return c.cfg.SlotsPerKESPeriod
+}
+
+// MaxKESEvolutions returns the maximum number of KES key evolutions.
+func (c *Config) MaxKESEvolutions() uint64 {
+	return c.cfg.MaxKESEvolutions
+}
+
+// BlockProducer returns whether block production mode is enabled.
+func (c *Config) BlockProducer() bool {
+	return c.cfg.BlockProducer
+}
+
+// ShelleyVRFKey returns the path to the VRF signing key file.
+func (c *Config) ShelleyVRFKey() string {
+	return c.cfg.ShelleyVRFKey
+}
+
+// ShelleyKESKey returns the path to the KES signing key file.
+func (c *Config) ShelleyKESKey() string {
+	return c.cfg.ShelleyKESKey
+}
+
+// ShelleyOperationalCertificate returns the path to the operational certificate.
+func (c *Config) ShelleyOperationalCertificate() string {
+	return c.cfg.ShelleyOperationalCertificate
+}
+
+// ForgeSyncToleranceSlots returns the sync tolerance for block forging.
+func (c *Config) ForgeSyncToleranceSlots() uint64 {
+	return c.cfg.ForgeSyncToleranceSlots
+}
+
+// ForgeStaleGapThresholdSlots returns the stale gap threshold for warnings.
+func (c *Config) ForgeStaleGapThresholdSlots() uint64 {
+	return c.cfg.ForgeStaleGapThresholdSlots
+}
+
+// ValidateForgedBlock returns whether to self-validate forged blocks.
+func (c *Config) ValidateForgedBlock() bool {
+	return c.cfg.ValidateForgedBlock
+}
+
+// LeiosVoteSigningKeyFile returns the path to the Leios vote signing key.
+func (c *Config) LeiosVoteSigningKeyFile() string {
+	return c.cfg.LeiosVoteSigningKeyFile
+}
+
+// LeiosVoterPublicKeys returns the Leios voter public key registry.
+func (c *Config) LeiosVoterPublicKeys() map[string]string {
+	return c.cfg.LeiosVoterPublicKeys
+}
+
+// PeerSharing returns the peer sharing configuration.
+func (c *Config) PeerSharing() *bool {
+	return c.cfg.PeerSharing
+}
+
+// Mithril returns the Mithril bootstrap configuration.
+func (c *Config) Mithril() internalconfig.MithrilConfig {
+	return c.cfg.Mithril
+}
+
+// Logger returns the configured logger instance.
+func (c *Config) Logger() *slog.Logger {
+	return c.logger
+}
+
+// CardanoNodeConfig returns the loaded Cardano node configuration.
+func (c *Config) CardanoNodeConfig() *cardano.CardanoNodeConfig {
+	return c.cardanoNodeConfig
+}
+
+// TopologyConfig returns the loaded topology configuration.
+func (c *Config) TopologyConfig() *topology.TopologyConfig {
+	return c.topologyConfig
+}
+
+// PrometheusRegistry returns the Prometheus registry for metrics.
+func (c *Config) PrometheusRegistry() prometheus.Registerer {
+	return c.promRegistry
+}
+
+// IntersectPoints returns the intersect points for chainsync.
+func (c *Config) IntersectPoints() []ocommon.Point {
+	return c.intersectPoints
+}
+
+// Listeners returns the configured listener configurations.
+func (c *Config) Listeners() []ListenerConfig {
+	return c.listeners
+}
+
+// Tracing returns whether OpenTelemetry tracing is enabled.
+func (c *Config) Tracing() bool {
+	return c.tracing
+}
+
+// TracingStdout returns whether tracing output goes to stdout.
+func (c *Config) TracingStdout() bool {
+	return c.tracingStdout
+}
+
+// LedgerPeerTarget returns the target number of ledger peers.
+func (c *Config) LedgerPeerTarget() int {
+	return c.ledgerPeerTarget
+}
+
+// LeiosPipelineTiming returns the Leios pipeline timing configuration.
+func (c *Config) LeiosPipelineTiming() *leios.PipelineTiming {
+	return c.leiosPipelineTiming
 }

@@ -94,7 +94,7 @@ func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters() (
 // it into the ouroboros component's protocol handlers. Invalid voter
 // registry entries are fatal at startup.
 func (n *Node) initLeiosVoteManager(ctx context.Context) error {
-	registry, err := leios.NewVoterRegistry(n.config.leiosVoterPublicKeys)
+	registry, err := leios.NewVoterRegistry(n.config.LeiosVoterPublicKeys())
 	if err != nil {
 		return fmt.Errorf("invalid leios voter public keys: %w", err)
 	}
@@ -122,7 +122,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		// votes over the same window and cannot drift.
 		VoteWindowSlots: n.leiosPipelineTiming().VoteWindowSlots,
 		Registry:        registry,
-		PromRegistry:    n.config.promRegistry,
+		PromRegistry:    n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios vote manager: %w", err)
@@ -132,7 +132,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
-	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
+	if n.config.LeiosVoteSigningKeyFile() != "" && !n.config.BlockProducer() {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",
 			"component", "node",
@@ -144,8 +144,8 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 // leiosPipelineTiming returns the configured pipeline timing, falling back
 // to the provisional defaults when no override is set.
 func (n *Node) leiosPipelineTiming() leios.PipelineTiming {
-	if n.config.leiosPipelineTiming != nil {
-		return *n.config.leiosPipelineTiming
+	if n.config.LeiosPipelineTiming() != nil {
+		return *n.config.LeiosPipelineTiming()
 	}
 	return leios.DefaultPipelineTiming()
 }
@@ -165,7 +165,7 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 			ledgerState: n.ledgerState,
 		},
 		Timing:       n.leiosPipelineTiming(),
-		PromRegistry: n.config.promRegistry,
+		PromRegistry: n.config.PrometheusRegistry(),
 	})
 	if err != nil {
 		return fmt.Errorf("create leios pipeline manager: %w", err)
@@ -183,14 +183,14 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 // unreadable or invalid key is fatal.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
 	if n.leiosVoteManager == nil ||
-		n.config.leiosVoteSigningKeyFile == "" {
+		n.config.LeiosVoteSigningKeyFile() == "" {
 		return nil
 	}
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
 	key, err := leios.LoadVoteSigningKeyFile(
-		n.config.leiosVoteSigningKeyFile,
+		n.config.LeiosVoteSigningKeyFile(),
 	)
 	if err != nil {
 		return fmt.Errorf("load leios vote signing key: %w", err)

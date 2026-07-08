@@ -67,14 +67,14 @@ func newTestNodeForBP(
 	cardanoCfg *cardano.CardanoNodeConfig,
 ) *Node {
 	t.Helper()
-	cfg := Config{
-		logger:                        slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		blockProducer:                 enabled,
-		shelleyVRFKey:                 vrf,
-		shelleyKESKey:                 kes,
-		shelleyOperationalCertificate: opcert,
-		cardanoNodeConfig:             cardanoCfg,
-	}
+	cfg := NewConfig(
+		WithBlockProducer(enabled),
+		WithShelleyVRFKey(vrf),
+		WithShelleyKESKey(kes),
+		WithShelleyOperationalCertificate(opcert),
+		WithCardanoNodeConfig(cardanoCfg),
+	)
+	cfg.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	return &Node{config: cfg}
 }
 
@@ -179,7 +179,7 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
-	n.config.network = "preview"
+	WithNetwork("preview")(&n.config)
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartup: %v", err)
@@ -200,7 +200,7 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
-	n.config.network = "devnet"
+	WithNetwork("devnet")(&n.config)
 	creds, err := n.validateBlockProducerStartup()
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartup: %v", err)
@@ -218,11 +218,10 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
+	cfg := NewConfig(WithBlockProducer(true))
+	cfg.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := &Node{
-		config: Config{
-			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			blockProducer: true,
-		},
+		config: cfg,
 	}
 	sentinel := errors.New("db unavailable")
 	err := n.handleGenesisSnapshotError(sentinel)
@@ -238,11 +237,10 @@ func TestHandleGenesisSnapshotError_BlockProducerFatal(t *testing.T) {
 }
 
 func TestHandleGenesisSnapshotError_RelayWarnsAndContinues(t *testing.T) {
+	cfg := NewConfig(WithBlockProducer(false))
+	cfg.logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	n := &Node{
-		config: Config{
-			logger:        slog.New(slog.NewJSONHandler(io.Discard, nil)),
-			blockProducer: false,
-		},
+		config: cfg,
 	}
 	err := n.handleGenesisSnapshotError(errors.New("db unavailable"))
 	if err != nil {
