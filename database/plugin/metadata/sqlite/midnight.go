@@ -18,6 +18,7 @@ import (
 	"errors"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/pagination"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"gorm.io/gorm"
@@ -205,6 +206,12 @@ func (d *MetadataStoreSqlite) DeleteMidnightDeregistrationsByBlock(
 // FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
 // (block_number, tx_index) ascending, starting strictly after
 // (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// A page may return more than limit rows: (block_number, tx_index) is not a
+// unique key (a single tx can write multiple rows), so a page that would
+// otherwise cut a shared key in half is extended to include the rest of
+// that key's rows. This keeps the (start_block, start_tx_index) cursor
+// gap-free across pages.
 func (d *MetadataStoreSqlite) FindMidnightAssetCreatesFrom(
 	startBlock uint64,
 	startTxIndex uint32,
@@ -226,12 +233,15 @@ func (d *MetadataStoreSqlite) FindMidnightAssetCreatesFrom(
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return rows, nil
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
 }
 
 // FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
 // (block_number, tx_index) ascending, starting strictly after
 // (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
 func (d *MetadataStoreSqlite) FindMidnightAssetSpendsFrom(
 	startBlock uint64,
 	startTxIndex uint32,
@@ -253,12 +263,15 @@ func (d *MetadataStoreSqlite) FindMidnightAssetSpendsFrom(
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return rows, nil
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
 }
 
 // FindMidnightRegistrationsFrom returns registration rows ordered by
 // (block_number, tx_index) ascending, starting strictly after
 // (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
 func (d *MetadataStoreSqlite) FindMidnightRegistrationsFrom(
 	startBlock uint64,
 	startTxIndex uint32,
@@ -280,12 +293,15 @@ func (d *MetadataStoreSqlite) FindMidnightRegistrationsFrom(
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return rows, nil
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
 }
 
 // FindMidnightDeregistrationsFrom returns deregistration rows ordered by
 // (block_number, tx_index) ascending, starting strictly after
 // (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+//
+// See FindMidnightAssetCreatesFrom for why a page may return more than
+// limit rows.
 func (d *MetadataStoreSqlite) FindMidnightDeregistrationsFrom(
 	startBlock uint64,
 	startTxIndex uint32,
@@ -307,7 +323,7 @@ func (d *MetadataStoreSqlite) FindMidnightDeregistrationsFrom(
 	if err := query.Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return rows, nil
+	return pagination.ExtendPageToFullTxGroup(db, rows, limit)
 }
 
 func (d *MetadataStoreSqlite) GetMidnightCandidates(

@@ -227,7 +227,7 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `DeleteMidnightAssetSpendsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_spends` rows for the given block. Used during chain rollback; caller restores the returned UTxOs to the in-memory set. |
 | `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block. Used during chain rollback. |
 | `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
-| `FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)` | Returns `midnight_asset_creates` rows with `(block_number, tx_index) > (startBlock, startTxIndex)`, ordered `block_number ASC, tx_index ASC`, capped at `limit` (`limit <= 0` means no SQL LIMIT). Backs the MidnightState `GetAssetCreates` RPC. |
+| `FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)` | Returns `midnight_asset_creates` rows with `(block_number, tx_index) > (startBlock, startTxIndex)`, ordered `block_number ASC, tx_index ASC`, capped at `limit` (`limit <= 0` means no SQL LIMIT). May return more than `limit` rows: `(block_number, tx_index)` is not a unique key (one tx can write several rows to the same table), so a page that would otherwise end mid-key is extended, via `pagination.ExtendPageToFullTxGroup`, to include the rest of that key's rows — keeping the cursor gap-free instead of silently dropping the remainder on the next call. Backs the MidnightState `GetAssetCreates` RPC. |
 | `FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_asset_spends`. Backs `GetAssetSpends`. |
 | `FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_registrations`. Backs `GetRegistrations`. |
 | `FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_deregistrations`. Backs `GetDeregistrations`. |
@@ -264,7 +264,17 @@ deregistration=3), applies `end_block_hash` truncation and the `tx_capacity`
 limit, and returns the last emitted row's position as `next_position`.
 Fetching each table's own top-`tx_capacity` rows is sufficient for a correct
 merge, since a row beyond that position in its own table cannot be among the
-global top `tx_capacity` results.
+global top `tx_capacity` results. Truncating to `tx_capacity` extends forward
+while the next item shares the cutoff's `(block_number, tx_index)` key, for
+the same reason the per-table `Find*From` methods extend a page: a single tx
+can write rows of more than one kind (e.g. a create and a registration), and
+cutting between them would silently drop the remainder. `end_block_hash` is
+resolved to a block number via the handler's configured block-hash resolver
+(`node.go` wires `database.BlockByHash`), not by scanning the fetched event
+rows, so the boundary is honored even when the target block carries no
+Midnight events of its own. Both `utxo_capacity` and `tx_capacity` default to
+a bounded page size when omitted (proto3 zero value) and are clamped to a
+maximum, rather than being forwarded to the store as an unbounded scan.
 
 ### Stake Accounts and Certificate Tables
 

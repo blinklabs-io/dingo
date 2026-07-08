@@ -202,6 +202,52 @@ func TestFindMidnightDeregistrationsFrom_CursorPagination(t *testing.T) {
 	require.Equal(t, uint32(1), page2[0].TxIndex)
 }
 
+// TestFindMidnightAssetCreatesFrom_ExtendsPastLimitWithinSameTx verifies
+// that when a page's LIMIT would otherwise land in the middle of a single
+// transaction's rows (one tx can create several cNIGHT outputs), the page
+// is extended to include the rest of that transaction's rows rather than
+// silently dropping them on the next call.
+func TestFindMidnightAssetCreatesFrom_ExtendsPastLimitWithinSameTx(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	// tx (1,0) has 3 outputs; tx (2,0) has 1.
+	for i := range 3 {
+		require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    uint64(i + 1),
+			TxHash:      hashFor(1),
+			OutputIndex: uint32(i),
+			BlockNumber: 1,
+			BlockHash:   hashFor(1),
+			TxIndex:     0,
+		}))
+	}
+	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+		Address:     []byte{0x01},
+		Quantity:    99,
+		TxHash:      hashFor(2),
+		OutputIndex: 0,
+		BlockNumber: 2,
+		BlockHash:   hashFor(2),
+		TxIndex:     0,
+	}))
+
+	page, err := store.FindMidnightAssetCreatesFrom(0, 0, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, page, 3, "page must extend past limit=2 to include the full (1,0) tx group")
+	for _, row := range page {
+		require.Equal(t, uint64(1), row.BlockNumber)
+		require.Equal(t, uint32(0), row.TxIndex)
+	}
+
+	last := page[len(page)-1]
+	next, err := store.FindMidnightAssetCreatesFrom(last.BlockNumber, last.TxIndex, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, next, 1, "resuming after the extended page must not repeat any row and must find tx (2,0)")
+	require.Equal(t, uint64(2), next[0].BlockNumber)
+}
+
 // TestFindMidnightAssetCreatesFrom_NoLimit verifies limit <= 0 returns every
 // matching row without a SQL LIMIT applied.
 func TestFindMidnightAssetCreatesFrom_NoLimit(t *testing.T) {

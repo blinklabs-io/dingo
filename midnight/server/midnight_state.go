@@ -15,11 +15,11 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"sort"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/midnight"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -35,6 +35,65 @@ const (
 	utxoEventKindDeregistration
 )
 
+const (
+	// defaultEventPageSize is used when a request's capacity field is the
+	// proto3 zero value (unset), so a page always has a bounded size
+	// instead of triggering an unbounded store scan and response.
+	defaultEventPageSize = 1000
+	// maxEventPageSize caps a client-requested capacity so a single page
+	// can't force an unbounded scan/response.
+	maxEventPageSize = 10000
+)
+
+// effectivePageSize clamps a client-requested capacity to
+// [1, maxEventPageSize], substituting defaultEventPageSize when the request
+// omitted it (proto3 zero value). The store's own Find*From contract treats
+// limit <= 0 as "no SQL LIMIT", so RPC handlers must never forward a
+// non-positive capacity as-is.
+func effectivePageSize(requested uint32) int {
+	switch {
+	case requested == 0:
+		return defaultEventPageSize
+	case requested > maxEventPageSize:
+		return maxEventPageSize
+	default:
+		return int(requested)
+	}
+}
+
+// eventStore is the narrow slice of metadata.MetadataStore used by the
+// UTxO-event query RPCs. It is declared locally, rather than depending on
+// the full metadata.MetadataStore interface, so this gRPC-query package
+// does not carry unrelated write-path and lifecycle methods; any store
+// (e.g. *sqlite.MetadataStoreSqlite) that implements these four methods
+// satisfies it structurally, with no explicit declaration required.
+type eventStore interface {
+	FindMidnightAssetCreatesFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetCreate, error)
+	FindMidnightAssetSpendsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetSpend, error)
+	FindMidnightRegistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightRegistration, error)
+	FindMidnightDeregistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightDeregistration, error)
+}
+
 // GetAssetCreates returns cNIGHT UTxO creations starting strictly after
 // (start_block, start_tx_index), ordered by (block_number, tx_index)
 // ascending and capped at utxo_capacity rows.
@@ -48,7 +107,7 @@ func (s *service) GetAssetCreates(
 	rows, err := s.metadata.FindMidnightAssetCreatesFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
-		int(req.GetUtxoCapacity()),
+		effectivePageSize(req.GetUtxoCapacity()),
 		nil,
 	)
 	if err != nil {
@@ -74,7 +133,7 @@ func (s *service) GetAssetSpends(
 	rows, err := s.metadata.FindMidnightAssetSpendsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
-		int(req.GetUtxoCapacity()),
+		effectivePageSize(req.GetUtxoCapacity()),
 		nil,
 	)
 	if err != nil {
@@ -100,7 +159,7 @@ func (s *service) GetRegistrations(
 	rows, err := s.metadata.FindMidnightRegistrationsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
-		int(req.GetUtxoCapacity()),
+		effectivePageSize(req.GetUtxoCapacity()),
 		nil,
 	)
 	if err != nil {
@@ -126,7 +185,7 @@ func (s *service) GetDeregistrations(
 	rows, err := s.metadata.FindMidnightDeregistrationsFrom(
 		uint64(req.GetStartBlock()),
 		req.GetStartTxIndex(),
-		int(req.GetUtxoCapacity()),
+		effectivePageSize(req.GetUtxoCapacity()),
 		nil,
 	)
 	if err != nil {
@@ -173,7 +232,7 @@ func (s *service) GetUtxoEvents(
 		startBlock = uint64(pos.GetBlockNumber())
 		startTxIndex = pos.GetTxIndex()
 	}
-	limit := int(req.GetTxCapacity())
+	limit := effectivePageSize(req.GetTxCapacity())
 
 	creates, err := s.metadata.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, nil)
 	if err != nil {
@@ -261,12 +320,18 @@ func (s *service) GetUtxoEvents(
 	})
 
 	if endHash := req.GetEndBlockHash(); len(endHash) > 0 {
-		boundary, found := uint64(0), false
-		for _, item := range items {
-			if bytes.Equal(item.blockHash, endHash) {
-				boundary, found = item.blockNumber, true
-				break
-			}
+		if s.blockNumberByHash == nil {
+			return nil, status.Error(
+				codes.FailedPrecondition,
+				"end_block_hash requires a configured block resolver",
+			)
+		}
+		// Resolved independently of the fetched event rows: a block with no
+		// Midnight events of its own would never be found by scanning
+		// items, silently letting the response run past the boundary.
+		boundary, found, err := s.blockNumberByHash(endHash)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "resolve end_block_hash: %v", err)
 		}
 		if found {
 			cut := len(items)
@@ -281,7 +346,17 @@ func (s *service) GetUtxoEvents(
 	}
 
 	if limit > 0 && len(items) > limit {
-		items = items[:limit]
+		// Extend forward while the next item shares the cutoff's
+		// (block_number, tx_index) key, so a page never splits a single
+		// transaction's events across kinds (e.g. a create and a
+		// registration written by the same tx).
+		cut := limit
+		for cut < len(items) &&
+			items[cut].blockNumber == items[cut-1].blockNumber &&
+			items[cut].txIndex == items[cut-1].txIndex {
+			cut++
+		}
+		items = items[:cut]
 	}
 
 	events := make([]*midnight.UtxoEvent, len(items))

@@ -17,9 +17,7 @@ package server_test
 import (
 	"context"
 	"log/slog"
-	"net"
 	"os"
-	"strconv"
 	"testing"
 	"time"
 
@@ -28,6 +26,8 @@ import (
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // setupTestStore creates an in-memory sqlite metadata store with the schema
@@ -44,28 +44,12 @@ func setupTestStore(t *testing.T) *sqlite.MetadataStoreSqlite {
 	return store
 }
 
-// startTestServerWithMetadata starts a server backed by md and returns its
-// dial address. The server is stopped on test cleanup.
+// startTestServerWithMetadata starts a server backed by md (with no block
+// resolver configured) and returns its dial address. The server is stopped
+// on test cleanup.
 func startTestServerWithMetadata(t *testing.T, md *sqlite.MetadataStoreSqlite) string {
 	t.Helper()
-	port := freePort(t)
-	srv, err := server.New(server.Config{
-		Host:     "127.0.0.1",
-		Port:     port,
-		Metadata: md,
-	})
-	require.NoError(t, err)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	require.NoError(t, srv.Start(ctx))
-	t.Cleanup(func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopCancel()
-		require.NoError(t, srv.Stop(stopCtx))
-	})
-
-	return net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+	return startTestServerConfig(t, server.Config{Metadata: md})
 }
 
 func hashForByte(b byte) []byte {
@@ -312,4 +296,141 @@ func TestGetUtxoEvents_CursorPagination(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Empty(t, page3.GetEvents())
+}
+
+// TestGetUtxoEvents_TxCapacityDoesNotSplitTxGroup verifies that when
+// tx_capacity would otherwise cut through events sharing the same
+// (block_number, tx_index) but different kinds (e.g. a cNIGHT create and a
+// mapping-validator registration written by the same tx), the page is
+// extended to include the whole group rather than dropping the remainder.
+func TestGetUtxoEvents_TxCapacityDoesNotSplitTxGroup(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+		Address:     []byte{0x01},
+		Quantity:    1,
+		TxHash:      hashForByte(1),
+		OutputIndex: 0,
+		BlockNumber: 1,
+		BlockHash:   hashForByte(1),
+		TxIndex:     0,
+	}))
+	require.NoError(t, store.CreateMidnightRegistration(nil, &models.MidnightRegistration{
+		FullDatum:   []byte{0xd1},
+		TxHash:      hashForByte(2),
+		OutputIndex: 0,
+		BlockNumber: 1,
+		BlockHash:   hashForByte(1),
+		TxIndex:     0,
+	}))
+	require.NoError(t, store.CreateMidnightAssetSpend(nil, &models.MidnightAssetSpend{
+		Address:        []byte{0x01},
+		Quantity:       1,
+		SpendingTxHash: hashForByte(3),
+		UtxoTxHash:     hashForByte(4),
+		UtxoIndex:      0,
+		BlockNumber:    2,
+		BlockHash:      hashForByte(2),
+		TxIndex:        0,
+	}))
+
+	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// tx_capacity=1 would naturally cut after just the create, splitting
+	// the (1,0) group; the handler must extend to include the registration
+	// too, without pulling in the unrelated spend at (2,0).
+	resp, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 1})
+	require.NoError(t, err)
+	require.Len(t, resp.GetEvents(), 2, "must extend past tx_capacity to include the full (1,0) group")
+	require.NotNil(t, resp.GetEvents()[0].GetAssetCreate())
+	require.NotNil(t, resp.GetEvents()[1].GetRegistration())
+
+	next := resp.GetNextPosition()
+	require.NotNil(t, next)
+	require.Equal(t, uint32(1), next.GetBlockNumber())
+	require.Equal(t, uint32(0), next.GetTxIndex())
+
+	page2, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+		TxCapacity:    1,
+		StartPosition: next,
+	})
+	require.NoError(t, err)
+	require.Len(t, page2.GetEvents(), 1, "resuming must find exactly the spend, with no duplicates")
+	require.NotNil(t, page2.GetEvents()[0].GetAssetSpend())
+}
+
+// TestGetUtxoEvents_EndBlockHashRequiresResolver verifies end_block_hash
+// fails clearly when no block resolver is configured, instead of silently
+// ignoring the boundary.
+func TestGetUtxoEvents_EndBlockHashRequiresResolver(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	client := midnight.NewMidnightStateClient(dial(t, startTestServerWithMetadata(t, store)))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+		TxCapacity:   10,
+		EndBlockHash: hashForByte(1),
+	})
+	require.Error(t, err)
+	require.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+// TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents verifies the
+// end_block_hash boundary is honored even when the target block itself
+// carries no Midnight events — resolved via the configured block resolver,
+// not by scanning the fetched event rows (which would never find a hash
+// belonging to an event-less block).
+func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+		Address:     []byte{0x01},
+		Quantity:    1,
+		TxHash:      hashForByte(1),
+		OutputIndex: 0,
+		BlockNumber: 1,
+		BlockHash:   hashForByte(1),
+		TxIndex:     0,
+	}))
+	require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+		Address:     []byte{0x01},
+		Quantity:    1,
+		TxHash:      hashForByte(2),
+		OutputIndex: 0,
+		BlockNumber: 3,
+		BlockHash:   hashForByte(3),
+		TxIndex:     0,
+	}))
+
+	// Block 2 is resolvable on-chain but has zero Midnight events of its
+	// own.
+	blockNumbers := map[string]uint64{
+		string(hashForByte(1)): 1,
+		string(hashForByte(2)): 2,
+		string(hashForByte(3)): 3,
+	}
+	addr := startTestServerConfig(t, server.Config{
+		Metadata: store,
+		BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
+			n, ok := blockNumbers[string(hash)]
+			return n, ok, nil
+		},
+	})
+	client := midnight.NewMidnightStateClient(dial(t, addr))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{
+		TxCapacity:   10,
+		EndBlockHash: hashForByte(2),
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.GetEvents(), 1, "must include block 1's create but exclude block 3's, even though the boundary block 2 has no events of its own")
+	require.Equal(t, uint64(1), resp.GetEvents()[0].GetAssetCreate().GetBlockNumber())
 }

@@ -32,7 +32,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/midnight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -53,8 +52,15 @@ type Config struct {
 	// Metadata is the store backing the MidnightState query RPCs
 	// (GetAssetCreates, GetAssetSpends, GetRegistrations,
 	// GetDeregistrations, GetUtxoEvents). Nil leaves those RPCs
-	// unimplemented.
-	Metadata metadata.MetadataStore
+	// unimplemented. Any metadata.MetadataStore implementation satisfies
+	// this narrower interface structurally.
+	Metadata eventStore
+	// BlockNumberByHash resolves a Cardano block hash to its block number.
+	// It backs GetUtxoEvents' end_block_hash boundary so that boundary is
+	// honored even when the target block has no Midnight events of its
+	// own (found=false for an unknown hash, not an error). Nil causes
+	// GetUtxoEvents to fail requests that set end_block_hash.
+	BlockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
 	// Host and Port are the gRPC listen address. Defaults to 0.0.0.0:50051.
 	Host string
 	Port uint
@@ -140,7 +146,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// MidnightState service: the UTxO-event query RPCs are implemented
 	// against s.config.Metadata; every other RPC returns Unimplemented until
 	// its handler lands.
-	midnight.RegisterMidnightStateServer(grpcServer, &service{metadata: s.config.Metadata})
+	midnight.RegisterMidnightStateServer(grpcServer, &service{
+		metadata:          s.config.Metadata,
+		blockNumberByHash: s.config.BlockNumberByHash,
+	})
 
 	// Health service reporting SERVING for the overall server ("") and the
 	// MidnightState service by name.
@@ -259,5 +268,6 @@ func (s *Server) gracefulStop(timeout time.Duration) {
 // return codes.Unimplemented until its handler is added in follow-up work.
 type service struct {
 	midnight.UnimplementedMidnightStateServer
-	metadata metadata.MetadataStore
+	metadata          eventStore
+	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
 }

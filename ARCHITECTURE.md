@@ -810,20 +810,33 @@ ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
 service reporting `SERVING`. `Config.Metadata` (set to `n.db.Metadata()` in
-`node.go`) backs the five UTxO-event query RPCs — `GetAssetCreates`,
-`GetAssetSpends`, `GetRegistrations`, `GetDeregistrations`, and
-`GetUtxoEvents` — implemented in `midnight/server/midnight_state.go`; the
-first four page a single `midnight_*` table forward from a
-`(start_block, start_tx_index)` cursor, and `GetUtxoEvents` merge-sorts all
-four tables by `(block_number, tx_index, kind_order)` and returns a
-`next_position` cursor (see DATABASE.md's Midnight Indexer section for the
-merge algorithm). The remaining RPC bodies are still incomplete, tracked by
-the Midnight plan and issues #2118/#2119. TLS is enabled when the shared
-`tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the listener
-synchronously (so bind/cert errors surface immediately) and serves in a
-goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
-a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
-without affecting indexer eligibility.
+`node.go`, typed as a package-local `eventStore` interface rather than the
+full `metadata.MetadataStore` so this gRPC-query package doesn't carry
+unrelated write-path/lifecycle methods) backs the five UTxO-event query RPCs
+— `GetAssetCreates`, `GetAssetSpends`, `GetRegistrations`,
+`GetDeregistrations`, and `GetUtxoEvents` — implemented in
+`midnight/server/midnight_state.go`; the first four page a single
+`midnight_*` table forward from a `(start_block, start_tx_index)` cursor, and
+`GetUtxoEvents` merge-sorts all four tables by
+`(block_number, tx_index, kind_order)` and returns a `next_position` cursor
+(see DATABASE.md's Midnight Indexer section for the merge algorithm,
+including how page cutoffs extend to avoid splitting a transaction's rows).
+`Config.BlockNumberByHash` (set to a closure over `database.BlockByHash` in
+`node.go`) resolves `GetUtxoEvents`' `end_block_hash` to a block number
+independent of the fetched event rows, so the boundary is honored even for a
+block with no Midnight events; `GetUtxoEvents` fails with
+`codes.FailedPrecondition` if `end_block_hash` is set but no resolver was
+configured. `utxo_capacity`/`tx_capacity` are clamped server-side
+(`effectivePageSize`) to a bounded default/max instead of being forwarded
+to the store, since the store's own pagination contract treats a
+non-positive limit as unbounded. The remaining RPC bodies are still
+incomplete, tracked by the Midnight plan and issues #2118/#2119. TLS is
+enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
+binds the listener synchronously (so bind/cert errors surface immediately)
+and serves in a goroutine; a context watcher performs a bounded
+`GracefulStop`, escalating to a hard `Stop` on timeout. Setting
+`midnight.port` to `0` disables the server without affecting indexer
+eligibility.
 
 ### Off-chain Metadata Fetching
 

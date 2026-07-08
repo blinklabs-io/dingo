@@ -43,15 +43,17 @@ func freePort(t *testing.T) uint {
 	return uint(port) //nolint:gosec // port is always in range
 }
 
-// startTestServer starts a server on a free loopback port and returns its
-// dial address. The server is stopped on test cleanup.
-func startTestServer(t *testing.T) string {
+// startTestServerConfig starts a server with cfg (Host/Port populated from a
+// free loopback port, overriding whatever cfg set) and returns its dial
+// address. The server is stopped on test cleanup. Shared by every test
+// helper that needs a running server so the start/stop boilerplate and its
+// cleanup ordering live in exactly one place.
+func startTestServerConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
 	port := freePort(t)
-	srv, err := server.New(server.Config{
-		Host: "127.0.0.1",
-		Port: port,
-	})
+	cfg.Host = "127.0.0.1"
+	cfg.Port = port
+	srv, err := server.New(cfg)
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,6 +69,13 @@ func startTestServer(t *testing.T) string {
 	})
 
 	return net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
+}
+
+// startTestServer starts a server on a free loopback port and returns its
+// dial address. The server is stopped on test cleanup.
+func startTestServer(t *testing.T) string {
+	t.Helper()
+	return startTestServerConfig(t, server.Config{})
 }
 
 func dial(t *testing.T, addr string) *grpc.ClientConn {

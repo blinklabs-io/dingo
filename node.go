@@ -1098,8 +1098,18 @@ func (n *Node) Run(ctx context.Context) error {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
-				Logger:          n.config.logger,
-				Metadata:        n.db.Metadata(),
+				Logger:   n.config.logger,
+				Metadata: n.db.Metadata(),
+				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
+					block, err := database.BlockByHash(n.db, hash)
+					if err != nil {
+						if errors.Is(err, models.ErrBlockNotFound) {
+							return 0, false, nil
+						}
+						return 0, false, err
+					}
+					return block.Number, true, nil
+				},
 				Host:            n.config.midnight.Host,
 				Port:            n.config.midnight.Port,
 				TLSCertFilePath: n.config.tlsCertFilePath,
