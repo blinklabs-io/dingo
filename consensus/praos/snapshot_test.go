@@ -22,15 +22,19 @@ import (
 )
 
 func TestStakeSnapshotEpochUsesPraosRotation(t *testing.T) {
+	// Leader election in epoch E is validated against stake as of the end of
+	// epoch E-2. dingo's mark[K] holds stake as of the end of K-1, so that
+	// distribution is mark[E-1]; StakeSnapshotEpoch(E) therefore returns E-1
+	// (saturating to the genesis snapshot for the earliest epochs).
 	for _, tc := range []struct {
 		epoch uint64
 		want  uint64
 	}{
 		{epoch: 0, want: 0},
 		{epoch: 1, want: 0},
-		{epoch: 2, want: 0},
-		{epoch: 3, want: 1},
-		{epoch: 10, want: 8},
+		{epoch: 2, want: 1},
+		{epoch: 3, want: 2},
+		{epoch: 10, want: 9},
 	} {
 		assert.Equal(
 			t,

@@ -262,8 +262,11 @@ func TestCommitteeMemberLookups(t *testing.T) {
 }
 
 func TestCommitteeSnapshotEpoch(t *testing.T) {
+	// Mirrors praos.StakeSnapshotEpoch = E-1 (leader/committee stake is
+	// end-of-E-2 = mark[E-1]); values shifted +1 when the E-2 off-by-one was
+	// corrected.
 	for _, tc := range []struct{ epoch, want uint64 }{
-		{0, 0}, {1, 0}, {2, 0}, {3, 1}, {10, 8},
+		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {10, 9},
 	} {
 		assert.Equal(
 			t, tc.want, CommitteeSnapshotEpoch(tc.epoch),

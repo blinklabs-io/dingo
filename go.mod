@@ -17,7 +17,7 @@ require (
 	github.com/aws/smithy-go v1.27.3
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.187.2
+	github.com/blinklabs-io/gouroboros v0.187.3
 	github.com/blinklabs-io/ouroboros-mock v0.14.0
 	github.com/blinklabs-io/plutigo v0.1.16
 	github.com/blockfrost/blockfrost-go v0.4.0
@@ -59,7 +59,6 @@ require (
 )
 
 // XXX: uncomment when testing local changes to gouroboros
-// replace github.com/blinklabs-io/gouroboros => ../gouroboros
 
 // XXX: uncomment when testing local changes to plutigo
 // replace github.com/blinklabs-io/plutigo => ../plutigo

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -88,8 +89,8 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(
-			o.instrumentChainsyncRollForward(o.chainsyncClientRollForward),
+		ochainsync.WithRollForwardRawFunc(
+			o.instrumentChainsyncRollForwardRaw(o.chainsyncClientRollForwardRaw),
 		),
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
@@ -1281,13 +1282,54 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 	}
 }
 
-func (o *Ouroboros) instrumentChainsyncRollForward(
-	fn func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error,
-) func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error {
+// decodeChainsyncHeader decodes a chain-sync block header, choosing the decoder
+// by block type. On the Musashi prototype network, blocks tagged Conway (block
+// type 7) carry the Leios header extension (leios_certified/leios_announcement)
+// in place — a structurally extended Babbage header that gouroboros' strict
+// Conway header decoder rejects. Decode those via the Dijkstra header path,
+// which handles the trailing extension, so the strict Conway decoder that every
+// real Conway network relies on is left untouched. All other networks and block
+// types decode exactly as before.
+func (o *Ouroboros) decodeChainsyncHeader(
+	blockType uint,
+	raw []byte,
+) (gledger.BlockHeader, error) {
+	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
+		blockType == gledger.BlockTypeConway {
+		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	}
+	return gledger.NewBlockHeaderFromCbor(blockType, raw)
+}
+
+// chainsyncClientRollForwardRaw decodes the raw header itself (via
+// decodeChainsyncHeader) and forwards the decoded header to the shared
+// RollForward handler. dingo takes the raw callback so it can apply the
+// Musashi-scoped Conway-with-Leios-header decode; using the decoded callback
+// would let gouroboros' strict decode fail before dingo can intervene.
+func (o *Ouroboros) chainsyncClientRollForwardRaw(
+	ctx ochainsync.CallbackContext,
+	blockType uint,
+	blockData []byte,
+	tip ochainsync.Tip,
+) error {
+	header, err := o.decodeChainsyncHeader(blockType, blockData)
+	if err != nil {
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): %w",
+			blockType,
+			err,
+		)
+	}
+	return o.chainsyncClientRollForward(ctx, blockType, header, tip)
+}
+
+func (o *Ouroboros) instrumentChainsyncRollForwardRaw(
+	fn func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error {
 	return func(
 		ctx ochainsync.CallbackContext,
 		blockType uint,
-		blockData any,
+		blockData []byte,
 		tip ochainsync.Tip,
 	) error {
 		start := time.Now()

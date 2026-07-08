@@ -7,7 +7,7 @@ Dingo stores chain state in two sibling stores:
 
 The SQL schema is generated from GORM models in `database/models/` plus the plugin-local singleton tables `commit_timestamp` and `node_settings`. There are no checked-in SQL migrations; startup runs `AutoMigrate` for the active metadata plugin. The SQLite plugin migrates the full model set in one pass after its compatibility migrations so GORM-declared relationships and cascade constraints are present on fresh SQLite databases. On a database created before auto-migrate was enabled, adding a missing `OnDelete:CASCADE` foreign key rebuilds the child table with the constraint enforced; because those older databases never enforced the cascade, orphaned child rows may have accumulated (for example `asset` rows left behind when their `utxo` was deleted) and would fail the rebuild with `FOREIGN KEY constraint failed (787)`. To avoid this, every plugin purges orphaned rows whose cascade-FK parent no longer exists before running `AutoMigrate` (`models.PurgeOrphanedCascadeRows` in `database/models/purge_orphans.go`); this is a no-op once the foreign keys exist, since the constraint then prevents orphans.
 
-The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns.
+The Go model `models.Block` has `TableName() == "block"`, but it is not migrated into the metadata database. Blocks are stored in the blob store. SQL rows refer to blocks with `slot`, `block_hash`, and other hash columns. `Block.Decode` is Leios-aware for Conway-tagged blocks (`ledger.BlockTypeConway`): it calls `DecodeConwayBlock` (`database/models/leios_block.go`), which tries gouroboros' strict Conway decoder first and only falls back to reconstructing a Leios-extended block when strict decode fails. This is detection-based, so the Musashi prototype's Conway-tagged blocks (block type 7 carrying a 12-field Leios-extended header body) decode from stored CBOR while real Conway networks (mainnet/preprod/preview) are unaffected. The reconstruct preserves the original wire bytes, so `Block.Cbor()` returns the verbatim block and any `DOFF` byte offsets recorded against the stored block CBOR stay valid.
 
 ## API Surface
 
@@ -196,7 +196,6 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `redeemer` | `id`, `transaction_id`, `tag`, `index`, `data`, `ex_units_memory`, `ex_units_cpu` | PK `id`; indexes `transaction_id`, `tag`, `index` | API-mode redeemers. Join to `transaction.id`. |
 | `datum` | `id`, `hash`, `raw_datum`, `added_slot` | PK `id`; unique/index `hash`; index `added_slot` | API-mode datum hash index. UTxOs can reference it with `utxo.datum_hash = datum.hash`. |
 | `certs` | `id`, `transaction_id`, `cert_index`, `cert_type`, `certificate_id`, `slot`, `block_hash` | PK `id`; unique `(transaction_id, cert_index)`; indexes `transaction_id`, `certificate_id`, `cert_type`, `slot`, `block_hash` | Unified certificate index. `certificate_id` points to one specialized certificate table according to `cert_type`; this is logical, not DB-enforced. |
-| `endorser_transaction` | `id`, `hash`, `rb_slot` | PK `id`; unique `hash`; index `rb_slot` | Leios endorser-block conflict-resolution provenance (issue #2699), populated only on the Musashi prototype network; empty on every other network. One row per applied endorser-block (speculative) transaction, keyed by the same `transaction.hash` recorded in `utxo.tx_id` (its outputs) and `utxo.spent_at_tx_id` (its spends). `rb_slot` is the referencing ranking block's slot, used to prune on rollback (`rb_slot > slot`). Its presence marks a spend as a revocable speculative spend: when an authoritative ranking-block transaction needs an input a speculative endorser-block transaction already spent, that endorser transaction (and its endorser-on-endorser closure) is revoked — inputs restored via `spent_at_tx_id`, produced outputs deleted by `tx_id` — instead of wedging on "UTxO already spent". A conflict whose prior spender is not present here is a genuine ranking-block double-spend and still errors. |
 
 ### Midnight Indexer
 
@@ -375,19 +374,21 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
-Leios endorser-block transactions are stored the same way, even though an
+Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking
-block's referenced endorser block is applied (`ledger/leios_apply.go`), the
-endorser transactions' CBOR is written as a standalone blob under a `bp` +
-`(endorser-block slot, endorser-block hash)` key via `SetGenesisCbor` — which,
-like the genesis UTxO blob, writes only the `bp` and `bp..._metadata` keys and
-deliberately omits the `bi`/`bh` index keys, so the chain iterator never treats
-it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
-created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
-scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
-synthetic endorser/genesis blob is never returned as the "previous block." This
-matters for storage callers, but it does not make a slot-key scan a canonical
-chain query: retained fork blobs can still sort before an epoch boundary.
+block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
+writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
+endorser-block hash)` key. That `bp` value is the endorser-block offset blob
+used by cold extraction, not a chain block and not the transaction metadata
+rows. Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
+keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
+never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
+ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the
+`bp`-prefix scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0`
+blobs so a synthetic endorser/genesis blob is never returned as the "previous
+block." This matters for storage callers, but it does not make a slot-key scan
+a canonical chain query: retained fork blobs can still sort before an epoch
+boundary.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
 ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
 index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
@@ -410,34 +411,27 @@ commit in batches; the recorded trust-boundary point's row is the completion
 marker and commits last, so the heal is idempotent and a crash mid-heal resumes
 from the highest valid canonical row below the boundary. Fork rows at the
 boundary or below it do not mark completion or seed the fold when the canonical
-trust-boundary hash / primary-chain anchor is available. Each endorser
-transaction's `t` entry
-and its outputs' `u` entries store ordinary `DOFF` references whose
-`block_slot`/`block_hash` point at that endorser-block blob, so cold-extract
-resolution is identical to chain-block transactions. The transactions' metadata
-rows, however, are recorded under the referencing ranking block's point, so a
-rollback of the ranking block
+trust-boundary hash / primary-chain anchor is available.
+
+Whether the decoded endorser transactions are then applied to the ledger is
+selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
+`ARCHITECTURE.md`; wired from the network in `node.go`, false on the Musashi
+prototype and true elsewhere). On the CIP-conformant path (every network except
+Musashi), `LeiosApplyEndorserBlockTxs` persists the transaction-level apply
+data: each endorser transaction's `t` entry and its outputs' `u` entries store
+ordinary `DOFF` references whose `block_slot`/`block_hash` point at the
+standalone `bp` blob above, so cold-extract resolution is identical to
+chain-block transactions. The transactions' metadata rows are recorded under
+the referencing ranking block's point, so a rollback of the ranking block
 removes them (the orphaned endorser-block blob is harmless and re-created on
-reprocess).
+reprocess). On the Haskell-conformant path (Musashi,
+`LeiosApplyEndorserBlockTxs` false) only the standalone `bp` endorser-block blob
+above is written for historical serving and the node-to-client inline view; no
+`t`/`u` entries or metadata rows are created, because the endorser transactions
+are not applied to the UTxO set.
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.
-
-On the Musashi prototype network (where successive endorser blocks carry
-mutually-conflicting, never-confirmed mempool transactions) endorser-block
-application is additionally conflict-tolerant (issue #2699): an endorser
-transaction whose input is already spent is skipped rather than aborting the
-batch; any staged tx/UTxO blob offsets and metadata rows from the failed
-attempt are cleaned before continuing, so skipped transactions do not contribute
-donations, events, spend links, outputs, or API indexes. Each applied endorser
-transaction is recorded in `endorser_transaction` as a revocable speculative
-spend. When a later authoritative ranking-block transaction needs an input such
-a speculative transaction spent, the endorser transaction (and any endorser
-transaction that spent one of its outputs, transitively) is revoked — its
-consumed inputs restored through `utxo.spent_at_tx_id`, produced `utxo.tx_id`
-outputs deleted, and non-cascaded address and metadata-label index rows removed
-— before the ranking-block transaction is applied. This is gated off on every
-other network, where endorser-block transactions are applied unconditionally.
 
 ### Archive And History Expiry Contract
 
