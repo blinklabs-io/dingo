@@ -62,22 +62,30 @@ func deleteUtxoBlobs(d *Database, utxos []models.Utxo, _ *Txn) error {
 		for _, utxo := range utxos[start:end] {
 			if err := blob.DeleteUtxo(batchTxn.Blob(), utxo.TxId, utxo.OutputIdx); err != nil {
 				deleteErrors++
-				d.logger.Debug(
+				d.logger.Warn(
 					"failed to delete UTxO blob data",
 					"txid", hex.EncodeToString(utxo.TxId),
 					"output_idx", utxo.OutputIdx,
+					"added_slot", utxo.AddedSlot,
+					"deleted_slot", utxo.DeletedSlot,
 					"error", err,
 				)
 			}
 		}
 		if err := batchTxn.Commit(); err != nil {
 			_ = batchTxn.Rollback()
-			d.logger.Debug("blob delete batch commit failed", "error", err)
+			d.logger.Warn(
+				"UTxO blob delete batch commit failed",
+				"batch_start", start,
+				"batch_end", end,
+				"batch_size", end-start,
+				"error", err,
+			)
 		}
 	}
 	if deleteErrors > 0 {
-		d.logger.Debug(
-			"blob deletion completed with errors",
+		d.logger.Warn(
+			"UTxO blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
