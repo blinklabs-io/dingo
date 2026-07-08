@@ -983,7 +983,9 @@ func TestVoteManagerCommitteeMemoized(t *testing.T) {
 	require.NoError(t, err)
 	assert.Same(t, first, second)
 	assert.Equal(t, 1, fixture.stake.callCount())
-	assert.Equal(t, uint64(3), first.SnapshotEpoch)
+	// StakeSnapshotEpoch(5) = 5-1 = 4 (leader/committee stake is end-of-E-2 =
+	// mark[E-1]); this shifted from 3 when the E-2 off-by-one was corrected.
+	assert.Equal(t, uint64(4), first.SnapshotEpoch)
 
 	_, err = fixture.mgr.CommitteeForEpoch(4)
 	require.NoError(t, err)

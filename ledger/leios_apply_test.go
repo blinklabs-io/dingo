@@ -99,16 +99,6 @@ func requireLeiosApplyTestTxCount(
 	require.Equal(t, want, got)
 }
 
-func requireLeiosApplyTestNoEndorserBlob(
-	t *testing.T,
-	db *database.Database,
-	slot uint64,
-	hash []byte,
-) {
-	t.Helper()
-	require.False(t, db.HasGenesisCbor(slot, hash))
-}
-
 func requireLeiosApplyTestEndorserBlob(
 	t *testing.T,
 	db *database.Database,
@@ -128,15 +118,10 @@ func requireLeiosApplyTestEndorserBlob(
 	}))
 }
 
-func TestApplyEndorserBlockDedupSkipsCommittedTransaction(t *testing.T) {
+func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, _, tx := leiosApplyTestTx(t, 0x01)
-	require.NoError(t, gdb.Create(&models.Transaction{
-		Hash:  tx.Hash().Bytes(),
-		Type:  tx.Type(),
-		Slot:  99,
-		Valid: true,
-	}).Error)
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x01)
 
 	const ebSlot = uint64(200)
 	ebHash := leiosApplyTestEbHash(0x22)
@@ -155,74 +140,152 @@ func TestApplyEndorserBlockDedupSkipsCommittedTransaction(t *testing.T) {
 		return err
 	}))
 
-	require.Equal(t, 0, applied)
+	require.Equal(t, 1, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 1)
-	requireLeiosApplyTestNoEndorserBlob(t, db, ebSlot, ebHash)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+	// The transaction is recorded under the ranking block's point.
+	var got int64
+	require.NoError(t, gdb.Model(&models.Transaction{}).
+		Where("hash = ?", tx.Hash().Bytes()).
+		Count(&got).Error)
+	require.Equal(t, int64(1), got)
 }
 
-func TestApplyEndorserBlockDedupSeesEarlierEndorserBlockInBatch(t *testing.T) {
+func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, bodyCbor, _ := leiosApplyTestTx(t, 0x02)
-	firstEbHash := leiosApplyTestEbHash(0x44)
-	secondEbHash := leiosApplyTestEbHash(0x55)
-	firstApplied := -1
-	secondApplied := -1
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx1, body1, _ := leiosApplyTestTx(t, 0x02)
+	rawTx2, body2, _ := leiosApplyTestTx(t, 0x03)
 
-	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		var err error
-		firstApplied, err = ls.applyEndorserBlock(
-			txn,
-			leiosApplyTestRankingPoint(0x66),
-			1,
-			300,
-			firstEbHash,
-			[]cbor.RawMessage{rawTx},
-		)
-		if err != nil {
-			return err
-		}
-		secondApplied, err = ls.applyEndorserBlock(
-			txn,
-			leiosApplyTestRankingPoint(0x77),
-			2,
-			301,
-			secondEbHash,
-			[]cbor.RawMessage{rawTx},
-		)
-		return err
-	}))
-
-	require.Equal(t, 1, firstApplied)
-	require.Equal(t, 0, secondApplied)
-	requireLeiosApplyTestTxCount(t, gdb, 1)
-	requireLeiosApplyTestEndorserBlob(t, db, 300, firstEbHash, bodyCbor)
-	requireLeiosApplyTestNoEndorserBlob(t, db, 301, secondEbHash)
-}
-
-func TestApplyEndorserBlockDedupSkipsRepeatedTransactionInSameEndorserBlock(
-	t *testing.T,
-) {
-	ls, db, gdb := newLeiosApplyTestLedger(t)
-	rawTx, bodyCbor, _ := leiosApplyTestTx(t, 0x03)
-	ebHash := leiosApplyTestEbHash(0x88)
+	const ebSlot = uint64(300)
+	ebHash := leiosApplyTestEbHash(0x44)
 	applied := -1
-
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
 		applied, err = ls.applyEndorserBlock(
 			txn,
-			leiosApplyTestRankingPoint(0x99),
+			leiosApplyTestRankingPoint(0x55),
 			1,
-			400,
+			ebSlot,
 			ebHash,
-			[]cbor.RawMessage{rawTx, rawTx},
+			[]cbor.RawMessage{rawTx1, rawTx2},
 		)
 		return err
 	}))
 
-	require.Equal(t, 1, applied)
-	requireLeiosApplyTestTxCount(t, gdb, 1)
-	requireLeiosApplyTestEndorserBlob(t, db, 400, ebHash, bodyCbor)
+	require.Equal(t, 2, applied)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+	// The blob is a flat concatenation of each transaction's body CBOR (these
+	// transactions produce no outputs).
+	want := append(append([]byte{}, body1...), body2...)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
+}
+
+// On the Haskell-conformant path (Musashi prototype) the endorser block is
+// stored but its transactions are not applied to the UTxO.
+func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
+	rawTx, bodyCbor, _ := leiosApplyTestTx(t, 0x06)
+
+	const ebSlot = uint64(400)
+	ebHash := leiosApplyTestEbHash(0x66)
+	applied := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		applied, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x77),
+			1,
+			ebSlot,
+			ebHash,
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+
+	// Nothing applied to the UTxO, but the endorser blob is still stored.
+	require.Equal(t, 0, applied)
+	requireLeiosApplyTestTxCount(t, gdb, 0)
+	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+}
+
+// leiosTestHash returns a distinct 32-byte hash whose bytes are all b, usable
+// as both a map key (string form) and an endorser-block hash.
+func leiosTestHash(b byte) []byte {
+	return bytes.Repeat([]byte{b}, lcommon.Blake2b256Size)
+}
+
+// TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
+// endorser blocks are fetched on announcement; in the settled backlog they are
+// fetched only when a certifying ranking block certifies them (via its parent's
+// announcement), and uncertified historical announcements are skipped.
+func TestClassifyEndorserBlockFetches(t *testing.T) {
+	var (
+		hashA = leiosTestHash(0xA1) // announces ebA (historical)
+		hashC = leiosTestHash(0xC1) // certifies, parent = A (historical)
+		hashD = leiosTestHash(0xD1) // announces ebB (near head)
+		hashE = leiosTestHash(0xE1) // announces ebE (historical, uncertified)
+		ebA   = lcommon.NewBlake2b256(leiosTestHash(0x0A))
+		ebB   = lcommon.NewBlake2b256(leiosTestHash(0x0B))
+		ebE   = lcommon.NewBlake2b256(leiosTestHash(0x0E))
+	)
+	infos := []leiosBlockInfo{
+		{hash: string(hashA), slot: 100, announces: true, ebHash: ebA},
+		{hash: string(hashC), prevHash: string(hashA), slot: 140, certifies: true},
+		{hash: string(hashD), slot: 100_000, announces: true, ebHash: ebB},
+		{hash: string(hashE), slot: 200, announces: true, ebHash: ebE},
+	}
+	annByHash := map[string]leiosEbRef{
+		string(hashA): {slot: 100, hash: ebA},
+		string(hashD): {slot: 100_000, hash: ebB},
+		string(hashE): {slot: 200, hash: ebE},
+	}
+	neverCached := func(lcommon.Blake2b256) bool { return false }
+
+	// Haskell/cert-driven path. wallSlot 100050, waitSlots 100: slots 100/140/200
+	// are settled backlog, slot 100000 is within the head window.
+	backfill, tipWait := classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, true, neverCached,
+	)
+	// Only the certified endorser block (ebA, via CertRB C's parent A) is
+	// backfilled; the uncertified historical announcement (ebE) is skipped.
+	require.Len(t, backfill, 1)
+	require.Equal(t, ebA, backfill[0].hash)
+	require.Equal(t, uint64(100), backfill[0].slot)
+	// Only the near-head announcement (ebB) is fetched on announcement.
+	require.Len(t, tipWait, 1)
+	require.Equal(t, ebB, tipWait[0].hash)
+
+	// A cached endorser block is not refetched.
+	backfill, _ = classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, true,
+		func(h lcommon.Blake2b256) bool { return h == ebA },
+	)
+	require.Empty(t, backfill)
+
+	// CIP path (certDrivenHistorical=false): the settled backlog is
+	// announcement-driven, so every referenced historical endorser block is
+	// backfilled (ebA and ebE), not just certified ones, and the near-head
+	// announcement (ebB) still goes to tipWait.
+	backfill, tipWait = classifyEndorserBlockFetches(
+		infos, annByHash, 100_050, true, 100, false, neverCached,
+	)
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b256{ebA, ebE},
+		[]lcommon.Blake2b256{backfill[0].hash, backfill[1].hash},
+	)
+	require.Len(t, tipWait, 1)
+	require.Equal(t, ebB, tipWait[0].hash)
+
+	// With an unknown wall-clock slot every block is treated as near-head, so
+	// all announcements fetch on announcement and none go to backfill.
+	backfill, tipWait = classifyEndorserBlockFetches(
+		infos, annByHash, 0, false, 100, true, neverCached,
+	)
+	require.Empty(t, backfill)
+	require.Len(t, tipWait, 3) // ebA, ebB, ebE (all announcements)
 }

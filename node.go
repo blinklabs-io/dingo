@@ -319,12 +319,6 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.validateHistorical,
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.startEra.IsDijkstra(),
-			// The Musashi prototype network's successive endorser blocks carry
-			// mutually-conflicting, never-confirmed mempool transactions, so
-			// tolerate and resolve those conflicts (skip conflicting endorser
-			// spends, let authoritative ranking-block spends revoke them)
-			// instead of wedging on "UTxO already spent" (issue #2699).
-			LeiosTolerateEndorserConflicts: n.config.isMusashiNetwork(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -345,7 +339,26 @@ func (n *Node) Run(ctx context.Context) error {
 			// the still-diffusing tail) exceeds the diffusion window — so the
 			// certify deadline is the bound that matches when the EB is actually
 			// available to fetch.
-			EndorserBlockWaitSlots:     n.leiosPipelineTiming().CertifyByDeadlineSlots,
+			EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
+			// Two-path Leios ledger selection: the Musashi prototype
+			// (prototype-2026w27) does not apply endorser-block transactions to
+			// the UTxO (Haskell-conformant), whereas dingo's forward path applies
+			// them for real Leios throughput (CIP-conformant). Select the
+			// Haskell-conformant path on Musashi and the CIP-conformant path
+			// elsewhere.
+			LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
+			// dingo's leadership stake omits reward-account balances (staking
+			// rewards are not yet computed), which spuriously rejects the
+			// dominant pool's eligible blocks on Musashi's concentrated
+			// topology and wedges the chain. Trust rather than reject there
+			// until reward calculation lands; enforce on real networks where
+			// the omission is negligible.
+			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
+			// On Musashi, endorser txs are stored but not applied, so
+			// ranking-block txs spending endorser-resident outputs disagree on
+			// validation and are trusted anyway; skip the wasted per-tx
+			// validation so block application keeps up with the production rate.
+			SkipDijkstraTxValidation:   n.config.isMusashiNetwork(),
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

@@ -881,37 +881,6 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
-// GetExistingTransactionHashes returns the subset of the provided hashes that
-// are already recorded in the ledger. It is lightweight (hash column only) and
-// chunked to keep the IN clause within backend parameter limits. Used to skip
-// re-applying transactions an earlier endorser block already applied
-// (issue #2699).
-func (d *Database) GetExistingTransactionHashes(
-	hashes [][]byte,
-	txn *Txn,
-) ([][]byte, error) {
-	if len(hashes) == 0 {
-		return nil, nil
-	}
-	if txn == nil {
-		txn = d.Transaction(false)
-		defer txn.Release()
-	}
-	const chunk = 900
-	var existing [][]byte
-	for i := 0; i < len(hashes); i += chunk {
-		end := min(i+chunk, len(hashes))
-		part, err := d.metadata.ExistingTransactionHashes(
-			hashes[i:end], txn.Metadata(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get existing tx hashes: %w", err)
-		}
-		existing = append(existing, part...)
-	}
-	return existing, nil
-}
-
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *Database) GetTransactionsByHashes(
 	hashes [][]byte,
@@ -1385,18 +1354,6 @@ func (d *Database) TransactionsDeleteRolledback(
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete transactions after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-
-	// Drop endorser-transaction provenance for the undone spends (empty on
-	// networks that do not apply endorser blocks).
-	if err := d.metadata.DeleteEndorserTransactionsAfterSlot(
-		slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete endorser transactions after slot %d: %w",
 			slot,
 			err,
 		)

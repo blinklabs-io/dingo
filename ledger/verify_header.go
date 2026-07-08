@@ -342,6 +342,28 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 		threshold,
 		mode,
 	) {
+		// dingo's leadership stake is delegated UTxO only; staking rewards are
+		// not yet computed, so reward-account balances are missing from the
+		// stake distribution. On the prototype network the dominant pool's
+		// reward accrual pushes its true relative stake above the UTxO-only
+		// figure, so this UTxO-only threshold spuriously rejects its eligible
+		// blocks. Trust the block there (all cryptographic header checks above
+		// still passed) rather than wedge the chain; enforce elsewhere. See
+		// LedgerStateConfig.SkipLeaderStakeThresholdCheck.
+		if ls.config.SkipLeaderStakeThresholdCheck {
+			ls.config.Logger.Warn(
+				"leader eligibility below stake-derived threshold; trusting block (leadership stake omits reward balances)",
+				"slot", block.SlotNumber(),
+				"pool", hex.EncodeToString(poolKeyHash[:]),
+				"pool_stake", poolStake,
+				"total_stake", totalStake,
+				"epoch", epochId,
+				"snapshot_epoch", snapshotEpoch,
+				"snapshot_type", snapshotType,
+				"component", "ledger",
+			)
+			return nil
+		}
 		return fmt.Errorf(
 			"block header verification rejected at slot %d: "+
 				"producer pool %x VRF leader value exceeds stake-derived threshold "+
@@ -425,13 +447,30 @@ func (ls *LedgerState) leaderEligibilityStake(
 			)
 	}
 	if snapshot == nil || snapshot.TotalStake == 0 {
+		// Mirror cardano-ledger: a pool absent from the leader stake
+		// distribution is a hard rejection (the reference node's
+		// VRFKeyUnknown). The reference distribution (nesPd) is always
+		// populated, so an empty epoch snapshot here signals a dingo-side
+		// storage or computation gap (corrupt DB, incomplete Mithril import,
+		// pruned history) rather than genuine pool ineligibility. Surface that
+		// distinction to operators without changing the reject decision.
+		diag := "pool is absent from the epoch distribution"
+		if total, terr := ls.db.Metadata().GetTotalActiveStake(
+			snapshotEpoch,
+			snapshotType,
+			nil,
+		); terr == nil && total == 0 {
+			diag = "epoch mark snapshot is empty (no pools) - likely a " +
+				"storage or computation gap, not pool ineligibility"
+		}
 		return 0, 0, snapshotEpoch, snapshotType, false,
 			fmt.Errorf(
 				"block header verification rejected at slot %d: "+
-					"producer pool %x has no stake in epoch %d snapshot",
+					"producer pool %x has no stake in epoch %d snapshot (%s)",
 				block.SlotNumber(),
 				poolKeyHash[:],
 				snapshotEpoch,
+				diag,
 			)
 	}
 	if ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch) {

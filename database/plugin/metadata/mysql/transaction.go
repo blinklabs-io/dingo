@@ -82,28 +82,6 @@ func (d *MetadataStoreMysql) resolveReadDB(
 	return d.resolveDB(txn)
 }
 
-// ExistingTransactionHashes returns transaction hashes already recorded.
-func (d *MetadataStoreMysql) ExistingTransactionHashes(
-	hashes [][]byte,
-	txn types.Txn,
-) ([][]byte, error) {
-	if len(hashes) == 0 {
-		return nil, nil
-	}
-	db, err := d.resolveDB(txn)
-	if err != nil {
-		return nil, err
-	}
-	var existing [][]byte
-	result := db.Model(&models.Transaction{}).
-		Where("hash IN ?", hashes).
-		Pluck("hash", &existing)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return existing, nil
-}
-
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreMysql) GetTransactionByHash(
 	hash []byte,

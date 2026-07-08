@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -89,8 +90,12 @@ func (o *Ouroboros) blockfetchServerConnOpts() []blockfetch.BlockFetchOptionFunc
 
 func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc {
 	return []blockfetch.BlockFetchOptionFunc{
-		blockfetch.WithBlockFunc(
-			o.instrumentBlockfetchBlock(o.blockfetchClientBlock),
+		// Take the raw block callback so dingo decodes the block itself. This
+		// lets the Musashi-scoped Conway-with-Leios-header decode run; the
+		// decoded callback would let gouroboros' strict Conway decode fail
+		// before dingo can intervene (mirrors the chain-sync header path).
+		blockfetch.WithBlockRawFunc(
+			o.instrumentBlockfetchBlockRaw(o.blockfetchClientBlockRaw),
 		),
 		blockfetch.WithBatchDoneFunc(
 			o.instrumentBlockfetchBatchDone(o.blockfetchClientBatchDone),
@@ -98,6 +103,44 @@ func (o *Ouroboros) blockfetchClientConnOpts() []blockfetch.BlockFetchOptionFunc
 		blockfetch.WithBatchStartTimeout(60 * time.Second),
 		blockfetch.WithBlockTimeout(60 * time.Second),
 	}
+}
+
+// decodeBlockfetchBlock decodes a fetched block, choosing the decoder by block
+// type. On the Musashi prototype network, blocks tagged Conway (block type 7)
+// carry the Leios header extension (leios_certified/leios_announcement) in a
+// 12-field header body that gouroboros' strict Conway decoder rejects.
+// models.DecodeConwayBlock reconstructs those while preserving the original
+// wire bytes so the block hash matches the chain-sync header hash. The strict
+// Conway decoder that every real Conway network relies on is left untouched.
+// All other networks and block types decode exactly as gouroboros would.
+func (o *Ouroboros) decodeBlockfetchBlock(
+	blockType uint,
+	raw []byte,
+) (gledger.Block, error) {
+	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
+		blockType == gledger.BlockTypeConway {
+		return models.DecodeConwayBlock(raw)
+	}
+	return gledger.NewBlockFromCbor(blockType, raw)
+}
+
+// blockfetchClientBlockRaw decodes the raw fetched block (via
+// decodeBlockfetchBlock) and forwards the decoded block to the shared block
+// handler.
+func (o *Ouroboros) blockfetchClientBlockRaw(
+	ctx blockfetch.CallbackContext,
+	blockType uint,
+	blockData []byte,
+) error {
+	block, err := o.decodeBlockfetchBlock(blockType, blockData)
+	if err != nil {
+		return fmt.Errorf(
+			"decode block-fetch block (block type %d): %w",
+			blockType,
+			err,
+		)
+	}
+	return o.blockfetchClientBlock(ctx, blockType, block)
 }
 
 func (o *Ouroboros) blockfetchServerRequestRange(
@@ -626,16 +669,16 @@ func (o *Ouroboros) instrumentBlockfetchRequestRange(
 	}
 }
 
-func (o *Ouroboros) instrumentBlockfetchBlock(
-	fn func(blockfetch.CallbackContext, uint, gledger.Block) error,
-) func(blockfetch.CallbackContext, uint, gledger.Block) error {
+func (o *Ouroboros) instrumentBlockfetchBlockRaw(
+	fn func(blockfetch.CallbackContext, uint, []byte) error,
+) func(blockfetch.CallbackContext, uint, []byte) error {
 	return func(
 		ctx blockfetch.CallbackContext,
 		blockType uint,
-		block gledger.Block,
+		blockData []byte,
 	) error {
 		start := time.Now()
-		err := fn(ctx, blockType, block)
+		err := fn(ctx, blockType, blockData)
 		o.recordProtocolMessage("blockfetch", err, time.Since(start))
 		return err
 	}

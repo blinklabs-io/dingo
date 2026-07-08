@@ -1210,7 +1210,7 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	// Pool owns 100% of stake — matches createTestBlock's threshold assumption.
 	const totalStake = uint64(1_000_000_000)
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], totalStake)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], totalStake)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "eligible pool with full stake should pass")
@@ -1238,7 +1238,7 @@ func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	// Seed the normal rotated mark snapshot with full stake. In the imported
 	// Mithril epoch this must not substitute for NewEpochState.pool-distr.
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
@@ -1308,7 +1308,7 @@ func TestVerifyBlockLeaderEligibility_ZeroStakeFails(t *testing.T) {
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 0)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 0)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
@@ -1326,12 +1326,12 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	// Actual pool: tiny stake (1 lovelace).
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1)
 	// Dummy pool: huge stake to make the total far exceed the pool's share,
 	// pushing sigma ≈ 1/10^18 and the threshold to essentially zero.
 	dummyHash := make([]byte, 28)
 	dummyHash[0] = 0xFF
-	seedPoolStakeSnapshot(t, db, 3, dummyHash, 1_000_000_000_000_000_000)
+	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
@@ -1354,11 +1354,15 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 	ls.mithrilLedgerSlot = importedCaptureSlot
 	tb.block.slot = ls.epochCache[2].StartSlot + 50
 
+	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4]
+	// (the end-of-epoch-3 "set" distribution), so the imported mark is seeded
+	// at epoch 4. importedCaptureSlot (epoch4-start+50) is past epoch 4's start,
+	// which is what marks it as Mithril-imported.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfTypeAtSlot(
 		t,
 		db,
-		3,
+		4,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash[:],
 		1,
@@ -1370,7 +1374,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 	seedPoolStakeSnapshotOfTypeAtSlot(
 		t,
 		db,
-		3,
+		4,
 		models.PoolStakeSnapshotTypeMark,
 		dummyHash,
 		1_000_000_000_000_000_000,
@@ -1378,13 +1382,13 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 		importedCaptureSlot,
 	)
 	snapshot, err := db.Metadata().GetPoolStakeSnapshot(
-		3,
+		4,
 		models.PoolStakeSnapshotTypeMark,
 		poolKeyHash[:],
 		nil,
 	)
 	require.NoError(t, err)
-	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 3))
+	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 4))
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
@@ -1411,8 +1415,12 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	dummyHash := make([]byte, 28)
 	dummyHash[0] = 0xFF
-	snapshotEpoch := uint64(3)
-	boundarySlot := ls.epochCache[0].StartSlot
+	// Leader election in epoch 5 uses mark[StakeSnapshotEpoch(5)] = mark[4].
+	// Capture it live at epoch 4's boundary-1 (end of epoch 3); that slot is
+	// before epoch 4's start, so it reads as a genuinely live-computed mark
+	// (not Mithril-imported) and the threshold check must still run.
+	snapshotEpoch := uint64(4)
+	boundarySlot := ls.epochCache[1].StartSlot
 	snapshotSlot := boundarySlot - 1
 	seedLiveDelegatedPoolStake(
 		t, db, poolKeyHash[:], 1, snapshotSlot, 1,
@@ -1453,7 +1461,7 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 
 	// Seed a pool stake snapshot so the check reaches the coeff lookup.
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
 	ls := &LedgerState{
 		db: db,
@@ -1486,7 +1494,7 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 	t.Cleanup(func() { db.Close() }) //nolint:errcheck
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
-	seedPoolStakeSnapshot(t, db, 3, poolKeyHash[:], 1_000_000_000)
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1_000_000_000)
 
 	// Build a genesis config with activeSlotsCoeff explicitly set to 0.
 	// big.Rat.SetString("0") gives Sign()==0, which the guard must catch.
