@@ -556,7 +556,8 @@ dingo/
 │   ├── indexer/         # Block scanner indexing midnight_* metadata tables
 │   └── server/          # Native gRPC server lifecycle (reflection, health, TLS)
 │       ├── server.go    # Serves the MidnightState gRPC compatibility surface
-│       └── service.go   # Governance/parameters/block/epoch/stability RPC handlers
+│       ├── service.go   # Governance/parameters/block/epoch/stability RPC handlers
+│       └── adapter.go   # *database.Database -> MidnightDatabase interface adapter
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -812,7 +813,12 @@ ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
 service reporting `SERVING`. The `MidnightState` service is backed by two
-groups of injected dependencies, both wired in `node.go`.
+groups of injected dependencies, both wired in `node.go`. Per the
+composition-boundary principle (domain packages depend on narrow,
+constructor-injected interfaces, not concrete node/database types),
+`midnight/server` declares its own narrow interfaces — `eventStore`,
+`MidnightDatabase`, and `SlotTimer` — rather than importing the concrete
+`*database.Database`/`*ledger.LedgerState`.
 
 `Config.Metadata` (set to `n.db.Metadata()`, typed as a package-local
 `eventStore` interface rather than the full `metadata.MetadataStore` so this
@@ -837,12 +843,14 @@ Midnight events; `GetUtxoEvents` fails with `codes.FailedPrecondition` if
 to a bounded default/max instead of being forwarded to the store, since the
 store's own pagination contract treats a non-positive limit as unbounded.
 
-`Config.Database` (set to `midnightserver.NewDatabase(n.db)`, a narrow
-`MidnightDatabase` interface so this package doesn't depend on the concrete
-`*database.Database`) and `Config.SlotTimer` (set to `n.ledgerState`,
-satisfying `SlotToTime`/`TimeToSlot`) back the
-governance/parameters/block/epoch/stability RPCs implemented in
-`midnight/server/service.go`:
+`Config.Database` (set to `midnightserver.NewDatabase(n.db)` — `adapter.go`'s
+`databaseAdapter`, which bridges the package-level
+`database.BlockByHash`/`BlocksRecent`/`BlockBeforeSlot` functions and the
+0-based/1-based block-number translation into `MidnightDatabase` interface
+methods, mirroring `api/mesh`'s `meshDatabaseAdapter`/`MeshDatabase`) and
+`Config.SlotTimer` (set to `n.ledgerState`, satisfying `SlotToTime`/
+`TimeToSlot`) back the governance/parameters/block/epoch/stability RPCs
+implemented in `midnight/server/service.go`:
 
 - `GetTechnicalCommitteeDatum` / `GetCouncilDatum` — latest
   `MidnightGovernanceDatum` at or before a block number.

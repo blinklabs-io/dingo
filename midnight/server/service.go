@@ -21,7 +21,6 @@ import (
 	"sort"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/midnight"
 	midnightindexer "github.com/blinklabs-io/dingo/midnight/indexer"
@@ -122,7 +121,7 @@ func (s *service) GetEpochNonce(
 	_ context.Context,
 	req *midnight.EpochNonceRequest,
 ) (*midnight.EpochNonceResponse, error) {
-	epoch, err := s.db.GetEpoch(req.GetEpoch(), nil)
+	epoch, err := s.db.GetEpoch(req.GetEpoch())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get epoch: %v", err)
 	}
@@ -178,7 +177,6 @@ func (s *service) GetEpochCandidates(
 	stakeSnapshots, err := s.db.GetPoolStakeSnapshotsByEpoch(
 		epoch,
 		models.PoolStakeSnapshotTypeMark,
-		nil,
 	)
 	if err != nil {
 		return nil, status.Errorf(
@@ -212,7 +210,7 @@ func (s *service) GetBlockByHash(
 	_ context.Context,
 	req *midnight.BlockByHashRequest,
 ) (*midnight.BlockByHashResponse, error) {
-	blk, err := database.BlockByHash(s.db, req.GetBlockHash())
+	blk, err := s.db.BlockByHash(req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
@@ -249,7 +247,7 @@ func (s *service) GetLatestBlock(
 	_ context.Context,
 	_ *midnight.LatestBlockRequest,
 ) (*midnight.LatestBlockResponse, error) {
-	blocks, err := database.BlocksRecent(s.db, 1)
+	blocks, err := s.db.BlocksRecent(1)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get latest block: %v", err)
 	}
@@ -270,7 +268,7 @@ func (s *service) GetStableBlock(
 	_ context.Context,
 	req *midnight.StableBlockRequest,
 ) (*midnight.StableBlockResponse, error) {
-	blk, err := database.BlockByHash(s.db, req.GetBlockHash())
+	blk, err := s.db.BlockByHash(req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return nil, status.Error(codes.NotFound, "block not found")
@@ -314,14 +312,7 @@ func (s *service) GetLatestStableBlock(
 	if tip.Number < offset {
 		return &midnight.LatestStableBlockResponse{}, nil
 	}
-	// BlockByIndex looks up by the blob store's internal sequential index,
-	// which is 1-based (database.BlockInitialIndex) while Cardano block
-	// numbers are 0-based; translate as api/blockfrost's block-by-height
-	// lookup does.
-	blk, err := s.db.BlockByIndex(
-		tip.Number-offset+database.BlockInitialIndex,
-		nil,
-	)
+	blk, err := s.db.BlockByNumber(tip.Number - offset)
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
 			return &midnight.LatestStableBlockResponse{}, nil
@@ -343,7 +334,7 @@ func (s *service) GetLatestStableBlock(
 // non-zero, the latest block at or before that wall-clock time.
 func (s *service) resolveTipBlock(asOfMillis uint64) (models.Block, error) {
 	if asOfMillis == 0 {
-		blocks, err := database.BlocksRecent(s.db, 1)
+		blocks, err := s.db.BlocksRecent(1)
 		if err != nil {
 			return models.Block{}, err
 		}
@@ -361,7 +352,7 @@ func (s *service) resolveTipBlock(asOfMillis uint64) (models.Block, error) {
 			err,
 		)
 	}
-	return database.BlockBeforeSlot(s.db, slot+1)
+	return s.db.BlockBeforeSlot(slot + 1)
 }
 
 // buildBlock converts a stored block into the shared MidnightState Block
@@ -391,7 +382,7 @@ func (s *service) buildBlock(blk models.Block) (*midnight.Block, error) {
 // epochForSlot resolves the epoch containing slot from the stored epoch
 // cache.
 func (s *service) epochForSlot(slot uint64) (*models.Epoch, error) {
-	epoch, err := s.db.GetEpochBySlot(slot, nil)
+	epoch, err := s.db.GetEpochBySlot(slot)
 	if err != nil {
 		return nil, fmt.Errorf("resolve epoch for slot %d: %w", slot, err)
 	}

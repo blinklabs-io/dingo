@@ -28,6 +28,12 @@ func (d *Database) GetPoolStakeSnapshotsByEpoch(
 	snapshotType string,
 	txn *Txn,
 ) ([]*models.PoolStakeSnapshot, error) {
+	if !models.ValidPoolStakeSnapshotType(snapshotType) {
+		return nil, fmt.Errorf(
+			"get pool stake snapshots by epoch: invalid snapshot type %q",
+			snapshotType,
+		)
+	}
 	if txn == nil {
 		return d.metadata.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, nil)
 	}

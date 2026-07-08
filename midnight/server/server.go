@@ -33,7 +33,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/midnight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -54,6 +54,39 @@ const (
 type SlotTimer interface {
 	SlotToTime(slot uint64) (time.Time, error)
 	TimeToSlot(t time.Time) (uint64, error)
+}
+
+// MidnightDatabase is the subset of *database.Database needed by the
+// governance/parameters/block/epoch/stability RPCs. Keeping this package
+// dependent on a narrow interface (rather than *database.Database directly)
+// matches the composition boundary documented in ARCHITECTURE.md: domain
+// packages depend on constructor-injected narrow interfaces, and only the
+// composition layer (here, adapter.go's NewDatabase) wires the concrete
+// type. All methods implicitly use a nil transaction (auto-transaction per
+// call), mirroring api/mesh's MeshDatabase.
+type MidnightDatabase interface {
+	GetLatestMidnightGovernanceDatum(
+		datumType string,
+		blockNumber uint64,
+	) (*models.MidnightGovernanceDatum, error)
+	GetMidnightAriadneParamsAtOrBeforeEpoch(
+		epoch uint64,
+	) (*models.MidnightAriadneParams, error)
+	GetMidnightEpochCandidatesByEpoch(
+		epoch uint64,
+	) (*models.MidnightEpochCandidates, error)
+	GetPoolStakeSnapshotsByEpoch(
+		epoch uint64,
+		snapshotType string,
+	) ([]*models.PoolStakeSnapshot, error)
+	GetEpoch(epochId uint64) (*models.Epoch, error)
+	GetEpochBySlot(slot uint64) (*models.Epoch, error)
+	BlockByHash(hash []byte) (models.Block, error)
+	// BlockByNumber returns the block at the given 0-based consensus block
+	// number, translating to the blob store's internal 1-based index.
+	BlockByNumber(number uint64) (models.Block, error)
+	BlocksRecent(count int) ([]models.Block, error)
+	BlockBeforeSlot(slot uint64) (models.Block, error)
 }
 
 // Config holds the configuration for the Midnight gRPC server.
@@ -83,9 +116,9 @@ type Config struct {
 	// Defaults to 30s.
 	ShutdownTimeout time.Duration
 	// Database backs the governance/parameters/block/epoch/stability RPCs.
-	// Required for those RPCs to work; RPCs that only need Database are
-	// unaffected by a nil SlotTimer.
-	Database *database.Database
+	// Wrap a *database.Database with NewDatabase. Required for those RPCs to
+	// work; RPCs that only need Database are unaffected by a nil SlotTimer.
+	Database MidnightDatabase
 	// SlotTimer resolves block timestamps and, for the as-of-timestamp
 	// variants of the stability RPCs, converts a wall-clock time back to a
 	// slot. Required by GetBlockByHash, GetLatestBlock, GetStableBlock, and
@@ -295,6 +328,6 @@ type service struct {
 	midnight.UnimplementedMidnightStateServer
 	metadata          eventStore
 	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
-	db                *database.Database
+	db                MidnightDatabase
 	slotTimer         SlotTimer
 }

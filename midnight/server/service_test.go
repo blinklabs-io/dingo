@@ -147,7 +147,7 @@ func TestGetTechnicalCommitteeDatum_AtOrBefore(t *testing.T) {
 			BlockNumber: blockNumber,
 		}))
 	}
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	_, err := client.GetTechnicalCommitteeDatum(callCtx(t), &midnight.TechnicalCommitteeDatumRequest{BlockNumber: 5})
@@ -182,7 +182,7 @@ func TestGetCouncilDatum_DistinctFromTechnicalCommittee(t *testing.T) {
 		Datum:       []byte("council"),
 		BlockNumber: 10,
 	}))
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	resp, err := client.GetCouncilDatum(callCtx(t), &midnight.CouncilDatumRequest{BlockNumber: 100})
@@ -200,7 +200,7 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 			Datum: []byte{byte('a' + i)},
 		}))
 	}
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	_, err := client.GetAriadneParameters(callCtx(t), &midnight.AriadneParametersRequest{Epoch: 0})
@@ -219,7 +219,7 @@ func TestGetAriadneParameters_AtOrBefore(t *testing.T) {
 func TestGetEpochNonce(t *testing.T) {
 	db := newTestDatabase(t)
 	require.NoError(t, db.SetEpoch(100, 1, []byte("epoch-1-nonce"), nil, nil, nil, 0, 1000, 100, nil))
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	resp, err := client.GetEpochNonce(callCtx(t), &midnight.EpochNonceRequest{Epoch: 1})
@@ -256,7 +256,7 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 		{Epoch: 7, SnapshotType: models.PoolStakeSnapshotTypeMark, PoolKeyHash: []byte{0x01}, TotalStake: 100, DelegatorCount: 1, CapturedSlot: 1},
 	}, nil))
 
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	resp, err := client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 7})
@@ -281,7 +281,7 @@ func TestGetLatestBlock(t *testing.T) {
 	insertPlaceholderBlock(t, db, 1, 1, 0x01)
 	tip := insertPlaceholderBlock(t, db, 2, 2, 0x02)
 
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	resp, err := client.GetLatestBlock(callCtx(t), &midnight.LatestBlockRequest{})
@@ -299,7 +299,7 @@ func TestGetBlockByHash(t *testing.T) {
 	require.NoError(t, err)
 	wantTxCount := len(decoded.Transactions())
 
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	resp, err := client.GetBlockByHash(callCtx(t), &midnight.BlockByHashRequest{BlockHash: blk.Hash})
@@ -341,7 +341,7 @@ func TestStability_MatchesConfiguredKAndF(t *testing.T) {
 			target := insertPlaceholderBlock(t, db, 1000, 1000, 0xAA)
 			tip := insertPlaceholderBlock(t, db, 1000+offset, 1000+offset, 0xBB)
 
-			addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+			addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 			client := dialClient(t, addr)
 
 			// Exactly at the offset: stable.
@@ -387,7 +387,7 @@ func TestGetStableBlock_AsOfTimestamp(t *testing.T) {
 	older := insertPlaceholderBlock(t, db, 10, 10, 0x01)
 	insertPlaceholderBlock(t, db, 20, 20, 0x02) // newer than the as-of time
 
-	addr := startTestServerWithConfig(t, server.Config{Database: db, SlotTimer: fakeSlotTimer{}})
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
 	client := dialClient(t, addr)
 
 	asOfMillis := uint64(time.Unix(fakeGenesisUnix+15, 0).UnixMilli())
