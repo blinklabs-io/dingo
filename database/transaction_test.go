@@ -235,6 +235,35 @@ func TestDeleteTxBlobsCountsFailedBatchCommit(t *testing.T) {
 	require.Contains(t, logs.String(), "\"total\":3")
 }
 
+// TestDeleteUtxoBlobsCountsFailedBatchCommit injects a UTxO batch commit failure.
+// It verifies every uncommitted deletion is included in the aggregate error count.
+func TestDeleteUtxoBlobsCountsFailedBatchCommit(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	store := &mockBlobStore{commitErrs: []error{errors.New("commit failed")}}
+	db := &Database{
+		blob: store,
+		logger: slog.New(
+			slog.NewJSONHandler(
+				&logs,
+				&slog.HandlerOptions{Level: slog.LevelDebug},
+			),
+		),
+	}
+
+	utxos := []models.Utxo{
+		{TxId: []byte{0x01}, OutputIdx: 0},
+		{TxId: []byte{0x02}, OutputIdx: 1},
+		{TxId: []byte{0x03}, OutputIdx: 2},
+	}
+	require.NoError(t, deleteUtxoBlobs(db, utxos, nil))
+	require.Len(t, store.txns, 1)
+	require.Equal(t, 1, store.txns[0].commitCount)
+	require.Contains(t, logs.String(), "\"failed\":3")
+	require.Contains(t, logs.String(), "\"total\":3")
+}
+
 // TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata injects a transaction blob deletion failure.
 // It verifies the failure is logged while rollback metadata cleanup still succeeds.
 func TestTransactionsDeleteRolledbackLogsBlobFailureAndDeletesMetadata(t *testing.T) {
