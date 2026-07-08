@@ -64,7 +64,8 @@ var _ leiosEndorserBlockCertifier = (*dijkstra.DijkstraBlockHeader)(nil)
 // (the Musashi prototype) the blob is still stored (for serving and the
 // node-to-client inline view) but the transactions are not applied to the UTxO.
 // It returns the number of transactions applied to the UTxO (0 on the
-// Haskell-conformant path).
+// Haskell-conformant path, or when the CIP path finds every transaction was
+// already applied).
 //
 // Endorser-block transactions are not part of any chain block, so — mirroring
 // the genesis path (buildGenesisBlockCbor / SetGenesisCbor) — their CBOR is
@@ -144,6 +145,25 @@ func (ls *LedgerState) applyEndorserBlock(
 		bodyCbors = append(bodyCbors, []byte(elems[0]))
 	}
 
+	if ls.config.LeiosApplyEndorserBlockTxs {
+		// The CIP path mutates UTxO state, so it must reject duplicates before
+		// building offsets or applying the delta. Otherwise a repeated endorser
+		// transaction can re-spend inputs and leave block processing stuck
+		// retrying the same "UTxO already spent" failure.
+		var err error
+		txs, bodyCbors, err = ls.deduplicateEndorserBlockTransactions(
+			txs,
+			bodyCbors,
+			txn,
+		)
+		if err != nil {
+			return 0, err
+		}
+		if len(txs) == 0 {
+			return 0, nil
+		}
+	}
+
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
@@ -179,6 +199,47 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 	return len(txs), nil
+}
+
+func (ls *LedgerState) deduplicateEndorserBlockTransactions(
+	txs []lcommon.Transaction,
+	bodyCbors [][]byte,
+	txn *database.Txn,
+) ([]lcommon.Transaction, [][]byte, error) {
+	if len(txs) == 0 {
+		return txs, bodyCbors, nil
+	}
+	hashes := make([][]byte, len(txs))
+	for i, tx := range txs {
+		hashes[i] = tx.Hash().Bytes()
+	}
+	existing, err := ls.db.GetTransactionsByHashes(hashes, txn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dedup endorser transactions: %w", err)
+	}
+	skip := make(map[string]struct{}, len(existing))
+	for _, tx := range existing {
+		if len(tx.Hash) == 0 {
+			continue
+		}
+		skip[string(tx.Hash)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(txs))
+	keptTxs := txs[:0]
+	keptBodies := bodyCbors[:0]
+	for i, tx := range txs {
+		hashKey := string(tx.Hash().Bytes())
+		if _, dup := skip[hashKey]; dup {
+			continue
+		}
+		if _, dup := seen[hashKey]; dup {
+			continue
+		}
+		seen[hashKey] = struct{}{}
+		keptTxs = append(keptTxs, tx)
+		keptBodies = append(keptBodies, bodyCbors[i])
+	}
+	return keptTxs, keptBodies, nil
 }
 
 type leiosEndorserBlockStorageError struct {

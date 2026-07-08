@@ -182,6 +182,81 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, want)
 }
 
+func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	ls.config.LeiosApplyEndorserBlockTxs = true // CIP-conformant path
+	rawTx1, body1, _ := leiosApplyTestTx(t, 0x04)
+	rawTx2, _, _ := leiosApplyTestTx(t, 0x05)
+
+	appliedFirst := -1
+	appliedSameTxnDuplicate := -1
+	appliedSecondUnique := -1
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		appliedFirst, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x81),
+			1,
+			500,
+			leiosApplyTestEbHash(0x82),
+			[]cbor.RawMessage{rawTx1, rawTx1},
+		)
+		if err != nil {
+			return err
+		}
+		appliedSameTxnDuplicate, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x83),
+			2,
+			501,
+			leiosApplyTestEbHash(0x84),
+			[]cbor.RawMessage{rawTx1},
+		)
+		if err != nil {
+			return err
+		}
+		appliedSecondUnique, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x85),
+			3,
+			502,
+			leiosApplyTestEbHash(0x86),
+			[]cbor.RawMessage{rawTx2},
+		)
+		return err
+	}))
+
+	require.Equal(t, 1, appliedFirst)
+	require.Equal(t, 0, appliedSameTxnDuplicate)
+	require.Equal(t, 1, appliedSecondUnique)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		500,
+		leiosApplyTestEbHash(0x82),
+		body1,
+	)
+
+	appliedCommittedDuplicate := -1
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var err error
+		appliedCommittedDuplicate, err = ls.applyEndorserBlock(
+			txn,
+			leiosApplyTestRankingPoint(0x87),
+			4,
+			503,
+			leiosApplyTestEbHash(0x88),
+			[]cbor.RawMessage{rawTx1},
+		)
+		return err
+	}))
+	require.Equal(t, 0, appliedCommittedDuplicate)
+	requireLeiosApplyTestTxCount(t, gdb, 2)
+}
+
 // On the Haskell-conformant path (Musashi prototype) the endorser block is
 // stored but its transactions are not applied to the UTxO.
 func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {

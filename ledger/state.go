@@ -3785,12 +3785,19 @@ func (ls *LedgerState) ledgerProcessBlock(
 								"eb_slot", ebSlot,
 								"eb_txs", applied,
 							)
-						} else {
+						} else if !ls.config.LeiosApplyEndorserBlockTxs {
 							// Haskell-conformant path: the endorser block was
 							// stored (for serving and the NtC inline view) but its
 							// transactions were not applied to the UTxO.
 							ls.config.Logger.Debug(
 								"stored Leios endorser block without applying to UTxO",
+								"component", "ledger",
+								"slot", point.Slot,
+								"eb_slot", ebSlot,
+							)
+						} else {
+							ls.config.Logger.Debug(
+								"skipped already-applied Leios endorser block transactions",
 								"component", "ledger",
 								"slot", point.Slot,
 								"eb_slot", ebSlot,

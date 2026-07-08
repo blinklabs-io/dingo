@@ -96,10 +96,10 @@ func decodeLeiosExtendedConwayBlock(raw []byte) (*conway.ConwayBlock, error) {
 	if _, err := cbor.Decode(headerParts[0], &bodyElems); err != nil {
 		return nil, fmt.Errorf("decode Conway block header body: %w", err)
 	}
-	if len(bodyElems) < babbageHeaderBodyFieldCount {
+	if len(bodyElems) != babbageHeaderBodyFieldCount+2 {
 		return nil, fmt.Errorf(
-			"unexpected Conway block header body: expected at least %d fields, got %d",
-			babbageHeaderBodyFieldCount,
+			"unexpected Conway block header body: expected %d fields, got %d",
+			babbageHeaderBodyFieldCount+2,
 			len(bodyElems),
 		)
 	}

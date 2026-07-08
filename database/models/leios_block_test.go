@@ -79,6 +79,20 @@ func buildStandardConwayBlock(t *testing.T) []byte {
 // components (and therefore the block body hash) are left untouched.
 func extendConwayHeaderWithLeios(t *testing.T, standardRaw []byte) []byte {
 	t.Helper()
+	return extendConwayHeaderBody(
+		t,
+		standardRaw,
+		cbor.RawMessage{0xf4},
+		cbor.RawMessage{0xf6},
+	)
+}
+
+func extendConwayHeaderBody(
+	t *testing.T,
+	standardRaw []byte,
+	extraFields ...cbor.RawMessage,
+) []byte {
+	t.Helper()
 	var comps []cbor.RawMessage
 	_, err := cbor.Decode(standardRaw, &comps)
 	require.NoError(t, err)
@@ -91,12 +105,7 @@ func extendConwayHeaderWithLeios(t *testing.T, standardRaw []byte) []byte {
 	_, err = cbor.Decode(headerParts[0], &bodyElems)
 	require.NoError(t, err)
 	require.Len(t, bodyElems, 10)
-	// 0xf4 = CBOR false (leios_certified); 0xf6 = CBOR null (leios_announcement)
-	extendedElems := append(
-		bodyElems,
-		cbor.RawMessage{0xf4},
-		cbor.RawMessage{0xf6},
-	)
+	extendedElems := append(bodyElems, extraFields...)
 	extendedBody, err := cbor.Encode(extendedElems)
 	require.NoError(t, err)
 	extendedHeader, err := cbor.Encode([]any{
@@ -186,4 +195,31 @@ func TestDecodeConwayBlockLeiosExtendedHeader(t *testing.T) {
 	routed, err := stored.Decode()
 	require.NoError(t, err)
 	assert.Equal(t, block.Hash(), routed.Hash())
+}
+
+func TestDecodeConwayBlockRejectsMalformedLeiosHeaderExtension(t *testing.T) {
+	standardRaw := buildStandardConwayBlock(t)
+	for _, tc := range []struct {
+		name        string
+		extraFields []cbor.RawMessage
+	}{
+		{
+			name:        "one extra field",
+			extraFields: []cbor.RawMessage{{0xf4}},
+		},
+		{
+			name: "three extra fields",
+			extraFields: []cbor.RawMessage{
+				{0xf4},
+				{0xf6},
+				{0xf6},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := extendConwayHeaderBody(t, standardRaw, tc.extraFields...)
+			_, err := DecodeConwayBlock(raw)
+			require.Error(t, err)
+		})
+	}
 }
