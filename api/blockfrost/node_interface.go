@@ -140,6 +140,14 @@ type BlockfrostNode interface {
 		assetName []byte,
 	) (AssetInfo, error)
 
+	// AssetAddresses returns paginated addresses currently holding the given
+	// asset, along with the total holder count before pagination.
+	AssetAddresses(
+		policyID string,
+		assetName []byte,
+		params PaginationParams,
+	) ([]AssetHolderInfo, int, error)
+
 	// DRep returns governance DRep information for a parsed
 	// DRep credential.
 	DRep(DRepCredential) (DRepInfo, error)
@@ -558,6 +566,12 @@ type AssetInfo struct {
 	InitialMintTxHash string
 	MintOrBurnCount   int
 	OnchainMetadata   *any
+}
+
+// AssetHolderInfo holds address and quantity data for a single asset holder.
+type AssetHolderInfo struct {
+	Address  string
+	Quantity string
 }
 
 // DRepCredential holds a parsed governance DRep identifier.

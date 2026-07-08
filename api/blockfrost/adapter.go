@@ -786,6 +786,128 @@ func (a *NodeAdapter) Asset(
 	}, nil
 }
 
+// AssetAddresses returns paginated addresses currently holding the given asset.
+func (a *NodeAdapter) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	policyIDBytes, err := hex.DecodeString(policyID)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"decode asset policy ID %q: %w",
+			policyID,
+			err,
+		)
+	}
+	utxos, err := a.ledgerState.Database().
+		UtxosByAssets(policyIDBytes, assetName, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get asset UTxOs for %s%x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	holders, err := assetHoldersFromUtxos(policyIDBytes, assetName, utxos, params)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"build asset holders for %s%x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if len(holders) == 0 {
+		return nil, 0, fmt.Errorf(
+			"asset %s%x: %w",
+			policyID,
+			assetName,
+			ErrAssetNotFound,
+		)
+	}
+	total := len(holders)
+	return paginateAssetHolders(holders, params), total, nil
+}
+
+type assetHolderQuantity struct {
+	address  string
+	quantity uint64
+}
+
+func assetHoldersFromUtxos(
+	policyID []byte,
+	assetName []byte,
+	utxos []models.Utxo,
+	params PaginationParams,
+) ([]AssetHolderInfo, error) {
+	quantities := make(map[string]uint64)
+	for _, utxo := range utxos {
+		var quantity uint64
+		for _, asset := range utxo.Assets {
+			if bytes.Equal(asset.PolicyId, policyID) &&
+				bytes.Equal(asset.Name, assetName) {
+				quantity += uint64(asset.Amount)
+			}
+		}
+		if quantity == 0 {
+			continue
+		}
+		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode UTxO %x#%d: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		quantities[output.Address().String()] += quantity
+	}
+
+	rows := make([]assetHolderQuantity, 0, len(quantities))
+	for address, quantity := range quantities {
+		rows = append(rows, assetHolderQuantity{
+			address:  address,
+			quantity: quantity,
+		})
+	}
+	slices.SortFunc(rows, func(a, b assetHolderQuantity) int {
+		if params.Order == "desc" {
+			if n := cmp.Compare(b.quantity, a.quantity); n != 0 {
+				return n
+			}
+			return cmp.Compare(b.address, a.address)
+		}
+		if n := cmp.Compare(a.quantity, b.quantity); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.address, b.address)
+	})
+
+	holders := make([]AssetHolderInfo, 0, len(rows))
+	for _, row := range rows {
+		holders = append(holders, AssetHolderInfo{
+			Address:  row.address,
+			Quantity: strconv.FormatUint(row.quantity, 10),
+		})
+	}
+	return holders, nil
+}
+
+func paginateAssetHolders(
+	holders []AssetHolderInfo,
+	params PaginationParams,
+) []AssetHolderInfo {
+	start := (params.Page - 1) * params.Count
+	if start >= len(holders) {
+		return []AssetHolderInfo{}
+	}
+	end := min(start+params.Count, len(holders))
+	return holders[start:end]
+}
+
 // DRep returns governance DRep information for the requested
 // credential.
 func (a *NodeAdapter) DRep(

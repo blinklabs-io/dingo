@@ -220,6 +220,13 @@ type AddressTransactionResponse struct {
 	BlockTime   int    `json:"block_time"`
 }
 
+// AssetAddressResponse represents one entry in the
+// GET /assets/{asset}/addresses response.
+type AssetAddressResponse struct {
+	Address  string `json:"address"`
+	Quantity string `json:"quantity"`
+}
+
 // AssetResponse represents a Blockfrost native asset
 // object.
 type AssetResponse struct {

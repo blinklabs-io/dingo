@@ -113,6 +113,10 @@ func (b *Blockfrost) Start(
 		b.handleAsset,
 	)
 	mux.HandleFunc(
+		"GET /api/v0/assets/{asset}/addresses",
+		b.handleAssetAddresses,
+	)
+	mux.HandleFunc(
 		"GET /api/v0/pools/extended",
 		b.handlePoolsExtended,
 	)

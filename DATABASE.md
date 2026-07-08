@@ -683,7 +683,7 @@ WHERE payment_script = true
   AND deleted_slot = 0;
 ```
 
-### `GetUtxosByAssets` and Asset Quantity
+### `GetUtxosByAssets`, Asset Quantity, and Asset Holders
 
 ```sql
 -- Live UTxOs containing a policy/name pair
@@ -707,6 +707,13 @@ WHERE a.policy_id = decode($1, 'hex')
   AND a.name = decode($2, 'hex')
   AND u.deleted_slot = 0;
 ```
+
+The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
+uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value
+to recover the exact original address, then aggregates matching asset
+quantities by that address. Decoding CBOR is required because some valid
+addresses, such as pointer addresses, cannot be reconstructed from the
+metadata credential-hash columns alone.
 
 ### `GetTransactionsByMetadataLabel`
 

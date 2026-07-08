@@ -15,6 +15,7 @@
 package blockfrost
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -26,8 +27,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,6 +66,11 @@ type mockNode struct {
 	genesis                       GenesisInfo
 	pools                         []PoolExtendedInfo
 	asset                         AssetInfo
+	assetHolders                  []AssetHolderInfo
+	assetHoldersTotal             int
+	assetAddressesPolicyID        string
+	assetAddressesAssetName       []byte
+	assetAddressesParams          PaginationParams
 	drep                          DRepInfo
 	drepCredential                DRepCredential
 	addressUTXOs                  []AddressUTXOInfo
@@ -104,6 +112,7 @@ type mockNode struct {
 	genesisErr                    error
 	poolsErr                      error
 	assetErr                      error
+	assetAddressesErr             error
 	drepErr                       error
 	addressUTXOsErr               error
 	addressTransactionsErr        error
@@ -201,6 +210,17 @@ func (m *mockNode) Asset(
 	_ []byte,
 ) (AssetInfo, error) {
 	return m.asset, m.assetErr
+}
+
+func (m *mockNode) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	m.assetAddressesPolicyID = policyID
+	m.assetAddressesAssetName = assetName
+	m.assetAddressesParams = params
+	return m.assetHolders, m.assetHoldersTotal, m.assetAddressesErr
 }
 
 func (m *mockNode) DRep(
@@ -700,6 +720,164 @@ func TestHandleAssetNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 	assert.Equal(t, "Not Found", resp.Error)
 	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestHandleAssetAddresses(t *testing.T) {
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e"
+	mock := &mockNode{
+		assetHolders: []AssetHolderInfo{
+			{Address: "addr1holder1", Quantity: "1"},
+			{Address: "addr1holder2", Quantity: "42"},
+		},
+		assetHoldersTotal: 12,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses?count=2&page=3&order=desc",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(
+		t,
+		"00112233445566778899aabbccddeeff00112233445566778899aabb",
+		mock.assetAddressesPolicyID,
+	)
+	assert.Equal(t, []byte("token"), mock.assetAddressesAssetName)
+	assert.Equal(
+		t,
+		PaginationParams{Count: 2, Page: 3, Order: "desc"},
+		mock.assetAddressesParams,
+	)
+	assert.Equal(t, "12", w.Header().Get("X-Pagination-Count-Total"))
+	assert.Equal(t, "6", w.Header().Get("X-Pagination-Page-Total"))
+
+	var resp []AssetAddressResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	require.Len(t, resp, 2)
+	assert.Equal(t, "addr1holder1", resp[0].Address)
+	assert.Equal(t, "1", resp[0].Quantity)
+	assert.Equal(t, "addr1holder2", resp[1].Address)
+	assert.Equal(t, "42", resp[1].Quantity)
+}
+
+func TestHandleAssetAddressesInvalidIdentifier(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/not-hex/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", "not-hex")
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "Bad Request", resp.Error)
+	assert.Equal(t, "Invalid asset identifier.", resp.Message)
+}
+
+func TestHandleAssetAddressesNotFound(t *testing.T) {
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	mock := &mockNode{
+		assetAddressesErr: ErrAssetNotFound,
+	}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestHandleAssetAddressesNoHolders(t *testing.T) {
+	const assetID = "00112233445566778899aabbccddeeff00112233445566778899aabb"
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/api/v0/assets/"+assetID+"/addresses",
+		nil,
+	)
+	req.SetPathValue("asset", assetID)
+	w := httptest.NewRecorder()
+	b.handleAssetAddresses(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	var resp ErrorResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, "Not Found", resp.Error)
+	assert.Equal(t, "The requested asset could not be found.", resp.Message)
+}
+
+func TestAssetHoldersFromUtxosPreservesPointerAddress(t *testing.T) {
+	paymentHash := bytes.Repeat([]byte{0xab}, lcommon.AddressHashSize)
+	policyID := bytes.Repeat([]byte{0xcd}, lcommon.AddressHashSize)
+	assetName := []byte("TOKEN")
+	addrBytes := []byte{
+		(lcommon.AddressTypeKeyPointer << 4) |
+			lcommon.AddressNetworkTestnet,
+	}
+	addrBytes = append(addrBytes, paymentHash...)
+	addrBytes = append(addrBytes, 0x01, 0x00, 0x00)
+	addr, err := lcommon.NewAddressFromBytes(addrBytes)
+	require.NoError(t, err)
+
+	output := shelley.ShelleyTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1_000_000,
+	}
+	outputCbor, err := cbor.Encode(&output)
+	require.NoError(t, err)
+	holders, err := assetHoldersFromUtxos(
+		policyID,
+		assetName,
+		[]models.Utxo{{
+			TxId:      bytes.Repeat([]byte{0x01}, 32),
+			OutputIdx: 0,
+			Cbor:      outputCbor,
+			Assets: []models.Asset{{
+				PolicyId: policyID,
+				Name:     assetName,
+				Amount:   types.Uint64(7),
+			}},
+		}},
+		PaginationParams{Count: 100, Page: 1, Order: "asc"},
+	)
+	require.NoError(t, err)
+	require.Len(t, holders, 1)
+	assert.Equal(t, addr.String(), holders[0].Address)
+	assert.Equal(t, "7", holders[0].Quantity)
 }
 
 func TestHandleDRep(t *testing.T) {
