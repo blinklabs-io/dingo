@@ -15,6 +15,9 @@
 package server
 
 import (
+	"fmt"
+	"math"
+
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 )
@@ -76,7 +79,16 @@ func (a *databaseAdapter) BlockByNumber(number uint64) (models.Block, error) {
 	// Cardano block numbers are 0-based; the blob store's internal index is
 	// 1-based (database.BlockInitialIndex). Translate here, the same way
 	// api/blockfrost's block-by-height lookup does, so callers deal only in
-	// consensus block numbers.
+	// consensus block numbers. Guard the addition first: no real chain gets
+	// anywhere near math.MaxUint64, but without the check that value would
+	// wrap to internal index 0 instead of failing.
+	if number > math.MaxUint64-database.BlockInitialIndex {
+		return models.Block{}, fmt.Errorf(
+			"block number %d overflows internal index: %w",
+			number,
+			models.ErrBlockNotFound,
+		)
+	}
 	return a.db.BlockByIndex(number+database.BlockInitialIndex, nil)
 }
 
