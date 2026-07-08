@@ -210,12 +210,15 @@ func topLevelCommand(cmd *cobra.Command) *cobra.Command {
 // requirements come from the command rather than cfg.RunMode.
 func effectiveRunMode(top *cobra.Command, cfg *config.Config) config.RunMode {
 	if top == nil {
-		// Bare root command: dispatches on the configured run mode,
-		// defaulting to serve.
-		if cfg.RunMode == "" {
-			return config.RunModeServe
+		// Bare root command dispatches on the configured run mode,
+		// falling through to serve for an empty or unrecognized mode
+		// (matching rootCmd's dispatch default). Serving-listener checks
+		// therefore still apply to an invalid runMode; the invalid mode
+		// itself is reported separately by Validate.
+		if cfg.RunMode.Valid() && cfg.RunMode != "" {
+			return cfg.RunMode
 		}
-		return cfg.RunMode
+		return config.RunModeServe
 	}
 	switch top.Name() {
 	case "serve":

@@ -325,6 +325,22 @@ func TestValidateUtilityModeRelaxesListenerAndSource(t *testing.T) {
 	assert.NoError(t, cfg.validate(RunModeUtility, false))
 }
 
+// TestValidateInvalidModeStillReportsListeners verifies that when the
+// bare root falls back to an effective serve mode for an invalid
+// configured runMode, the listener-port violations are reported
+// alongside the invalid-runMode error rather than being suppressed.
+func TestValidateInvalidModeStillReportsListeners(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = "batch"
+	cfg.RelayPort = 0
+	// cmd/dingo passes RunModeServe as the effective mode for an invalid
+	// configured runMode at the bare root.
+	err := cfg.validate(RunModeServe, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid runMode")
+	assert.Contains(t, err.Error(), "port (relay/NtN) must be set")
+}
+
 func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeLoad

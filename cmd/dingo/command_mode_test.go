@@ -62,6 +62,10 @@ func TestEffectiveRunMode(t *testing.T) {
 		{"bare load", nil, config.RunModeLoad, config.RunModeLoad},
 		{"bare dev", nil, config.RunModeDev, config.RunModeDev},
 		{"bare empty defaults to serve", nil, "", config.RunModeServe},
+		// An invalid configured runMode falls through to serve (matching
+		// rootCmd's dispatch default) so serving-listener checks still
+		// apply; the invalid mode is reported separately by Validate.
+		{"bare invalid falls back to serve", nil, "batch", config.RunModeServe},
 		// Subcommands run a fixed operation regardless of configured runMode.
 		{
 			"serve subcommand ignores load config",
