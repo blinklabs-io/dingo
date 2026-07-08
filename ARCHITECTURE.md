@@ -1796,11 +1796,15 @@ Configuration priority (highest to lowest):
 
 After all sources are merged (including CLI flags), `Config.Validate()`
 (`internal/config`) checks the resulting configuration before any services
-start: mode enums, port ranges (privileged/out-of-range), load-mode
+start: mode enums, port ranges (privileged/out-of-range/duplicate), load-mode
 `immutableDbPath` requirement, path-traversal guards, TLS cert/key pairing,
 mempool watermarks, block-producer credential paths, and duration/strategy
-strings that are otherwise only parsed at their point of use. All violations
-are reported together in a single startup error.
+strings that are otherwise only parsed at their point of use. The relay,
+private, and metrics listener ports are required for the serving modes but not
+for `load`, which starts none of them. All violations are reported together in
+a single startup error. Validation runs for every service-starting command;
+the informational `version` and `list` subcommands are exempt so they still
+run against an otherwise-invalid config.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)

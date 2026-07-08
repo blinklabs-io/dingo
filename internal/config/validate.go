@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,6 +30,20 @@ const (
 	maxPort             = 65535
 )
 
+// AcceptedChainsyncStrategies mirrors the values accepted by
+// chainsync.ParseHeaderSyncStrategy. internal/config cannot import
+// chainsync without pulling node subsystems into the config package, so
+// the two lists are kept in sync by a parity test in cmd/dingo (which
+// can import both).
+var AcceptedChainsyncStrategies = []string{
+	"", "primary", "parallel", "round-robin", "roundrobin", "round_robin",
+}
+
+// AcceptedMithrilBackends mirrors the values accepted by cmd/dingo's
+// resolveMithrilBackend (empty selects v2). Kept in sync by the same
+// parity test in cmd/dingo as AcceptedChainsyncStrategies.
+var AcceptedMithrilBackends = []string{"", "v1", "v2"}
+
 // Validate checks the fully merged configuration (defaults, YAML,
 // environment, CLI flags) for invalid values and nonsensical
 // combinations. Every problem found is returned, joined into a single
@@ -35,7 +51,11 @@ const (
 // from cmd/dingo after CLI flags have been applied, before any
 // services start; LoadConfig alone does not see CLI flag values.
 func (c *Config) Validate() error {
-	return c.validate(os.Geteuid() == 0)
+	// The privileged-port restriction is Unix-specific. os.Geteuid
+	// returns -1 on Windows, which would otherwise misclassify every
+	// Windows process as unprivileged and reject sub-1024 ports there.
+	privileged := runtime.GOOS == "windows" || os.Geteuid() == 0
+	return c.validate(privileged)
 }
 
 // validate is the deterministic core of Validate. privileged reports
@@ -75,15 +95,18 @@ func (c *Config) validate(privileged bool) error {
 		))
 	}
 
-	// Ports
+	// Ports. The relay, private, and metrics listeners are required for
+	// the serving modes but not started by "load", so they may be unset
+	// (0) in a load-only config.
+	listenersRequired := c.RunMode != RunModeLoad
 	ports := []struct {
 		setting  string
 		port     uint
 		required bool
 	}{
-		{"port (relay/NtN)", c.RelayPort, true},
-		{"privatePort", c.PrivatePort, true},
-		{"metricsPort", c.MetricsPort, true},
+		{"port (relay/NtN)", c.RelayPort, listenersRequired},
+		{"privatePort", c.PrivatePort, listenersRequired},
+		{"metricsPort", c.MetricsPort, listenersRequired},
 		{"debugPort", c.DebugPort, false},
 		{"utxorpcPort", c.UtxorpcPort, false},
 		{"blockfrostPort", c.BlockfrostPort, false},
@@ -91,10 +114,24 @@ func (c *Config) validate(privileged bool) error {
 		{"barkPort", c.BarkPort, false},
 		{"midnight.port", c.Midnight.Port, false},
 	}
+	// Two services sharing a port only fails at bind time; catch it
+	// here. Zero ports are disabled or OS-assigned, so they don't clash.
+	seenPorts := make(map[uint]string, len(ports))
 	for _, p := range ports {
 		if err := validatePort(p.setting, p.port, p.required, privileged); err != nil {
 			errs = append(errs, err)
 		}
+		if p.port == 0 {
+			continue
+		}
+		if other, dup := seenPorts[p.port]; dup {
+			errs = append(errs, fmt.Errorf(
+				"port %d is assigned to both %s and %s",
+				p.port, other, p.setting,
+			))
+			continue
+		}
+		seenPorts[p.port] = p.setting
 	}
 
 	// Path traversal guard on the Cardano node config path, matching
@@ -200,12 +237,11 @@ func (c *Config) validate(privileged bool) error {
 		}
 	}
 
-	// Chainsync; accepted strategy names must match
-	// chainsync.ParseHeaderSyncStrategy (not imported here to keep
-	// internal/config free of node subsystem dependencies)
-	switch strings.ToLower(strings.TrimSpace(c.Chainsync.Strategy)) {
-	case "", "primary", "parallel", "round-robin", "roundrobin", "round_robin":
-	default:
+	// Chainsync; accepted strategy names come from
+	// AcceptedChainsyncStrategies, kept in sync with
+	// chainsync.ParseHeaderSyncStrategy by a parity test in cmd/dingo.
+	strategy := strings.ToLower(strings.TrimSpace(c.Chainsync.Strategy))
+	if !slices.Contains(AcceptedChainsyncStrategies, strategy) {
 		errs = append(errs, fmt.Errorf(
 			"invalid chainsync.strategy %q (want primary, parallel, or round-robin)",
 			c.Chainsync.Strategy,
@@ -218,11 +254,11 @@ func (c *Config) validate(privileged bool) error {
 		))
 	}
 
-	// Mithril backend; accepted values must match
-	// cmd/dingo resolveMithrilBackend (empty selects v2)
-	switch c.Mithril.Backend {
-	case "", "v1", "v2":
-	default:
+	// Mithril backend; accepted values come from
+	// AcceptedMithrilBackends, kept in sync with cmd/dingo's
+	// resolveMithrilBackend by a parity test in cmd/dingo (empty
+	// selects v2).
+	if !slices.Contains(AcceptedMithrilBackends, c.Mithril.Backend) {
 		errs = append(errs, fmt.Errorf(
 			"invalid mithril.backend %q: must be \"v1\" or \"v2\"",
 			c.Mithril.Backend,

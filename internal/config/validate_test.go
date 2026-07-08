@@ -87,6 +87,21 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "load mode allows unset listener ports",
+			modify: func(c *Config) {
+				c.RunMode = RunModeLoad
+				c.ImmutableDbPath = "/data/immutable"
+				c.RelayPort = 0
+				c.PrivatePort = 0
+				c.MetricsPort = 0
+			},
+		},
+		{
+			name:    "serve mode still requires listener ports",
+			modify:  func(c *Config) { c.RelayPort = 0 },
+			wantErr: "port (relay/NtN) must be set",
+		},
+		{
 			name:    "port above maximum",
 			modify:  func(c *Config) { c.UtxorpcPort = 99999999 },
 			wantErr: "invalid utxorpcPort: 99999999 (must be at most 65535)",
@@ -109,6 +124,18 @@ func TestValidate(t *testing.T) {
 		{
 			name:   "optional port disabled with zero",
 			modify: func(c *Config) { c.UtxorpcPort = 0 },
+		},
+		{
+			name:    "duplicate port assignment",
+			modify:  func(c *Config) { c.PrivatePort = c.RelayPort },
+			wantErr: "is assigned to both",
+		},
+		{
+			name: "duplicate zero ports do not collide",
+			modify: func(c *Config) {
+				c.DebugPort = 0
+				c.BarkPort = 0
+			},
 		},
 		{
 			name: "cardano config path traversal",

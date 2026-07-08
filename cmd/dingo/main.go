@@ -361,8 +361,14 @@ DSN Override:
 			cfg.ImmutableDbPath = args[0]
 		}
 
-		if err := cfg.Validate(); err != nil {
-			return fmt.Errorf("invalid configuration: %w", err)
+		// version and list are informational and start no services, so
+		// they must still run even when the merged config is invalid.
+		switch cmd.Name() {
+		case "version", "list":
+		default:
+			if err := cfg.Validate(); err != nil {
+				return fmt.Errorf("invalid configuration: %w", err)
+			}
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
