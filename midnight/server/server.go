@@ -16,9 +16,10 @@
 // google.golang.org/grpc server (not ConnectRPC) so that clients written
 // against the Acropolis tonic service are byte-for-byte compatible. The
 // UTxO-event query RPCs (GetAssetCreates, GetAssetSpends, GetRegistrations,
-// GetDeregistrations, GetUtxoEvents) are backed by Config.Metadata; the
-// remaining RPCs fall back to UnimplementedMidnightStateServer until their
-// handlers are added separately.
+// GetDeregistrations, GetUtxoEvents) are backed by Config.Metadata
+// (see midnight_state.go). The governance/parameters/block/epoch/stability
+// RPCs are backed by Config.Database and Config.SlotTimer (see service.go).
+// Any remaining RPC falls back to UnimplementedMidnightStateServer.
 package server
 
 import (
@@ -32,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/midnight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -45,6 +47,14 @@ const (
 	defaultPort            = 50051
 	defaultShutdownTimeout = 30 * time.Second
 )
+
+// SlotTimer converts between slot numbers and wall-clock time. Satisfied by
+// *ledger.LedgerState; kept as a narrow local interface so this package does
+// not need to import the full ledger package.
+type SlotTimer interface {
+	SlotToTime(slot uint64) (time.Time, error)
+	TimeToSlot(t time.Time) (uint64, error)
+}
 
 // Config holds the configuration for the Midnight gRPC server.
 type Config struct {
@@ -72,6 +82,15 @@ type Config struct {
 	// ShutdownTimeout bounds GracefulStop before escalating to a hard Stop.
 	// Defaults to 30s.
 	ShutdownTimeout time.Duration
+	// Database backs the governance/parameters/block/epoch/stability RPCs.
+	// Required for those RPCs to work; RPCs that only need Database are
+	// unaffected by a nil SlotTimer.
+	Database *database.Database
+	// SlotTimer resolves block timestamps and, for the as-of-timestamp
+	// variants of the stability RPCs, converts a wall-clock time back to a
+	// slot. Required by GetBlockByHash, GetLatestBlock, GetStableBlock, and
+	// GetLatestStableBlock.
+	SlotTimer SlotTimer
 }
 
 // Server runs the MidnightState gRPC service over its own listener.
@@ -143,12 +162,15 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	grpcServer := grpc.NewServer(opts...)
-	// MidnightState service: the UTxO-event query RPCs are implemented
-	// against s.config.Metadata; every other RPC returns Unimplemented until
-	// its handler lands.
+	// MidnightState service: the UTxO-event query RPCs are backed by
+	// s.config.Metadata; the governance/parameters/block/epoch/stability RPCs
+	// by s.config.Database and s.config.SlotTimer. Any RPC whose backend is
+	// nil returns Unimplemented (embedded) or a clean FailedPrecondition.
 	midnight.RegisterMidnightStateServer(grpcServer, &service{
 		metadata:          s.config.Metadata,
 		blockNumberByHash: s.config.BlockNumberByHash,
+		db:                s.config.Database,
+		slotTimer:         s.config.SlotTimer,
 	})
 
 	// Health service reporting SERVING for the overall server ("") and the
@@ -266,8 +288,13 @@ func (s *Server) gracefulStop(timeout time.Duration) {
 // service is the MidnightState implementation. Embedding
 // UnimplementedMidnightStateServer makes every RPC not overridden below
 // return codes.Unimplemented until its handler is added in follow-up work.
+// The UTxO-event query RPCs use metadata/blockNumberByHash (midnight_state.go);
+// the governance/parameters/block/epoch/stability RPCs use db/slotTimer
+// (service.go).
 type service struct {
 	midnight.UnimplementedMidnightStateServer
 	metadata          eventStore
 	blockNumberByHash func(hash []byte) (blockNumber uint64, found bool, err error)
+	db                *database.Database
+	slotTimer         SlotTimer
 }

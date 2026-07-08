@@ -50,6 +50,14 @@ func freePort(t *testing.T) uint {
 // cleanup ordering live in exactly one place.
 func startTestServerConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
+	return startTestServerWithConfig(t, server.Config{})
+}
+
+// startTestServerWithConfig is like startTestServer but lets the caller
+// supply Database/SlotTimer (and any other Config field); Host and Port are
+// always overridden to a free loopback address.
+func startTestServerWithConfig(t *testing.T, cfg server.Config) string {
+	t.Helper()
 	port := freePort(t)
 	cfg.Host = "127.0.0.1"
 	cfg.Port = port
@@ -96,7 +104,7 @@ func TestStubServiceReturnsUnimplemented(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := client.GetLatestBlock(ctx, &midnight.LatestBlockRequest{})
+	_, err := client.GetAssetCreates(ctx, &midnight.AssetCreatesRequest{})
 	require.Error(t, err)
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 }
@@ -178,7 +186,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 	client := midnight.NewMidnightStateClient(dial(t, addr))
 	callCtx, callCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer callCancel()
-	_, err = client.GetLatestBlock(callCtx, &midnight.LatestBlockRequest{})
+	_, err = client.GetAssetCreates(callCtx, &midnight.AssetCreatesRequest{})
 	require.Equal(t, codes.Unimplemented, status.Code(err))
 
 	// Cancellation triggers graceful shutdown; once stopped a fresh call no
@@ -199,7 +207,7 @@ func TestShutdownOnContextCancel(t *testing.T) {
 			200*time.Millisecond,
 		)
 		defer probeCancel()
-		_, probeErr := c.GetLatestBlock(probeCtx, &midnight.LatestBlockRequest{})
+		_, probeErr := c.GetAssetCreates(probeCtx, &midnight.AssetCreatesRequest{})
 		return status.Code(probeErr) != codes.Unimplemented
 	}, 5*time.Second, "server did not shut down after context cancel")
 }

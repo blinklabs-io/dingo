@@ -1023,7 +1023,7 @@ func TestCandidateAddRemove(t *testing.T) {
 	require.Len(t, snapshots, 1, "epoch transition must write a candidate snapshot")
 	assert.Equal(t, uint64(1), snapshots[0].Epoch)
 
-	var entries []candidateEntry
+	var entries []CandidateEntry
 	require.NoError(t, fxcbor.Unmarshal(snapshots[0].CandidatesCbor, &entries))
 	require.Len(t, entries, 1)
 }

@@ -553,8 +553,10 @@ dingo/
 │   └── blob.go          # Remote archive blob adapter
 ├── midnight/            # Midnight MidnightState gRPC compatibility surface
 │   ├── midnight_state*.pb.go # Generated google.golang.org/grpc service stubs
+│   ├── indexer/         # Block scanner indexing midnight_* metadata tables
 │   └── server/          # Native gRPC server lifecycle (reflection, health, TLS)
-│       └── server.go    # Serves the MidnightState gRPC compatibility surface
+│       ├── server.go    # Serves the MidnightState gRPC compatibility surface
+│       └── service.go   # Governance/parameters/block/epoch/stability RPC handlers
 ├── mithril/             # Mithril snapshot bootstrap
 │   ├── bootstrap.go     # Bootstrap orchestration
 │   ├── client.go        # Mithril aggregator client
@@ -809,14 +811,16 @@ In `storageMode: api` with `midnight.port > 0`, `node.go` starts
 ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
-service reporting `SERVING`. `Config.Metadata` (set to `n.db.Metadata()` in
-`node.go`, typed as a package-local `eventStore` interface rather than the
-full `metadata.MetadataStore` so this gRPC-query package doesn't carry
-unrelated write-path/lifecycle methods) backs the five UTxO-event query RPCs
-— `GetAssetCreates`, `GetAssetSpends`, `GetRegistrations`,
-`GetDeregistrations`, and `GetUtxoEvents` — implemented in
-`midnight/server/midnight_state.go`; the first four page a single
-`midnight_*` table forward from a `(start_block, start_tx_index)` cursor, and
+service reporting `SERVING`. The `MidnightState` service is backed by two
+groups of injected dependencies, both wired in `node.go`.
+
+`Config.Metadata` (set to `n.db.Metadata()`, typed as a package-local
+`eventStore` interface rather than the full `metadata.MetadataStore` so this
+gRPC-query package doesn't carry unrelated write-path/lifecycle methods) backs
+the five UTxO-event query RPCs — `GetAssetCreates`, `GetAssetSpends`,
+`GetRegistrations`, `GetDeregistrations`, and `GetUtxoEvents` — implemented in
+`midnight/server/midnight_state.go`; the first four page a single `midnight_*`
+table forward from a `(start_block, start_tx_index)` cursor, and
 `GetUtxoEvents` merge-sorts all four tables by
 `(block_number, tx_index, kind_order)` and returns a `next_position` cursor
 (see DATABASE.md's Midnight Indexer section for the merge algorithm,
@@ -824,16 +828,46 @@ including how page cutoffs extend to avoid splitting a transaction's rows,
 and for how write-side atomicity in the indexer and the read-side
 `ReadTransaction()` shared by `GetUtxoEvents`' four table reads together keep
 that cursor from skipping rows while the live indexer is mid-block).
-`Config.BlockNumberByHash` (set to a closure over `database.BlockByHash` in
-`node.go`) resolves `GetUtxoEvents`' `end_block_hash` to a block number
-independent of the fetched event rows, so the boundary is honored even for a
-block with no Midnight events; `GetUtxoEvents` fails with
-`codes.FailedPrecondition` if `end_block_hash` is set but no resolver was
-configured. `utxo_capacity`/`tx_capacity` are clamped server-side
-(`effectivePageSize`) to a bounded default/max instead of being forwarded
-to the store, since the store's own pagination contract treats a
-non-positive limit as unbounded. The remaining RPC bodies are still
-incomplete, tracked by the Midnight plan and issues #2118/#2119. TLS is
+`Config.BlockNumberByHash` (set to a closure over `database.BlockByHash`)
+resolves `GetUtxoEvents`' `end_block_hash` to a block number independent of
+the fetched event rows, so the boundary is honored even for a block with no
+Midnight events; `GetUtxoEvents` fails with `codes.FailedPrecondition` if
+`end_block_hash` is set but no resolver was configured.
+`utxo_capacity`/`tx_capacity` are clamped server-side (`effectivePageSize`)
+to a bounded default/max instead of being forwarded to the store, since the
+store's own pagination contract treats a non-positive limit as unbounded.
+
+`Config.Database` (set to `midnightserver.NewDatabase(n.db)`, a narrow
+`MidnightDatabase` interface so this package doesn't depend on the concrete
+`*database.Database`) and `Config.SlotTimer` (set to `n.ledgerState`,
+satisfying `SlotToTime`/`TimeToSlot`) back the
+governance/parameters/block/epoch/stability RPCs implemented in
+`midnight/server/service.go`:
+
+- `GetTechnicalCommitteeDatum` / `GetCouncilDatum` — latest
+  `MidnightGovernanceDatum` at or before a block number.
+- `GetAriadneParameters` — latest `MidnightAriadneParams` at or before an
+  epoch.
+- `GetBlockByHash` / `GetLatestBlock` — block metadata via
+  `database.BlockByHash`/`BlocksRecent`, with epoch number resolved from the
+  stored epoch cache (`Database.GetEpochBySlot`) and timestamp from
+  `SlotTimer.SlotToTime`.
+- `GetEpochNonce` — reads `Epoch.Nonce` via `Database.GetEpoch`.
+- `GetEpochCandidates` — decodes `MidnightEpochCandidates.CandidatesCbor` via
+  `midnight/indexer.DecodeEpochCandidatesCbor` and joins it with the `"mark"`
+  `pool_stake_snapshot` rows for the epoch to build the stake distribution.
+- `GetStableBlock` / `GetLatestStableBlock` — compare
+  `chain_tip_block_number - block_number` against the requested stability
+  offset; when `as_of_timestamp_unix_millis` is set, the "tip" is resolved to
+  the latest block at or before that wall-clock time
+  (`SlotTimer.TimeToSlot` + `database.BlockBeforeSlot`) instead of the live
+  tip. `GetLatestStableBlock` looks the target block number up via
+  `Database.BlockByIndex`, translating 0-based block number to the blob
+  store's 1-based index the same way `api/blockfrost` does.
+
+With both groups wired, every `MidnightState` RPC is implemented. A handler
+whose backend is nil (e.g. a server started for lifecycle/health only)
+returns a clean `codes.FailedPrecondition` rather than nil-panicking. TLS is
 enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
 binds the listener synchronously (so bind/cert errors surface immediately)
 and serves in a goroutine; a context watcher performs a bounded

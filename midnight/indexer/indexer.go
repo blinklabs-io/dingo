@@ -109,11 +109,24 @@ type candidateKey struct {
 	OutputIndex uint32
 }
 
-// candidateEntry is one element of the epoch-candidate snapshot.
-type candidateEntry struct {
+// CandidateEntry is one element of the epoch-candidate snapshot stored in
+// MidnightEpochCandidates.CandidatesCbor. Exported so that MidnightState
+// gRPC handlers (midnight/server) can decode the snapshot back into
+// individual candidates.
+type CandidateEntry struct {
 	TxHash      []byte `cbor:"1,keyasint"`
 	OutputIndex uint32 `cbor:"2,keyasint"`
 	Datum       []byte `cbor:"3,keyasint"`
+}
+
+// DecodeEpochCandidatesCbor decodes a MidnightEpochCandidates.CandidatesCbor
+// blob back into its candidate entries.
+func DecodeEpochCandidatesCbor(data []byte) ([]CandidateEntry, error) {
+	var entries []CandidateEntry
+	if err := fxcbor.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("decode epoch candidates cbor: %w", err)
+	}
+	return entries, nil
 }
 
 // Indexer scans blocks for Midnight-relevant transactions and writes rows
@@ -1403,11 +1416,11 @@ func (idx *Indexer) snapshotEpochLocked(epoch uint64, blockNumber uint64, txn ty
 		return
 	}
 
-	entries := make([]candidateEntry, 0, len(idx.candidates))
+	entries := make([]CandidateEntry, 0, len(idx.candidates))
 	for k, datum := range idx.candidates {
 		hashCopy := make([]byte, 32)
 		copy(hashCopy, k.TxHash[:])
-		entries = append(entries, candidateEntry{
+		entries = append(entries, CandidateEntry{
 			TxHash:      hashCopy,
 			OutputIndex: k.OutputIndex,
 			Datum:       datum,

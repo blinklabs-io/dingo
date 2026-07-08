@@ -1515,6 +1515,7 @@ type MetadataStore interface {
 	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
 	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
 	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsAtOrBeforeEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
 	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
 	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
@@ -1523,6 +1524,7 @@ type MetadataStore interface {
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
+	GetMidnightEpochCandidatesByEpoch(uint64, types.Txn) (*models.MidnightEpochCandidates, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

@@ -447,6 +447,28 @@ func (d *MetadataStorePostgres) GetMidnightAriadneParamsByEpoch(
 	return &params, nil
 }
 
+// GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
+// row at or before epoch, or nil when none exists.
+func (d *MetadataStorePostgres) GetMidnightAriadneParamsAtOrBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	result := db.Where("epoch <= ?", epoch).
+		Order("epoch DESC").First(&params)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
 func (d *MetadataStorePostgres) UpsertMidnightAriadneParams(
 	txn types.Txn,
 	params *models.MidnightAriadneParams,
@@ -549,4 +571,25 @@ func (d *MetadataStorePostgres) DeleteMidnightEpochCandidatesByBlock(
 	}
 	return db.Where("block_number = ?", blockNumber).
 		Delete(&models.MidnightEpochCandidates{}).Error
+}
+
+// GetMidnightEpochCandidatesByEpoch returns the candidate snapshot for one
+// epoch, or nil when none exists.
+func (d *MetadataStorePostgres) GetMidnightEpochCandidatesByEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightEpochCandidates, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var ec models.MidnightEpochCandidates
+	result := db.Where("epoch = ?", epoch).First(&ec)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &ec, nil
 }
