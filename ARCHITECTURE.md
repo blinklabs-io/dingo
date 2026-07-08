@@ -1030,8 +1030,40 @@ When a network config supplies a `CheckpointsFile` (mainnet and preview ship one
 `ledger/verify_header.go` performs cryptographic validation of block headers:
 - VRF proof verification against the epoch nonce
 - KES signature verification with period checks
-- Operational certificate chain validation
 - Slot leader eligibility checking
+
+### Operational Certificate Validation
+
+Inbound operational-certificate (opcert) validation is split by its data
+dependency across two points in the pipeline:
+
+- **Stateless checks at header verification** (`ledger/verify_opcert.go`,
+  invoked from `verifyBlockHeaderCrypto`): the cold-key signature and the KES
+  period expiry. The cold verification key is the header's issuer vkey — a
+  registered pool's cold key is, by construction, the vkey whose Blake2b224
+  hash is its pool id. `opCertFromHeader` extracts the opcert across the
+  Shelley- and Babbage-family header layouts; `verifyOpCertColdSignature`
+  verifies the cold-key signature over the raw cardano-ledger `OCertSignable`
+  bytes (not `gouroboros`' `ledger.VerifyOpCertSignature`, which hashes a CBOR
+  array that does not match real opcerts), and `ledger.ValidateKesPeriod`
+  (against `maxKESEvolutions` from Shelley genesis) checks expiry. Running
+  here rejects forged or expired opcerts before the block body is fetched.
+  These checks share the existing skip-during-historical-sync gating.
+- **Counter monotonicity at block apply** (`validateOpCertCounter`, invoked
+  from `ledgerProcessBlock` under `shouldValidate`, before the block's
+  transactions are validated): a read-before-write of the pool's stored opcert
+  counter inside the validation transaction. A backward counter (below the last
+  seen — stale/stolen hot key) is rejected in every era. A gapped counter (more
+  than one past the last seen) is the Praos over-increment case and is rejected
+  only for Praos eras (Babbage onward, via `opCertNoGapRuleApplies`); TPraos
+  eras (Shelley–Alonzo) enforce only monotonicity, so the gap rule is scoped by
+  era rather than by validation mode (`shouldValidate` can be true for
+  historical or near-tip TPraos blocks). A pool with no recorded counter has no
+  baseline (genuine first sighting, or a Mithril-restored start) and is accepted
+  as the baseline. Rollback safety is inherited from the per-`(pool, slot)`
+  `PoolOpCertSequence` store, which drops rows past the rollback slot and
+  recomputes the latest counter, so the counter never advances for a block that
+  is later rolled back.
 
 ### Epoch Nonce Computation
 
