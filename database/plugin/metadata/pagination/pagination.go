@@ -46,6 +46,10 @@ type BlockTxPositioned interface {
 // WHERE/ORDER conditions from the caller's own query — GORM chain calls
 // clone rather than mutate, so reusing the handle that ran that query is
 // safe.
+//
+// The replacement group is ordered by id ASC, so repeated calls for the
+// same page return the tied rows in the same order — every current caller's
+// row model has an auto-increment "id" primary key column.
 func ExtendPageToFullTxGroup[T BlockTxPositioned](
 	db *gorm.DB,
 	rows []T,
@@ -66,6 +70,7 @@ func ExtendPageToFullTxGroup[T BlockTxPositioned](
 	}
 	var group []T
 	if err := db.Where("block_number = ? AND tx_index = ?", lastBlock, lastTx).
+		Order("id ASC").
 		Find(&group).Error; err != nil {
 		return nil, err
 	}

@@ -227,7 +227,7 @@ func (d *MetadataStorePostgres) FindMidnightAssetCreatesFrom(
 	query := db.Where(
 		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
 		startBlock, startBlock, startTxIndex,
-	).Order("block_number ASC, tx_index ASC")
+	).Order("block_number ASC, tx_index ASC, id ASC")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -257,7 +257,7 @@ func (d *MetadataStorePostgres) FindMidnightAssetSpendsFrom(
 	query := db.Where(
 		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
 		startBlock, startBlock, startTxIndex,
-	).Order("block_number ASC, tx_index ASC")
+	).Order("block_number ASC, tx_index ASC, id ASC")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -287,7 +287,7 @@ func (d *MetadataStorePostgres) FindMidnightRegistrationsFrom(
 	query := db.Where(
 		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
 		startBlock, startBlock, startTxIndex,
-	).Order("block_number ASC, tx_index ASC")
+	).Order("block_number ASC, tx_index ASC, id ASC")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}
@@ -317,7 +317,7 @@ func (d *MetadataStorePostgres) FindMidnightDeregistrationsFrom(
 	query := db.Where(
 		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
 		startBlock, startBlock, startTxIndex,
-	).Order("block_number ASC, tx_index ASC")
+	).Order("block_number ASC, tx_index ASC, id ASC")
 	if limit > 0 {
 		query = query.Limit(limit)
 	}

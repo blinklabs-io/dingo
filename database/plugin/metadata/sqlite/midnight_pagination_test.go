@@ -248,6 +248,38 @@ func TestFindMidnightAssetCreatesFrom_ExtendsPastLimitWithinSameTx(t *testing.T)
 	require.Equal(t, uint64(2), next[0].BlockNumber)
 }
 
+// TestFindMidnightAssetCreatesFrom_ExtendedGroupOrderIsDeterministic
+// verifies that repeated calls returning the same extended tx group return
+// its rows in the same order (id ASC), not whatever order the database
+// happens to produce for an unordered scan.
+func TestFindMidnightAssetCreatesFrom_ExtendedGroupOrderIsDeterministic(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	const groupSize = 8
+	for i := range groupSize {
+		require.NoError(t, store.CreateMidnightAssetCreate(nil, &models.MidnightAssetCreate{
+			Address:     []byte{0x01},
+			Quantity:    uint64(i + 1),
+			TxHash:      hashFor(1),
+			OutputIndex: uint32(i),
+			BlockNumber: 1,
+			BlockHash:   hashFor(1),
+			TxIndex:     0,
+		}))
+	}
+
+	first, err := store.FindMidnightAssetCreatesFrom(0, 0, 2, nil)
+	require.NoError(t, err)
+	require.Len(t, first, groupSize)
+
+	for range 5 {
+		again, err := store.FindMidnightAssetCreatesFrom(0, 0, 2, nil)
+		require.NoError(t, err)
+		require.Equal(t, first, again, "repeated calls must return the extended group in the same order")
+	}
+}
+
 // TestFindMidnightAssetCreatesFrom_NoLimit verifies limit <= 0 returns every
 // matching row without a SQL LIMIT applied.
 func TestFindMidnightAssetCreatesFrom_NoLimit(t *testing.T) {
