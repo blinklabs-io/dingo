@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -1485,4 +1486,124 @@ func TestMysqlRestoreDrepStateAtSlot(t *testing.T) {
 			}
 		},
 	)
+}
+
+// TestValidateDatabaseName verifies the conservative MySQL identifier allowlist.
+func TestValidateDatabaseName(t *testing.T) {
+	valid := []string{
+		"mydb",
+		"dingo",
+		"my_db",
+		"my-db",
+		"db123",
+		"UPPER",
+		"Mixed_Case-1",
+		strings.Repeat("a", 64),
+	}
+	for _, name := range valid {
+		if err := validateDatabaseName(name); err != nil {
+			t.Errorf("expected %q to be valid, got error: %v", name, err)
+		}
+	}
+
+	invalid := []struct {
+		name string
+		desc string
+	}{
+		{"", "empty name"},
+		{"`injected`", "backtick injection"},
+		{"db`drop", "embedded backtick"},
+		{"db name", "space in name"},
+		{"db;DROP TABLE x", "semicolon injection"},
+		{"db.name", "dot in name"},
+		{"db/name", "slash in name"},
+		{"db\\name", "backslash in name"},
+		{"db\x00name", "null byte"},
+		{strings.Repeat("a", 65), "over MySQL identifier length limit"},
+	}
+	for _, tc := range invalid {
+		if err := validateDatabaseName(tc.name); err == nil {
+			t.Errorf("expected %q (%s) to be invalid, but got no error", tc.name, tc.desc)
+		}
+	}
+}
+
+// TestNewWithOptionsRejectsInvalidDatabaseName verifies option-based config validation.
+func TestNewWithOptionsRejectsInvalidDatabaseName(t *testing.T) {
+	_, err := NewWithOptions(WithDatabase("`bad`"))
+	if err == nil {
+		t.Fatal("expected error for database name with backticks, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("bad name"))
+	if err == nil {
+		t.Fatal("expected error for database name with space, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("bad name"), WithDSN("   "))
+	if err == nil {
+		t.Fatal("expected error for bad database name with whitespace DSN, got nil")
+	}
+
+	_, err = NewWithOptions(WithDatabase("good_db"))
+	if err != nil {
+		t.Fatalf("expected valid database name to succeed, got: %v", err)
+	}
+}
+
+// TestNewRejectsInvalidDatabaseName verifies direct constructor config validation.
+func TestNewRejectsInvalidDatabaseName(t *testing.T) {
+	_, err := New(
+		"localhost",
+		3306,
+		"root",
+		"",
+		"`bad`",
+		"",
+		"UTC",
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error for database name with backticks, got nil")
+	}
+}
+
+// TestNewAllowsEmptyDatabaseNameDefault preserves the legacy empty-name default.
+func TestNewAllowsEmptyDatabaseNameDefault(t *testing.T) {
+	store, err := New(
+		"localhost",
+		3306,
+		"root",
+		"",
+		"",
+		"",
+		"UTC",
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("expected empty database name to use default, got: %v", err)
+	}
+	if store.database != "mysql" {
+		t.Fatalf("expected default database name mysql, got %q", store.database)
+	}
+}
+
+// TestStartRejectsInvalidDatabaseNameFromDSN verifies DSN database validation.
+func TestStartRejectsInvalidDatabaseNameFromDSN(t *testing.T) {
+	store, err := NewWithOptions(
+		WithDSN("root:secret@tcp(localhost:3306)/bad`name?parseTime=true"),
+	)
+	if err != nil {
+		t.Fatalf("expected store creation to defer DSN database validation to start, got: %v", err)
+	}
+
+	err = store.Start()
+	if err == nil {
+		t.Fatal("expected error for DSN database name with backticks, got nil")
+	}
+	if !strings.Contains(err.Error(), "mysql config dsn") {
+		t.Fatalf("expected DSN config error, got: %v", err)
+	}
 }
