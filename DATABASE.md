@@ -227,6 +227,10 @@ added for retired pools. This uses the `metadata.MetadataStore` methods
 | `DeleteMidnightAssetSpendsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_asset_spends` rows for the given block. Used during chain rollback; caller restores the returned UTxOs to the in-memory set. |
 | `DeleteMidnightRegistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_registrations` rows for the given block. Used during chain rollback. |
 | `DeleteMidnightDeregistrationsByBlock(txn, blockNumber)` | Deletes and returns all `midnight_deregistrations` rows for the given block. Used during chain rollback; caller restores the returned reg UTxOs to the in-memory set. |
+| `FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)` | Returns `midnight_asset_creates` rows with `(block_number, tx_index) > (startBlock, startTxIndex)`, ordered `block_number ASC, tx_index ASC`, capped at `limit` (`limit <= 0` means no SQL LIMIT). Backs the MidnightState `GetAssetCreates` RPC. |
+| `FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_asset_spends`. Backs `GetAssetSpends`. |
+| `FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_registrations`. Backs `GetRegistrations`. |
+| `FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)` | Same cursor semantics as `FindMidnightAssetCreatesFrom`, over `midnight_deregistrations`. Backs `GetDeregistrations`. |
 | `InsertMidnightGovernanceDatum(txn, *MidnightGovernanceDatum)` | Insert a governance datum row. Idempotent: silently ignores replay conflicts on `(datum_type, tx_hash, output_index)`; latest is found via `ORDER BY block_number DESC`. |
 | `DeleteMidnightGovernanceDatumsByBlock(txn, blockNumber)` | Deletes governance datum rows written by a rolled-back block. |
 | `GetLatestMidnightGovernanceDatum(datumType, blockNumber, txn)` | Returns the newest datum of `datumType` at or before `blockNumber`, or nil when none exist. |
@@ -251,6 +255,16 @@ and output index so identical sets produce identical CBOR.
 On startup, committee-candidate restoration reads live `utxo` rows and joins
 `utxo.datum_hash` to `datum.raw_datum`; it does not require block CBOR blobs
 to still be available.
+
+The MidnightState `GetUtxoEvents` RPC has no dedicated store method: the
+`midnight/server` handler calls the four `Find*From` methods above with the
+same cursor window, then merge-sorts the results in Go by
+`(block_number, tx_index, kind_order)` (create=0, spend=1, registration=2,
+deregistration=3), applies `end_block_hash` truncation and the `tx_capacity`
+limit, and returns the last emitted row's position as `next_position`.
+Fetching each table's own top-`tx_capacity` rows is sufficient for a correct
+merge, since a row beyond that position in its own table cannot be among the
+global top `tx_capacity` results.
 
 ### Stake Accounts and Certificate Tables
 

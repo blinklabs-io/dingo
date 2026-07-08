@@ -204,6 +204,114 @@ func (d *MetadataStoreMysql) DeleteMidnightDeregistrationsByBlock(
 	return rows, nil
 }
 
+// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+func (d *MetadataStoreMysql) FindMidnightAssetCreatesFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetCreate, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightAssetCreate
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+func (d *MetadataStoreMysql) FindMidnightAssetSpendsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetSpend, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightAssetSpend
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// FindMidnightRegistrationsFrom returns registration rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+func (d *MetadataStoreMysql) FindMidnightRegistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightRegistration, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightRegistration
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// FindMidnightDeregistrationsFrom returns deregistration rows ordered by
+// (block_number, tx_index) ascending, starting strictly after
+// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+func (d *MetadataStoreMysql) FindMidnightDeregistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightDeregistration, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	query := db.Where(
+		"(block_number > ?) OR (block_number = ? AND tx_index > ?)",
+		startBlock, startBlock, startTxIndex,
+	).Order("block_number ASC, tx_index ASC")
+	if limit > 0 {
+		query = query.Limit(limit)
+	}
+	var rows []models.MidnightDeregistration
+	if err := query.Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 func (d *MetadataStoreMysql) GetMidnightCandidates(
 	addr ledger.Address,
 	txn types.Txn,

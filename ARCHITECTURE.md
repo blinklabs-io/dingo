@@ -809,12 +809,19 @@ In `storageMode: api` with `midnight.port > 0`, `node.go` starts
 ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
-service reporting `SERVING`. The compatibility surface is still incomplete:
-merged work covers server lifecycle and block scanning, while the remaining RPC
-bodies are tracked by the Midnight plan and issues #2118/#2119. TLS is enabled
-when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the
-listener synchronously (so bind/cert errors surface immediately) and serves in
-a goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
+service reporting `SERVING`. `Config.Metadata` (set to `n.db.Metadata()` in
+`node.go`) backs the five UTxO-event query RPCs — `GetAssetCreates`,
+`GetAssetSpends`, `GetRegistrations`, `GetDeregistrations`, and
+`GetUtxoEvents` — implemented in `midnight/server/midnight_state.go`; the
+first four page a single `midnight_*` table forward from a
+`(start_block, start_tx_index)` cursor, and `GetUtxoEvents` merge-sorts all
+four tables by `(block_number, tx_index, kind_order)` and returns a
+`next_position` cursor (see DATABASE.md's Midnight Indexer section for the
+merge algorithm). The remaining RPC bodies are still incomplete, tracked by
+the Midnight plan and issues #2118/#2119. TLS is enabled when the shared
+`tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the listener
+synchronously (so bind/cert errors surface immediately) and serves in a
+goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
 a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
 without affecting indexer eligibility.
 

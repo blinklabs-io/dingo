@@ -1099,6 +1099,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
 				Logger:          n.config.logger,
+				Metadata:        n.db.Metadata(),
 				Host:            n.config.midnight.Host,
 				Port:            n.config.midnight.Port,
 				TLSCertFilePath: n.config.tlsCertFilePath,
