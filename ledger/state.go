@@ -3777,32 +3777,12 @@ func (ls *LedgerState) ledgerProcessBlock(
 							"error", err,
 						)
 					default:
-						if applied > 0 {
-							ls.config.Logger.Info(
-								"applied Leios endorser block transactions",
-								"component", "ledger",
-								"slot", point.Slot,
-								"eb_slot", ebSlot,
-								"eb_txs", applied,
-							)
-						} else if !ls.config.LeiosApplyEndorserBlockTxs {
-							// Haskell-conformant path: the endorser block was
-							// stored (for serving and the NtC inline view) but its
-							// transactions were not applied to the UTxO.
-							ls.config.Logger.Debug(
-								"stored Leios endorser block without applying to UTxO",
-								"component", "ledger",
-								"slot", point.Slot,
-								"eb_slot", ebSlot,
-							)
-						} else {
-							ls.config.Logger.Debug(
-								"skipped already-applied Leios endorser block transactions",
-								"component", "ledger",
-								"slot", point.Slot,
-								"eb_slot", ebSlot,
-							)
-						}
+						ls.logLeiosEndorserBlockApplyResult(
+							point,
+							ebSlot,
+							ebTxs,
+							applied,
+						)
 					}
 				} else {
 					ls.config.Logger.Debug(
@@ -4055,6 +4035,48 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	return delta, nil
+}
+
+func (ls *LedgerState) logLeiosEndorserBlockApplyResult(
+	point ocommon.Point,
+	ebSlot uint64,
+	ebTxs []cbor.RawMessage,
+	applied int,
+) {
+	switch {
+	case applied > 0:
+		ls.config.Logger.Info(
+			"applied Leios endorser block transactions",
+			"component", "ledger",
+			"slot", point.Slot,
+			"eb_slot", ebSlot,
+			"eb_txs", applied,
+		)
+	case len(ebTxs) == 0:
+		ls.config.Logger.Debug(
+			"Leios endorser block has no transactions",
+			"component", "ledger",
+			"slot", point.Slot,
+			"eb_slot", ebSlot,
+		)
+	case !ls.config.LeiosApplyEndorserBlockTxs:
+		// Haskell-conformant path: the endorser block was stored (for serving
+		// and the NtC inline view) but its transactions were not applied to the
+		// UTxO.
+		ls.config.Logger.Debug(
+			"stored Leios endorser block without applying to UTxO",
+			"component", "ledger",
+			"slot", point.Slot,
+			"eb_slot", ebSlot,
+		)
+	default:
+		ls.config.Logger.Debug(
+			"skipped already-applied Leios endorser block transactions",
+			"component", "ledger",
+			"slot", point.Slot,
+			"eb_slot", ebSlot,
+		)
+	}
 }
 
 // updateTipMetrics updates gauges from in-memory state. Call under ls.Lock().

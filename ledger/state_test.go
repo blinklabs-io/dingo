@@ -4064,3 +4064,66 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, uint64(4), sequence)
 }
+
+func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
+	t *testing.T,
+) {
+	tests := []struct {
+		name     string
+		applyTxs bool
+		ebTxs    []cbor.RawMessage
+		applied  int
+		want     string
+		notWant  []string
+	}{
+		{
+			name:     "empty CIP block",
+			applyTxs: true,
+			want:     "Leios endorser block has no transactions",
+			notWant: []string{
+				"skipped already-applied Leios endorser block transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
+		},
+		{
+			name:     "CIP deduplicated block",
+			applyTxs: true,
+			ebTxs:    []cbor.RawMessage{{0x80}},
+			want:     "skipped already-applied Leios endorser block transactions",
+			notWant:  []string{"Leios endorser block has no transactions"},
+		},
+		{
+			name:    "Haskell stored block",
+			ebTxs:   []cbor.RawMessage{{0x80}},
+			want:    "stored Leios endorser block without applying to UTxO",
+			notWant: []string{"Leios endorser block has no transactions"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					LeiosApplyEndorserBlockTxs: tc.applyTxs,
+					Logger: slog.New(slog.NewTextHandler(
+						&logBuf,
+						&slog.HandlerOptions{Level: slog.LevelDebug},
+					)),
+				},
+			}
+
+			ls.logLeiosEndorserBlockApplyResult(
+				ocommon.Point{Slot: 10},
+				20,
+				tc.ebTxs,
+				tc.applied,
+			)
+
+			logs := logBuf.String()
+			assert.Contains(t, logs, tc.want)
+			for _, notWant := range tc.notWant {
+				assert.NotContains(t, logs, notWant)
+			}
+		})
+	}
+}

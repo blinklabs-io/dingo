@@ -374,19 +374,21 @@ magic "DTXP" (4) + block_slot (8) + block_hash (32)
 + metadata_offset/metadata_length (8) + is_valid (1)
 ```
 
-Leios endorser-block transactions are stored the same way, even though an
+Leios endorser-block storage uses the same blob-key namespace, even though an
 endorser block is not part of the ranking-block chain. When a Dijkstra ranking
-block references an endorser block (`ledger/leios_apply.go`), the endorser
-transactions' CBOR is written as a standalone blob under a `bp` +
-`(endorser-block slot, endorser-block hash)` key via `SetGenesisCbor` — which,
-like the genesis UTxO blob, writes only the `bp` and `bp..._metadata` keys and
-deliberately omits the `bi`/`bh` index keys, so the chain iterator never treats
-it as a chain block. Its `bp..._metadata` carries `ID=0` (real ranking blocks
-created via `BlockCreate` get `ID >= 1`), which is also how the `bp`-prefix
-scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0` blobs so a
-synthetic endorser/genesis blob is never returned as the "previous block." This
-matters for storage callers, but it does not make a slot-key scan a canonical
-chain query: retained fork blobs can still sort before an epoch boundary.
+block references an endorser block (`ledger/leios_apply.go`), `SetGenesisCbor`
+writes a standalone CBOR blob under a `bp` + `(endorser-block slot,
+endorser-block hash)` key. That `bp` value is the endorser-block offset blob
+used by cold extraction, not a chain block and not the transaction metadata
+rows. Like the genesis UTxO blob, it writes only the `bp` and `bp..._metadata`
+keys and deliberately omits the `bi`/`bh` index keys, so the chain iterator
+never treats it as a chain block. Its `bp..._metadata` carries `ID=0` (real
+ranking blocks created via `BlockCreate` get `ID >= 1`), which is also how the
+`bp`-prefix scanning helpers exclude it: `BlockBeforeSlotTxn` skips `ID=0`
+blobs so a synthetic endorser/genesis blob is never returned as the "previous
+block." This matters for storage callers, but it does not make a slot-key scan
+a canonical chain query: retained fork blobs can still sort before an epoch
+boundary.
 Epoch nonce code derives `last_epoch_block_nonce` from the previous epoch's last
 ranking block's `PrevHash` through `canonicalBlockBeforeSlot`: when a chain
 index is attached it uses `chain.BlockBeforeSlot`; startup helpers, tests, and
@@ -411,21 +413,22 @@ from the highest valid canonical row below the boundary. Fork rows at the
 boundary or below it do not mark completion or seed the fold when the canonical
 trust-boundary hash / primary-chain anchor is available.
 
-Whether the stored endorser transactions are then applied to the ledger is
+Whether the decoded endorser transactions are then applied to the ledger is
 selected by `LedgerStateConfig.LeiosApplyEndorserBlockTxs` (see
 `ARCHITECTURE.md`; wired from the network in `node.go`, false on the Musashi
 prototype and true elsewhere). On the CIP-conformant path (every network except
-Musashi) each endorser transaction's `t` entry and its outputs' `u` entries
-store ordinary `DOFF` references whose `block_slot`/`block_hash` point at that
-endorser-block blob, so cold-extract resolution is identical to chain-block
-transactions; the transactions' metadata rows are recorded under the
-referencing ranking block's point, so a rollback of the ranking block removes
-them (the orphaned endorser-block blob is harmless and re-created on reprocess).
-On the Haskell-conformant path (Musashi, `LeiosApplyEndorserBlockTxs` false)
-only the standalone `bp` endorser-block blob above is written — for historical
-serving and the node-to-client inline view — and no `t`/`u` entries or metadata
-rows are created, because the endorser transactions are not applied to the UTxO
-set.
+Musashi), `LeiosApplyEndorserBlockTxs` persists the transaction-level apply
+data: each endorser transaction's `t` entry and its outputs' `u` entries store
+ordinary `DOFF` references whose `block_slot`/`block_hash` point at the
+standalone `bp` blob above, so cold-extract resolution is identical to
+chain-block transactions. The transactions' metadata rows are recorded under
+the referencing ranking block's point, so a rollback of the ranking block
+removes them (the orphaned endorser-block blob is harmless and re-created on
+reprocess). On the Haskell-conformant path (Musashi,
+`LeiosApplyEndorserBlockTxs` false) only the standalone `bp` endorser-block blob
+above is written for historical serving and the node-to-client inline view; no
+`t`/`u` entries or metadata rows are created, because the endorser transactions
+are not applied to the UTxO set.
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.

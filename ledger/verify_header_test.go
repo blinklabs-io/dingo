@@ -1165,6 +1165,24 @@ func seedPoolRegistration(
 	require.NoError(t, err)
 }
 
+func seedBlockPoolRegistration(
+	t *testing.T,
+	db *database.Database,
+	block gledger.Block,
+) {
+	t.Helper()
+	poolKeyHash := block.IssuerVkey().Hash()
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	require.NoError(t, err)
+	require.True(t, ok)
+	seedPoolRegistration(
+		t,
+		db,
+		poolKeyHash[:],
+		lcommon.Blake2b256Hash(vrfKey).Bytes(),
+	)
+}
+
 // TestVerifyBlockLeaderEligibility_ByronSkipped verifies that Byron blocks
 // bypass eligibility checking entirely (Byron uses PBFT, not Praos).
 func TestVerifyBlockLeaderEligibility_ByronSkipped(t *testing.T) {
@@ -1336,6 +1354,47 @@ func TestVerifyBlockLeaderEligibility_VRFAboveThresholdFails(t *testing.T) {
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "VRF leader value exceeds stake-derived threshold")
+}
+
+func TestVerifyBlockHeaderCrypto_SkipLeaderStakeThresholdCheckWarnsAndAccepts(
+	t *testing.T,
+) {
+	tb := createTestBlock(t, [32]byte{41}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	var logBuf bytes.Buffer
+	ls.config.Logger = slog.New(slog.NewTextHandler(
+		&logBuf,
+		&slog.HandlerOptions{Level: slog.LevelWarn},
+	))
+	ls.config.SkipLeaderStakeThresholdCheck = true
+
+	poolKeyHash := tb.block.IssuerVkey().Hash()
+	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1)
+	dummyHash := make([]byte, 28)
+	dummyHash[0] = 0xFF
+	seedPoolStakeSnapshot(t, db, 4, dummyHash, 1_000_000_000_000_000_000)
+	seedBlockPoolRegistration(t, db, tb.block)
+
+	err := ls.verifyBlockHeaderCrypto(tb.block)
+	require.NoError(t, err)
+	logs := logBuf.String()
+	assert.Contains(
+		t,
+		logs,
+		"leader eligibility below stake-derived threshold; trusting block",
+	)
+	assert.Contains(t, logs, "leadership stake omits reward balances")
+}
+
+func TestVerifyBlockHeaderCrypto_EmptyMarkSnapshotDiagnostic(t *testing.T) {
+	tb := createTestBlock(t, [32]byte{42}, 0, tamperNone)
+	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
+	seedBlockPoolRegistration(t, db, tb.block)
+
+	err := ls.verifyBlockHeaderCrypto(tb.block)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "epoch mark snapshot is empty")
+	assert.Contains(t, err.Error(), "has no stake in epoch")
 }
 
 func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
