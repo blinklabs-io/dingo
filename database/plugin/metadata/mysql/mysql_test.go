@@ -18,10 +18,12 @@ package mysql
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,10 +32,12 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // TestTable is a simple table for testing concurrent transactions
@@ -45,6 +49,10 @@ type mockTransaction struct {
 	hash         lcommon.Blake2b256
 	certificates []lcommon.Certificate
 	isValid      bool
+	inputs       []lcommon.TransactionInput
+	collateral   []lcommon.TransactionInput
+	refInputs    []lcommon.TransactionInput
+	consumed     []lcommon.TransactionInput
 	withdrawals  map[*lcommon.Address]*big.Int
 }
 
@@ -97,11 +105,11 @@ func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
 }
 
 func (m *mockTransaction) Inputs() []lcommon.TransactionInput {
-	return nil
+	return m.inputs
 }
 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
-	return nil
+	return m.collateral
 }
 
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
@@ -125,7 +133,7 @@ func (m *mockTransaction) Cbor() []byte {
 }
 
 func (m *mockTransaction) Consumed() []lcommon.TransactionInput {
-	return nil
+	return m.consumed
 }
 
 func (m *mockTransaction) Witnesses() lcommon.TransactionWitnessSet {
@@ -137,7 +145,7 @@ func (m *mockTransaction) ValidityIntervalStart() uint64 {
 }
 
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
-	return nil
+	return m.refInputs
 }
 
 func (m *mockTransaction) TotalCollateral() *big.Int {
@@ -178,6 +186,49 @@ func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {
 
 func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
+}
+
+type setTransactionSQLRecorder struct {
+	mu         sync.Mutex
+	statements []string
+}
+
+func (r *setTransactionSQLRecorder) LogMode(
+	gormlogger.LogLevel,
+) gormlogger.Interface {
+	return r
+}
+
+func (*setTransactionSQLRecorder) Info(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Warn(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Error(context.Context, string, ...any) {}
+
+func (r *setTransactionSQLRecorder) Trace(
+	_ context.Context,
+	_ time.Time,
+	fc func() (string, int64),
+	_ error,
+) {
+	sql, _ := fc()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statements = append(r.statements, sql)
+}
+
+func (r *setTransactionSQLRecorder) countUtxoSelects() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, stmt := range r.statements {
+		normalized := strings.ToUpper(stmt)
+		if strings.Contains(normalized, "SELECT") &&
+			strings.Contains(normalized, "FROM `UTXO`") {
+			count++
+		}
+	}
+	return count
 }
 
 // testHash32 creates a 32-byte test hash from a seed string.
@@ -418,6 +469,136 @@ func TestMysqlMultipleTransaction(t *testing.T) {
 	}
 	if err := <-errCh; err != nil {
 		t.Fatalf("goroutine error: %s", err)
+	}
+}
+
+// TestMysqlSetTransactionBatchesMultiInputUtxoLookups verifies multi-input,
+// collateral, and reference-input processing uses bounded UTxO SELECTs.
+func TestMysqlSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
+	store := newTestMysqlStore(t)
+	defer store.Close() //nolint:errcheck
+	store.storageMode = types.StorageModeAPI
+
+	makeTxID := func(seed byte) []byte {
+		return bytes.Repeat([]byte{seed}, 32)
+	}
+	makeInput := func(seed byte, idx uint32) lcommon.TransactionInput {
+		return dbtestutil.NewMockInput(makeTxID(seed), idx)
+	}
+
+	// Seed UTxOs for regular inputs, collateral, and reference inputs.
+	utxos := make([]models.Utxo, 0, 7)
+	for i := 0; i < 7; i++ {
+		utxos = append(utxos, models.Utxo{
+			TxId:       makeTxID(byte(0x60 + i)),
+			OutputIdx:  uint32(i),
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{byte(0x10 + i)}, 28),
+			StakingKey: bytes.Repeat([]byte{byte(0x20 + i)}, 28),
+			Amount:     types.Uint64(1_000_000 + i),
+		})
+	}
+	if result := store.DB().Create(&utxos); result.Error != nil {
+		t.Fatalf("create utxos: %v", result.Error)
+	}
+
+	// Record SQL executed by SetTransaction so UTxO SELECTs can be counted.
+	recorder := &setTransactionSQLRecorder{}
+	store.db = store.DB().Session(&gorm.Session{Logger: recorder})
+
+	// Build a transaction containing multiple items in every input class.
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x91}, 32))
+	defer func() {
+		cleanupDB := store.DB()
+		for i := 0; i < 7; i++ {
+			seedTxID := makeTxID(byte(0x60 + i))
+			if result := cleanupDB.Model(&models.Utxo{}).
+				Where("tx_id = ?", seedTxID).
+				Updates(map[string]any{
+					"collateral_by_tx_id": nil,
+					"referenced_by_tx_id": nil,
+					"spent_at_tx_id":      nil,
+					"deleted_slot":        0,
+				}); result.Error != nil {
+				t.Errorf("cleanup utxo refs: %v", result.Error)
+			}
+			if result := cleanupDB.
+				Where("tx_id = ?", seedTxID).
+				Delete(&models.Utxo{}); result.Error != nil {
+				t.Errorf("cleanup utxo: %v", result.Error)
+			}
+		}
+		if result := cleanupDB.
+			Where("hash = ?", txHash.Bytes()).
+			Delete(&models.Transaction{}); result.Error != nil {
+			t.Errorf("cleanup transaction: %v", result.Error)
+		}
+	}()
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		inputs: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+		collateral: []lcommon.TransactionInput{
+			makeInput(0x63, 3),
+			makeInput(0x64, 4),
+		},
+		refInputs: []lcommon.TransactionInput{
+			makeInput(0x65, 5),
+			makeInput(0x66, 6),
+		},
+		consumed: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+	}
+	point := ocommon.NewPoint(200, bytes.Repeat([]byte{0x92}, 32))
+
+	// Process the transaction through the regular SetTransaction path.
+	if err := store.SetTransaction(tx, point, 0, nil, nil); err != nil {
+		t.Fatalf("set transaction: %v", err)
+	}
+
+	// Verify exactly one batch SELECT was used per input class.
+	if got := recorder.countUtxoSelects(); got != 3 {
+		t.Fatalf("expected 3 batched UTxO SELECTs, got %d", got)
+	}
+
+	// Verify all regular inputs were marked as spent.
+	var spent int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("spent_at_tx_id = ?", txHash.Bytes()).
+		Count(&spent); result.Error != nil {
+		t.Fatalf("count spent utxos: %v", result.Error)
+	}
+	if spent != 3 {
+		t.Fatalf("expected 3 spent UTxOs, got %d", spent)
+	}
+
+	// Verify all collateral inputs were linked to the transaction.
+	var collateral int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("collateral_by_tx_id = ?", txHash.Bytes()).
+		Count(&collateral); result.Error != nil {
+		t.Fatalf("count collateral utxos: %v", result.Error)
+	}
+	if collateral != 2 {
+		t.Fatalf("expected 2 collateral UTxOs, got %d", collateral)
+	}
+
+	// Verify all reference inputs were linked to the transaction.
+	var referenced int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("referenced_by_tx_id = ?", txHash.Bytes()).
+		Count(&referenced); result.Error != nil {
+		t.Fatalf("count reference input utxos: %v", result.Error)
+	}
+	if referenced != 2 {
+		t.Fatalf("expected 2 reference input UTxOs, got %d", referenced)
 	}
 }
 

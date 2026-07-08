@@ -33,6 +33,12 @@ import (
 // Postgres can handle large batches efficiently.
 const postgresBatchChunkSize = 1000
 
+// UtxoRef represents a reference to a UTXO by transaction ID and output index.
+type UtxoRef struct {
+	TxId      []byte
+	OutputIdx uint32
+}
+
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStorePostgres) GetUtxo(
 	txId []byte,
@@ -54,6 +60,50 @@ func (d *MetadataStorePostgres) GetUtxo(
 		return nil, fmt.Errorf("get utxo %x#%d: %w", txId, idx, result.Error)
 	}
 	return ret, nil
+}
+
+// GetUtxosBatch retrieves multiple UTXOs by their references in batched queries.
+// Returns a map keyed by "txid:outputidx" for easy lookup.
+func (d *MetadataStorePostgres) GetUtxosBatch(
+	refs []UtxoRef,
+	txn types.Txn,
+) (map[string]*models.Utxo, error) {
+	if len(refs) == 0 {
+		return make(map[string]*models.Utxo), nil
+	}
+
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[string]*models.Utxo, len(refs))
+	for i := 0; i < len(refs); i += postgresBatchChunkSize {
+		end := min(i+postgresBatchChunkSize, len(refs))
+		chunk := refs[i:end]
+
+		conditions := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, ref := range chunk {
+			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+			args = append(args, ref.TxId, ref.OutputIdx)
+		}
+
+		var utxos []models.Utxo
+		queryResult := db.
+			Where("deleted_slot = 0").
+			Where("("+strings.Join(conditions, " OR ")+")", args...).
+			Find(&utxos)
+		if queryResult.Error != nil {
+			return nil, queryResult.Error
+		}
+		for j := range utxos {
+			key := fmt.Sprintf("%x:%d", utxos[j].TxId, utxos[j].OutputIdx)
+			result[key] = &utxos[j]
+		}
+	}
+
+	return result, nil
 }
 
 // GetUtxoIncludingSpent returns a Utxo by reference, including spent UTxOs

@@ -17,6 +17,7 @@
 package mysql
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1009,32 +1010,35 @@ func (d *MetadataStoreMysql) SetTransaction(
 		}
 	}
 	// Add Inputs to Transaction
-	for _, input := range tx.Inputs() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
+	if len(tx.Inputs()) > 0 {
+		inputRefs := make([]UtxoRef, 0, len(tx.Inputs()))
+		for _, input := range tx.Inputs() {
+			inputRefs = append(inputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		inputUtxos, err := d.GetUtxosBatch(inputRefs, txn)
 		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
+			return fmt.Errorf("failed to batch fetch input UTXOs: %w", err)
 		}
-		if utxo == nil {
-			d.logger.Warn(
-				"Skipping missing input UTxO",
-				"hash",
-				input.Id().String(),
-				"index",
-				inIdx,
-			)
-			continue
+		for _, input := range tx.Inputs() {
+			inTxId := input.Id().Bytes()
+			inIdx := input.Index()
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := inputUtxos[key]
+			if utxo == nil {
+				d.logger.Warn(
+					"Skipping missing input UTxO",
+					"hash",
+					input.Id().String(),
+					"index",
+					inIdx,
+				)
+				continue
+			}
+			tmpTx.Inputs = append(tmpTx.Inputs, *utxo)
 		}
-		tmpTx.Inputs = append(
-			tmpTx.Inputs,
-			*utxo,
-		)
 	}
 	// Add Collateral to Transaction
 	if len(tx.Collateral()) > 0 {
@@ -1043,18 +1047,22 @@ func (d *MetadataStoreMysql) SetTransaction(
 		var caseArgs []any
 		var whereArgs []any
 
+		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
+		for _, input := range tx.Collateral() {
+			collateralRefs = append(collateralRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		collateralUtxos, err := d.GetUtxosBatch(collateralRefs, txn)
+		if err != nil {
+			return fmt.Errorf("failed to batch fetch collateral UTXOs: %w", err)
+		}
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := collateralUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing collateral UTxO",
@@ -1105,18 +1113,25 @@ func (d *MetadataStoreMysql) SetTransaction(
 		var caseArgs []any
 		var whereArgs []any
 
+		refInputRefs := make([]UtxoRef, 0, len(tx.ReferenceInputs()))
+		for _, input := range tx.ReferenceInputs() {
+			refInputRefs = append(refInputRefs, UtxoRef{
+				TxId:      input.Id().Bytes(),
+				OutputIdx: input.Index(),
+			})
+		}
+		refInputUtxos, err := d.GetUtxosBatch(refInputRefs, txn)
+		if err != nil {
+			return fmt.Errorf(
+				"failed to batch fetch reference input UTXOs: %w",
+				err,
+			)
+		}
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
-			utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-			if err != nil {
-				return fmt.Errorf(
-					"failed to fetch input %x#%d: %w",
-					inTxId,
-					inIdx,
-					err,
-				)
-			}
+			key := fmt.Sprintf("%x:%d", inTxId, inIdx)
+			utxo := refInputUtxos[key]
 			if utxo == nil {
 				d.logger.Warn(
 					"Skipping missing reference input UTxO",
@@ -1165,51 +1180,116 @@ func (d *MetadataStoreMysql) SetTransaction(
 	}
 
 	// Consume UTxOs
-	for _, input := range tx.Consumed() {
-		inTxId := input.Id().Bytes()
-		inIdx := input.Index()
-		utxo, err := d.GetUtxo(inTxId, inIdx, txn)
-		if err != nil {
-			return fmt.Errorf(
-				"failed to fetch input %x#%d: %w",
-				inTxId,
-				inIdx,
-				err,
-			)
+	if len(tx.Consumed()) > 0 {
+		type consumedUtxoRef struct {
+			txID []byte
+			idx  uint32
+			hash string
 		}
-		if utxo == nil {
-			d.logger.Warn(
-				"input UTxO not found",
-				"hash",
-				input.Id().String(),
-				"index",
-				inIdx,
-			)
-			continue
-		}
-		// Update existing UTxOs
-		result = db.Model(&models.Utxo{}).
-			Where("tx_id = ? AND output_idx = ?", inTxId, inIdx).
-			Where("spent_at_tx_id IS NULL OR spent_at_tx_id = ?", txHash).
-			Updates(map[string]any{
-				"deleted_slot":   point.Slot,
-				"spent_at_tx_id": txHash,
+		consumedRefs := make([]consumedUtxoRef, 0, len(tx.Consumed()))
+		for _, input := range tx.Consumed() {
+			inTxID := input.Id().Bytes()
+			inIdx := input.Index()
+			duplicate := false
+			for i := range consumedRefs {
+				if consumedRefs[i].idx == inIdx &&
+					bytes.Equal(consumedRefs[i].txID, inTxID) {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				continue
+			}
+			consumedRefs = append(consumedRefs, consumedUtxoRef{
+				txID: inTxID,
+				idx:  inIdx,
+				hash: input.Id().String(),
 			})
-		if result.Error != nil {
-			return result.Error
+		}
+		if len(consumedRefs) > 0 {
+			whereConditions := make([]string, 0, len(consumedRefs))
+			updateArgs := make([]any, 0, 2+(len(consumedRefs)*2))
+			updateArgs = append(updateArgs, point.Slot, txHash)
+			for _, ref := range consumedRefs {
+				whereConditions = append(
+					whereConditions,
+					"(tx_id = ? AND output_idx = ?)",
+				)
+				updateArgs = append(updateArgs, ref.txID, ref.idx)
+			}
+			sql := fmt.Sprintf(
+				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
+					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
+				strings.Join(whereConditions, " OR "),
+			)
+			result = db.Exec(sql, updateArgs...)
+			if result.Error != nil {
+				return fmt.Errorf("batch consume utxos: %w", result.Error)
+			}
+			if result.RowsAffected != int64(len(consumedRefs)) {
+				for _, ref := range consumedRefs {
+					var existingUtxo models.Utxo
+					checkResult := db.Where(
+						"tx_id = ? AND output_idx = ?",
+						ref.txID,
+						ref.idx,
+					).First(&existingUtxo)
+					if checkResult.Error != nil {
+						if errors.Is(checkResult.Error, gorm.ErrRecordNotFound) {
+							d.logger.Warn(
+								"input UTxO not found",
+								"hash",
+								ref.hash,
+								"index",
+								ref.idx,
+							)
+							continue
+						}
+						return fmt.Errorf(
+							"failed to check UTXO %x#%d: %w",
+							ref.txID,
+							ref.idx,
+							checkResult.Error,
+						)
+					}
+					if existingUtxo.SpentAtTxId != nil &&
+						bytes.Equal(existingUtxo.SpentAtTxId, txHash) {
+						continue
+					}
+					if existingUtxo.DeletedSlot == 0 &&
+						existingUtxo.SpentAtTxId == nil {
+						return fmt.Errorf(
+							"batch consume did not update UTXO %x#%d",
+							ref.txID,
+							ref.idx,
+						)
+					}
+					return fmt.Errorf(
+						"%w: %x:%d",
+						types.ErrUtxoConflict,
+						ref.txID,
+						ref.idx,
+					)
+				}
+			}
 		}
 	}
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
 	if d.storageMode == types.StorageModeAPI {
 		// Index unique addresses participating in this transaction.
-		// Includes inputs, collateral inputs, outputs, and collateral return.
+		// Includes inputs, collateral inputs, reference inputs, outputs, and collateral return.
 		addressUtxos := make(
 			[]models.Utxo,
 			0,
-			len(tmpTx.Inputs)+len(tmpTx.Collateral)+len(tmpTx.Outputs)+1,
+			len(tmpTx.Inputs)+
+				len(tmpTx.Collateral)+
+				len(tmpTx.ReferenceInputs)+
+				len(tmpTx.Outputs)+1,
 		)
 		addressUtxos = append(addressUtxos, tmpTx.Inputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Collateral...)
+		addressUtxos = append(addressUtxos, tmpTx.ReferenceInputs...)
 		addressUtxos = append(addressUtxos, tmpTx.Outputs...)
 		if tmpTx.CollateralReturn != nil {
 			addressUtxos = append(addressUtxos, *tmpTx.CollateralReturn)
