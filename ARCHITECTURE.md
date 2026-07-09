@@ -1754,6 +1754,18 @@ it, and permanently miss a sibling row for the same key committed moments
 later. See DATABASE.md's Midnight Indexer section for how this pairs with
 `GetUtxoEvents`' shared `ReadTransaction()` on the read side.
 
+`processTx`/`processOutput` also mutate the indexer's in-memory tracked-UTxO
+and governance state (`cNightUTxOs`, `regUTxOs`, `candidates`,
+`candidateRemovals`, `epochTransitions`, `lastAriadneDatum`, `currentEpoch`,
+`snapshotEpoch`) as they go, ahead of the write transaction's commit. To keep
+that memory from drifting ahead of the database when a later write in the
+same block fails, `processBlock` snapshots all of it
+(`snapshotMutableState`) before scanning any transactions and restores the
+snapshot (`restoreMutableState`) if it returns without committing — so a
+partially-processed, ultimately-rolled-back block leaves memory exactly as
+it was, rather than retaining mutations for rows the database never durably
+recorded.
+
 **Startup and catch-up**: `node.go` calls
 `LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
 indexer (via `Start()`) *before* `LedgerState.Start()`, so backfill can resolve

@@ -1204,7 +1204,11 @@ func (s *failingAfterNCreatesStore) CreateMidnightAssetCreate(
 // too, rather than left durably committed on its own. All of a block's
 // midnight_* rows share one write transaction specifically so that readers
 // paginating by (block_number, tx_index) never observe part of a block's
-// rows without the rest.
+// rows without the rest. It also verifies the in-memory tracked-UTxO set is
+// restored to its pre-block state, not left ahead of the rolled-back DB —
+// the first tx's create adds a UTxO to idx.cNightUTxOs before the second
+// tx's create fails, so without a restore that entry would linger in memory
+// even though the DB never durably recorded it.
 func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
@@ -1234,5 +1238,13 @@ func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 		t,
 		rows,
 		"the first tx's successful write must be rolled back along with the second tx's failure",
+	)
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Empty(
+		t,
+		idx.cNightUTxOs,
+		"the first tx's in-memory UTxO must be undone along with its rolled-back DB row",
 	)
 }

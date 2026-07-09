@@ -24,6 +24,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"math/big"
 	"sort"
@@ -769,6 +770,66 @@ func (idx *Indexer) rollbackCandidateCreates(txs []lcommon.Transaction) {
 	}
 }
 
+// mutableStateSnapshot captures every in-memory field processTx/processOutput
+// (and the epoch-advance/candidate-snapshot helpers they call) mutate while
+// scanning a block, so a failed block's partial mutations can be undone.
+// Without this, a later write failing within the same block's transaction
+// would roll back the DB while leaving these already-applied — the two
+// views would disagree about whether the block's earlier rows exist.
+type mutableStateSnapshot struct {
+	cNightUTxOs       map[utxoKey]cNightUTxO
+	regUTxOs          map[utxoKey]registrationUTxO
+	candidates        map[candidateKey][]byte
+	candidateRemovals map[uint64]map[candidateKey][]byte
+	epochTransitions  map[uint64]uint64
+	lastAriadneDatum  []byte
+	currentEpoch      uint64
+	hasCurrentEpoch   bool
+	snapshotEpoch     uint64
+	hasSnapshotEpoch  bool
+}
+
+// snapshotMutableState clones the mutable fields processBlock's write path
+// may touch. idx.mu must not be held by the caller.
+func (idx *Indexer) snapshotMutableState() mutableStateSnapshot {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	candidateRemovals := make(map[uint64]map[candidateKey][]byte, len(idx.candidateRemovals))
+	for blockNumber, removals := range idx.candidateRemovals {
+		candidateRemovals[blockNumber] = maps.Clone(removals)
+	}
+	return mutableStateSnapshot{
+		cNightUTxOs:       maps.Clone(idx.cNightUTxOs),
+		regUTxOs:          maps.Clone(idx.regUTxOs),
+		candidates:        maps.Clone(idx.candidates),
+		candidateRemovals: candidateRemovals,
+		epochTransitions:  maps.Clone(idx.epochTransitions),
+		lastAriadneDatum:  idx.lastAriadneDatum,
+		currentEpoch:      idx.currentEpoch,
+		hasCurrentEpoch:   idx.hasCurrentEpoch,
+		snapshotEpoch:     idx.snapshotEpoch,
+		hasSnapshotEpoch:  idx.hasSnapshotEpoch,
+	}
+}
+
+// restoreMutableState overwrites the mutable fields with a prior snapshot,
+// undoing any in-memory mutations a failed processBlock call made. idx.mu
+// must not be held by the caller.
+func (idx *Indexer) restoreMutableState(snap mutableStateSnapshot) {
+	idx.mu.Lock()
+	defer idx.mu.Unlock()
+	idx.cNightUTxOs = snap.cNightUTxOs
+	idx.regUTxOs = snap.regUTxOs
+	idx.candidates = snap.candidates
+	idx.candidateRemovals = snap.candidateRemovals
+	idx.epochTransitions = snap.epochTransitions
+	idx.lastAriadneDatum = snap.lastAriadneDatum
+	idx.currentEpoch = snap.currentEpoch
+	idx.hasCurrentEpoch = snap.hasCurrentEpoch
+	idx.snapshotEpoch = snap.snapshotEpoch
+	idx.hasSnapshotEpoch = snap.hasSnapshotEpoch
+}
+
 // processBlock iterates the transactions in a block and calls processTx for
 // each one. Exposed for direct use in tests.
 func (idx *Indexer) processBlock(
@@ -784,6 +845,20 @@ func (idx *Indexer) processBlock(
 	// a sibling row for that same key committed moments later.
 	txn := idx.config.Metadata.Transaction()
 	defer txn.Rollback() //nolint:errcheck
+
+	// processTx/processOutput (and the epoch-advance/pruning steps below)
+	// mutate idx's in-memory tracked-UTxO and governance state as they go,
+	// ahead of txn's commit. If a later write in this same block fails, txn
+	// rolls back but those earlier mutations would otherwise stand,
+	// leaving memory ahead of the database. Snapshot before mutating so a
+	// failure can restore exactly the pre-block state.
+	snap := idx.snapshotMutableState()
+	committed := false
+	defer func() {
+		if !committed {
+			idx.restoreMutableState(snap)
+		}
+	}()
 
 	// Resolve the epoch for this block so Ariadne rows are keyed correctly
 	// during both backfill and live processing.
@@ -857,6 +932,7 @@ func (idx *Indexer) processBlock(
 	if err := txn.Commit(); err != nil {
 		return fmt.Errorf("midnight indexer: commit block=%d: %w", block.Number, err)
 	}
+	committed = true
 	return nil
 }
 
