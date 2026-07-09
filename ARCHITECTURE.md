@@ -1796,15 +1796,21 @@ Configuration priority (highest to lowest):
 
 After all sources are merged (including CLI flags), `Config.Validate()`
 (`internal/config`) checks the resulting configuration before any services
-start: mode enums, port ranges (privileged/out-of-range/duplicate), load-mode
-`immutableDbPath` requirement, path-traversal guards, TLS cert/key pairing,
-mempool watermarks, block-producer credential paths, and duration/strategy
-strings that are otherwise only parsed at their point of use. The relay,
-private, and metrics listener ports are required only for the serving modes;
-the one-shot subcommands (`load`, `sync`, `mithril`) start none of them. Because
-those subcommands run a fixed operation regardless of the configured `runMode`
-(which defaults to `serve`), `cmd/dingo` passes `Validate()` an *effective* run
-mode derived from the invoked command, so listener and ImmutableDB-source
+start: mode enums, listener port ranges (privileged/out-of-range/duplicate),
+load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
+pairing, mempool watermarks, block-producer credential paths, and
+duration/strategy strings that are otherwise only parsed at their point of use.
+Port checks apply only to the listeners a given invocation actually starts,
+derived from the *effective* run mode plus the storage mode: the serving modes
+start the relay, private, metrics, debug, and bark listeners (and, under `api`
+storage, the UTxORPC/Blockfrost/Mesh/Midnight listeners); the `sync` and
+`mithril` utilities start only the metrics and debug listeners; `load` starts
+none. A port configured for an inactive listener cannot bind, so it is neither
+range-checked nor counted toward a collision; the relay, private, and metrics
+ports must additionally be set in the serving modes. Because the one-shot
+subcommands run a fixed operation regardless of the configured `runMode` (which
+defaults to `serve`), `cmd/dingo` passes `Validate()` the effective run mode
+derived from the invoked command, so listener and ImmutableDB-source
 requirements match what the command actually does. All violations are reported
 together in a single startup error. The informational `version` and `list`
 subcommands are exempt so they still run against an otherwise-invalid config.

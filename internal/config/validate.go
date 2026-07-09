@@ -101,30 +101,48 @@ func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 		))
 	}
 
-	// Ports. The relay, private, and metrics listeners are required only
-	// for the serving modes; the load and one-shot utility (sync,
-	// mithril) invocations start none of them, so those ports may be
-	// unset (0).
-	listenersRequired := effectiveMode.RequiresListeners()
+	// Ports. Only listeners this invocation actually starts are
+	// range-checked, privilege-checked, and checked against each other for
+	// collisions: a port configured for a listener that stays inactive
+	// cannot bind and so cannot conflict. The active set is derived from
+	// the effective run mode plus the storage mode, mirroring the gating in
+	// (*dingo.Node).Start and cmd/dingo's node.Run/mithril paths:
+	//   - relay, private: serving modes only (required there);
+	//   - metrics, debug: serving modes and the sync/mithril utilities;
+	//   - bark: serving modes only (not storage-gated);
+	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
+	//     storage (dev mode forces API storage on at startup).
+	// The load and one-shot utility invocations start no relay/private or
+	// API listeners, so those ports may be unset (0) for them.
+	serving := effectiveMode.RequiresListeners()
+	auxListeners := serving ||
+		effectiveMode == RunModeSync ||
+		effectiveMode == RunModeMithril
+	apiListeners := serving &&
+		(effectiveMode == RunModeDev || c.StorageMode == storageModeAPI)
 	ports := []struct {
 		setting  string
 		port     uint
+		active   bool
 		required bool
 	}{
-		{"port (relay/NtN)", c.RelayPort, listenersRequired},
-		{"privatePort", c.PrivatePort, listenersRequired},
-		{"metricsPort", c.MetricsPort, listenersRequired},
-		{"debugPort", c.DebugPort, false},
-		{"utxorpcPort", c.UtxorpcPort, false},
-		{"blockfrostPort", c.BlockfrostPort, false},
-		{"meshPort", c.MeshPort, false},
-		{"barkPort", c.BarkPort, false},
-		{"midnight.port", c.Midnight.Port, false},
+		{"port (relay/NtN)", c.RelayPort, serving, serving},
+		{"privatePort", c.PrivatePort, serving, serving},
+		{"metricsPort", c.MetricsPort, auxListeners, serving},
+		{"debugPort", c.DebugPort, auxListeners, false},
+		{"barkPort", c.BarkPort, serving, false},
+		{"utxorpcPort", c.UtxorpcPort, apiListeners, false},
+		{"blockfrostPort", c.BlockfrostPort, apiListeners, false},
+		{"meshPort", c.MeshPort, apiListeners, false},
+		{"midnight.port", c.Midnight.Port, apiListeners, false},
 	}
-	// Two services sharing a port only fails at bind time; catch it
+	// Two active listeners sharing a port only fails at bind time; catch it
 	// here. Zero ports are disabled or OS-assigned, so they don't clash.
 	seenPorts := make(map[uint]string, len(ports))
 	for _, p := range ports {
+		if !p.active {
+			continue
+		}
 		if err := validatePort(p.setting, p.port, p.required, privileged); err != nil {
 			errs = append(errs, err)
 		}

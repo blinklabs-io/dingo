@@ -103,13 +103,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "port (relay/NtN) must be set",
 		},
 		{
-			name:    "port above maximum",
-			modify:  func(c *Config) { c.UtxorpcPort = 99999999 },
+			name: "port above maximum",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.UtxorpcPort = 99999999
+			},
 			wantErr: "invalid utxorpcPort: 99999999 (must be at most 65535)",
 		},
 		{
-			name:    "privileged port without privileges",
-			modify:  func(c *Config) { c.BlockfrostPort = 443 },
+			name: "privileged port without privileges",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BlockfrostPort = 443
+			},
 			wantErr: "privileged port",
 		},
 		{
@@ -123,8 +129,11 @@ func TestValidate(t *testing.T) {
 			wantErr: "metricsPort must be set",
 		},
 		{
-			name:   "optional port disabled with zero",
-			modify: func(c *Config) { c.UtxorpcPort = 0 },
+			name: "optional port disabled with zero",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.UtxorpcPort = 0
+			},
 		},
 		{
 			name:    "duplicate port assignment",
@@ -137,6 +146,36 @@ func TestValidate(t *testing.T) {
 				c.DebugPort = 0
 				c.BarkPort = 0
 			},
+		},
+		{
+			// UTxORPC/Blockfrost/Mesh/Midnight bind only under API storage
+			// mode; in core mode their ports never bind, so even an
+			// out-of-range or privileged value must not be rejected.
+			name: "core mode skips inactive API port validation",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeCore
+				c.UtxorpcPort = 99999999
+				c.BlockfrostPort = 443
+			},
+		},
+		{
+			// An API port colliding with an active serving port is not a
+			// real clash in core mode because the API listener is inactive.
+			name: "core mode ignores API/serving port collision",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeCore
+				c.MetricsPort = c.MeshPort
+			},
+		},
+		{
+			// Under API storage the same collision is real: both listeners
+			// bind, so it must be reported.
+			name: "api mode rejects API/serving port collision",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.MetricsPort = c.MeshPort
+			},
+			wantErr: "is assigned to both",
 		},
 		{
 			name: "cardano config path traversal",
@@ -308,21 +347,68 @@ func TestValidate(t *testing.T) {
 
 func TestValidatePrivilegedPortAllowedAsRoot(t *testing.T) {
 	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
 	cfg.BlockfrostPort = 443
 	assert.NoError(t, cfg.validate(cfg.RunMode, true))
 }
 
-// TestValidateUtilityModeRelaxesListenerAndSource verifies that a
-// one-shot utility invocation (sync, mithril) neither requires the
-// serving listener ports nor an ImmutableDB source, even though the
-// configured runMode is the default serve.
-func TestValidateUtilityModeRelaxesListenerAndSource(t *testing.T) {
+// TestValidateUtilityModesRelaxListenerAndSource verifies that the
+// one-shot sync and mithril invocations neither require the serving
+// listener ports nor an ImmutableDB source, even though the configured
+// runMode is the default serve. Their metrics/debug listeners accept an
+// unset port, which the runtime binds ephemerally.
+func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
+	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.RelayPort = 0
+			cfg.PrivatePort = 0
+			cfg.MetricsPort = 0
+			cfg.DebugPort = 0
+			cfg.ImmutableDbPath = ""
+			assert.NoError(t, cfg.validate(mode, false))
+		})
+	}
+}
+
+// TestValidateSyncModeIgnoresInactiveListenerCollision reproduces
+// `dingo --metrics-port 8080 sync`: the metrics port matches the default
+// mesh port, but sync starts no Mesh listener, so there is no real
+// collision and validation must pass.
+func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 	cfg := validTestConfig()
+	cfg.MetricsPort = cfg.MeshPort // 8080, the default mesh port
 	cfg.RelayPort = 0
 	cfg.PrivatePort = 0
-	cfg.MetricsPort = 0
 	cfg.ImmutableDbPath = ""
-	assert.NoError(t, cfg.validate(RunModeUtility, false))
+	assert.NoError(t, cfg.validate(RunModeSync, false))
+}
+
+// TestValidateUtilityModesValidateMetricsPort verifies that the sync and
+// mithril utilities still validate the metrics port they do start, even
+// though they skip the serving and API listener ports.
+func TestValidateUtilityModesValidateMetricsPort(t *testing.T) {
+	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
+		t.Run(string(mode), func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.MetricsPort = 99999999
+			err := cfg.validate(mode, false)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid metricsPort")
+		})
+	}
+}
+
+// TestValidateLoadModeSkipsAllListenerPorts verifies that load, which
+// starts no listeners, does not reject otherwise out-of-range listener
+// ports: they never bind during an import.
+func TestValidateLoadModeSkipsAllListenerPorts(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeLoad
+	cfg.ImmutableDbPath = "/data/immutable"
+	cfg.MetricsPort = 99999999
+	cfg.UtxorpcPort = 99999999
+	assert.NoError(t, cfg.validate(RunModeLoad, false))
 }
 
 // TestValidateInvalidModeStillReportsListeners verifies that when the
@@ -344,11 +430,12 @@ func TestValidateInvalidModeStillReportsListeners(t *testing.T) {
 func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.RunMode = RunModeLoad
-	cfg.UtxorpcPort = 70000
+	cfg.ImmutableDbPath = ""
 	cfg.EvictionWatermark = 2.0
+	cfg.Chainsync.Strategy = "fastest"
 	err := cfg.validate(cfg.RunMode, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
-	assert.Contains(t, err.Error(), "invalid utxorpcPort")
 	assert.Contains(t, err.Error(), "invalid evictionWatermark")
+	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }

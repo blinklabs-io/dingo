@@ -225,10 +225,17 @@ func effectiveRunMode(top *cobra.Command, cfg *config.Config) config.RunMode {
 		return config.RunModeServe
 	case "load":
 		return config.RunModeLoad
+	case "sync":
+		return config.RunModeSync
+	case "mithril":
+		// mithril and its subcommands (sync, list, show): one-shot
+		// utilities that start no serving/API listeners.
+		return config.RunModeMithril
 	default:
-		// sync, mithril (and its subcommands): one-shot utilities that
-		// start no listeners and need no ImmutableDB source.
-		return config.RunModeUtility
+		// No other non-informational top-level command exists today;
+		// fall back to full serving validation so a future command's
+		// misconfiguration is caught rather than silently skipped.
+		return config.RunModeServe
 	}
 }
 
@@ -364,9 +371,9 @@ DSN Override:
 
 			// When no subcommand given, check RunMode from config.
 			// cfg.RunMode is a configured mode (validated by
-			// RunMode.Valid); the effective-only RunModeUtility never
-			// reaches here.
-			switch cfg.RunMode { //nolint:exhaustive // RunModeUtility is effective-only, never configured
+			// RunMode.Valid); the effective-only sync/mithril modes never
+			// reach here.
+			switch cfg.RunMode { //nolint:exhaustive // sync/mithril are effective-only, never configured
 			case config.RunModeLoad:
 				// Validate() has already enforced that ImmutableDbPath
 				// is set for load mode

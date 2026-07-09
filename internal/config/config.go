@@ -101,14 +101,20 @@ const (
 	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
-)
 
-// RunModeUtility is an effective run mode used only for validation, not
-// a configurable runMode (RunMode.Valid rejects it). The one-shot
-// utility subcommands (sync, mithril) start no listeners and need no
-// ImmutableDB source regardless of the configured runMode; cmd/dingo
-// passes this mode to Config.Validate for them.
-const RunModeUtility RunMode = "utility"
+	// RunModeSync and RunModeMithril are effective run modes used only for
+	// validation, not configurable runMode values (RunMode.Valid rejects
+	// them). The one-shot sync and mithril subcommands run a fixed
+	// operation regardless of the configured runMode; cmd/dingo passes the
+	// mode matching the invoked command to Config.Validate. They start
+	// neither the relay/private serving listeners nor the API listeners,
+	// but they do start a Prometheus metrics listener and an optional pprof
+	// debug listener, so they are kept distinct from load (which starts
+	// none) and from each other rather than collapsed into one catch-all
+	// utility mode.
+	RunModeSync    RunMode = "sync"
+	RunModeMithril RunMode = "mithril"
+)
 
 // StartEra controls experimental direct startup in a later ledger era.
 type StartEra string
@@ -123,8 +129,8 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeUtility:
-		// Effective-only mode used for validation; never a configurable runMode.
+	case RunModeSync, RunModeMithril:
+		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
 		return false
@@ -137,15 +143,17 @@ func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
 }
 
-// RequiresListeners reports whether an (effective) run mode starts the
-// relay, private, and metrics listeners. The serving modes (serve, dev,
-// leios, and the empty default) do; the load and utility one-shot modes
-// do not.
+// RequiresListeners reports whether an (effective) run mode runs as a
+// serving node, starting the relay and private (NtN/NtC) listeners. The
+// serving modes (serve, dev, leios, and the empty default) do; the load
+// and one-shot sync/mithril utilities do not. (The metrics and debug
+// listeners are not gated here: serving modes and the sync/mithril
+// utilities all start them, so Validate handles those ports separately.)
 func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeUtility:
+	case RunModeLoad, RunModeSync, RunModeMithril:
 		return false
 	default:
 		return false

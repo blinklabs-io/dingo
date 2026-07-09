@@ -80,22 +80,22 @@ func TestEffectiveRunMode(t *testing.T) {
 			config.RunModeLoad,
 		},
 		{
-			"sync is a utility",
+			"sync uses the sync utility mode",
 			[]string{"sync"},
 			config.RunModeServe,
-			config.RunModeUtility,
+			config.RunModeSync,
 		},
 		{
-			"mithril list is a utility",
+			"mithril list uses the mithril utility mode",
 			[]string{"mithril", "list"},
 			config.RunModeServe,
-			config.RunModeUtility,
+			config.RunModeMithril,
 		},
 		{
-			"mithril sync is a utility",
+			"mithril sync uses the mithril utility mode",
 			[]string{"mithril", "sync"},
 			config.RunModeServe,
-			config.RunModeUtility,
+			config.RunModeMithril,
 		},
 	}
 	for _, tt := range tests {
