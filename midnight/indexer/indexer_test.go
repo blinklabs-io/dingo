@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
@@ -1014,7 +1015,7 @@ func TestCandidateAddRemove(t *testing.T) {
 
 	// Epoch transition: snapshot must contain the one remaining candidate.
 	idx.mu.Lock()
-	idx.advanceEpochLocked(2, 2)
+	idx.advanceEpochLocked(2, 2, nil)
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
@@ -1150,8 +1151,8 @@ func TestCandidateEmptySnapshot(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(0, 0) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
-	idx.advanceEpochLocked(1, 1) // advance to epoch 1, snapshots epoch 0
+	idx.advanceEpochLocked(0, 0, nil) // cold-start init: sets currentEpoch=0, hasCurrentEpoch=true
+	idx.advanceEpochLocked(1, 1, nil) // advance to epoch 1, snapshots epoch 0
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
@@ -1168,12 +1169,131 @@ func TestEpochTransitionIdempotent(t *testing.T) {
 	idx := setupGovIndexer(t, store)
 
 	idx.mu.Lock()
-	idx.advanceEpochLocked(3, 0)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
-	idx.advanceEpochLocked(4, 42) // advance to epoch 4, snapshots epoch 3
-	idx.advanceEpochLocked(4, 42) // no-op: same epoch, guard prevents a second snapshot
+	idx.advanceEpochLocked(3, 0, nil)  // cold-start init: sets currentEpoch=3, hasCurrentEpoch=true
+	idx.advanceEpochLocked(4, 42, nil) // advance to epoch 4, snapshots epoch 3
+	idx.advanceEpochLocked(4, 42, nil) // no-op: same epoch, guard prevents a second snapshot
 	idx.mu.Unlock()
 
 	var snapshots []models.MidnightEpochCandidates
 	require.NoError(t, store.DB().Find(&snapshots).Error)
 	require.Len(t, snapshots, 1, "advancing to the same epoch twice must not write a second snapshot row")
+}
+
+// failingAfterNCreatesStore wraps a real store and fails the (n+1)th call to
+// CreateMidnightAssetCreate, so a test can force processBlock to fail
+// partway through a block that would otherwise write more than one row.
+type failingAfterNCreatesStore struct {
+	*sqlite.MetadataStoreSqlite
+	remaining int
+}
+
+func (s *failingAfterNCreatesStore) CreateMidnightAssetCreate(
+	txn types.Txn,
+	row *models.MidnightAssetCreate,
+) error {
+	if s.remaining <= 0 {
+		return errors.New("injected failure")
+	}
+	s.remaining--
+	return s.MetadataStoreSqlite.CreateMidnightAssetCreate(txn, row)
+}
+
+// TestProcessBlock_PartialFailureRollsBackWholeBlock verifies that when one
+// transaction's write fails partway through a block, an earlier
+// transaction's already-successful write in the SAME block is rolled back
+// too, rather than left durably committed on its own. All of a block's
+// midnight_* rows share one write transaction specifically so that readers
+// paginating by (block_number, tx_index) never observe part of a block's
+// rows without the rest. It also verifies the in-memory tracked-UTxO set is
+// restored to its pre-block state, not left ahead of the rolled-back DB —
+// the first tx's create adds a UTxO to idx.cNightUTxOs before the second
+// tx's create fails, so without a restore that entry would linger in memory
+// even though the DB never durably recorded it.
+func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 1}
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+	})
+	require.NoError(t, err)
+
+	tx1 := buildTx(t, pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
+	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+
+	block := testBlock(1, 100, 0xAA)
+	err = idx.processBlock(block, []lcommon.Transaction{tx1, tx2}, 1_000_000)
+	require.Error(t, err, "the second tx's create must fail and abort the whole block")
+
+	var rows []models.MidnightAssetCreate
+	require.NoError(t, store.DB().Find(&rows).Error)
+	require.Empty(
+		t,
+		rows,
+		"the first tx's successful write must be rolled back along with the second tx's failure",
+	)
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Empty(
+		t,
+		idx.cNightUTxOs,
+		"the first tx's in-memory UTxO must be undone along with its rolled-back DB row",
+	)
+}
+
+// TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact verifies that
+// undoing a failed block's mutations touches only the keys that block
+// itself wrote, not the whole tracked-UTxO map. A prior, already-committed
+// block's entry must survive a later block's rollback untouched — the
+// journal records per-key pre-block values instead of cloning and
+// restoring the entire live map, so this also demonstrates the undo cost
+// scales with what the failed block changed, not with total tracked state.
+func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 2}
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+	})
+	require.NoError(t, err)
+
+	// Block 1 succeeds outright and leaves a durably tracked UTxO.
+	seedTx := buildTx(t, pad32("11000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("11000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 50)})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{seedTx}, 1_000))
+
+	idx.mu.RLock()
+	require.Len(t, idx.cNightUTxOs, 1, "block 1's create must be tracked")
+	idx.mu.RUnlock()
+
+	// Block 2's first tx succeeds, its second fails, aborting the block.
+	tx1 := buildTx(t, pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
+	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+	err = idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx1, tx2}, 2_000)
+	require.Error(t, err, "block 2's second tx must fail and abort the block")
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Len(
+		t,
+		idx.cNightUTxOs,
+		1,
+		"block 1's unrelated, already-committed UTxO must survive block 2's rollback untouched",
+	)
 }

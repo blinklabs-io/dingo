@@ -809,14 +809,37 @@ In `storageMode: api` with `midnight.port > 0`, `node.go` starts
 ConnectRPC, for byte-for-byte compatibility with the Acropolis tonic service)
 on its own `midnight.host:midnight.port` listener. It registers the
 `MidnightState` service, plus gRPC reflection and a `grpc_health_v1` health
-service reporting `SERVING`. The compatibility surface is still incomplete:
-merged work covers server lifecycle and block scanning, while the remaining RPC
-bodies are tracked by the Midnight plan and issues #2118/#2119. TLS is enabled
-when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start` binds the
-listener synchronously (so bind/cert errors surface immediately) and serves in
-a goroutine; a context watcher performs a bounded `GracefulStop`, escalating to
-a hard `Stop` on timeout. Setting `midnight.port` to `0` disables the server
-without affecting indexer eligibility.
+service reporting `SERVING`. `Config.Metadata` (set to `n.db.Metadata()` in
+`node.go`, typed as a package-local `eventStore` interface rather than the
+full `metadata.MetadataStore` so this gRPC-query package doesn't carry
+unrelated write-path/lifecycle methods) backs the five UTxO-event query RPCs
+— `GetAssetCreates`, `GetAssetSpends`, `GetRegistrations`,
+`GetDeregistrations`, and `GetUtxoEvents` — implemented in
+`midnight/server/midnight_state.go`; the first four page a single
+`midnight_*` table forward from a `(start_block, start_tx_index)` cursor, and
+`GetUtxoEvents` merge-sorts all four tables by
+`(block_number, tx_index, kind_order)` and returns a `next_position` cursor
+(see DATABASE.md's Midnight Indexer section for the merge algorithm,
+including how page cutoffs extend to avoid splitting a transaction's rows,
+and for how write-side atomicity in the indexer and the read-side
+`ReadTransaction()` shared by `GetUtxoEvents`' four table reads together keep
+that cursor from skipping rows while the live indexer is mid-block).
+`Config.BlockNumberByHash` (set to a closure over `database.BlockByHash` in
+`node.go`) resolves `GetUtxoEvents`' `end_block_hash` to a block number
+independent of the fetched event rows, so the boundary is honored even for a
+block with no Midnight events; `GetUtxoEvents` fails with
+`codes.FailedPrecondition` if `end_block_hash` is set but no resolver was
+configured. `utxo_capacity`/`tx_capacity` are clamped server-side
+(`effectivePageSize`) to a bounded default/max instead of being forwarded
+to the store, since the store's own pagination contract treats a
+non-positive limit as unbounded. The remaining RPC bodies are still
+incomplete, tracked by the Midnight plan and issues #2118/#2119. TLS is
+enabled when the shared `tlsCertFilePath`/`tlsKeyFilePath` are set. `Start`
+binds the listener synchronously (so bind/cert errors surface immediately)
+and serves in a goroutine; a context watcher performs a bounded
+`GracefulStop`, escalating to a hard `Stop` on timeout. Setting
+`midnight.port` to `0` disables the server without affecting indexer
+eligibility.
 
 ### Off-chain Metadata Fetching
 
@@ -1738,15 +1761,50 @@ An optional block scanner that indexes Midnight chain events into multiple
   snapshots created by the rolled-back block before readers can observe stale
   `midnight_epoch_candidates` rows.
 
-**Epoch tracking**: The indexer subscribes to `epoch.transition`
-(`event.EpochTransitionEventType`) as well as block events. Before scanning the
-first block of a new epoch, `handleBlockEvent` calls `advanceEpochLocked` to
-snapshot any skipped epochs and update `currentEpoch`. A late or duplicate
-`epoch.transition` event is ignored when the epoch has already been snapshotted
-by the block-event path (`hasSnapshotEpoch` guard). On cold start
-(`hasCurrentEpoch = false`), the first block's epoch is recorded without
-snapshotting so no spurious empty snapshot is written before any candidates are
-observed.
+**Epoch tracking**: `processBlock` resolves and advances the epoch (via
+`advanceEpochLocked`) for every block, on both the live event path and the
+backfill path (both call `processBlock`, which is the single place this
+happens — there is no separate epoch-event subscription). `advanceEpochLocked`
+snapshots any skipped epochs before updating `currentEpoch`; a repeated call
+for an epoch already snapshotted is a no-op (`hasSnapshotEpoch` guard). On
+cold start (`hasCurrentEpoch = false`), the first block's epoch is recorded
+without snapshotting so no spurious empty snapshot is written before any
+candidates are observed.
+
+**Write atomicity**: `processBlock` opens one write transaction
+(`Metadata.Transaction()`) and threads it through every `Create*`/
+`InsertMidnightGovernanceDatum`/`UpsertMidnightAriadneParams`/
+`UpsertMidnightEpochCandidates` call it makes while scanning the block —
+including the epoch-advance snapshot above — committing once at the end and
+rolling back on any error. This closes a race that independent per-row
+autocommit writes would otherwise leave open: `(block_number, tx_index)` is
+not a unique key (one tx can write more than one row to the same table), so
+a reader paginating by that cursor could see one row for a key, advance past
+it, and permanently miss a sibling row for the same key committed moments
+later. See DATABASE.md's Midnight Indexer section for how this pairs with
+`GetUtxoEvents`' shared `ReadTransaction()` on the read side.
+
+`processTx`/`processOutput` also mutate the indexer's in-memory tracked-UTxO
+and governance state (`cNightUTxOs`, `regUTxOs`, `candidates`,
+`candidateRemovals`, `epochTransitions`, `lastAriadneDatum`, `currentEpoch`,
+`snapshotEpoch`) as they go, ahead of the write transaction's commit. To keep
+that memory from drifting ahead of the database when a later write in the
+same block fails, `processBlock` opens a `blockMutationJournal`
+(`newBlockMutationJournal`) before scanning any transactions and undoes it
+(`undoBlockMutations`) if the block returns without committing — so a
+partially-processed, ultimately-rolled-back block leaves memory exactly as
+it was, rather than retaining mutations for rows the database never durably
+recorded. The journal records only each touched key's pre-block value (via
+a generic `mapJournal[K, V]`, the first time that key is touched in the
+block) rather than cloning `cNightUTxOs`/`regUTxOs`/`candidates` wholesale —
+those maps hold all actively tracked state for the whole chain, so a full
+clone would cost O(total live state) on every block instead of O(that
+block's own changes). `candidateRemovals`/`epochTransitions` are only ever
+written under the current block's own key while processing it, so the
+journal there is just that one key's pre-block value; the periodic pruning
+step that deletes older keys from both maps separately records exactly
+which entries it removes, so undo can restore them without journaling the
+maps' full contents either.
 
 **Startup and catch-up**: `node.go` calls
 `LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
@@ -1760,9 +1818,11 @@ same scan logic before subscribing to live events. The checkpoint (phase
 is stored in the `backfill_checkpoint` table via `SetBackfillCheckpoint` and is
 updated after each block — both during backfill and for each live event. Because
 the checkpoint write and the block's `Create*` writes are separate (not
-transactional), a crash between the two causes at most one block to be
-re-processed on the next restart: the block whose rows were written but whose
-checkpoint update did not commit. All four `Create*` methods use
+transactional — the block's writes are their own single transaction per Write
+atomicity above, but the checkpoint commits afterward in a second, separate
+one), a crash between the two causes at most one block to be re-processed on
+the next restart: the block whose rows were written but whose checkpoint
+update did not commit. All four `Create*` methods use
 `ON CONFLICT DO NOTHING` against the unique indexes on the UTxO natural keys
 (`tx_hash + output_index` / `utxo_tx_hash + utxo_index`), so re-processing an
 already-indexed block is safe and produces no duplicate rows.

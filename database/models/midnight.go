@@ -36,6 +36,11 @@ func (MidnightAssetCreate) TableName() string {
 	return "midnight_asset_creates"
 }
 
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightAssetCreate) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
+}
+
 // MidnightAssetSpend stores cNIGHT UTxO spends for the Midnight indexer.
 type MidnightAssetSpend struct {
 	ID               uint   `gorm:"primarykey"`
@@ -54,6 +59,11 @@ func (MidnightAssetSpend) TableName() string {
 	return "midnight_asset_spends"
 }
 
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightAssetSpend) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
+}
+
 // MidnightRegistration stores mapping validator registration events.
 type MidnightRegistration struct {
 	ID               uint   `gorm:"primarykey"`
@@ -68,6 +78,11 @@ type MidnightRegistration struct {
 
 func (MidnightRegistration) TableName() string {
 	return "midnight_registrations"
+}
+
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightRegistration) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
 }
 
 // MidnightDeregistration stores mapping validator deregistration events.
@@ -85,6 +100,11 @@ type MidnightDeregistration struct {
 
 func (MidnightDeregistration) TableName() string {
 	return "midnight_deregistrations"
+}
+
+// BlockTxPosition implements pagination.BlockTxPositioned.
+func (r MidnightDeregistration) BlockTxPosition() (blockNumber uint64, txIndex uint32) {
+	return r.BlockNumber, r.TxIndex
 }
 
 // MidnightGovernanceDatum stores latest Technical Committee and Council datums.

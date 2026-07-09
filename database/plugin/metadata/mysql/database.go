@@ -591,9 +591,13 @@ func (d *MetadataStoreMysql) Transaction() types.Txn {
 	return newMysqlTxn(db)
 }
 
-// ReadTransaction creates a read-only transaction.
+// ReadTransaction creates a read-only transaction with repeatable-read
+// isolation, so every statement run through it observes one consistent
+// snapshot for its whole lifetime. InnoDB's session default is already
+// REPEATABLE READ, but setting it explicitly here does not depend on that
+// ambient session configuration.
 func (d *MetadataStoreMysql) ReadTransaction() types.Txn {
-	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin read transaction",

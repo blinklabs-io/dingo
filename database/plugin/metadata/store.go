@@ -156,6 +156,58 @@ type MetadataStore interface {
 	// the in-memory tracked-UTxO set. Used during chain rollback.
 	DeleteMidnightDeregistrationsByBlock(types.Txn, uint64) ([]models.MidnightDeregistration, error)
 
+	// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// The result may hold more than limit rows: (block_number, tx_index) is
+	// not a unique key (one tx can write several rows to the same table),
+	// so implementations extend a page that would otherwise end mid-key to
+	// include the rest of that key's rows, keeping the cursor gap-free.
+	// Used to serve the MidnightState GetAssetCreates RPC.
+	FindMidnightAssetCreatesFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetCreate, error)
+
+	// FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetAssetSpends RPC.
+	FindMidnightAssetSpendsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetSpend, error)
+
+	// FindMidnightRegistrationsFrom returns registration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetRegistrations RPC.
+	FindMidnightRegistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightRegistration, error)
+
+	// FindMidnightDeregistrationsFrom returns deregistration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetDeregistrations
+	// RPC.
+	FindMidnightDeregistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightDeregistration, error)
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.
