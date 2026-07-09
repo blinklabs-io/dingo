@@ -370,20 +370,26 @@ func (a *NodeAdapter) blockOutputAndFees(
 			err,
 		)
 	}
-	var totalOutput, totalFees uint64
+	// Accumulate in big.Int: a block's summed lovelace is bounded by the ADA
+	// supply and stays well under uint64 in practice, but big.Int keeps the
+	// response totals correct even if a chained aggregate ever exceeds uint64
+	// rather than silently wrapping.
+	totalOutput := new(big.Int)
+	totalFees := new(big.Int)
 	for _, tx := range txs {
-		totalFees += uint64(tx.Fee)
+		totalFees.Add(totalFees, new(big.Int).SetUint64(uint64(tx.Fee)))
 		outputs := tx.Outputs
 		if !tx.Valid && tx.CollateralReturn != nil {
 			outputs = []models.Utxo{*tx.CollateralReturn}
 		}
 		for _, out := range outputs {
-			totalOutput += uint64(out.Amount)
+			totalOutput.Add(
+				totalOutput,
+				new(big.Int).SetUint64(uint64(out.Amount)),
+			)
 		}
 	}
-	return strconv.FormatUint(totalOutput, 10),
-		strconv.FormatUint(totalFees, 10),
-		nil
+	return totalOutput.String(), totalFees.String(), nil
 }
 
 // nextBlockHash returns the hash of the block that directly follows the block

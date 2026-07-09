@@ -19,6 +19,8 @@ import (
 	"encoding/hex"
 	"io"
 	"log/slog"
+	"math"
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -131,6 +133,44 @@ func TestNodeAdapterBlockOutputAndFeesEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "0", output)
 	assert.Equal(t, "0", fees)
+}
+
+// TestNodeAdapterBlockOutputAndFeesNoOverflow guards the big.Int accumulation:
+// summing amounts/fees whose total exceeds uint64 must produce the true total
+// rather than silently wrapping.
+func TestNodeAdapterBlockOutputAndFeesNoOverflow(t *testing.T) {
+	adapter, store, _ := newDBBackedAdapter(t)
+
+	blockHash := fill32(0xef)
+
+	maxU64 := uint64(math.MaxUint64)
+
+	// Two transactions, each with the maximum fee and a maximum-value output.
+	// The per-field values are valid uint64, but their sums are not.
+	for i, b := range []byte{0x21, 0x22} {
+		tx := &models.Transaction{
+			Hash:       fill32(b),
+			BlockHash:  blockHash,
+			BlockIndex: uint32(i),
+			Valid:      true,
+			Fee:        types.Uint64(maxU64),
+			Outputs: []models.Utxo{
+				{TxId: fill32(b), OutputIdx: 0, Amount: types.Uint64(maxU64)},
+			},
+		}
+		require.NoError(t, store.DB().Create(tx).Error)
+	}
+
+	// Expected total = 2 * MaxUint64 for both output and fees.
+	want := new(big.Int).Mul(
+		new(big.Int).SetUint64(maxU64),
+		big.NewInt(2),
+	).String()
+
+	output, fees, err := adapter.blockOutputAndFees(blockHash)
+	require.NoError(t, err)
+	assert.Equal(t, want, output)
+	assert.Equal(t, want, fees)
 }
 
 // TestNodeAdapterNextBlockHash covers the successor lookup against real block
