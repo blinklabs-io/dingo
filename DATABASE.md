@@ -748,6 +748,15 @@ To match `includeInactive = false`, add:
 AND a.active = true
 ```
 
+### `GetStakeByPools`
+
+Current live stake by pool joins active `account` rows to UTxOs with
+`deleted_slot = 0` and sums their lovelace amounts. Because `utxo.amount` is
+stored as text (`types.Uint64`) on postgres and mysql, implementations cast it
+before summation: `INTEGER` on sqlite, `BIGINT` on postgres, and `UNSIGNED` on
+mysql. The casts keep postgres from rejecting `SUM(text)` and prevent mysql
+from implicitly converting amounts to `DOUBLE` and losing integer precision.
+
 ### `GetStakeByPoolsAtSlot`
 
 Historical stake by pool for epoch-boundary snapshots. The query resolves the

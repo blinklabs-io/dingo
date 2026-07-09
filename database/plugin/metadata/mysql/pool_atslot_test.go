@@ -67,3 +67,56 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsMysql(t *testing.T) {
 	require.Equal(t, uint64(0), stakes[string(poolEmpty)])
 	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
 }
+
+// TestGetStakeByPoolsPreservesIntegerPrecisionMysql verifies that the live
+// stake query casts the text-encoded amount before summing it. Values above
+// 2^53 expose MySQL's lossy implicit DOUBLE conversion.
+func TestGetStakeByPoolsPreservesIntegerPrecisionMysql(t *testing.T) {
+	store := newTestMysqlStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	pool := bytes.Repeat([]byte{0xC1}, 28)
+	stakeKey := bytes.Repeat([]byte{0x74}, 28)
+
+	cleanup := func() {
+		_ = db.Where("staking_key = ?", stakeKey).Delete(&models.Account{}).Error
+		_ = db.Where("staking_key = ?", stakeKey).Delete(&models.Utxo{}).Error
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	require.NoError(t, db.Create(&models.Account{
+		StakingKey: stakeKey,
+		Pool:       pool,
+		AddedSlot:  10,
+		Active:     true,
+	}).Error)
+
+	utxos := []models.Utxo{
+		{
+			TxId:        bytes.Repeat([]byte{0x21}, 32),
+			OutputIdx:   0,
+			StakingKey:  stakeKey,
+			Amount:      9007199254740993,
+			AddedSlot:   20,
+			DeletedSlot: 0,
+		},
+		{
+			TxId:        bytes.Repeat([]byte{0x22}, 32),
+			OutputIdx:   0,
+			StakingKey:  stakeKey,
+			Amount:      2,
+			AddedSlot:   20,
+			DeletedSlot: 0,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPools([][]byte{pool}, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(9007199254740995), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
+}

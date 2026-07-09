@@ -1077,7 +1077,7 @@ func (d *MetadataStoreMysql) GetStakeByPools(
 
 	var stakeResults []poolStakeResult
 	if err := db.Table("account").
-		Select("account.pool, COALESCE(SUM(utxo.amount), 0) as total_stake").
+		Select("account.pool, COALESCE(SUM(CAST(utxo.amount AS UNSIGNED)), 0) as total_stake").
 		Joins("INNER JOIN utxo ON utxo.credential_tag = account.credential_tag AND utxo.staking_key = account.staking_key").
 		Where("account.pool IN ? AND account.active = ? AND utxo.deleted_slot = 0", poolKeyHashes, true).
 		Group("account.pool").
