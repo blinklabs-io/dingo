@@ -532,6 +532,9 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleLatestBlock(t *testing.T) {
+	blockVRF := "vrf_vk1abc"
+	opCert := "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100"
+	opCertCounter := "7"
 	mock := &mockNode{
 		block: BlockInfo{
 			Hash:          "abc123",
@@ -545,6 +548,13 @@ func TestHandleLatestBlock(t *testing.T) {
 			SlotLeader:    "pool1xyz",
 			PreviousBlock: "prev123",
 			Confirmations: 10,
+			Output:        "123456789",
+			Fees:          "4321",
+			BlockVRF:      &blockVRF,
+			OPCert:        &opCert,
+			OPCertCounter: &opCertCounter,
+			// Latest block is the tip, so it has no successor.
+			NextBlock: nil,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -573,9 +583,21 @@ func TestHandleLatestBlock(t *testing.T) {
 	assert.Equal(t, "pool1xyz", resp.SlotLeader)
 	assert.Equal(t, "prev123", resp.PreviousBlock)
 	assert.Equal(t, uint64(10), resp.Confirmations)
+	require.NotNil(t, resp.Output)
+	assert.Equal(t, "123456789", *resp.Output)
+	require.NotNil(t, resp.Fees)
+	assert.Equal(t, "4321", *resp.Fees)
+	require.NotNil(t, resp.BlockVRF)
+	assert.Equal(t, "vrf_vk1abc", *resp.BlockVRF)
+	require.NotNil(t, resp.OPCert)
+	assert.Equal(t, opCert, *resp.OPCert)
+	require.NotNil(t, resp.OPCertCounter)
+	assert.Equal(t, "7", *resp.OPCertCounter)
+	assert.Nil(t, resp.NextBlock)
 }
 
 func TestHandleBlockByHashOrNumber(t *testing.T) {
+	nextBlock := "nexthash"
 	mock := &mockNode{
 		blockByID: BlockInfo{
 			Hash:          "abc123",
@@ -589,6 +611,10 @@ func TestHandleBlockByHashOrNumber(t *testing.T) {
 			SlotLeader:    "pool1...",
 			PreviousBlock: "prevhash",
 			Confirmations: 7,
+			Output:        "999",
+			Fees:          "10",
+			// Historical (non-tip) block: it has a known successor.
+			NextBlock: &nextBlock,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -610,6 +636,12 @@ func TestHandleBlockByHashOrNumber(t *testing.T) {
 	assert.Equal(t, "abc123", resp.Hash)
 	assert.Equal(t, uint64(1000), resp.Height)
 	assert.Equal(t, uint64(7), resp.Confirmations)
+	require.NotNil(t, resp.Output)
+	assert.Equal(t, "999", *resp.Output)
+	require.NotNil(t, resp.Fees)
+	assert.Equal(t, "10", *resp.Fees)
+	require.NotNil(t, resp.NextBlock)
+	assert.Equal(t, "nexthash", *resp.NextBlock)
 }
 
 func TestHandleBlockNotFound(t *testing.T) {

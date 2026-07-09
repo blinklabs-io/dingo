@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -42,6 +43,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
 var (
@@ -304,6 +306,29 @@ func (a *NodeAdapter) blockInfoFromBlock(
 	if tip.BlockNumber >= block.Number {
 		confirmations = tip.BlockNumber - block.Number
 	}
+
+	output, fees, err := a.blockOutputAndFees(block.Hash)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"aggregate output and fees for block %x: %w",
+			block.Hash,
+			err,
+		)
+	}
+
+	blockVRF, opCert, opCertCounter := praosHeaderFields(
+		decodedBlock.Header(),
+	)
+
+	nextBlock, err := a.nextBlockHash(block.Number, tip.BlockNumber)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"resolve next block for block %x: %w",
+			block.Hash,
+			err,
+		)
+	}
+
 	return BlockInfo{
 		Hash:      hex.EncodeToString(block.Hash),
 		Slot:      block.Slot,
@@ -320,7 +345,143 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			block.PrevHash,
 		),
 		Confirmations: confirmations,
+		Output:        output,
+		Fees:          fees,
+		BlockVRF:      blockVRF,
+		OPCert:        opCert,
+		OPCertCounter: opCertCounter,
+		NextBlock:     nextBlock,
 	}, nil
+}
+
+// blockOutputAndFees aggregates the total lovelace output and fees across all
+// transactions in a block. Fees are summed from each transaction's recorded
+// fee. For phase-2 invalid transactions, the collateral return (rather than the
+// discarded outputs) counts toward the block output, matching the
+// per-transaction endpoint.
+func (a *NodeAdapter) blockOutputAndFees(
+	blockHash []byte,
+) (output string, fees string, err error) {
+	txs, err := a.ledgerState.GetTransactionsByBlockHash(blockHash)
+	if err != nil {
+		return "", "", fmt.Errorf(
+			"get transactions for block %x: %w",
+			blockHash,
+			err,
+		)
+	}
+	var totalOutput, totalFees uint64
+	for _, tx := range txs {
+		totalFees += uint64(tx.Fee)
+		outputs := tx.Outputs
+		if !tx.Valid && tx.CollateralReturn != nil {
+			outputs = []models.Utxo{*tx.CollateralReturn}
+		}
+		for _, out := range outputs {
+			totalOutput += uint64(out.Amount)
+		}
+	}
+	return strconv.FormatUint(totalOutput, 10),
+		strconv.FormatUint(totalFees, 10),
+		nil
+}
+
+// nextBlockHash returns the hash of the block that directly follows the block
+// at the given height, or nil when the block is the chain tip (no successor).
+func (a *NodeAdapter) nextBlockHash(
+	height uint64,
+	tipHeight uint64,
+) (*string, error) {
+	if height >= tipHeight {
+		return nil, nil
+	}
+	// Dingo's blob block index is 1-based (BlockInitialIndex) while Cardano
+	// block heights are 0-based, so the successor's internal index is
+	// height + BlockInitialIndex + 1.
+	if height > math.MaxUint64-database.BlockInitialIndex-1 {
+		return nil, nil
+	}
+	next, err := a.ledgerState.Database().BlockByIndex(
+		height+database.BlockInitialIndex+1,
+		nil,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	hash := hex.EncodeToString(next.Hash)
+	return &hash, nil
+}
+
+// praosHeaderFields extracts the Blockfrost block_vrf, op_cert, and
+// op_cert_counter values from a Praos/TPraos block header. Byron and unknown
+// headers carry none of these, so all three returns are nil.
+func praosHeaderFields(
+	header gledger.BlockHeader,
+) (blockVRF *string, opCert *string, opCertCounter *string) {
+	var vrfKey, opCertHotVkey []byte
+	var counter uint64
+	switch h := header.(type) {
+	case *shelley.ShelleyBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *allegra.AllegraBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *mary.MaryBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *alonzo.AlonzoBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *babbage.BabbageBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	case *conway.ConwayBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	case *dijkstra.DijkstraBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	default:
+		// Byron and unknown headers have no Praos/TPraos header fields.
+		return nil, nil, nil
+	}
+	if len(vrfKey) > 0 {
+		if encoded, err := bech32EncodeData("vrf_vk", vrfKey); err == nil {
+			blockVRF = &encoded
+		}
+	}
+	if len(opCertHotVkey) > 0 {
+		hexCert := hex.EncodeToString(opCertHotVkey)
+		opCert = &hexCert
+	}
+	counterStr := strconv.FormatUint(counter, 10)
+	opCertCounter = &counterStr
+	return blockVRF, opCert, opCertCounter
+}
+
+// bech32EncodeData bech32-encodes raw 8-bit data under the given human-readable
+// prefix, converting to the 5-bit groups bech32 requires.
+func bech32EncodeData(hrp string, data []byte) (string, error) {
+	conv, err := bech32.ConvertBits(data, 8, 5, true)
+	if err != nil {
+		return "", fmt.Errorf("convert bits: %w", err)
+	}
+	encoded, err := bech32.Encode(hrp, conv)
+	if err != nil {
+		return "", fmt.Errorf("bech32 encode: %w", err)
+	}
+	return encoded, nil
 }
 
 // LatestBlockTxHashes returns transaction hashes from the

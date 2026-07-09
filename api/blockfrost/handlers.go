@@ -1731,8 +1731,8 @@ func assetNameASCII(
 }
 
 func blockResponse(info BlockInfo) BlockResponse {
-	output := "0"
-	fees := "0"
+	output := info.Output
+	fees := info.Fees
 	return BlockResponse{
 		Hash:          info.Hash,
 		Slot:          info.Slot,
@@ -1747,8 +1747,10 @@ func blockResponse(info BlockInfo) BlockResponse {
 		Confirmations: info.Confirmations,
 		Output:        &output,
 		Fees:          &fees,
-		BlockVRF:      nil,
-		NextBlock:     nil,
+		BlockVRF:      info.BlockVRF,
+		OPCert:        info.OPCert,
+		OPCertCounter: info.OPCertCounter,
+		NextBlock:     info.NextBlock,
 	}
 }
 
