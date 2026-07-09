@@ -1255,7 +1255,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
-				d.logger.Debug(
+				d.logger.Warn(
 					"failed to delete TX blob data",
 					"txHash", hex.EncodeToString(txHash),
 					"error", err,
@@ -1280,13 +1280,19 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()
-				d.logger.Debug("tx blob delete batch commit failed", "error", err)
+				d.logger.Warn(
+					"TX blob delete batch commit failed",
+					"batch_start", start,
+					"batch_end", end,
+					"batch_size", len(batch),
+					"error", err,
+				)
 			}
 		}
 	}
 	if deleteErrors > 0 {
-		d.logger.Debug(
-			"tx blob deletion completed with errors",
+		d.logger.Warn(
+			"TX blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
