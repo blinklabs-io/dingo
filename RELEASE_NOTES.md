@@ -8,7 +8,7 @@
 
 **Version:** v0.62.0
 
-This release strengthens Mithril core catch-up, tightens inbound ledger validation, and reduces database work during transaction indexing.
+This release strengthens Mithril core catch-up, tightens ledger validation, and reduces database work during transaction indexing.
 
 ### ✨ What's New
 
@@ -34,7 +34,7 @@ This release strengthens Mithril core catch-up, tightens inbound ledger validati
 * Summarized **misconfigured database names now fail fast:** Invalid MySQL database names no longer reach malformed SQL or late startup failure paths.
 * Noted **Blockfrost clients can list asset holder addresses and quantities:** The new endpoint follows Blockfrost pagination and 404 behavior for unknown assets or assets without live holders.
 
-### Recommended Network Compatibility ⚠️
+### Compatibilidad de red recomendada ⚠️
 
 | Network             | Compatible |
 |---------------------|------------|
