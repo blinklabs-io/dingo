@@ -35,6 +35,24 @@ import (
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
+	if n.ledgerState == nil {
+		return nil, errors.New(
+			"block producer mode requires ledger state for current slot",
+		)
+	}
+	currentSlot, err := n.ledgerState.CurrentSlot()
+	if err != nil {
+		if !errors.Is(err, ledger.ErrBeforeGenesis) {
+			return nil, fmt.Errorf("compute current slot: %w", err)
+		}
+		currentSlot = 0
+	}
+	return n.validateBlockProducerStartupAtSlot(currentSlot)
+}
+
+func (n *Node) validateBlockProducerStartupAtSlot(
+	currentSlot uint64,
+) (*forging.PoolCredentials, error) {
 	creds := forging.NewPoolCredentials()
 	if err := creds.LoadFromFiles(
 		n.config.shelleyVRFKey,
@@ -60,11 +78,13 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 			"block producer mode requires Shelley genesis information",
 		)
 	}
-	now := time.Now()
-	if err := creds.ValidateKESPeriod(genesis, now); err != nil {
+	if err := creds.ValidateKESPeriod(genesis, currentSlot); err != nil {
 		return nil, fmt.Errorf("validate KES period: %w", err)
 	}
-	currentPeriod, err := forging.CurrentKESPeriod(genesis, now)
+	currentPeriod, err := forging.CurrentKESPeriodFromGenesis(
+		genesis,
+		currentSlot,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("compute current KES period: %w", err)
 	}
@@ -76,6 +96,7 @@ func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) 
 		"block producer credentials validated",
 		"component", "node",
 		"pool_id", creds.GetPoolID().String(),
+		"current_slot", currentSlot,
 		"current_kes_period", currentPeriod,
 		"opcert_kes_period", opCert.KESPeriod,
 		"opcert_counter", opCert.IssueNumber,
@@ -525,8 +546,17 @@ func (a *epochInfoAdapter) NextEpochNonceReadyEpoch() (uint64, bool) {
 	return a.ledgerState.NextEpochNonceReadyEpoch()
 }
 
-func (a *epochInfoAdapter) SlotsPerEpoch() uint64 {
-	return a.ledgerState.SlotsPerEpoch()
+func (a *epochInfoAdapter) EpochSlotRange(
+	epoch uint64,
+) (leader.EpochSlotRange, error) {
+	info, err := a.ledgerState.EpochInfo(epoch)
+	if err != nil {
+		return leader.EpochSlotRange{}, err
+	}
+	return leader.EpochSlotRange{
+		StartSlot: info.StartSlot,
+		SlotCount: uint64(info.LengthInSlots),
+	}, nil
 }
 
 func (a *epochInfoAdapter) EpochForSlot(slot uint64) (uint64, error) {

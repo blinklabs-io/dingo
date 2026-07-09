@@ -79,11 +79,16 @@ func TestCalculateSchedule_TPraosErasMatchGouroborosTPraos(t *testing.T) {
 		epoch         uint64 = 0
 	)
 	activeSlotCoeff := big.NewRat(2, 5)
+	epochRange := leader.EpochSlotRange{
+		StartSlot: epoch * slotsPerEpoch,
+		SlotCount: slotsPerEpoch,
+	}
 
 	// dingo's calculator, called with the era-correct mode.
-	calc := leader.NewCalculator(0.4, slotsPerEpoch)
+	calc := leader.NewCalculator(0.4)
 	dingoSchedule, err := calc.CalculateSchedule(
 		epoch,
+		epochRange,
 		poolID,
 		vrfSeed,
 		poolStake,
@@ -104,7 +109,7 @@ func TestCalculateSchedule_TPraosErasMatchGouroborosTPraos(t *testing.T) {
 	tpraosLeaders := map[uint64]struct{}{}
 	signer, err := consensus.NewSimpleVRFSigner(vrfSeed)
 	require.NoError(t, err)
-	for slot := range (epoch + 1) * slotsPerEpoch {
+	for slot := epochRange.StartSlot; slot < epochRange.StartSlot+epochRange.SlotCount; slot++ {
 		res, err := consensus.IsSlotLeaderWithMode(
 			slot,
 			epochNonce,

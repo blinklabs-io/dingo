@@ -197,6 +197,31 @@ func TestSummary_SlotToEpoch_InSecondEra(t *testing.T) {
 	assert.Equal(t, uint(6), got.EraID)
 }
 
+func TestSummary_EpochInfo_ByronPrefix(t *testing.T) {
+	byronEnd := hardfork.Bound{Slot: 86_400, Epoch: 4}
+	s := hardfork.Summary{
+		Eras: []hardfork.EraSummary{
+			{
+				EraID:  0,
+				Start:  hardfork.Bound{Slot: 0, Epoch: 0},
+				End:    &byronEnd,
+				Params: byronParams,
+			},
+			{
+				EraID:  1,
+				Start:  byronEnd,
+				Params: shelleyParams,
+			},
+		},
+	}
+
+	got, err := s.EpochInfo(299)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(299), got.Epoch)
+	assert.Equal(t, uint64(127_526_400), got.StartSlot)
+	assert.Equal(t, uint64(432_000), got.LengthInSlots)
+}
+
 func TestSummary_SlotToEpoch_PastHorizon(t *testing.T) {
 	end := boundedAt(100*20*time.Second, 100, 5)
 	s := hardfork.Summary{

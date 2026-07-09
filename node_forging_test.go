@@ -82,7 +82,7 @@ func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths()
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartup: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestValidateBlockProducerStartup_HappyPath(t *testing.T) {
 func TestValidateBlockProducerStartup_NoCardanoConfig(t *testing.T) {
 	vrf, kes, opcert := devnetCredPaths()
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, nil)
-	_, err := n.validateBlockProducerStartup()
+	_, err := n.validateBlockProducerStartupAtSlot(0)
 	if err == nil {
 		t.Fatal("expected error for missing cardano node config")
 	}
@@ -122,7 +122,7 @@ func TestValidateBlockProducerStartup_ExpiredKESPeriod(t *testing.T) {
 		t.Fatalf("LoadShelleyGenesisFromReader: %v", err)
 	}
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cfg)
-	_, err := n.validateBlockProducerStartup()
+	_, err := n.validateBlockProducerStartupAtSlot(20)
 	if err == nil {
 		t.Fatal("expected error for expired opcert KES period")
 	}
@@ -141,7 +141,7 @@ func TestValidateBlockProducerStartup_MissingFile(t *testing.T) {
 		filepath.Join(tmp, "missing-opcert.cert"),
 		cardanoCfg,
 	)
-	_, err := n.validateBlockProducerStartup()
+	_, err := n.validateBlockProducerStartupAtSlot(0)
 	if err == nil {
 		t.Fatal("expected error for missing credential files")
 	}
@@ -180,7 +180,7 @@ func TestValidateBlockProducerLedger_NonDevnetVRFMismatchIsFatal(t *testing.T) {
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "preview"
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartup: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestValidateBlockProducerLedger_DevnetVRFMismatchWarns(t *testing.T) {
 	cardanoCfg := shelleyGenesisCfgForBP(t, time.Now().Add(-time.Hour))
 	n := newTestNodeForBP(t, true, vrf, kes, opcert, cardanoCfg)
 	n.config.network = "devnet"
-	creds, err := n.validateBlockProducerStartup()
+	creds, err := n.validateBlockProducerStartupAtSlot(0)
 	if err != nil {
 		t.Fatalf("validateBlockProducerStartup: %v", err)
 	}
