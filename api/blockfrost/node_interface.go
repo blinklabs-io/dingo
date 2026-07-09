@@ -205,6 +205,22 @@ type BlockInfo struct {
 	SlotLeader    string
 	PreviousBlock string
 	Confirmations uint64
+	// Output is the total lovelace output of the block's transactions.
+	Output string
+	// Fees is the total lovelace fees of the block's transactions.
+	Fees string
+	// BlockVRF is the bech32-encoded (vrf_vk) VRF verification key from the
+	// Praos/TPraos header, or nil for Byron/unknown headers.
+	BlockVRF *string
+	// OPCert is the hex-encoded operational certificate hot vkey, or nil for
+	// Byron/unknown headers.
+	OPCert *string
+	// OPCertCounter is the operational certificate issue counter as a decimal
+	// string, or nil for Byron/unknown headers.
+	OPCertCounter *string
+	// NextBlock is the hash of the block that builds on this one, or nil when
+	// this block is the chain tip.
+	NextBlock *string
 }
 
 // EpochInfo holds epoch data needed by the API.
