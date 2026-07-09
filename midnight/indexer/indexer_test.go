@@ -559,6 +559,59 @@ func TestDeregistration_Rollback(t *testing.T) {
 	assert.NotEmpty(t, reg.FullDatum)
 }
 
+// TestRollback_NoRecordedEvents verifies that rolling back a block that
+// recorded no Midnight-relevant rows is a clean no-op: it returns without
+// error, leaves the in-memory tracked sets unchanged, and does not touch rows
+// belonging to other blocks. Deleting by a block number that matched nothing
+// must not disturb earlier, non-rolled-back state.
+func TestRollback_NoRecordedEvents(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupIndexer(t, store)
+
+	// Block 1: a real cNIGHT create that must survive the rollback below.
+	keepTxHash := pad32("a1000001")
+	block1 := testBlock(1, 100, 0x01)
+	require.NoError(t, idx.processBlock(block1,
+		[]lcommon.Transaction{buildTx(t, keepTxHash,
+			[]lcommon.TransactionInput{buildInput(t, pad32("a1000000"), 0)},
+			[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 500)})},
+		1_000))
+
+	// Block 2: only a non-relevant plain transfer, so nothing is recorded.
+	plainTx := buildTx(t, pad32("b2000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("b2000000"), 0)},
+		[]lcommon.TransactionOutput{anyOutput(t)})
+	block2 := testBlock(2, 200, 0x02)
+	require.NoError(t, idx.processBlock(block2, []lcommon.Transaction{plainTx}, 2_000))
+
+	// Precondition: block 2 wrote no rows; only block 1's create exists.
+	var creates []models.MidnightAssetCreate
+	require.NoError(t, store.DB().Find(&creates).Error)
+	require.Len(t, creates, 1, "only block 1 should have recorded a create")
+
+	idx.mu.RLock()
+	utxoCountBefore := len(idx.cNightUTxOs)
+	idx.mu.RUnlock()
+
+	// Roll back block 2, which recorded no events. Must be a clean no-op.
+	idx.rollbackBlock(block2)
+
+	// Block 1's create row must be untouched by the rollback of an empty block.
+	require.NoError(t, store.DB().Find(&creates).Error)
+	assert.Len(t, creates, 1,
+		"rolling back a block with no recorded events must not delete other blocks' rows")
+
+	idx.mu.RLock()
+	_, kept := idx.cNightUTxOs[utxoKey{TxHash: keepTxHash, Index: 0}]
+	utxoCountAfter := len(idx.cNightUTxOs)
+	idx.mu.RUnlock()
+	assert.True(t, kept,
+		"block 1's tracked UTxO must remain after rolling back an unrelated empty block")
+	assert.Equal(t, utxoCountBefore, utxoCountAfter,
+		"tracked UTxO set must be unchanged by a no-op rollback")
+}
+
 // TestNew_PolicyIDLengthValidation verifies that New rejects policy IDs that
 // are not exactly 28 bytes (56 hex characters).
 func TestNew_PolicyIDLengthValidation(t *testing.T) {
