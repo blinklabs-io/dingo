@@ -56,6 +56,12 @@ func (a *databaseAdapter) GetMidnightEpochCandidatesByEpoch(
 	return a.db.GetMidnightEpochCandidatesByEpoch(epoch)
 }
 
+func (a *databaseAdapter) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	return a.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(txHashes)
+}
+
 func (a *databaseAdapter) GetPoolStakeSnapshotsByEpoch(
 	epoch uint64,
 	snapshotType string,

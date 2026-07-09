@@ -862,8 +862,16 @@ implemented in `midnight/server/service.go`:
   `SlotTimer.SlotToTime`.
 - `GetEpochNonce` — reads `Epoch.Nonce` via `Database.GetEpoch`.
 - `GetEpochCandidates` — decodes `MidnightEpochCandidates.CandidatesCbor` via
-  `midnight/indexer.DecodeEpochCandidatesCbor` and joins it with the `"mark"`
-  `pool_stake_snapshot` rows for the epoch to build the stake distribution.
+  `midnight/indexer.DecodeEpochCandidatesCbor` for `(tx_hash, output_index,
+  datum)` membership, batch-fetches
+  `midnight_committee_candidate_registrations` rows for those tx hashes
+  (`Database.GetMidnightCommitteeCandidateRegistrationsByTxHashes`, one query
+  regardless of candidate count) to fill in each candidate's
+  `block_number`/`slot_number`/`tx_index`/`tx_inputs` (the latter decoded via
+  `midnight/indexer.DecodeCandidateInputsCbor`), and joins the `"mark"`
+  `pool_stake_snapshot` rows for the epoch to build the stake distribution. A
+  candidate with no matching registration row keeps those fields at their
+  zero values rather than failing the response.
 - `GetStableBlock` / `GetLatestStableBlock` — compare
   `chain_tip_block_number - block_number` against the requested stability
   offset; when `as_of_timestamp_unix_millis` is set, the "tip" is resolved to
@@ -1802,6 +1810,19 @@ An optional block scanner that indexes Midnight chain events into multiple
   candidate snapshots record the block that created them, so rollback deletes
   snapshots created by the rolled-back block before readers can observe stale
   `midnight_epoch_candidates` rows.
+  `midnight_epoch_candidates.CandidatesCbor` records only `(tx_hash,
+  output_index, datum)` membership — it has no room for the creating
+  transaction's block/slot/tx-index or the inputs it consumed, and the
+  in-memory set is rebuilt on restart from the generic UTXO index
+  (`GetMidnightCandidates`, which also carries only tx_hash/output_index/
+  datum), so that provenance can't be recovered after a restart if it isn't
+  persisted separately. `processOutput` therefore also writes a
+  `midnight_committee_candidate_registrations` row (`block_number`,
+  `slot_number`, `tx_index`, and `tx_inputs_cbor` — the creating tx's inputs,
+  via `EncodeCandidateInputsCbor`) the first time each candidate UTxO is
+  observed, write-before-track same as the in-memory update. `rollbackBlock`
+  deletes registration rows for the rolled-back block alongside the epoch
+  snapshot cleanup.
 
 **Epoch tracking**: `processBlock` resolves and advances the epoch (via
 `advanceEpochLocked`) for every block, on both the live event path and the

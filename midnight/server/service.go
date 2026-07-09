@@ -163,6 +163,14 @@ func (s *service) GetEpochCandidates(
 			err,
 		)
 	}
+	registrations, err := s.candidateRegistrationsFor(entries)
+	if err != nil {
+		return nil, status.Errorf(
+			codes.Internal,
+			"get committee candidate registrations: %v",
+			err,
+		)
+	}
 	candidates := make([]*midnight.EpochCandidate, len(entries))
 	for i, entry := range entries {
 		candidates[i] = &midnight.EpochCandidate{
@@ -170,8 +178,35 @@ func (s *service) GetEpochCandidates(
 			UtxoTxHash:  entry.TxHash,
 			UtxoIndex:   entry.OutputIndex,
 			EpochNumber: epoch,
-			BlockNumber: snapshot.BlockNumber,
 		}
+		reg, ok := registrations[candidateRegistrationKey{
+			txHash:      string(entry.TxHash),
+			outputIndex: entry.OutputIndex,
+		}]
+		if !ok {
+			// Every candidate tracked in a snapshot was written via
+			// processOutput's write-before-track path, which always inserts
+			// a registration row first; a miss here means the row was lost
+			// (e.g. a pre-migration snapshot). Report what we know rather
+			// than failing the whole response.
+			continue
+		}
+		candidates[i].BlockNumber = reg.BlockNumber
+		candidates[i].SlotNumber = reg.SlotNumber
+		candidates[i].TxIndex = reg.TxIndex
+		inputs, err := midnightindexer.DecodeCandidateInputsCbor(reg.TxInputsCbor)
+		if err != nil {
+			return nil, status.Errorf(
+				codes.Internal,
+				"decode candidate tx inputs: %v",
+				err,
+			)
+		}
+		txInputs := make([]*midnight.UtxoId, len(inputs))
+		for j, ref := range inputs {
+			txInputs[j] = &midnight.UtxoId{TxHash: ref.TxHash, Index: ref.Index}
+		}
+		candidates[i].TxInputs = txInputs
 	}
 
 	stakeSnapshots, err := s.db.GetPoolStakeSnapshotsByEpoch(
@@ -203,6 +238,48 @@ func (s *service) GetEpochCandidates(
 		Candidates:        candidates,
 		StakeDistribution: stakeDistribution,
 	}, nil
+}
+
+// candidateRegistrationKey identifies a committee-candidate UTxO by its
+// creating (tx_hash, output_index), matching how
+// MidnightCommitteeCandidateRegistration rows are keyed.
+type candidateRegistrationKey struct {
+	txHash      string // string(txHash bytes), not hex — cheaper and just as hashable
+	outputIndex uint32
+}
+
+// candidateRegistrationsFor batch-fetches the on-chain provenance for every
+// entry's creating transaction and returns it keyed by (tx_hash,
+// output_index) for O(1) lookup per candidate. A single query regardless of
+// candidate count avoids one round trip per candidate.
+func (s *service) candidateRegistrationsFor(
+	entries []midnightindexer.CandidateEntry,
+) (map[candidateRegistrationKey]models.MidnightCommitteeCandidateRegistration, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(entries))
+	txHashes := make([][]byte, 0, len(entries))
+	for _, entry := range entries {
+		key := string(entry.TxHash)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		txHashes = append(txHashes, entry.TxHash)
+	}
+	rows, err := s.db.GetMidnightCommitteeCandidateRegistrationsByTxHashes(txHashes)
+	if err != nil {
+		return nil, err
+	}
+	byKey := make(map[candidateRegistrationKey]models.MidnightCommitteeCandidateRegistration, len(rows))
+	for _, row := range rows {
+		byKey[candidateRegistrationKey{
+			txHash:      string(row.TxHash),
+			outputIndex: row.OutputIndex,
+		}] = row
+	}
+	return byKey, nil
 }
 
 // GetBlockByHash returns metadata for the block with the requested hash.

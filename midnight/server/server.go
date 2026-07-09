@@ -75,6 +75,14 @@ type MidnightDatabase interface {
 	GetMidnightEpochCandidatesByEpoch(
 		epoch uint64,
 	) (*models.MidnightEpochCandidates, error)
+	// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns the
+	// on-chain provenance (block/slot/tx-index/tx-inputs) for candidate
+	// UTxOs whose creating tx hash is in txHashes, for GetEpochCandidates to
+	// join against the (tx_hash, output_index, datum) membership decoded
+	// from a MidnightEpochCandidates snapshot.
+	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		txHashes [][]byte,
+	) ([]models.MidnightCommitteeCandidateRegistration, error)
 	GetPoolStakeSnapshotsByEpoch(
 		epoch uint64,
 		snapshotType string,

@@ -90,6 +90,17 @@ func (d *Database) GetMidnightEpochCandidatesByEpoch(
 	return d.metadata.GetMidnightEpochCandidatesByEpoch(epoch, nil)
 }
 
+// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns every
+// candidate-registration provenance row whose tx_hash is in txHashes.
+func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	return d.metadata.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		txHashes,
+		nil,
+	)
+}
+
 // UpsertMidnightEpochCandidates inserts or replaces the committee-candidate
 // snapshot for the given epoch.
 func (d *Database) UpsertMidnightEpochCandidates(

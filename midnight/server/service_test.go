@@ -238,6 +238,14 @@ type candidateEntryCbor struct {
 	Datum       []byte `cbor:"3,keyasint"`
 }
 
+// candidateInputRefCbor mirrors midnight/indexer.CandidateInputRef's CBOR
+// shape so this test can seed registration rows without importing the
+// indexer package.
+type candidateInputRefCbor struct {
+	TxHash []byte `cbor:"1,keyasint"`
+	Index  uint32 `cbor:"2,keyasint"`
+}
+
 func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	db := newTestDatabase(t)
 	entries := []candidateEntryCbor{
@@ -251,6 +259,29 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 		BlockNumber:    700,
 		CandidatesCbor: blob,
 	}))
+
+	// Registration provenance is looked up separately from the snapshot, by
+	// (tx_hash, output_index); seed one row per candidate with distinct
+	// block/slot/tx-index/inputs so the assertions below can't pass by
+	// accident (e.g. by reading the same field twice).
+	inputsA, err := cbor.Marshal([]candidateInputRefCbor{{TxHash: []byte{0x11}, Index: 2}})
+	require.NoError(t, err)
+	inputsB, err := cbor.Marshal([]candidateInputRefCbor{
+		{TxHash: []byte{0x22}, Index: 0},
+		{TxHash: []byte{0x33}, Index: 5},
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.Metadata().InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
+		TxHash: []byte{0xAA}, OutputIndex: 0,
+		BlockNumber: 701, SlotNumber: 7010, TxIndex: 3,
+		TxInputsCbor: inputsA,
+	}))
+	require.NoError(t, db.Metadata().InsertMidnightCommitteeCandidateRegistration(nil, &models.MidnightCommitteeCandidateRegistration{
+		TxHash: []byte{0xBB}, OutputIndex: 1,
+		BlockNumber: 702, SlotNumber: 7020, TxIndex: 4,
+		TxInputsCbor: inputsB,
+	}))
+
 	require.NoError(t, db.Metadata().SavePoolStakeSnapshots([]*models.PoolStakeSnapshot{
 		{Epoch: 7, SnapshotType: models.PoolStakeSnapshotTypeMark, PoolKeyHash: []byte{0x02}, TotalStake: 200, DelegatorCount: 1, CapturedSlot: 1},
 		{Epoch: 7, SnapshotType: models.PoolStakeSnapshotTypeMark, PoolKeyHash: []byte{0x01}, TotalStake: 100, DelegatorCount: 1, CapturedSlot: 1},
@@ -262,9 +293,27 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 	resp, err := client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 7})
 	require.NoError(t, err)
 	require.Len(t, resp.GetCandidates(), 2)
-	require.Equal(t, []byte("candidate-a"), resp.GetCandidates()[0].GetFullDatum())
-	require.Equal(t, uint64(700), resp.GetCandidates()[0].GetBlockNumber())
-	require.Equal(t, uint64(7), resp.GetCandidates()[0].GetEpochNumber())
+
+	c0 := resp.GetCandidates()[0]
+	require.Equal(t, []byte("candidate-a"), c0.GetFullDatum())
+	require.Equal(t, uint64(7), c0.GetEpochNumber())
+	require.Equal(t, uint64(701), c0.GetBlockNumber())
+	require.Equal(t, uint64(7010), c0.GetSlotNumber())
+	require.Equal(t, uint32(3), c0.GetTxIndex())
+	require.Len(t, c0.GetTxInputs(), 1)
+	require.Equal(t, []byte{0x11}, c0.GetTxInputs()[0].GetTxHash())
+	require.Equal(t, uint32(2), c0.GetTxInputs()[0].GetIndex())
+
+	c1 := resp.GetCandidates()[1]
+	require.Equal(t, []byte("candidate-b"), c1.GetFullDatum())
+	require.Equal(t, uint64(702), c1.GetBlockNumber())
+	require.Equal(t, uint64(7020), c1.GetSlotNumber())
+	require.Equal(t, uint32(4), c1.GetTxIndex())
+	require.Len(t, c1.GetTxInputs(), 2)
+	require.Equal(t, []byte{0x22}, c1.GetTxInputs()[0].GetTxHash())
+	require.Equal(t, uint32(0), c1.GetTxInputs()[0].GetIndex())
+	require.Equal(t, []byte{0x33}, c1.GetTxInputs()[1].GetTxHash())
+	require.Equal(t, uint32(5), c1.GetTxInputs()[1].GetIndex())
 
 	require.Len(t, resp.GetStakeDistribution(), 2)
 	// Sorted by pool key hash ascending: 0x01 before 0x02.
@@ -274,6 +323,41 @@ func TestGetEpochCandidates_CandidatesAndStakeDistribution(t *testing.T) {
 
 	_, err = client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 999})
 	require.Equal(t, codes.NotFound, status.Code(err))
+}
+
+// TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero documents
+// the graceful-degradation path: a candidate present in the snapshot but
+// with no matching registration row (which should not happen given the
+// indexer's write-before-track invariant, but could for a pre-migration
+// snapshot) still returns successfully with its datum/UTxO identity intact,
+// just without block/slot/tx-index/inputs.
+func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(t *testing.T) {
+	db := newTestDatabase(t)
+	entries := []candidateEntryCbor{
+		{TxHash: []byte{0xCC}, OutputIndex: 0, Datum: []byte("candidate-c")},
+	}
+	blob, err := cbor.Marshal(entries)
+	require.NoError(t, err)
+	require.NoError(t, db.UpsertMidnightEpochCandidates(&models.MidnightEpochCandidates{
+		Epoch:          9,
+		BlockNumber:    900,
+		CandidatesCbor: blob,
+	}))
+	// Deliberately no InsertMidnightCommitteeCandidateRegistration call.
+
+	addr := startTestServerWithConfig(t, server.Config{Database: server.NewDatabase(db), SlotTimer: fakeSlotTimer{}})
+	client := dialClient(t, addr)
+
+	resp, err := client.GetEpochCandidates(callCtx(t), &midnight.EpochCandidatesRequest{Epoch: 9})
+	require.NoError(t, err)
+	require.Len(t, resp.GetCandidates(), 1)
+	c := resp.GetCandidates()[0]
+	require.Equal(t, []byte("candidate-c"), c.GetFullDatum())
+	require.Equal(t, uint64(9), c.GetEpochNumber())
+	require.Equal(t, uint64(0), c.GetBlockNumber())
+	require.Equal(t, uint64(0), c.GetSlotNumber())
+	require.Equal(t, uint32(0), c.GetTxIndex())
+	require.Empty(t, c.GetTxInputs())
 }
 
 func TestGetLatestBlock(t *testing.T) {

@@ -1525,6 +1525,12 @@ type MetadataStore interface {
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
 	GetMidnightEpochCandidatesByEpoch(uint64, types.Txn) (*models.MidnightEpochCandidates, error)
+	InsertMidnightCommitteeCandidateRegistration(types.Txn, *models.MidnightCommitteeCandidateRegistration) error
+	DeleteMidnightCommitteeCandidateRegistrationsByBlock(types.Txn, uint64) error
+	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		[][]byte,
+		types.Txn,
+	) ([]models.MidnightCommitteeCandidateRegistration, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

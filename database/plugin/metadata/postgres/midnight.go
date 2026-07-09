@@ -593,3 +593,54 @@ func (d *MetadataStorePostgres) GetMidnightEpochCandidatesByEpoch(
 	}
 	return &ec, nil
 }
+
+// InsertMidnightCommitteeCandidateRegistration inserts a candidate UTxO
+// provenance row. Uses ON CONFLICT DO NOTHING so that backfill replays are
+// idempotent.
+func (d *MetadataStorePostgres) InsertMidnightCommitteeCandidateRegistration(
+	txn types.Txn,
+	row *models.MidnightCommitteeCandidateRegistration,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+}
+
+// DeleteMidnightCommitteeCandidateRegistrationsByBlock deletes candidate
+// registration rows written while applying blockNumber. Used during
+// rollback so a re-applied block at the same height starts clean.
+func (d *MetadataStorePostgres) DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightCommitteeCandidateRegistration{}).Error
+}
+
+// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns every
+// registration row whose tx_hash is in txHashes, for the caller to match
+// against (tx_hash, output_index) pairs. A single IN query regardless of how
+// many candidates are being enriched avoids one round trip per candidate.
+func (d *MetadataStorePostgres) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+	txn types.Txn,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	if len(txHashes) == 0 {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightCommitteeCandidateRegistration
+	if err := db.Where("tx_hash IN ?", txHashes).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
