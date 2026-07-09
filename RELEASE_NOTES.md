@@ -92,6 +92,52 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Catch-up en modo núcleo de Mithril, validación del ledger y indexación de base de datos más rápida
+
+**Fecha:** July 9, 2026
+
+**Versión:** v0.62.0
+
+Esta versión refuerza el catch-up en modo núcleo de Mithril, endurece la validación entrante del ledger y reduce el trabajo de base de datos durante la indexación de transacciones.
+
+### ✨ Novedades
+
+* Agregó **catch-up de Mithril v2 en modo núcleo para bases de datos existentes:** Los operadores pueden llevar una base de datos núcleo ya sincronizada a artefactos más nuevos sin un bootstrap completo, y cualquier divergencia ahora falla de forma segura antes de modificar datos.
+* Introdujo **el endpoint de direcciones de holders de activos de Blockfrost:** Los clientes de la API pueden listar direcciones y cantidades de holders para activos nativos mediante `GET /api/v0/assets/{asset}/addresses`, con paginación y comportamiento 404 estilo Blockfrost cuando el activo no tiene holders vivos.
+
+### 💪 Mejoras
+
+* Mejoró **la indexación de transacciones con lecturas UTxO por lotes:** MySQL y Postgres ahora leen inputs, collateral inputs y reference inputs en lotes, lo que reduce los viajes de ida y vuelta y mantiene completa la indexación de direcciones de reference inputs en API mode.
+* Reforzó **la cobertura de regresión de `LedgerDelta.apply`:** Las pruebas directas ahora cubren persistencia de transacciones, manejo de parámetros de gobernanza y protocolo, acumulación de donaciones, comportamiento ante transacciones inválidas, rollback y seguridad al reutilizar objetos agrupados.
+* Actualizó **el forge y la validación de Dijkstra para ajustarlos a las nuevas formas del protocolo:** El nodo ahora codifica los candidatos a block body de Dijkstra como `[header, block_body]`, calcula el hash y el tamaño del body a partir del body codificado, excluye transacciones inválidas y resuelve las referencias de endorser de Leios de forma más estricta.
+
+### 🔧 Correcciones
+
+* Corrigió **la validación de certificados operativos entrantes:** El ledger ahora rechaza antes los certificados operativos falsificados, caducados, obsoletos o inválidos mediante comprobaciones de encabezado sin estado y comprobaciones de contador con estado.
+* Endureció **la validación de nombres de base de datos de MySQL antes de `CREATE DATABASE`:** Los nombres mal configurados ahora fallan rápido cuando violan la longitud o las reglas de caracteres permitidas o incluyen acentos graves, lo que evita SQL inválido y fallos tardíos al arrancar.
+
+### 📋 Lo que se debe saber
+
+* Aclaró **que el catch-up del núcleo de Mithril mantiene utilizables las bases de datos existentes:** Los operadores pueden sincronizar una base de datos núcleo de Mithril v2 existente con artefactos más nuevos sin borrarla, aunque las cadenas divergentes siguen deteniéndose y requieren una resincronización completa.
+* Destacó **que la validación del ledger rechaza antes los certificados operativos incorrectos:** Los certificados falsificados, caducados, obsoletos o inválidos fallan antes y con más rigor durante la validación de bloques.
+* Subrayó **que la indexación de transacciones ahora realiza menos viajes a la base de datos:** Las lecturas UTxO se agrupan entre inputs, collateral inputs y reference inputs, y la indexación de direcciones en API mode ahora incluye reference inputs.
+* Resumió **que los nombres de base de datos mal configurados ahora fallan rápido:** Los nombres inválidos de MySQL ya no llegan a SQL mal formado ni a rutas tardías de fallo al iniciar.
+* Indicó **que los clientes de Blockfrost pueden listar direcciones y cantidades de holders de activos:** El nuevo endpoint sigue la paginación de Blockfrost y el comportamiento 404 para activos desconocidos o sin holders vivos.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ---
 
 ## v0.61.2 (July 6, 2026)
