@@ -21,11 +21,14 @@ import (
 	"os"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockledger "github.com/blinklabs-io/ouroboros-mock/ledger"
 	fxcbor "github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/assert"
@@ -1087,10 +1090,31 @@ func TestCandidateRegistrationProvenance_PersistedAndDecodable(t *testing.T) {
 	assert.Equal(t, uint32(3), refs[1].Index)
 }
 
-// TestCandidateRegistrationProvenance_RollbackDeletes verifies that rolling
-// back a block deletes the committee-candidate registration rows it wrote,
-// so a re-applied block at the same height doesn't see stale provenance.
-func TestCandidateRegistrationProvenance_RollbackDeletes(t *testing.T) {
+// decodableBlockCbor returns the CBOR and block type of a real, decodable
+// block from the shared immutable test fixtures. Used where a rollback test
+// needs block.Decode() to succeed (testBlock produces CBOR-less blocks that
+// fail to decode).
+func decodableBlockCbor(t *testing.T) ([]byte, uint) {
+	t.Helper()
+	imm, err := immutable.New("../../database/immutable/testdata")
+	require.NoError(t, err)
+	it, err := imm.BlocksFromPoint(ocommon.Point{})
+	require.NoError(t, err)
+	defer it.Close()
+	b, err := it.Next()
+	require.NoError(t, err)
+	require.NotNil(t, b)
+	// Sanity: the fixture block must actually decode.
+	_, err = ledger.NewBlockFromCbor(b.Type, b.Cbor)
+	require.NoError(t, err)
+	return b.Cbor, b.Type
+}
+
+// TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess verifies
+// that rolling back a decodable block deletes the committee-candidate
+// registration rows it wrote, so a re-applied block at the same height
+// doesn't see stale provenance.
+func TestCandidateRegistrationProvenance_RollbackDeletesOnDecodeSuccess(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
 	idx := setupGovIndexer(t, store)
@@ -1103,7 +1127,15 @@ func TestCandidateRegistrationProvenance_RollbackDeletes(t *testing.T) {
 		[]lcommon.TransactionInput{buildInput(t, pad32("cafe1000"), 0)},
 		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
 	)
+	// Process the candidate under a block whose CBOR/type make block.Decode()
+	// succeed, so rollbackBlock takes the create-removal + provenance-delete
+	// path. The fixture block's own transactions are unrelated to our
+	// candidate; the registration delete is keyed by block number, and the
+	// in-memory create removal simply finds nothing matching to remove.
+	cborData, blockType := decodableBlockCbor(t)
 	block := testBlock(1, 100, 0xC7)
+	block.Cbor = cborData
+	block.Type = blockType
 	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
 
 	var before []models.MidnightCommitteeCandidateRegistration
@@ -1114,7 +1146,50 @@ func TestCandidateRegistrationProvenance_RollbackDeletes(t *testing.T) {
 
 	var after []models.MidnightCommitteeCandidateRegistration
 	require.NoError(t, store.DB().Find(&after).Error)
-	assert.Empty(t, after, "registration row must be deleted after rollback")
+	assert.Empty(t, after, "registration row must be deleted after a decode-success rollback")
+}
+
+// TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure guards
+// the fix for the decode-failure inconsistency: when a rolled-back block
+// cannot be decoded, its created candidates cannot be removed from the
+// in-memory set, so their registration provenance rows must be RETAINED.
+// Deleting them would let a later epoch snapshot emit those candidates with
+// missing tx_inputs/slot_number/tx_index/block_number.
+func TestCandidateRegistrationProvenance_RollbackRetainsOnDecodeFailure(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	idx := setupGovIndexer(t, store)
+
+	datum := simpleDatumCbor(t)
+	txHash := pad32("cafe2001")
+	createTx := buildTx(
+		t,
+		txHash,
+		[]lcommon.TransactionInput{buildInput(t, pad32("cafe2000"), 0)},
+		[]lcommon.TransactionOutput{buildGovOutput(t, testMappingAddr, datum)},
+	)
+	// testBlock carries no CBOR, so block.Decode() fails inside rollbackBlock.
+	block := testBlock(1, 100, 0xC8)
+	require.NoError(t, idx.processBlock(block, []lcommon.Transaction{createTx}, 1_000))
+
+	key := candidateTestKey(t, txHash, 0)
+	idx.mu.RLock()
+	_, trackedBefore := idx.candidates[key]
+	idx.mu.RUnlock()
+	require.True(t, trackedBefore, "candidate must be in memory before rollback")
+
+	idx.rollbackBlock(block)
+
+	// The in-memory candidate remains (decode failure can't remove it)...
+	idx.mu.RLock()
+	_, trackedAfter := idx.candidates[key]
+	idx.mu.RUnlock()
+	assert.True(t, trackedAfter, "decode failure leaves the created candidate in memory")
+
+	// ...so its provenance row must remain too, keeping the two consistent.
+	var after []models.MidnightCommitteeCandidateRegistration
+	require.NoError(t, store.DB().Find(&after).Error)
+	require.Len(t, after, 1, "registration row must be retained when the candidate can't be removed from memory")
 }
 
 // TestCandidateRollbackRestoresSpentAndRemovesCreated verifies candidate

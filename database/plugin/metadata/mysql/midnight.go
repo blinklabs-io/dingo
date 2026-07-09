@@ -28,7 +28,8 @@ import (
 )
 
 // CreateMidnightAssetCreate inserts a cNIGHT UTxO creation row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightAssetCreate(
 	txn types.Txn,
 	row *models.MidnightAssetCreate,
@@ -41,7 +42,8 @@ func (d *MetadataStoreMysql) CreateMidnightAssetCreate(
 }
 
 // CreateMidnightAssetSpend inserts a cNIGHT UTxO spend row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightAssetSpend(
 	txn types.Txn,
 	row *models.MidnightAssetSpend,
@@ -54,7 +56,8 @@ func (d *MetadataStoreMysql) CreateMidnightAssetSpend(
 }
 
 // CreateMidnightRegistration inserts a mapping-validator registration row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightRegistration(
 	txn types.Txn,
 	row *models.MidnightRegistration,
@@ -67,7 +70,8 @@ func (d *MetadataStoreMysql) CreateMidnightRegistration(
 }
 
 // CreateMidnightDeregistration inserts a mapping-validator deregistration row.
-// Uses INSERT IGNORE so that backfill replays are idempotent.
+// Idempotent on replay: GORM's DoNothing conflict clause renders on MySQL as
+// a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) CreateMidnightDeregistration(
 	txn types.Txn,
 	row *models.MidnightDeregistration,
@@ -595,8 +599,8 @@ func (d *MetadataStoreMysql) GetMidnightEpochCandidatesByEpoch(
 }
 
 // InsertMidnightCommitteeCandidateRegistration inserts a candidate UTxO
-// provenance row. Uses INSERT IGNORE so that backfill replays are
-// idempotent.
+// provenance row. Idempotent on replay: GORM's DoNothing conflict clause
+// renders on MySQL as a no-op ON DUPLICATE KEY UPDATE (not INSERT IGNORE).
 func (d *MetadataStoreMysql) InsertMidnightCommitteeCandidateRegistration(
 	txn types.Txn,
 	row *models.MidnightCommitteeCandidateRegistration,

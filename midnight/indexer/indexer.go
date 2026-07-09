@@ -669,24 +669,21 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 	}
 
 	if len(idx.candidateAddrBytes) > 0 {
-		// Snapshot cleanup, registration-provenance cleanup, and spend-
-		// journal restore only need block.Number; do all three before
-		// decoding so a decode error leaves neither stale DB rows nor
-		// unrestored in-memory candidates.
+		// Snapshot cleanup and spend-journal restore only need block.Number;
+		// do both before decoding so a decode error leaves neither stale DB
+		// rows nor unrestored in-memory candidates.
 		idx.rollbackCandidateSnapshots(block)
-		if err := idx.config.Metadata.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
-			nil,
-			block.Number,
-		); err != nil && idx.config.Logger != nil {
-			idx.config.Logger.Error(
-				"midnight indexer: rollback committee candidate registrations",
-				"error", err,
-				"block", block.Number,
-			)
-		}
 		idx.rollbackCandidateSpends(block.Number)
 		decoded, err := block.Decode()
 		if err != nil {
+			// Decode failure means we cannot remove the in-memory candidate
+			// outputs this block created. Their
+			// MidnightCommitteeCandidateRegistration provenance rows must
+			// therefore be RETAINED, not deleted: a later epoch snapshot may
+			// still serialize those candidates, and GetEpochCandidates needs
+			// the provenance to fill in tx_inputs/slot_number/tx_index/
+			// block_number. Deleting the rows here would leave the in-memory
+			// candidate set and the persisted provenance inconsistent.
 			if idx.config.Logger != nil {
 				idx.config.Logger.Error(
 					"midnight indexer: rollback candidate decode block",
@@ -696,6 +693,20 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 			}
 		} else {
 			idx.rollbackCandidateCreates(decoded.Transactions())
+			// The created candidates are now gone from the in-memory set, so
+			// their provenance rows can be deleted in lockstep. Doing this
+			// only on the decode-success path preserves the invariant that
+			// every in-memory candidate has a registration row.
+			if err := idx.config.Metadata.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+				nil,
+				block.Number,
+			); err != nil && idx.config.Logger != nil {
+				idx.config.Logger.Error(
+					"midnight indexer: rollback committee candidate registrations",
+					"error", err,
+					"block", block.Number,
+				)
+			}
 		}
 	}
 
