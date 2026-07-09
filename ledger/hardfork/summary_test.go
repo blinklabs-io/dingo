@@ -220,6 +220,52 @@ func TestSummary_EpochInfo_ByronPrefix(t *testing.T) {
 	assert.Equal(t, uint64(299), got.Epoch)
 	assert.Equal(t, uint64(127_526_400), got.StartSlot)
 	assert.Equal(t, uint64(432_000), got.LengthInSlots)
+	assert.Equal(t, time.Second, got.SlotLength)
+	assert.Equal(t, uint(1), got.EraID)
+}
+
+func TestSummary_EpochInfo_StartSlotOverflow(t *testing.T) {
+	maxUint64 := ^uint64(0)
+	tests := []struct {
+		name    string
+		summary hardfork.Summary
+		epoch   uint64
+	}{
+		{
+			name: "epoch offset multiplication",
+			summary: hardfork.Summary{
+				Eras: []hardfork.EraSummary{{
+					Start: hardfork.Bound{Epoch: 0, Slot: 0},
+					Params: hardfork.EraParams{
+						EpochSize:  2,
+						SlotLength: time.Second,
+					},
+				}},
+			},
+			epoch: maxUint64,
+		},
+		{
+			name: "era start slot addition",
+			summary: hardfork.Summary{
+				Eras: []hardfork.EraSummary{{
+					Start: hardfork.Bound{Epoch: 0, Slot: maxUint64 - 1},
+					Params: hardfork.EraParams{
+						EpochSize:  2,
+						SlotLength: time.Second,
+					},
+				}},
+			},
+			epoch: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := tt.summary.EpochInfo(tt.epoch)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "overflows uint64")
+		})
+	}
 }
 
 func TestSummary_SlotToEpoch_PastHorizon(t *testing.T) {

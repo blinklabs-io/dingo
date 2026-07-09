@@ -32,9 +32,13 @@ import (
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
+	if _, err := n.blockProducerShelleyGenesis(); err != nil {
+		return nil, err
+	}
 	if n.ledgerState == nil {
 		return nil, errors.New(
 			"block producer mode requires ledger state for current slot",
@@ -64,19 +68,9 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 	if err := creds.ValidateOpCert(); err != nil {
 		return nil, fmt.Errorf("validate operational certificate: %w", err)
 	}
-	// KES-period plausibility requires a Shelley genesis. Block producer
-	// mode without one is unsafe — a node with no genesis cannot tell
-	// whether the opcert is current — so refuse to start.
-	if n.config.cardanoNodeConfig == nil {
-		return nil, errors.New(
-			"block producer mode requires Cardano node config with Shelley genesis",
-		)
-	}
-	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
-	if genesis == nil {
-		return nil, errors.New(
-			"block producer mode requires Shelley genesis information",
-		)
+	genesis, err := n.blockProducerShelleyGenesis()
+	if err != nil {
+		return nil, err
 	}
 	if err := creds.ValidateKESPeriod(genesis, currentSlot); err != nil {
 		return nil, fmt.Errorf("validate KES period: %w", err)
@@ -103,6 +97,24 @@ func (n *Node) validateBlockProducerStartupAtSlot(
 		"opcert_expiry_period", creds.OpCertExpiryPeriod(),
 	)
 	return creds, nil
+}
+
+func (n *Node) blockProducerShelleyGenesis() (*shelley.ShelleyGenesis, error) {
+	// KES-period plausibility requires a Shelley genesis. Block producer
+	// mode without one is unsafe — a node with no genesis cannot tell
+	// whether the opcert is current — so refuse to start.
+	if n.config.cardanoNodeConfig == nil {
+		return nil, errors.New(
+			"block producer mode requires Cardano node config with Shelley genesis",
+		)
+	}
+	genesis := n.config.cardanoNodeConfig.ShelleyGenesis()
+	if genesis == nil {
+		return nil, errors.New(
+			"block producer mode requires Shelley genesis information",
+		)
+	}
+	return genesis, nil
 }
 
 // blockProducerLedgerView adapts ledger.LedgerState to

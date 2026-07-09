@@ -363,7 +363,13 @@ func TestElectionUsesEpochSlotRangeForSchedule(t *testing.T) {
 	epochProvider.activeSlotCoeff = 1.0
 	epochProvider.SetEpochNonceForEpoch(epoch, electionTestNonce)
 	epochProvider.epochSlotRange = func(gotEpoch uint64) (EpochSlotRange, error) {
-		require.Equal(t, epoch, gotEpoch)
+		if gotEpoch != epoch {
+			return EpochSlotRange{}, fmt.Errorf(
+				"got epoch slot range request for epoch %d, want %d",
+				gotEpoch,
+				epoch,
+			)
+		}
 		return EpochSlotRange{
 			StartSlot: preprodEpochStart,
 			SlotCount: testEpochSlotCount,
