@@ -1,5 +1,53 @@
 # Dingo Releases
 
+## v0.62.0 (July 9, 2026)
+
+**Title:** Mithril core catch-up, ledger validation, and faster database indexing
+
+**Date:** July 9, 2026
+
+**Version:** v0.62.0
+
+This release strengthens Mithril core catch-up, tightens inbound ledger validation, and reduces database work during transaction indexing.
+
+### ✨ What's New
+
+* Added **Mithril v2 core-mode catch-up for existing databases:** Operators can advance an already-synced core database to newer artifacts without a full bootstrap, and divergence now fails closed before any mutation.
+* Introduced **the Blockfrost asset holder addresses endpoint:** API clients can list holder addresses and quantities for native assets through `GET /api/v0/assets/{asset}/addresses`, with pagination and Blockfrost-style 404 behavior when the asset has no live holders.
+
+### 💪 Improvements
+
+* Improved **transaction indexing with batched UTxO reads:** MySQL and Postgres now read inputs, collateral inputs, and reference inputs in batches, which reduces round trips and keeps reference-input address indexing complete in API mode.
+* Strengthened **regression coverage for `LedgerDelta.apply`:** Direct tests now cover transaction persistence, governance and protocol parameter handling, donation accumulation, invalid transaction handling, rollback behavior, and pooled object reuse safety.
+* Updated **Dijkstra forging and validation to match revised protocol shapes:** The node now encodes candidate Dijkstra block bodies as `[header, block_body]`, computes the body hash and size from the encoded body, excludes invalid transactions, and resolves Leios endorser references more strictly.
+
+### 🔧 Fixes
+
+* Fixed **inbound operational certificate validation:** The ledger now rejects forged, expired, stale, or otherwise invalid operational certificates earlier through stateless header checks and stateful counter checks.
+* Hardened **MySQL database name validation before `CREATE DATABASE`:** Misconfigured names now fail fast when they violate the allowed length or character rules or contain backticks, which prevents malformed SQL and late startup failures.
+
+### 📋 What You Need to Know
+
+* Clarified **Mithril core catch-up keeps existing databases usable:** Operators can sync an existing Mithril v2 core database to newer artifacts without deleting it, while divergent chains still stop and require a full resync.
+* Highlighted **ledger validation now rejects bad operational certificates sooner:** Forged, expired, stale, or invalid certificates fail earlier and more strictly during block validation.
+* Emphasized **transaction indexing now performs fewer database round trips:** UTxO reads batch across inputs, collateral inputs, and reference inputs, and API mode address indexing now includes reference inputs.
+* Summarized **misconfigured database names now fail fast:** Invalid MySQL database names no longer reach malformed SQL or late startup failure paths.
+* Noted **Blockfrost clients can list asset holder addresses and quantities:** The new endpoint follows Blockfrost pagination and 404 behavior for unknown assets or assets without live holders.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.61.2 (July 6, 2026)
 
 **Title:** Safer recovery, steadier peer governance, and tighter validation
