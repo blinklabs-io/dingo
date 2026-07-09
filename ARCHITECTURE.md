@@ -1759,12 +1759,22 @@ and governance state (`cNightUTxOs`, `regUTxOs`, `candidates`,
 `candidateRemovals`, `epochTransitions`, `lastAriadneDatum`, `currentEpoch`,
 `snapshotEpoch`) as they go, ahead of the write transaction's commit. To keep
 that memory from drifting ahead of the database when a later write in the
-same block fails, `processBlock` snapshots all of it
-(`snapshotMutableState`) before scanning any transactions and restores the
-snapshot (`restoreMutableState`) if it returns without committing — so a
+same block fails, `processBlock` opens a `blockMutationJournal`
+(`newBlockMutationJournal`) before scanning any transactions and undoes it
+(`undoBlockMutations`) if the block returns without committing — so a
 partially-processed, ultimately-rolled-back block leaves memory exactly as
 it was, rather than retaining mutations for rows the database never durably
-recorded.
+recorded. The journal records only each touched key's pre-block value (via
+a generic `mapJournal[K, V]`, the first time that key is touched in the
+block) rather than cloning `cNightUTxOs`/`regUTxOs`/`candidates` wholesale —
+those maps hold all actively tracked state for the whole chain, so a full
+clone would cost O(total live state) on every block instead of O(that
+block's own changes). `candidateRemovals`/`epochTransitions` are only ever
+written under the current block's own key while processing it, so the
+journal there is just that one key's pre-block value; the periodic pruning
+step that deletes older keys from both maps separately records exactly
+which entries it removes, so undo can restore them without journaling the
+maps' full contents either.
 
 **Startup and catch-up**: `node.go` calls
 `LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the

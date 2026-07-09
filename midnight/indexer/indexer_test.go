@@ -1248,3 +1248,52 @@ func TestProcessBlock_PartialFailureRollsBackWholeBlock(t *testing.T) {
 		"the first tx's in-memory UTxO must be undone along with its rolled-back DB row",
 	)
 }
+
+// TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact verifies that
+// undoing a failed block's mutations touches only the keys that block
+// itself wrote, not the whole tracked-UTxO map. A prior, already-committed
+// block's entry must survive a later block's rollback untouched — the
+// journal records per-key pre-block values instead of cloning and
+// restoring the entire live map, so this also demonstrates the undo cost
+// scales with what the failed block changed, not with total tracked state.
+func TestProcessBlock_PartialFailureLeavesUnrelatedStateIntact(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	wrapped := &failingAfterNCreatesStore{MetadataStoreSqlite: store, remaining: 2}
+	idx, err := New(Config{
+		Metadata:        wrapped,
+		Logger:          slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		CNightPolicyID:  testPolicyID,
+		CNightAssetName: testAssetNameHex,
+	})
+	require.NoError(t, err)
+
+	// Block 1 succeeds outright and leaves a durably tracked UTxO.
+	seedTx := buildTx(t, pad32("11000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("11000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 50)})
+	require.NoError(t, idx.processBlock(testBlock(1, 100, 0x11), []lcommon.Transaction{seedTx}, 1_000))
+
+	idx.mu.RLock()
+	require.Len(t, idx.cNightUTxOs, 1, "block 1's create must be tracked")
+	idx.mu.RUnlock()
+
+	// Block 2's first tx succeeds, its second fails, aborting the block.
+	tx1 := buildTx(t, pad32("aa000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("aa000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 100)})
+	tx2 := buildTx(t, pad32("bb000001"),
+		[]lcommon.TransactionInput{buildInput(t, pad32("bb000000"), 0)},
+		[]lcommon.TransactionOutput{buildCNightOutput(t, testPolicyID, testAssetNameHex, 200)})
+	err = idx.processBlock(testBlock(2, 200, 0x22), []lcommon.Transaction{tx1, tx2}, 2_000)
+	require.Error(t, err, "block 2's second tx must fail and abort the block")
+
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	require.Len(
+		t,
+		idx.cNightUTxOs,
+		1,
+		"block 1's unrelated, already-committed UTxO must survive block 2's rollback untouched",
+	)
+}

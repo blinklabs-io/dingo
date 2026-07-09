@@ -770,64 +770,142 @@ func (idx *Indexer) rollbackCandidateCreates(txs []lcommon.Transaction) {
 	}
 }
 
-// mutableStateSnapshot captures every in-memory field processTx/processOutput
-// (and the epoch-advance/candidate-snapshot helpers they call) mutate while
-// scanning a block, so a failed block's partial mutations can be undone.
-// Without this, a later write failing within the same block's transaction
-// would roll back the DB while leaving these already-applied — the two
-// views would disagree about whether the block's earlier rows exist.
-type mutableStateSnapshot struct {
-	cNightUTxOs       map[utxoKey]cNightUTxO
-	regUTxOs          map[utxoKey]registrationUTxO
-	candidates        map[candidateKey][]byte
-	candidateRemovals map[uint64]map[candidateKey][]byte
-	epochTransitions  map[uint64]uint64
-	lastAriadneDatum  []byte
-	currentEpoch      uint64
-	hasCurrentEpoch   bool
-	snapshotEpoch     uint64
-	hasSnapshotEpoch  bool
+// mapJournal records, for a single map, the pre-block value of every key
+// that gets touched while processing a block — the first time each key is
+// touched, not on every touch, so undo restores exactly the value the key
+// had before this block started. Cost is proportional to the number of
+// distinct keys this block mutates, not to the size of the live map.
+type mapJournal[K comparable, V any] struct {
+	before  map[K]V
+	existed map[K]bool
 }
 
-// snapshotMutableState clones the mutable fields processBlock's write path
-// may touch. idx.mu must not be held by the caller.
-func (idx *Indexer) snapshotMutableState() mutableStateSnapshot {
+func newMapJournal[K comparable, V any]() *mapJournal[K, V] {
+	return &mapJournal[K, V]{before: make(map[K]V), existed: make(map[K]bool)}
+}
+
+// record captures m[key]'s current value and presence, if key has not
+// already been recorded this block. Call before mutating m[key].
+func (j *mapJournal[K, V]) record(m map[K]V, key K) {
+	if _, seen := j.existed[key]; seen {
+		return
+	}
+	v, ok := m[key]
+	j.before[key] = v
+	j.existed[key] = ok
+}
+
+// undo restores every key this journal recorded to its pre-block value, or
+// deletes it if it did not exist before this block.
+func (j *mapJournal[K, V]) undo(m map[K]V) {
+	for key, existed := range j.existed {
+		if existed {
+			m[key] = j.before[key]
+		} else {
+			delete(m, key)
+		}
+	}
+}
+
+// blockMutationJournal records exactly the in-memory mutations
+// processTx/processOutput (and the epoch-advance/candidate-snapshot/pruning
+// steps around them) make while scanning one block, so a failed block's
+// partial mutations can be undone in proportion to what this block changed
+// rather than by cloning the indexer's entire live state on every block —
+// cNightUTxOs, regUTxOs, and candidates hold all actively tracked UTxOs
+// across the whole chain, so a full clone would cost O(total live state)
+// per block instead of O(this block's changes).
+//
+// Without undoing these, a later write failing within the same block's
+// transaction would roll back the DB while these mutations stood — memory
+// and the database would disagree about whether the block's earlier rows
+// exist.
+type blockMutationJournal struct {
+	cNightUTxOs *mapJournal[utxoKey, cNightUTxO]
+	regUTxOs    *mapJournal[utxoKey, registrationUTxO]
+	candidates  *mapJournal[candidateKey, []byte]
+
+	// candidateRemovals and epochTransitions are only ever written under
+	// this block's own key (block.Number) while processing it, so their
+	// journal is just that one key's pre-block value — not a per-key
+	// mapJournal, since every write this block makes to either map shares
+	// the same key.
+	candidateRemovalsExisted bool
+	candidateRemovalsBefore  map[candidateKey][]byte
+	epochTransitionExisted   bool
+	epochTransitionBefore    uint64
+
+	// Pruning deletes stale entries (keyed by *older* blocks) in the same
+	// pass; record exactly what it removes so undo can put them back.
+	prunedCandidateRemovals map[uint64]map[candidateKey][]byte
+	prunedEpochTransitions  map[uint64]uint64
+
+	// Scalars mutated at most a handful of times per block; recording the
+	// single pre-block value is already O(1).
+	lastAriadneDatumBefore []byte
+	currentEpochBefore     uint64
+	hasCurrentEpochBefore  bool
+	snapshotEpochBefore    uint64
+	hasSnapshotEpochBefore bool
+}
+
+// newBlockMutationJournal starts a journal for the block about to be
+// processed, capturing the pre-block value of every field that is only
+// ever touched under this block's own key (so no per-key journal is
+// needed for it) plus the scalar fields. idx.mu must not be held by the
+// caller.
+func (idx *Indexer) newBlockMutationJournal(blockNumber uint64) *blockMutationJournal {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	candidateRemovals := make(map[uint64]map[candidateKey][]byte, len(idx.candidateRemovals))
-	for blockNumber, removals := range idx.candidateRemovals {
-		candidateRemovals[blockNumber] = maps.Clone(removals)
+	j := &blockMutationJournal{
+		cNightUTxOs:            newMapJournal[utxoKey, cNightUTxO](),
+		regUTxOs:               newMapJournal[utxoKey, registrationUTxO](),
+		candidates:             newMapJournal[candidateKey, []byte](),
+		lastAriadneDatumBefore: idx.lastAriadneDatum,
+		currentEpochBefore:     idx.currentEpoch,
+		hasCurrentEpochBefore:  idx.hasCurrentEpoch,
+		snapshotEpochBefore:    idx.snapshotEpoch,
+		hasSnapshotEpochBefore: idx.hasSnapshotEpoch,
 	}
-	return mutableStateSnapshot{
-		cNightUTxOs:       maps.Clone(idx.cNightUTxOs),
-		regUTxOs:          maps.Clone(idx.regUTxOs),
-		candidates:        maps.Clone(idx.candidates),
-		candidateRemovals: candidateRemovals,
-		epochTransitions:  maps.Clone(idx.epochTransitions),
-		lastAriadneDatum:  idx.lastAriadneDatum,
-		currentEpoch:      idx.currentEpoch,
-		hasCurrentEpoch:   idx.hasCurrentEpoch,
-		snapshotEpoch:     idx.snapshotEpoch,
-		hasSnapshotEpoch:  idx.hasSnapshotEpoch,
+	if removals, ok := idx.candidateRemovals[blockNumber]; ok {
+		j.candidateRemovalsExisted = true
+		j.candidateRemovalsBefore = maps.Clone(removals)
 	}
+	if prevEpoch, ok := idx.epochTransitions[blockNumber]; ok {
+		j.epochTransitionExisted = true
+		j.epochTransitionBefore = prevEpoch
+	}
+	return j
 }
 
-// restoreMutableState overwrites the mutable fields with a prior snapshot,
-// undoing any in-memory mutations a failed processBlock call made. idx.mu
+// undo reverts every mutation this journal recorded, restoring idx's
+// in-memory state to exactly what it was before the block started. idx.mu
 // must not be held by the caller.
-func (idx *Indexer) restoreMutableState(snap mutableStateSnapshot) {
+func (idx *Indexer) undoBlockMutations(j *blockMutationJournal, blockNumber uint64) {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
-	idx.cNightUTxOs = snap.cNightUTxOs
-	idx.regUTxOs = snap.regUTxOs
-	idx.candidates = snap.candidates
-	idx.candidateRemovals = snap.candidateRemovals
-	idx.epochTransitions = snap.epochTransitions
-	idx.lastAriadneDatum = snap.lastAriadneDatum
-	idx.currentEpoch = snap.currentEpoch
-	idx.hasCurrentEpoch = snap.hasCurrentEpoch
-	idx.snapshotEpoch = snap.snapshotEpoch
-	idx.hasSnapshotEpoch = snap.hasSnapshotEpoch
+	j.cNightUTxOs.undo(idx.cNightUTxOs)
+	j.regUTxOs.undo(idx.regUTxOs)
+	j.candidates.undo(idx.candidates)
+
+	if j.candidateRemovalsExisted {
+		idx.candidateRemovals[blockNumber] = j.candidateRemovalsBefore
+	} else {
+		delete(idx.candidateRemovals, blockNumber)
+	}
+	if j.epochTransitionExisted {
+		idx.epochTransitions[blockNumber] = j.epochTransitionBefore
+	} else {
+		delete(idx.epochTransitions, blockNumber)
+	}
+	maps.Copy(idx.candidateRemovals, j.prunedCandidateRemovals)
+	maps.Copy(idx.epochTransitions, j.prunedEpochTransitions)
+
+	idx.lastAriadneDatum = j.lastAriadneDatumBefore
+	idx.currentEpoch = j.currentEpochBefore
+	idx.hasCurrentEpoch = j.hasCurrentEpochBefore
+	idx.snapshotEpoch = j.snapshotEpochBefore
+	idx.hasSnapshotEpoch = j.hasSnapshotEpochBefore
 }
 
 // processBlock iterates the transactions in a block and calls processTx for
@@ -849,14 +927,15 @@ func (idx *Indexer) processBlock(
 	// processTx/processOutput (and the epoch-advance/pruning steps below)
 	// mutate idx's in-memory tracked-UTxO and governance state as they go,
 	// ahead of txn's commit. If a later write in this same block fails, txn
-	// rolls back but those earlier mutations would otherwise stand,
-	// leaving memory ahead of the database. Snapshot before mutating so a
-	// failure can restore exactly the pre-block state.
-	snap := idx.snapshotMutableState()
+	// rolls back but those earlier mutations would otherwise stand, leaving
+	// memory ahead of the database. Journal each mutation's pre-block value
+	// so a failure can undo exactly this block's changes, without cloning
+	// the whole (chain-sized) live state on every block.
+	journal := idx.newBlockMutationJournal(block.Number)
 	committed := false
 	defer func() {
 		if !committed {
-			idx.restoreMutableState(snap)
+			idx.undoBlockMutations(journal, block.Number)
 		}
 	}()
 
@@ -893,7 +972,7 @@ func (idx *Indexer) processBlock(
 	}
 
 	for i, tx := range txs {
-		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn); err != nil { //nolint:gosec
+		if err := idx.processTx(block, tx, uint32(i), timestampMs, govEpoch, txn, journal); err != nil { //nolint:gosec
 			return err
 		}
 	}
@@ -901,16 +980,27 @@ func (idx *Indexer) processBlock(
 	// Prune rollback journals that are beyond the rollback window.
 	// Ouroboros cannot roll back more than candidateRollbackDepth blocks, so
 	// journal entries older than that depth will never be needed for rollback.
+	// Record exactly what gets pruned (never this block's own key — its
+	// block number is always >= pruneBelow) so a failure can put it back,
+	// without journaling the whole map.
 	if block.Number > candidateRollbackDepth {
 		pruneBelow := block.Number - candidateRollbackDepth
 		idx.mu.Lock()
-		for bn := range idx.candidateRemovals {
+		for bn, removals := range idx.candidateRemovals {
 			if bn < pruneBelow {
+				if journal.prunedCandidateRemovals == nil {
+					journal.prunedCandidateRemovals = make(map[uint64]map[candidateKey][]byte)
+				}
+				journal.prunedCandidateRemovals[bn] = removals
 				delete(idx.candidateRemovals, bn)
 			}
 		}
-		for bn := range idx.epochTransitions {
+		for bn, prevEpoch := range idx.epochTransitions {
 			if bn < pruneBelow {
+				if journal.prunedEpochTransitions == nil {
+					journal.prunedEpochTransitions = make(map[uint64]uint64)
+				}
+				journal.prunedEpochTransitions[bn] = prevEpoch
 				delete(idx.epochTransitions, bn)
 			}
 		}
@@ -939,7 +1029,9 @@ func (idx *Indexer) processBlock(
 // processTx scans a single transaction's inputs and outputs. txn is the
 // block-scoped write transaction opened by processBlock; every row this
 // function (and processOutput) writes uses it, so the block's rows become
-// visible to readers atomically on processBlock's Commit.
+// visible to readers atomically on processBlock's Commit. journal records
+// this block's in-memory mutations so processBlock can undo them if a
+// later write in the same block fails.
 func (idx *Indexer) processTx(
 	block models.Block,
 	tx lcommon.Transaction,
@@ -947,6 +1039,7 @@ func (idx *Indexer) processTx(
 	timestampMs uint64,
 	govEpoch uint64,
 	txn types.Txn,
+	journal *blockMutationJournal,
 ) error {
 	txHashBytes := tx.Id().Bytes()
 
@@ -984,6 +1077,7 @@ func (idx *Indexer) processTx(
 				)
 			}
 			idx.mu.Lock()
+			journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 			delete(idx.cNightUTxOs, key)
 			idx.mu.Unlock()
 		}
@@ -1006,6 +1100,7 @@ func (idx *Indexer) processTx(
 				)
 			}
 			idx.mu.Lock()
+			journal.regUTxOs.record(idx.regUTxOs, key)
 			delete(idx.regUTxOs, key)
 			idx.mu.Unlock()
 		}
@@ -1013,7 +1108,7 @@ func (idx *Indexer) processTx(
 		// Always attempt to remove from candidate set (no-op if not tracked).
 		if len(idx.candidateAddrBytes) > 0 {
 			idx.mu.Lock()
-			if candidateKey, datum, removed := idx.removeCandidate(inpHashBytes, inpIdx); removed {
+			if candidateKey, datum, removed := idx.removeCandidate(journal, inpHashBytes, inpIdx); removed {
 				idx.recordCandidateRemovalLocked(block.Number, candidateKey, datum)
 			}
 			idx.mu.Unlock()
@@ -1031,6 +1126,7 @@ func (idx *Indexer) processTx(
 			govEpoch,
 			out,
 			txn,
+			journal,
 		); err != nil {
 			return err
 		}
@@ -1040,7 +1136,8 @@ func (idx *Indexer) processTx(
 
 // processOutput checks a single transaction output for cNIGHT tokens,
 // registration auth tokens, and governance/Ariadne/candidate data. txn is
-// processBlock's block-scoped write transaction; see processTx.
+// processBlock's block-scoped write transaction; journal records this
+// block's in-memory mutations; see processTx.
 func (idx *Indexer) processOutput(
 	block models.Block,
 	txHashBytes []byte,
@@ -1050,6 +1147,7 @@ func (idx *Indexer) processOutput(
 	govEpoch uint64,
 	out lcommon.TransactionOutput,
 	txn types.Txn,
+	journal *blockMutationJournal,
 ) error {
 	txHashHex := hex.EncodeToString(txHashBytes)
 	key := utxoKey{TxHash: txHashHex, Index: outIdx}
@@ -1078,6 +1176,7 @@ func (idx *Indexer) processOutput(
 					)
 				}
 				idx.mu.Lock()
+				journal.cNightUTxOs.record(idx.cNightUTxOs, key)
 				idx.cNightUTxOs[key] = cNightUTxO{
 					Address:  addrBytes,
 					Quantity: quantity,
@@ -1112,6 +1211,7 @@ func (idx *Indexer) processOutput(
 						)
 					}
 					idx.mu.Lock()
+					journal.regUTxOs.record(idx.regUTxOs, key)
 					idx.regUTxOs[key] = registrationUTxO{FullDatum: datumCbor}
 					idx.mu.Unlock()
 				}
@@ -1222,6 +1322,7 @@ func (idx *Indexer) processOutput(
 		copy(ckey.TxHash[:], txHashBytes)
 		ckey.OutputIndex = outIdx
 		idx.mu.Lock()
+		journal.candidates.record(idx.candidates, ckey)
 		idx.candidates[ckey] = bytes.Clone(datumCbor)
 		idx.mu.Unlock()
 	}
@@ -1353,7 +1454,11 @@ func (idx *Indexer) snapshotEpochLocked(epoch uint64, blockNumber uint64, txn ty
 // removeCandidate removes a UTxO from the in-memory candidate set when it is
 // consumed by a transaction. This is a no-op if the key is not in the set.
 // idx.mu must be held by the caller.
-func (idx *Indexer) removeCandidate(txHashBytes []byte, outputIndex uint32) (candidateKey, []byte, bool) {
+func (idx *Indexer) removeCandidate(
+	journal *blockMutationJournal,
+	txHashBytes []byte,
+	outputIndex uint32,
+) (candidateKey, []byte, bool) {
 	var key candidateKey
 	copy(key.TxHash[:], txHashBytes)
 	key.OutputIndex = outputIndex
@@ -1361,6 +1466,7 @@ func (idx *Indexer) removeCandidate(txHashBytes []byte, outputIndex uint32) (can
 	if !ok {
 		return key, nil, false
 	}
+	journal.candidates.record(idx.candidates, key)
 	delete(idx.candidates, key)
 	return key, bytes.Clone(datum), true
 }
