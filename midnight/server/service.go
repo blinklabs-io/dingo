@@ -31,6 +31,41 @@ import (
 // The service struct is declared in server.go, where its db/slotTimer fields
 // (used by the handlers below) sit alongside the metadata/blockNumberByHash
 // fields used by the UTxO-event query handlers in midnight_state.go.
+//
+// db and slotTimer may be nil: the server can be started for health,
+// reflection, and lifecycle purposes without them (see server.New). The
+// implemented handlers guard on their required backends with checkDatabase /
+// checkBlockBackends so a missing dependency yields a clean
+// FailedPrecondition status rather than a nil-pointer panic. In production
+// (node.go) both are always wired.
+
+// checkDatabase returns a FailedPrecondition status when the service was
+// constructed without a Database backend, which every implemented RPC needs.
+func (s *service) checkDatabase() error {
+	if s.db == nil {
+		return status.Error(
+			codes.FailedPrecondition,
+			"midnight: database backend not configured",
+		)
+	}
+	return nil
+}
+
+// checkBlockBackends returns a FailedPrecondition status when the service is
+// missing either the Database or the SlotTimer that the block/stability RPCs
+// require (they resolve epoch numbers and wall-clock timestamps).
+func (s *service) checkBlockBackends() error {
+	if err := s.checkDatabase(); err != nil {
+		return err
+	}
+	if s.slotTimer == nil {
+		return status.Error(
+			codes.FailedPrecondition,
+			"midnight: slot timer not configured",
+		)
+	}
+	return nil
+}
 
 // GetTechnicalCommitteeDatum returns the newest Technical Committee datum at
 // or before the requested block number.
@@ -38,6 +73,9 @@ func (s *service) GetTechnicalCommitteeDatum(
 	_ context.Context,
 	req *midnight.TechnicalCommitteeDatumRequest,
 ) (*midnight.TechnicalCommitteeDatumResponse, error) {
+	if err := s.checkDatabase(); err != nil {
+		return nil, err
+	}
 	datum, err := s.db.GetLatestMidnightGovernanceDatum(
 		models.MidnightGovernanceDatumTypeTechnicalCommittee,
 		req.GetBlockNumber(),
@@ -67,6 +105,9 @@ func (s *service) GetCouncilDatum(
 	_ context.Context,
 	req *midnight.CouncilDatumRequest,
 ) (*midnight.CouncilDatumResponse, error) {
+	if err := s.checkDatabase(); err != nil {
+		return nil, err
+	}
 	datum, err := s.db.GetLatestMidnightGovernanceDatum(
 		models.MidnightGovernanceDatumTypeCouncil,
 		req.GetBlockNumber(),
@@ -96,6 +137,9 @@ func (s *service) GetAriadneParameters(
 	_ context.Context,
 	req *midnight.AriadneParametersRequest,
 ) (*midnight.AriadneParametersResponse, error) {
+	if err := s.checkDatabase(); err != nil {
+		return nil, err
+	}
 	params, err := s.db.GetMidnightAriadneParamsAtOrBeforeEpoch(req.GetEpoch())
 	if err != nil {
 		return nil, status.Errorf(
@@ -121,6 +165,9 @@ func (s *service) GetEpochNonce(
 	_ context.Context,
 	req *midnight.EpochNonceRequest,
 ) (*midnight.EpochNonceResponse, error) {
+	if err := s.checkDatabase(); err != nil {
+		return nil, err
+	}
 	epoch, err := s.db.GetEpoch(req.GetEpoch())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get epoch: %v", err)
@@ -138,6 +185,9 @@ func (s *service) GetEpochCandidates(
 	_ context.Context,
 	req *midnight.EpochCandidatesRequest,
 ) (*midnight.EpochCandidatesResponse, error) {
+	if err := s.checkDatabase(); err != nil {
+		return nil, err
+	}
 	epoch := req.GetEpoch()
 	snapshot, err := s.db.GetMidnightEpochCandidatesByEpoch(epoch)
 	if err != nil {
@@ -287,6 +337,9 @@ func (s *service) GetBlockByHash(
 	_ context.Context,
 	req *midnight.BlockByHashRequest,
 ) (*midnight.BlockByHashResponse, error) {
+	if err := s.checkBlockBackends(); err != nil {
+		return nil, err
+	}
 	blk, err := s.db.BlockByHash(req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -324,6 +377,9 @@ func (s *service) GetLatestBlock(
 	_ context.Context,
 	_ *midnight.LatestBlockRequest,
 ) (*midnight.LatestBlockResponse, error) {
+	if err := s.checkBlockBackends(); err != nil {
+		return nil, err
+	}
 	blocks, err := s.db.BlocksRecent(1)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "get latest block: %v", err)
@@ -345,6 +401,9 @@ func (s *service) GetStableBlock(
 	_ context.Context,
 	req *midnight.StableBlockRequest,
 ) (*midnight.StableBlockResponse, error) {
+	if err := s.checkBlockBackends(); err != nil {
+		return nil, err
+	}
 	blk, err := s.db.BlockByHash(req.GetBlockHash())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {
@@ -378,6 +437,9 @@ func (s *service) GetLatestStableBlock(
 	_ context.Context,
 	req *midnight.LatestStableBlockRequest,
 ) (*midnight.LatestStableBlockResponse, error) {
+	if err := s.checkBlockBackends(); err != nil {
+		return nil, err
+	}
 	tip, err := s.resolveTipBlock(req.GetAsOfTimestampUnixMillis())
 	if err != nil {
 		if errors.Is(err, models.ErrBlockNotFound) {

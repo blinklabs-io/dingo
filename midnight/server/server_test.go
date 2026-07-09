@@ -50,7 +50,7 @@ func freePort(t *testing.T) uint {
 // cleanup ordering live in exactly one place.
 func startTestServerConfig(t *testing.T, cfg server.Config) string {
 	t.Helper()
-	return startTestServerWithConfig(t, server.Config{})
+	return startTestServerWithConfig(t, cfg)
 }
 
 // startTestServerWithConfig is like startTestServer but lets the caller

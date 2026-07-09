@@ -332,6 +332,13 @@ func (s *Server) gracefulStop(timeout time.Duration) {
 // The UTxO-event query RPCs use metadata/blockNumberByHash (midnight_state.go);
 // the governance/parameters/block/epoch/stability RPCs use db/slotTimer
 // (service.go).
+//
+// Any backend field may be nil: the server can be started for health,
+// reflection, and lifecycle purposes without them. Handlers guard on their
+// required backend (checkDatabase / checkBlockBackends in service.go, and
+// the metadata/blockNumberByHash checks in midnight_state.go) so a missing
+// dependency yields a clean status error rather than a nil-pointer panic. In
+// production (node.go) all backends are wired.
 type service struct {
 	midnight.UnimplementedMidnightStateServer
 	metadata          eventStore

@@ -360,6 +360,65 @@ func TestGetEpochCandidates_MissingRegistrationLeavesProvenanceZero(t *testing.T
 	require.Empty(t, c.GetTxInputs())
 }
 
+// TestEmptyConfigImplementedRPCsReturnFailedPrecondition verifies that a
+// server started without a Database/SlotTimer (server.New(server.Config{}),
+// as the health/reflection/lifecycle tests do) answers every implemented RPC
+// with a clean FailedPrecondition status instead of nil-panicking on a
+// missing backend. An unimplemented RPC must still return Unimplemented.
+func TestEmptyConfigImplementedRPCsReturnFailedPrecondition(t *testing.T) {
+	addr := startTestServerWithConfig(t, server.Config{})
+	client := dialClient(t, addr)
+
+	implemented := map[string]func(context.Context) error{
+		"GetTechnicalCommitteeDatum": func(ctx context.Context) error {
+			_, err := client.GetTechnicalCommitteeDatum(ctx, &midnight.TechnicalCommitteeDatumRequest{})
+			return err
+		},
+		"GetCouncilDatum": func(ctx context.Context) error {
+			_, err := client.GetCouncilDatum(ctx, &midnight.CouncilDatumRequest{})
+			return err
+		},
+		"GetAriadneParameters": func(ctx context.Context) error {
+			_, err := client.GetAriadneParameters(ctx, &midnight.AriadneParametersRequest{})
+			return err
+		},
+		"GetEpochNonce": func(ctx context.Context) error {
+			_, err := client.GetEpochNonce(ctx, &midnight.EpochNonceRequest{})
+			return err
+		},
+		"GetEpochCandidates": func(ctx context.Context) error {
+			_, err := client.GetEpochCandidates(ctx, &midnight.EpochCandidatesRequest{})
+			return err
+		},
+		"GetBlockByHash": func(ctx context.Context) error {
+			_, err := client.GetBlockByHash(ctx, &midnight.BlockByHashRequest{})
+			return err
+		},
+		"GetLatestBlock": func(ctx context.Context) error {
+			_, err := client.GetLatestBlock(ctx, &midnight.LatestBlockRequest{})
+			return err
+		},
+		"GetStableBlock": func(ctx context.Context) error {
+			_, err := client.GetStableBlock(ctx, &midnight.StableBlockRequest{})
+			return err
+		},
+		"GetLatestStableBlock": func(ctx context.Context) error {
+			_, err := client.GetLatestStableBlock(ctx, &midnight.LatestStableBlockRequest{})
+			return err
+		},
+	}
+	for name, call := range implemented {
+		err := call(callCtx(t))
+		require.Error(t, err, "%s must error on empty config", name)
+		require.Equal(t, codes.FailedPrecondition, status.Code(err),
+			"%s must return FailedPrecondition, not panic/other", name)
+	}
+
+	// Unimplemented RPCs are unaffected by the missing backend.
+	_, err := client.GetAssetCreates(callCtx(t), &midnight.AssetCreatesRequest{})
+	require.Equal(t, codes.Unimplemented, status.Code(err))
+}
+
 func TestGetLatestBlock(t *testing.T) {
 	db := newTestDatabase(t)
 	insertPlaceholderBlock(t, db, 1, 1, 0x01)
