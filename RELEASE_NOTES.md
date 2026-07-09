@@ -34,7 +34,7 @@ This release strengthens Mithril core catch-up, tightens ledger validation, and 
 * Summarized **misconfigured database names now fail fast:** Invalid MySQL database names no longer reach malformed SQL or late startup failure paths.
 * Noted **Blockfrost clients can list asset holder addresses and quantities:** The new endpoint follows Blockfrost pagination and 404 behavior for unknown assets or assets without live holders.
 
-### Compatibilidad de red recomendada ⚠️
+### Recommended Network Compatibility ⚠️
 
 | Network             | Compatible |
 |---------------------|------------|
@@ -126,7 +126,7 @@ Esta versión refuerza el catch-up en modo núcleo de Mithril, endurece la valid
 * Resumió **que los nombres de base de datos mal configurados ahora fallan rápido:** Los nombres inválidos de MySQL ya no llegan a SQL mal formado ni a rutas tardías de fallo al iniciar.
 * Indicó **que los clientes de Blockfrost pueden listar direcciones y cantidades de holders de activos:** El nuevo endpoint sigue la paginación de Blockfrost y el comportamiento 404 para activos desconocidos o sin holders vivos.
 
-### Recommended Network Compatibility ⚠️
+### Compatibilidad de red recomendada ⚠️
 
 | Network             | Compatible |
 |---------------------|------------|
