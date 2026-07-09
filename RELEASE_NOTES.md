@@ -46,6 +46,52 @@ This release strengthens Mithril core catch-up, tightens inbound ledger validati
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** Mithril のコアモード追従、ledger 検証の強化、データベース索引の高速化
+
+**日付:** July 9, 2026
+
+**バージョン:** v0.62.0
+
+このリリースでは、Mithril のコアモード追従を強化し、インバウンド ledger 検証を厳格化し、トランザクション索引でのデータベース処理を削減します。
+
+### ✨ 新機能
+
+* 追加しました **既存データベース向けの Mithril v2 コアモード追従:** すでに同期済みのコアデータベースを、完全な再初期化なしで新しい成果物へ進められ、分岐した場合は変更前に安全に停止します。
+* 追加しました **Blockfrost の asset holder addresses エンドポイント:** API クライアントは `GET /api/v0/assets/{asset}/addresses` でネイティブ資産の保有者アドレスと数量をページング付きで取得でき、資産が存在しないかライブ保有者がいない場合は Blockfrost 互換の 404 応答になります。
+
+### 💪 改善
+
+* 改善しました **バッチ化した UTxO 読み取りによるトランザクション索引:** MySQL と Postgres は inputs、collateral inputs、reference inputs をまとめて読み取り、往復回数を減らしつつ API mode の reference-input address indexing を維持します。
+* 強化しました **`LedgerDelta.apply` の回帰テスト:** 直接テストで、transaction persistence、governance と protocol parameter の処理、donation accumulation、invalid transaction の扱い、rollback 動作、pooled object の再利用安全性を確認します。
+* 更新しました **改訂された protocol shapes に合わせた Dijkstra の forging と validation:** ノードは candidate Dijkstra block body を `[header, block_body]` としてエンコードし、body hash と size をエンコード済み body から計算し、無効な transaction を除外し、Leios endorser reference をより厳密に解決します。
+
+### 🔧 修正
+
+* 修正しました **インバウンド operational certificate validation:** ledger は stateless な header チェックと stateful な counter チェックを通じて、偽造、期限切れ、古い、または不正な operational certificate をより早く拒否します。
+* 強化しました **`CREATE DATABASE` 前の MySQL database name validation:** 許可された長さや文字規則に違反する名前、またはバッククォートを含む名前は、設定ミスの段階で早期に失敗し、壊れた SQL や起動遅延を防ぎます。
+
+### 📋 知っておくこと
+
+* 明確化しました **Mithril core catch-up は既存データベースをそのまま利用できること:** 既存の Mithril v2 core database は削除せずに新しい成果物へ追従でき、分岐した chain は引き続き停止して full resync が必要になります。
+* 強調しました **ledger validation が不正な operational certificate をより早く拒否すること:** 偽造、期限切れ、古い、または無効な certificate は、block validation の早い段階でより厳格に失敗します。
+* 強調しました **トランザクション索引がデータベース往復を減らすこと:** UTxO 読み取りは inputs、collateral inputs、reference inputs にわたってまとめて実行され、API mode の address indexing には reference inputs が含まれます。
+* 要約しました **設定ミスの database name が早期失敗すること:** 不正な MySQL database name は、壊れた SQL や起動時の後段エラーに到達しません。
+* 記載しました **Blockfrost クライアントが asset holder の address と quantity を取得できること:** 新しい endpoint は、Blockfrost の pagination と、未知の資産または live holder のいない資産に対する 404 動作に従います。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ---
 
 ## v0.61.2 (July 6, 2026)
