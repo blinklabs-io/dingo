@@ -820,7 +820,10 @@ unrelated write-path/lifecycle methods) backs the five UTxO-event query RPCs
 `GetUtxoEvents` merge-sorts all four tables by
 `(block_number, tx_index, kind_order)` and returns a `next_position` cursor
 (see DATABASE.md's Midnight Indexer section for the merge algorithm,
-including how page cutoffs extend to avoid splitting a transaction's rows).
+including how page cutoffs extend to avoid splitting a transaction's rows,
+and for how write-side atomicity in the indexer and the read-side
+`ReadTransaction()` shared by `GetUtxoEvents`' four table reads together keep
+that cursor from skipping rows while the live indexer is mid-block).
 `Config.BlockNumberByHash` (set to a closure over `database.BlockByHash` in
 `node.go`) resolves `GetUtxoEvents`' `end_block_hash` to a block number
 independent of the fetched event rows, so the boundary is honored even for a
@@ -1728,15 +1731,28 @@ An optional block scanner that indexes Midnight chain events into multiple
   snapshots created by the rolled-back block before readers can observe stale
   `midnight_epoch_candidates` rows.
 
-**Epoch tracking**: The indexer subscribes to `epoch.transition`
-(`event.EpochTransitionEventType`) as well as block events. Before scanning the
-first block of a new epoch, `handleBlockEvent` calls `advanceEpochLocked` to
-snapshot any skipped epochs and update `currentEpoch`. A late or duplicate
-`epoch.transition` event is ignored when the epoch has already been snapshotted
-by the block-event path (`hasSnapshotEpoch` guard). On cold start
-(`hasCurrentEpoch = false`), the first block's epoch is recorded without
-snapshotting so no spurious empty snapshot is written before any candidates are
-observed.
+**Epoch tracking**: `processBlock` resolves and advances the epoch (via
+`advanceEpochLocked`) for every block, on both the live event path and the
+backfill path (both call `processBlock`, which is the single place this
+happens — there is no separate epoch-event subscription). `advanceEpochLocked`
+snapshots any skipped epochs before updating `currentEpoch`; a repeated call
+for an epoch already snapshotted is a no-op (`hasSnapshotEpoch` guard). On
+cold start (`hasCurrentEpoch = false`), the first block's epoch is recorded
+without snapshotting so no spurious empty snapshot is written before any
+candidates are observed.
+
+**Write atomicity**: `processBlock` opens one write transaction
+(`Metadata.Transaction()`) and threads it through every `Create*`/
+`InsertMidnightGovernanceDatum`/`UpsertMidnightAriadneParams`/
+`UpsertMidnightEpochCandidates` call it makes while scanning the block —
+including the epoch-advance snapshot above — committing once at the end and
+rolling back on any error. This closes a race that independent per-row
+autocommit writes would otherwise leave open: `(block_number, tx_index)` is
+not a unique key (one tx can write more than one row to the same table), so
+a reader paginating by that cursor could see one row for a key, advance past
+it, and permanently miss a sibling row for the same key committed moments
+later. See DATABASE.md's Midnight Indexer section for how this pairs with
+`GetUtxoEvents`' shared `ReadTransaction()` on the read side.
 
 **Startup and catch-up**: `node.go` calls
 `LedgerState.PrepareEpochCacheForStartup()`, then creates and starts the
@@ -1750,9 +1766,11 @@ same scan logic before subscribing to live events. The checkpoint (phase
 is stored in the `backfill_checkpoint` table via `SetBackfillCheckpoint` and is
 updated after each block — both during backfill and for each live event. Because
 the checkpoint write and the block's `Create*` writes are separate (not
-transactional), a crash between the two causes at most one block to be
-re-processed on the next restart: the block whose rows were written but whose
-checkpoint update did not commit. All four `Create*` methods use
+transactional — the block's writes are their own single transaction per Write
+atomicity above, but the checkpoint commits afterward in a second, separate
+one), a crash between the two causes at most one block to be re-processed on
+the next restart: the block whose rows were written but whose checkpoint
+update did not commit. All four `Create*` methods use
 `ON CONFLICT DO NOTHING` against the unique indexes on the UTxO natural keys
 (`tx_hash + output_index` / `utxo_tx_hash + utxo_index`), so re-processing an
 already-indexed block is safe and produces no duplicate rows.

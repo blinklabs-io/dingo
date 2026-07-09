@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/stretchr/testify/require"
@@ -433,4 +434,84 @@ func TestGetUtxoEvents_EndBlockHashStopsAtBlockWithNoEvents(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, resp.GetEvents(), 1, "must include block 1's create but exclude block 3's, even though the boundary block 2 has no events of its own")
 	require.Equal(t, uint64(1), resp.GetEvents()[0].GetAssetCreate().GetBlockNumber())
+}
+
+// spyEventStore wraps a real store and records the txn passed to
+// ReadTransaction and to each Find*From call, so a test can assert
+// GetUtxoEvents shares exactly one read transaction across all four tables
+// instead of passing nil (a separate, independently-timed read) to each.
+type spyEventStore struct {
+	*sqlite.MetadataStoreSqlite
+	readTxnCalls int
+	seenTxns     []types.Txn
+}
+
+func (s *spyEventStore) ReadTransaction() types.Txn {
+	s.readTxnCalls++
+	return s.MetadataStoreSqlite.ReadTransaction()
+}
+
+func (s *spyEventStore) FindMidnightAssetCreatesFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetCreate, error) {
+	s.seenTxns = append(s.seenTxns, txn)
+	return s.MetadataStoreSqlite.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)
+}
+
+func (s *spyEventStore) FindMidnightAssetSpendsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightAssetSpend, error) {
+	s.seenTxns = append(s.seenTxns, txn)
+	return s.MetadataStoreSqlite.FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)
+}
+
+func (s *spyEventStore) FindMidnightRegistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightRegistration, error) {
+	s.seenTxns = append(s.seenTxns, txn)
+	return s.MetadataStoreSqlite.FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)
+}
+
+func (s *spyEventStore) FindMidnightDeregistrationsFrom(
+	startBlock uint64,
+	startTxIndex uint32,
+	limit int,
+	txn types.Txn,
+) ([]models.MidnightDeregistration, error) {
+	s.seenTxns = append(s.seenTxns, txn)
+	return s.MetadataStoreSqlite.FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)
+}
+
+// TestGetUtxoEvents_SharesOneReadTransactionAcrossTables verifies GetUtxoEvents
+// opens exactly one read transaction and passes that SAME transaction to all
+// four Find*From calls, rather than four independent (nil-txn) reads that
+// could each observe a different point in time while the live indexer is
+// mid-block.
+func TestGetUtxoEvents_SharesOneReadTransactionAcrossTables(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	spy := &spyEventStore{MetadataStoreSqlite: store}
+
+	client := midnight.NewMidnightStateClient(dial(t, startTestServerConfig(t, server.Config{Metadata: spy})))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := client.GetUtxoEvents(ctx, &midnight.UtxoEventsRequest{TxCapacity: 10})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, spy.readTxnCalls, "GetUtxoEvents must open exactly one read transaction")
+	require.Len(t, spy.seenTxns, 4, "all four Find*From calls must have run")
+	for i, txn := range spy.seenTxns {
+		require.NotNil(t, txn, "call %d must receive the shared transaction, not nil", i)
+		require.True(t, txn == spy.seenTxns[0], "call %d must receive the SAME transaction object as the others", i)
+	}
 }

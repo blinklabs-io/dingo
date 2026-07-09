@@ -276,6 +276,35 @@ Midnight events of its own. Both `utxo_capacity` and `tx_capacity` default to
 a bounded page size when omitted (proto3 zero value) and are clamped to a
 maximum, rather than being forwarded to the store as an unbounded scan.
 
+**Write-side atomicity.** All of one block's `midnight_*` writes — every
+`Create*`/`InsertMidnightGovernanceDatum`/`UpsertMidnightAriadneParams`/
+`UpsertMidnightEpochCandidates` call `processBlock` makes while scanning that
+block's transactions — share a single write transaction
+(`Metadata.Transaction()`), committed once at the end of `processBlock` and
+rolled back on any error. `(block_number, tx_index)` is not a unique key: one
+transaction can write more than one row to the same table (for example
+several cNIGHT outputs created in one tx, or a create and a registration in
+the same tx). Without this, a live indexer using independent autocommit
+writes could let a paginated reader observe one row for a key, advance its
+`start_block`/`start_tx_index` cursor past it, and then permanently miss a
+sibling row for that same key committed moments later — the per-table page
+and merge extensions described above only close pagination-boundary gaps
+*within* an already-fully-committed key, not gaps against a write still in
+flight.
+
+**Read-side consistency.** `GetUtxoEvents` opens one
+`Metadata.ReadTransaction()` and passes it to all four `Find*From` calls, so
+they observe a single consistent point in time instead of four independent
+reads that could each land on a different side of a live block commit (which
+would otherwise let the merged `next_position` cursor skip rows in whichever
+table hadn't yet reflected that commit at the time of its read).
+`ReadTransaction()` uses SQLite's WAL-mode snapshot semantics on that backend
+and an explicit `REPEATABLE READ` isolation level on Postgres/MySQL (the
+former's driver default, `READ COMMITTED`, would otherwise let two
+statements in the same read-only transaction observe different commits; the
+latter's session default already behaves this way, but is set explicitly
+rather than relied on).
+
 ### Stake Accounts and Certificate Tables
 
 | Table | Columns | Keys / indexes | Relationships and notes |

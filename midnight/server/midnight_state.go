@@ -65,7 +65,7 @@ func effectivePageSize(requested uint32) int {
 // UTxO-event query RPCs. It is declared locally, rather than depending on
 // the full metadata.MetadataStore interface, so this gRPC-query package
 // does not carry unrelated write-path and lifecycle methods; any store
-// (e.g. *sqlite.MetadataStoreSqlite) that implements these four methods
+// (e.g. *sqlite.MetadataStoreSqlite) that implements these methods
 // satisfies it structurally, with no explicit declaration required.
 type eventStore interface {
 	FindMidnightAssetCreatesFrom(
@@ -92,6 +92,13 @@ type eventStore interface {
 		limit int,
 		txn types.Txn,
 	) ([]models.MidnightDeregistration, error)
+	// ReadTransaction opens a read-only, repeatable-read transaction.
+	// GetUtxoEvents shares one across its four Find*From calls so they
+	// observe a single consistent point in time — without it, the four
+	// independent reads could straddle the live indexer committing a new
+	// block between them, each table then reflecting a different "as of"
+	// point and corrupting the merged next_position cursor.
+	ReadTransaction() types.Txn
 }
 
 // GetAssetCreates returns cNIGHT UTxO creations starting strictly after
@@ -234,19 +241,26 @@ func (s *service) GetUtxoEvents(
 	}
 	limit := effectivePageSize(req.GetTxCapacity())
 
-	creates, err := s.metadata.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, nil)
+	// One shared read transaction for all four tables: without it, each
+	// Find*From call would independently see whatever the live indexer had
+	// most recently committed, so the four reads could straddle a block
+	// commit and disagree on "as of" which block/tx they cover.
+	txn := s.metadata.ReadTransaction()
+	defer txn.Rollback() //nolint:errcheck
+
+	creates, err := s.metadata.FindMidnightAssetCreatesFrom(startBlock, startTxIndex, limit, txn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query asset creates: %v", err)
 	}
-	spends, err := s.metadata.FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, nil)
+	spends, err := s.metadata.FindMidnightAssetSpendsFrom(startBlock, startTxIndex, limit, txn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query asset spends: %v", err)
 	}
-	registrations, err := s.metadata.FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, nil)
+	registrations, err := s.metadata.FindMidnightRegistrationsFrom(startBlock, startTxIndex, limit, txn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query registrations: %v", err)
 	}
-	deregistrations, err := s.metadata.FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, nil)
+	deregistrations, err := s.metadata.FindMidnightDeregistrationsFrom(startBlock, startTxIndex, limit, txn)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "query deregistrations: %v", err)
 	}

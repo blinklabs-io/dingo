@@ -435,9 +435,15 @@ func (d *MetadataStorePostgres) Transaction() types.Txn {
 	return newPostgresTxn(db)
 }
 
-// ReadTransaction creates a read-only transaction.
+// ReadTransaction creates a read-only transaction with repeatable-read
+// isolation, so every statement run through it observes one consistent
+// snapshot for its whole lifetime instead of the server default (READ
+// COMMITTED), under which two statements in the same read-only transaction
+// can otherwise observe different commits. Read-only REPEATABLE READ
+// transactions cannot hit serialization failures (there is nothing for them
+// to conflict with), so this raises consistency at no retry cost.
 func (d *MetadataStorePostgres) ReadTransaction() types.Txn {
-	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin read transaction",

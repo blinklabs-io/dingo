@@ -707,7 +707,11 @@ func (d *MetadataStoreSqlite) Transaction() types.Txn {
 // ReadTransaction creates a read-only transaction using the read
 // connection pool. For file-based databases this avoids contending
 // with the write connection; for in-memory databases it falls back
-// to the write connection.
+// to the write connection. No explicit isolation level is needed here
+// (unlike the postgres/mysql implementations): SQLite's WAL journal mode
+// (enabled for every file-based database this store opens) gives a
+// transaction a consistent snapshot for its whole lifetime as soon as its
+// first statement runs, regardless of concurrent writers.
 func (d *MetadataStoreSqlite) ReadTransaction() types.Txn {
 	db := d.ReadDB().Begin()
 	if db.Error != nil {
