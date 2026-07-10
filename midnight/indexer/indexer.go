@@ -109,11 +109,62 @@ type candidateKey struct {
 	OutputIndex uint32
 }
 
-// candidateEntry is one element of the epoch-candidate snapshot.
-type candidateEntry struct {
+// CandidateEntry is one element of the epoch-candidate snapshot stored in
+// MidnightEpochCandidates.CandidatesCbor. Exported so that MidnightState
+// gRPC handlers (midnight/server) can decode the snapshot back into
+// individual candidates.
+type CandidateEntry struct {
 	TxHash      []byte `cbor:"1,keyasint"`
 	OutputIndex uint32 `cbor:"2,keyasint"`
 	Datum       []byte `cbor:"3,keyasint"`
+}
+
+// DecodeEpochCandidatesCbor decodes a MidnightEpochCandidates.CandidatesCbor
+// blob back into its candidate entries.
+func DecodeEpochCandidatesCbor(data []byte) ([]CandidateEntry, error) {
+	var entries []CandidateEntry
+	if err := fxcbor.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("decode epoch candidates cbor: %w", err)
+	}
+	return entries, nil
+}
+
+// CandidateInputRef identifies one UTxO consumed by the transaction that
+// created a committee-candidate UTxO. Encoded into
+// MidnightCommitteeCandidateRegistration.TxInputsCbor; exported so
+// midnight/server can decode it back into the EpochCandidate.tx_inputs
+// proto field.
+type CandidateInputRef struct {
+	TxHash []byte `cbor:"1,keyasint"`
+	Index  uint32 `cbor:"2,keyasint"`
+}
+
+// EncodeCandidateInputsCbor encodes a transaction's inputs as the
+// TxInputsCbor payload for MidnightCommitteeCandidateRegistration.
+func EncodeCandidateInputsCbor(inputs []lcommon.TransactionInput) ([]byte, error) {
+	refs := make([]CandidateInputRef, len(inputs))
+	for i, inp := range inputs {
+		refs[i] = CandidateInputRef{
+			TxHash: inp.Id().Bytes(),
+			Index:  inp.Index(),
+		}
+	}
+	data, err := fxcbor.Marshal(refs)
+	if err != nil {
+		return nil, fmt.Errorf("encode candidate tx inputs cbor: %w", err)
+	}
+	return data, nil
+}
+
+// DecodeCandidateInputsCbor decodes a
+// MidnightCommitteeCandidateRegistration.TxInputsCbor blob back into its
+// input references.
+func DecodeCandidateInputsCbor(data []byte) ([]CandidateInputRef, error) {
+	var refs []CandidateInputRef
+	if err := fxcbor.Unmarshal(data, &refs); err != nil {
+		return nil, fmt.Errorf("decode candidate tx inputs cbor: %w", err)
+	}
+	return refs, nil
 }
 
 // Indexer scans blocks for Midnight-relevant transactions and writes rows
@@ -625,6 +676,14 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 		idx.rollbackCandidateSpends(block.Number)
 		decoded, err := block.Decode()
 		if err != nil {
+			// Decode failure means we cannot remove the in-memory candidate
+			// outputs this block created. Their
+			// MidnightCommitteeCandidateRegistration provenance rows must
+			// therefore be RETAINED, not deleted: a later epoch snapshot may
+			// still serialize those candidates, and GetEpochCandidates needs
+			// the provenance to fill in tx_inputs/slot_number/tx_index/
+			// block_number. Deleting the rows here would leave the in-memory
+			// candidate set and the persisted provenance inconsistent.
 			if idx.config.Logger != nil {
 				idx.config.Logger.Error(
 					"midnight indexer: rollback candidate decode block",
@@ -634,6 +693,20 @@ func (idx *Indexer) rollbackBlock(block models.Block) {
 			}
 		} else {
 			idx.rollbackCandidateCreates(decoded.Transactions())
+			// The created candidates are now gone from the in-memory set, so
+			// their provenance rows can be deleted in lockstep. Doing this
+			// only on the decode-success path preserves the invariant that
+			// every in-memory candidate has a registration row.
+			if err := idx.config.Metadata.DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+				nil,
+				block.Number,
+			); err != nil && idx.config.Logger != nil {
+				idx.config.Logger.Error(
+					"midnight indexer: rollback committee candidate registrations",
+					"error", err,
+					"block", block.Number,
+				)
+			}
 		}
 	}
 
@@ -1115,6 +1188,29 @@ func (idx *Indexer) processTx(
 		}
 	}
 
+	// txInputsCborOnce lazily encodes the creating transaction's input
+	// references the first time a candidate output actually needs them, and
+	// caches the result so a tx with multiple candidate outputs doesn't
+	// re-encode. Most transactions in a block never touch the candidate
+	// address, so encoding eagerly for every transaction would waste work.
+	var txInputsCbor []byte
+	var txInputsCborComputed bool
+	txInputsCborOnce := func() ([]byte, error) {
+		if txInputsCborComputed {
+			return txInputsCbor, nil
+		}
+		var err error
+		txInputsCbor, err = EncodeCandidateInputsCbor(tx.Inputs())
+		if err != nil {
+			return nil, fmt.Errorf(
+				"encode candidate tx inputs tx=%s: %w",
+				hex.EncodeToString(txHashBytes), err,
+			)
+		}
+		txInputsCborComputed = true
+		return txInputsCbor, nil
+	}
+
 	// Scan outputs for cNIGHT creates, registration outputs, and governance.
 	for outIdx, out := range tx.Outputs() {
 		if err := idx.processOutput(
@@ -1127,6 +1223,7 @@ func (idx *Indexer) processTx(
 			out,
 			txn,
 			journal,
+			txInputsCborOnce,
 		); err != nil {
 			return err
 		}
@@ -1148,6 +1245,7 @@ func (idx *Indexer) processOutput(
 	out lcommon.TransactionOutput,
 	txn types.Txn,
 	journal *blockMutationJournal,
+	txInputsCborOnce func() ([]byte, error),
 ) error {
 	txHashHex := hex.EncodeToString(txHashBytes)
 	key := utxoKey{TxHash: txHashHex, Index: outIdx}
@@ -1318,6 +1416,26 @@ func (idx *Indexer) processOutput(
 	// Committee-candidate tracking.
 	if len(idx.candidateAddrBytes) > 0 &&
 		bytes.Equal(addrBytes, idx.candidateAddrBytes) {
+		txInputsCbor, err := txInputsCborOnce()
+		if err != nil {
+			return err
+		}
+		if err := idx.config.Metadata.InsertMidnightCommitteeCandidateRegistration(
+			txn,
+			&models.MidnightCommitteeCandidateRegistration{
+				TxHash:       txHashBytes,
+				OutputIndex:  outIdx,
+				BlockNumber:  block.Number,
+				SlotNumber:   block.Slot,
+				TxIndex:      txIdx,
+				TxInputsCbor: txInputsCbor,
+			},
+		); err != nil {
+			return fmt.Errorf(
+				"write committee candidate registration tx=%s output=%d block=%d: %w",
+				txHashHex, outIdx, block.Number, err,
+			)
+		}
 		var ckey candidateKey
 		copy(ckey.TxHash[:], txHashBytes)
 		ckey.OutputIndex = outIdx
@@ -1403,11 +1521,11 @@ func (idx *Indexer) snapshotEpochLocked(epoch uint64, blockNumber uint64, txn ty
 		return
 	}
 
-	entries := make([]candidateEntry, 0, len(idx.candidates))
+	entries := make([]CandidateEntry, 0, len(idx.candidates))
 	for k, datum := range idx.candidates {
 		hashCopy := make([]byte, 32)
 		copy(hashCopy, k.TxHash[:])
-		entries = append(entries, candidateEntry{
+		entries = append(entries, CandidateEntry{
 			TxHash:      hashCopy,
 			OutputIndex: k.OutputIndex,
 			Datum:       datum,

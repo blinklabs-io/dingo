@@ -445,6 +445,28 @@ func (d *MetadataStoreSqlite) GetMidnightAriadneParamsByEpoch(
 	return &params, nil
 }
 
+// GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
+// row at or before epoch, or nil when none exists.
+func (d *MetadataStoreSqlite) GetMidnightAriadneParamsAtOrBeforeEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightAriadneParams, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var params models.MidnightAriadneParams
+	result := db.Where("epoch <= ?", epoch).
+		Order("epoch DESC").First(&params)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &params, nil
+}
+
 func (d *MetadataStoreSqlite) UpsertMidnightAriadneParams(
 	txn types.Txn,
 	params *models.MidnightAriadneParams,
@@ -547,4 +569,75 @@ func (d *MetadataStoreSqlite) DeleteMidnightEpochCandidatesByBlock(
 	}
 	return db.Where("block_number = ?", blockNumber).
 		Delete(&models.MidnightEpochCandidates{}).Error
+}
+
+// GetMidnightEpochCandidatesByEpoch returns the candidate snapshot for one
+// epoch, or nil when none exists.
+func (d *MetadataStoreSqlite) GetMidnightEpochCandidatesByEpoch(
+	epoch uint64,
+	txn types.Txn,
+) (*models.MidnightEpochCandidates, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var ec models.MidnightEpochCandidates
+	result := db.Where("epoch = ?", epoch).First(&ec)
+	if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	return &ec, nil
+}
+
+// InsertMidnightCommitteeCandidateRegistration inserts a candidate UTxO
+// provenance row. Uses OR IGNORE so that backfill replays are idempotent.
+func (d *MetadataStoreSqlite) InsertMidnightCommitteeCandidateRegistration(
+	txn types.Txn,
+	row *models.MidnightCommitteeCandidateRegistration,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Clauses(clause.OnConflict{DoNothing: true}).Create(row).Error
+}
+
+// DeleteMidnightCommitteeCandidateRegistrationsByBlock deletes candidate
+// registration rows written while applying blockNumber. Used during
+// rollback so a re-applied block at the same height starts clean.
+func (d *MetadataStoreSqlite) DeleteMidnightCommitteeCandidateRegistrationsByBlock(
+	txn types.Txn,
+	blockNumber uint64,
+) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return db.Where("block_number = ?", blockNumber).
+		Delete(&models.MidnightCommitteeCandidateRegistration{}).Error
+}
+
+// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns every
+// registration row whose tx_hash is in txHashes, for the caller to match
+// against (tx_hash, output_index) pairs. A single IN query regardless of how
+// many candidates are being enriched avoids one round trip per candidate.
+func (d *MetadataStoreSqlite) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+	txn types.Txn,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	if len(txHashes) == 0 {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.MidnightCommitteeCandidateRegistration
+	if err := db.Where("tx_hash IN ?", txHashes).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }

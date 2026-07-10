@@ -43,6 +43,7 @@ var MigrateModels = []any{
 	&MidnightAriadneRollback{},
 	&MidnightAssetCreate{},
 	&MidnightAssetSpend{},
+	&MidnightCommitteeCandidateRegistration{},
 	&MidnightDeregistration{},
 	&MidnightEpochCandidates{},
 	&MidnightGovernanceDatum{},

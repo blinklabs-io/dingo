@@ -1128,6 +1128,8 @@ func (n *Node) Run(ctx context.Context) error {
 				TLSCertFilePath: n.config.tlsCertFilePath,
 				TLSKeyFilePath:  n.config.tlsKeyFilePath,
 				ShutdownTimeout: n.config.shutdownTimeout,
+				Database:        midnightserver.NewDatabase(n.db),
+				SlotTimer:       n.ledgerState,
 			},
 		)
 		if err != nil {

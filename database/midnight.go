@@ -74,6 +74,33 @@ func (d *Database) UpsertMidnightAriadneParams(
 	return txn.Commit()
 }
 
+// GetMidnightAriadneParamsAtOrBeforeEpoch returns the newest Ariadne params
+// row at or before epoch, or nil when none exists.
+func (d *Database) GetMidnightAriadneParamsAtOrBeforeEpoch(
+	epoch uint64,
+) (*models.MidnightAriadneParams, error) {
+	return d.metadata.GetMidnightAriadneParamsAtOrBeforeEpoch(epoch, nil)
+}
+
+// GetMidnightEpochCandidatesByEpoch returns the committee-candidate snapshot
+// for one epoch, or nil when none exists.
+func (d *Database) GetMidnightEpochCandidatesByEpoch(
+	epoch uint64,
+) (*models.MidnightEpochCandidates, error) {
+	return d.metadata.GetMidnightEpochCandidatesByEpoch(epoch, nil)
+}
+
+// GetMidnightCommitteeCandidateRegistrationsByTxHashes returns every
+// candidate-registration provenance row whose tx_hash is in txHashes.
+func (d *Database) GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+	txHashes [][]byte,
+) ([]models.MidnightCommitteeCandidateRegistration, error) {
+	return d.metadata.GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		txHashes,
+		nil,
+	)
+}
+
 // UpsertMidnightEpochCandidates inserts or replaces the committee-candidate
 // snapshot for the given epoch.
 func (d *Database) UpsertMidnightEpochCandidates(

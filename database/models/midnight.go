@@ -157,3 +157,26 @@ type MidnightEpochCandidates struct {
 func (MidnightEpochCandidates) TableName() string {
 	return "midnight_epoch_candidates"
 }
+
+// MidnightCommitteeCandidateRegistration stores full on-chain provenance for
+// a committee-candidate UTxO the first time it is observed as a transaction
+// output: which block/slot/transaction created it and which UTxOs its
+// creating transaction consumed. MidnightEpochCandidates.CandidatesCbor
+// records only (tx_hash, output_index, datum) membership at each epoch
+// boundary — this table is the durable side-store GetEpochCandidates joins
+// against to fill in tx_inputs/slot_number/tx_index/block_number, since the
+// in-memory candidate set is rebuilt on restart from the generic UTXO index
+// (GetMidnightCandidates), which carries only tx_hash/output_index/datum.
+type MidnightCommitteeCandidateRegistration struct {
+	ID           uint   `gorm:"primarykey"`
+	TxHash       []byte `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:1;size:32;not null"`
+	OutputIndex  uint32 `gorm:"uniqueIndex:idx_midnight_committee_candidate_reg_utxo,priority:2;not null"`
+	BlockNumber  uint64 `gorm:"index;not null"`
+	SlotNumber   uint64 `gorm:"not null"`
+	TxIndex      uint32 `gorm:"not null"`
+	TxInputsCbor []byte `gorm:"not null"`
+}
+
+func (MidnightCommitteeCandidateRegistration) TableName() string {
+	return "midnight_committee_candidate_registrations"
+}
