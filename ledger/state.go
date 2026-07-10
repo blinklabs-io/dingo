@@ -3261,6 +3261,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 		// Process batch in groups of batchSize to stay under DB txn limits
 		var tipForLog ochainsync.Tip
 		var checker ForgedBlockChecker
+		var parentEnvelope envelopeParent
+		var parentEnvelopeSet bool
 		for i = 0; i < len(nextBatch); i += batchSize {
 			end = min(
 				len(nextBatch),
@@ -3282,6 +3284,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			snapshotEra := ls.currentEra
 			snapshotPParams := ls.currentPParams
 			snapshotPrevEraPParams := ls.prevEraPParams
+			snapshotTip := ls.currentTip
 			snapshotTipHash := ls.currentTip.Point.Hash
 			snapshotNonce := ls.currentTipBlockNonce
 			localCheckpointWritten := ls.checkpointWrittenForEpoch
@@ -3314,6 +3317,14 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			runningNonce := snapshotNonce
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
+			if !parentEnvelopeSet {
+				parentEnvelope = envelopeParent{
+					slot:        snapshotTip.Point.Slot,
+					blockNumber: snapshotTip.BlockNumber,
+					origin:      len(snapshotTip.Point.Hash) == 0,
+				}
+				parentEnvelopeSet = true
+			}
 			// Flag to enable validation after transaction commits (set inside callback,
 			// applied after commit to avoid mutating in-memory state on txn failure)
 			var wantEnableValidation bool
@@ -3438,6 +3449,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						expectedPrevHash = tmpPoint.Hash
+						parentEnvelope = envelopeParentFromBlock(next)
 						blocksProcessed++
 						continue
 					}
@@ -3454,6 +3466,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						shouldValidateBlock,
 						skipPhase2Validation,
 						expectedPrevHash,
+						parentEnvelope,
 						blockOffsets,
 						snapshotEra,
 						snapshotPParams,
@@ -3468,6 +3481,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 					// Update expected prev hash for next block in batch
 					expectedPrevHash = tmpPoint.Hash
+					parentEnvelope = envelopeParentFromBlock(next)
 					// Track pending tip (will be committed after txn succeeds)
 					pendingTip = ochainsync.Tip{
 						Point:       tmpPoint,
@@ -3656,6 +3670,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	shouldValidate bool,
 	skipPhase2Validation bool,
 	expectedPrevHash []byte,
+	parent envelopeParent,
 	offsets *database.BlockIngestionResult,
 	currentEra eras.EraDesc,
 	pparams lcommon.ProtocolParameters,
@@ -3688,6 +3703,13 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// one ahead of current pparams. Skipped on testnets pre-Dijkstra
 	// per cardano-ledger PR 5785.
 	if shouldValidate {
+		if err := validateInboundBlockEnvelope(
+			block,
+			pparams,
+			parent,
+		); err != nil {
+			return nil, err
+		}
 		if err := ls.validateBlockHeaderProtocolVersion(
 			block.Header(), pparams,
 		); err != nil {
