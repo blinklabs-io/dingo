@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -43,7 +44,7 @@ func validateInboundBlockEnvelope(
 	parent envelopeParent,
 ) error {
 	if block == nil {
-		return fmt.Errorf("validate inbound block envelope: nil block")
+		return errors.New("validate inbound block envelope: nil block")
 	}
 	if err := validateByronEbbPlacement(block); err != nil {
 		return err
@@ -67,14 +68,14 @@ func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 	if isEbb {
 		if block.BlockNumber() != parent.blockNumber {
 			return fmt.Errorf(
-				"Byron EBB block number %d does not match parent block number %d",
+				"byron EBB block number %d does not match parent block number %d",
 				block.BlockNumber(),
 				parent.blockNumber,
 			)
 		}
 		if block.SlotNumber() < parent.slot {
 			return fmt.Errorf(
-				"Byron EBB slot %d precedes parent slot %d",
+				"byron EBB slot %d precedes parent slot %d",
 				block.SlotNumber(),
 				parent.slot,
 			)
@@ -106,19 +107,19 @@ func validateByronEbbPlacement(block gledger.Block) error {
 		return nil
 	}
 	if ebb.BlockHeader == nil {
-		return fmt.Errorf("Byron EBB has nil header")
+		return errors.New("byron EBB has nil header")
 	}
 	slot := ebb.SlotNumber()
 	if slot%byron.ByronSlotsPerEpoch != 0 {
 		return fmt.Errorf(
-			"Byron EBB slot %d is not an epoch boundary slot",
+			"byron EBB slot %d is not an epoch boundary slot",
 			slot,
 		)
 	}
 	expectedSlot := ebb.BlockHeader.ConsensusData.Epoch * byron.ByronSlotsPerEpoch
 	if slot != expectedSlot {
 		return fmt.Errorf(
-			"Byron EBB slot %d does not match epoch %d boundary slot %d",
+			"byron EBB slot %d does not match epoch %d boundary slot %d",
 			slot,
 			ebb.BlockHeader.ConsensusData.Epoch,
 			expectedSlot,
