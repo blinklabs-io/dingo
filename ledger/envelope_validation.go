@@ -77,13 +77,16 @@ func isNilBlockHeader(header lcommon.BlockHeader) bool {
 		return true
 	}
 	value := reflect.ValueOf(header)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface,
-		reflect.Map, reflect.Pointer, reflect.Slice:
+	kind := value.Kind()
+	if kind == reflect.Chan ||
+		kind == reflect.Func ||
+		kind == reflect.Interface ||
+		kind == reflect.Map ||
+		kind == reflect.Pointer ||
+		kind == reflect.Slice {
 		return value.IsNil()
-	default:
-		return false
 	}
+	return false
 }
 
 // validateBlockOrder checks that a block follows its parent by block number
