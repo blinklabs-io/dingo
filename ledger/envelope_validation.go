@@ -34,6 +34,16 @@ type envelopeParent struct {
 	slot        uint64
 	blockNumber uint64
 	origin      bool
+	byronEbb    bool
+}
+
+func envelopeParentFromBlock(block gledger.Block) envelopeParent {
+	_, isEbb := block.(*byron.ByronEpochBoundaryBlock)
+	return envelopeParent{
+		slot:        block.SlotNumber(),
+		blockNumber: block.BlockNumber(),
+		byronEbb:    isEbb,
+	}
 }
 
 // validateInboundBlockEnvelope runs the consensus envelope checks that must
@@ -88,6 +98,10 @@ func validateBlockOrder(block gledger.Block, parent envelopeParent) error {
 			block.BlockNumber(),
 			parent.blockNumber,
 		)
+	}
+	if block.SlotNumber() == parent.slot &&
+		(parent.byronEbb && block.Era().Id == byron.EraIdByron) {
+		return nil
 	}
 	if block.SlotNumber() <= parent.slot {
 		return fmt.Errorf(

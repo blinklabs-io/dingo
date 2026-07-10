@@ -240,6 +240,25 @@ func TestValidateBlockOrderAllowsOriginParent(t *testing.T) {
 	require.NoError(t, validateBlockOrder(block, envelopeParent{origin: true}))
 }
 
+// TestValidateBlockOrderAllowsByronMainBlockAfterEbb verifies that the main
+// block at a Byron epoch boundary may share the EBB parent's slot.
+func TestValidateBlockOrderAllowsByronMainBlockAfterEbb(t *testing.T) {
+	block := &envelopeTestBlock{
+		header: &envelopeTestHeader{
+			slot:   10,
+			number: 6,
+			era:    byron.EraByron,
+		},
+	}
+	parent := envelopeParent{
+		slot:        10,
+		blockNumber: 5,
+		byronEbb:    true,
+	}
+
+	require.NoError(t, validateBlockOrder(block, parent))
+}
+
 // TestValidateInboundBlockEnvelopeByronEbbOrdering covers the Byron EBB rule
 // that an EBB shares its parent's block number instead of incrementing it.
 func TestValidateInboundBlockEnvelopeByronEbbOrdering(t *testing.T) {

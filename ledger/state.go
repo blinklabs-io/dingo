@@ -3440,10 +3440,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 							BlockNumber: next.BlockNumber(),
 						}
 						expectedPrevHash = tmpPoint.Hash
-						parentEnvelope = envelopeParent{
-							slot:        next.SlotNumber(),
-							blockNumber: next.BlockNumber(),
-						}
+						parentEnvelope = envelopeParentFromBlock(next)
 						blocksProcessed++
 						continue
 					}
@@ -3475,10 +3472,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 					}
 					// Update expected prev hash for next block in batch
 					expectedPrevHash = tmpPoint.Hash
-					parentEnvelope = envelopeParent{
-						slot:        next.SlotNumber(),
-						blockNumber: next.BlockNumber(),
-					}
+					parentEnvelope = envelopeParentFromBlock(next)
 					// Track pending tip (will be committed after txn succeeds)
 					pendingTip = ochainsync.Tip{
 						Point:       tmpPoint,
