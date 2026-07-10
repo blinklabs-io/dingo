@@ -352,7 +352,9 @@ func (n *Node) Run(ctx context.Context) error {
 			// dominant pool's eligible blocks on Musashi's concentrated
 			// topology and wedges the chain. Trust rather than reject there
 			// until reward calculation lands; enforce on real networks where
-			// the omission is negligible.
+			// the omission is negligible. TPraos bootstrap pool-threshold
+			// checks are waived separately inside header validation after
+			// genesis overlay slots are handled.
 			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
 			// On Musashi, endorser txs are stored but not applied, so
 			// ranking-block txs spending endorser-resident outputs disagree on

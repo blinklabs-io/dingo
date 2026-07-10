@@ -1603,6 +1603,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					"deregistration", "stake_delegation", "stake_registration_delegation", "stake_vote_delegation",
 					"stake_vote_registration_delegation", "registration", "registration_drep", "deregistration_drep",
 					"update_drep", "vote_delegation", "vote_registration_delegation", "move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
@@ -1656,6 +1657,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn("unknown certificate type", "type", fmt.Sprintf("%T", cert))
 					continue
@@ -1913,6 +1916,22 @@ func (d *MetadataStoreSqlite) SetTransaction(
 
 					// Collect update for batch processing
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					// Include inactive pools when retiring.
 					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), true, txn)
@@ -3225,6 +3244,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					"registration_drep", "deregistration_drep", "update_drep",
 					"vote_delegation", "vote_registration_delegation",
 					"move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).
@@ -3279,6 +3299,8 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn(
 						"unknown certificate type (batched)",
@@ -3518,6 +3540,20 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					tmpPool, err := d.GetPool(
 						lcommon.PoolKeyHash(c.PoolKeyHash[:]),

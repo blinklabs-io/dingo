@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -66,6 +67,9 @@ const (
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
+
+	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
+	deferredHeaderValidationSyncStateValue  = "true"
 
 	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
 	// used to gate shadow blockfetch dispatch when no peer-population
@@ -281,6 +285,116 @@ func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.mithrilLedgerSlot
+}
+
+func headerValidationPointKey(point ocommon.Point) string {
+	return fmt.Sprintf("%d:%s", point.Slot, hex.EncodeToString(point.Hash))
+}
+
+func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
+	return deferredHeaderValidationSyncStatePrefix + headerValidationPointKey(point)
+}
+
+func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(map[string]struct{})
+	}
+	ls.deferredHeaderValidation[headerValidationPointKey(point)] = struct{}{}
+}
+
+func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
+	ls.Lock()
+	defer ls.Unlock()
+	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
+}
+
+func (ls *LedgerState) consumeDeferredHeaderValidation(point ocommon.Point) bool {
+	ls.Lock()
+	defer ls.Unlock()
+	key := headerValidationPointKey(point)
+	if _, ok := ls.deferredHeaderValidation[key]; !ok {
+		return false
+	}
+	delete(ls.deferredHeaderValidation, key)
+	return true
+}
+
+func (ls *LedgerState) persistDeferredHeaderValidation(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	if err := ls.db.SetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		deferredHeaderValidationSyncStateValue,
+		txn,
+	); err != nil {
+		return fmt.Errorf("set deferred header validation marker: %w", err)
+	}
+	return nil
+}
+
+func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	if err := ls.db.DeleteSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		txn,
+	); err != nil {
+		return fmt.Errorf("delete deferred header validation marker: %w", err)
+	}
+	return nil
+}
+
+func (ls *LedgerState) deferredHeaderValidationRequired(
+	point ocommon.Point,
+	txn *database.Txn,
+) (bool, error) {
+	required := ls.consumeDeferredHeaderValidation(point)
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return required, nil
+	}
+	value, err := ls.db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		txn,
+	)
+	if err != nil {
+		return false, fmt.Errorf("read deferred header validation marker: %w", err)
+	}
+	return required || value == deferredHeaderValidationSyncStateValue, nil
+}
+
+func (ls *LedgerState) verifyDeferredBlockHeaderState(
+	txn *database.Txn,
+	point ocommon.Point,
+	block gledger.Block,
+) error {
+	required, err := ls.deferredHeaderValidationRequired(point, txn)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
+	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
+		return fmt.Errorf(
+			"deferred block header verification failed at slot %d: %w",
+			point.Slot,
+			err,
+		)
+	}
+	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
@@ -1805,31 +1919,44 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Also skip headers covered by a Mithril snapshot: those slots were
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
+	headerCryptoVerified := false
 	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
-			if ls.config.EventBus != nil {
-				ls.config.Logger.Warn(
-					"recycling connection after header verification failure",
+			if errors.Is(err, errHeaderVerificationDeferred) {
+				ls.config.Logger.Debug(
+					"deferring chainsync header crypto verification until blockfetch",
 					"component", "ledger",
-					"connection_id", e.ConnectionId.String(),
 					"slot", e.Point.Slot,
 					"hash", hex.EncodeToString(e.Point.Hash),
+					"error", err,
 				)
-				ls.config.EventBus.Publish(
-					ConnectionRecycleRequestedEventType,
-					event.NewEvent(
+			} else {
+				if ls.config.EventBus != nil {
+					ls.config.Logger.Warn(
+						"recycling connection after header verification failure",
+						"component", "ledger",
+						"connection_id", e.ConnectionId.String(),
+						"slot", e.Point.Slot,
+						"hash", hex.EncodeToString(e.Point.Hash),
+					)
+					ls.config.EventBus.Publish(
 						ConnectionRecycleRequestedEventType,
-						ConnectionRecycleRequestedEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       "header_verification_failure",
-						},
-					),
+						event.NewEvent(
+							ConnectionRecycleRequestedEventType,
+							ConnectionRecycleRequestedEvent{
+								ConnectionId: e.ConnectionId,
+								Reason:       "header_verification_failure",
+							},
+						),
+					)
+				}
+				return fmt.Errorf(
+					"block header crypto verification failed: %w",
+					err,
 				)
 			}
-			return fmt.Errorf(
-				"block header crypto verification failed: %w",
-				err,
-			)
+		} else {
+			headerCryptoVerified = true
 		}
 	}
 
@@ -1864,7 +1991,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"header_count", headerCount,
 		"connection_id", e.ConnectionId.String(),
 	)
-	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
+	var err error
+	if headerCryptoVerified {
+		err = ls.chain.AddVerifiedBlockHeader(e.BlockHeader)
+	} else {
+		err = ls.chain.AddBlockHeader(e.BlockHeader)
+	}
+	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
 			localTip := ls.chain.Tip()
 			// A header behind the local tip is stale only if the
@@ -2019,7 +2152,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"connection_id", initialConnId.String(),
 		"header_count", ls.chain.HeaderCount(),
 	)
-	err := ls.startQueuedBlockfetchLocked(initialConnId)
+	err = ls.startQueuedBlockfetchLocked(initialConnId)
 	if err != nil {
 		// The chosen connection's blockfetch protocol may have shut
 		// down. Try the header source connection if it's different;
@@ -2075,7 +2208,15 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 	if !validationEnabled {
 		return false
 	}
-	return mithrilLedgerSlot == 0 || slot > mithrilLedgerSlot
+	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+		return false
+	}
+	return ls.hasCachedEpochNonceForSlot(slot)
+}
+
+func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
+	epoch, err := ls.epochForSlot(slot)
+	return err == nil && len(epoch.Nonce) > 0
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -2353,15 +2494,50 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// historical blocks were already validated by the network.
 	validationEnabled, _ := ls.validationStateSnapshot()
 	if validationEnabled {
-		// Chainsync already verified the queued header before blockfetch started.
-		// When the fetched block matches that first queued header by point, a
-		// second VRF/KES verification is redundant. Chain insertion still checks
-		// that the block matches the queued header hash before accepting it.
-		if !ls.chain.FirstHeaderMatchesPoint(e.Point) {
-			if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+		// Chainsync may already have verified the queued header before
+		// blockfetch started. When the fetched block matches that first
+		// verified queued header by point, a second VRF/KES verification is
+		// redundant. Chain insertion still checks that the block matches the
+		// queued header hash before accepting it.
+		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+			e.Point,
+		)
+		if !headerAlreadyVerified && !ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+				return err
+			}
+			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+				e.Point,
+			)
+		}
+		var verifyErr error
+		if !headerAlreadyVerified {
+			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+		} else {
+			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
+				e.Block,
+				true,
+				true,
+			)
+		}
+		if verifyErr != nil {
+			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
+				ls.markDeferredHeaderValidation(e.Point)
+				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
+					ls.clearDeferredHeaderValidation(e.Point)
+					return err
+				}
+				ls.config.Logger.Debug(
+					"deferring stateful block header verification until ledger apply",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"error", verifyErr,
+				)
+			} else {
 				return fmt.Errorf(
 					"block header crypto verification failed: %w",
-					err,
+					verifyErr,
 				)
 			}
 		}
@@ -2583,6 +2759,13 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 		if addBlockErr == nil {
 			ls.checkSlotBattle(pendingEvent, nil)
 			continue
+		}
+		ls.clearDeferredHeaderValidation(pendingEvent.Point)
+		if err := ls.clearPersistentDeferredHeaderValidation(
+			pendingEvent.Point,
+			nil,
+		); err != nil {
+			return err
 		}
 		var notFitErr chain.BlockNotFitChainTipError
 		var notMatchErr chain.BlockNotMatchHeaderError

@@ -62,10 +62,11 @@ type Chain struct {
 }
 
 type queuedHeader struct {
-	header      ledger.BlockHeader
-	point       ocommon.Point
-	prevHash    []byte
-	blockNumber uint64
+	header         ledger.BlockHeader
+	point          ocommon.Point
+	prevHash       []byte
+	blockNumber    uint64
+	cryptoVerified bool
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -132,6 +133,17 @@ func (c *Chain) MaxQueuedHeaders() int {
 }
 
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, false)
+}
+
+func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, true)
+}
+
+func (c *Chain) addBlockHeader(
+	header ledger.BlockHeader,
+	cryptoVerified bool,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -143,8 +155,9 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 			Slot: header.SlotNumber(),
 			Hash: headerHash.Bytes(),
 		},
-		prevHash:    headerPrevHash.Bytes(),
-		blockNumber: header.BlockNumber(),
+		prevHash:       headerPrevHash.Bytes(),
+		blockNumber:    header.BlockNumber(),
+		cryptoVerified: cryptoVerified,
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1066,6 +1079,17 @@ func (c *Chain) HeaderCount() int {
 }
 
 func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, false)
+}
+
+func (c *Chain) FirstVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, true)
+}
+
+func (c *Chain) firstHeaderMatchesPoint(
+	point ocommon.Point,
+	requireCryptoVerified bool,
+) bool {
 	if c == nil {
 		return false
 	}
@@ -1078,7 +1102,10 @@ func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
 	if header.point.Slot != point.Slot {
 		return false
 	}
-	return bytes.Equal(header.point.Hash, point.Hash)
+	if !bytes.Equal(header.point.Hash, point.Hash) {
+		return false
+	}
+	return !requireCryptoVerified || header.cryptoVerified
 }
 
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {

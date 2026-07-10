@@ -24,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
@@ -67,7 +68,8 @@ type LedgerDelta struct {
 	BlockNumber  uint64
 	Transactions []TransactionRecord
 	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
-	txSlicePtr   *[]TransactionRecord           // store original pointer from pool
+	donation     uint64
+	txSlicePtr   *[]TransactionRecord // store original pointer from pool
 }
 
 func NewLedgerDelta(
@@ -80,6 +82,7 @@ func NewLedgerDelta(
 	delta.BlockEraId = blockEraId
 	delta.BlockNumber = blockNumber
 	delta.Offsets = nil // Reset offsets from previous use
+	delta.donation = 0
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -97,6 +100,7 @@ func (d *LedgerDelta) Release() {
 	}
 	// Clear offsets to avoid retaining large memory across blocks
 	d.Offsets = nil
+	d.donation = 0
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -113,6 +117,21 @@ func (d *LedgerDelta) addTransaction(
 }
 
 func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
+	return d.applyWithDonationRecording(ls, txn, true)
+}
+
+func (d *LedgerDelta) applyWithoutRecordingDonations(
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
+	return d.applyWithDonationRecording(ls, txn, false)
+}
+
+func (d *LedgerDelta) applyWithDonationRecording(
+	ls *LedgerState,
+	txn *database.Txn,
+	recordDonations bool,
+) error {
 	appliedTxs := make([]bool, len(d.Transactions))
 	for i, tr := range d.Transactions {
 		if tr.Index < 0 || tr.Index > math.MaxUint32 {
@@ -164,36 +183,12 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 		}
 	}
 
-	// Accumulate Conway treasury donations from this block. Donations move
-	// into the treasury at the next epoch boundary (see processEpochRollover);
-	// they are recorded here keyed by block slot so a rollback drops them.
-	// Only valid transactions contribute: an invalid (phase-2 failed)
-	// transaction consumes collateral and its body, including any donation,
-	// is not applied.
-	var donation uint64
-	for i, tr := range d.Transactions {
-		if !appliedTxs[i] {
-			continue
+	if recordDonations {
+		if err := d.recordNetworkDonations(ls, txn, appliedTxs); err != nil {
+			return err
 		}
-		if !tr.Tx.IsValid() {
-			continue
-		}
-		if don := tr.Tx.Donation(); don != nil && don.Sign() > 0 {
-			donation += don.Uint64()
-		}
-	}
-	if donation > 0 {
-		ls.RLock()
-		epoch := ls.currentEpoch.EpochId
-		ls.RUnlock()
-		if err := ls.db.Metadata().AddNetworkDonation(
-			d.Point.Slot,
-			epoch,
-			donation,
-			txn.Metadata(),
-		); err != nil {
-			return fmt.Errorf("record network donation: %w", err)
-		}
+	} else {
+		d.accumulateNetworkDonations(appliedTxs)
 	}
 
 	// Emit transaction events only after all processing succeeds,
@@ -218,6 +213,125 @@ func (d *LedgerDelta) apply(ls *LedgerState, txn *database.Txn) error {
 				),
 			)
 		}
+	}
+
+	return nil
+}
+
+func (d *LedgerDelta) donate(amount uint64) {
+	d.donation += amount
+}
+
+func (d *LedgerDelta) applyTransactionMetadataOnlyWithoutRecordingDonations(
+	ls *LedgerState,
+	txn *database.Txn,
+) error {
+	return d.applyTransactionMetadataOnlyWithDonationRecording(ls, txn, false)
+}
+
+func (d *LedgerDelta) applyTransactionMetadataOnlyWithDonationRecording(
+	ls *LedgerState,
+	txn *database.Txn,
+	recordDonations bool,
+) error {
+	for _, tr := range d.Transactions {
+		if tr.Index < 0 || tr.Index > math.MaxUint32 {
+			return fmt.Errorf("transaction index out of range: %d", tr.Index)
+		}
+
+		certs := tr.Tx.Certificates()
+		certDeposits := certDepositsMapPool.Get().(map[int]uint64)
+		for k := range certDeposits {
+			delete(certDeposits, k)
+		}
+		for i, cert := range certs {
+			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
+			if err != nil {
+				certDepositsMapPool.Put(certDeposits)
+				return fmt.Errorf("calculate certificate deposit: %w", err)
+			}
+			certDeposits[i] = deposit
+		}
+
+		setErr := ls.db.SetTransactionMetadataOnly(
+			tr.Tx,
+			d.Point,
+			uint32(tr.Index), //nolint:gosec
+			certDeposits,
+			txn,
+		)
+		certDepositsMapPool.Put(certDeposits)
+		if setErr != nil {
+			return fmt.Errorf("record transaction metadata: %w", setErr)
+		}
+
+		if tr.Tx.IsValid() {
+			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
+				return fmt.Errorf("process governance: %w", err)
+			}
+		}
+	}
+
+	if recordDonations {
+		if err := d.recordNetworkDonations(ls, txn, nil); err != nil {
+			return err
+		}
+	} else {
+		d.accumulateNetworkDonations(nil)
+	}
+
+	return nil
+}
+
+func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) {
+	// Accumulate Conway treasury donations from this block. Donations move
+	// into the treasury at the next epoch boundary (see processEpochRollover);
+	// they are recorded here keyed by block slot so a rollback drops them.
+	// Only valid transactions contribute: an invalid (phase-2 failed)
+	// transaction consumes collateral and its body, including any donation,
+	// is not applied.
+	var donation uint64
+	for i, tr := range d.Transactions {
+		if appliedTxs != nil && !appliedTxs[i] {
+			continue
+		}
+		if !tr.Tx.IsValid() {
+			continue
+		}
+		if don := tr.Tx.Donation(); don != nil && don.Sign() > 0 {
+			donation += don.Uint64()
+		}
+	}
+	d.donate(donation)
+}
+
+func (d *LedgerDelta) recordNetworkDonations(
+	ls *LedgerState,
+	txn *database.Txn,
+	appliedTxs []bool,
+) error {
+	// Accumulate Conway treasury donations from this block. Donations move
+	// into the treasury at the next epoch boundary (see processEpochRollover);
+	// they are recorded here keyed by block slot so a rollback drops them.
+	// Only valid transactions contribute: an invalid (phase-2 failed)
+	// transaction consumes collateral and its body, including any donation,
+	// is not applied.
+	d.accumulateNetworkDonations(appliedTxs)
+	donation := d.donation
+	if donation == 0 {
+		return nil
+	}
+
+	ls.RLock()
+	epoch := ls.currentEpoch.EpochId
+	ls.RUnlock()
+	if err := ls.db.Metadata().AddNetworkDonation(
+		d.Point.Slot,
+		epoch,
+		donation,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("record network donation: %w", err)
 	}
 
 	return nil
@@ -248,8 +362,8 @@ func (d *LedgerDelta) processGovernance(
 	pparams := ls.currentPParams
 	ls.RUnlock()
 
-	conwayPParams, ok := pparams.(*conway.ConwayProtocolParameters)
-	if !ok {
+	conwayPParams := conwayProtocolParameters(pparams)
+	if conwayPParams == nil {
 		return fmt.Errorf(
 			"governance requires Conway protocol parameters, got %T",
 			pparams,
@@ -285,6 +399,22 @@ func (d *LedgerDelta) processGovernance(
 	}
 
 	return nil
+}
+
+func conwayProtocolParameters(
+	pparams lcommon.ProtocolParameters,
+) *conway.ConwayProtocolParameters {
+	switch p := pparams.(type) {
+	case *conway.ConwayProtocolParameters:
+		return p
+	case *dijkstra.DijkstraProtocolParameters:
+		if p == nil {
+			return nil
+		}
+		return &p.ConwayProtocolParameters
+	default:
+		return nil
+	}
 }
 
 type LedgerDeltaBatch struct {

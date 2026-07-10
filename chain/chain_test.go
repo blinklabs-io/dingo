@@ -897,6 +897,34 @@ func TestChainHeaderRange(t *testing.T) {
 	}
 }
 
+func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	header := testBlocks[0]
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	if err := c.AddBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding header to chain: %s", err)
+	}
+	if !c.FirstHeaderMatchesPoint(point) {
+		t.Fatal("expected first header to match point")
+	}
+	if c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("unverified header must not satisfy verified match")
+	}
+
+	c.ClearHeaders()
+	if err := c.AddVerifiedBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding verified header to chain: %s", err)
+	}
+	if !c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("verified header should satisfy verified match")
+	}
+}
+
 func TestChainHeaderBlock(t *testing.T) {
 	testBlockCount := 3
 	cm, err := chain.NewManager(nil, nil)

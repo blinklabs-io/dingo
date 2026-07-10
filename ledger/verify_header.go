@@ -19,15 +19,33 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 
 	"github.com/blinklabs-io/dingo/consensus/praos"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/mary"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	utxorpc "github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
+)
+
+type genesisDelegation struct {
+	genesisHash  []byte
+	delegateHash []byte
+	vrfHash      []byte
+}
+
+type genesisOverlaySlotStatus uint8
+
+const (
+	genesisOverlayNone genesisOverlaySlotStatus = iota
+	genesisOverlayNonActive
+	genesisOverlayActive
 )
 
 // headerOnlyBlock adapts a block header to the Block interface so we can
@@ -35,6 +53,11 @@ import (
 type headerOnlyBlock struct {
 	header ledger.BlockHeader
 }
+
+var (
+	errHeaderVerificationDeferred     = errors.New("header verification deferred")
+	errLeaderStakeSnapshotUnavailable = errors.New("leader stake snapshot unavailable")
+)
 
 func (b headerOnlyBlock) Header() ledger.BlockHeader { return b.header }
 func (b headerOnlyBlock) Type() int                  { return 0 }
@@ -55,7 +78,11 @@ func (b headerOnlyBlock) BlockBodyHash() lcommon.Blake2b256 {
 }
 
 func (ls *LedgerState) verifyBlockHeaderOnlyCrypto(header ledger.BlockHeader) error {
-	return ls.verifyBlockHeaderCrypto(headerOnlyBlock{header: header})
+	_, err := ls.verifyBlockHeaderStatelessCrypto(
+		headerOnlyBlock{header: header},
+		false,
+	)
+	return err
 }
 
 // verifyBlockHeader performs cryptographic verification of a block header.
@@ -156,49 +183,69 @@ func verifyBlockHeaderHex(
 func (ls *LedgerState) verifyBlockHeaderCrypto(
 	block ledger.Block,
 ) error {
-	// Skip Byron-era blocks early to avoid parameter lookups
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, false)
+}
+
+func (ls *LedgerState) verifyBlockHeaderCryptoBeforeApply(
+	block ledger.Block,
+) error {
+	return ls.verifyBlockHeaderCryptoWithEpochAdvance(block, true, true)
+}
+
+func (ls *LedgerState) verifyBlockHeaderCryptoWithEpochAdvance(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
+	epoch, err := ls.verifyBlockHeaderStatelessCrypto(
+		block,
+		allowEpochCacheAdvance,
+	)
+	if err != nil {
+		return err
+	}
+	return ls.verifyBlockHeaderState(block, epoch.EpochId, allowStateDefer)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStateWithEpochAdvance(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+	allowStateDefer bool,
+) error {
 	if block.Era().Id == byron.EraIdByron {
 		return nil
 	}
-
-	blockSlot := block.SlotNumber()
-
-	// Look up the epoch for this block's slot from the epoch cache.
-	// This is an epoch-aware lookup that searches through all known
-	// epochs rather than only the current one, ensuring that blocks
-	// at epoch boundaries are verified against the correct nonce.
-	epoch, err := ls.epochForSlot(blockSlot)
+	epoch, err := ls.headerVerificationEpoch(
+		block.SlotNumber(),
+		allowEpochCacheAdvance,
+	)
 	if err != nil {
-		// Epoch cache doesn't cover this slot yet. Blockfetch can
-		// deliver blocks past the epoch boundary before the ledger
-		// processing goroutine runs the full epoch rollover. Eagerly
-		// compute the next epoch(s) so verification can proceed.
-		epoch, err = ls.ensureEpochForSlot(blockSlot)
-		if err != nil {
-			return fmt.Errorf(
-				"block header verification rejected: no epoch data for slot %d: %w",
-				blockSlot,
-				err,
-			)
-		}
+		return err
+	}
+	return ls.verifyBlockHeaderState(block, epoch.EpochId, allowStateDefer)
+}
+
+func (ls *LedgerState) verifyBlockHeaderStatelessCrypto(
+	block ledger.Block,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, error) {
+	// Skip Byron-era blocks early to avoid parameter lookups
+	if block.Era().Id == byron.EraIdByron {
+		return models.Epoch{}, nil
 	}
 
-	// Reject blocks for which we have epoch data but no nonce.
-	// A missing nonce means the epoch rollover has not completed
-	// or the epoch is too far in the future.
-	if len(epoch.Nonce) == 0 {
-		return fmt.Errorf(
-			"block header verification rejected: "+
-				"epoch %d has no nonce for slot %d "+
-				"(epoch rollover may not have been processed yet)",
-			epoch.EpochId,
-			blockSlot,
-		)
+	blockSlot := block.SlotNumber()
+	epoch, err := ls.headerVerificationEpoch(
+		blockSlot,
+		allowEpochCacheAdvance,
+	)
+	if err != nil {
+		return models.Epoch{}, err
 	}
 
 	slotsPerKesPeriod := ls.SlotsPerKESPeriod()
 	if slotsPerKesPeriod == 0 {
-		return fmt.Errorf(
+		return models.Epoch{}, fmt.Errorf(
 			"shelley genesis not available for block header verification at slot %d",
 			blockSlot,
 		)
@@ -209,7 +256,7 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		ls.epochNonceHex(epoch.EpochId, epoch.Nonce),
 		slotsPerKesPeriod,
 	); err != nil {
-		return err
+		return models.Epoch{}, err
 	}
 
 	// Validate the operational certificate's cold-key signature and KES
@@ -221,11 +268,70 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 		slotsPerKesPeriod,
 		ls.maxKESEvolutions(),
 	); err != nil {
-		return fmt.Errorf(
+		return models.Epoch{}, fmt.Errorf(
 			"block header verification failed at slot %d: %w",
 			blockSlot,
 			err,
 		)
+	}
+
+	return epoch, nil
+}
+
+func (ls *LedgerState) headerVerificationEpoch(
+	blockSlot uint64,
+	allowEpochCacheAdvance bool,
+) (models.Epoch, error) {
+	// Look up the epoch for this block's slot from the epoch cache.
+	// This is an epoch-aware lookup that searches through all known
+	// epochs rather than only the current one, ensuring that blocks
+	// at epoch boundaries are verified against the correct nonce.
+	epoch, err := ls.epochForSlot(blockSlot)
+	if err != nil {
+		if !allowEpochCacheAdvance {
+			return models.Epoch{}, fmt.Errorf(
+				"%w: no cached epoch data for slot %d: %w",
+				errHeaderVerificationDeferred,
+				blockSlot,
+				err,
+			)
+		}
+		// Epoch cache doesn't cover this slot yet. Blockfetch can
+		// deliver blocks past the epoch boundary before the ledger
+		// processing goroutine runs the full epoch rollover. Eagerly
+		// compute the next epoch(s) so verification can proceed.
+		epoch, err = ls.ensureEpochForSlot(blockSlot)
+		if err != nil {
+			return models.Epoch{}, fmt.Errorf(
+				"block header verification rejected: no epoch data for slot %d: %w",
+				blockSlot,
+				err,
+			)
+		}
+	}
+
+	// Reject blocks for which we have epoch data but no nonce.
+	// A missing nonce means the epoch rollover has not completed
+	// or the epoch is too far in the future.
+	if len(epoch.Nonce) == 0 {
+		return models.Epoch{}, fmt.Errorf(
+			"block header verification rejected: "+
+				"epoch %d has no nonce for slot %d "+
+				"(epoch rollover may not have been processed yet)",
+			epoch.EpochId,
+			blockSlot,
+		)
+	}
+	return epoch, nil
+}
+
+func (ls *LedgerState) verifyBlockHeaderState(
+	block ledger.Block,
+	epochId uint64,
+	allowStateDefer bool,
+) error {
+	if handled, err := ls.verifyGenesisDelegateHeader(block); handled || err != nil {
+		return err
 	}
 
 	// Bind the header's VRF key to the pool's on-chain registered VRF key.
@@ -233,10 +339,353 @@ func (ls *LedgerState) verifyBlockHeaderCrypto(
 	// in the header (SkipStakePoolValidation skips gouroboros' registered-key
 	// check), so without this an attacker can grind VRF keys to win slots.
 	if err := ls.verifyRegisteredVrfKey(block); err != nil {
+		if allowStateDefer &&
+			errors.Is(err, models.ErrPoolNotFound) &&
+			ls.ledgerTipBehindSlot(block.SlotNumber()) {
+			return fmt.Errorf(
+				"%w: registered VRF key state for slot %d is ahead of the ledger apply cursor: %w",
+				errHeaderVerificationDeferred,
+				block.SlotNumber(),
+				err,
+			)
+		}
 		return err
 	}
 
-	return ls.verifyBlockLeaderEligibility(block, epoch.EpochId)
+	if err := ls.verifyBlockLeaderEligibility(block, epochId); err != nil {
+		if allowStateDefer &&
+			errors.Is(err, errLeaderStakeSnapshotUnavailable) &&
+			ls.ledgerTipBehindSlot(block.SlotNumber()) {
+			return fmt.Errorf(
+				"%w: leader stake snapshot state for slot %d is ahead of the ledger apply cursor: %w",
+				errHeaderVerificationDeferred,
+				block.SlotNumber(),
+				err,
+			)
+		}
+		return err
+	}
+	return nil
+}
+
+func (ls *LedgerState) verifyGenesisDelegateHeader(
+	block ledger.Block,
+) (bool, error) {
+	if block.Era().Id == byron.EraIdByron ||
+		!ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
+		return false, nil
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return false, nil
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return false, nil
+	}
+
+	genesisDeleg, status, err := ls.genesisOverlayDelegationForSlot(
+		block.SlotNumber(),
+		shelleyGenesis,
+	)
+	if err != nil {
+		return true, err
+	}
+	if status == genesisOverlayNone {
+		return false, nil
+	}
+	if status == genesisOverlayNonActive {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"slot is reserved for the genesis overlay schedule but not active",
+			block.SlotNumber(),
+		)
+	}
+
+	issuerHash := block.IssuerVkey().Hash()
+	if !bytes.Equal(issuerHash.Bytes(), genesisDeleg.delegateHash) {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis overlay slot assigned to delegate %x, got issuer %x",
+			block.SlotNumber(),
+			genesisDeleg.delegateHash,
+			issuerHash.Bytes(),
+		)
+	}
+
+	vrfKey, ok, err := headerVrfKeyFromBodyCbor(block.Header())
+	if err != nil {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"extract genesis delegate VRF key: %w",
+			block.SlotNumber(),
+			err,
+		)
+	}
+	if !ok || len(vrfKey) == 0 {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis delegate VRF key unavailable",
+			block.SlotNumber(),
+		)
+	}
+	headerVrfKeyHash := lcommon.Blake2b256Hash(vrfKey)
+	if !bytes.Equal(headerVrfKeyHash.Bytes(), genesisDeleg.vrfHash) {
+		return true, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"genesis delegate %s VRF key does not match genesis VRF key "+
+				"(header %x, genesis %x)",
+			block.SlotNumber(),
+			hex.EncodeToString(issuerHash.Bytes()),
+			headerVrfKeyHash.Bytes(),
+			genesisDeleg.vrfHash,
+		)
+	}
+	return true, nil
+}
+
+func (ls *LedgerState) genesisOverlayDelegationForSlot(
+	slot uint64,
+	shelleyGenesis *shelley.ShelleyGenesis,
+) (genesisDelegation, genesisOverlaySlotStatus, error) {
+	genesisDelegs, err := parseShelleyGenesisDelegations(shelleyGenesis)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: %w",
+			slot,
+			err,
+		)
+	}
+	if len(genesisDelegs) == 0 {
+		return genesisDelegation{}, genesisOverlayNone, nil
+	}
+
+	epoch, err := ls.epochForSlot(slot)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"resolve epoch for genesis overlay schedule: %w",
+			slot,
+			err,
+		)
+	}
+	if epoch.LengthInSlots == 0 || slot < epoch.StartSlot {
+		return genesisDelegation{}, genesisOverlayNone, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"invalid epoch data for genesis overlay schedule",
+			slot,
+		)
+	}
+
+	decentralization := ls.decentralizationParamRatForSlot(slot)
+	overlayIndex, status := classifyGenesisOverlaySlot(
+		slot-epoch.StartSlot,
+		decentralization,
+		shelleyGenesis.ActiveSlotsCoeff.Rat,
+		uint64(len(genesisDelegs)),
+	)
+	if status != genesisOverlayActive {
+		return genesisDelegation{}, status, nil
+	}
+
+	genesisDeleg := genesisDelegs[overlayIndex]
+	activeDeleg, err := ls.activeGenesisDelegationForSlot(genesisDeleg, slot)
+	if err != nil {
+		return genesisDelegation{}, genesisOverlayNone, err
+	}
+	return activeDeleg, genesisOverlayActive, nil
+}
+
+func parseShelleyGenesisDelegations(
+	shelleyGenesis *shelley.ShelleyGenesis,
+) ([]genesisDelegation, error) {
+	if shelleyGenesis == nil || len(shelleyGenesis.GenDelegs) == 0 {
+		return nil, nil
+	}
+	ret := make([]genesisDelegation, 0, len(shelleyGenesis.GenDelegs))
+	for genesisHashHex, genDeleg := range shelleyGenesis.GenDelegs {
+		genesisHash, err := hex.DecodeString(genesisHashHex)
+		if err != nil || len(genesisHash) != lcommon.Blake2b224Size {
+			return nil, fmt.Errorf(
+				"invalid genesis key hash %q",
+				genesisHashHex,
+			)
+		}
+		delegateHashHex := genDeleg["delegate"]
+		delegateHash, err := hex.DecodeString(delegateHashHex)
+		if err != nil || len(delegateHash) != lcommon.Blake2b224Size {
+			return nil, fmt.Errorf(
+				"invalid genesis delegate hash %q",
+				delegateHashHex,
+			)
+		}
+		vrfHashHex := genDeleg["vrf"]
+		vrfHash, err := hex.DecodeString(vrfHashHex)
+		if err != nil || len(vrfHash) != lcommon.Blake2b256Size {
+			return nil, fmt.Errorf(
+				"invalid genesis delegate VRF key hash %q",
+				vrfHashHex,
+			)
+		}
+		ret = append(ret, genesisDelegation{
+			genesisHash:  genesisHash,
+			delegateHash: delegateHash,
+			vrfHash:      vrfHash,
+		})
+	}
+	slices.SortFunc(ret, func(a, b genesisDelegation) int {
+		return bytes.Compare(a.genesisHash, b.genesisHash)
+	})
+	return ret, nil
+}
+
+func (ls *LedgerState) activeGenesisDelegationForSlot(
+	initial genesisDelegation,
+	slot uint64,
+) (genesisDelegation, error) {
+	row, err := ls.db.Metadata().GetGenesisDelegationForSlot(
+		initial.genesisHash,
+		slot,
+		nil,
+	)
+	if err != nil {
+		return genesisDelegation{}, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"lookup active genesis delegation: %w",
+			slot,
+			err,
+		)
+	}
+	if row == nil {
+		return initial, nil
+	}
+	if len(row.GenesisDelegateHash) != lcommon.Blake2b224Size ||
+		len(row.VrfKeyHash) != lcommon.Blake2b256Size {
+		return genesisDelegation{}, fmt.Errorf(
+			"block header verification rejected at slot %d: "+
+				"invalid active genesis delegation for genesis key %x",
+			slot,
+			initial.genesisHash,
+		)
+	}
+	return genesisDelegation{
+		genesisHash:  append([]byte(nil), initial.genesisHash...),
+		delegateHash: append([]byte(nil), row.GenesisDelegateHash...),
+		vrfHash:      append([]byte(nil), row.VrfKeyHash...),
+	}, nil
+}
+
+func classifyGenesisOverlaySlot(
+	relativeSlot uint64,
+	decentralization *big.Rat,
+	activeSlotsCoeff *big.Rat,
+	genesisKeyCount uint64,
+) (uint64, genesisOverlaySlotStatus) {
+	if decentralization == nil ||
+		decentralization.Sign() <= 0 ||
+		decentralization.Cmp(big.NewRat(1, 1)) > 0 ||
+		activeSlotsCoeff == nil ||
+		activeSlotsCoeff.Sign() <= 0 ||
+		activeSlotsCoeff.Cmp(big.NewRat(1, 1)) > 0 ||
+		genesisKeyCount == 0 {
+		return 0, genesisOverlayNone
+	}
+	position := ceilUint64Rat(relativeSlot, decentralization)
+	nextPosition := ceilUint64Rat(relativeSlot+1, decentralization)
+	if position >= nextPosition {
+		return 0, genesisOverlayNone
+	}
+	activeSlotCoeffInv := activeSlotCoeffInverse(activeSlotsCoeff)
+	if activeSlotCoeffInv == 0 || position%activeSlotCoeffInv != 0 {
+		return 0, genesisOverlayNonActive
+	}
+	return (position / activeSlotCoeffInv) % genesisKeyCount,
+		genesisOverlayActive
+}
+
+func ceilUint64Rat(v uint64, rat *big.Rat) uint64 {
+	numerator := new(big.Int).Mul(
+		new(big.Int).SetUint64(v),
+		rat.Num(),
+	)
+	denom := rat.Denom()
+	numerator.Add(numerator, new(big.Int).Sub(denom, big.NewInt(1)))
+	numerator.Quo(numerator, denom)
+	return numerator.Uint64()
+}
+
+func activeSlotCoeffInverse(activeSlotsCoeff *big.Rat) uint64 {
+	inv := new(big.Int).Quo(
+		activeSlotsCoeff.Denom(),
+		activeSlotsCoeff.Num(),
+	)
+	return inv.Uint64()
+}
+
+func (ls *LedgerState) genesisDelegationActiveForSlot(slot uint64) bool {
+	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+		return decentralizedParamActive(pparams)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return false
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil ||
+		shelleyGenesis.ProtocolParameters.Decentralization == nil {
+		return false
+	}
+	return shelleyGenesis.ProtocolParameters.Decentralization.Sign() > 0
+}
+
+func (ls *LedgerState) decentralizationParamRatForSlot(slot uint64) *big.Rat {
+	if pparams := ls.ProtocolParamsForSlot(slot); pparams != nil {
+		return decentralizationParamRat(pparams)
+	}
+	if ls.config.CardanoNodeConfig == nil {
+		return nil
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	if shelleyGenesis == nil ||
+		shelleyGenesis.ProtocolParameters.Decentralization == nil {
+		return nil
+	}
+	return shelleyGenesis.ProtocolParameters.Decentralization.Rat
+}
+
+func decentralizedParamActive(
+	pparams lcommon.ProtocolParameters,
+) bool {
+	rat := decentralizationParamRat(pparams)
+	return rat != nil && rat.Sign() > 0
+}
+
+func decentralizationParamRat(
+	pparams lcommon.ProtocolParameters,
+) *big.Rat {
+	switch pp := pparams.(type) {
+	case *shelley.ShelleyProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	case *mary.MaryProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	case *alonzo.AlonzoProtocolParameters:
+		if pp.Decentralization == nil {
+			return nil
+		}
+		return pp.Decentralization.Rat
+	default:
+		return nil
+	}
+}
+
+func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
+	ls.RLock()
+	defer ls.RUnlock()
+	return ls.currentTip.Point.Slot < slot
 }
 
 // verifyBlockLeaderEligibility checks that the block's producer pool was
@@ -268,6 +717,15 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	epochId uint64,
 ) error {
 	if block.Era().Id == byron.EraIdByron {
+		return nil
+	}
+	if ls.genesisDelegationActiveForSlot(block.SlotNumber()) {
+		ls.config.Logger.Warn(
+			"skipping leader eligibility check: decentralization parameter active",
+			"slot", block.SlotNumber(),
+			"epoch", epochId,
+			"component", "ledger",
+		)
 		return nil
 	}
 
@@ -462,6 +920,17 @@ func (ls *LedgerState) leaderEligibilityStake(
 		); terr == nil && total == 0 {
 			diag = "epoch mark snapshot is empty (no pools) - likely a " +
 				"storage or computation gap, not pool ineligibility"
+			return 0, 0, snapshotEpoch, snapshotType, false,
+				fmt.Errorf(
+					"%w: "+
+						"block header verification rejected at slot %d: "+
+						"producer pool %x has no stake in epoch %d snapshot (%s)",
+					errLeaderStakeSnapshotUnavailable,
+					block.SlotNumber(),
+					poolKeyHash[:],
+					snapshotEpoch,
+					diag,
+				)
 		}
 		return 0, 0, snapshotEpoch, snapshotType, false,
 			fmt.Errorf(

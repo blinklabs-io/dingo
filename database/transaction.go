@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -35,6 +36,42 @@ import (
 // complete pre-boundary UTxO history. Duplicated here (rather than imported)
 // because the database package cannot depend on ledger, which depends on it.
 const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+
+type metadataOnlyTransaction struct {
+	lcommon.Transaction
+}
+
+func (tx metadataOnlyTransaction) Inputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Outputs() []lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) ReferenceInputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Collateral() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) CollateralReturn() lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Consumed() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
+	return nil
+}
 
 // mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
 // or 0 if none is recorded (genesis sync, or a non-genesis chainsync
@@ -205,6 +242,47 @@ func (d *Database) SetTransaction(
 		}
 	}
 
+	return nil
+}
+
+// SetTransactionMetadataOnly records transaction metadata, certificates, and
+// other non-UTxO metadata without writing blob offsets, produced outputs, spent
+// inputs, collateral, reference inputs, reward withdrawals, or pparam updates.
+//
+// This is used for Leios/Musashi endorser-block transactions whose certificate
+// and governance data must be visible to the metadata-backed ledger queries
+// even though their UTxO effects are not applied by Dingo's Musashi path.
+func (d *Database) SetTransactionMetadataOnly(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return types.ErrNilTxn
+	}
+	if err := d.metadata.SetTransaction(
+		metadataOnlyTransaction{Transaction: tx},
+		point,
+		idx,
+		certDeposits,
+		metadataTxn,
+	); err != nil {
+		return fmt.Errorf("set transaction metadata only: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

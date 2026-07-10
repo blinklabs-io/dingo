@@ -430,6 +430,9 @@ type LedgerStateConfig struct {
 	// the threshold falsely rejects that pool's legitimately-eligible blocks and
 	// wedges the chain — so it is skipped there. All other header checks (KES,
 	// VRF proof, registered-VRF-key binding, opcert) still apply regardless.
+	// Separately, TPraos bootstrap epochs with decentralization still active
+	// validate genesis overlay assignment in verify_header.go, then skip only
+	// the local pool stake-threshold check while d remains active.
 	// Interim measure until reward calculation lands and reward balances can be
 	// included in the leadership stake. Set from the network in node.go (true
 	// on musashi, false otherwise).
@@ -579,6 +582,7 @@ type LedgerState struct {
 	firstBlockReceived            bool                // true after latency sample recorded for this batch
 	shadowBlockReceivedHashes     map[string]struct{} // blocks delivered this batch (dedup shadow vs primary)
 	batchBlocksReceived           int                 // total blocks received in current blockfetch batch (including mid-batch flushes)
+	deferredHeaderValidation      map[string]struct{} // block points whose stateful header checks wait for ledger apply
 	checkpointWrittenForEpoch     bool
 	closed                        atomic.Bool
 	inRecovery                    bool // guards against recursive recovery in SubmitAsyncDBTxn
@@ -3734,6 +3738,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			}
 		}
 	}
+	var blockDonation uint64
 	// Apply the referenced Leios endorser block's transactions before the
 	// ranking block's own, so the endorser-resident outputs the ranking block
 	// spends are present in the UTxO set. The endorser block is identified by
@@ -3749,7 +3754,8 @@ func (ls *LedgerState) ledgerProcessBlock(
 				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
 					ebHash.Bytes(),
 				); ok {
-					applied, err := ls.applyEndorserBlock(
+					var donation uint64
+					applied, donation, err := ls.applyEndorserBlock(
 						txn,
 						point,
 						block.BlockNumber(),
@@ -3783,6 +3789,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 							ebTxs,
 							applied,
 						)
+						blockDonation += donation
 					}
 				} else {
 					ls.config.Logger.Debug(
@@ -3808,6 +3815,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 			)
 		}
 	}
+
+	if err := ls.verifyDeferredBlockHeaderState(txn, point, block); err != nil {
+		return nil, err
+	}
 	// Process transactions
 	var delta *LedgerDelta
 	// Track outputs from earlier transactions in this block for intra-block
@@ -3821,6 +3832,10 @@ func (ls *LedgerState) ledgerProcessBlock(
 				block.BlockNumber(),
 			)
 			delta.Offsets = offsets
+			if !shouldValidate && blockDonation > 0 {
+				delta.donate(blockDonation)
+				blockDonation = 0
+			}
 		}
 		// Validate transaction
 		// Skip validation for phase-2 failed TXs (isValid=false).
@@ -3996,10 +4011,11 @@ func (ls *LedgerState) ledgerProcessBlock(
 
 		// Apply delta immediately if we may need the data to validate the next TX
 		if shouldValidate {
-			if err := delta.apply(ls, txn); err != nil {
+			if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
 				delta.Release()
 				return nil, err
 			}
+			blockDonation += delta.donation
 			delta.Release()
 			delta = nil // reset
 
@@ -4016,6 +4032,17 @@ func (ls *LedgerState) ledgerProcessBlock(
 				intraBlockUtxos[key] = utxo
 			}
 		}
+	}
+	if blockDonation > 0 {
+		if delta == nil {
+			delta = NewLedgerDelta(
+				point,
+				uint(block.Era().Id),
+				block.BlockNumber(),
+			)
+			delta.Offsets = offsets
+		}
+		delta.donate(blockDonation)
 	}
 	// Record the opcert counter now that the block's transactions are
 	// processed. The monotonicity check ran before transaction validation

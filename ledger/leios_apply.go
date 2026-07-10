@@ -62,7 +62,8 @@ var _ leiosEndorserBlockCertifier = (*dijkstra.DijkstraBlockHeader)(nil)
 // block that references it, so the endorser-resident outputs the ranking block's
 // transactions spend are present in the UTxO set. On the Haskell-conformant path
 // (the Musashi prototype) the blob is still stored (for serving and the
-// node-to-client inline view) but the transactions are not applied to the UTxO.
+// node-to-client inline view), and non-UTxO metadata that Dingo uses for ledger
+// queries is recorded, but the transactions are not applied to the UTxO.
 // It returns the number of transactions applied to the UTxO (0 on the
 // Haskell-conformant path, or when the CIP path finds every transaction was
 // already applied).
@@ -77,7 +78,8 @@ var _ leiosEndorserBlockCertifier = (*dijkstra.DijkstraBlockHeader)(nil)
 // ranking block must remove them, and the ranking block is what admits the
 // endorser block to the chain.
 //
-// It returns the number of transactions applied. Decode/build failures happen
+// It returns the number of transactions applied and the Conway donation total
+// from accepted endorser-block transactions. Decode/build failures happen
 // before storage is mutated and callers may treat them as best-effort. Once
 // the endorser blob or transaction rows start writing, any error is wrapped in
 // leiosEndorserBlockStorageError so callers can abort the outer transaction
@@ -89,12 +91,12 @@ func (ls *LedgerState) applyEndorserBlock(
 	ebSlot uint64,
 	ebHashBytes []byte,
 	rawTxs []cbor.RawMessage,
-) (int, error) {
+) (int, uint64, error) {
 	if len(rawTxs) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
 	if len(ebHashBytes) != lcommon.Blake2b256Size {
-		return 0, fmt.Errorf(
+		return 0, 0, fmt.Errorf(
 			"endorser block hash must be %d bytes, got %d",
 			lcommon.Blake2b256Size,
 			len(ebHashBytes),
@@ -117,16 +119,16 @@ func (ls *LedgerState) applyEndorserBlock(
 		if len(txCbor) > 0 && txCbor[0]>>5 == 2 {
 			var inner []byte
 			if _, err := cbor.Decode(txCbor, &inner); err != nil {
-				return 0, fmt.Errorf("unwrap endorser tx %d: %w", i, err)
+				return 0, 0, fmt.Errorf("unwrap endorser tx %d: %w", i, err)
 			}
 			txCbor = inner
 		}
 		var elems []cbor.RawMessage
 		if _, err := cbor.Decode(txCbor, &elems); err != nil {
-			return 0, fmt.Errorf("decode endorser tx %d envelope: %w", i, err)
+			return 0, 0, fmt.Errorf("decode endorser tx %d envelope: %w", i, err)
 		}
 		if len(elems) < 2 {
-			return 0, fmt.Errorf(
+			return 0, 0, fmt.Errorf(
 				"endorser tx %d has %d elements, want >= 2",
 				i,
 				len(elems),
@@ -139,75 +141,93 @@ func (ls *LedgerState) applyEndorserBlock(
 		// "unknown transaction type" for these), so it must not be used here.
 		tx, err := ledger.NewTransactionFromCbor(ledger.TxTypeDijkstra, txCbor)
 		if err != nil {
-			return 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
+			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
 		}
 		txs = append(txs, tx)
 		bodyCbors = append(bodyCbors, []byte(elems[0]))
 	}
 
+	// Reject repeated endorser transactions before recording ledger data. The
+	// CIP path compacts the block to transactions that still need UTxO apply;
+	// the Musashi metadata-only path keeps the blob intact for serving while
+	// using the indexes to suppress duplicate metadata side effects.
+	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(txs, txn)
+	if err != nil {
+		return 0, 0, err
+	}
 	if ls.config.LeiosApplyEndorserBlockTxs {
-		// The CIP path mutates UTxO state, so it must reject duplicates before
-		// building offsets or applying the delta. Otherwise a repeated endorser
-		// transaction can re-spend inputs and leave block processing stuck
-		// retrying the same "UTxO already spent" failure.
-		var err error
-		txs, bodyCbors, err = ls.deduplicateEndorserBlockTransactions(
-			txs,
-			bodyCbors,
-			txn,
-		)
-		if err != nil {
-			return 0, err
+		if len(keepIndexes) == 0 {
+			return 0, 0, nil
 		}
-		if len(txs) == 0 {
-			return 0, nil
+		keptTxs := txs[:0]
+		keptBodies := bodyCbors[:0]
+		for _, idx := range keepIndexes {
+			keptTxs = append(keptTxs, txs[idx])
+			keptBodies = append(keptBodies, bodyCbors[idx])
 		}
+		txs = keptTxs
+		bodyCbors = keptBodies
 	}
 
 	// Build the endorser-block blob and its offsets, then persist the blob
 	// under (ebSlot, ebHash) so cold-extract can resolve the DOFF refs.
 	blob, offsets, err := buildEndorserBlockBlob(txs, bodyCbors, ebSlot, ebHash)
 	if err != nil {
-		return 0, fmt.Errorf("build endorser block blob: %w", err)
+		return 0, 0, fmt.Errorf("build endorser block blob: %w", err)
 	}
 	if err := ls.db.SetGenesisCbor(ebSlot, ebHash[:], blob, txn); err != nil {
-		return 0, &leiosEndorserBlockStorageError{
+		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("store endorser block blob: %w", err),
+		}
+	}
+
+	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
+	defer delta.Release()
+	delta.Offsets = offsets
+	if ls.config.LeiosApplyEndorserBlockTxs {
+		for i, tx := range txs {
+			delta.addTransaction(tx, i)
+		}
+	} else {
+		for _, idx := range keepIndexes {
+			delta.addTransaction(txs[idx], idx)
 		}
 	}
 
 	// Haskell-conformant path (Musashi prototype-2026w27): the endorser block is
 	// stored above for serving and the node-to-client inline view, but its
-	// transactions are NOT applied to the UTxO — the prototype's ledger is
-	// ranking-block-only (its SUBUTXO rule is a no-op). Return 0 applied.
+	// transactions are NOT applied to the UTxO. Dingo still records transaction
+	// metadata, certificates, and governance because header verification and
+	// other ledger queries are backed by the metadata DB.
 	if !ls.config.LeiosApplyEndorserBlockTxs {
-		return 0, nil
+		if err := delta.applyTransactionMetadataOnlyWithoutRecordingDonations(ls, txn); err != nil {
+			return 0, 0, &leiosEndorserBlockStorageError{
+				err: fmt.Errorf(
+					"record endorser block transaction metadata: %w",
+					err,
+				),
+			}
+		}
+		return 0, delta.donation, nil
 	}
 
 	// CIP-conformant path: apply the endorser transactions as a delta recorded
 	// under the ranking block's point (so a rollback removes them), with offsets
 	// pointing into the endorser-block blob.
-	delta := NewLedgerDelta(rbPoint, uint(dijkstra.EraIdDijkstra), rbBlockNumber)
-	defer delta.Release()
-	delta.Offsets = offsets
-	for i, tx := range txs {
-		delta.addTransaction(tx, i)
-	}
-	if err := delta.apply(ls, txn); err != nil {
-		return 0, &leiosEndorserBlockStorageError{
+	if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
+		return 0, 0, &leiosEndorserBlockStorageError{
 			err: fmt.Errorf("apply endorser block transactions: %w", err),
 		}
 	}
-	return len(txs), nil
+	return len(txs), delta.donation, nil
 }
 
-func (ls *LedgerState) deduplicateEndorserBlockTransactions(
+func (ls *LedgerState) deduplicateEndorserBlockTransactionIndexes(
 	txs []lcommon.Transaction,
-	bodyCbors [][]byte,
 	txn *database.Txn,
-) ([]lcommon.Transaction, [][]byte, error) {
+) ([]int, error) {
 	if len(txs) == 0 {
-		return txs, bodyCbors, nil
+		return nil, nil
 	}
 	hashes := make([][]byte, len(txs))
 	for i, tx := range txs {
@@ -215,7 +235,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactions(
 	}
 	existing, err := ls.db.GetTransactionsByHashes(hashes, txn)
 	if err != nil {
-		return nil, nil, fmt.Errorf("dedup endorser transactions: %w", err)
+		return nil, fmt.Errorf("dedup endorser transactions: %w", err)
 	}
 	skip := make(map[string]struct{}, len(existing))
 	for _, tx := range existing {
@@ -225,8 +245,7 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactions(
 		skip[string(tx.Hash)] = struct{}{}
 	}
 	seen := make(map[string]struct{}, len(txs))
-	keptTxs := txs[:0]
-	keptBodies := bodyCbors[:0]
+	keepIndexes := make([]int, 0, len(txs))
 	for i, tx := range txs {
 		hashKey := string(tx.Hash().Bytes())
 		if _, dup := skip[hashKey]; dup {
@@ -236,10 +255,9 @@ func (ls *LedgerState) deduplicateEndorserBlockTransactions(
 			continue
 		}
 		seen[hashKey] = struct{}{}
-		keptTxs = append(keptTxs, tx)
-		keptBodies = append(keptBodies, bodyCbors[i])
+		keepIndexes = append(keepIndexes, i)
 	}
-	return keptTxs, keptBodies, nil
+	return keepIndexes, nil
 }
 
 type leiosEndorserBlockStorageError struct {
