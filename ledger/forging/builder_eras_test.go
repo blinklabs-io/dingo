@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"math"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -235,12 +236,190 @@ func TestBuildBlockSupportsDijkstraEra(t *testing.T) {
 	// the encoded Dijkstra block_body with null certificate fields. A
 	// mismatch means the network would reject the block.
 	dblock := block.(*dijkstra.DijkstraBlock)
+	certified, present := dblock.BlockHeader.LeiosCertified()
+	require.True(t, present, "Dijkstra forge must emit the Leios header extension")
+	assert.False(t, certified)
+	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
+	assert.False(t, announced)
 	assert.Equal(
 		t,
 		dblock.BlockBodyHash(),
 		dblock.CalculatedBlockBodyHash(),
 		"forged Dijkstra block body hash must match the header commitment",
 	)
+}
+
+func TestBuildBlockDijkstraAnnouncesLeiosEndorserBlock(t *testing.T) {
+	creds := setupTestCredentials(t)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:        16384,
+			MaxBlockBodySize: 90112,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+			MaxBlockExUnits: lcommon.ExUnits{
+				Memory: 62000000,
+				Steps:  20000000000,
+			},
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1000,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	ebHash := lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size))
+	block, _, err := builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
+		Announcement: &LeiosEndorserBlockAnnouncement{
+			Hash: ebHash,
+			Size: 1234,
+		},
+	})
+	require.NoError(t, err)
+	dblock := block.(*dijkstra.DijkstraBlock)
+
+	certified, present := dblock.BlockHeader.LeiosCertified()
+	require.True(t, present)
+	assert.False(t, certified)
+	gotHash, gotSize, ok := dblock.BlockHeader.LeiosAnnouncement()
+	require.True(t, ok)
+	assert.Equal(t, ebHash, gotHash)
+	assert.Equal(t, uint64(1234), gotSize)
+	assert.Nil(t, dblock.BlockBody.LeiosCertificate)
+	assert.Equal(t, dblock.BlockBodyHash(), dblock.CalculatedBlockBodyHash())
+}
+
+func TestBuildBlockDijkstraRejectsOversizeLeiosAnnouncement(t *testing.T) {
+	creds := setupTestCredentials(t)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:        16384,
+			MaxBlockBodySize: 90112,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+			MaxBlockExUnits: lcommon.ExUnits{
+				Memory: 62000000,
+				Steps:  20000000000,
+			},
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool:         &mockMempool{transactions: []MempoolTransaction{}},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1000,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	ebHash := lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size))
+	_, _, err = builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
+		Announcement: &LeiosEndorserBlockAnnouncement{
+			Hash: ebHash,
+			Size: uint64(math.MaxUint32) + 1,
+		},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "leios announcement size exceeds uint32")
+}
+
+func TestBuildBlockDijkstraCertifiesLeiosEndorserBlock(t *testing.T) {
+	creds := setupTestCredentials(t)
+	txCbor := makeMinimalTxCbor(t, 0x01, 0)
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			MaxTxSize:        uint(len(txCbor)),
+			MaxBlockBodySize: 90112,
+			ProtocolVersion: lcommon.ProtocolParametersProtocolVersion{
+				Major: 10,
+			},
+			MaxBlockExUnits: lcommon.ExUnits{
+				Memory: 62000000,
+				Steps:  20000000000,
+			},
+		},
+	}
+	builder, err := NewDefaultBlockBuilder(BlockBuilderConfig{
+		Mempool: &mockMempool{
+			transactions: []MempoolTransaction{
+				{
+					Hash: "tx1",
+					Cbor: txCbor,
+					Type: dijkstra.TxTypeDijkstra,
+				},
+			},
+		},
+		PParamsProvider: &mockPParamsProvider{pparams: pparams},
+		ChainTip: &mockChainTip{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: 1000,
+					Hash: make([]byte, 32),
+				},
+				BlockNumber: 100,
+			},
+		},
+		EpochNonce: &mockEpochNonceProvider{
+			epoch: 1,
+			nonce: make([]byte, 32),
+		},
+		Credentials: creds,
+	})
+	require.NoError(t, err)
+
+	signature := make([]byte, lcommon.LeiosBlsSignatureSize)
+	for i := range signature {
+		signature[i] = byte(i)
+	}
+	block, _, err := builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
+		Certificate: &lcommon.LeiosEbCertificate{
+			SlotNo:              900,
+			EndorserBlockHash:   lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
+			Signers:             []byte{0x80},
+			AggregatedSignature: signature,
+		},
+	})
+	require.NoError(t, err)
+	dblock := block.(*dijkstra.DijkstraBlock)
+
+	certified, present := dblock.BlockHeader.LeiosCertified()
+	require.True(t, present)
+	assert.True(t, certified)
+	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
+	assert.False(t, announced)
+	require.NotNil(t, dblock.BlockBody.LeiosCertificate)
+	assert.Equal(t, []byte{0x80}, dblock.BlockBody.LeiosCertificate.Signers)
+	assert.Equal(t, signature, dblock.BlockBody.LeiosCertificate.AggregatedSignature)
+	assert.Empty(t, dblock.Transactions())
+	assert.Equal(t, dblock.BlockBodyHash(), dblock.CalculatedBlockBodyHash())
 }
 
 func TestBuildBlockDijkstraNormalizesAdmittedTxForBlock(t *testing.T) {

@@ -25,9 +25,17 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 // devnetKeysDir locates the credential fixtures shipped with the repo.
@@ -307,5 +315,125 @@ func TestMempoolAdaptersPreservePendingTransactionView(t *testing.T) {
 	if !bytes.Equal(forgingTxs[0].Cbor, source.txs[0].Cbor) {
 		t.Fatalf("forging CBOR mismatch: got %x want %x",
 			forgingTxs[0].Cbor, source.txs[0].Cbor)
+	}
+}
+
+type testLeiosParentChain struct {
+	tip   ochainsync.Tip
+	block models.Block
+	err   error
+}
+
+func (c testLeiosParentChain) Tip() ochainsync.Tip {
+	return c.tip
+}
+
+func (c testLeiosParentChain) BlockByPoint(
+	ocommon.Point,
+	*database.Txn,
+) (models.Block, error) {
+	if c.err != nil {
+		return models.Block{}, c.err
+	}
+	return c.block, nil
+}
+
+func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
+	t *testing.T,
+) {
+	ebHashBytes := testLeiosHash(0x40)
+	parent := legacyLeiosParentBlock(t, ebHashBytes, 8192)
+	adapter := &leiosPipelineAdapter{
+		chain: testLeiosParentChain{
+			tip: ochainsync.Tip{
+				Point: ocommon.Point{
+					Slot: parent.Slot,
+					Hash: parent.Hash,
+				},
+				BlockNumber: parent.Number,
+			},
+			block: parent,
+		},
+	}
+
+	gotHash, ok, err := adapter.ParentLeiosAnnouncement()
+	if err != nil {
+		t.Fatalf("ParentLeiosAnnouncement: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected parent announcement")
+	}
+	if !bytes.Equal(gotHash.Bytes(), ebHashBytes) {
+		t.Fatalf("announcement hash mismatch: got %x want %x",
+			gotHash.Bytes(), ebHashBytes)
+	}
+}
+
+func testLeiosHash(seed byte) []byte {
+	hash := make([]byte, lcommon.Blake2b256Size)
+	for i := range hash {
+		hash[i] = seed + byte(i)
+	}
+	return hash
+}
+
+func legacyLeiosParentBlock(
+	t *testing.T,
+	ebHash []byte,
+	ebSize uint64,
+) models.Block {
+	t.Helper()
+	body := dijkstra.DijkstraBlockBody{
+		InvalidTransactions: []uint{},
+		Transactions:        []dijkstra.DijkstraTransaction{},
+	}
+	bodyCbor, err := body.MarshalCBOR()
+	if err != nil {
+		t.Fatalf("marshal Dijkstra body: %v", err)
+	}
+	var prevHash lcommon.Blake2b256
+	var issuerVkey lcommon.IssuerVkey
+	headerBody := []any{
+		uint64(7),
+		uint64(42),
+		prevHash,
+		issuerVkey,
+		make([]byte, 32),
+		lcommon.VrfResult{
+			Output: []byte{},
+			Proof:  make([]byte, 80),
+		},
+		uint64(len(bodyCbor)),
+		body.Hash(),
+		babbage.BabbageOpCert{
+			HotVkey:   make([]byte, 32),
+			Signature: make([]byte, 64),
+		},
+		babbage.BabbageProtoVersion{
+			Major: dijkstra.MinProtocolVersionDijkstra,
+		},
+		[]any{ebHash, ebSize},
+	}
+	headerCbor, err := cbor.Encode([]any{headerBody, make([]byte, 448)})
+	if err != nil {
+		t.Fatalf("encode Dijkstra header: %v", err)
+	}
+	blockCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(headerCbor),
+		cbor.RawMessage(bodyCbor),
+	})
+	if err != nil {
+		t.Fatalf("encode Dijkstra block: %v", err)
+	}
+	decoded, err := dijkstra.NewDijkstraBlockFromCbor(blockCbor)
+	if err != nil {
+		t.Fatalf("decode test Dijkstra block: %v", err)
+	}
+	return models.Block{
+		Hash:   decoded.Hash().Bytes(),
+		Cbor:   blockCbor,
+		Slot:   decoded.SlotNumber(),
+		Number: decoded.BlockNumber(),
+		Type:   dijkstra.BlockTypeDijkstra,
 	}
 }
