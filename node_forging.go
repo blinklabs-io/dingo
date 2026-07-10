@@ -23,7 +23,10 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/leiosheader"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
@@ -33,6 +36,8 @@ import (
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
+	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
 
 func (n *Node) validateBlockProducerStartup() (*forging.PoolCredentials, error) {
@@ -285,10 +290,18 @@ func (n *Node) initBlockForger(
 	// (i.e. Dijkstra era is enabled). Relay nodes and pre-Dijkstra
 	// block producers leave these nil and skip EB production.
 	var leiosChecker forging.LeiosProduceChecker
+	var leiosCerts forging.LeiosCertificateProvider
+	var leiosParent forging.LeiosParentAnnouncementProvider
 	var leiosEBCaster forging.EndorserBlockBroadcaster
 	var leiosMempool forging.MempoolProvider
 	if n.leiosPipelineManager != nil && n.ouroboros != nil {
-		leiosChecker = &leiosPipelineAdapter{mgr: n.leiosPipelineManager}
+		adapter := &leiosPipelineAdapter{
+			mgr:   n.leiosPipelineManager,
+			chain: n.chainManager.PrimaryChain(),
+		}
+		leiosChecker = adapter
+		leiosCerts = adapter
+		leiosParent = adapter
 		leiosEBCaster = n.ouroboros
 		leiosMempool = mempoolAdapter
 	}
@@ -304,21 +317,23 @@ func (n *Node) initBlockForger(
 
 	// Create the block forger with the real leader election
 	forger, err := forging.NewBlockForger(forging.ForgerConfig{
-		Mode:                        forging.ModeProduction,
-		Logger:                      n.config.logger,
-		Credentials:                 creds,
-		LeaderChecker:               election,
-		BlockBuilder:                builder,
-		BlockBroadcaster:            broadcaster,
-		BlockForged:                 n.ledgerState.RecordForgedBlock,
-		SlotClock:                   slotClock,
-		ForgeSyncToleranceSlots:     n.config.forgeSyncToleranceSlots,
-		ForgeStaleGapThresholdSlots: n.config.forgeStaleGapThresholdSlots,
-		BlockValidator:              blockValidator,
-		PromRegistry:                n.config.promRegistry,
-		LeiosProduceChecker:         leiosChecker,
-		LeiosEBBroadcaster:          leiosEBCaster,
-		LeiosMempool:                leiosMempool,
+		Mode:                            forging.ModeProduction,
+		Logger:                          n.config.logger,
+		Credentials:                     creds,
+		LeaderChecker:                   election,
+		BlockBuilder:                    builder,
+		BlockBroadcaster:                broadcaster,
+		BlockForged:                     n.ledgerState.RecordForgedBlock,
+		SlotClock:                       slotClock,
+		ForgeSyncToleranceSlots:         n.config.forgeSyncToleranceSlots,
+		ForgeStaleGapThresholdSlots:     n.config.forgeStaleGapThresholdSlots,
+		BlockValidator:                  blockValidator,
+		PromRegistry:                    n.config.promRegistry,
+		LeiosProduceChecker:             leiosChecker,
+		LeiosEBBroadcaster:              leiosEBCaster,
+		LeiosMempool:                    leiosMempool,
+		LeiosCertificateProvider:        leiosCerts,
+		LeiosParentAnnouncementProvider: leiosParent,
 	})
 	if err != nil {
 		// Stop election to prevent goroutine leak
@@ -612,11 +627,16 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 	return a.ledgerState.UpstreamTipSlot()
 }
 
-// leiosPipelineAdapter adapts leios.PipelineManager to
-// forging.LeiosProduceChecker. It translates the ProduceDecision return
-// value into the (bool, string, error) form the forge loop expects.
+// leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
+// the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
-	mgr *leios.PipelineManager
+	mgr   *leios.PipelineManager
+	chain leiosParentChain
+}
+
+type leiosParentChain interface {
+	Tip() ochainsync.Tip
+	BlockByPoint(ocommon.Point, *database.Txn) (models.Block, error)
 }
 
 func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
@@ -627,6 +647,55 @@ func (a *leiosPipelineAdapter) MayProduceEndorserBlock(
 		return false, "", err
 	}
 	return dec.Allowed, dec.Reason, nil
+}
+
+func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.LeiosCertifiedEndorserBlock {
+	eligible := a.mgr.EligibleCertifiedEbs()
+	out := make([]forging.LeiosCertifiedEndorserBlock, 0, len(eligible))
+	for _, eb := range eligible {
+		out = append(out, forging.LeiosCertifiedEndorserBlock{
+			SlotNo:            eb.SlotNo,
+			EndorserBlockHash: eb.EndorserBlockHash,
+			Certificate:       eb.Certificate,
+		})
+	}
+	return out
+}
+
+func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
+	ebHash lcommon.Blake2b256,
+) {
+	a.mgr.MarkEmbedded(ebHash)
+}
+
+func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
+	lcommon.Blake2b256,
+	bool,
+	error,
+) {
+	if a.chain == nil {
+		return lcommon.Blake2b256{}, false, errors.New("chain unavailable")
+	}
+	tip := a.chain.Tip()
+	if len(tip.Point.Hash) == 0 {
+		return lcommon.Blake2b256{}, false, nil
+	}
+	block, err := a.chain.BlockByPoint(tip.Point, nil)
+	if err != nil {
+		return lcommon.Blake2b256{}, false, fmt.Errorf(
+			"resolve parent block: %w",
+			err,
+		)
+	}
+	decoded, err := block.Decode()
+	if err != nil {
+		return lcommon.Blake2b256{}, false, fmt.Errorf(
+			"decode parent block: %w",
+			err,
+		)
+	}
+	hash, _, ok := leiosheader.ReferencedEndorserBlock(decoded.Header())
+	return hash, ok, nil
 }
 
 // forgedBlockValidatorAdapter adapts ledger.LedgerState to
