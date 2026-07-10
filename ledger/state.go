@@ -3257,6 +3257,8 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 		// Process batch in groups of batchSize to stay under DB txn limits
 		var tipForLog ochainsync.Tip
 		var checker ForgedBlockChecker
+		var parentEnvelope envelopeParent
+		var parentEnvelopeSet bool
 		for i = 0; i < len(nextBatch); i += batchSize {
 			end = min(
 				len(nextBatch),
@@ -3311,10 +3313,13 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			runningNonce := snapshotNonce
 			// Track expected previous hash for batch processing - updated after each block
 			expectedPrevHash := snapshotTipHash
-			parentEnvelope := envelopeParent{
-				slot:        snapshotTip.Point.Slot,
-				blockNumber: snapshotTip.BlockNumber,
-				origin:      len(snapshotTip.Point.Hash) == 0,
+			if !parentEnvelopeSet {
+				parentEnvelope = envelopeParent{
+					slot:        snapshotTip.Point.Slot,
+					blockNumber: snapshotTip.BlockNumber,
+					origin:      len(snapshotTip.Point.Hash) == 0,
+				}
+				parentEnvelopeSet = true
 			}
 			// Flag to enable validation after transaction commits (set inside callback,
 			// applied after commit to avoid mutating in-memory state on txn failure)

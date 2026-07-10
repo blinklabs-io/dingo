@@ -295,6 +295,18 @@ func TestValidateByronEbbPlacementRejectsNilHeader(t *testing.T) {
 	require.Contains(t, err.Error(), "nil header")
 }
 
+// TestValidateInboundBlockEnvelopeRejectsNilHeader ensures malformed non-Byron
+// blocks fail before ordering or size validation can dereference the header.
+func TestValidateInboundBlockEnvelopeRejectsNilHeader(t *testing.T) {
+	err := validateInboundBlockEnvelope(
+		&envelopeTestBlock{},
+		&shelley.ShelleyProtocolParameters{},
+		envelopeParent{},
+	)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "nil block header")
+}
+
 func mustEnvelopeCbor(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := cbor.Encode(value)

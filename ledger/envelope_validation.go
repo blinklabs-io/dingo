@@ -17,6 +17,7 @@ package ledger
 import (
 	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -59,6 +60,9 @@ func validateInboundBlockEnvelope(
 	if err := validateByronEbbPlacement(block); err != nil {
 		return err
 	}
+	if isNilBlockHeader(block.Header()) {
+		return errors.New("validate inbound block envelope: nil block header")
+	}
 	if err := validateBlockOrder(block, parent); err != nil {
 		return err
 	}
@@ -66,6 +70,20 @@ func validateInboundBlockEnvelope(
 		return nil
 	}
 	return validateBlockSizes(block, pparams)
+}
+
+func isNilBlockHeader(header lcommon.BlockHeader) bool {
+	if header == nil {
+		return true
+	}
+	value := reflect.ValueOf(header)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface,
+		reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // validateBlockOrder checks that a block follows its parent by block number
