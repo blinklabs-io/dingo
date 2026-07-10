@@ -1803,9 +1803,10 @@ duration/strategy strings that are otherwise only parsed at their point of use.
 Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes
 start the relay, private, metrics, debug, and bark listeners (and, under `api`
-storage, the UTxORPC/Blockfrost/Mesh/Midnight listeners); the `sync` and
-`mithril` utilities start only the metrics and debug listeners; `load` starts
-none. A port configured for an inactive listener cannot bind, so it is neither
+storage, the UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
+sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
+and debug listeners; the read-only `mithril list`/`show` and `load` start none.
+A port configured for an inactive listener cannot bind, so it is neither
 range-checked nor counted toward a collision; the relay, private, and metrics
 ports must additionally be set in the serving modes. Because the one-shot
 subcommands run a fixed operation regardless of the configured `runMode` (which

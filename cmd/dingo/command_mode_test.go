@@ -80,20 +80,34 @@ func TestEffectiveRunMode(t *testing.T) {
 			config.RunModeLoad,
 		},
 		{
-			"sync uses the sync utility mode",
+			"sync uses the sync operation mode",
 			[]string{"sync"},
 			config.RunModeServe,
 			config.RunModeSync,
 		},
+		// `mithril sync` starts the metrics/debug listeners, so it uses the
+		// sync operation mode; the read-only mithril subcommands do not.
 		{
-			"mithril list uses the mithril utility mode",
+			"mithril sync uses the sync operation mode",
+			[]string{"mithril", "sync"},
+			config.RunModeServe,
+			config.RunModeSync,
+		},
+		{
+			"mithril list is a read-only mithril utility",
 			[]string{"mithril", "list"},
 			config.RunModeServe,
 			config.RunModeMithril,
 		},
 		{
-			"mithril sync uses the mithril utility mode",
-			[]string{"mithril", "sync"},
+			"mithril show is a read-only mithril utility",
+			[]string{"mithril", "show"},
+			config.RunModeServe,
+			config.RunModeMithril,
+		},
+		{
+			"bare mithril is a read-only mithril utility",
+			[]string{"mithril"},
 			config.RunModeServe,
 			config.RunModeMithril,
 		},
@@ -101,8 +115,7 @@ func TestEffectiveRunMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := findCmd(t, root, tt.path...)
-			top := topLevelCommand(cmd)
-			got := effectiveRunMode(top, &config.Config{RunMode: tt.runMode})
+			got := effectiveRunMode(cmd, &config.Config{RunMode: tt.runMode})
 			require.Equal(t, tt.want, got)
 		})
 	}

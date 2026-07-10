@@ -384,19 +384,26 @@ func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 	assert.NoError(t, cfg.validate(RunModeSync, false))
 }
 
-// TestValidateUtilityModesValidateMetricsPort verifies that the sync and
-// mithril utilities still validate the metrics port they do start, even
-// though they skip the serving and API listener ports.
-func TestValidateUtilityModesValidateMetricsPort(t *testing.T) {
-	for _, mode := range []RunMode{RunModeSync, RunModeMithril} {
-		t.Run(string(mode), func(t *testing.T) {
-			cfg := validTestConfig()
-			cfg.MetricsPort = 99999999
-			err := cfg.validate(mode, false)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "invalid metricsPort")
-		})
-	}
+// TestValidateSyncModeValidatesMetricsPort verifies that the Mithril sync
+// operation still validates the metrics port it starts, even though it
+// skips the serving and API listener ports.
+func TestValidateSyncModeValidatesMetricsPort(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.MetricsPort = 99999999
+	err := cfg.validate(RunModeSync, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid metricsPort")
+}
+
+// TestValidateMithrilReadOnlyModeSkipsAuxPorts is a regression test for
+// the read-only Mithril subcommands (`mithril list`, `mithril show`),
+// which query the aggregator and start no listeners: a bad metrics or
+// debug port must not block them.
+func TestValidateMithrilReadOnlyModeSkipsAuxPorts(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.MetricsPort = 99999999
+	cfg.DebugPort = 99999999
+	assert.NoError(t, cfg.validate(RunModeMithril, false))
 }
 
 // TestValidateLoadModeSkipsAllListenerPorts verifies that load, which

@@ -104,14 +104,16 @@ const (
 
 	// RunModeSync and RunModeMithril are effective run modes used only for
 	// validation, not configurable runMode values (RunMode.Valid rejects
-	// them). The one-shot sync and mithril subcommands run a fixed
-	// operation regardless of the configured runMode; cmd/dingo passes the
-	// mode matching the invoked command to Config.Validate. They start
-	// neither the relay/private serving listeners nor the API listeners,
-	// but they do start a Prometheus metrics listener and an optional pprof
-	// debug listener, so they are kept distinct from load (which starts
-	// none) and from each other rather than collapsed into one catch-all
-	// utility mode.
+	// them); cmd/dingo passes the one matching the invoked command to
+	// Config.Validate. Neither starts the relay/private serving listeners
+	// or the API listeners. They differ in their auxiliary-listener
+	// surface: RunModeSync is the Mithril snapshot sync operation (via
+	// `dingo sync --mithril` or `dingo mithril sync`), which starts a
+	// Prometheus metrics listener and an optional pprof debug listener;
+	// RunModeMithril is the read-only Mithril query subcommands (`list`,
+	// `show`, and bare `mithril`), which start no listeners at all.
+	// Keeping them distinct lets Validate check exactly the ports each
+	// invocation binds.
 	RunModeSync    RunMode = "sync"
 	RunModeMithril RunMode = "mithril"
 )
@@ -147,8 +149,9 @@ func (m RunMode) IsDevMode() bool {
 // serving node, starting the relay and private (NtN/NtC) listeners. The
 // serving modes (serve, dev, leios, and the empty default) do; the load
 // and one-shot sync/mithril utilities do not. (The metrics and debug
-// listeners are not gated here: serving modes and the sync/mithril
-// utilities all start them, so Validate handles those ports separately.)
+// listeners are gated separately by Validate: serving modes and the
+// Mithril sync operation start them, the read-only Mithril subcommands do
+// not.)
 func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":

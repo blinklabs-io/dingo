@@ -206,9 +206,10 @@ func topLevelCommand(cmd *cobra.Command) *cobra.Command {
 // effectiveRunMode reports the run mode a command invocation will
 // actually execute, which governs the config it requires. Only the bare
 // `dingo` process honors the configured runMode; each explicit
-// subcommand runs a fixed operation, so its listener/source
-// requirements come from the command rather than cfg.RunMode.
-func effectiveRunMode(top *cobra.Command, cfg *config.Config) config.RunMode {
+// subcommand runs a fixed operation, so its listener/source requirements
+// come from the command (cmd, the leaf being run) rather than cfg.RunMode.
+func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
+	top := topLevelCommand(cmd)
 	if top == nil {
 		// Bare root command dispatches on the configured run mode,
 		// falling through to serve for an empty or unrecognized mode
@@ -226,10 +227,16 @@ func effectiveRunMode(top *cobra.Command, cfg *config.Config) config.RunMode {
 	case "load":
 		return config.RunModeLoad
 	case "sync":
+		// `dingo sync [--mithril]` runs the Mithril snapshot sync, which
+		// starts a metrics listener and an optional pprof debug listener.
 		return config.RunModeSync
 	case "mithril":
-		// mithril and its subcommands (sync, list, show): one-shot
-		// utilities that start no serving/API listeners.
+		// Only `mithril sync` binds the metrics/debug listeners; the
+		// read-only `mithril list` / `mithril show` (and bare `mithril`)
+		// query the aggregator and start nothing.
+		if cmd.Name() == "sync" {
+			return config.RunModeSync
+		}
 		return config.RunModeMithril
 	default:
 		// No other non-informational top-level command exists today;
@@ -434,7 +441,7 @@ DSN Override:
 		// version and list are informational and start no services, so
 		// they must still run even when the merged config is invalid.
 		if !isInformationalCommand(top) {
-			if err := cfg.Validate(effectiveRunMode(top, cfg)); err != nil {
+			if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
 				return fmt.Errorf("invalid configuration: %w", err)
 			}
 		}

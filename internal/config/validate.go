@@ -108,16 +108,15 @@ func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 	// the effective run mode plus the storage mode, mirroring the gating in
 	// (*dingo.Node).Start and cmd/dingo's node.Run/mithril paths:
 	//   - relay, private: serving modes only (required there);
-	//   - metrics, debug: serving modes and the sync/mithril utilities;
+	//   - metrics, debug: serving modes and the Mithril sync operation
+	//     (RunModeSync); the read-only Mithril subcommands start neither;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
 	//     storage (dev mode forces API storage on at startup).
-	// The load and one-shot utility invocations start no relay/private or
-	// API listeners, so those ports may be unset (0) for them.
+	// The load and read-only Mithril invocations start no listeners, so
+	// their ports may be unset (0) and are not checked.
 	serving := effectiveMode.RequiresListeners()
-	auxListeners := serving ||
-		effectiveMode == RunModeSync ||
-		effectiveMode == RunModeMithril
+	auxListeners := serving || effectiveMode == RunModeSync
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.StorageMode == storageModeAPI)
 	ports := []struct {
