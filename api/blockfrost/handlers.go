@@ -700,6 +700,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		resp = append(resp, AddressUTXOResponse{
 			Address:             utxo.Address,
 			TxHash:              utxo.TxHash,
+			TxIndex:             int(utxo.TxIndex),
 			OutputIndex:         int(utxo.OutputIndex),
 			Amount:              convertAddressAmounts(utxo.Amount),
 			Block:               utxo.Block,

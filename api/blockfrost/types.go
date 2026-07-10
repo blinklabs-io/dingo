@@ -201,8 +201,11 @@ type AddressAmountResponse struct {
 // AddressUTXOResponse represents a Blockfrost address
 // UTxO object.
 type AddressUTXOResponse struct {
-	Address             string                  `json:"address"`
-	TxHash              string                  `json:"tx_hash"`
+	Address string `json:"address"`
+	TxHash  string `json:"tx_hash"`
+	// TxIndex is a deprecated Blockfrost alias for OutputIndex ("UTXO index
+	// in the transaction"), kept for schema compatibility.
+	TxIndex             int                     `json:"tx_index"`
 	OutputIndex         int                     `json:"output_index"`
 	Amount              []AddressAmountResponse `json:"amount"`
 	Block               string                  `json:"block"`

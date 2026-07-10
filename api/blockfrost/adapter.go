@@ -2036,21 +2036,86 @@ func (a *NodeAdapter) AddressUTXOs(
 		)
 	}
 
+	// Inline datum and reference script are not persisted in metadata rows, so
+	// resolve each paged UTxO's CBOR (hot cache -> block LRU -> cold blob) and
+	// recover them from the decoded output. Missing entries degrade to nil
+	// rather than failing the whole listing.
+	utxoCbor, err := a.addressUtxoCbor(paged)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve CBOR for address UTxOs %q: %w",
+			address,
+			err,
+		)
+	}
+
 	ret := make([]AddressUTXOInfo, 0, len(paged))
 	for _, utxo := range paged {
 		txKey := hex.EncodeToString(utxo.TxId)
+		var inlineDatum, referenceScriptHash *string
+		if cborBytes := utxoCbor[utxoRef(utxo.Utxo)]; len(cborBytes) > 0 {
+			if output, decodeErr := gledger.NewTransactionOutputFromCbor(
+				cborBytes,
+			); decodeErr == nil {
+				inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(output)
+			}
+		}
 		ret = append(ret, AddressUTXOInfo{
 			Address:             address,
 			TxHash:              txKey,
+			TxIndex:             utxo.OutputIdx,
 			OutputIndex:         utxo.OutputIdx,
 			Amount:              addressAmountsFromUtxo(utxo.Utxo),
 			Block:               txBlockHashes[txKey],
 			DataHash:            optionalHexString(utxo.DatumHash),
-			InlineDatum:         nil,
-			ReferenceScriptHash: nil,
+			InlineDatum:         inlineDatum,
+			ReferenceScriptHash: referenceScriptHash,
 		})
 	}
 	return ret, total, nil
+}
+
+// addressUtxoCbor resolves the raw output CBOR for the given UTxOs in a single
+// batch, keyed by UtxoRef. It is used to recover the inline datum and reference
+// script, which are not stored in metadata rows.
+func (a *NodeAdapter) addressUtxoCbor(
+	utxos []models.UtxoWithOrdering,
+) (map[database.UtxoRef][]byte, error) {
+	if len(utxos) == 0 {
+		return map[database.UtxoRef][]byte{}, nil
+	}
+	seen := make(map[database.UtxoRef]struct{}, len(utxos))
+	refs := make([]database.UtxoRef, 0, len(utxos))
+	for _, utxo := range utxos {
+		ref := utxoRef(utxo.Utxo)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return a.ledgerState.Database().CborCache().ResolveUtxoCborBatch(refs)
+}
+
+// utxoDatumAndScriptRef derives the Blockfrost inline_datum and
+// reference_script_hash fields from a decoded transaction output. It returns nil
+// for either field the output does not carry: a datum-hash-only output has no
+// inline datum, and most outputs have no reference script.
+func utxoDatumAndScriptRef(
+	output lcommon.TransactionOutput,
+) (inlineDatum *string, referenceScriptHash *string) {
+	if datum := output.Datum(); datum != nil {
+		if raw := datum.Cbor(); len(raw) > 0 {
+			encoded := hex.EncodeToString(raw)
+			inlineDatum = &encoded
+		}
+	}
+	if scriptRef := output.ScriptRef(); scriptRef != nil {
+		hash := scriptRef.Hash()
+		encoded := hex.EncodeToString(hash.Bytes())
+		referenceScriptHash = &encoded
+	}
+	return inlineDatum, referenceScriptHash
 }
 
 // AddressTransactions returns paginated transaction
@@ -2422,18 +2487,31 @@ func (a *NodeAdapter) TransactionUTXOs(
 	})
 	outputs := make([]TransactionOutputInfo, 0, len(txOutputs))
 	for _, output := range txOutputs {
+		// Resolve the decoded output so inline datum and reference script hash
+		// can be recovered from the transaction CBOR (they are not persisted in
+		// metadata rows). A phase-2 invalid transaction's collateral return is
+		// held separately from the discarded regular outputs.
+		var decodedOutput lcommon.TransactionOutput
+		if isCollateralReturn {
+			decodedOutput = decodedTx.CollateralReturn()
+		} else if outputIndex := int(output.OutputIdx); outputIndex < len(decodedOutputs) {
+			decodedOutput = decodedOutputs[outputIndex]
+		}
 		address := ""
-		outputIndex := int(output.OutputIdx)
-		if outputIndex < len(decodedOutputs) {
-			address = decodedOutputs[outputIndex].Address().String()
+		var inlineDatum, referenceScriptHash *string
+		if decodedOutput != nil {
+			address = decodedOutput.Address().String()
+			inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(
+				decodedOutput,
+			)
 		}
 		outputs = append(outputs, TransactionOutputInfo{
 			Address:             address,
 			Amount:              addressAmountsFromUtxo(output),
 			OutputIndex:         output.OutputIdx,
 			DataHash:            optionalHexString(output.DatumHash),
-			InlineDatum:         optionalHexString(output.Datum),
-			ReferenceScriptHash: nil,
+			InlineDatum:         inlineDatum,
+			ReferenceScriptHash: referenceScriptHash,
 			Collateral:          isCollateralReturn,
 		})
 	}
@@ -3281,6 +3359,16 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 	if err != nil {
 		return TransactionInputInfo{}, err
 	}
+	// Inputs reference outputs produced by earlier transactions; their inline
+	// datum and reference script are recovered from the resolved output CBOR
+	// (populated by transactionInputCbor) since neither is persisted in
+	// metadata rows. Missing CBOR degrades both fields to nil.
+	var inlineDatum, referenceScriptHash *string
+	if len(utxo.Cbor) > 0 {
+		if output, decodeErr := utxo.Decode(); decodeErr == nil {
+			inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(output)
+		}
+	}
 	return TransactionInputInfo{
 		Address:             addr,
 		Amount:              addressAmountsFromUtxo(utxo),
@@ -3288,8 +3376,8 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 		OutputIndex:         utxo.OutputIdx,
 		DataHash:            optionalHexString(utxo.DatumHash),
 		Collateral:          collateral,
-		InlineDatum:         optionalHexString(utxo.Datum),
-		ReferenceScriptHash: nil,
+		InlineDatum:         inlineDatum,
+		ReferenceScriptHash: referenceScriptHash,
 		Reference:           reference,
 	}, nil
 }
