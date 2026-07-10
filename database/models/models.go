@@ -33,6 +33,7 @@ var MigrateModels = []any{
 	&Drep{},
 	&Epoch{},
 	&EpochSummary{},
+	&GenesisDelegation{},
 	&GovernanceProposal{},
 	&GovernanceVote{},
 	&ImportCheckpoint{},

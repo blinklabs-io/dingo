@@ -552,6 +552,14 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PParamUpdate, error)
 
+	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
+	// certificate for genesisHash before the supplied block slot.
+	GetGenesisDelegationForSlot(
+		[]byte, // genesisHash
+		uint64, // blockSlot
+		types.Txn,
+	) (*models.GenesisDelegation, error)
+
 	// GetUtxo retrieves an unspent transaction output by transaction ID and index.
 	GetUtxo(
 		[]byte, // txId

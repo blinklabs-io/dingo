@@ -69,6 +69,31 @@ func (d *MetadataStorePostgres) GetPParamUpdates(
 	return ret, nil
 }
 
+// GetGenesisDelegationForSlot returns the latest genesis-key delegation
+// certificate before the supplied block slot.
+func (d *MetadataStorePostgres) GetGenesisDelegationForSlot(
+	genesisHash []byte,
+	blockSlot uint64,
+	txn types.Txn,
+) (*models.GenesisDelegation, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var ret models.GenesisDelegation
+	result := db.Where("genesis_hash = ? AND added_slot < ?", genesisHash, blockSlot).
+		Order("added_slot DESC, block_index DESC, cert_index DESC, id DESC").
+		Limit(1).
+		Find(&ret)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if ret.ID == 0 {
+		return nil, nil
+	}
+	return &ret, nil
+}
+
 // SetPParams saves protocol parameters
 func (d *MetadataStorePostgres) SetPParams(
 	params []byte,

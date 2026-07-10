@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -58,6 +59,14 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 
 	ls := &LedgerState{
 		validationEnabled: true,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 2_000,
+				Nonce:         make([]byte, 32),
+			},
+		},
 		config: LedgerStateConfig{
 			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			EventBus: bus,
@@ -74,6 +83,144 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 	got := testutil.RequireReceive(t, recycled, 2*time.Second, "recycle event not published")
 	assert.Equal(t, connId, got.ConnectionId)
 	assert.Equal(t, "header_verification_failure", got.Reason)
+}
+
+func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	connId := testRecycleConnId()
+
+	recycled := make(chan ConnectionRecycleRequestedEvent, 1)
+	bus.SubscribeFunc(
+		ConnectionRecycleRequestedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ConnectionRecycleRequestedEvent)
+			if ok {
+				recycled <- e
+			}
+		},
+	)
+
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             testChain,
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			BlockfetchRequestRangeFunc: func(
+				ouroboros.ConnectionId,
+				ocommon.Point,
+				ocommon.Point,
+			) error {
+				return nil
+			},
+		},
+	}
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId,
+		BlockHeader:  header,
+		Point:        point,
+	})
+	require.NoError(t, err)
+
+	testutil.RequireNoReceive(
+		t,
+		recycled,
+		100*time.Millisecond,
+		"missing epoch should defer header verification, not recycle peer",
+	)
+	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
+}
+
+func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(bus.Stop)
+	connId := testRecycleConnId()
+
+	recycled := make(chan ConnectionRecycleRequestedEvent, 1)
+	bus.SubscribeFunc(
+		ConnectionRecycleRequestedEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ConnectionRecycleRequestedEvent)
+			if ok {
+				recycled <- e
+			}
+		},
+	)
+
+	requested := make(chan ocommon.Point, 1)
+	cm, err := chain.NewManager(nil, nil)
+	require.NoError(t, err)
+	testChain := cm.PrimaryChain()
+	ls := &LedgerState{
+		validationEnabled: true,
+		chain:             testChain,
+		epochCache: []models.Epoch{
+			{
+				EpochId:       0,
+				StartSlot:     0,
+				LengthInSlots: 2_000,
+			},
+		},
+		config: LedgerStateConfig{
+			Logger:   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EventBus: bus,
+			BlockfetchRequestRangeFunc: func(
+				_ ouroboros.ConnectionId,
+				start ocommon.Point,
+				_ ocommon.Point,
+			) error {
+				requested <- start
+				return nil
+			},
+		},
+	}
+	t.Cleanup(func() {
+		if ls.chainsyncBlockfetchTimeoutTimer != nil {
+			ls.chainsyncBlockfetchTimeoutTimer.Stop()
+		}
+	})
+	header := mockHeader{slot: 1000, blockNumber: 100}
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	err = ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
+		ConnectionId: connId,
+		BlockHeader:  header,
+		Point:        point,
+	})
+	require.NoError(t, err)
+
+	gotStart := testutil.RequireReceive(
+		t,
+		requested,
+		2*time.Second,
+		"empty nonce should start blockfetch for deferred verification",
+	)
+	assert.Equal(t, point, gotStart)
+	testutil.RequireNoReceive(
+		t,
+		recycled,
+		100*time.Millisecond,
+		"empty nonce should defer header verification, not recycle peer",
+	)
+	assert.True(t, testChain.FirstHeaderMatchesPoint(point))
+	assert.False(t, testChain.FirstVerifiedHeaderMatchesPoint(point))
 }
 
 // TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent verifies that
@@ -118,4 +265,32 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) 
 	got := testutil.RequireReceive(t, recycled, 2*time.Second, "recycle event not published")
 	assert.Equal(t, connId, got.ConnectionId)
 	assert.Equal(t, "block_header_verification_failure", got.Reason)
+}
+
+func TestBlockfetchStatefulHeaderVerificationDefersUntilLedgerApply(
+	t *testing.T,
+) {
+	connId := testRecycleConnId()
+	tb := createTestBlock(t, [32]byte{47}, 0, tamperNone)
+	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
+	ls.validationEnabled = true
+	ls.activeBlockfetchConnId = connId
+	ls.chainsyncBlockfetchReadyChan = make(chan struct{})
+	ls.chain = &chain.Chain{}
+
+	point := ocommon.NewPoint(tb.block.SlotNumber(), tb.block.Hash().Bytes())
+	err := ls.handleEventBlockfetchBlock(BlockfetchEvent{
+		ConnectionId: connId,
+		Block:        tb.block,
+		Point:        point,
+	})
+	require.NoError(t, err)
+	require.Len(t, ls.pendingBlockfetchEvents, 1)
+	assert.True(t, ls.consumeDeferredHeaderValidation(point))
+	value, err := ls.db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Equal(t, deferredHeaderValidationSyncStateValue, value)
 }

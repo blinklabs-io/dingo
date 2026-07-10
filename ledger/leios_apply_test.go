@@ -129,7 +129,7 @@ func TestApplyEndorserBlockAppliesTransaction(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, err = ls.applyEndorserBlock(
+		applied, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x33),
 			1,
@@ -163,7 +163,7 @@ func TestApplyEndorserBlockAppliesMultipleTransactions(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, err = ls.applyEndorserBlock(
+		applied, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x55),
 			1,
@@ -194,7 +194,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		appliedFirst, err = ls.applyEndorserBlock(
+		appliedFirst, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x81),
 			1,
@@ -205,7 +205,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		appliedSameTxnDuplicate, err = ls.applyEndorserBlock(
+		appliedSameTxnDuplicate, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x83),
 			2,
@@ -216,7 +216,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		appliedSecondUnique, err = ls.applyEndorserBlock(
+		appliedSecondUnique, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x85),
 			3,
@@ -243,7 +243,7 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	txn = db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		appliedCommittedDuplicate, err = ls.applyEndorserBlock(
+		appliedCommittedDuplicate, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x87),
 			4,
@@ -258,11 +258,12 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 }
 
 // On the Haskell-conformant path (Musashi prototype) the endorser block is
-// stored but its transactions are not applied to the UTxO.
+// stored and its transaction metadata is recorded, but its transactions are not
+// applied to the UTxO.
 func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
-	rawTx, bodyCbor, _ := leiosApplyTestTx(t, 0x06)
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
 
 	const ebSlot = uint64(400)
 	ebHash := leiosApplyTestEbHash(0x66)
@@ -270,7 +271,7 @@ func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
 	txn := db.Transaction(true)
 	require.NoError(t, txn.Do(func(txn *database.Txn) error {
 		var err error
-		applied, err = ls.applyEndorserBlock(
+		applied, _, err = ls.applyEndorserBlock(
 			txn,
 			leiosApplyTestRankingPoint(0x77),
 			1,
@@ -281,10 +282,60 @@ func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
 		return err
 	}))
 
-	// Nothing applied to the UTxO, but the endorser blob is still stored.
+	// Nothing applied to the UTxO, but metadata and the endorser blob are stored.
 	require.Equal(t, 0, applied)
-	requireLeiosApplyTestTxCount(t, gdb, 0)
+	requireLeiosApplyTestTxCount(t, gdb, 1)
+	var gotTx models.Transaction
+	require.NoError(t, gdb.Where("hash = ?", tx.Hash().Bytes()).First(&gotTx).Error)
+	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+}
+
+func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x07)
+	firstPoint := leiosApplyTestRankingPoint(0x91)
+	replayPoint := leiosApplyTestRankingPoint(0x93)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			firstPoint,
+			1,
+			600,
+			leiosApplyTestEbHash(0x92),
+			[]cbor.RawMessage{rawTx, rawTx},
+		)
+		return err
+	}))
+
+	txn = db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		_, _, err := ls.applyEndorserBlock(
+			txn,
+			replayPoint,
+			2,
+			601,
+			leiosApplyTestEbHash(0x94),
+			[]cbor.RawMessage{rawTx},
+		)
+		return err
+	}))
+
+	requireLeiosApplyTestTxCount(t, gdb, 1)
+	var gotTx models.Transaction
+	require.NoError(t, gdb.Where("hash = ?", tx.Hash().Bytes()).First(&gotTx).Error)
+	require.Equal(t, firstPoint.Slot, gotTx.Slot)
+	require.Equal(t, uint32(0), gotTx.BlockIndex)
+	requireLeiosApplyTestEndorserBlob(
+		t,
+		db,
+		600,
+		leiosApplyTestEbHash(0x92),
+		append(append([]byte{}, bodyCbor...), bodyCbor...),
+	)
+	requireLeiosApplyTestEndorserBlob(t, db, 601, leiosApplyTestEbHash(0x94), bodyCbor)
 }
 
 // leiosTestHash returns a distinct 32-byte hash whose bytes are all b, usable
