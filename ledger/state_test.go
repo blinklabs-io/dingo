@@ -4049,6 +4049,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			false,
 			false,
 			nil,
+			envelopeParent{},
 			nil,
 			eras.BabbageEraDesc,
 			nil,
