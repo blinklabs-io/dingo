@@ -383,8 +383,11 @@ type AddressAmountInfo struct {
 // AddressUTXOInfo holds address UTxO data needed by the
 // API.
 type AddressUTXOInfo struct {
-	Address             string
-	TxHash              string
+	Address string
+	TxHash  string
+	// TxIndex is the deprecated Blockfrost alias for OutputIndex (the UTxO's
+	// index within its producing transaction); it carries the same value.
+	TxIndex             uint32
 	OutputIndex         uint32
 	Amount              []AddressAmountInfo
 	Block               string
