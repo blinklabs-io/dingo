@@ -33,10 +33,18 @@ import (
 // ScheduleFormatVersion identifies the in-memory and on-disk shape of a
 // computed Schedule. Bump it whenever a code change alters how schedules
 // are computed (e.g. the consensus mode threading added with the
-// per-era TPraos/CPraos split): older persisted schedules then fail
-// validatePersistedSchedule and are recomputed from scratch instead of
-// being silently reused with stale assumptions.
-const ScheduleFormatVersion = 1
+// per-era TPraos/CPraos split, or the epoch slot range becoming
+// era-aware): older persisted schedules then fail validatePersistedSchedule
+// and are recomputed from scratch instead of being silently reused with
+// stale assumptions.
+const ScheduleFormatVersion = 2
+
+// EpochSlotRange identifies the absolute slot range covered by an epoch.
+// StartSlot is inclusive and SlotCount is the number of slots to evaluate.
+type EpochSlotRange struct {
+	StartSlot uint64
+	SlotCount uint64
+}
 
 // Schedule represents the leader schedule for a stake pool in an epoch.
 // It contains the slots where the pool is eligible to produce blocks.
@@ -131,16 +139,12 @@ type Calculator struct {
 	// ActiveSlotCoeff (f) determines block production rate.
 	// For mainnet, f = 0.05 (5% of slots have blocks on average)
 	ActiveSlotCoeff float64
-
-	// SlotsPerEpoch is the number of slots in an epoch.
-	SlotsPerEpoch uint64
 }
 
 // NewCalculator creates a calculator with the given protocol parameters.
-func NewCalculator(activeSlotCoeff float64, slotsPerEpoch uint64) *Calculator {
+func NewCalculator(activeSlotCoeff float64) *Calculator {
 	return &Calculator{
 		ActiveSlotCoeff: activeSlotCoeff,
-		SlotsPerEpoch:   slotsPerEpoch,
 	}
 }
 
@@ -196,6 +200,7 @@ func (c *Calculator) activeSlotCoeffRat() (*big.Rat, error) {
 // reaching the canonical chain.
 func (c *Calculator) CalculateSchedule(
 	epoch uint64,
+	epochRange EpochSlotRange,
 	poolId lcommon.PoolKeyHash,
 	poolVrfSkey []byte,
 	poolStake uint64,
@@ -205,6 +210,16 @@ func (c *Calculator) CalculateSchedule(
 ) (*Schedule, error) {
 	if totalStake == 0 {
 		return nil, errors.New("total stake cannot be zero")
+	}
+	if epochRange.SlotCount == 0 {
+		return nil, errors.New("epoch slot count cannot be zero")
+	}
+	if epochRange.StartSlot > ^uint64(0)-epochRange.SlotCount {
+		return nil, fmt.Errorf(
+			"epoch slot range overflows uint64: start=%d count=%d",
+			epochRange.StartSlot,
+			epochRange.SlotCount,
+		)
 	}
 
 	// Create VRF signer from the pool's VRF secret key seed
@@ -216,8 +231,8 @@ func (c *Calculator) CalculateSchedule(
 	schedule := NewSchedule(epoch, poolId, poolStake, totalStake, epochNonce)
 
 	// Calculate epoch slot range
-	epochStartSlot := epoch * c.SlotsPerEpoch
-	epochEndSlot := epochStartSlot + c.SlotsPerEpoch
+	epochStartSlot := epochRange.StartSlot
+	epochEndSlot := epochStartSlot + epochRange.SlotCount
 
 	activeSlotCoeff, err := c.activeSlotCoeffRat()
 	if err != nil {

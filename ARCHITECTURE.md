@@ -1,6 +1,6 @@
 # Architecture
 
-Last reviewed: 2026-06-23
+Last reviewed: 2026-07-09
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -371,7 +371,8 @@ sequenceDiagram
     Note over SC,EB: Epoch Preparation
     EB->>LE: EpochTransitionEvent(newEpoch)
     LE->>LS: GetStakeDistribution("mark" snapshot, epoch-2)
-    LE->>LE: compute VRF schedule for new epoch
+    LE->>LS: EpochSlotRange(newEpoch)
+    LE->>LE: compute VRF schedule over absolute epoch slots
 
     Note over SC,EB: Per-Slot Forging Loop
     SC->>BF: slot tick
@@ -1490,7 +1491,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 
 ### Leader Election (`ledger/leader/`)
 
-`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. For each slot, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures remain hard validation rejects, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
+`Election` subscribes to epoch transition events and pre-computes a leader schedule for each epoch. The epoch provider supplies the era-aware absolute slot range for the epoch from `LedgerState.EpochInfo`, which is backed by the hard-fork summary; leader schedules must not derive the range as `epoch * slotsPerEpoch`, because Byron-era prefixes make that value wrong on preprod and mainnet. For each slot in the resolved range, it checks whether the pool's VRF output meets the threshold determined by the pool's relative stake as of the end of epoch E-2 (the reference node's active `set`/`nesPd` distribution). dingo captures `mark[K]` at the boundary into epoch K, holding stake as of the end of K-1, so that distribution is the Mark row for epoch E-1: `praos.StakeSnapshotEpoch(E)` returns E-1 (see "dingo storage indexing" under Stake Snapshots). Header validation uses the same Mark row except for the epoch imported from a Mithril snapshot, where it uses the imported active `pool-distr` stake fraction. Mark snapshots are captured from slot-aware delegation and UTxO state at the boundary slot; threshold failures remain hard validation rejects, and a pool absent from the epoch's Mark distribution is a hard reject mirroring the reference node's `VRFKeyUnknown`. An epoch whose Mark row is entirely empty instead signals a dingo-side storage or computation gap (corrupt DB, incomplete Mithril import, pruned history) rather than pool ineligibility, and the reject message says so. Post-Mithril historical Mark rows captured at or after the target snapshot epoch's start slot are treated as import artifacts and skip only the stake-threshold eligibility check.
 
 ### Block Forging (`ledger/forging/`)
 
@@ -1502,6 +1503,7 @@ When running as a stake pool operator, Dingo can produce blocks. This involves t
 5. Broadcasts the forged block through the chain manager
 
 The forger tracks slot battles (competing blocks at the same slot) and skips forging when the node is not sufficiently synced, controlled by `forgeSyncToleranceSlots` and `forgeStaleGapThresholdSlots`.
+KES periods are computed from the era-aware absolute slot (`currentSlot / slotsPerKESPeriod`) for both startup opcert validation and forge-time signing, so networks with Byron-era prefixes do not skew the current KES period by converting wall-clock duration directly through the Shelley slot length.
 
 #### Optional Self-Validation (`DINGO_VALIDATE_FORGED_BLOCK`)
 

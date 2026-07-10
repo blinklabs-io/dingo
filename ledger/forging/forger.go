@@ -321,7 +321,12 @@ func (f *BlockForger) Start(ctx context.Context) error {
 	if f.metrics != nil && f.slotClock != nil && f.creds != nil {
 		if slotsPerKES := f.slotClock.SlotsPerKESPeriod(); slotsPerKES > 0 {
 			if currentSlot, err := f.slotClock.CurrentSlot(); err == nil {
-				f.updateKESMetrics(currentSlot / slotsPerKES)
+				if kesPeriod, err := CurrentKESPeriod(
+					currentSlot,
+					slotsPerKES,
+				); err == nil {
+					f.updateKESMetrics(kesPeriod)
+				}
 			}
 		}
 	}
@@ -568,7 +573,10 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	if slotsPerKESPeriod == 0 {
 		return errors.New("slots per KES period is zero")
 	}
-	kesPeriod := currentSlot / slotsPerKESPeriod
+	kesPeriod, err := CurrentKESPeriod(currentSlot, slotsPerKESPeriod)
+	if err != nil {
+		return err
+	}
 
 	// Ensure KES key is at correct period
 	if err := f.creds.UpdateKESPeriod(kesPeriod); err != nil {
