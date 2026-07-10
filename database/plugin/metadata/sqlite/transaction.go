@@ -961,6 +961,9 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 			)
 		}
 	}
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1106,6 +1109,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				result.Error,
 			)
 		}
+	}
+
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
 	}
 
 	// Create UTxO records for outputs in a single statement per transaction.
@@ -2804,6 +2811,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				result.Error,
 			)
 		}
+	}
+
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
 	}
 
 	// ------------------------------------------------------------------ //
@@ -4698,6 +4709,15 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 		Delete(&models.TransactionMetadataLabel{}); result.Error != nil {
 		return fmt.Errorf(
 			"delete transaction metadata labels after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
+
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.AssetMintBurn{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete asset mint/burn events after slot %d: %w",
 			slot,
 			result.Error,
 		)

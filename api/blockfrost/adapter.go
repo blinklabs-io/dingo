@@ -940,17 +940,82 @@ func (a *NodeAdapter) Asset(
 		)
 	}
 
-	return AssetInfo{
-		Asset:             policyID + hex.EncodeToString(assetName),
-		PolicyID:          policyID,
-		AssetName:         hex.EncodeToString(assetName),
-		AssetNameASCII:    assetNameASCII(assetName),
-		Fingerprint:       string(asset.Fingerprint),
-		Quantity:          strconv.FormatUint(quantity, 10),
-		InitialMintTxHash: "",
-		MintOrBurnCount:   0,
-		OnchainMetadata:   nil,
-	}, nil
+	initialMintTxHash, mintOrBurnCount, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetMintBurnInfo(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset mint/burn info by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+
+	info := AssetInfo{
+		Asset:           policyID + hex.EncodeToString(assetName),
+		PolicyID:        policyID,
+		AssetName:       hex.EncodeToString(assetName),
+		AssetNameASCII:  assetNameASCII(assetName),
+		Fingerprint:     string(asset.Fingerprint),
+		Quantity:        strconv.FormatUint(quantity, 10),
+		MintOrBurnCount: mintOrBurnCount,
+	}
+	if len(initialMintTxHash) > 0 {
+		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
+		if err := a.populateAssetOnchainMetadata(
+			&info,
+			initialMintTxHash,
+			policyID,
+			assetName,
+		); err != nil {
+			return AssetInfo{}, err
+		}
+	}
+	return info, nil
+}
+
+// populateAssetOnchainMetadata resolves the CIP-25 on-chain metadata for an
+// asset from its initial mint transaction and fills the metadata fields on
+// info. A mint transaction without (matching) metadata is not an error; the
+// fields are simply left unset.
+func (a *NodeAdapter) populateAssetOnchainMetadata(
+	info *AssetInfo,
+	initialMintTxHash []byte,
+	policyID string,
+	assetName []byte,
+) error {
+	tx, err := a.ledgerState.Database().
+		GetTransactionByHash(initialMintTxHash, nil)
+	if err != nil {
+		return fmt.Errorf(
+			"get initial mint tx %x for asset %s%x: %w",
+			initialMintTxHash,
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if tx == nil || len(tx.Metadata) == 0 {
+		return nil
+	}
+	// A mint transaction without a CIP-25 (label 721) entry is normal; treat a
+	// missing label as "no on-chain metadata" rather than an error.
+	jsonValue, _, err := labelcodec.RawValues(tx.Metadata, metadataLabelCIP25)
+	if err != nil {
+		return nil //nolint:nilerr // missing metadata label is not an error
+	}
+	metadata, standard, ok := parseCIP25Metadata(
+		string(jsonValue),
+		policyID,
+		assetName,
+	)
+	if !ok {
+		return nil
+	}
+	info.OnchainMetadata = &metadata
+	info.OnchainMetadataStandard = &standard
+	return nil
 }
 
 // AssetAddresses returns paginated addresses currently holding the given asset.

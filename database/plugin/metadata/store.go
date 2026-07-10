@@ -723,6 +723,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetAssetMintBurnInfo returns the hash of the earliest transaction that
+	// minted the asset (its initial mint) and the total number of recorded
+	// mint/burn events for the asset. Returns (nil, 0, nil) when the asset has
+	// no recorded mint/burn history (e.g. running in core storage mode).
+	GetAssetMintBurnInfo(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,

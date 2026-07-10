@@ -573,15 +573,18 @@ type TransactionRequiredSignerInfo struct {
 
 // AssetInfo holds native asset data needed by the API.
 type AssetInfo struct {
-	Asset             string
-	PolicyID          string
-	AssetName         string
-	AssetNameASCII    string
-	Fingerprint       string
-	Quantity          string
-	InitialMintTxHash string
-	MintOrBurnCount   int
-	OnchainMetadata   *any
+	OnchainMetadata         *any
+	OnchainMetadataStandard *string
+	OnchainMetadataExtra    *string
+	Metadata                *any
+	Asset                   string
+	PolicyID                string
+	AssetName               string
+	AssetNameASCII          string
+	Fingerprint             string
+	Quantity                string
+	InitialMintTxHash       string
+	MintOrBurnCount         int
 }
 
 // AssetHolderInfo holds address and quantity data for a single asset holder.

@@ -20,6 +20,7 @@ var MigrateModels = []any{
 	&AccountRewardDelta{},
 	&AddressTransaction{},
 	&Asset{},
+	&AssetMintBurn{},
 	&AuthCommitteeHot{},
 	&BackfillCheckpoint{},
 	&BlockNonce{},

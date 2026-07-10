@@ -661,16 +661,20 @@ func TestHandleBlockNotFound(t *testing.T) {
 }
 
 func TestHandleAsset(t *testing.T) {
+	onchain := any(map[string]any{"name": "Test Token", "decimals": float64(6)})
+	standard := "CIP25v2"
 	mock := &mockNode{
 		asset: AssetInfo{
-			Asset:             "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
-			PolicyID:          "00112233445566778899aabbccddeeff00112233445566778899aabb",
-			AssetName:         "746f6b656e",
-			AssetNameASCII:    "token",
-			Fingerprint:       "asset1test",
-			Quantity:          "42",
-			InitialMintTxHash: "",
-			MintOrBurnCount:   0,
+			Asset:                   "00112233445566778899aabbccddeeff00112233445566778899aabb746f6b656e",
+			PolicyID:                "00112233445566778899aabbccddeeff00112233445566778899aabb",
+			AssetName:               "746f6b656e",
+			AssetNameASCII:          "token",
+			Fingerprint:             "asset1test",
+			Quantity:                "42",
+			InitialMintTxHash:       "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
+			MintOrBurnCount:         3,
+			OnchainMetadata:         &onchain,
+			OnchainMetadataStandard: &standard,
 		},
 	}
 	b := newTestBlockfrost(mock)
@@ -700,7 +704,11 @@ func TestHandleAsset(t *testing.T) {
 	assert.Equal(t, mock.asset.Quantity, resp.Quantity)
 	assert.Equal(t, mock.asset.InitialMintTxHash, resp.InitialMintTxHash)
 	assert.Equal(t, mock.asset.MintOrBurnCount, resp.MintOrBurnCount)
-	assert.Nil(t, resp.OnchainMetadata)
+	require.NotNil(t, resp.OnchainMetadata)
+	assert.Equal(t, onchain, *resp.OnchainMetadata)
+	require.NotNil(t, resp.OnchainMetadataStandard)
+	assert.Equal(t, "CIP25v2", *resp.OnchainMetadataStandard)
+	assert.Nil(t, resp.Metadata)
 }
 
 func TestHandleAssetInvalidIdentifier(t *testing.T) {
