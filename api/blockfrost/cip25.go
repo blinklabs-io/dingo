@@ -37,8 +37,10 @@ const (
 //
 // Dingo's metadata codec renders byte-string map keys as hex, so the policy id
 // key is always the hex policy id for both v1 (text hex) and v2 (bytes) forms.
-// The asset name key is the UTF-8 name in v1 and the hex name in v2, so both
-// candidates are tried.
+// The asset name key is the UTF-8 name in v1 and the hex name in v2. The key
+// format is chosen from the detected standard rather than trying both, so an
+// asset whose UTF-8 name happens to collide with another asset's hex name under
+// the same policy is not matched to the wrong entry.
 //
 // It returns the metadata object, the detected standard ("CIP25v1" or
 // "CIP25v2"), and whether a matching asset entry was found.
@@ -69,19 +71,21 @@ func parseCIP25Metadata(
 		return nil, "", false
 	}
 
-	candidates := []string{hex.EncodeToString(assetName), string(assetName)}
-	for _, key := range candidates {
-		raw, ok := byAsset[key]
-		if !ok {
-			continue
-		}
-		var metadata any
-		if err := json.Unmarshal(raw, &metadata); err != nil {
-			return nil, "", false
-		}
-		return metadata, standard, true
+	// v2 asset-name keys are byte strings (rendered as hex); v1 keys are the
+	// UTF-8 asset name.
+	key := string(assetName)
+	if standard == onchainMetadataStandardCIP25v2 {
+		key = hex.EncodeToString(assetName)
 	}
-	return nil, "", false
+	raw, ok := byAsset[key]
+	if !ok {
+		return nil, "", false
+	}
+	var metadata any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, "", false
+	}
+	return metadata, standard, true
 }
 
 // isCIP25Version2 reports whether a CIP-25 "version" value denotes version 2.

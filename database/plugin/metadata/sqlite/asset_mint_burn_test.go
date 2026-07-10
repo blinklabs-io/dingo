@@ -116,6 +116,36 @@ func TestAssetMintBurnInfoNoHistory(t *testing.T) {
 	assert.Equal(t, 0, count)
 }
 
+func TestAssetMintBurnNotRecordedForInvalidTx(t *testing.T) {
+	t.Parallel()
+	store := setupTestDBWithMode(t, types.StorageModeAPI)
+	name := []byte("token")
+
+	// A phase-2-invalid transaction includes a mint field but never applies it
+	// on-chain, so it must not be recorded as mint/burn history.
+	tx := &mockTransaction{
+		hash:    lcommon.NewBlake2b256([]byte("invalid_mint")),
+		isValid: false,
+		mint:    mintOf(name, 1000),
+	}
+	require.NoError(t, store.SetTransaction(
+		tx,
+		ocommon.Point{Hash: []byte("invalid_block"), Slot: 100},
+		0,
+		nil,
+		nil,
+	))
+
+	initialHash, count, err := store.GetAssetMintBurnInfo(
+		testMintPolicy,
+		name,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.Nil(t, initialHash)
+	assert.Equal(t, 0, count)
+}
+
 func TestAssetMintBurnNotRecordedInCoreMode(t *testing.T) {
 	t.Parallel()
 	store := setupTestDBWithMode(t, types.StorageModeCore)

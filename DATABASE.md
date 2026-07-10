@@ -776,11 +776,16 @@ LIMIT 1;
 ```
 
 On-chain metadata (`onchain_metadata`, `onchain_metadata_standard`) is not
-stored in a dedicated table: the adapter loads the initial mint transaction's
-`transaction.metadata`, extracts CIP-25 metadata label `721`, and matches the
-policy/asset entry (v1 UTF-8 or v2 hex asset-name keys). Off-chain `metadata`
-(the Cardano token registry) has no on-node source and is returned as `null`.
-CIP-68 datum-based metadata is not yet parsed.
+stored in a dedicated table: the adapter loads only the initial mint
+transaction's `transaction.metadata` column (via
+`GetTransactionMetadataByHash`, which selects the blob without preloading
+inputs/outputs/witnesses), extracts CIP-25 metadata label `721`, and matches
+the policy/asset entry. The asset-name key format is chosen from the detected
+standard — UTF-8 for v1, hex for v2 — rather than trying both, so an asset
+whose UTF-8 name collides with another asset's hex name is not mismatched.
+Off-chain `metadata` (the Cardano token registry) has no on-node source and,
+like CIP-68 (`onchain_metadata_extra`) datum-based metadata, is returned as
+`null` to match the Blockfrost response shape.
 
 The Blockfrost-compatible `GET /api/v0/assets/{asset}/addresses` endpoint
 uses `GetUtxosByAssets` for live candidate UTxOs, decodes each UTxO CBOR value

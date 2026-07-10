@@ -985,23 +985,23 @@ func (a *NodeAdapter) populateAssetOnchainMetadata(
 	policyID string,
 	assetName []byte,
 ) error {
-	tx, err := a.ledgerState.Database().
-		GetTransactionByHash(initialMintTxHash, nil)
+	metadataCbor, err := a.ledgerState.Database().
+		GetTransactionMetadataByHash(initialMintTxHash, nil)
 	if err != nil {
 		return fmt.Errorf(
-			"get initial mint tx %x for asset %s%x: %w",
+			"get initial mint tx %x metadata for asset %s%x: %w",
 			initialMintTxHash,
 			policyID,
 			assetName,
 			err,
 		)
 	}
-	if tx == nil || len(tx.Metadata) == 0 {
+	if len(metadataCbor) == 0 {
 		return nil
 	}
 	// A mint transaction without a CIP-25 (label 721) entry is normal; treat a
 	// missing label as "no on-chain metadata" rather than an error.
-	jsonValue, _, err := labelcodec.RawValues(tx.Metadata, metadataLabelCIP25)
+	jsonValue, _, err := labelcodec.RawValues(metadataCbor, metadataLabelCIP25)
 	if err != nil {
 		return nil //nolint:nilerr // missing metadata label is not an error
 	}

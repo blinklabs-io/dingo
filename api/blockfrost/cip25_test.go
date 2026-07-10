@@ -54,6 +54,23 @@ func TestParseCIP25Metadata(t *testing.T) {
 			wantName:     "Str Ver",
 		},
 		{
+			// v1 metadata must not match the hex form of the asset name: here
+			// the entry keyed by another asset's UTF-8 name equals our asset's
+			// hex name ("746f6b656e"). A hex lookup would return the wrong
+			// asset's metadata.
+			name: "v1 does not fall back to hex key",
+			json: `{"` + policyID +
+				`":{"746f6b656e":{"name":"Collision"}}}`,
+			wantOK: false,
+		},
+		{
+			// v2 metadata is keyed by hex; a UTF-8 key must not be matched.
+			name: "v2 does not fall back to utf8 key",
+			json: `{"` + policyID +
+				`":{"token":{"name":"Collision"}},"version":2}`,
+			wantOK: false,
+		},
+		{
 			name:   "policy not present",
 			json:   `{"deadbeef":{"token":{"name":"nope"}}}`,
 			wantOK: false,

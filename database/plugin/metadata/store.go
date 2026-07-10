@@ -592,6 +592,17 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint, bool, error)
 
+	// GetTransactionMetadataByHash returns only the stored (API-mode)
+	// CBOR metadata blob for the transaction with the given hash,
+	// without loading any associations. Returns (nil, nil) when no such
+	// transaction exists or when it has no metadata. Used by the asset
+	// endpoint to resolve CIP-25 on-chain metadata without paying for
+	// full transaction preloads.
+	GetTransactionMetadataByHash(
+		[]byte, // hash
+		types.Txn,
+	) ([]byte, error)
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes

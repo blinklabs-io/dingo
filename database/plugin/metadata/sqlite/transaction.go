@@ -180,6 +180,31 @@ func (d *MetadataStoreSqlite) GetTransactionIDByHash(
 	return row.ID, true, nil
 }
 
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash without preloading any related rows. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *MetadataStoreSqlite) GetTransactionMetadataByHash(
+	hash []byte,
+	txn types.Txn,
+) ([]byte, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var row struct{ Metadata []byte }
+	result := db.Model(&models.Transaction{}).
+		Select("metadata").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return row.Metadata, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStoreSqlite) GetTransactionsByHashes(
 	hashes [][]byte,

@@ -114,9 +114,10 @@ func (d *MetadataStorePostgres) GetAssetMintBurnInfo(
 }
 
 // recordAssetMintBurn persists the mint/burn events for a transaction. It is a
-// no-op outside API storage mode or when the transaction mints/burns nothing.
-// Re-applying the same transaction (e.g. after a rollback) is idempotent via
-// the unique (tx_hash, policy_id, name) index.
+// no-op outside API storage mode, for phase-2-invalid transactions (whose mint
+// field is never applied on-chain), or when the transaction mints/burns
+// nothing. Re-applying the same transaction (e.g. after a rollback) is
+// idempotent via the unique (tx_hash, policy_id, name) index.
 func (d *MetadataStorePostgres) recordAssetMintBurn(
 	tx lcommon.Transaction,
 	txHash []byte,
@@ -125,6 +126,11 @@ func (d *MetadataStorePostgres) recordAssetMintBurn(
 	txn types.Txn,
 ) error {
 	if d.storageMode != types.StorageModeAPI {
+		return nil
+	}
+	// A phase-2 script-validation failure includes the transaction in the block
+	// but does not apply its mint/burn, so it must not enter asset history.
+	if !tx.IsValid() {
 		return nil
 	}
 	rows := models.ConvertMintToAssetMintBurnModels(
