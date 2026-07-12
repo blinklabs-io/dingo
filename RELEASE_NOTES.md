@@ -24,7 +24,7 @@ This release broadens MidnightState client access, completes more API responses,
 
 * Fixed **surface blob deletion failures during rollback cleanup:** Rollback cleanup now logs blob deletion failures instead of failing quietly, which makes recovery problems easier to diagnose.
 * Corrected **return Blockfrost block aggregates and header details more completely:** Blockfrost block responses now fill in more aggregate and header fields, which makes those API results more reliable for clients.
-* Refined **calculate pool stake totals with the right live UTxO amount types:** Pool stake totals now avoid summation errors caused by uncast live UTxO amounts, which improves stake reporting accuracy.
+* Refined **calculate pool stake totals without conversion errors:** Pool stake totals now avoid summation errors when live UTxO amounts are added together, which improves stake reporting accuracy.
 * Enhanced **populate richer Blockfrost UTxO details for addresses and transactions:** Address and transaction UTxO responses now include more embedded data and reference details, which makes downstream inspection more complete.
 * Repaired **count slots correctly across Byron history:** Slot calculations now account for Byron data, which keeps historical chain calculations aligned across older eras.
 * Balanced **keep Leios pool and governance results aligned with endorsement effects:** Leios processing now applies endorsement effects to pool and governance state, which keeps those results more accurate.
@@ -58,7 +58,7 @@ Thank you for trying!
 
 **バージョン:** v0.63.0
 
-このリリースでは、MidnightState のクエリ範囲を広げ、API 応答の欠けていた情報を補い、インバウンド ledger 検証とチェーン整合性を強化します。
+このリリースでは、MidnightState を通じたクライアントの参照範囲を広げ、API 応答の詳細を補い、インバウンド block 検証と履歴チェーン処理を強化します。
 
 ### ✨ 新機能
 
@@ -74,7 +74,7 @@ Thank you for trying!
 
 * 修正しました **rollback cleanup 中の blob 削除失敗を可視化すること:** rollback cleanup は blob 削除失敗を黙って見過ごさず記録するようになり、回復時の問題を診断しやすくなります。
 * 是正しました **Blockfrost の block aggregate と header 情報をより完全に返すこと:** Blockfrost の block 応答は、aggregate と header の項目をより多く埋めるようになり、API 利用側で結果を信頼しやすくなります。
-* 改善しました **live UTxO amount の型を正しく扱って pool stake 合計を計算すること:** pool stake 合計は型変換不足による集計ずれを避けるようになり、stake 報告の正確性が向上します。
+* 改善しました **変換ずれを避けて pool stake 合計を計算すること:** pool stake 合計は live UTxO amount を合算する際の集計ずれを避けるようになり、stake 報告の正確性が向上します。
 * 補完しました **address と transaction 向けの Blockfrost UTxO 詳細をより充実させること:** address と transaction の UTxO 応答は、埋め込みデータと参照情報をより多く含むようになり、下流での確認を行いやすくなります。
 * 修復しました **Byron の履歴を含めて slot を正しく数えること:** slot 計算は Byron データも考慮するようになり、古い era をまたぐ履歴計算の整合性を保ちます。
 * 調整しました **Leios の pool と governance 結果を endorsement の影響に合わせること:** Leios の処理は endorsement の影響を pool と governance の状態へ反映し、結果の正確性を保ちます。
@@ -83,10 +83,10 @@ Thank you for trying!
 
 ### 📋 知っておくこと
 
-* 明確化しました **クライアント統合でより広い MidnightState 読み取りを計画できること:** Midnight データに依存する統合は、UTxO 結果のページングと、より広い governance および chain state の照会を利用できます。
-* 強調しました **アップグレード後は Blockfrost 応答と stake 報告がより完全になること:** block と UTxO 応答はより多くの詳細を返し、pool stake 合計は従来の型処理の問題を避けます。
-* 記載しました **履歴処理と実験的 era 処理をより信頼できること:** Byron の slot 計算、Leios の endorsement 処理、Dijkstra の forging は、期待される chain 挙動により近づきます。
-* 要約しました **検証済みライブ経路でインバウンド block の早期拒否が強まること:** ノードは既存の検証ゲートを維持したまま、壊れた block や順序違反の block をより早く停止します。
+* 明確化しました **MidnightState をクライアント処理のより広い参照面として使えること:** クライアント統合は、UTxO のページングと、より広い governance および chain の参照を一つのサービスにまとめられます。
+* 強調しました **storage recovery 作業後に rollback cleanup のログを確認できること:** blob 削除失敗はログへ出力されるようになり、cleanup で未処理の保存作業が残った場合に早く把握できます。
+* 記載しました **下流の data consumer で欠けた応答詳細が減ること:** Blockfrost client と stake reporting workflow は、block、address、transaction、pool stake のより完全なデータを受け取れます。
+* 要約しました **履歴処理とインバウンド処理の安全策が強まること:** Byron の slot 計算、Leios の endorsement 処理、Dijkstra の forging、インバウンド block 検証は、不正な chain data が進む可能性をさらに下げます。
 
 ### 推奨ネットワーク互換性 ⚠️
 
@@ -108,7 +108,7 @@ Thank you for trying!
 
 **Versión:** v0.63.0
 
-Esta versión amplía la cobertura de consultas de MidnightState, completa más detalles en las respuestas de la API y refuerza la validación entrante del ledger y la corrección de la cadena.
+Esta versión amplía el acceso de los clientes a MidnightState, completa más respuestas de la API y refuerza la validación de bloques entrantes y el tratamiento histórico de la cadena.
 
 ### ✨ Novedades
 
@@ -124,7 +124,7 @@ Esta versión amplía la cobertura de consultas de MidnightState, completa más 
 
 * Corrigió **mostrar los fallos de eliminación de blobs durante la limpieza de rollback:** La limpieza de rollback ahora registra los fallos de eliminación de blobs en lugar de ignorarlos en silencio, lo que facilita diagnosticar problemas de recuperación.
 * Completó **devolver con más detalle los agregados y encabezados de bloques de Blockfrost:** Las respuestas de bloques de Blockfrost ahora rellenan más campos de agregados y encabezados, lo que hace que esos resultados sean más fiables para los clientes.
-* Refinó **calcular los totales de stake por pool con los tipos correctos para los importes UTxO en vivo:** Los totales de stake por pool ahora evitan errores de suma causados por importes UTxO sin convertir, lo que mejora la precisión de los informes de stake.
+* Refinó **calcular los totales de stake por pool sin errores de conversión:** Los totales de stake por pool ahora evitan errores de suma cuando se agregan importes UTxO en vivo, lo que mejora la precisión de los informes de stake.
 * Mejoró **rellenar detalles UTxO más completos de Blockfrost para direcciones y transacciones:** Las respuestas UTxO de direcciones y transacciones ahora incluyen más detalles de datos incrustados y de referencias, lo que hace más completa la inspección posterior.
 * Reparó **contar los slots correctamente en el historial de Byron:** El cálculo de slots ahora tiene en cuenta los datos de Byron, lo que mantiene alineados los cálculos históricos de la cadena a través de eras anteriores.
 * Equilibró **mantener alineados los resultados de pools y gobernanza de Leios con los efectos de las endorsments:** El procesamiento de Leios ahora aplica los efectos de las endorsments al estado de pools y gobernanza, lo que mantiene esos resultados más precisos.
@@ -133,10 +133,10 @@ Esta versión amplía la cobertura de consultas de MidnightState, completa más 
 
 ### 📋 Lo que se debe saber
 
-* Aclaró **planificar lecturas más amplias de MidnightState en las integraciones cliente:** Las integraciones que dependen de datos de Midnight ahora pueden paginar resultados UTxO y consultar más estado de gobernanza y de cadena desde el servicio.
-* Destacó **esperar datos más completos en Blockfrost y en los informes de stake tras la actualización:** Las respuestas de bloques y UTxO ahora devuelven más detalles, y los totales de stake por pool evitan los problemas anteriores de tratamiento de tipos.
-* Subrayó **confiar más en el procesamiento histórico y de eras experimentales:** Los cálculos de slots de Byron, el manejo de endorsments de Leios y el forjado de Dijkstra ahora se alinean mejor con el comportamiento esperado de la cadena.
-* Resumió **esperar un rechazo más estricto de bloques entrantes en rutas validadas en vivo:** El nodo ahora detiene antes los bloques mal formados o desordenados, mientras mantiene la puerta de validación existente para el procesamiento histórico omitido o de confianza.
+* Aclaró **usar MidnightState como una superficie de lectura más amplia para los flujos cliente:** Las integraciones cliente pueden apoyarse en un solo servicio para lecturas UTxO paginadas junto con consultas más amplias de gobernanza y de cadena.
+* Destacó **revisar los registros de limpieza de rollback tras trabajos de recuperación de almacenamiento:** Los fallos de eliminación de blobs ahora aparecen en los registros, lo que ofrece señales más rápidas cuando la limpieza deja trabajo de almacenamiento sin terminar.
+* Subrayó **esperar menos detalles ausentes en los consumidores de datos posteriores:** Los clientes de Blockfrost y los flujos de informes de stake ahora reciben datos más completos de bloques, direcciones, transacciones y stake por pool.
+* Resumió **confiar en protecciones más sólidas para el procesamiento histórico y entrante de la cadena:** El cálculo de slots de Byron, el manejo de endorsments de Leios, el forjado de Dijkstra y las comprobaciones de bloques entrantes ahora reducen mejor la posibilidad de que avance información de cadena incorrecta.
 
 ### Compatibilidad de red recomendada ⚠️
 
