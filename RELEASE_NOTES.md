@@ -100,6 +100,58 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Expansión de MidnightState, mayor precisión de la API y validación entrante del ledger más estricta
+
+**Fecha:** July 10, 2026
+
+**Versión:** v0.63.0
+
+Esta versión amplía la cobertura de consultas de MidnightState, completa más detalles en las respuestas de la API y refuerza la validación entrante del ledger y la corrección de la cadena.
+
+### ✨ Novedades
+
+* Agregó **paginar las consultas UTxO de MidnightState:** Los clientes de MidnightState ahora pueden solicitar resultados UTxO por páginas, lo que facilita manejar conjuntos de resultados grandes.
+* Amplió **consultar más datos de gobernanza y de cadena en MidnightState:** MidnightState ahora expone consultas de gobernanza, parámetros del protocolo, bloques, épocas y estado relacionado, lo que ofrece a los clientes un acceso de lectura más amplio a los datos del nodo.
+
+### 💪 Mejoras
+
+* Reforzó **mantener más seguro el manejo de rollback de Midnight cuando no se registraron eventos:** Las rutas de rollback del indexador de Midnight ahora siguen cubriendo el caso sin eventos, lo que reduce el riesgo de regresiones durante la recuperación.
+* Actualizó **mantener al día el historial de versiones en el repositorio con v0.62.0:** El repositorio ahora incluye la entrada de la versión anterior en inglés, japonés y español para facilitar el seguimiento de las versiones.
+
+### 🔧 Correcciones
+
+* Corrigió **mostrar los fallos de eliminación de blobs durante la limpieza de rollback:** La limpieza de rollback ahora registra los fallos de eliminación de blobs en lugar de ignorarlos en silencio, lo que facilita diagnosticar problemas de recuperación.
+* Completó **devolver con más detalle los agregados y encabezados de bloques de Blockfrost:** Las respuestas de bloques de Blockfrost ahora rellenan más campos de agregados y encabezados, lo que hace que esos resultados sean más fiables para los clientes.
+* Refinó **calcular los totales de stake por pool con los tipos correctos para los importes UTxO en vivo:** Los totales de stake por pool ahora evitan errores de suma causados por importes UTxO sin convertir, lo que mejora la precisión de los informes de stake.
+* Mejoró **rellenar detalles UTxO más completos de Blockfrost para direcciones y transacciones:** Las respuestas UTxO de direcciones y transacciones ahora incluyen más detalles de datos incrustados y de referencias, lo que hace más completa la inspección posterior.
+* Reparó **contar los slots correctamente en el historial de Byron:** El cálculo de slots ahora tiene en cuenta los datos de Byron, lo que mantiene alineados los cálculos históricos de la cadena a través de eras anteriores.
+* Equilibró **mantener alineados los resultados de pools y gobernanza de Leios con los efectos de las endorsments:** El procesamiento de Leios ahora aplica los efectos de las endorsments al estado de pools y gobernanza, lo que mantiene esos resultados más precisos.
+* Estabilizó **forjar correctamente bloques de Dijkstra:** La producción de bloques de Dijkstra ahora sigue más de cerca el comportamiento esperado, lo que reduce la creación de bloques no válidos en las ejecuciones afectadas.
+* Endureció **rechazar antes los bloques entrantes mal formados durante la validación del ledger:** El procesamiento entrante validado ahora detiene bloques con envolturas mal formadas, orden incorrecto, colocación no válida del límite de época de Byron o encabezados y cuerpos sobredimensionados antes de que continúe un trabajo más profundo del ledger.
+
+### 📋 Lo que se debe saber
+
+* Aclaró **planificar lecturas más amplias de MidnightState en las integraciones cliente:** Las integraciones que dependen de datos de Midnight ahora pueden paginar resultados UTxO y consultar más estado de gobernanza y de cadena desde el servicio.
+* Destacó **esperar datos más completos en Blockfrost y en los informes de stake tras la actualización:** Las respuestas de bloques y UTxO ahora devuelven más detalles, y los totales de stake por pool evitan los problemas anteriores de tratamiento de tipos.
+* Subrayó **confiar más en el procesamiento histórico y de eras experimentales:** Los cálculos de slots de Byron, el manejo de endorsments de Leios y el forjado de Dijkstra ahora se alinean mejor con el comportamiento esperado de la cadena.
+* Resumió **esperar un rechazo más estricto de bloques entrantes en rutas validadas en vivo:** El nodo ahora detiene antes los bloques mal formados o desordenados, mientras mantiene la puerta de validación existente para el procesamiento histórico omitido o de confianza.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.62.0 (July 9, 2026)
 
 **Title:** Mithril core catch-up, ledger validation, and faster database indexing
