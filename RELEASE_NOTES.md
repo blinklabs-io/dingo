@@ -8,7 +8,7 @@
 
 **Version:** v0.63.0
 
-This release expands MidnightState query coverage, fills in more API response detail, and tightens inbound ledger validation and chain correctness.
+This release broadens MidnightState client access, completes more API responses, and strengthens inbound block validation and historical chain handling.
 
 ### ✨ What's New
 
@@ -33,10 +33,10 @@ This release expands MidnightState query coverage, fills in more API response de
 
 ### 📋 What You Need to Know
 
-* Clarified **plan for broader MidnightState reads in client integrations:** Integrations that rely on Midnight data can now page UTxO results and query more governance and chain state from the service.
-* Highlighted **expect more complete Blockfrost and stake reporting data after upgrading:** Block and UTxO responses now return fuller details, and pool stake totals avoid earlier type handling errors.
-* Emphasized **trust historical and experimental era processing more:** Byron slot calculations, Leios endorsement handling, and Dijkstra forging now align more closely with expected chain behavior.
-* Summarized **expect stricter inbound block rejection on validated live paths:** The node now stops malformed or out of order validated blocks earlier while keeping the existing validation gate for trusted or skipped historical processing.
+* Clarified **use MidnightState as a broader read surface for client workflows:** Client integrations can rely on one service for paged UTxO reads together with wider governance and chain lookups.
+* Highlighted **review rollback cleanup logs after storage recovery work:** Blob deletion failures now appear in logs, which gives operators faster evidence when cleanup leaves storage work unfinished.
+* Emphasized **expect downstream data consumers to see fewer missing response details:** Blockfrost clients and stake reporting workflows now receive more complete block, address, transaction, and pool stake data.
+* Summarized **trust stronger safeguards around historical and inbound chain processing:** Byron slot accounting, Leios endorsement handling, Dijkstra forging, and validated inbound block checks now reduce the chance that incorrect chain data advances unnoticed.
 
 ### Recommended Network Compatibility ⚠️
 
