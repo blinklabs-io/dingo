@@ -50,6 +50,56 @@ This release expands MidnightState query coverage, fills in more API response de
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** MidnightState の拡張、API 応答の正確性向上、インバウンド ledger 検証の厳格化
+
+**日付:** July 10, 2026
+
+**バージョン:** v0.63.0
+
+このリリースでは、MidnightState のクエリ範囲を広げ、API 応答の欠けていた情報を補い、インバウンド ledger 検証とチェーン整合性を強化します。
+
+### ✨ 新機能
+
+* 追加しました **MidnightState の UTxO クエリをページ単位で取得できること:** MidnightState クライアントは UTxO 結果をページングして取得できるようになり、大きな結果セットを扱いやすくなります。
+* 拡張しました **MidnightState でより多くの governance と chain data を照会できること:** MidnightState は governance、protocol parameter、block、epoch、および関連する state クエリを提供し、クライアントが参照できるノード情報を広げます。
+
+### 💪 改善
+
+* 強化しました **イベント未記録時の Midnight rollback 処理をより安全に保つこと:** Midnight indexer の rollback 経路はイベントがない場合も継続してカバーされ、回復時の回帰リスクを下げます。
+* 更新しました **リポジトリ内の v0.62.0 リリース履歴を最新に保つこと:** リポジトリには、前回リリースの英語、日本語、スペイン語のエントリが含まれ、リリース履歴を追いやすくなります。
+
+### 🔧 修正
+
+* 修正しました **rollback cleanup 中の blob 削除失敗を可視化すること:** rollback cleanup は blob 削除失敗を黙って見過ごさず記録するようになり、回復時の問題を診断しやすくなります。
+* 是正しました **Blockfrost の block aggregate と header 情報をより完全に返すこと:** Blockfrost の block 応答は、aggregate と header の項目をより多く埋めるようになり、API 利用側で結果を信頼しやすくなります。
+* 改善しました **live UTxO amount の型を正しく扱って pool stake 合計を計算すること:** pool stake 合計は型変換不足による集計ずれを避けるようになり、stake 報告の正確性が向上します。
+* 補完しました **address と transaction 向けの Blockfrost UTxO 詳細をより充実させること:** address と transaction の UTxO 応答は、埋め込みデータと参照情報をより多く含むようになり、下流での確認を行いやすくなります。
+* 修復しました **Byron の履歴を含めて slot を正しく数えること:** slot 計算は Byron データも考慮するようになり、古い era をまたぐ履歴計算の整合性を保ちます。
+* 調整しました **Leios の pool と governance 結果を endorsement の影響に合わせること:** Leios の処理は endorsement の影響を pool と governance の状態へ反映し、結果の正確性を保ちます。
+* 安定化しました **Dijkstra block を正しく forge すること:** Dijkstra の block 生成は期待される動作により近づき、影響を受ける実行で無効な block が作られる可能性を減らします。
+* 厳格化しました **ledger 検証で不正なインバウンド block をより早く拒否すること:** 検証対象のインバウンド処理は、壊れた envelope、不正な順序、不正な Byron epoch boundary 配置、過大な header や body を、より深い ledger 処理へ進む前に停止します。
+
+### 📋 知っておくこと
+
+* 明確化しました **クライアント統合でより広い MidnightState 読み取りを計画できること:** Midnight データに依存する統合は、UTxO 結果のページングと、より広い governance および chain state の照会を利用できます。
+* 強調しました **アップグレード後は Blockfrost 応答と stake 報告がより完全になること:** block と UTxO 応答はより多くの詳細を返し、pool stake 合計は従来の型処理の問題を避けます。
+* 記載しました **履歴処理と実験的 era 処理をより信頼できること:** Byron の slot 計算、Leios の endorsement 処理、Dijkstra の forging は、期待される chain 挙動により近づきます。
+* 要約しました **検証済みライブ経路でインバウンド block の早期拒否が強まること:** ノードは既存の検証ゲートを維持したまま、壊れた block や順序違反の block をより早く停止します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ## v0.62.0 (July 9, 2026)
 
 **Title:** Mithril core catch-up, ledger validation, and faster database indexing
