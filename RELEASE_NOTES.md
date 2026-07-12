@@ -18,7 +18,6 @@ This release broadens MidnightState client access, completes more API responses,
 ### 💪 Improvements
 
 * Strengthened **keep Midnight rollback handling safer when no events were recorded:** Midnight indexer rollback paths now keep their no-event case covered, which reduces regression risk during recovery.
-* Updated **keep the in repository release history current with v0.62.0:** The repository now includes the previous release entry in English, Japanese, and Spanish for easier release tracking.
 
 ### 🔧 Fixes
 
