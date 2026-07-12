@@ -20,6 +20,36 @@ This release expands MidnightState query coverage, fills in more API response de
 * Strengthened **keep Midnight rollback handling safer when no events were recorded:** Midnight indexer rollback paths now keep their no-event case covered, which reduces regression risk during recovery.
 * Updated **keep the in repository release history current with v0.62.0:** The repository now includes the previous release entry in English, Japanese, and Spanish for easier release tracking.
 
+### 🔧 Fixes
+
+* Fixed **surface blob deletion failures during rollback cleanup:** Rollback cleanup now logs blob deletion failures instead of failing quietly, which makes recovery problems easier to diagnose.
+* Corrected **return Blockfrost block aggregates and header details more completely:** Blockfrost block responses now fill in more aggregate and header fields, which makes those API results more reliable for clients.
+* Refined **calculate pool stake totals with the right live UTxO amount types:** Pool stake totals now avoid summation errors caused by uncast live UTxO amounts, which improves stake reporting accuracy.
+* Enhanced **populate richer Blockfrost UTxO details for addresses and transactions:** Address and transaction UTxO responses now include more embedded data and reference details, which makes downstream inspection more complete.
+* Repaired **count slots correctly across Byron history:** Slot calculations now account for Byron data, which keeps historical chain calculations aligned across older eras.
+* Balanced **keep Leios pool and governance results aligned with endorsement effects:** Leios processing now applies endorsement effects to pool and governance state, which keeps those results more accurate.
+* Stabilized **forge Dijkstra blocks correctly:** Dijkstra block production now follows the expected behavior more closely, which reduces invalid block creation during affected runs.
+* Hardened **reject malformed inbound blocks earlier during ledger validation:** Validated inbound processing now stops blocks with malformed envelopes, bad ordering, invalid Byron epoch boundary placement, or oversized headers and bodies before deeper ledger work continues.
+
+### 📋 What You Need to Know
+
+* Clarified **plan for broader MidnightState reads in client integrations:** Integrations that rely on Midnight data can now page UTxO results and query more governance and chain state from the service.
+* Highlighted **expect more complete Blockfrost and stake reporting data after upgrading:** Block and UTxO responses now return fuller details, and pool stake totals avoid earlier type handling errors.
+* Emphasized **trust historical and experimental era processing more:** Byron slot calculations, Leios endorsement handling, and Dijkstra forging now align more closely with expected chain behavior.
+* Summarized **expect stricter inbound block rejection on validated live paths:** The node now stops malformed or out of order validated blocks earlier while keeping the existing validation gate for trusted or skipped historical processing.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.62.0 (July 9, 2026)
 
 **Title:** Mithril core catch-up, ledger validation, and faster database indexing
