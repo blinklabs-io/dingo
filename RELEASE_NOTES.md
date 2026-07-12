@@ -1,5 +1,25 @@
 # Dingo Releases
 
+## v0.63.0 (July 10, 2026)
+
+**Title:** MidnightState expansion, API correctness, and stricter inbound ledger validation
+
+**Date:** July 10, 2026
+
+**Version:** v0.63.0
+
+This release expands MidnightState query coverage, fills in more API response detail, and tightens inbound ledger validation and chain correctness.
+
+### ✨ What's New
+
+* Added **page through MidnightState UTxO queries:** MidnightState clients can now request UTxO results in pages, which makes large result sets easier to consume.
+* Expanded **query more MidnightState governance and chain data:** MidnightState now exposes governance, protocol parameter, block, epoch, and related state queries, which gives clients broader read access to node data.
+
+### 💪 Improvements
+
+* Strengthened **keep Midnight rollback handling safer when no events were recorded:** Midnight indexer rollback paths now keep their no-event case covered, which reduces regression risk during recovery.
+* Updated **keep the in repository release history current with v0.62.0:** The repository now includes the previous release entry in English, Japanese, and Spanish for easier release tracking.
+
 ## v0.62.0 (July 9, 2026)
 
 **Title:** Mithril core catch-up, ledger validation, and faster database indexing
