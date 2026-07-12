@@ -116,7 +116,6 @@ Esta versión amplía el acceso de los clientes a MidnightState, completa más r
 ### 💪 Mejoras
 
 * Reforzó **mantener más seguro el manejo de rollback de Midnight cuando no se registraron eventos:** Las rutas de rollback del indexador de Midnight ahora siguen cubriendo el caso sin eventos, lo que reduce el riesgo de regresiones durante la recuperación.
-* Actualizó **mantener al día el historial de versiones en el repositorio con v0.62.0:** El repositorio ahora incluye la entrada de la versión anterior en inglés, japonés y español para facilitar el seguimiento de las versiones.
 
 ### 🔧 Correcciones
 
