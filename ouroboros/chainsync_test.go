@@ -230,18 +230,6 @@ func setTestLedgerTip(
 	).Elem().Set(reflect.ValueOf(tip))
 }
 
-func testLedgerDB(t *testing.T, ls *ledger.LedgerState) *database.Database {
-	t.Helper()
-	field := reflect.ValueOf(ls).Elem().FieldByName("db")
-	require.True(t, field.IsValid())
-	db, ok := reflect.NewAt(
-		field.Type(),
-		unsafe.Pointer(field.UnsafeAddr()),
-	).Elem().Interface().(*database.Database)
-	require.True(t, ok)
-	return db
-}
-
 func snapshotChainsyncNtNTimeouts() map[string]struct {
 	timeout        time.Duration
 	hasTimeoutFunc bool
@@ -825,7 +813,7 @@ func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
 	)
 	require.NoError(t, err)
 	clientState.NeedsInitialRollback = false
-	require.NoError(t, testLedgerDB(t, h.ledgerState).Close())
+	require.NoError(t, h.ledgerState.Database().Close())
 
 	// Request the next item from the now-broken iterator.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
