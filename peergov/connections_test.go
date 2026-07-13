@@ -217,6 +217,11 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "connection shutdown initiated without eof",
+			err:  errors.New("connection shutdown initiated: handshake failed"),
+			want: false,
+		},
+		{
 			name: "nil",
 			err:  nil,
 			want: false,

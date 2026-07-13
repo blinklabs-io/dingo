@@ -60,7 +60,8 @@ func isExpectedNetworkDialError(err error) bool {
 		// "connection shutdown initiated". This happens routinely when a peer
 		// dials us while we dial it; the surviving duplex connection carries
 		// diffusion both ways, so it is expected rather than a dial failure.
-		strings.Contains(msg, "connection shutdown initiated")
+		(errors.Is(err, io.EOF) &&
+			strings.Contains(msg, "connection shutdown initiated"))
 }
 
 // shortLivedReconnectDelay returns the exponential backoff rung for the
