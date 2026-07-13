@@ -59,6 +59,8 @@ const (
 	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
 
+var chainsyncRestartAfter = time.After
+
 func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	if timeout < ochainsync.MustReplyTimeoutMax {
 		return ochainsync.MustReplyTimeoutMax
@@ -1064,7 +1066,7 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 			)
 			closeConn()
 			<-done
-		case <-time.After(chainsyncRestartTimeout):
+		case <-chainsyncRestartAfter(chainsyncRestartTimeout):
 			o.config.Logger.Warn(
 				"chainsync restart timed out, closing connection",
 				"connection_id", connId.String(),
