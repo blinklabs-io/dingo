@@ -945,7 +945,7 @@ func (ls *LedgerState) leaderEligibilityStake(
 	if ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch) {
 		if ls.config.Logger != nil {
 			ls.config.Logger.Warn(
-				"skipping leader eligibility check: mark snapshot captured after target epoch start",
+				"skipping leader eligibility check: Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary",
 				"slot", block.SlotNumber(),
 				"epoch", epochId,
 				"snapshot_epoch", snapshotEpoch,
