@@ -25,7 +25,9 @@ import (
 
 // newTestRootCmd wires the real subcommands under a root command,
 // mirroring main() so the command-classification helpers see the same
-// tree.
+// tree. The built-in help and completion commands, which cobra normally
+// adds during Execute, are initialized explicitly so the tree includes
+// them too.
 func newTestRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "dingo"}
 	root.AddCommand(
@@ -36,6 +38,8 @@ func newTestRootCmd() *cobra.Command {
 		mithrilCommand(),
 		syncCommand(),
 	)
+	root.InitDefaultHelpCmd()
+	root.InitDefaultCompletionCmd()
 	return root
 }
 
@@ -131,6 +135,11 @@ func TestIsInformationalCommand(t *testing.T) {
 		{"bare root", nil, false},
 		{"version", []string{"version"}, true},
 		{"list", []string{"list"}, true},
+		// cobra runs the root PersistentPreRunE for its built-in help and
+		// completion commands, so they must be exempt from validation.
+		{"help", []string{"help"}, true},
+		{"completion", []string{"completion"}, true},
+		{"completion zsh", []string{"completion", "zsh"}, true},
 		{"serve", []string{"serve"}, false},
 		{"sync", []string{"sync"}, false},
 		// Nested `mithril list` must not be mistaken for top-level `list`.

@@ -406,6 +406,20 @@ func TestValidateMithrilReadOnlyModeSkipsAuxPorts(t *testing.T) {
 	assert.NoError(t, cfg.validate(RunModeMithril, false))
 }
 
+// TestValidateDevConfigViaServeChecksApiPorts covers `dingo serve` with
+// a configured runMode of "dev": the effective mode is serve, but
+// node.Run keys dev behavior off the configured mode and forces API
+// storage, so the API listener ports bind and must still be validated.
+func TestValidateDevConfigViaServeChecksApiPorts(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.RunMode = RunModeDev
+	cfg.StorageMode = storageModeCore
+	cfg.UtxorpcPort = 99999999
+	err := cfg.validate(RunModeServe, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid utxorpcPort")
+}
+
 // TestValidateLoadModeSkipsAllListenerPorts verifies that load, which
 // starts no listeners, does not reject otherwise out-of-range listener
 // ports: they never bind during an import.

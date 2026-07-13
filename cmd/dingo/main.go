@@ -247,14 +247,17 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 }
 
 // isInformationalCommand reports whether a top-level command only prints
-// static information (version, list) and therefore needs no valid
-// runtime configuration.
+// static information — version, list, and cobra's built-in help and
+// completion commands — and therefore needs no valid runtime
+// configuration. (cobra runs the root PersistentPreRunE for help and
+// completion too, so without the exemption an invalid config would
+// block `dingo help` and shell-completion generation.)
 func isInformationalCommand(top *cobra.Command) bool {
 	if top == nil {
 		return false
 	}
 	switch top.Name() {
-	case "version", "list":
+	case "version", "list", "help", "completion":
 		return true
 	default:
 		return false

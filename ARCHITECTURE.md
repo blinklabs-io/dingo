@@ -1803,7 +1803,8 @@ duration/strategy strings that are otherwise only parsed at their point of use.
 Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes
 start the relay, private, metrics, debug, and bark listeners (and, under `api`
-storage, the UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
+storage or a configured `dev` run mode — which forces `api` storage — the
+UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
 and debug listeners; the read-only `mithril list`/`show` and `load` start none.
 A port configured for an inactive listener cannot bind, so it is neither
@@ -1814,7 +1815,11 @@ defaults to `serve`), `cmd/dingo` passes `Validate()` the effective run mode
 derived from the invoked command, so listener and ImmutableDB-source
 requirements match what the command actually does. All violations are reported
 together in a single startup error. The informational `version` and `list`
-subcommands are exempt so they still run against an otherwise-invalid config.
+subcommands — and cobra's built-in `help` and `completion` — are exempt so
+they still run against an otherwise-invalid config. The privileged-port
+check (below 1024) recognizes root, Windows, Linux `CAP_NET_BIND_SERVICE`,
+and a zeroed `net.ipv4.ip_unprivileged_port_start` (as container runtimes
+set) as allowed to bind.
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)

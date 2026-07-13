@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,11 +58,64 @@ var AcceptedMithrilBackends = []string{"", "v1", "v2"}
 // the configured runMode, so cmd/dingo passes the mode reflecting what
 // the command does. It governs which listeners and sources are required.
 func (c *Config) Validate(effectiveMode RunMode) error {
-	// The privileged-port restriction is Unix-specific. os.Geteuid
-	// returns -1 on Windows, which would otherwise misclassify every
-	// Windows process as unprivileged and reject sub-1024 ports there.
-	privileged := runtime.GOOS == "windows" || os.Geteuid() == 0
-	return c.validate(effectiveMode, privileged)
+	return c.validate(effectiveMode, canBindPrivilegedPorts())
+}
+
+// canBindPrivilegedPorts reports whether the process may bind TCP ports
+// below 1024. Root (euid 0) always can, and Windows has no
+// privileged-port restriction (os.Geteuid also returns -1 there, which
+// would otherwise misclassify every Windows process as unprivileged).
+// On Linux a non-root process may still bind low ports when it holds
+// CAP_NET_BIND_SERVICE (setcap, systemd AmbientCapabilities) or when
+// net.ipv4.ip_unprivileged_port_start has been lowered to 0 (container
+// runtimes such as Docker do this by default), so those are honored
+// before rejecting.
+func canBindPrivilegedPorts() bool {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		return true
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if start, err := readProcUint(
+		"/proc/sys/net/ipv4/ip_unprivileged_port_start",
+	); err == nil && start == 0 {
+		return true
+	}
+	return hasCapNetBindService()
+}
+
+// readProcUint reads a procfs file containing a single unsigned
+// decimal value.
+func readProcUint(path string) (uint64, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // fixed procfs paths
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+}
+
+// hasCapNetBindService reports whether the process's effective
+// capability set includes CAP_NET_BIND_SERVICE (bit 10), read from the
+// CapEff line of /proc/self/status.
+func hasCapNetBindService() bool {
+	const capNetBindService = 10
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for line := range strings.Lines(string(data)) {
+		rest, ok := strings.CutPrefix(line, "CapEff:")
+		if !ok {
+			continue
+		}
+		mask, err := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+		if err != nil {
+			return false
+		}
+		return mask&(1<<capNetBindService) != 0
+	}
+	return false
 }
 
 // validate is the deterministic core of Validate. privileged reports
@@ -112,13 +166,17 @@ func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 	//     (RunModeSync); the read-only Mithril subcommands start neither;
 	//   - bark: serving modes only (not storage-gated);
 	//   - UTxORPC, Blockfrost, Mesh, Midnight: serving modes under API
-	//     storage (dev mode forces API storage on at startup).
+	//     storage. Dev mode forces API storage on at startup, and node.Run
+	//     keys that off the *configured* runMode — `dingo serve` with
+	//     runMode "dev" still runs dev — so the configured mode is
+	//     consulted alongside the effective one.
 	// The load and read-only Mithril invocations start no listeners, so
 	// their ports may be unset (0) and are not checked.
 	serving := effectiveMode.RequiresListeners()
 	auxListeners := serving || effectiveMode == RunModeSync
 	apiListeners := serving &&
-		(effectiveMode == RunModeDev || c.StorageMode == storageModeAPI)
+		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
+			c.StorageMode == storageModeAPI)
 	ports := []struct {
 		setting  string
 		port     uint
