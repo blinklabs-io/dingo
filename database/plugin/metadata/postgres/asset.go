@@ -18,11 +18,13 @@ package postgres
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // GetAssetByPolicyAndName returns an asset by policy ID and asset name
@@ -77,6 +79,88 @@ func (d *MetadataStorePostgres) GetAssetQuantityByPolicyAndName(
 		return 0, result.Error
 	}
 	return total, nil
+}
+
+// GetAssetMintBurnInfo returns the initial mint transaction hash and the total
+// mint/burn event count for the given asset.
+func (d *MetadataStorePostgres) GetAssetMintBurnInfo(
+	policyId lcommon.Blake2b224,
+	assetName []byte,
+	txn types.Txn,
+) ([]byte, int, error) {
+	query, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var count int64
+	if result := query.Model(&models.AssetMintBurn{}).
+		Where("policy_id = ? AND name = ?", policyId[:], assetName).
+		Count(&count); result.Error != nil {
+		return nil, 0, result.Error
+	}
+	if count == 0 {
+		return nil, 0, nil
+	}
+
+	var first models.AssetMintBurn
+	if result := query.
+		Where("policy_id = ? AND name = ?", policyId[:], assetName).
+		Order("slot ASC, tx_index ASC, id ASC").
+		First(&first); result.Error != nil {
+		return nil, 0, result.Error
+	}
+	return first.TxHash, int(count), nil
+}
+
+// recordAssetMintBurn persists the mint/burn events for a transaction. It is a
+// no-op outside API storage mode, for phase-2-invalid transactions (whose mint
+// field is never applied on-chain), or when the transaction mints/burns
+// nothing. Re-applying the same transaction (e.g. after a rollback) is
+// idempotent via the unique (tx_hash, policy_id, name) index.
+func (d *MetadataStorePostgres) recordAssetMintBurn(
+	tx lcommon.Transaction,
+	txHash []byte,
+	slot uint64,
+	txIndex uint32,
+	txn types.Txn,
+) error {
+	if d.storageMode != types.StorageModeAPI {
+		return nil
+	}
+	// A phase-2 script-validation failure includes the transaction in the block
+	// but does not apply its mint/burn, so it must not enter asset history.
+	if !tx.IsValid() {
+		return nil
+	}
+	rows := models.ConvertMintToAssetMintBurnModels(
+		tx.AssetMint(),
+		txHash,
+		slot,
+		txIndex,
+	)
+	if len(rows) == 0 {
+		return nil
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	if result := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "tx_hash"},
+			{Name: "policy_id"},
+			{Name: "name"},
+		},
+		DoNothing: true,
+	}).Create(&rows); result.Error != nil {
+		return fmt.Errorf(
+			"record asset mint/burn for tx %x: %w",
+			txHash,
+			result.Error,
+		)
+	}
+	return nil
 }
 
 // GetAssetsByPolicy returns all assets for a given policy ID

@@ -600,6 +600,17 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint, bool, error)
 
+	// GetTransactionMetadataByHash returns only the stored (API-mode)
+	// CBOR metadata blob for the transaction with the given hash,
+	// without loading any associations. Returns (nil, nil) when no such
+	// transaction exists or when it has no metadata. Used by the asset
+	// endpoint to resolve CIP-25 on-chain metadata without paying for
+	// full transaction preloads.
+	GetTransactionMetadataByHash(
+		[]byte, // hash
+		types.Txn,
+	) ([]byte, error)
+
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
 		[][]byte, // hashes
@@ -730,6 +741,16 @@ type MetadataStore interface {
 		[]byte, // assetName
 		types.Txn,
 	) (uint64, error)
+
+	// GetAssetMintBurnInfo returns the hash of the earliest transaction that
+	// minted the asset (its initial mint) and the total number of recorded
+	// mint/burn events for the asset. Returns (nil, 0, nil) when the asset has
+	// no recorded mint/burn history (e.g. running in core storage mode).
+	GetAssetMintBurnInfo(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
 
 	// GetScript retrieves a script by its hash.
 	GetScript(

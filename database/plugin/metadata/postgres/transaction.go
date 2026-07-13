@@ -159,6 +159,31 @@ func (d *MetadataStorePostgres) GetTransactionIDByHash(
 	return row.ID, true, nil
 }
 
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash without preloading any related rows. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *MetadataStorePostgres) GetTransactionMetadataByHash(
+	hash []byte,
+	txn types.Txn,
+) ([]byte, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var row struct{ Metadata []byte }
+	result := db.Model(&models.Transaction{}).
+		Select("metadata").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return row.Metadata, nil
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *MetadataStorePostgres) GetTransactionsByHashes(
 	hashes [][]byte,
@@ -875,6 +900,9 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 			)
 		}
 	}
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1010,6 +1038,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 				result.Error,
 			)
 		}
+	}
+
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
 	}
 	// Add Inputs to Transaction
 	if len(tx.Inputs()) > 0 {
@@ -2709,6 +2741,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 		}
 	}
 
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
+
 	// ------------------------------------------------------------------ //
 	// 2. Accumulate UTxO outputs                                          //
 	// ------------------------------------------------------------------ //
@@ -4109,6 +4145,15 @@ func (d *MetadataStorePostgres) DeleteTransactionsAfterSlot(
 		Delete(&models.TransactionMetadataLabel{}); result.Error != nil {
 		return fmt.Errorf(
 			"delete transaction metadata labels after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
+
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.AssetMintBurn{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete asset mint/burn events after slot %d: %w",
 			slot,
 			result.Error,
 		)

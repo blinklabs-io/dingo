@@ -1760,6 +1760,17 @@ signers, and account/delegation/registration/reward endpoints. It uses an
 adapter pattern to translate between Dingo's internal state and Blockfrost
 response types and supports Blockfrost-style pagination headers.
 
+`GET /assets/{asset}` derives its mint-history fields from the API-mode
+`asset_mint_burn` table, which the transaction indexer populates from
+`tx.AssetMint()` (recorded in `SetTransaction`, `SetTransactionBatched`, and
+`SetGapBlockTransaction`; removed on rollback). `initial_mint_tx_hash` and
+`mint_or_burn_count` come from `MetadataStore.GetAssetMintBurnInfo`. On-chain
+metadata (`onchain_metadata`/`onchain_metadata_standard`) is resolved lazily in
+the adapter by loading the initial mint transaction's stored metadata and
+parsing its CIP-25 (label 721) entry for the policy/asset; no dedicated
+metadata table is kept. Off-chain `metadata` (token registry) and CIP-68
+datum metadata are not yet sourced and return `null`.
+
 ### Mesh API (`api/mesh/`)
 
 Implements the Mesh (formerly Rosetta) API specification for wallet integration and chain analysis. Provides endpoints for network status, account balances, block queries, transaction construction, and mempool access.

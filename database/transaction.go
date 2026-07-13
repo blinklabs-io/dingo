@@ -959,6 +959,23 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash, without loading any associations. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *Database) GetTransactionMetadataByHash(
+	hash []byte,
+	txn *Txn,
+) ([]byte, error) {
+	if len(hash) == 0 {
+		return nil, nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetTransactionMetadataByHash(hash, txn.Metadata())
+}
+
 // GetTransactionsByHashes returns transactions for the provided hashes.
 func (d *Database) GetTransactionsByHashes(
 	hashes [][]byte,

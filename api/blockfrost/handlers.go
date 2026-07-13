@@ -454,15 +454,18 @@ func (b *Blockfrost) handleAsset(
 	}
 
 	writeJSON(w, http.StatusOK, AssetResponse{
-		Asset:             asset.Asset,
-		PolicyID:          asset.PolicyID,
-		AssetName:         asset.AssetName,
-		AssetNameASCII:    asset.AssetNameASCII,
-		Fingerprint:       asset.Fingerprint,
-		Quantity:          asset.Quantity,
-		InitialMintTxHash: asset.InitialMintTxHash,
-		MintOrBurnCount:   asset.MintOrBurnCount,
-		OnchainMetadata:   asset.OnchainMetadata,
+		Asset:                   asset.Asset,
+		PolicyID:                asset.PolicyID,
+		AssetName:               asset.AssetName,
+		AssetNameASCII:          asset.AssetNameASCII,
+		Fingerprint:             asset.Fingerprint,
+		Quantity:                asset.Quantity,
+		InitialMintTxHash:       asset.InitialMintTxHash,
+		MintOrBurnCount:         asset.MintOrBurnCount,
+		OnchainMetadata:         asset.OnchainMetadata,
+		OnchainMetadataStandard: asset.OnchainMetadataStandard,
+		OnchainMetadataExtra:    asset.OnchainMetadataExtra,
+		Metadata:                asset.Metadata,
 	})
 }
 

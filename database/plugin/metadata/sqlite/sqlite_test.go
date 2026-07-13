@@ -67,6 +67,7 @@ type mockTransaction struct {
 	outputs      []lcommon.TransactionOutput
 	collReturn   lcommon.TransactionOutput
 	withdrawals  map[*lcommon.Address]*big.Int
+	mint         *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -134,7 +135,7 @@ func (m *mockTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2
 }
 
 func (m *mockTransaction) AssetMint() *lcommon.MultiAsset[lcommon.MultiAssetTypeMint] {
-	return nil
+	return m.mint
 }
 
 func (m *mockTransaction) AuxDataHash() *lcommon.Blake2b256 {
