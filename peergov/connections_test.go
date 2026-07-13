@@ -206,6 +206,22 @@ func TestIsExpectedNetworkDialError(t *testing.T) {
 			want: false,
 		},
 		{
+			// gouroboros closes the muxer with this error when a crossing
+			// duplicate connection is pruned during the handshake (duplex
+			// connection-manager dedup). It is benign, not a dial failure.
+			name: "connection shutdown initiated eof (duplex dedup)",
+			err: fmt.Errorf(
+				"connection shutdown initiated: %w",
+				io.EOF,
+			),
+			want: true,
+		},
+		{
+			name: "connection shutdown initiated without eof",
+			err:  errors.New("connection shutdown initiated: handshake failed"),
+			want: false,
+		},
+		{
 			name: "nil",
 			err:  nil,
 			want: false,
