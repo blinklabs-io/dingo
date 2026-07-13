@@ -522,6 +522,8 @@ func TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection(
 func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(
 	t *testing.T,
 ) {
+	// Create a local chain with one known point and expose it as the ledger
+	// tip so FindIntersect takes the normal non-origin path.
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
@@ -540,10 +542,14 @@ func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(
 		BlockNumber: block.BlockNumber(),
 	})
 
+	// Ask the server to intersect at the point we know exists.
 	gotPoint, tip, err := o.chainsyncServerFindIntersect(
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{point},
 	)
+
+	// The callback returns the match, reports the tip, and leaves downstream
+	// client state registered at the intersect point.
 	require.NoError(t, err)
 	require.Equal(t, point, gotPoint)
 	require.Equal(t, point, tip.Point)
@@ -560,6 +566,8 @@ func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(
 func TestChainsyncServerFindIntersect_MissingIntersection(
 	t *testing.T,
 ) {
+	// Create a chain tip, then prepare an in-range point with a different
+	// hash so the lookup is valid but does not intersect.
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
@@ -580,10 +588,14 @@ func TestChainsyncServerFindIntersect_MissingIntersection(
 		BlockNumber: block.BlockNumber(),
 	})
 
+	// Submit the nonmatching point list to the server callback.
 	_, _, err := o.chainsyncServerFindIntersect(
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPoint(10, gledger.Blake2b256{0xff}.Bytes())},
 	)
+
+	// The callback maps the missing intersection to the protocol
+	// ErrIntersectNotFound response.
 	require.ErrorIs(t, err, ochainsync.ErrIntersectNotFound)
 }
 
@@ -592,6 +604,8 @@ func TestChainsyncServerFindIntersect_MissingIntersection(
 func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 	t *testing.T,
 ) {
+	// Move the ledger past origin so malformed point data reaches the
+	// database-backed intersection lookup.
 	o := newFindIntersectTestOuroboros(t)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 	block := &testBlock{
@@ -612,10 +626,15 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 		BlockNumber: block.BlockNumber(),
 	})
 
+	// Submit a malformed point hash that causes the ledger lookup to fail
+	// while resolving the candidate block.
 	_, _, err := o.chainsyncServerFindIntersect(
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPoint(10, []byte{0xff})},
 	)
+
+	// The server wraps and returns the ledger error to the protocol layer
+	// instead of hiding it as an ordinary miss.
 	require.ErrorContains(t, err, "get intersect point")
 	require.ErrorContains(t, err, "parsing block key")
 }
@@ -625,14 +644,20 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 	t *testing.T,
 ) {
+	// Use a ledger that can intersect at origin, but a ChainsyncState without
+	// a chain provider so client registration must fail.
 	o := newFindIntersectTestOuroboros(t)
 	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
+	// Perform FindIntersect with origin so registration is the first failing
+	// operation after a successful intersection.
 	_, _, err := o.chainsyncServerFindIntersect(
 		ochainsync.CallbackContext{ConnectionId: connId},
 		[]ocommon.Point{ocommon.NewPointOrigin()},
 	)
+
+	// The registration error is surfaced to the caller.
 	require.ErrorContains(t, err, "add chainsync client")
 	require.ErrorContains(t, err, "no chain provider available")
 }
@@ -642,13 +667,18 @@ func TestChainsyncServerFindIntersect_ClientRegistrationFailure(
 func TestChainsyncServerRequestNext_AddClientFailure(
 	t *testing.T,
 ) {
+	// Configure RequestNext with ChainsyncState that cannot build a
+	// server-side iterator for the downstream client.
 	o := newFindIntersectTestOuroboros(t)
 	o.ChainsyncState = dchainsync.NewState(o.EventBus, nil)
 	connId := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
 
+	// Enter RequestNext before any protocol response can be sent.
 	err := o.chainsyncServerRequestNext(
 		ochainsync.CallbackContext{ConnectionId: connId},
 	)
+
+	// AddClient failure is returned directly from the callback.
 	require.ErrorContains(t, err, "add chainsync client")
 	require.ErrorContains(t, err, "no chain provider available")
 }
@@ -658,13 +688,18 @@ func TestChainsyncServerRequestNext_AddClientFailure(
 func TestChainsyncServerRequestNext_InitialRollbackClearsFlag(
 	t *testing.T,
 ) {
+	// Start a real server protocol with a fresh downstream client that still
+	// needs its initial rollback response.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	ctx := ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	}
 
+	// Handle the first RequestNext for this connection.
 	require.NoError(t, h.o.chainsyncServerRequestNext(ctx))
+
+	// The one-shot initial rollback state has been consumed.
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
 		ocommon.NewPointOrigin(),
@@ -678,6 +713,8 @@ func TestChainsyncServerRequestNext_InitialRollbackClearsFlag(
 func TestChainsyncServerRequestNext_ImmediateForwardBlock(
 	t *testing.T,
 ) {
+	// Register the downstream client and append a block that the iterator can
+	// return without entering AwaitReply.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -696,10 +733,13 @@ func TestChainsyncServerRequestNext_ImmediateForwardBlock(
 	}
 	require.NoError(t, h.ledgerState.Chain().AddBlock(block, nil))
 
+	// Request the next item from the server-side ChainSync callback.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// The immediate block was consumed by the RollForward path.
 	require.NoError(t, err)
 	_, err = clientState.ChainIter.Next(false)
 	require.ErrorIs(t, err, chain.ErrIteratorChainTip)
@@ -710,6 +750,8 @@ func TestChainsyncServerRequestNext_ImmediateForwardBlock(
 func TestChainsyncServerRequestNext_ImmediateRollbackEvent(
 	t *testing.T,
 ) {
+	// Move the iterator past a block, then roll the chain back so the next
+	// synchronous iterator result is a rollback event.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -732,10 +774,13 @@ func TestChainsyncServerRequestNext_ImmediateRollbackEvent(
 	require.False(t, next.Rollback)
 	require.NoError(t, h.ledgerState.Chain().Rollback(ocommon.NewPointOrigin()))
 
+	// Request the next item from the server-side ChainSync callback.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// The rollback was consumed by the RollBackward path.
 	require.NoError(t, err)
 	_, err = clientState.ChainIter.Next(false)
 	require.ErrorIs(t, err, chain.ErrIteratorChainTip)
@@ -746,6 +791,8 @@ func TestChainsyncServerRequestNext_ImmediateRollbackEvent(
 func TestChainsyncServerRequestNext_AwaitReplyAtIteratorTip(
 	t *testing.T,
 ) {
+	// Register a downstream client at origin with no block or rollback
+	// immediately available from the iterator.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -754,10 +801,13 @@ func TestChainsyncServerRequestNext_AwaitReplyAtIteratorTip(
 	require.NoError(t, err)
 	clientState.NeedsInitialRollback = false
 
+	// Request the next item while the iterator is at chain tip.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// AwaitReply is sent successfully and async waiting is armed.
 	require.NoError(t, err)
 }
 
@@ -766,6 +816,8 @@ func TestChainsyncServerRequestNext_AwaitReplyAtIteratorTip(
 func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
 	t *testing.T,
 ) {
+	// Register a client, skip initial rollback, and close the backing DB so
+	// the synchronous iterator returns a real lookup error.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -775,10 +827,14 @@ func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
 	clientState.NeedsInitialRollback = false
 	require.NoError(t, testLedgerDB(t, h.ledgerState).Close())
 
+	// Request the next item from the now-broken iterator.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// The real iterator error propagates instead of being treated as the
+	// normal chain-tip sentinel.
 	require.Error(t, err)
 	require.NotErrorIs(t, err, chain.ErrIteratorChainTip)
 }
@@ -788,6 +844,8 @@ func TestChainsyncServerRequestNext_SyncIteratorErrorPropagates(
 func TestChainsyncServerRequestNext_AwaitReplyErrorPropagates(
 	t *testing.T,
 ) {
+	// Stop the protocol before RequestNext reaches the AwaitReply send path,
+	// causing the send to fail.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -797,10 +855,13 @@ func TestChainsyncServerRequestNext_AwaitReplyErrorPropagates(
 	clientState.NeedsInitialRollback = false
 	h.server.Stop()
 
+	// Request next while the iterator is at tip.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// The AwaitReply send failure is returned to the caller.
 	require.Error(t, err)
 }
 
@@ -809,6 +870,8 @@ func TestChainsyncServerRequestNext_AwaitReplyErrorPropagates(
 func TestChainsyncServerRequestNext_MissingConnectionAfterAwaitReply(
 	t *testing.T,
 ) {
+	// Register a client, then remove its connection before the callback
+	// reaches the post-AwaitReply connection lookup.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -818,10 +881,13 @@ func TestChainsyncServerRequestNext_MissingConnectionAfterAwaitReply(
 	clientState.NeedsInitialRollback = false
 	require.True(t, h.o.ConnManager.RemoveConnection(h.conn.Id(), h.conn))
 
+	// Request next while the iterator is at tip.
 	err = h.o.chainsyncServerRequestNext(ochainsync.CallbackContext{
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	})
+
+	// The missing connection guard returns an explicit error.
 	require.ErrorContains(t, err, "not found")
 }
 
@@ -830,6 +896,8 @@ func TestChainsyncServerRequestNext_MissingConnectionAfterAwaitReply(
 func TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection(
 	t *testing.T,
 ) {
+	// Park the server in AwaitReply so the async goroutine blocks in
+	// ChainIter.Next(true), then cancel that iterator.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	clientState, err := h.o.ChainsyncState.AddClient(
 		h.conn.Id(),
@@ -842,7 +910,12 @@ func TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection(
 		ConnectionId: h.conn.Id(),
 		Server:       h.server,
 	}))
+
+	// Cancel the iterator to simulate normal connection/iterator cleanup.
 	clientState.ChainIter.Cancel()
+
+	// Expected iterator cancellation is ignored and does not emit a
+	// connection-close lifecycle event.
 	testutil.RequireNoReceive(
 		t,
 		h.closedCh,
@@ -856,6 +929,8 @@ func TestChainsyncServerRequestNext_AsyncIteratorCancelDoesNotCloseConnection(
 func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 	t *testing.T,
 ) {
+	// Replace the restart timer with a test channel and block the restart
+	// function so the timeout branch is deterministic.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	timeoutCh := make(chan time.Time)
 	oldRestartAfter := chainsyncRestartAfter
@@ -867,6 +942,7 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 	restartStarted := make(chan struct{})
 	releaseRestart := make(chan struct{})
 
+	// Start restart, wait until it is running, then trigger timeout.
 	h.o.restartChainsyncClientAsync(
 		context.Background(),
 		h.conn.Id(),
@@ -884,6 +960,8 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 		"restart function should start",
 	)
 	timeoutCh <- time.Now()
+
+	// The timeout branch closes/recycles the connection.
 	evt := testutil.RequireReceive(
 		t,
 		h.closedCh,
@@ -901,11 +979,14 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
 	t *testing.T,
 ) {
+	// Start a restart under a cancellable context and block the restart
+	// function so ctx.Done can win the select.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	restartStarted := make(chan struct{})
 	releaseRestart := make(chan struct{})
 
+	// Start restart, wait until it is running, then cancel the context.
 	h.o.restartChainsyncClientAsync(
 		ctx,
 		h.conn.Id(),
@@ -923,6 +1004,8 @@ func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
 		"restart function should start",
 	)
 	cancel()
+
+	// Cancellation closes/recycles the connection.
 	evt := testutil.RequireReceive(
 		t,
 		h.closedCh,
@@ -940,9 +1023,12 @@ func TestRestartChainsyncClientAsync_ContextCancelClosesConnection(
 func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
 	t *testing.T,
 ) {
+	// Prepare a restart function that completes normally and signals when the
+	// goroutine has run.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	restartDone := make(chan struct{})
 
+	// Run the restart path without returning an error.
 	h.o.restartChainsyncClientAsync(
 		context.Background(),
 		h.conn.Id(),
@@ -958,6 +1044,8 @@ func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
 		5*time.Second,
 		"restart function should complete",
 	)
+
+	// A successful restart does not close the connection.
 	testutil.RequireNoReceive(
 		t,
 		h.closedCh,
@@ -971,9 +1059,11 @@ func TestRestartChainsyncClientAsync_SuccessLeavesConnectionOpen(
 func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
 	t *testing.T,
 ) {
+	// Prepare a restart function that fails immediately.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	expectedErr := errors.New("restart failed")
 
+	// Run the async restart path with a failing function.
 	h.o.restartChainsyncClientAsync(
 		context.Background(),
 		h.conn.Id(),
@@ -988,6 +1078,8 @@ func TestRestartChainsyncClientAsync_RestartFailureClosesConnection(
 		5*time.Second,
 		"restart failure should close the connection",
 	)
+
+	// Restart failure closes/recycles the affected connection.
 	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
 	require.True(t, ok)
 	require.Equal(t, h.conn.Id(), closed.ConnectionId)
