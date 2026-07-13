@@ -15,12 +15,16 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +41,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// txsubmissionRelayTestTxHex is a real, decodable Conway-era transaction.
+// The server-init relay loop parses relayed bodies with
+// ledger.NewTransactionFromCbor before admitting them to the mempool, so
+// end-to-end relay tests need genuine CBOR rather than the placeholder
+// bodies used by the callback-level tests above.
+const txsubmissionRelayTestTxHex = "84a700818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
+
+const txsubmissionRelayTestEraId = 6 // Conway
+
+const txsubmissionRelayTestNetworkMagic = 42
+
 type txsubmissionTestValidator struct{}
 
 func (txsubmissionTestValidator) ValidateTx(gledger.Transaction) error {
@@ -49,6 +64,24 @@ func (txsubmissionTestValidator) ValidateTxWithOverlay(
 	map[string]lcommon.Utxo,
 ) error {
 	return nil
+}
+
+// txsubmissionRejectingValidator rejects every transaction, so that
+// AddTransaction fails the way it would for a real mempool policy
+// violation (e.g. an invalid or already-spent UTxO), letting tests observe
+// how txsubmissionServerInit handles a mempool error during relay.
+type txsubmissionRejectingValidator struct{}
+
+func (txsubmissionRejectingValidator) ValidateTx(gledger.Transaction) error {
+	return errors.New("txsubmissionRejectingValidator: rejected")
+}
+
+func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	return errors.New("txsubmissionRejectingValidator: rejected")
 }
 
 // TestTxSubmissionClientRequestTxIds verifies empty, partial, and capped
@@ -287,17 +320,26 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 }
 
+// newTxSubmissionTestOuroboros builds a lightweight Ouroboros/mempool pair
+// for exercising the client-side TxSubmission callbacks directly. Optional
+// mutateConfig funcs can override the default MempoolConfig, e.g. to set a
+// short TTL for testing expiry behavior.
 func newTxSubmissionTestOuroboros(
 	t *testing.T,
+	mutateConfig ...func(*mempool.MempoolConfig),
 ) (*Ouroboros, ouroboros.ConnectionId) {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	m, err := mempool.NewMempool(mempool.MempoolConfig{
+	cfg := mempool.MempoolConfig{
 		Logger:          logger,
 		PromRegistry:    prometheus.NewRegistry(),
 		Validator:       txsubmissionTestValidator{},
 		MempoolCapacity: 1024 * 1024,
-	})
+	}
+	for _, mutate := range mutateConfig {
+		mutate(&cfg)
+	}
+	m, err := mempool.NewMempool(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, m.Stop(t.Context()))
@@ -374,4 +416,351 @@ func mustTxSubmissionTestTxId(t *testing.T, hash string) txsubmission.TxId {
 		EraId: 6,
 		TxId:  txId,
 	}
+}
+
+// txSubmissionRelayHarness wires two real Ouroboros nodes together over a
+// net.Pipe with the full NtN handshake and TxSubmission mini-protocol, so
+// txsubmissionServerInit's background goroutine runs for real: node A's
+// TxSubmission server pulls TxIds/Txs from node B's TxSubmission client and
+// decodes/admits them into node A's own mempool. This exercises the relay
+// loop itself, which the callback-level tests above cannot reach since
+// ctx.Server is a concrete network-backed type.
+type txSubmissionRelayHarness struct {
+	nodeA *Ouroboros
+	nodeB *Ouroboros
+	connA *ouroboros.Connection
+	connB *ouroboros.Connection
+	cmA   *connmanager.ConnectionManager
+	cmB   *connmanager.ConnectionManager
+	mA    *mempool.Mempool
+	mB    *mempool.Mempool
+}
+
+// newTxSubmissionRelayHarness intentionally does not register any
+// t.Cleanup teardown: callers must close the harness themselves so tests
+// that compare goroutine counts around the harness's lifetime observe a
+// deterministic teardown point rather than one deferred until after the
+// test function returns.
+func newTxSubmissionRelayHarness(t *testing.T) *txSubmissionRelayHarness {
+	return newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{})
+}
+
+// txSubmissionRelayHarnessOpts overrides the harness's defaults. Every
+// field is optional; the zero value reproduces newTxSubmissionRelayHarness's
+// original behavior (a shared discard logger and permissive validators on
+// both nodes).
+type txSubmissionRelayHarnessOpts struct {
+	logger     *slog.Logger
+	validatorA mempool.TxValidator
+	validatorB mempool.TxValidator
+}
+
+func newTxSubmissionRelayHarnessWithOpts(
+	t *testing.T,
+	opts txSubmissionRelayHarnessOpts,
+) *txSubmissionRelayHarness {
+	t.Helper()
+	logger := opts.logger
+	if logger == nil {
+		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
+	}
+	validatorA := opts.validatorA
+	if validatorA == nil {
+		validatorA = txsubmissionTestValidator{}
+	}
+	validatorB := opts.validatorB
+	if validatorB == nil {
+		validatorB = txsubmissionTestValidator{}
+	}
+
+	mA, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       validatorA,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+	mB, err := mempool.NewMempool(mempool.MempoolConfig{
+		Logger:          logger,
+		PromRegistry:    prometheus.NewRegistry(),
+		Validator:       validatorB,
+		MempoolCapacity: 1024 * 1024,
+	})
+	require.NoError(t, err)
+
+	cmA := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+	cmB := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{Logger: logger},
+	)
+
+	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
+	nodeA.Mempool = mA
+	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
+	nodeB.Mempool = mB
+
+	serverPipe, clientPipe := net.Pipe()
+
+	connACh := make(chan *ouroboros.Connection, 1)
+	errACh := make(chan error, 1)
+	go func() {
+		conn, err := ouroboros.New(
+			ouroboros.WithConnection(serverPipe),
+			ouroboros.WithServer(true),
+			ouroboros.WithNetworkMagic(txsubmissionRelayTestNetworkMagic),
+			ouroboros.WithNodeToNode(true),
+			ouroboros.WithFullDuplex(true),
+			ouroboros.WithLogger(logger),
+			ouroboros.WithTxSubmissionConfig(
+				txsubmission.NewConfig(
+					slices.Concat(
+						nodeA.txsubmissionClientConnOpts(),
+						nodeA.txsubmissionServerConnOpts(),
+					)...,
+				),
+			),
+		)
+		if err != nil {
+			errACh <- err
+			return
+		}
+		connACh <- conn
+	}()
+
+	connB, err := ouroboros.New(
+		ouroboros.WithConnection(clientPipe),
+		ouroboros.WithNetworkMagic(txsubmissionRelayTestNetworkMagic),
+		ouroboros.WithNodeToNode(true),
+		ouroboros.WithFullDuplex(true),
+		ouroboros.WithLogger(logger),
+		ouroboros.WithTxSubmissionConfig(
+			txsubmission.NewConfig(
+				slices.Concat(
+					nodeB.txsubmissionClientConnOpts(),
+					nodeB.txsubmissionServerConnOpts(),
+				)...,
+			),
+		),
+	)
+	require.NoError(t, err)
+
+	var connA *ouroboros.Connection
+	select {
+	case err := <-errACh:
+		t.Fatalf("node A connection setup failed: %s", err)
+	case connA = <-connACh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for node A connection setup")
+	}
+
+	require.True(
+		t,
+		cmA.AddConnection(connA, false, connA.Id().RemoteAddr.String()),
+	)
+	require.True(
+		t,
+		cmB.AddConnection(connB, true, connB.Id().RemoteAddr.String()),
+	)
+
+	return &txSubmissionRelayHarness{
+		nodeA: nodeA,
+		nodeB: nodeB,
+		connA: connA,
+		connB: connB,
+		cmA:   cmA,
+		cmB:   cmB,
+		mA:    mA,
+		mB:    mB,
+	}
+}
+
+// close tears down both connections and their owning nodes synchronously,
+// so callers can reliably observe goroutine counts settling afterward.
+func (h *txSubmissionRelayHarness) close(t *testing.T) {
+	t.Helper()
+	_ = h.connA.Close()
+	_ = h.connB.Close()
+	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = h.cmA.Stop(stopCtx)
+	_ = h.cmB.Stop(stopCtx)
+	_ = h.mA.Stop(context.Background())
+	_ = h.mB.Stop(context.Background())
+}
+
+// TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd drives the real
+// txsubmissionServerInit goroutine over an actual TxSubmission session: node
+// B offers a real transaction from its mempool, node A's server pulls the
+// TxIds then the TxBody, decodes the CBOR, and admits it to its own
+// mempool. This is the happy-path relay loop that the direct callback tests
+// cannot reach.
+func TestTxSubmissionServerInitRelaysMempoolTransactionEndToEnd(t *testing.T) {
+	h := newTxSubmissionRelayHarness(t)
+	defer h.close(t)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	wantTx, err := gledger.NewTransactionFromCbor(
+		txsubmissionRelayTestEraId,
+		txBytes,
+	)
+	require.NoError(t, err)
+
+	// Mirrors txsubmissionClientStart's role in the real outbound-connection
+	// flow: register a mempool consumer for the peer and tell it to start
+	// asking us for our mempool contents, which triggers node A's Init
+	// callback (txsubmissionServerInit) on the other end of the wire.
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return len(h.mA.Transactions()) == 1
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's transaction to be relayed into node A's mempool",
+	)
+
+	relayed := h.mA.Transactions()[0]
+	require.Equal(t, wantTx.Hash().String(), relayed.Hash)
+	require.Equal(t, txBytes, relayed.Cbor)
+}
+
+// TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect verifies the
+// server-init relay goroutine does not leak when the peer connection closes
+// while it is parked in a blocking RequestTxIds call. The mempool is seeded
+// with exactly one transaction so the loop completes one real round trip
+// (proving the goroutine actually reached the blocking call again) before
+// the connection is torn down.
+//
+// Goroutine counts are compared against a baseline captured before the
+// harness is built, rather than using goleak, since goleak inspects the
+// whole process and would also trip on unrelated pre-existing leaks
+// elsewhere in this package's test suite.
+func TestTxSubmissionServerInitExitsCleanlyOnPeerDisconnect(t *testing.T) {
+	baseline := runtime.NumGoroutine()
+
+	h := newTxSubmissionRelayHarness(t)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return len(h.mA.Transactions()) == 1
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected node B's transaction to be relayed before disconnect",
+	)
+
+	// Node B's mempool is now empty, so node A's relay goroutine is parked
+	// in a blocking RequestTxIds call awaiting the next offer. Closing here
+	// must unblock and exit that goroutine, along with every other
+	// goroutine the harness spawned, rather than leaking any of them.
+	h.close(t)
+
+	require.Eventually(
+		t,
+		func() bool {
+			return runtime.NumGoroutine() <= baseline+2
+		},
+		5*time.Second,
+		20*time.Millisecond,
+		"expected relay and connection goroutines to exit after peer disconnect",
+	)
+}
+
+// TestTxSubmissionClientRequestTxsExpiredTransactionNotServed verifies that
+// a transaction the mempool's own TTL has already expired -- before this
+// peer ever advertised it via RequestTxIds -- is handled the same as an
+// unknown TxId: an empty reply, not an error. The consumer cache only ever
+// learns about a transaction when it is advertised, so a TxId that expired
+// from the mempool beforehand must fall straight through to "not found"
+// rather than erroring or panicking.
+func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
+	o, connId := newTxSubmissionTestOuroboros(t, func(cfg *mempool.MempoolConfig) {
+		cfg.TransactionTTL = 10 * time.Millisecond
+		cfg.CleanupInterval = 10 * time.Millisecond
+	})
+	o.Mempool.AddConsumer(connId)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, o.Mempool.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+	wantTx, err := gledger.NewTransactionFromCbor(
+		txsubmissionRelayTestEraId,
+		txBytes,
+	)
+	require.NoError(t, err)
+
+	// Wait for the mempool's own TTL sweep to remove the transaction. It is
+	// never requested via RequestTxIds first, so the consumer cache never
+	// learns about it either -- exactly the "expired before offer" case.
+	require.Eventually(
+		t,
+		func() bool {
+			return len(o.Mempool.Transactions()) == 0
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected transaction to expire from the mempool",
+	)
+
+	bodies, err := o.txsubmissionClientRequestTxs(
+		txsubmission.CallbackContext{ConnectionId: connId},
+		[]txsubmission.TxId{
+			mustTxSubmissionTestTxId(t, wantTx.Hash().String()),
+		},
+	)
+	require.NoError(t, err)
+	require.Empty(t, bodies)
+}
+
+// TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly verifies
+// that a mempool error while admitting a relayed transaction -- e.g. a
+// validator rejection -- is logged and the relay goroutine returns cleanly
+// instead of panicking or wedging the connection. Node A's mempool rejects
+// every transaction so a real, well-formed relay reaches
+// Mempool.AddTransaction's error path inside txsubmissionServerInit.
+func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(t *testing.T) {
+	logBuf := &lockedBuffer{}
+	logger := slog.New(
+		slog.NewJSONHandler(logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}),
+	)
+
+	h := newTxSubmissionRelayHarnessWithOpts(t, txSubmissionRelayHarnessOpts{
+		logger:     logger,
+		validatorA: txsubmissionRejectingValidator{},
+	})
+	defer h.close(t)
+
+	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
+	require.NoError(t, err)
+	require.NoError(t, h.mB.AddTransaction(txsubmissionRelayTestEraId, txBytes))
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(h.connB.Id()))
+
+	require.Eventually(
+		t,
+		func() bool {
+			return strings.Contains(logBuf.String(), "failed to add tx")
+		},
+		5*time.Second,
+		10*time.Millisecond,
+		"expected the mempool rejection to be logged",
+	)
+
+	require.Empty(
+		t,
+		h.mA.Transactions(),
+		"rejected transaction must not be admitted to the mempool",
+	)
 }
