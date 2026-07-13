@@ -134,7 +134,7 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, ids, tt.wantCount)
 			for idx, id := range ids {
-				require.Equal(t, uint16(6), id.TxId.EraId)
+				require.Equal(t, uint16(txsubmissionRelayTestEraId), id.TxId.EraId)
 				require.Equal(
 					t,
 					uint32(len(fixtures[idx].body)),
@@ -412,7 +412,7 @@ func mustTxSubmissionTestTxId(t *testing.T, hash string) txsubmission.TxId {
 	var txId [32]byte
 	copy(txId[:], bytes)
 	return txsubmission.TxId{
-		EraId: 6,
+		EraId: uint16(txsubmissionRelayTestEraId),
 		TxId:  txId,
 	}
 }
