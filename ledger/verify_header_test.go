@@ -1768,7 +1768,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
-	assert.Contains(t, logBuf.String(), "mark snapshot captured after target epoch start")
+	assert.Contains(t, logBuf.String(), "Mithril-imported mark snapshot captured mid-epoch, not at the epoch boundary")
 	assert.NotContains(t, logBuf.String(), "total active stake is zero")
 }
 
