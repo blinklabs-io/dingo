@@ -933,9 +933,10 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 	// function so the timeout branch is deterministic.
 	h := newChainsyncAsyncSendFailureHarness(t)
 	timeoutCh := make(chan time.Time)
+	timeoutArgCh := make(chan time.Duration, 1)
 	oldRestartAfter := chainsyncRestartAfter
 	chainsyncRestartAfter = func(timeout time.Duration) <-chan time.Time {
-		require.Equal(t, chainsyncRestartTimeout, timeout)
+		timeoutArgCh <- timeout
 		return timeoutCh
 	}
 	t.Cleanup(func() { chainsyncRestartAfter = oldRestartAfter })
@@ -958,6 +959,16 @@ func TestRestartChainsyncClientAsync_TimeoutClosesConnection(
 		restartStarted,
 		5*time.Second,
 		"restart function should start",
+	)
+	require.Equal(
+		t,
+		chainsyncRestartTimeout,
+		testutil.RequireReceive(
+			t,
+			timeoutArgCh,
+			5*time.Second,
+			"restart timeout duration should be requested",
+		),
 	)
 	timeoutCh <- time.Now()
 
