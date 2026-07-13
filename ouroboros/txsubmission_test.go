@@ -22,13 +22,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"reflect"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
@@ -47,6 +45,10 @@ import (
 // end-to-end relay tests need genuine CBOR rather than the placeholder
 // bodies used by the callback-level tests above.
 const txsubmissionRelayTestTxHex = "84a700818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
+
+const txsubmissionRelayTestTxWithValidityStartHex = "84a8081a02faf08000818258200c07395aed88bdddc6de0518d1462dd0ec7e52e1e3a53599f7cdb24dc80237f8010181a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a02dc6c00021a001e84800b5820192d0c0c2c2320e843e080b5f91a9ca35155bc50f3ef3bfdbc72c1711b86367e0d818258203af629a5cd75f76d0cc21172e1193b85f199ca78e837c3965d77d7d6bc90206b0010a20058390073a817bb425cbe179af824529d96ceb93c41c3ab507380095d1be4ebd64c93ef0094f5c179e5380109ebeef022245944e3914f5bcca3a793011a006acfc0111a002dc6c0a4008182582025fcacade3fffc096b53bdaf4c7d012bded303c9edbee686d24b372dae60aa1b58409da928a064ff9f795110bdcb8ab05d2a7a023dd15ebc42044f102ce366c0c9077024c7951c2d63584b7d2eea7bf1da4a7453bde4c99dd083889c1e2e2e3db804048119077a0581840000187b820a0a06814746010000222601f4f6"
+
+const txsubmissionRelayIssue1685TxHex = "84a500d901028282582004d97ebdeb064082639d67c8318ce069a35983bb05782d1327b004cca330ab5b008258204430e4bc2db0ef794c70b79851eecc332d8f77fb022c0d03ad24797f390ae54f000181825839005e7faca37d22d8753db699b104cbb2586f8787e17c116ff254ef0401e669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988d1b0000000487a0103c021a0002d719031a0661906704d90102818a03581c7f4a5ac4b6a0f40cf07f989238d8e623315d80cc0602255b15c01eb3582025b400987b8e6d3f2d1913f7e7179611dc6563dc6731064de6b6dbe05114006e1b00000002540be4001a1908b100d81e82151901f4581de0e669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988dd9010281581ce669129d1393c159b9b5a84d894271b5689910cc2e364ca05771988d818400190bb9444017f8d6f6827668747470733a2f2f6269742e6c792f34634e34374d31582086ed8edc5e20678c124d49dd1f6f6cb0b358797b71586f8a9db36bccf313f9eea100d9010283825820e61a0ef75ebcfba9569f2ef450d50320f376c36056f09f759d0e18ebf30a5ece5840c329a870e41de8e59b3ec872ec8d06f10e19c5dc436311e409827bf5792f86e75bb2c46785991563f42a03498c9c5342957efa15b348fffbd38f4fe64aef4f01825820942aaf02196ca16a79483b5862ff3d521e4c62c24dbc6aa495a360c101249de3584071ea7ed1740fbabe61f9c73f7306ef1ade9c2cf07a9d3c75d3ca130dd7e2078ea687cc326e7e790038580fdb3d9ec8e7e0edf70f5ff47527dd5ae0de6f5eca04825820eb2dbcf867f0611ca671a3ce89ae6c89a1a2eea96d6dcba82c607d4c9dbc489e5840f7e9a45d24cfbe8a7e7bc8200d84aa914cb51448873a41e0cf80aa641dd266490a0568b3039377fc5836d94320dc5c125f56352e0ad529f518035b4c2a313102f5f6"
 
 const txsubmissionRelayTestEraId = 6 // Conway
 
@@ -87,9 +89,10 @@ func (txsubmissionRejectingValidator) ValidateTxWithOverlay(
 // TestTxSubmissionClientRequestTxIds verifies empty, partial, and capped
 // TxId responses when a peer asks what transactions this node can relay.
 func TestTxSubmissionClientRequestTxIds(t *testing.T) {
+	fixtures := txsubmissionTestFixtures(t)
 	tests := []struct {
 		name      string
-		hashes    []string
+		txCount   int
 		req       uint16
 		wantCount int
 	}{
@@ -99,21 +102,14 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 			wantCount: 0,
 		},
 		{
-			name: "partial response",
-			hashes: []string{
-				txsubmissionTestHash(1),
-				txsubmissionTestHash(2),
-			},
+			name:      "partial response",
+			txCount:   2,
 			req:       10,
 			wantCount: 2,
 		},
 		{
-			name: "full response",
-			hashes: []string{
-				txsubmissionTestHash(1),
-				txsubmissionTestHash(2),
-				txsubmissionTestHash(3),
-			},
+			name:      "full response",
+			txCount:   3,
 			req:       2,
 			wantCount: 2,
 		},
@@ -124,7 +120,7 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 			// Arrange a peer consumer with the test's available tx set.
 			o, connId := newTxSubmissionTestOuroboros(t)
 			o.Mempool.AddConsumer(connId)
-			appendTxSubmissionTestTxs(t, o.Mempool, tt.hashes...)
+			addTxSubmissionTestFixtures(t, o.Mempool, fixtures[:tt.txCount]...)
 
 			// Ask the handler for at most the peer-requested number of TxIds.
 			ids, err := o.txsubmissionClientRequestTxIds(
@@ -141,10 +137,10 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 				require.Equal(t, uint16(6), id.TxId.EraId)
 				require.Equal(
 					t,
-					uint32(len(txsubmissionTestBody(tt.hashes[idx]))),
+					uint32(len(fixtures[idx].body)),
 					id.Size,
 				)
-				require.Equal(t, tt.hashes[idx], hex.EncodeToString(id.TxId.TxId[:]))
+				require.Equal(t, fixtures[idx].hash, hex.EncodeToString(id.TxId.TxId[:]))
 			}
 		})
 	}
@@ -154,10 +150,10 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 // peer acknowledgements discard previously advertised transaction bodies.
 func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	// Arrange one cached transaction for a peer consumer.
+	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.Mempool.AddConsumer(connId)
-	hash := txsubmissionTestHash(1)
-	appendTxSubmissionTestTxs(t, o.Mempool, hash)
+	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// First advertise the transaction so it is stored in the consumer cache.
@@ -172,7 +168,7 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 
 	// Verify the acknowledged transaction body can no longer be served.
 	bodies, err := o.txsubmissionClientRequestTxs(ctx, []txsubmission.TxId{
-		mustTxSubmissionTestTxId(t, hash),
+		fixture.txId,
 	})
 	require.NoError(t, err)
 	require.Empty(t, bodies)
@@ -182,11 +178,11 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 // bodies while unknown or already-served TxIds are ignored.
 func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	// Arrange one known tx and one unknown tx id for the peer request.
+	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.Mempool.AddConsumer(connId)
-	knownHash := txsubmissionTestHash(1)
 	unknownHash := txsubmissionTestHash(99)
-	appendTxSubmissionTestTxs(t, o.Mempool, knownHash)
+	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// Advertise the known tx first so RequestTxs can find it in cache.
@@ -202,8 +198,8 @@ func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []txsubmission.TxBody{
 		{
-			EraId:  6,
-			TxBody: txsubmissionTestBody(knownHash),
+			EraId:  txsubmissionRelayTestEraId,
+			TxBody: fixture.body,
 		},
 	}, bodies)
 
@@ -235,29 +231,21 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 	require.Nil(t, bodies)
 }
 
-// TestTxSubmissionClientRequestTxIdsMalformedCachedTxHash verifies malformed
-// cached transaction hashes return errors instead of panicking.
-func TestTxSubmissionClientRequestTxIdsMalformedCachedTxHash(t *testing.T) {
-	// Arrange a cached tx with a hash that is valid hex but the wrong length.
+// TestTxSubmissionClientRequestTxsUnknownZeroTxId verifies malformed or
+// impossible peer TxId requests return no bodies instead of panicking.
+func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
+	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.Mempool.AddConsumer(connId)
-	appendTxSubmissionTestTx(t, o.Mempool, &mempool.MempoolTransaction{
-		Hash:     strings.Repeat("0", 62),
-		Cbor:     []byte("bad-hash-body"),
-		Type:     6,
-		LastSeen: time.Now(),
-	})
 
-	// Verify the malformed hash is returned as an error, not a panic.
+	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
 	require.NotPanics(t, func() {
-		ids, err := o.txsubmissionClientRequestTxIds(
+		bodies, err := o.txsubmissionClientRequestTxs(
 			txsubmission.CallbackContext{ConnectionId: connId},
-			false,
-			0,
-			1,
+			[]txsubmission.TxId{{EraId: txsubmissionRelayTestEraId}},
 		)
-		require.ErrorContains(t, err, "unexpected tx hash length")
-		require.Nil(t, ids)
+		require.NoError(t, err)
+		require.Empty(t, bodies)
 	})
 }
 
@@ -265,10 +253,10 @@ func TestTxSubmissionClientRequestTxIdsMalformedCachedTxHash(t *testing.T) {
 // zero-count peer request leaves the consumer positioned on the next tx.
 func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	// Arrange one available tx for the peer consumer.
+	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.Mempool.AddConsumer(connId)
-	hash := txsubmissionTestHash(1)
-	appendTxSubmissionTestTxs(t, o.Mempool, hash)
+	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
 	// A zero-count request should return nothing.
@@ -280,7 +268,7 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	ids, err = o.txsubmissionClientRequestTxIds(ctx, false, 0, 1)
 	require.NoError(t, err)
 	require.Len(t, ids, 1)
-	require.Equal(t, hash, hex.EncodeToString(ids[0].TxId.TxId[:]))
+	require.Equal(t, fixture.hash, hex.EncodeToString(ids[0].TxId.TxId[:]))
 }
 
 // TestTxSubmissionServerInitMissingConnectionReturnsCleanly verifies server
@@ -305,7 +293,8 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	o, connId := newTxSubmissionTestOuroboros(t)
 	o.Mempool.AddConsumer(connId)
 	o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(1, 1)
-	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 2))
+	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
+	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 
 	// Deliver the same connection-close event used by normal node wiring.
 	o.HandleConnClosedEvent(event.Event{
@@ -365,44 +354,54 @@ func txsubmissionTestConnId(t *testing.T) ouroboros.ConnectionId {
 	}
 }
 
-func appendTxSubmissionTestTxs(
-	t *testing.T,
-	m *mempool.Mempool,
-	hashes ...string,
-) {
-	t.Helper()
-	for _, hash := range hashes {
-		appendTxSubmissionTestTx(t, m, &mempool.MempoolTransaction{
-			Hash:     hash,
-			Cbor:     txsubmissionTestBody(hash),
-			Type:     6,
-			LastSeen: time.Now(),
-		})
-	}
-}
-
-func appendTxSubmissionTestTx(
-	t *testing.T,
-	m *mempool.Mempool,
-	tx *mempool.MempoolTransaction,
-) {
-	t.Helper()
-	m.Lock()
-	defer m.Unlock()
-	value := reflect.ValueOf(m).Elem().FieldByName("transactions")
-	transactions := reflect.NewAt(
-		value.Type(),
-		unsafe.Pointer(value.UnsafeAddr()),
-	).Elem()
-	transactions.Set(reflect.Append(transactions, reflect.ValueOf(tx)))
-}
-
 func txsubmissionTestHash(idx int) string {
 	return fmt.Sprintf("%064x", idx)
 }
 
-func txsubmissionTestBody(hash string) []byte {
-	return []byte("tx-body-" + hash)
+type txsubmissionTestFixture struct {
+	hash string
+	body []byte
+	txId txsubmission.TxId
+}
+
+func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
+	t.Helper()
+	hexFixtures := []string{
+		txsubmissionRelayTestTxHex,
+		txsubmissionRelayTestTxWithValidityStartHex,
+		txsubmissionRelayIssue1685TxHex,
+	}
+	ret := make([]txsubmissionTestFixture, 0, len(hexFixtures))
+	for _, txHex := range hexFixtures {
+		txBytes, err := hex.DecodeString(txHex)
+		require.NoError(t, err)
+		tx, err := gledger.NewTransactionFromCbor(
+			txsubmissionRelayTestEraId,
+			txBytes,
+		)
+		require.NoError(t, err)
+		txHash := tx.Hash().String()
+		ret = append(ret, txsubmissionTestFixture{
+			hash: txHash,
+			body: txBytes,
+			txId: mustTxSubmissionTestTxId(t, txHash),
+		})
+	}
+	return ret
+}
+
+func addTxSubmissionTestFixtures(
+	t *testing.T,
+	m *mempool.Mempool,
+	fixtures ...txsubmissionTestFixture,
+) {
+	t.Helper()
+	for _, fixture := range fixtures {
+		require.NoError(
+			t,
+			m.AddTransaction(txsubmissionRelayTestEraId, fixture.body),
+		)
+	}
 }
 
 func mustTxSubmissionTestTxId(t *testing.T, hash string) txsubmission.TxId {
