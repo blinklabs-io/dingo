@@ -1816,10 +1816,11 @@ derived from the invoked command, so listener and ImmutableDB-source
 requirements match what the command actually does. All violations are reported
 together in a single startup error. The informational `version` and `list`
 subcommands — and cobra's built-in `help` and `completion` — are exempt so
-they still run against an otherwise-invalid config. The privileged-port
-check (below 1024) recognizes root, Windows, Linux `CAP_NET_BIND_SERVICE`,
-and a zeroed `net.ipv4.ip_unprivileged_port_start` (as container runtimes
-set) as allowed to bind.
+they still run against an otherwise-invalid config. The privileged-port check compares each active port against what the
+process may actually bind: root, Windows, and Linux `CAP_NET_BIND_SERVICE`
+allow any port, and otherwise Linux uses the kernel's
+`net.ipv4.ip_unprivileged_port_start` cutoff (1024 by default; container
+runtimes commonly set 0).
 
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)

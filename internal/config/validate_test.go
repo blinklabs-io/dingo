@@ -51,7 +51,7 @@ func validTestConfig() *Config {
 
 func TestValidateDefaultsPass(t *testing.T) {
 	cfg := validTestConfig()
-	assert.NoError(t, cfg.validate(cfg.RunMode, false))
+	assert.NoError(t, cfg.validate(cfg.RunMode, minUnprivilegedPort))
 }
 
 func TestValidate(t *testing.T) {
@@ -334,7 +334,7 @@ func TestValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validTestConfig()
 			tt.modify(cfg)
-			err := cfg.validate(cfg.RunMode, false)
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr == "" {
 				assert.NoError(t, err)
 				return
@@ -345,11 +345,29 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestValidatePrivilegedPortAllowedAsRoot(t *testing.T) {
+// TestValidatePrivilegedPortAllowedWhenBindable covers a process that
+// may bind any port (root, Windows, or CAP_NET_BIND_SERVICE):
+// minBindable is 0, so a sub-1024 port passes.
+func TestValidatePrivilegedPortAllowedWhenBindable(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.StorageMode = storageModeAPI
 	cfg.BlockfrostPort = 443
-	assert.NoError(t, cfg.validate(cfg.RunMode, true))
+	assert.NoError(t, cfg.validate(cfg.RunMode, 0))
+}
+
+// TestValidateLoweredPrivilegedPortCutoff covers a Linux deployment
+// with net.ipv4.ip_unprivileged_port_start lowered to a nonzero value:
+// ports at or above the cutoff must pass while ports below it are
+// still rejected.
+func TestValidateLoweredPrivilegedPortCutoff(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.StorageMode = storageModeAPI
+	cfg.BlockfrostPort = 80
+	assert.NoError(t, cfg.validate(cfg.RunMode, 80))
+	cfg.BlockfrostPort = 79
+	err := cfg.validate(cfg.RunMode, 80)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "privileged port")
 }
 
 // TestValidateUtilityModesRelaxListenerAndSource verifies that the
@@ -366,7 +384,7 @@ func TestValidateUtilityModesRelaxListenerAndSource(t *testing.T) {
 			cfg.MetricsPort = 0
 			cfg.DebugPort = 0
 			cfg.ImmutableDbPath = ""
-			assert.NoError(t, cfg.validate(mode, false))
+			assert.NoError(t, cfg.validate(mode, minUnprivilegedPort))
 		})
 	}
 }
@@ -381,7 +399,7 @@ func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 	cfg.RelayPort = 0
 	cfg.PrivatePort = 0
 	cfg.ImmutableDbPath = ""
-	assert.NoError(t, cfg.validate(RunModeSync, false))
+	assert.NoError(t, cfg.validate(RunModeSync, minUnprivilegedPort))
 }
 
 // TestValidateSyncModeValidatesMetricsPort verifies that the Mithril sync
@@ -390,7 +408,7 @@ func TestValidateSyncModeIgnoresInactiveListenerCollision(t *testing.T) {
 func TestValidateSyncModeValidatesMetricsPort(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.MetricsPort = 99999999
-	err := cfg.validate(RunModeSync, false)
+	err := cfg.validate(RunModeSync, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid metricsPort")
 }
@@ -403,7 +421,7 @@ func TestValidateMithrilReadOnlyModeSkipsAuxPorts(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.MetricsPort = 99999999
 	cfg.DebugPort = 99999999
-	assert.NoError(t, cfg.validate(RunModeMithril, false))
+	assert.NoError(t, cfg.validate(RunModeMithril, minUnprivilegedPort))
 }
 
 // TestValidateDevConfigViaServeChecksApiPorts covers `dingo serve` with
@@ -415,7 +433,7 @@ func TestValidateDevConfigViaServeChecksApiPorts(t *testing.T) {
 	cfg.RunMode = RunModeDev
 	cfg.StorageMode = storageModeCore
 	cfg.UtxorpcPort = 99999999
-	err := cfg.validate(RunModeServe, false)
+	err := cfg.validate(RunModeServe, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid utxorpcPort")
 }
@@ -429,7 +447,7 @@ func TestValidateLoadModeSkipsAllListenerPorts(t *testing.T) {
 	cfg.ImmutableDbPath = "/data/immutable"
 	cfg.MetricsPort = 99999999
 	cfg.UtxorpcPort = 99999999
-	assert.NoError(t, cfg.validate(RunModeLoad, false))
+	assert.NoError(t, cfg.validate(RunModeLoad, minUnprivilegedPort))
 }
 
 // TestValidateInvalidModeStillReportsListeners verifies that when the
@@ -442,7 +460,7 @@ func TestValidateInvalidModeStillReportsListeners(t *testing.T) {
 	cfg.RelayPort = 0
 	// cmd/dingo passes RunModeServe as the effective mode for an invalid
 	// configured runMode at the bare root.
-	err := cfg.validate(RunModeServe, false)
+	err := cfg.validate(RunModeServe, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid runMode")
 	assert.Contains(t, err.Error(), "port (relay/NtN) must be set")
@@ -454,7 +472,7 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	cfg.ImmutableDbPath = ""
 	cfg.EvictionWatermark = 2.0
 	cfg.Chainsync.Strategy = "fastest"
-	err := cfg.validate(cfg.RunMode, false)
+	err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires immutableDbPath")
 	assert.Contains(t, err.Error(), "invalid evictionWatermark")

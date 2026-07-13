@@ -58,31 +58,36 @@ var AcceptedMithrilBackends = []string{"", "v1", "v2"}
 // the configured runMode, so cmd/dingo passes the mode reflecting what
 // the command does. It governs which listeners and sources are required.
 func (c *Config) Validate(effectiveMode RunMode) error {
-	return c.validate(effectiveMode, canBindPrivilegedPorts())
+	return c.validate(effectiveMode, minBindablePort())
 }
 
-// canBindPrivilegedPorts reports whether the process may bind TCP ports
-// below 1024. Root (euid 0) always can, and Windows has no
-// privileged-port restriction (os.Geteuid also returns -1 there, which
-// would otherwise misclassify every Windows process as unprivileged).
-// On Linux a non-root process may still bind low ports when it holds
-// CAP_NET_BIND_SERVICE (setcap, systemd AmbientCapabilities) or when
-// net.ipv4.ip_unprivileged_port_start has been lowered to 0 (container
-// runtimes such as Docker do this by default), so those are honored
-// before rejecting.
-func canBindPrivilegedPorts() bool {
+// minBindablePort returns the lowest TCP port this process may bind;
+// configured ports below it are privileged and rejected. Root (euid 0)
+// may bind any port, and Windows has no privileged-port restriction
+// (os.Geteuid also returns -1 there, which would otherwise misclassify
+// every Windows process as unprivileged). On Linux the restriction is
+// lifted entirely by CAP_NET_BIND_SERVICE (setcap, systemd
+// AmbientCapabilities), and the cutoff is otherwise the kernel's
+// net.ipv4.ip_unprivileged_port_start — 1024 by default, 0 inside
+// containers under runtimes such as Docker, and possibly any other
+// value an operator has set — so the actual sysctl value is used. On
+// other Unixes the traditional 1024 cutoff applies.
+func minBindablePort() uint {
 	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		return true
+		return 0
 	}
 	if runtime.GOOS != "linux" {
-		return false
+		return minUnprivilegedPort
+	}
+	if hasCapNetBindService() {
+		return 0
 	}
 	if start, err := readProcUint(
 		"/proc/sys/net/ipv4/ip_unprivileged_port_start",
-	); err == nil && start == 0 {
-		return true
+	); err == nil && start <= maxPort {
+		return uint(start)
 	}
-	return hasCapNetBindService()
+	return minUnprivilegedPort
 }
 
 // readProcUint reads a procfs file containing a single unsigned
@@ -118,11 +123,11 @@ func hasCapNetBindService() bool {
 	return false
 }
 
-// validate is the deterministic core of Validate. privileged reports
-// whether the process may bind ports below 1024 (i.e. running as
-// root); it is a parameter so tests do not depend on the effective
-// UID of the test runner.
-func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
+// validate is the deterministic core of Validate. minBindable is the
+// lowest port the process may bind (0 for a privileged process, 1024
+// for a typical unprivileged one); it is a parameter so tests do not
+// depend on the effective UID or kernel settings of the test runner.
+func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	var errs []error
 
 	// Mode enums
@@ -200,7 +205,7 @@ func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 		if !p.active {
 			continue
 		}
-		if err := validatePort(p.setting, p.port, p.required, privileged); err != nil {
+		if err := validatePort(p.setting, p.port, p.required, minBindable); err != nil {
 			errs = append(errs, err)
 		}
 		if p.port == 0 {
@@ -352,10 +357,16 @@ func (c *Config) validate(effectiveMode RunMode, privileged bool) error {
 
 // validatePort checks a configured TCP port. Ports are uints, so
 // values above 65535 are representable but unbindable; ports below
-// 1024 need elevated privileges; and 0 either disables the component
-// (required=false) or is nonsense for a mandatory listener
-// (required=true, binding port 0 picks a random port).
-func validatePort(setting string, port uint, required, privileged bool) error {
+// minBindable are privileged ports the process may not bind; and 0
+// either disables the component (required=false) or is nonsense for a
+// mandatory listener (required=true, binding port 0 picks a random
+// port).
+func validatePort(
+	setting string,
+	port uint,
+	required bool,
+	minBindable uint,
+) error {
 	if port == 0 {
 		if required {
 			return fmt.Errorf("%s must be set (port 0 is not valid)", setting)
@@ -368,11 +379,12 @@ func validatePort(setting string, port uint, required, privileged bool) error {
 			setting, port, maxPort,
 		)
 	}
-	if port < minUnprivilegedPort && !privileged {
+	if port < minBindable {
 		return fmt.Errorf(
-			"invalid %s: %d is a privileged port and the process is not "+
-				"running as root (use %d-%d)",
-			setting, port, minUnprivilegedPort, maxPort,
+			"invalid %s: %d is a privileged port this process may not "+
+				"bind (use %d-%d, or grant the privilege, e.g. root or "+
+				"CAP_NET_BIND_SERVICE)",
+			setting, port, minBindable, maxPort,
 		)
 	}
 	return nil
