@@ -54,7 +54,13 @@ func isExpectedNetworkDialError(err error) bool {
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "cannot assign requested address") ||
 		strings.Contains(msg, "version data mismatch") ||
-		strings.Contains(msg, "timeout waiting on transition")
+		strings.Contains(msg, "timeout waiting on transition") ||
+		// gouroboros reports a crossing duplicate connection pruned during
+		// the handshake (duplex connection-manager dedup) as an EOF-wrapped
+		// "connection shutdown initiated". This happens routinely when a peer
+		// dials us while we dial it; the surviving duplex connection carries
+		// diffusion both ways, so it is expected rather than a dial failure.
+		strings.Contains(msg, "connection shutdown initiated")
 }
 
 // shortLivedReconnectDelay returns the exponential backoff rung for the
