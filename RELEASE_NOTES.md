@@ -34,6 +34,40 @@ This release restores governance side effects after epoch-boundary restarts, sim
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** Governance replay の回復と pool import の簡素化
+
+**日付:** July 14, 2026
+
+**バージョン:** v0.64.0
+
+このリリースでは、epoch boundary で再起動した後の governance の副作用を復元し、database interface からの pool import を簡単にし、リポジトリ内の release history を最新に保ちます。
+
+### ✨ 新機能
+
+* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその registration record を一つ上位の呼び出しで取り込めるようになり、手動の write transaction 準備を減らし、無効な transaction handle による意図しない書き込みを防ぎます。
+
+### 💪 改善
+
+* 記載しました **前回の patch notes を release history に反映すること:** リポジトリ内の release history は前回の patch entry を含むようになり、最近の更新履歴を確認しやすくなります。
+
+### 🔧 修正
+
+* 修正しました **epoch boundary の replay で governance の副作用を保つこと:** Node は epoch boundary で再起動した後も governance の treasury withdrawal と期限切れ proposal の deposit refund を復元し、replay 中の treasury、reserves、reward account の balance 整合性を保ちます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ## v0.63.1 (July 14, 2026)
 
 **Title:** Blockfrost asset completeness, calmer logs, and steadier maintenance
