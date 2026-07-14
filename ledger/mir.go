@@ -97,6 +97,13 @@ func (ls *LedgerState) applyMIRCerts(
 				)
 			}
 			if credited {
+				if reward.Amount > ^uint64(0)-totalDebited {
+					return fmt.Errorf(
+						"MIR distribution total overflow: current=%d adding=%d",
+						totalDebited,
+						reward.Amount,
+					)
+				}
 				totalDebited += reward.Amount
 				ls.config.Logger.Debug(
 					"applied MIR reward",
@@ -185,6 +192,12 @@ func (ls *LedgerState) applyMIRPotTransfer(
 				reserves, amount,
 			)
 		}
+		if amount > ^uint64(0)-treasury {
+			return fmt.Errorf(
+				"MIR pot transfer would overflow treasury: pot has %d, moving %d",
+				treasury, amount,
+			)
+		}
 		reserves -= amount
 		treasury += amount
 	case mirPotTreasury:
@@ -192,6 +205,12 @@ func (ls *LedgerState) applyMIRPotTransfer(
 			return fmt.Errorf(
 				"MIR pot transfer would underflow treasury: pot has %d, moving %d",
 				treasury, amount,
+			)
+		}
+		if amount > ^uint64(0)-reserves {
+			return fmt.Errorf(
+				"MIR pot transfer would overflow reserves: pot has %d, moving %d",
+				reserves, amount,
 			)
 		}
 		treasury -= amount
