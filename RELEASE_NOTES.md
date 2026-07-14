@@ -12,11 +12,11 @@ This release restores governance side effects after restarts at an epoch boundar
 
 ### ✨ What's New
 
-* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration record through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
+* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration details through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
 
 ### 💪 Improvements
 
-* Reviewed **keep the in repository release history current with the previous patch notes:** The repository release history now includes the previous patch entry, which keeps recent release context easier to review.
+* Reviewed **keep the repository release history current with the previous patch notes:** The repository release history now includes the previous patch entry, which keeps recent release context easier to review.
 
 ### 🔧 Fixes
 
@@ -46,11 +46,11 @@ Thank you for trying!
 
 ### ✨ 新機能
 
-* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその registration record を一回の database call で取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
+* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその登録情報を一回の呼び出しで取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
 
 ### 💪 改善
 
-* 記載しました **前回の patch notes を release history に反映すること:** リポジトリ内の release history は前回の patch entry を含むようになり、最近の更新履歴を確認しやすくなります。
+* 記載しました **前回の patch notes をリポジトリの release history に反映すること:** リポジトリの release history は前回の patch entry を含むようになり、最近の更新履歴を確認しやすくなります。
 
 ### 🔧 修正
 
@@ -80,11 +80,11 @@ Esta versión restaura los efectos de gobernanza después de reinicios en un lí
 
 ### ✨ Novedades
 
-* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y su registro con una sola llamada a la base de datos, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
+* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y sus datos de registro con una sola llamada, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
 
 ### 💪 Mejoras
 
-* Actualizó **mantener al día la historia de versiones del repositorio con las notas del parche anterior:** La historia de versiones dentro del repositorio ahora incluye la entrada del parche anterior, lo que facilita revisar el contexto reciente de las versiones.
+* Actualizó **mantener al día la historia de versiones del repositorio con las notas del parche anterior:** La historia de versiones del repositorio ahora incluye la entrada del parche anterior, lo que facilita revisar el contexto reciente de las versiones.
 
 ### 🔧 Correcciones
 
