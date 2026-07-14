@@ -166,6 +166,7 @@ type LeiosCertifiedEndorserBlock struct {
 	SlotNo            uint64
 	EndorserBlockHash lcommon.Blake2b256
 	Certificate       *lcommon.LeiosEbCertificate
+	AnnouncingRbHash  lcommon.Blake2b256
 }
 
 // LeiosCertificateProvider supplies certified EBs and records successful
@@ -178,7 +179,12 @@ type LeiosCertificateProvider interface {
 // LeiosParentAnnouncementProvider reports the EB announced by the parent
 // ranking block. CertRBs may only certify that announced EB.
 type LeiosParentAnnouncementProvider interface {
-	ParentLeiosAnnouncement() (lcommon.Blake2b256, bool, error)
+	ParentLeiosAnnouncement() (
+		lcommon.Blake2b256,
+		lcommon.Blake2b256,
+		bool,
+		error,
+	)
 }
 
 // EndorserBlockBroadcaster stores a locally-forged endorser block and
@@ -756,7 +762,7 @@ func (f *BlockForger) leiosBlockDataForSlot(
 	if f.leiosCerts == nil {
 		return LeiosBlockData{}, nil
 	}
-	parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
+	parentRbHash, parentHash, ok, err := f.leiosParent.ParentLeiosAnnouncement()
 	if err != nil {
 		f.logger.Warn(
 			"leios endorser block certificate skipped: parent announcement unavailable",
@@ -778,7 +784,8 @@ func (f *BlockForger) leiosBlockDataForSlot(
 			continue
 		}
 		if eb.EndorserBlockHash != parentHash ||
-			eb.Certificate.EndorserBlockHash != parentHash {
+			eb.Certificate.EndorserBlockHash != parentHash ||
+			eb.AnnouncingRbHash != parentRbHash {
 			continue
 		}
 		hash := eb.EndorserBlockHash

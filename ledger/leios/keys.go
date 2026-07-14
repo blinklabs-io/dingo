@@ -45,6 +45,25 @@ const voteSigningKeyFileMaxSize = 1024
 // voterPoolKeyHashSize is the Blake2b-224 pool key hash length.
 const voterPoolKeyHashSize = 28
 
+// DerivePrototypeVoteSigningKey reproduces the current Leios prototype's
+// temporary key derivation: the 28-byte pool cold-key hash is right-padded
+// with four zero bytes and interpreted as a BLS12-381 secret scalar.
+func DerivePrototypeVoteSigningKey(
+	poolKeyHash []byte,
+) (*VoteSigningKey, error) {
+	if len(poolKeyHash) != voterPoolKeyHashSize {
+		return nil, fmt.Errorf(
+			"%w: pool key hash must be %d bytes, got %d",
+			ErrInvalidSigningKey,
+			voterPoolKeyHashSize,
+			len(poolKeyHash),
+		)
+	}
+	raw := make([]byte, voteSigningKeySize)
+	copy(raw, poolKeyHash)
+	return ParseVoteSigningKey(hex.EncodeToString(raw))
+}
+
 // VoteSigningKey is a BLS12-381 MinSig signing key for Leios votes: a
 // scalar secret key with its G2 public key.
 type VoteSigningKey struct {

@@ -243,16 +243,20 @@ type EligibleEb struct {
 	EndorserBlockHash lcommon.Blake2b256
 	Certificate       *lcommon.LeiosEbCertificate
 	Epoch             uint64
+	AnnouncingRbHash  lcommon.Blake2b256
 }
 
 // ebState tracks one endorser block as it moves through the pipeline.
 type ebState struct {
-	hash        lcommon.Blake2b256
-	slot        uint64
-	epoch       uint64
-	certified   bool
-	certificate *lcommon.LeiosEbCertificate
-	embedded    bool
+	hash      lcommon.Blake2b256
+	slot      uint64
+	epoch     uint64
+	certified bool
+	// certificates is keyed by the vote signing context. The same EB may be
+	// announced by more than one ranking block; those aggregate signatures
+	// are not interchangeable.
+	certificates map[lcommon.Blake2b256]*lcommon.LeiosEbCertificate
+	embedded     bool
 	// equivocated is set when another distinct EB was observed for the
 	// same slot. Equivocated EBs are never offered for RB inclusion.
 	equivocated bool
@@ -553,7 +557,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		m.byHash[evt.EndorserBlockHash] = eb
 		m.markEquivocationLocked(inst)
 	}
-	if eb.certified {
+	if _, exists := eb.certificates[evt.AnnouncingRbHash]; exists {
 		return
 	}
 	// A certificate at or past the certification deadline is too late: the
@@ -576,9 +580,15 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		m.updateGaugesLocked(cur)
 		return
 	}
+	firstCertification := !eb.certified
 	eb.certified = true
-	eb.certificate = evt.Certificate
-	if m.metrics != nil {
+	if eb.certificates == nil {
+		eb.certificates = make(
+			map[lcommon.Blake2b256]*lcommon.LeiosEbCertificate,
+		)
+	}
+	eb.certificates[evt.AnnouncingRbHash] = evt.Certificate
+	if m.metrics != nil && firstCertification {
 		m.metrics.ebCertifiedTotal.Inc()
 	}
 	m.logger.Info(
@@ -635,15 +645,23 @@ func (m *PipelineManager) EligibleCertifiedEbs() []EligibleEb {
 			if !eb.certified || eb.equivocated || eb.embedded {
 				continue
 			}
-			if stageFor(inst.produceSlot, cur, m.timing, true) != StageEligible {
+			if stageFor(
+				inst.produceSlot,
+				cur,
+				m.timing,
+				true,
+			) != StageEligible {
 				continue
 			}
-			out = append(out, EligibleEb{
-				SlotNo:            inst.produceSlot,
-				EndorserBlockHash: eb.hash,
-				Certificate:       eb.certificate,
-				Epoch:             inst.epoch,
-			})
+			for rbHash, cert := range eb.certificates {
+				out = append(out, EligibleEb{
+					SlotNo:            inst.produceSlot,
+					EndorserBlockHash: eb.hash,
+					Certificate:       cert,
+					Epoch:             inst.epoch,
+					AnnouncingRbHash:  rbHash,
+				})
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
