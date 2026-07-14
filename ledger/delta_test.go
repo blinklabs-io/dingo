@@ -100,10 +100,69 @@ func TestProcessGovernanceAcceptsDijkstraProtocolParameters(t *testing.T) {
 	require.Equal(t, uint64(32), got.ExpiresEpoch)
 }
 
+func TestConwayProtocolParametersDijkstra(t *testing.T) {
+	pparams := &dijkstra.DijkstraProtocolParameters{
+		ConwayProtocolParameters: conway.ConwayProtocolParameters{
+			GovActionValidityPeriod: 42,
+			DRepInactivityPeriod:    99,
+		},
+	}
+
+	got := conwayProtocolParameters(pparams)
+	require.Same(t, &pparams.ConwayProtocolParameters, got)
+	require.Equal(t, uint64(42), got.GovActionValidityPeriod)
+	require.Equal(t, uint64(99), got.DRepInactivityPeriod)
+}
+
 func TestConwayProtocolParametersNilDijkstra(t *testing.T) {
 	var pparams *dijkstra.DijkstraProtocolParameters
 
 	require.Nil(t, conwayProtocolParameters(pparams))
+}
+
+func TestConwayProtocolParametersTypedNil(t *testing.T) {
+	var conwayPParams *conway.ConwayProtocolParameters
+	var dijkstraPParams *dijkstra.DijkstraProtocolParameters
+
+	require.Nil(t, conwayProtocolParameters(conwayPParams))
+	require.Nil(t, conwayProtocolParameters(dijkstraPParams))
+}
+
+func TestProcessGovernanceTypedNilPParams(t *testing.T) {
+	tests := []struct {
+		name    string
+		pparams lcommon.ProtocolParameters
+	}{
+		{
+			name:    "conway",
+			pparams: (*conway.ConwayProtocolParameters)(nil),
+		},
+		{
+			name:    "dijkstra",
+			pparams: (*dijkstra.DijkstraProtocolParameters)(nil),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ls := &LedgerState{
+				currentPParams: tt.pparams,
+			}
+			tx := mockledger.NewTransactionBuilder().
+				WithProposalProcedures(nil)
+
+			var err error
+			require.NotPanics(t, func() {
+				err = (&LedgerDelta{}).processGovernance(ls, tx, nil)
+			})
+			require.Error(t, err)
+			require.Contains(
+				t,
+				err.Error(),
+				"governance requires Conway protocol parameters",
+			)
+		})
+	}
 }
 
 func TestApplyTransactionMetadataOnlyRecordsNetworkDonations(t *testing.T) {
