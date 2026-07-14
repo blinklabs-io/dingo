@@ -68,15 +68,11 @@ Thank you for trying!
 
 **Versión:** v0.64.0
 
-Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época, simplifica las importaciones de pools mediante la interfaz de base de datos y mantiene actualizada la historia de versiones del repositorio.
+Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época y simplifica las importaciones de pools mediante la interfaz de base de datos.
 
 ### ✨ Novedades
 
 * Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y sus datos de registro con una sola llamada, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
-
-### 💪 Mejoras
-
-* Actualizó **mantener al día la historia de versiones del repositorio con las notas del parche anterior:** La historia de versiones del repositorio ahora incluye la entrada del parche anterior, lo que facilita revisar el contexto reciente de las versiones.
 
 ### 🔧 Correcciones
 
