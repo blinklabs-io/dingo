@@ -8,15 +8,11 @@
 
 **Version:** v0.64.0
 
-This release restores governance side effects after restarts at an epoch boundary, simplifies pool imports through the database interface, and keeps the repository release history current.
+This release restores governance side effects after restarts at an epoch boundary and simplifies pool imports through the database interface.
 
 ### ✨ What's New
 
 * Added **import pool state through the database interface:** Database integrations can now import a pool and its registration details through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
-
-### 💪 Improvements
-
-* Reviewed **keep the repository release history current with the previous patch notes:** The repository release history now includes the previous patch entry, which keeps recent release context easier to review.
 
 ### 🔧 Fixes
 
