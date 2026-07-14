@@ -8,11 +8,11 @@
 
 **Version:** v0.64.0
 
-This release restores governance side effects after epoch-boundary restarts, simplifies pool imports through the database interface, and keeps the in repository release history current.
+This release restores governance side effects after restarts at an epoch boundary, simplifies pool imports through the database interface, and keeps the repository release history current.
 
 ### ✨ What's New
 
-* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration record through one higher level call, which removes manual write transaction setup and stops invalid transaction handles before writes escape the intended boundary.
+* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration record through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
 
 ### 💪 Improvements
 
@@ -42,11 +42,11 @@ Thank you for trying!
 
 **バージョン:** v0.64.0
 
-このリリースでは、epoch boundary で再起動した後の governance の副作用を復元し、database interface からの pool import を簡単にし、リポジトリ内の release history を最新に保ちます。
+このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface からの pool import を簡単にし、リポジトリの release history を最新に保ちます。
 
 ### ✨ 新機能
 
-* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその registration record を一つ上位の呼び出しで取り込めるようになり、手動の write transaction 準備を減らし、無効な transaction handle による意図しない書き込みを防ぎます。
+* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその registration record を一回の database call で取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
 
 ### 💪 改善
 
@@ -54,7 +54,7 @@ Thank you for trying!
 
 ### 🔧 修正
 
-* 修正しました **epoch boundary の replay で governance の副作用を保つこと:** Node は epoch boundary で再起動した後も governance の treasury withdrawal と期限切れ proposal の deposit refund を復元し、replay 中の treasury、reserves、reward account の balance 整合性を保ちます。
+* 修正しました **epoch boundary の replay で governance の副作用を保つこと:** Node は epoch boundary での再起動後も governance の treasury withdrawal と期限切れ proposal の deposit refund を復元し、replay 中の treasury、reserves、reward account の balance 整合性を保ちます。
 
 ### 推奨ネットワーク互換性 ⚠️
 
@@ -76,11 +76,11 @@ Thank you for trying!
 
 **Versión:** v0.64.0
 
-Esta versión restaura los efectos de gobernanza después de reinicios en el límite de época, simplifica las importaciones de pools mediante la interfaz de base de datos y mantiene actualizada la historia de versiones dentro del repositorio.
+Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época, simplifica las importaciones de pools mediante la interfaz de base de datos y mantiene actualizada la historia de versiones del repositorio.
 
 ### ✨ Novedades
 
-* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y su registro con una sola llamada de nivel superior, lo que evita la preparación manual de transacciones de escritura y detiene manejos de transacción no válidos antes de que una escritura salga del límite previsto.
+* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y su registro con una sola llamada a la base de datos, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
 
 ### 💪 Mejoras
 
@@ -88,7 +88,7 @@ Esta versión restaura los efectos de gobernanza después de reinicios en el lí
 
 ### 🔧 Correcciones
 
-* Corrigió **conservar los efectos de gobernanza durante el replay del límite de época:** Los nodos ahora restauran los retiros del tesoro de gobernanza y los reembolsos de depósitos de propuestas vencidas después de un reinicio en el límite de época, lo que mantiene coherentes los saldos del tesoro, las reservas y las cuentas de recompensa durante el replay.
+* Corrigió **conservar los efectos de gobernanza durante el replay del límite de época:** Los nodos ahora restauran los retiros del tesoro de gobernanza y los reembolsos de depósitos de propuestas vencidas después de un reinicio en un límite de época, lo que mantiene coherentes los saldos del tesoro, las reservas y las cuentas de recompensa durante el replay.
 
 ### Compatibilidad de red recomendada ⚠️
 
