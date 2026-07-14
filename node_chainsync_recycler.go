@@ -226,20 +226,10 @@ func (n *Node) runChainsyncStallRecycler(
 	}
 }
 
-func (n *Node) waitChainsyncStallRecycler(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		n.chainsyncStallRecyclerWG.Wait()
-	}()
-	// WaitGroup.Wait cannot be selected on directly, so bridge completion to a
-	// channel and still honor the node's bounded shutdown context.
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+func (n *Node) waitChainsyncStallRecycler() {
+	// This wait is intentionally not bounded by the shutdown timeout: advancing
+	// while the recycler is still active can race dependency teardown.
+	n.chainsyncStallRecyclerWG.Wait()
 }
 
 func (n *Node) processChainsyncRecyclerTick(

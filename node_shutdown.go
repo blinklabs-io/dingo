@@ -101,12 +101,7 @@ func (n *Node) shutdown() error {
 
 	// n.cancel() above asks the stall recycler to stop; wait here so it cannot
 	// race later shutdown phases that close connection, ledger, or DB state.
-	if waitErr := n.waitChainsyncStallRecycler(ctx); waitErr != nil {
-		err = errors.Join(
-			err,
-			fmt.Errorf("chainsync stall recycler shutdown: %w", waitErr),
-		)
-	}
+	n.waitChainsyncStallRecycler()
 
 	// Stop block forger first to prevent new blocks
 	if n.blockForger != nil {
