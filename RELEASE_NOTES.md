@@ -1,5 +1,46 @@
 # Dingo Releases
 
+## v0.63.1 (July 14, 2026)
+
+**Title:** Blockfrost asset completeness, calmer logs, and refreshed dependencies
+
+**Date:** July 14, 2026
+
+**Version:** v0.63.1
+
+This release completes more Blockfrost asset data, makes routine Mithril and peer logging less noisy, and refreshes runtime and example dependencies while broadening automated coverage around transaction submission and synchronization flows.
+
+### 💪 Improvements
+
+* Improved **ship newer Cardano network configuration data:** Container builds now use a newer Cardano configuration set, which refreshes tracer data and updates Musashi network settings.
+* Strengthened **use safer upstream concurrency control behavior:** The bundled concurrency library now fails fast on invalid negative weights instead of risking corrupted internal state in dependency behavior.
+* Updated **keep health checking dependencies current:** Dingo now builds against the newer health library release while keeping the same health endpoints and configuration.
+* Modernized **inherit newer operating system support updates:** The runtime now picks up current upstream system fixes without requiring configuration changes.
+* Refreshed **bundle newer crypto, terminal, and text support libraries:** Dingo now includes newer upstream maintenance updates across these support libraries without changing configuration or APIs.
+* Polished **keep the Blockfrost explorer example on the latest Vite patch:** Local frontend work for the example now uses the patched build and development tooling release.
+* Streamlined **keep the Sundae preview example on the latest Vite patch:** Local development for the example now uses the newer Vite maintenance release.
+* Aligned **run the Sundae preview example on a newer upstream SDK:** The example now installs and runs against the newer SDK version without changing its own external behavior.
+* Verified **cover transaction submission handlers more thoroughly:** Broader automated protocol checks now help keep transaction submission behavior steady across future updates.
+* Expanded **cover server side chain synchronization paths more directly:** Additional automated protocol checks now help catch regressions earlier in server side synchronization behavior.
+
+### 🔧 Fixes
+
+* Completed **return asset mint history and metadata more fully in Blockfrost responses:** Blockfrost asset queries now populate mint history and metadata fields more reliably, which makes downstream asset inspection more complete.
+* Clarified **make Mithril warning logs easier to read:** Mithril related warning output now uses clearer wording, which makes routine operator review less confusing.
+* Softened **lower harmless duplicate connection shutdowns to info logs:** Normal peer connection races no longer surface benign EOF shutdowns as errors, while real handshake failures still remain errors.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.63.0 (July 10, 2026)
 
 **Title:** MidnightState expansion, API correctness, and stricter inbound ledger validation
