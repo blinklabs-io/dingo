@@ -713,14 +713,11 @@ func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
 // slot coefficient is logged and skipped rather than rejecting, to tolerate
 // early-chain bootstrap states where the genesis snapshot is not yet written.
 //
-// Reviewed for issue #1649 (fail-fast audit) and intentionally kept as
-// warn-and-continue rather than fail-fast: rejecting here would reject
-// every block during the genesis bootstrap window on a fresh node, since
-// the stake snapshot and active slot coefficient aren't available yet.
-// Making this fail-fast would require distinguishing "genuinely missing
-// during bootstrap" from "unexpectedly missing after bootstrap" (e.g. by
-// block/epoch number), which needs dedicated tests plus DevNet coverage
-// before changing. Left as remaining #1649 work rather than done here.
+// The warn-and-skip fallback is the default because rejecting here would reject
+// every block during the genesis bootstrap window on a fresh node, before the
+// stake snapshot and active slot coefficient exist. Operators running an
+// already-bootstrapped node can set StrictLeaderEligibility to turn these
+// skips into hard rejections instead (issue #1649 fail-fast option).
 func (ls *LedgerState) verifyBlockLeaderEligibility(
 	block ledger.Block,
 	epochId uint64,
@@ -751,7 +748,19 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	}
 	if totalStake == 0 {
 		// Genesis snapshot not yet written (very early bootstrap).
-		// Skip rather than reject.
+		// Skip rather than reject, unless the operator opted into
+		// strict leader eligibility.
+		if ls.config.StrictLeaderEligibility {
+			return fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"total active stake is zero, cannot verify leader "+
+					"eligibility (epoch: %d, snapshot_epoch: %d, snapshot_type: %s)",
+				block.SlotNumber(),
+				epochId,
+				snapshotEpoch,
+				snapshotType,
+			)
+		}
 		ls.config.Logger.Warn(
 			"skipping leader eligibility check: total active stake is zero",
 			"slot", block.SlotNumber(),
@@ -768,6 +777,14 @@ func (ls *LedgerState) verifyBlockLeaderEligibility(
 	// reject every non-Byron block; treat it as unavailable.
 	activeSlotCoeffRat := ls.activeSlotCoeffRat()
 	if activeSlotCoeffRat == nil || activeSlotCoeffRat.Sign() <= 0 {
+		if ls.config.StrictLeaderEligibility {
+			return fmt.Errorf(
+				"block header verification rejected at slot %d: "+
+					"active slot coefficient unavailable or non-positive, "+
+					"cannot verify leader eligibility",
+				block.SlotNumber(),
+			)
+		}
 		ls.config.Logger.Warn(
 			"skipping leader eligibility check: active slot coefficient unavailable or non-positive",
 			"slot", block.SlotNumber(),

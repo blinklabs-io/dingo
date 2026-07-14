@@ -310,16 +310,18 @@ func (n *Node) Run(ctx context.Context) error {
 	// Load state
 	state, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			ChainManager:       n.chainManager,
-			Database:           n.db,
-			EventBus:           n.eventBus,
-			Logger:             n.config.logger,
-			CardanoNodeConfig:  n.config.cardanoNodeConfig,
-			PromRegistry:       n.config.promRegistry,
-			ForgeBlocks:        n.config.isDevMode(),
-			ValidateHistorical: n.config.validateHistorical,
-			EnableDijkstra:     enableDijkstra,
-			StartInDijkstra:    n.config.startEra.IsDijkstra(),
+			ChainManager:            n.chainManager,
+			Database:                n.db,
+			EventBus:                n.eventBus,
+			Logger:                  n.config.logger,
+			CardanoNodeConfig:       n.config.cardanoNodeConfig,
+			PromRegistry:            n.config.promRegistry,
+			ForgeBlocks:             n.config.isDevMode(),
+			ValidateHistorical:      n.config.validateHistorical,
+			StrictLeaderEligibility: n.config.strictLeaderEligibility,
+			StrictSlotClock:         n.config.strictSlotClock,
+			EnableDijkstra:          enableDijkstra,
+			StartInDijkstra:         n.config.startEra.IsDijkstra(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).

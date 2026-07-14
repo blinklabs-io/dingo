@@ -1103,6 +1103,15 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 		func(evt event.Event) {
 			e, ok := evt.Data.(event.ChainsyncResyncEvent)
 			if !ok {
+				// A mismatched payload drops a resync request, which can
+				// leave the node on a stale chain with no trace. Log it
+				// rather than swallowing silently.
+				o.config.Logger.Warn(
+					"unexpected event data type in chainsync resync handler",
+					"component", "network",
+					"protocol", "chain-sync",
+					"type", fmt.Sprintf("%T", evt.Data),
+				)
 				return
 			}
 			select {

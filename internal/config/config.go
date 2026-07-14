@@ -425,6 +425,68 @@ func validateRuntimeConfig(cfg *Config) error {
 			mithrilBackendV2,
 		)
 	}
+	// Port fields double as listen/connect ports; a value above 65535 is
+	// invalid and used to surface only as a bind failure at runtime (well
+	// after config load) rather than at parse time. Reject them here so a
+	// typo fails fast. 0 means "disabled" for every port below, so it is
+	// always allowed. RelayPort is validated separately above because it
+	// has its own source-port-reuse semantics.
+	for _, p := range []struct {
+		name  string
+		value uint
+	}{
+		{"privatePort", cfg.PrivatePort},
+		{"utxorpcPort", cfg.UtxorpcPort},
+		{"barkPort", cfg.BarkPort},
+		{"metricsPort", cfg.MetricsPort},
+		{"debugPort", cfg.DebugPort},
+		{"blockfrostPort", cfg.BlockfrostPort},
+		{"meshPort", cfg.MeshPort},
+		{"midnight.port", cfg.Midnight.Port},
+	} {
+		if p.value > 65535 {
+			return fmt.Errorf(
+				"invalid %s: %d (must be 0 to disable, or 1-65535)",
+				p.name,
+				p.value,
+			)
+		}
+	}
+	// StorageMode is validated on the CLI flag path by normalizeStorageMode,
+	// but an invalid value from YAML/env used to fall through to a runtime
+	// check at node startup. Validate it at load so all three sources fail
+	// identically. Empty is allowed: the default ("core") is applied
+	// elsewhere.
+	switch strings.ToLower(strings.TrimSpace(cfg.StorageMode)) {
+	case "", storageModeCore, storageModeAPI:
+	default:
+		return fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			storageModeCore,
+			storageModeAPI,
+		)
+	}
+	// Duration-string fields were parsed lazily (at node startup, or in the
+	// mithril subcommand), so a typo such as "30x" was silently ignored and
+	// the default used. Parse them here to reject malformed values at config
+	// load. Empty means "use the default", so it is skipped.
+	for _, d := range []struct {
+		name  string
+		value string
+	}{
+		{"shutdownTimeout", cfg.ShutdownTimeout},
+		{"ledgerCatchupTimeout", cfg.LedgerCatchupTimeout},
+		{"chainsync.stallTimeout", cfg.Chainsync.StallTimeout},
+		{"mithril.downloadIdleTimeout", cfg.Mithril.DownloadIdleTimeout},
+	} {
+		if d.value == "" {
+			continue
+		}
+		if _, err := time.ParseDuration(d.value); err != nil {
+			return fmt.Errorf("invalid %s %q: %w", d.name, d.value, err)
+		}
+	}
 	return nil
 }
 
@@ -622,6 +684,19 @@ type Config struct {
 	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
 	// a non-genesis chainsync intersect point without a Mithril snapshot.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
+	// StrictLeaderEligibility rejects a block (instead of logging a warning
+	// and skipping the check) when the active stake snapshot or active slot
+	// coefficient needed to verify Praos leader eligibility is unavailable.
+	// Leave disabled during genesis bootstrap, where these are legitimately
+	// absent until the first stake snapshot is written; enable it on an
+	// established node to fail fast if eligibility can no longer be checked.
+	StrictLeaderEligibility bool `yaml:"strictLeaderEligibility" split_words:"true"`
+	// StrictSlotClock rejects a transaction (instead of falling back to the
+	// snapshot tip slot) when the slot clock cannot be read during
+	// validation. The fallback is normally harmless for transient clock
+	// errors, but an operator can enable this to fail fast rather than
+	// validate against a stale reference slot.
+	StrictSlotClock bool `yaml:"strictSlotClock" split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the
@@ -943,42 +1018,44 @@ var globalConfig = &Config{
 	// MempoolCapacity is left as the zero sentinel; LoadConfig fills
 	// it in based on RunMode (Praos vs Leios) after CLI/env/YAML have
 	// been merged.
-	MempoolCapacity:      0,
-	EvictionWatermark:    DefaultEvictionWatermark,
-	RejectionWatermark:   DefaultRejectionWatermark,
-	BindAddr:             "0.0.0.0",
-	CardanoConfig:        "", // Will be set dynamically based on network
-	DatabasePath:         ".dingo",
-	SocketPath:           "dingo.socket",
-	IntersectTip:         false,
-	ValidateHistorical:   false,
-	StrictUtxoValidation: false,
-	Tracing:              false,
-	TracingStdout:        false,
-	Network:              "preview",
-	NetworkMagic:         0,
-	MetricsPort:          12798,
-	DebugPort:            0,
-	PrivateBindAddr:      "127.0.0.1",
-	PrivatePort:          3002,
-	RelayPort:            3001,
-	BarkBaseUrl:          "",
-	BarkPort:             0,
-	UtxorpcPort:          9090,
-	CORSAllowedOrigins:   []string{"*"},
-	BlockfrostPort:       3000,
-	MeshPort:             8080,
-	Topology:             "",
-	TlsCertFilePath:      "",
-	TlsKeyFilePath:       "",
-	BlobPlugin:           DefaultBlobPlugin,
-	MetadataPlugin:       DefaultMetadataPlugin,
-	StorageMode:          "core",
-	RunMode:              RunModeServe,
-	StartEra:             StartEraDefault,
-	ImmutableDbPath:      "",
-	ShutdownTimeout:      DefaultShutdownTimeout,
-	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+	MempoolCapacity:         0,
+	EvictionWatermark:       DefaultEvictionWatermark,
+	RejectionWatermark:      DefaultRejectionWatermark,
+	BindAddr:                "0.0.0.0",
+	CardanoConfig:           "", // Will be set dynamically based on network
+	DatabasePath:            ".dingo",
+	SocketPath:              "dingo.socket",
+	IntersectTip:            false,
+	ValidateHistorical:      false,
+	StrictUtxoValidation:    false,
+	StrictLeaderEligibility: false,
+	StrictSlotClock:         false,
+	Tracing:                 false,
+	TracingStdout:           false,
+	Network:                 "preview",
+	NetworkMagic:            0,
+	MetricsPort:             12798,
+	DebugPort:               0,
+	PrivateBindAddr:         "127.0.0.1",
+	PrivatePort:             3002,
+	RelayPort:               3001,
+	BarkBaseUrl:             "",
+	BarkPort:                0,
+	UtxorpcPort:             9090,
+	CORSAllowedOrigins:      []string{"*"},
+	BlockfrostPort:          3000,
+	MeshPort:                8080,
+	Topology:                "",
+	TlsCertFilePath:         "",
+	TlsKeyFilePath:          "",
+	BlobPlugin:              DefaultBlobPlugin,
+	MetadataPlugin:          DefaultMetadataPlugin,
+	StorageMode:             "core",
+	RunMode:                 RunModeServe,
+	StartEra:                StartEraDefault,
+	ImmutableDbPath:         "",
+	ShutdownTimeout:         DefaultShutdownTimeout,
+	LedgerCatchupTimeout:    DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,

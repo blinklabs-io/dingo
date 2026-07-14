@@ -367,6 +367,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			}),
 			dingo.WithValidateHistorical(cfg.ValidateHistorical),
 			dingo.WithStrictUtxoValidation(cfg.StrictUtxoValidation),
+			dingo.WithStrictLeaderEligibility(cfg.StrictLeaderEligibility),
+			dingo.WithStrictSlotClock(cfg.StrictSlotClock),
 			dingo.WithRunMode(string(cfg.RunMode)),
 			dingo.WithStartEra(string(cfg.StartEra)),
 			dingo.WithShutdownTimeout(shutdownTimeout),

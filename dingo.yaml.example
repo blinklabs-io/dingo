@@ -368,6 +368,21 @@ validateHistorical: false
 # CLI: --strict-utxo-validation
 strictUtxoValidation: false
 
+# Reject a block (instead of logging a warning and skipping the check) when
+# the active stake snapshot or active slot coefficient needed to verify Praos
+# leader eligibility is unavailable. Leave disabled during genesis bootstrap,
+# where these are legitimately absent until the first stake snapshot is
+# written; enable it on an established node to fail fast. (default: false)
+# CLI: --strict-leader-eligibility
+strictLeaderEligibility: false
+
+# Reject a transaction (instead of falling back to the snapshot tip slot) when
+# the slot clock cannot be read during validation. The fallback is normally
+# harmless for transient clock errors; enable this to fail fast rather than
+# validate against a stale reference slot. (default: false)
+# CLI: --strict-slot-clock
+strictSlotClock: false
+
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.
 # Use 0 for default values, -1 for unlimited

@@ -460,6 +460,17 @@ type LedgerStateConfig struct {
 	// Leios certificate / endorser-availability surface is complete (#2587).
 	SkipDijkstraTxValidation bool
 	ValidateHistorical       bool
+	// StrictLeaderEligibility rejects a block when the stake snapshot or
+	// active slot coefficient needed for Praos leader eligibility is
+	// unavailable, instead of logging a warning and skipping the check.
+	// Off by default so genesis bootstrap (where these are legitimately
+	// absent) is not broken.
+	StrictLeaderEligibility bool
+	// StrictSlotClock rejects a transaction when the slot clock cannot be
+	// read during validation, instead of falling back to the snapshot tip
+	// slot. Off by default; the fallback is normally harmless for transient
+	// clock errors.
+	StrictSlotClock          bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool
 	TrustedReplay            bool
@@ -4608,6 +4619,19 @@ func (ls *LedgerState) computePParams(
 		}
 	}
 	if pparams == nil {
+		// A decode-capable era with no stored pparams is expected only at
+		// the very start of that era (before its first pparams row is
+		// written); later it signals stored params went missing. Byron
+		// (nil DecodePParamsFunc) always lands here by design, so only log
+		// for eras that are supposed to have stored pparams.
+		if era.DecodePParamsFunc != nil {
+			ls.config.Logger.Debug(
+				"no stored pparams for epoch, computing from genesis config",
+				"epoch", epoch.EpochId,
+				"era", era.Id,
+				"component", "ledger",
+			)
+		}
 		var err error
 		pparams, err = ls.computeGenesisProtocolParameters(era)
 		if err != nil {
@@ -4638,10 +4662,15 @@ func (ls *LedgerState) computePParams(
 					nil,
 				)
 				if prevErr != nil {
+					// prevEraPParams stays nil, so era-1 transactions in
+					// the era-overlap window fall back to the current
+					// era's parameters (see validateTxCore). Surface the
+					// consequence rather than logging a bare failure.
 					ls.config.Logger.Warn(
-						"failed to load previous-era pparams",
+						"failed to load previous-era pparams; era-1 transactions will be validated against current-era parameters",
 						"epoch", ep.EpochId,
 						"era", ep.EraId,
+						"current_era", era.Id,
 						"error", prevErr,
 					)
 				} else if prevPP != nil {
@@ -6575,16 +6604,21 @@ func (ls *LedgerState) validateTxCore(
 	snapshotPParams := ls.currentPParams
 	snapshotPrevEraPParams := ls.prevEraPParams
 	ls.RUnlock()
-	// Reviewed for issue #1649 (fail-fast audit) and kept as graceful
-	// degradation rather than fail-fast: this is monitored via the
-	// slotClockFallbacks metric (in addition to the debug log below), so
-	// sustained occurrences are visible to operators without failing tx
-	// validation on a transient clock read error. An operator-controlled
-	// strict mode that rejects instead of falling back is a reasonable
-	// follow-up but needs its own validation-behavior review; left as
-	// remaining #1649 work rather than done here.
+	// A slot clock read error normally degrades gracefully to the snapshot
+	// tip slot: it is monitored via the slotClockFallbacks metric (plus the
+	// debug log below), so sustained occurrences stay visible without
+	// failing tx validation on a transient error. Operators who prefer
+	// fail-fast can set StrictSlotClock, which rejects the transaction
+	// instead of validating it against a stale reference slot (issue #1649).
 	currentSlot, currentSlotErr := ls.CurrentSlot()
 	if currentSlotErr != nil {
+		if ls.config.StrictSlotClock {
+			ls.metrics.slotClockFallbacks.Inc()
+			return fmt.Errorf(
+				"slot clock unavailable during tx validation: %w",
+				currentSlotErr,
+			)
+		}
 		ls.config.Logger.Debug(
 			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
 			"error",

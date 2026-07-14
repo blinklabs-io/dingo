@@ -147,6 +147,8 @@ type Config struct {
 	peerSharing              bool
 	validateHistorical       bool
 	strictUtxoValidation     bool
+	strictLeaderEligibility  bool
+	strictSlotClock          bool
 	tracing                  bool
 	tracingStdout            bool
 	runMode                  string
@@ -716,6 +718,25 @@ func WithValidateHistorical(validate bool) ConfigOptionFunc {
 func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.strictUtxoValidation = strict
+	}
+}
+
+// WithStrictLeaderEligibility specifies whether a block is rejected (rather
+// than warned about and skipped) when the stake snapshot or active slot
+// coefficient needed for Praos leader eligibility is unavailable. See
+// ledger.LedgerStateConfig.StrictLeaderEligibility.
+func WithStrictLeaderEligibility(strict bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.strictLeaderEligibility = strict
+	}
+}
+
+// WithStrictSlotClock specifies whether a transaction is rejected (rather than
+// validated against the snapshot tip slot) when the slot clock cannot be read
+// during validation. See ledger.LedgerStateConfig.StrictSlotClock.
+func WithStrictSlotClock(strict bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.strictSlotClock = strict
 	}
 }
 

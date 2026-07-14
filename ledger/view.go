@@ -268,10 +268,22 @@ func (lv *LedgerView) PoolCurrentState(
 	return currentReg, pendingEpoch, nil
 }
 
-// IsPoolRegistered checks if a pool is currently registered
+// IsPoolRegistered checks if a pool is currently registered.
+//
+// The interface contract returns a bare bool, so a database error cannot be
+// propagated to the caller. PoolCurrentState already folds "pool not found"
+// into a non-error empty result, so any error here is an unexpected database
+// failure being reported as "not registered": log it rather than swallowing
+// it silently.
 func (lv *LedgerView) IsPoolRegistered(pkh lcommon.PoolKeyHash) bool {
 	reg, _, err := lv.PoolCurrentState(pkh)
 	if err != nil {
+		lv.ls.config.Logger.Warn(
+			"pool registration lookup failed, treating pool as not registered",
+			"component", "ledger",
+			"pool", pkh.String(),
+			"error", err,
+		)
 		return false
 	}
 	return reg != nil
@@ -687,9 +699,21 @@ func (lv *LedgerView) GovActionById(
 }
 
 // GovActionExists returns whether a governance action exists.
+//
+// The interface contract returns a bare bool, so a database error cannot be
+// propagated. GovActionById already returns (nil, nil) for a missing action,
+// so any error here is an unexpected database failure being reported as
+// "does not exist": log it rather than swallowing it silently.
 func (lv *LedgerView) GovActionExists(id lcommon.GovActionId) bool {
 	action, err := lv.GovActionById(id)
 	if err != nil {
+		lv.ls.config.Logger.Warn(
+			"governance action lookup failed, treating action as nonexistent",
+			"component", "ledger",
+			"tx_id", hex.EncodeToString(id.TransactionId[:]),
+			"gov_action_idx", id.GovActionIdx,
+			"error", err,
+		)
 		return false
 	}
 	return action != nil
