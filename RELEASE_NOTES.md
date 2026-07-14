@@ -41,6 +41,47 @@ This release completes more Blockfrost asset data, makes routine Mithril and pee
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** Blockfrost の資産情報補完、落ち着いたログ、依存関係の更新
+
+**日付:** July 14, 2026
+
+**バージョン:** v0.63.1
+
+このリリースでは、Blockfrost の資産データをより完全に返し、Mithril と peer の日常ログを落ち着かせ、transaction submission と同期処理に対する自動検証を広げながら、runtime と example の依存関係を更新します。
+
+### 💪 改善
+
+* 更新しました **より新しい Cardano network 設定データを取り込むこと:** container build は新しい Cardano 設定セットを使うようになり、tracer data を更新し、Musashi network 設定を新しくします。
+* 強化しました **より安全な upstream の concurrency control 動作を使うこと:** 同梱の concurrency library は、不正な負の重みを受け取ったときに内部状態を壊す前に即座に停止します。
+* 刷新しました **health check 依存関係を最新に保つこと:** Dingo は新しい health library で build されるようになり、health endpoint と設定はそのまま維持します。
+* 改良しました **新しい operating system support 更新を取り込むこと:** runtime は設定変更なしで upstream の system fix を取り込みます。
+* 補強しました **crypto、terminal、text の support library を新しくすること:** Dingo はこれらの support library に対する upstream の保守更新を取り込み、設定や API の変更は不要です。
+* 調整しました **Blockfrost explorer example を最新の Vite patch に保つこと:** example の local frontend 作業は、修正版の build と development tooling を使うようになります。
+* 最適化しました **Sundae preview example を最新の Vite patch に保つこと:** example の local development は、新しい Vite の保守リリースを使うようになります。
+* 整合しました **Sundae preview example を新しい upstream SDK で動かすこと:** example は外部向けの動作を変えずに、新しい SDK version を install して実行します。
+* 拡充しました **transaction submission handler のカバー範囲を広げること:** より広い自動 protocol check によって、今後の更新でも transaction submission の挙動を安定して保ちやすくなります。
+* 拡張しました **server side の chain synchronization 経路をより直接カバーすること:** 追加の自動 protocol check によって、server side の同期挙動に対する回帰を早く見つけやすくなります。
+
+### 🔧 修正
+
+* 補完しました **Blockfrost 応答で asset の mint history と metadata をより完全に返すこと:** Blockfrost の asset query は mint history と metadata field をより確実に埋めるようになり、下流での asset 確認をより完全にします。
+* 明確化しました **Mithril の warning log を読みやすくすること:** Mithril 関連の warning 出力は、日常の運用確認で混乱しにくい表現になります。
+* 抑制しました **無害な重複接続の shutdown を info log に下げること:** 通常の peer connection 競合で起きる benign な EOF 終了は error ではなく info として扱い、実際の handshake failure は引き続き error のままです。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ## v0.63.0 (July 10, 2026)
 
 **Title:** MidnightState expansion, API correctness, and stricter inbound ledger validation
