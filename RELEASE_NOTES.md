@@ -68,6 +68,42 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Recuperación del replay de gobernanza e importaciones de pools más simples
+
+**Fecha:** July 14, 2026
+
+**Versión:** v0.64.0
+
+Esta versión restaura los efectos de gobernanza después de reinicios en el límite de época, simplifica las importaciones de pools mediante la interfaz de base de datos y mantiene actualizada la historia de versiones dentro del repositorio.
+
+### ✨ Novedades
+
+* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y su registro con una sola llamada de nivel superior, lo que evita la preparación manual de transacciones de escritura y detiene manejos de transacción no válidos antes de que una escritura salga del límite previsto.
+
+### 💪 Mejoras
+
+* Actualizó **mantener al día la historia de versiones del repositorio con las notas del parche anterior:** La historia de versiones dentro del repositorio ahora incluye la entrada del parche anterior, lo que facilita revisar el contexto reciente de las versiones.
+
+### 🔧 Correcciones
+
+* Corrigió **conservar los efectos de gobernanza durante el replay del límite de época:** Los nodos ahora restauran los retiros del tesoro de gobernanza y los reembolsos de depósitos de propuestas vencidas después de un reinicio en el límite de época, lo que mantiene coherentes los saldos del tesoro, las reservas y las cuentas de recompensa durante el replay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.63.1 (July 14, 2026)
 
 **Title:** Blockfrost asset completeness, calmer logs, and steadier maintenance
