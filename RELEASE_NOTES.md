@@ -38,15 +38,11 @@ Thank you for trying!
 
 **バージョン:** v0.64.0
 
-このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface からの pool import を簡単にし、リポジトリの release history を最新に保ちます。
+このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface からの pool import を簡単にします。
 
 ### ✨ 新機能
 
 * 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその登録情報を一回の呼び出しで取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
-
-### 💪 改善
-
-* 記載しました **前回の patch notes をリポジトリの release history に反映すること:** リポジトリの release history は前回の patch entry を含むようになり、最近の更新履歴を確認しやすくなります。
 
 ### 🔧 修正
 
