@@ -951,6 +951,13 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			name:    "underscore name",
 			network: "test_net",
 		},
+		{
+			// An empty network must load: Validate() enforces that
+			// network or networkMagic is set, so a networkMagic-only
+			// configuration is legal at the LoadConfig layer.
+			name:    "empty network for magic-only configs",
+			network: "",
+		},
 	}
 
 	for _, tt := range validTests {
@@ -1015,10 +1022,6 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			network: ".hidden",
 		},
 		{
-			name:    "empty string",
-			network: "",
-		},
-		{
 			name:    "hyphen prefix",
 			network: "-bad",
 		},
@@ -1049,6 +1052,34 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestLoadConfig_NetworkMagicOnly is a regression test for the
+// networkMagic-without-network contract: a YAML config with an empty
+// network and a custom networkMagic must survive both LoadConfig and
+// validation, since Validate() accepts either network or networkMagic.
+func TestLoadConfig_NetworkMagicOnly(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+	yamlContent := "network: \"\"\nnetworkMagic: 42\n"
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network != "" {
+		t.Errorf("Network = %q, want empty", cfg.Network)
+	}
+	if cfg.NetworkMagic != 42 {
+		t.Errorf("NetworkMagic = %d, want 42", cfg.NetworkMagic)
+	}
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		t.Errorf("validation rejected magic-only config: %v", err)
 	}
 }
 

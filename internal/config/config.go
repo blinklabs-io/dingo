@@ -1081,9 +1081,14 @@ func LoadConfig(configFile string) (*Config, error) {
 		globalConfig.HistoryExpiry.Frequency = time.Hour
 	}
 
-	// Validate network name to prevent path traversal (INT-03).
-	if err := ValidateNetworkName(globalConfig.Network); err != nil {
-		return nil, err
+	// Validate network name to prevent path traversal (INT-03). An
+	// empty network is allowed here so a networkMagic-only
+	// configuration can load; Validate() enforces that network or
+	// networkMagic is set.
+	if globalConfig.Network != "" {
+		if err := ValidateNetworkName(globalConfig.Network); err != nil {
+			return nil, err
+		}
 	}
 	applyMidnightNetworkDefaults(globalConfig)
 
@@ -1122,6 +1127,14 @@ func LoadTopologyConfigFor(cfg *Config) (*topology.TopologyConfig, error) {
 		return &topology.TopologyConfig{}, nil
 	}
 	if cfg.Topology == "" {
+		if cfg.Network == "" {
+			// A networkMagic-only configuration has no network name to
+			// resolve an embedded topology or bootstrap peers from;
+			// peers must come from an explicit topology file. Return an
+			// empty topology (as dev mode does) rather than failing
+			// config load.
+			return &topology.TopologyConfig{}, nil
+		}
 		embeddedTopologyPath := path.Join(cfg.Network, "topology.json")
 		tc, err := topology.NewTopologyConfigFromFS(
 			cardano.EmbeddedConfigFS,

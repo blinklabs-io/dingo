@@ -66,7 +66,15 @@ var flagSpecs = []flagSpec{
 	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
 	// Networking
-	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", ValidateNetworkName),
+	// An explicitly empty --network is allowed: Validate() enforces
+	// that network or networkMagic is set, so a magic-only invocation
+	// can clear a configured network name.
+	validatedStringFlag("Network", "network", "n", "Cardano network name (e.g. preview, preprod, mainnet)", func(v string) error {
+		if v == "" {
+			return nil
+		}
+		return ValidateNetworkName(v)
+	}),
 	uint32Flag("NetworkMagic", "network-magic", "network magic override"),
 	uintFlag("RelayPort", "port", "relay/NtN port"),
 	stringFlag("PrivateBindAddr", "private-bind-addr", "", "private bind address"),

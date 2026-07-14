@@ -17,6 +17,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -182,25 +183,37 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	apiListeners := serving &&
 		(effectiveMode == RunModeDev || c.RunMode.IsDevMode() ||
 			c.StorageMode == storageModeAPI)
+	// Each entry's host is the bind address the listener actually uses
+	// at runtime: bindAddr for most, privateBindAddr for the private
+	// listener, midnight.host for Midnight, and all interfaces for bark
+	// (which is started without a host).
 	ports := []struct {
 		setting  string
+		host     string
 		port     uint
 		active   bool
 		required bool
 	}{
-		{"port (relay/NtN)", c.RelayPort, serving, serving},
-		{"privatePort", c.PrivatePort, serving, serving},
-		{"metricsPort", c.MetricsPort, auxListeners, serving},
-		{"debugPort", c.DebugPort, auxListeners, false},
-		{"barkPort", c.BarkPort, serving, false},
-		{"utxorpcPort", c.UtxorpcPort, apiListeners, false},
-		{"blockfrostPort", c.BlockfrostPort, apiListeners, false},
-		{"meshPort", c.MeshPort, apiListeners, false},
-		{"midnight.port", c.Midnight.Port, apiListeners, false},
+		{"port (relay/NtN)", c.BindAddr, c.RelayPort, serving, serving},
+		{"privatePort", c.PrivateBindAddr, c.PrivatePort, serving, serving},
+		{"metricsPort", c.BindAddr, c.MetricsPort, auxListeners, serving},
+		{"debugPort", c.BindAddr, c.DebugPort, auxListeners, false},
+		{"barkPort", "", c.BarkPort, serving, false},
+		{"utxorpcPort", c.BindAddr, c.UtxorpcPort, apiListeners, false},
+		{"blockfrostPort", c.BindAddr, c.BlockfrostPort, apiListeners, false},
+		{"meshPort", c.BindAddr, c.MeshPort, apiListeners, false},
+		{"midnight.port", c.Midnight.Host, c.Midnight.Port, apiListeners, false},
 	}
-	// Two active listeners sharing a port only fails at bind time; catch it
-	// here. Zero ports are disabled or OS-assigned, so they don't clash.
-	seenPorts := make(map[uint]string, len(ports))
+	// Two active listeners contending for a port only fails at bind
+	// time; catch it here. Zero ports are disabled or OS-assigned, so
+	// they don't clash, and a port is only a conflict when the bind
+	// addresses overlap: listeners on distinct specific addresses (e.g.
+	// 127.0.0.1 and 127.0.0.2) may legally share a port.
+	type boundListener struct {
+		setting string
+		host    string
+	}
+	seenPorts := make(map[uint][]boundListener, len(ports))
 	for _, p := range ports {
 		if !p.active {
 			continue
@@ -211,14 +224,21 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		if p.port == 0 {
 			continue
 		}
-		if other, dup := seenPorts[p.port]; dup {
+		for _, other := range seenPorts[p.port] {
+			if !bindAddrsOverlap(other.host, p.host) {
+				continue
+			}
 			errs = append(errs, fmt.Errorf(
-				"port %d is assigned to both %s and %s",
-				p.port, other, p.setting,
+				"port %d is assigned to both %s and %s "+
+					"on overlapping bind addresses",
+				p.port, other.setting, p.setting,
 			))
-			continue
+			break
 		}
-		seenPorts[p.port] = p.setting
+		seenPorts[p.port] = append(
+			seenPorts[p.port],
+			boundListener{setting: p.setting, host: p.host},
+		)
 	}
 
 	// Path traversal guard on the Cardano node config path, matching
@@ -243,13 +263,18 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			c.MempoolCapacity,
 		))
 	}
-	if c.EvictionWatermark <= 0 || c.EvictionWatermark >= 1.0 {
+	// NaN is checked explicitly: every ordered comparison with NaN is
+	// false, so a NaN watermark would slip through the range checks
+	// alone and reach mempool threshold arithmetic.
+	if math.IsNaN(c.EvictionWatermark) ||
+		c.EvictionWatermark <= 0 || c.EvictionWatermark >= 1.0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid evictionWatermark: %f (must be in range (0, 1))",
 			c.EvictionWatermark,
 		))
 	}
-	if c.RejectionWatermark <= 0 || c.RejectionWatermark > 1.0 {
+	if math.IsNaN(c.RejectionWatermark) ||
+		c.RejectionWatermark <= 0 || c.RejectionWatermark > 1.0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid rejectionWatermark: %f (must be in range (0, 1])",
 			c.RejectionWatermark,
@@ -390,16 +415,41 @@ func validatePort(
 	return nil
 }
 
+// bindAddrsOverlap reports whether two listener bind addresses can
+// contend for the same port: equal addresses always do, and a wildcard
+// address overlaps every other address. Hostname aliases for the same
+// interface (e.g. "localhost" vs "127.0.0.1") are not resolved; such
+// conflicts surface at bind time instead.
+func bindAddrsOverlap(a, b string) bool {
+	if a == b {
+		return true
+	}
+	return isWildcardAddr(a) || isWildcardAddr(b)
+}
+
+// isWildcardAddr reports whether a bind address selects all interfaces.
+func isWildcardAddr(addr string) bool {
+	switch addr {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	default:
+		return false
+	}
+}
+
 // validatePathNoTraversal rejects paths containing a ".." component.
 // Values can arrive via YAML or environment, where a traversal-shaped
 // path is more likely an injection than an intent; absolute paths
-// express any legitimate target without "..".
+// express any legitimate target without "..". The original path is
+// inspected component-by-component, deliberately without cleaning it
+// first: cleaning would erase an inner ".." (e.g.
+// "configs/../secret.json"), and the contract is that no ".."
+// component appears at all.
 func validatePathNoTraversal(setting, path string) error {
 	if path == "" {
 		return nil
 	}
-	cleaned := filepath.Clean(path)
-	for part := range strings.SplitSeq(filepath.ToSlash(cleaned), "/") {
+	for part := range strings.SplitSeq(filepath.ToSlash(path), "/") {
 		if part == ".." {
 			return fmt.Errorf(
 				"invalid %s %q: path must not contain \"..\" "+

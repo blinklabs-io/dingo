@@ -1808,15 +1808,19 @@ UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
 sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
 and debug listeners; the read-only `mithril list`/`show` and `load` start none.
 A port configured for an inactive listener cannot bind, so it is neither
-range-checked nor counted toward a collision; the relay, private, and metrics
+range-checked nor counted toward a collision; two active listeners are only
+reported as colliding when their bind addresses overlap (equal, or either
+side a wildcard) — listeners on distinct specific addresses may share a
+port. The relay, private, and metrics
 ports must additionally be set in the serving modes. Because the one-shot
 subcommands run a fixed operation regardless of the configured `runMode` (which
 defaults to `serve`), `cmd/dingo` passes `Validate()` the effective run mode
 derived from the invoked command, so listener and ImmutableDB-source
 requirements match what the command actually does. All violations are reported
 together in a single startup error. The informational `version` and `list`
-subcommands — and cobra's built-in `help` and `completion` — are exempt so
-they still run against an otherwise-invalid config. The privileged-port check compares each active port against what the
+subcommands — and cobra's built-in `help` and `completion` — skip config
+loading and validation entirely, so they run even when the config file is
+missing or invalid. The privileged-port check compares each active port against what the
 process may actually bind: root, Windows, and Linux `CAP_NET_BIND_SERVICE`
 allow any port, and otherwise Linux uses the kernel's
 `net.ipv4.ip_unprivileged_port_start` cutoff (1024 by default; container

@@ -15,6 +15,7 @@
 package config
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -178,6 +179,31 @@ func TestValidate(t *testing.T) {
 			wantErr: "is assigned to both",
 		},
 		{
+			// Listeners bound to distinct specific addresses can legally
+			// share a port; only overlapping bind addresses collide.
+			name: "distinct bind addresses may share a port",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "127.0.0.1"
+				c.PrivateBindAddr = "127.0.0.1"
+				c.DebugPort = 13000
+				c.Midnight.Host = "127.0.0.2"
+				c.Midnight.Port = 13000
+			},
+		},
+		{
+			// A wildcard bind address contends with every specific one.
+			name: "wildcard bind address collides with specific",
+			modify: func(c *Config) {
+				c.StorageMode = storageModeAPI
+				c.BindAddr = "0.0.0.0"
+				c.DebugPort = 13000
+				c.Midnight.Host = "127.0.0.2"
+				c.Midnight.Port = 13000
+			},
+			wantErr: "is assigned to both",
+		},
+		{
 			name: "cardano config path traversal",
 			modify: func(c *Config) {
 				c.CardanoConfig = "configs/../../etc/passwd"
@@ -190,10 +216,21 @@ func TestValidate(t *testing.T) {
 			wantErr: "must not contain \"..\"",
 		},
 		{
-			name: "cardano config inner dotdot cleans away",
+			// An inner ".." would clean away, but the contract is that
+			// no ".." component appears at all: cleaning first would
+			// let "configs/../secret.json" through.
+			name: "cardano config inner dotdot rejected",
 			modify: func(c *Config) {
 				c.CardanoConfig = "/etc/dingo/../dingo/config.json"
 			},
+			wantErr: "must not contain \"..\"",
+		},
+		{
+			name: "cardano config inner dotdot that cleans inside the tree",
+			modify: func(c *Config) {
+				c.CardanoConfig = "configs/../secret.json"
+			},
+			wantErr: "must not contain \"..\"",
 		},
 		{
 			name:   "cardano config absolute path",
@@ -229,6 +266,19 @@ func TestValidate(t *testing.T) {
 		{
 			name:    "rejection watermark out of range",
 			modify:  func(c *Config) { c.RejectionWatermark = 1.5 },
+			wantErr: "invalid rejectionWatermark",
+		},
+		{
+			// Every ordered comparison with NaN is false, so a plain
+			// out-of-range check would let NaN through (e.g. from
+			// --eviction-watermark NaN, which strconv parses).
+			name:    "NaN eviction watermark",
+			modify:  func(c *Config) { c.EvictionWatermark = math.NaN() },
+			wantErr: "invalid evictionWatermark",
+		},
+		{
+			name:    "NaN rejection watermark",
+			modify:  func(c *Config) { c.RejectionWatermark = math.NaN() },
 			wantErr: "invalid rejectionWatermark",
 		},
 		{

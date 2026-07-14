@@ -248,10 +248,11 @@ func effectiveRunMode(cmd *cobra.Command, cfg *config.Config) config.RunMode {
 
 // isInformationalCommand reports whether a top-level command only prints
 // static information — version, list, and cobra's built-in help and
-// completion commands — and therefore needs no valid runtime
-// configuration. (cobra runs the root PersistentPreRunE for help and
-// completion too, so without the exemption an invalid config would
-// block `dingo help` and shell-completion generation.)
+// completion commands — and therefore needs no runtime configuration at
+// all: config loading and validation are skipped for them. (cobra runs
+// the root PersistentPreRunE for help and completion too, so without
+// the exemption a missing or invalid config would block `dingo help`
+// and shell-completion generation.)
 func isInformationalCommand(top *cobra.Command) bool {
 	if top == nil {
 		return false
@@ -422,6 +423,16 @@ DSN Override:
 			os.Exit(0)
 		}
 
+		top := topLevelCommand(cmd)
+
+		// The informational commands (version, list, help, completion)
+		// print static output and read no configuration, so they skip
+		// config loading and validation entirely: they must work even
+		// when the config file is missing or invalid.
+		if isInformationalCommand(top) {
+			return nil
+		}
+
 		cfg, err := config.LoadConfig(configFile)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
@@ -431,8 +442,6 @@ DSN Override:
 			return fmt.Errorf("applying CLI flags: %w", err)
 		}
 
-		top := topLevelCommand(cmd)
-
 		// `dingo load <path>`: the positional argument is the
 		// highest-precedence source for ImmutableDbPath; merge it before
 		// validation so a config with runMode "load" and no
@@ -441,12 +450,8 @@ DSN Override:
 			cfg.ImmutableDbPath = args[0]
 		}
 
-		// version and list are informational and start no services, so
-		// they must still run even when the merged config is invalid.
-		if !isInformationalCommand(top) {
-			if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
-				return fmt.Errorf("invalid configuration: %w", err)
-			}
+		if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
 		}
 
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
