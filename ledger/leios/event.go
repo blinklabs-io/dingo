@@ -25,14 +25,25 @@ import (
 // into Dijkstra ranking block bodies.
 const EbQuorumEventType event.EventType = "leios.eb_quorum"
 
+// VoteEmittedEventType announces a locally signed prototype vote to the node
+// composition layer for diffusion over LeiosNotify.
+const VoteEmittedEventType event.EventType = "leios.vote_emitted"
+
+type VoteEmittedEvent struct {
+	Vote lcommon.LeiosPrototypeVote
+}
+
 // EbQuorumEvent carries the certificate built when an endorser block
 // reached stake quorum.
 type EbQuorumEvent struct {
 	SlotNo            uint64
 	EndorserBlockHash lcommon.Blake2b256
 	Epoch             uint64
-	Certificate       *lcommon.LeiosEbCertificate
-	VerifiedStake     uint64 // stake of signature-verified votes
-	ObservedStake     uint64 // stake of all membership-valid votes
-	TotalActiveStake  uint64 // quorum denominator
+	// AnnouncingRbHash is the BLS signing context for prototype votes. It is
+	// zero for legacy slot-plus-EB-hash votes.
+	AnnouncingRbHash lcommon.Blake2b256
+	Certificate      *lcommon.LeiosEbCertificate
+	VerifiedStake    uint64 // stake of signature-verified votes
+	ObservedStake    uint64 // stake of all membership-valid votes
+	TotalActiveStake uint64 // quorum denominator
 }

@@ -92,7 +92,9 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
 		ochainsync.WithRollForwardRawFunc(
-			o.instrumentChainsyncRollForwardRaw(o.chainsyncClientRollForwardRaw),
+			o.instrumentChainsyncRollForwardRaw(
+				o.chainsyncClientRollForwardRaw,
+			),
 		),
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
@@ -194,7 +196,10 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	}
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
-		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+		return nil, fmt.Errorf(
+			"failed to lookup connection ID: %s",
+			connId.String(),
+		)
 	}
 	if conn.ChainSync() == nil || conn.ChainSync().Client == nil {
 		return nil, fmt.Errorf(
@@ -277,7 +282,9 @@ func (o *Ouroboros) syncChainsyncClient(
 // (FindIntersect + RequestNext). The server will send RollBackward if
 // the intersection point is behind the client's current position, which
 // triggers the normal rollback handler.
-func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error {
+func (o *Ouroboros) RestartChainsyncClient(
+	connId ouroboros.ConnectionId,
+) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
 		return fmt.Errorf(
@@ -591,8 +598,10 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 	if !sendChainsyncConnError(conn.ErrorChan(), err) {
 		o.config.Logger.Debug(
 			"chainsync server: failed to forward async send error to connection error channel",
-			"connection_id", connectionID,
-			"operation", operation,
+			"connection_id",
+			connectionID,
+			"operation",
+			operation,
 		)
 	}
 }
@@ -1132,9 +1141,12 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				if recovery.SkipConnectionClose {
 					o.config.Logger.Info(
 						"skipping connection closure: chain already past rollback point",
-						"component", "ouroboros",
-						"rollback_slot", e.Point.Slot,
-						"chain_tip_slot", recovery.PrimaryChainTipSlot,
+						"component",
+						"ouroboros",
+						"rollback_slot",
+						e.Point.Slot,
+						"chain_tip_slot",
+						recovery.PrimaryChainTipSlot,
 					)
 					return
 				}
@@ -1151,9 +1163,12 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				// state, so there are no in-flight lookups to break.
 				o.config.Logger.Info(
 					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
-					"component", "ouroboros",
-					"rollback_slot", e.Point.Slot,
-					"connection_count", len(connIds),
+					"component",
+					"ouroboros",
+					"rollback_slot",
+					e.Point.Slot,
+					"connection_count",
+					len(connIds),
 				)
 				for _, connId := range connIds {
 					if o.ChainsyncState != nil {
@@ -1168,8 +1183,10 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					}
 					o.config.Logger.Info(
 						"closing connection for fresh chainsync after local rollback",
-						"component", "ouroboros",
-						"connection_id", connId.String(),
+						"component",
+						"ouroboros",
+						"connection_id",
+						connId.String(),
 					)
 					conn.Close()
 				}

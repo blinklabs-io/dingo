@@ -62,6 +62,27 @@ func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
 	assert.Equal(t, byte(4), committee.Members[3].PoolKeyHash[0])
 }
 
+func TestComputePrototypeCommitteeIncludesAllPoolsAscending(t *testing.T) {
+	poolStakes := map[string]uint64{
+		testPoolHash(1): 15,
+		testPoolHash(2): 50,
+		testPoolHash(3): 30,
+		testPoolHash(4): 5,
+	}
+	committee, err := ComputePrototypeCommittee(10, 8, poolStakes, 100)
+	require.NoError(t, err)
+	require.Len(t, committee.Members, 4)
+	assert.Equal(t, []uint64{5, 15, 30, 50}, []uint64{
+		committee.Members[0].Stake,
+		committee.Members[1].Stake,
+		committee.Members[2].Stake,
+		committee.Members[3].Stake,
+	})
+	assert.Equal(t, byte(4), committee.Members[0].PoolKeyHash[0])
+	assert.Equal(t, byte(2), committee.Members[3].PoolKeyHash[0])
+	assert.Equal(t, uint64(100), committee.CommitteeStake)
+}
+
 func TestComputeCommitteeBreaksTiesByPoolKeyHashAscending(t *testing.T) {
 	poolStakes := map[string]uint64{
 		testPoolHash(7): 25,

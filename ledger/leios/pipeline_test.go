@@ -205,6 +205,7 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 	const slot = 300
 	hash := ebHashFor("eb-a")
 	cert := &lcommon.LeiosEbCertificate{SlotNo: slot, EndorserBlockHash: hash}
+	rbHash := ebHashFor("announcing-rb")
 
 	f.slot.slot = slot
 	f.mgr.ObserveEndorserBlock(slot, hash)
@@ -219,6 +220,7 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 		EndorserBlockHash: hash,
 		Epoch:             0,
 		Certificate:       cert,
+		AnnouncingRbHash:  rbHash,
 	})
 
 	// Within the inclusion window -> eligible, certificate captured verbatim.
@@ -227,6 +229,7 @@ func TestObserveAndCertifySingleEb(t *testing.T) {
 	require.Len(t, eligible, 1)
 	assert.Equal(t, uint64(slot), eligible[0].SlotNo)
 	assert.Same(t, cert, eligible[0].Certificate)
+	assert.Equal(t, rbHash, eligible[0].AnnouncingRbHash)
 
 	// Past the inclusion window -> no longer eligible.
 	f.slot.slot = slot + DefaultPipelineTiming().RbInclusionWindowSlots

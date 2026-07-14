@@ -356,7 +356,7 @@ func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
 		},
 	}
 
-	gotHash, ok, err := adapter.ParentLeiosAnnouncement()
+	gotRbHash, gotHash, ok, err := adapter.ParentLeiosAnnouncement()
 	if err != nil {
 		t.Fatalf("ParentLeiosAnnouncement: %v", err)
 	}
@@ -366,6 +366,10 @@ func TestLeiosPipelineAdapterParentAnnouncementUsesLegacyHeaderExtension(
 	if !bytes.Equal(gotHash.Bytes(), ebHashBytes) {
 		t.Fatalf("announcement hash mismatch: got %x want %x",
 			gotHash.Bytes(), ebHashBytes)
+	}
+	if !bytes.Equal(gotRbHash.Bytes(), parent.Hash) {
+		t.Fatalf("ranking block hash mismatch: got %x want %x",
+			gotRbHash.Bytes(), parent.Hash)
 	}
 }
 

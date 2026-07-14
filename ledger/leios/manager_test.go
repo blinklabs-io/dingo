@@ -209,6 +209,23 @@ func (f *managerFixture) makeVote(
 	}
 }
 
+func (f *managerFixture) makePrototypeVote(
+	t *testing.T,
+	voterId uint64,
+	rbHash lcommon.Blake2b256,
+) lcommon.LeiosPrototypeVote {
+	t.Helper()
+	key, ok := f.keys[voterId]
+	require.True(t, ok, "no key for voter %d", voterId)
+	sig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+	require.NoError(t, err)
+	return lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: rbHash,
+		VoterId:          voterId,
+		VoteSignature:    sig,
+	}
+}
+
 type nextVotesResult struct {
 	votes []lcommon.LeiosVote
 	err   error
@@ -698,6 +715,8 @@ func TestVoteManagerQuorumRequiresVerifiedStake(t *testing.T) {
 
 func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	fixture := newManagerFixture(t)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
 	member := fixture.members[3]
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], member.PoolKeyHash)
@@ -706,7 +725,27 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	fixture.mgr.EnableVoting(poolKeyHash, key)
 
 	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	testutil.RequireNoReceive(
+		t,
+		emittedCh,
+		300*time.Millisecond,
+		"acquiring an EB before its ranking block is adopted must not emit a vote",
+	)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	emittedEvent := testutil.RequireReceive(
+		t, emittedCh, 2*time.Second, "prototype vote emission",
+	)
+	emitted, ok := emittedEvent.Data.(VoteEmittedEvent)
+	require.True(t, ok)
+	assert.Equal(t, rbHash, emitted.Vote.AnnouncingRbHash)
+	assert.Equal(t, uint64(3), emitted.Vote.VoterId)
+	require.NoError(t, VerifyVoteSignature(
+		key.PublicKey(),
+		PrototypeVoteMessageBytes(rbHash),
+		emitted.Vote.VoteSignature,
+	))
 
 	raws := fixture.mgr.VotesByIds(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
@@ -721,13 +760,14 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 		t,
 		VerifyVoteSignature(
 			key.PublicKey(),
-			VoteMessageBytes(577, ebHash),
+			PrototypeVoteMessageBytes(rbHash),
 			vote.VoteSignature,
 		),
 	)
 
 	// Exactly one vote per EB per voter
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
 	raws = fixture.mgr.VotesByIds(
 		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
 	)
@@ -745,6 +785,270 @@ func TestVoteManagerOwnVoteEmission(t *testing.T) {
 	require.NoError(t, result.err)
 	require.Len(t, result.votes, 1)
 	assert.Equal(t, uint64(3), result.votes[0].VoterId)
+}
+
+func TestVoteManagerQueuesPrototypeVoteUntilAnnouncement(t *testing.T) {
+	fixture := newManagerFixture(t)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("conn-a", vote))
+	assert.Empty(t, fixture.mgr.VotesByIds(
+		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
+	))
+
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	raws := fixture.mgr.VotesByIds(
+		[]lcommon.LeiosVoteId{{SlotNo: 577, VoterId: 3}},
+	)
+	require.Len(t, raws, 1)
+	var resolved lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &resolved)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(577), resolved.SlotNo)
+	assert.Equal(t, ebHash, resolved.EndorserBlockHash)
+	assert.Equal(t, vote.VoteSignature, resolved.VoteSignature)
+}
+
+func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
+	t *testing.T,
+) {
+	fixture := newManagerFixture(t)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	valid := fixture.makePrototypeVote(t, 3, rbHash)
+	// Neither signature can be checked before the ranking block identifies
+	// reserve the voter id and suppress the valid vote.
+	for i := range maxPendingPrototypeCandidatesPerVoter + 1 {
+		forged := valid
+		forged.VoteSignature = make([]byte, lcommon.LeiosBlsSignatureSize)
+		copy(forged.VoteSignature, valid.VoteSignature)
+		forged.VoteSignature[0] ^= byte(i + 1)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote("attacker", forged))
+	}
+	require.NoError(t, fixture.mgr.HandlePrototypeVote("peer", valid))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 577, VoterId: 3,
+	}})
+	require.Len(t, raws, 1)
+	var resolved lcommon.LeiosVote
+	_, err := cbor.Decode(raws[0], &resolved)
+	require.NoError(t, err)
+	assert.Equal(t, valid.VoteSignature, resolved.VoteSignature)
+}
+
+func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+
+	// Prototype voter ids are ascending by stake. The five largest members
+	// contribute 400 of 550 stake, crossing the 7/10 threshold.
+	for voterId := uint64(5); voterId < 10; voterId++ {
+		member, ok := committee.Member(voterId)
+		require.True(t, ok)
+		key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+		require.NoError(t, err)
+		sig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+		require.NoError(t, err)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"peer",
+			lcommon.LeiosPrototypeVote{
+				AnnouncingRbHash: rbHash,
+				VoterId:          voterId,
+				VoteSignature:    sig,
+			},
+		))
+	}
+
+	evt := testutil.RequireReceive(
+		t,
+		quorumCh,
+		2*time.Second,
+		"prototype quorum certificate",
+	)
+	quorum, ok := evt.Data.(EbQuorumEvent)
+	require.True(t, ok)
+	require.NotNil(t, quorum.Certificate)
+	assert.Equal(t, rbHash, quorum.AnnouncingRbHash)
+	assert.Equal(t, uint64(400), quorum.VerifiedStake)
+	require.NoError(t, ValidatePrototypeEbCertificate(
+		quorum.Certificate,
+		quorum.AnnouncingRbHash,
+		committee,
+		big.NewRat(7, 10),
+	))
+	wrongRbHash := lcommon.NewBlake2b256([]byte("different-rb"))
+	require.Error(t, ValidatePrototypeEbCertificate(
+		quorum.Certificate,
+		wrongRbHash,
+		committee,
+		big.NewRat(7, 10),
+	))
+}
+
+func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(t *testing.T) {
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	subId, quorumCh := fixture.eventBus.Subscribe(EbQuorumEventType)
+	defer fixture.eventBus.Unsubscribe(EbQuorumEventType, subId)
+	ebHash := lcommon.NewBlake2b256([]byte("same-eb"))
+	rbHashA := lcommon.NewBlake2b256([]byte("rb-a"))
+	rbHashB := lcommon.NewBlake2b256([]byte("rb-b"))
+	fixture.mgr.ObserveAnnouncement(577, rbHashA, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHashB, ebHash)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+
+	// The two groups total 400 stake, but neither announcing block reaches
+	// the 385 threshold independently. Their different signed messages must
+	// never be aggregated into one certificate.
+	for _, tc := range []struct {
+		rbHash   lcommon.Blake2b256
+		voterIds []uint64
+	}{
+		{rbHashA, []uint64{8, 9}},    // 190 stake
+		{rbHashB, []uint64{5, 6, 7}}, // 210 stake
+	} {
+		for _, voterId := range tc.voterIds {
+			member, ok := committee.Member(voterId)
+			require.True(t, ok)
+			key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+			require.NoError(t, err)
+			sig, err := SignVote(key, PrototypeVoteMessageBytes(tc.rbHash))
+			require.NoError(t, err)
+			require.NoError(t, fixture.mgr.HandlePrototypeVote(
+				"peer",
+				lcommon.LeiosPrototypeVote{
+					AnnouncingRbHash: tc.rbHash,
+					VoterId:          voterId,
+					VoteSignature:    sig,
+				},
+			))
+		}
+	}
+	testutil.RequireNoReceive(
+		t, quorumCh, 300*time.Millisecond,
+		"different prototype signing contexts must not share a tally",
+	)
+}
+
+func TestVoteManagerPrototypeRecordRetainedWhileContextTallyLive(t *testing.T) {
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	base := time.Now()
+	offset := time.Duration(0)
+	fixture.mgr.now = func() time.Time { return base.Add(offset) }
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	submit := func(voterId uint64) {
+		member, ok := committee.Member(voterId)
+		require.True(t, ok)
+		key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+		require.NoError(t, err)
+		sig, err := SignVote(key, PrototypeVoteMessageBytes(rbHash))
+		require.NoError(t, err)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"peer",
+			lcommon.LeiosPrototypeVote{
+				AnnouncingRbHash: rbHash,
+				VoterId:          voterId,
+				VoteSignature:    sig,
+			},
+		))
+	}
+
+	submit(5)
+	offset = 9 * time.Minute
+	submit(6) // keep the context-specific tally live
+	offset = voteStoreTTL + time.Minute
+	submit(5) // must deduplicate even though voter 5's record is old
+
+	fixture.mgr.mu.Lock()
+	tally := fixture.mgr.tallies[tallyKey{
+		slotNo:           577,
+		ebHash:           ebHash,
+		announcingRbHash: rbHash,
+	}]
+	record := fixture.mgr.voteRecords[lcommon.LeiosVoteId{
+		SlotNo: 577, VoterId: 5,
+	}]
+	fixture.mgr.mu.Unlock()
+	require.NotNil(t, tally)
+	assert.Len(t, tally.verifiedVotes, 2)
+	assert.Equal(t, rbHash, record.announcingRbHash)
+}
+
+func TestVoteManagerPrototypeCommitteeAndPoolDerivedKey(t *testing.T) {
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.PrototypeMode = true
+			// Prototype verification derives keys from pool IDs and does not
+			// depend on the transitional static registry.
+			registry, err := NewVoterRegistry(nil)
+			require.NoError(t, err)
+			cfg.Registry = registry
+		},
+	)
+	committee, err := fixture.mgr.CommitteeForEpoch(5)
+	require.NoError(t, err)
+	require.Len(t, committee.Members, 10)
+	for i := 1; i < len(committee.Members); i++ {
+		assert.LessOrEqual(
+			t,
+			committee.Members[i-1].Stake,
+			committee.Members[i].Stake,
+		)
+	}
+	member := committee.Members[3]
+	key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+	require.NoError(t, err)
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	fixture.mgr.EnableVoting(poolKeyHash, key)
+
+	ebHash := lcommon.NewBlake2b256([]byte("eb"))
+	rbHash := lcommon.NewBlake2b256([]byte("announcing-rb"))
+	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	raws := fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 577, VoterId: member.VoterId,
+	}})
+	require.Len(t, raws, 1)
 }
 
 func TestVoteManagerOwnVoteRequiresCommitteeMembership(t *testing.T) {
@@ -1041,6 +1345,11 @@ func TestVoteManagerParamsValidationFailureSurfaces(t *testing.T) {
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(
+		577,
+		lcommon.NewBlake2b256([]byte("announcing-rb")),
+		ebHash,
+	)
 	assert.Empty(
 		t,
 		fixture.mgr.VotesByIds(
@@ -1496,6 +1805,11 @@ func TestVoteManagerLocalVoteBypassesRecordCapacity(t *testing.T) {
 	require.NotNil(t, key)
 	fixture.mgr.EnableVoting(poolKeyHash, key)
 	fixture.mgr.HandleEndorserBlock(577, ebHash)
+	fixture.mgr.ObserveAnnouncement(
+		577,
+		lcommon.NewBlake2b256([]byte("announcing-rb")),
+		ebHash,
+	)
 	assert.Len(
 		t,
 		fixture.mgr.VotesByIds(

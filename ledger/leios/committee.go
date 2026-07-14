@@ -43,9 +43,12 @@ type CommitteeMember struct {
 	Stake       uint64 // active stake (lovelace) from the snapshot
 }
 
-// Committee is the deterministic stake-truncated voting committee for an
-// epoch. Members are ordered by stake descending (pool key hash ascending
-// for equal stake) and VoterId equals the member's index in that order.
+// Committee is a deterministic voting committee for an epoch. Its membership
+// and ordering depend on the constructor: ComputeCommittee selects a
+// stake-coverage prefix ordered by stake descending, while
+// ComputePrototypeCommittee includes every non-zero-stake pool ordered by
+// stake ascending. Both constructors break equal-stake ties by pool key hash
+// ascending and assign VoterId from the member's index in the resulting order.
 type Committee struct {
 	Epoch            uint64
 	SnapshotEpoch    uint64
@@ -154,6 +157,70 @@ func ComputeCommittee(
 			committee.CommitteeStake,
 			totalActiveStake,
 		)
+	}
+	return committee, nil
+}
+
+// ComputePrototypeCommittee reproduces the committee construction used by
+// the current interoperable Leios prototype: every non-zero-stake pool votes,
+// ordered by stake ascending with pool key hash ascending as the stable tie
+// break. VoterId is the index in that order.
+func ComputePrototypeCommittee(
+	epoch uint64,
+	snapshotEpoch uint64,
+	poolStakes map[string]uint64,
+	totalActiveStake uint64,
+) (*Committee, error) {
+	type poolStake struct {
+		hash  []byte
+		stake uint64
+	}
+	pools := make([]poolStake, 0, len(poolStakes))
+	for hashHex, stake := range poolStakes {
+		if stake == 0 {
+			continue
+		}
+		hash, err := hex.DecodeString(hashHex)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"malformed pool key hash %q: %w", hashHex, err,
+			)
+		}
+		if len(hash) != voterPoolKeyHashSize {
+			return nil, fmt.Errorf(
+				"malformed pool key hash %q: must be %d bytes",
+				hashHex,
+				voterPoolKeyHashSize,
+			)
+		}
+		pools = append(pools, poolStake{hash: hash, stake: stake})
+	}
+	if len(pools) == 0 || totalActiveStake == 0 {
+		return nil, ErrEmptyStakeDistribution
+	}
+	slices.SortFunc(pools, func(a, b poolStake) int {
+		if a.stake != b.stake {
+			if a.stake < b.stake {
+				return -1
+			}
+			return 1
+		}
+		return bytes.Compare(a.hash, b.hash)
+	})
+	committee := &Committee{
+		Epoch:            epoch,
+		SnapshotEpoch:    snapshotEpoch,
+		Members:          make([]CommitteeMember, 0, len(pools)),
+		TotalActiveStake: totalActiveStake,
+		byPoolHex:        make(map[string]uint64, len(pools)),
+	}
+	for _, pool := range pools {
+		voterId := uint64(len(committee.Members))
+		committee.Members = append(committee.Members, CommitteeMember{
+			VoterId: voterId, PoolKeyHash: pool.hash, Stake: pool.stake,
+		})
+		committee.byPoolHex[hex.EncodeToString(pool.hash)] = voterId
+		committee.CommitteeStake += pool.stake
 	}
 	return committee, nil
 }

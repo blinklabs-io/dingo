@@ -204,19 +204,21 @@ func (p *forgerTestLeiosCerts) MarkEndorserBlockEmbedded(
 }
 
 type forgerTestLeiosParentAnnouncement struct {
-	hash  lcommon.Blake2b256
-	ok    bool
-	err   error
-	calls int
+	rbHash lcommon.Blake2b256
+	hash   lcommon.Blake2b256
+	ok     bool
+	err    error
+	calls  int
 }
 
 func (p *forgerTestLeiosParentAnnouncement) ParentLeiosAnnouncement() (
+	lcommon.Blake2b256,
 	lcommon.Blake2b256,
 	bool,
 	error,
 ) {
 	p.calls++
-	return p.hash, p.ok, p.err
+	return p.rbHash, p.hash, p.ok, p.err
 }
 
 func TestCheckAndForgeProductionObservesForgedBlockWhenNotAdopted(
@@ -370,6 +372,7 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
 	broadcaster := &forgerTestBroadcaster{}
 	ebHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
+	rbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
 	cert := &lcommon.LeiosEbCertificate{
 		SlotNo:              9,
 		EndorserBlockHash:   ebHash,
@@ -382,10 +385,13 @@ func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
 				SlotNo:            9,
 				EndorserBlockHash: ebHash,
 				Certificate:       cert,
+				AnnouncingRbHash:  rbHash,
 			},
 		},
 	}
-	parent := &forgerTestLeiosParentAnnouncement{hash: ebHash, ok: true}
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash: rbHash, hash: ebHash, ok: true,
+	}
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,
@@ -423,6 +429,7 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 	broadcaster := &forgerTestBroadcaster{}
 	wrongHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x22}, 32))
 	parentHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
+	parentRbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
 	wrongCert := &lcommon.LeiosEbCertificate{
 		SlotNo:              8,
 		EndorserBlockHash:   wrongHash,
@@ -435,21 +442,39 @@ func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(
 		Signers:             []byte{0x80},
 		AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
 	}
+	wrongContextCert := &lcommon.LeiosEbCertificate{
+		SlotNo:              8,
+		EndorserBlockHash:   parentHash,
+		Signers:             []byte{0x80},
+		AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
 	leiosCerts := &forgerTestLeiosCerts{
 		eligible: []LeiosCertifiedEndorserBlock{
 			{
 				SlotNo:            8,
 				EndorserBlockHash: wrongHash,
 				Certificate:       wrongCert,
+				AnnouncingRbHash:  parentRbHash,
+			},
+			{
+				SlotNo:            8,
+				EndorserBlockHash: parentHash,
+				Certificate:       wrongContextCert,
+				AnnouncingRbHash: lcommon.NewBlake2b256(
+					bytes.Repeat([]byte{0x55}, 32),
+				),
 			},
 			{
 				SlotNo:            9,
 				EndorserBlockHash: parentHash,
 				Certificate:       parentCert,
+				AnnouncingRbHash:  parentRbHash,
 			},
 		},
 	}
-	parent := &forgerTestLeiosParentAnnouncement{hash: parentHash, ok: true}
+	parent := &forgerTestLeiosParentAnnouncement{
+		rbHash: parentRbHash, hash: parentHash, ok: true,
+	}
 
 	forger, err := NewBlockForger(ForgerConfig{
 		Mode:             ModeProduction,

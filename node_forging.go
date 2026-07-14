@@ -657,6 +657,7 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 			SlotNo:            eb.SlotNo,
 			EndorserBlockHash: eb.EndorserBlockHash,
 			Certificate:       eb.Certificate,
+			AnnouncingRbHash:  eb.AnnouncingRbHash,
 		})
 	}
 	return out
@@ -670,32 +671,34 @@ func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
 
 func (a *leiosPipelineAdapter) ParentLeiosAnnouncement() (
 	lcommon.Blake2b256,
+	lcommon.Blake2b256,
 	bool,
 	error,
 ) {
 	if a.chain == nil {
-		return lcommon.Blake2b256{}, false, errors.New("chain unavailable")
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, errors.New("chain unavailable")
 	}
 	tip := a.chain.Tip()
 	if len(tip.Point.Hash) == 0 {
-		return lcommon.Blake2b256{}, false, nil
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, nil
 	}
 	block, err := a.chain.BlockByPoint(tip.Point, nil)
 	if err != nil {
-		return lcommon.Blake2b256{}, false, fmt.Errorf(
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
 			"resolve parent block: %w",
 			err,
 		)
 	}
 	decoded, err := block.Decode()
 	if err != nil {
-		return lcommon.Blake2b256{}, false, fmt.Errorf(
+		return lcommon.Blake2b256{}, lcommon.Blake2b256{}, false, fmt.Errorf(
 			"decode parent block: %w",
 			err,
 		)
 	}
 	hash, _, ok := leiosheader.ReferencedEndorserBlock(decoded.Header())
-	return hash, ok, nil
+	rbHash := lcommon.NewBlake2b256(tip.Point.Hash)
+	return rbHash, hash, ok, nil
 }
 
 // forgedBlockValidatorAdapter adapts ledger.LedgerState to

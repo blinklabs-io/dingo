@@ -15,11 +15,13 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -112,6 +114,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		ParamsProvider: &leiosCommitteeParamsAdapter{
 			ledgerState: n.ledgerState,
 		},
+		PrototypeMode: true,
 		// LedgerState satisfies leios.SlotProvider directly; the slot
 		// window keeps fabricated far-past/future votes away from
 		// committee computation and the stake snapshot queries behind
@@ -132,10 +135,18 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
+	n.eventBus.SubscribeFunc(leios.VoteEmittedEventType, func(evt event.Event) {
+		data, ok := evt.Data.(leios.VoteEmittedEvent)
+		if !ok {
+			return
+		}
+		n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+	})
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",
-			"component", "node",
+			"component",
+			"node",
 		)
 	}
 	return nil
@@ -178,26 +189,37 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 	return nil
 }
 
-// enableLeiosVoting loads the configured vote signing key and enables
-// vote emission for the block producer's pool. A configured but
-// unreadable or invalid key is fatal.
+// enableLeiosVoting enables vote emission for the block producer's pool.
+// The current prototype derives the temporary BLS key from the pool ID. A
+// configured key is accepted only when it matches that derivation.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
-	if n.leiosVoteManager == nil ||
-		n.config.leiosVoteSigningKeyFile == "" {
+	if n.leiosVoteManager == nil {
 		return nil
 	}
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	key, err := leios.LoadVoteSigningKeyFile(
-		n.config.leiosVoteSigningKeyFile,
-	)
-	if err != nil {
-		return fmt.Errorf("load leios vote signing key: %w", err)
-	}
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
+	key, err := leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf("derive prototype leios vote signing key: %w", err)
+	}
+	if n.config.leiosVoteSigningKeyFile != "" {
+		configured, loadErr := leios.LoadVoteSigningKeyFile(
+			n.config.leiosVoteSigningKeyFile,
+		)
+		if loadErr != nil {
+			return fmt.Errorf("load leios vote signing key: %w", loadErr)
+		}
+		if !bytes.Equal(configured.PublicKeyBytes(), key.PublicKeyBytes()) {
+			return errors.New(
+				"configured leios vote signing key does not match " +
+					"the current prototype's pool-derived key",
+			)
+		}
+	}
 	n.leiosVoteManager.EnableVoting(poolKeyHash, key)
 	n.config.logger.Info(
 		"leios voting enabled",

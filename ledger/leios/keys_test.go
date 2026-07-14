@@ -62,6 +62,23 @@ func TestParseVoteSigningKeyRejectsMalformed(t *testing.T) {
 	}
 }
 
+func TestDerivePrototypeVoteSigningKey(t *testing.T) {
+	poolHash := make([]byte, voterPoolKeyHashSize)
+	poolHash[0] = 0x12
+	poolHash[len(poolHash)-1] = 0x34
+	derived, err := DerivePrototypeVoteSigningKey(poolHash)
+	require.NoError(t, err)
+
+	padded := make([]byte, voteSigningKeySize)
+	copy(padded, poolHash)
+	expected, err := ParseVoteSigningKey(hex.EncodeToString(padded))
+	require.NoError(t, err)
+	assert.Equal(t, expected.PublicKeyBytes(), derived.PublicKeyBytes())
+
+	_, err = DerivePrototypeVoteSigningKey(poolHash[:len(poolHash)-1])
+	assert.ErrorIs(t, err, ErrInvalidSigningKey)
+}
+
 func TestLoadVoteSigningKeyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vote.skey")

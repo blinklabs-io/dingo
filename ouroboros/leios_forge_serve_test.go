@@ -24,6 +24,112 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestEnqueueLeiosPrototypeVote(t *testing.T) {
+	o := &Ouroboros{leiosEBLog: newLeiosForgedEBLog()}
+	const connKey = "peer-a"
+	o.leiosEBLog.registerConn(connKey)
+	vote := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
+		VoterId:          7,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+
+	o.EnqueueLeiosPrototypeVote(vote)
+	entry, _ := o.leiosEBLog.next(connKey)
+	require.NotNil(t, entry)
+	require.NotNil(t, entry.vote)
+	require.Equal(t, vote, *entry.vote)
+	require.Nil(t, entry.point)
+}
+
+func TestLeiosForgedEBLogCommitsOnlyAfterDelivery(t *testing.T) {
+	log := newLeiosForgedEBLog()
+	const connKey = "peer-a"
+	log.registerConn(connKey)
+	first := ocommon.Point{Slot: 1, Hash: []byte{1}}
+	second := ocommon.Point{Slot: 2, Hash: []byte{2}}
+	log.append(leiosForgedEBEntry{point: &first})
+	log.append(leiosForgedEBEntry{point: &second})
+
+	entry, _ := log.next(connKey)
+	require.NotNil(t, entry)
+	require.Equal(t, first, *entry.point)
+	// Merely selecting a response must not advance the cursor.
+	entry, _ = log.next(connKey)
+	require.NotNil(t, entry)
+	require.Equal(t, first, *entry.point)
+
+	log.complete(connKey, true)
+	entry, _ = log.next(connKey)
+	require.NotNil(t, entry)
+	require.Equal(t, second, *entry.point)
+}
+
+func TestLeiosForgedEBLogRetriesFailedDeliveryAfterReconnect(t *testing.T) {
+	log := newLeiosForgedEBLog()
+	const failedConn = "peer-a"
+	log.registerConn(failedConn)
+	vote := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
+		VoterId:          7,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+	log.append(leiosForgedEBEntry{vote: &vote})
+
+	entry, _ := log.next(failedConn)
+	require.NotNil(t, entry)
+	require.Equal(t, vote, *entry.vote)
+	log.complete(failedConn, false)
+	// A failed send is immediately retryable while the connection remains up.
+	retry, _ := log.next(failedConn)
+	require.NotNil(t, retry)
+	require.Equal(t, vote, *retry.vote)
+	log.removeConn(failedConn)
+
+	const reconnected = "peer-b"
+	log.registerConn(reconnected)
+	retry, _ = log.next(reconnected)
+	require.NotNil(t, retry)
+	require.Equal(t, vote, *retry.vote)
+	log.complete(reconnected, true)
+	log.removeConn(reconnected)
+
+	// Successful retry releases the pinned entry; a later peer starts at tail.
+	const laterConn = "peer-c"
+	log.registerConn(laterConn)
+	entry, _ = log.next(laterConn)
+	require.Nil(t, entry)
+}
+
+func TestLeiosForgedEBLogOtherPeerDoesNotConsumeFailedRetry(t *testing.T) {
+	log := newLeiosForgedEBLog()
+	const failedConn = "peer-a"
+	const healthyConn = "peer-b"
+	log.registerConn(failedConn)
+	log.registerConn(healthyConn)
+	point := ocommon.Point{Slot: 1, Hash: []byte{1}}
+	log.append(leiosForgedEBEntry{point: &point})
+
+	entry, _ := log.next(failedConn)
+	require.NotNil(t, entry)
+	require.Equal(t, point, *entry.point)
+	log.complete(failedConn, false)
+
+	entry, _ = log.next(healthyConn)
+	require.NotNil(t, entry)
+	require.Equal(t, point, *entry.point)
+	log.complete(healthyConn, true)
+	log.removeConn(failedConn)
+	log.removeConn(healthyConn)
+
+	const reconnected = "peer-a-reconnected"
+	log.registerConn(reconnected)
+	retry, _ := log.next(reconnected)
+	require.NotNil(t, retry)
+	require.Equal(t, point, *retry.point)
+	log.complete(reconnected, true)
+}
+
 // TestServeForgedEndorserBlockTxs verifies that a locally-forged endorser
 // block's transaction bodies are stored alongside its manifest so the
 // leios-fetch server can serve them, in manifest order, honoring the requested
@@ -74,7 +180,12 @@ func TestServeForgedEndorserBlockTxs(t *testing.T) {
 	for i, raw := range msg.TxsRaw {
 		var inner []byte
 		_, derr := cbor.Decode(raw, &inner)
-		require.NoErrorf(t, derr, "served tx %d should be a CBOR byte string", i)
+		require.NoErrorf(
+			t,
+			derr,
+			"served tx %d should be a CBOR byte string",
+			i,
+		)
 		require.Equalf(
 			t,
 			bodies[i],

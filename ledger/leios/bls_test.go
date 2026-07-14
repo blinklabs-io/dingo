@@ -16,6 +16,7 @@ package leios
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"testing"
 
@@ -58,6 +59,41 @@ func TestSignVoteVerifyRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, sig, lcommon.LeiosBlsSignatureSize)
 	require.NoError(t, VerifyVoteSignature(key.PublicKey(), msg, sig))
+}
+
+func TestPrototypeVoteMusashiVector(t *testing.T) {
+	// Fixed MinSig/PoP vector cross-checked with Cloudflare CIRCL's
+	// independent BLS12-381 implementation. Keeping the expected bytes
+	// literal makes this test fail if either the Musashi message shape or
+	// cardano-crypto-leios ciphersuite DST changes accidentally.
+	rbHashBytes, err := hex.DecodeString(
+		"000102030405060708090a0b0c0d0e0f" +
+			"101112131415161718191a1b1c1d1e1f",
+	)
+	require.NoError(t, err)
+	var rbHash lcommon.Blake2b256
+	copy(rbHash[:], rbHashBytes)
+	msg := PrototypeVoteMessageBytes(rbHash)
+	assert.Equal(t, rbHashBytes, msg)
+
+	key := testSigningKey(t, 42)
+	sig, err := SignVote(key, msg)
+	require.NoError(t, err)
+	expectedSig, err := hex.DecodeString(
+		"a331e72f9f7e207d9d3468d16847547e24f295cba9915a33" +
+			"5302d727ef0f006be5265f504534a946d095f4622cf6f60a",
+	)
+	require.NoError(t, err)
+	assert.Equal(t, expectedSig, sig)
+
+	publicKey, err := ParseVoterPublicKey(
+		"ac7fa63dfc38bbf3712e27a180391bca4ccabf609c5967a0" +
+			"592eff420b6235f3f2b323051cb099acc3969aca310f7ff4" +
+			"191b2d6db43fafc2c9592f7e5f73981107975d3d92b8438" +
+			"91e724dbc9f05b5eee5a3b2b1fc782ede8149f30830b84444",
+	)
+	require.NoError(t, err)
+	require.NoError(t, VerifyVoteSignature(publicKey, msg, expectedSig))
 }
 
 func TestVerifyVoteSignatureWrongMessage(t *testing.T) {
