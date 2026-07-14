@@ -15,6 +15,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,94 @@ func TestLoad_ValidDurationStringsAccepted(t *testing.T) {
 		"mithril:\n  downloadIdleTimeout: \"2m\"\n"
 	if err := loadYAML(t, body); err != nil {
 		t.Fatalf("valid duration strings rejected: %v", err)
+	}
+}
+
+// TestLoad_NonPositiveDurationsRejected verifies that zero and negative
+// values for the positive-only timeout fields are rejected at load, rather
+// than being accepted and then silently replaced with a default by their
+// consumers (configuredShutdownTimeout / chainsync StallTimeout).
+func TestLoad_NonPositiveDurationsRejected(t *testing.T) {
+	fields := map[string]string{
+		"shutdownTimeout":        "shutdownTimeout: %q\n",
+		"ledgerCatchupTimeout":   "ledgerCatchupTimeout: %q\n",
+		"chainsync.stallTimeout": "chainsync:\n  stallTimeout: %q\n",
+	}
+	for _, val := range []string{"0s", "0", "-5s", "-1m"} {
+		for name, tmpl := range fields {
+			t.Run(name+"="+val, func(t *testing.T) {
+				body := fmt.Sprintf(tmpl, val)
+				if err := loadYAML(t, body); err == nil {
+					t.Fatalf(
+						"expected error for non-positive %s=%q, got nil",
+						name, val,
+					)
+				}
+			})
+		}
+	}
+}
+
+// TestLoad_DownloadIdleTimeoutNonPositiveAccepted verifies the documented
+// non-positive semantics of mithril.downloadIdleTimeout are preserved: "0"
+// means "use the default" and a negative duration disables idle detection,
+// so neither is rejected.
+func TestLoad_DownloadIdleTimeoutNonPositiveAccepted(t *testing.T) {
+	for _, val := range []string{"0s", "-1s", "-30m"} {
+		body := fmt.Sprintf("mithril:\n  downloadIdleTimeout: %q\n", val)
+		if err := loadYAML(t, body); err != nil {
+			t.Fatalf(
+				"downloadIdleTimeout=%q should be accepted, got: %v",
+				val, err,
+			)
+		}
+	}
+}
+
+// TestLoad_NonPositiveDurationEnvRejected covers the environment-variable
+// input path for the positive-only timeout fields.
+func TestLoad_NonPositiveDurationEnvRejected(t *testing.T) {
+	t.Run("stallTimeout", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("DINGO_CHAINSYNC_STALL_TIMEOUT", "-5s")
+		if _, err := LoadConfig(""); err == nil {
+			t.Fatal("expected error for negative stall timeout via env, got nil")
+		}
+	})
+	t.Run("shutdownTimeout", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("CARDANO_SHUTDOWN_TIMEOUT", "0s")
+		if _, err := LoadConfig(""); err == nil {
+			t.Fatal("expected error for zero shutdown timeout via env, got nil")
+		}
+	})
+}
+
+// TestApplyFlags_NonPositiveDurationRejected covers the CLI-flag input path.
+func TestApplyFlags_NonPositiveDurationRejected(t *testing.T) {
+	for _, tc := range []struct {
+		flag string
+		val  string
+	}{
+		{"--chainsync-stall-timeout", "0s"},
+		{"--shutdown-timeout", "-10s"},
+		{"--ledger-catchup-timeout", "0"},
+	} {
+		t.Run(tc.flag+"="+tc.val, func(t *testing.T) {
+			resetGlobalConfig()
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			cmd := &cobra.Command{Use: "dingo"}
+			RegisterFlags(cmd)
+			if err := cmd.ParseFlags([]string{tc.flag + "=" + tc.val}); err != nil {
+				t.Fatalf("failed to parse flags: %v", err)
+			}
+			if err := ApplyFlags(cmd, cfg); err == nil {
+				t.Fatalf("expected error for %s=%s, got nil", tc.flag, tc.val)
+			}
+		})
 	}
 }
 

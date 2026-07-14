@@ -470,10 +470,14 @@ func validateRuntimeConfig(cfg *Config) error {
 			storageModeAPI,
 		)
 	}
-	// Duration-string fields were parsed lazily (at node startup, or in the
-	// mithril subcommand), so a typo such as "30x" was silently ignored and
-	// the default used. Parse them here to reject malformed values at config
-	// load. Empty means "use the default", so it is skipped.
+	// Positive-only duration fields. These were parsed lazily (at node
+	// startup), so a typo such as "30x" was silently ignored and the default
+	// used. Worse, their consumers silently substitute a default for any
+	// non-positive value (configuredShutdownTimeout falls back to 30s for
+	// <= 0; chainsync applies its configured timeout only when > 0), so a
+	// "0s" or negative value here is just another flavor of the silent
+	// fallback this change removes. Require a positive duration. Empty means
+	// "use the default", so it is skipped.
 	for _, d := range []struct {
 		name  string
 		value string
@@ -481,13 +485,33 @@ func validateRuntimeConfig(cfg *Config) error {
 		{"shutdownTimeout", cfg.ShutdownTimeout},
 		{"ledgerCatchupTimeout", cfg.LedgerCatchupTimeout},
 		{"chainsync.stallTimeout", cfg.Chainsync.StallTimeout},
-		{"mithril.downloadIdleTimeout", cfg.Mithril.DownloadIdleTimeout},
 	} {
 		if d.value == "" {
 			continue
 		}
-		if _, err := time.ParseDuration(d.value); err != nil {
+		parsed, err := time.ParseDuration(d.value)
+		if err != nil {
 			return fmt.Errorf("invalid %s %q: %w", d.name, d.value, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf(
+				"invalid %s %q: must be a positive duration",
+				d.name,
+				d.value,
+			)
+		}
+	}
+	// mithril.downloadIdleTimeout has documented non-positive semantics
+	// (empty and "0" both mean "use the downloader default"; a negative
+	// duration disables idle detection), so it is only checked for parse
+	// validity, not sign.
+	if cfg.Mithril.DownloadIdleTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Mithril.DownloadIdleTimeout); err != nil {
+			return fmt.Errorf(
+				"invalid mithril.downloadIdleTimeout %q: %w",
+				cfg.Mithril.DownloadIdleTimeout,
+				err,
+			)
 		}
 	}
 	return nil
