@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/sqldialect"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -168,15 +169,8 @@ func QueryRegistrationHistoryByCredential(
 }
 
 func transactionJoinClause(db *gorm.DB) string {
-	if db == nil {
-		return `INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`
-	}
-	switch strings.ToLower(db.Name()) {
-	case "mysql":
-		return "INNER JOIN `transaction` tx ON tx.id = certs.transaction_id"
-	default:
-		return `INNER JOIN "transaction" tx ON tx.id = certs.transaction_id`
-	}
+	return "INNER JOIN " + sqldialect.TransactionTableName(db) +
+		" tx ON tx.id = certs.transaction_id"
 }
 
 func DelegationTableCertType(table string) (uint, bool) {
