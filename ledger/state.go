@@ -1427,6 +1427,7 @@ func (ls *LedgerState) handleSlotTicks() {
 		ls.RLock()
 		currentEpoch := ls.currentEpoch
 		currentEra := ls.currentEra
+		currentPParams := ls.currentPParams
 		tipSlot := ls.currentTip.Point.Slot
 		ls.RUnlock()
 
@@ -1510,7 +1511,7 @@ func (ls *LedgerState) handleSlotTicks() {
 				NewEpoch:        tick.Epoch,
 				BoundarySlot:    tick.Slot,
 				EpochNonce:      nil,
-				ProtocolVersion: currentEra.Id,
+				ProtocolVersion: ls.protocolMajorForEvent(currentPParams, currentEra),
 				SnapshotSlot:    snapshotSlot,
 			}
 			ls.config.EventBus.Publish(
@@ -1588,6 +1589,26 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 
 func (ls *LedgerState) resetNextEpochNonceReady() {
 	ls.nextNonceReadyEpoch.Store(0)
+}
+
+func (ls *LedgerState) protocolMajorForEvent(
+	pparams lcommon.ProtocolParameters,
+	era eras.EraDesc,
+) uint {
+	pv, err := GetProtocolVersion(pparams)
+	if err == nil {
+		return pv.Major
+	}
+	if ls.config.Logger != nil {
+		ls.config.Logger.Warn(
+			"could not extract protocol version for epoch event",
+			"error", err,
+			"pparams_type", fmt.Sprintf("%T", pparams),
+			"fallback_era_id", era.Id,
+			"component", "ledger",
+		)
+	}
+	return era.Id
 }
 
 // isNearTip returns true when the given slot is inside the current era's
@@ -3029,12 +3050,15 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 						snapshotSlot--
 					}
 					epochTransitionEvent := event.EpochTransitionEvent{
-						PreviousEpoch:   snapshotEpoch.EpochId,
-						NewEpoch:        newEpochId,
-						BoundarySlot:    rolloverResult.NewCurrentEpoch.StartSlot,
-						EpochNonce:      rolloverResult.NewCurrentEpoch.Nonce,
-						ProtocolVersion: rolloverResult.NewCurrentEra.Id,
-						SnapshotSlot:    snapshotSlot,
+						PreviousEpoch: snapshotEpoch.EpochId,
+						NewEpoch:      newEpochId,
+						BoundarySlot:  rolloverResult.NewCurrentEpoch.StartSlot,
+						EpochNonce:    rolloverResult.NewCurrentEpoch.Nonce,
+						ProtocolVersion: ls.protocolMajorForEvent(
+							rolloverResult.NewCurrentPParams,
+							rolloverResult.NewCurrentEra,
+						),
+						SnapshotSlot: snapshotSlot,
 					}
 					ls.config.EventBus.Publish(
 						event.EpochTransitionEventType,
