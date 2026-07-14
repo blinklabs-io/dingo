@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -153,6 +154,27 @@ func (d *MetadataStoreSqlite) GetTransactionSlotByHash(
 		return 0, false, result.Error
 	}
 	return row.Slot, true, nil
+}
+
+// SumTransactionFeesInSlotRange sums declared fees for valid transactions
+// and consumed collateral for phase-2-invalid transactions.
+func (d *MetadataStoreSqlite) SumTransactionFeesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	if err := db.Model(&models.Transaction{}).
+		Select("COALESCE(SUM(CASE WHEN valid THEN CAST(fee AS INTEGER) ELSE CAST(collateral_fee AS INTEGER) END), 0)").
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
+	}
+	return total, nil
 }
 
 // GetTransactionIDByHash returns the primary-key ID of the transaction
@@ -910,15 +932,27 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 	if err != nil {
 		return err
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(tx.Fee().Uint64()),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	// Store produced outputs only (no input lookup or consumption)
 	collateralReturn := tx.CollateralReturn()
@@ -992,6 +1026,38 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 	return nil
 }
 
+func (d *MetadataStoreSqlite) RecomputeGapCollateralFee(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	if tx.IsValid() {
+		return nil
+	}
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
+	if err := db.Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Update("collateral_fee", types.Uint64(collateralFee)).Error; err != nil {
+		return fmt.Errorf("update collateral fee for gap tx %x: %w", txHash, err)
+	}
+	return nil
+}
+
 // SetTransaction adds a new transaction to the database and processes all certificates
 func (d *MetadataStoreSqlite) SetTransaction(
 	tx lcommon.Transaction,
@@ -1005,15 +1071,27 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if err != nil {
 		return err
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(tx.Fee().Uint64()),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -1055,7 +1133,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	needsIdFetch := tmpTx.ID == 0
@@ -2708,15 +2786,29 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, batch.InFlightProducerAmount,
+	)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -2782,8 +2874,14 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		if _, err := execRawOnConn(
 			db,
 			`UPDATE "transaction" SET "block_hash" = ?, "block_index" = ?, `+
-				`"slot" = ? WHERE "hash" = ?`,
-			[]any{tmpTx.BlockHash, tmpTx.BlockIndex, tmpTx.Slot, txHash},
+				`"slot" = ?, "collateral_fee" = ? WHERE "hash" = ?`,
+			[]any{
+				tmpTx.BlockHash,
+				tmpTx.BlockIndex,
+				tmpTx.Slot,
+				tmpTx.CollateralFee,
+				txHash,
+			},
 		); err != nil {
 			return fmt.Errorf(
 				"update existing transaction (batched) at slot %d, txHash %x: %w",
