@@ -282,6 +282,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
+	// rows in the inclusive slot range, ordered by slot and pool key hash.
+	GetPoolBlockIssuersInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) ([]models.PoolOpCertSequence, error)
+
 	// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 	// inclusive slot range, grouped by pool key hash. The total return value
 	// counts all observed pool blocks in the range, not only the requested
@@ -470,6 +478,15 @@ type MetadataStore interface {
 		bool, // includeInactive
 		types.Txn,
 	) (map[string]*models.Account, error)
+
+	// GetAccountsActiveAtSlot returns the subset of stake credentials that
+	// were registered and not subsequently deregistered at or before the given
+	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
+	GetAccountsActiveAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]struct{}, error)
 
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
 	// validated transaction withdrawal and records rollback state. txHash must

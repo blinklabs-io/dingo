@@ -2466,6 +2466,43 @@ POOLREAP runs before governance so any deposit that lands in the treasury is
 visible to the withdrawals checked in step 3. The ordering of steps 1-4 is
 locked in by `TestProcessEpochRollover_OrderingInvariant`.
 
+### Reward Calculation And Precomputation
+
+Reward protocol parameters and epoch length come from the RUPD calculation
+epoch, while block-production counts use the delayed performance epoch. TPraos
+overlay slots are excluded while decentralization is non-zero. Pre-Babbage
+calculation resolves the reward prefilter from stake-account certificate
+history immediately before the first reward-update slot, using the RUPD
+randomness-stabilisation window (`4k/f`); Babbage and later forgo that filter.
+Rewards omitted by the filter return to reserves. Calculated rewards that fail
+the application-time account-registration check are unspendable and go to
+treasury. Spendable rewards are credited through `account_reward_delta`.
+
+After an epoch-transition event, ledger can precompute the next delayed reward
+update into `reward_pool_output` and `reward_account_output`. Calculation runs
+in a read-only transaction; a separate short write transaction re-reads the
+owning `RewardSnapshot` and persists only if its captured/boundary slots and
+content still match, no rollback generation spanning performance blocks, ADA
+pots, protocol state, and account certificate history changed, and no complete
+result was concurrently persisted or applied. A rollback or authoritative
+snapshot replacement therefore drops stale work and leaves the boundary path
+to recalculate. Pre-Babbage precomputation is deferred until applied block
+progress reaches the RUPD prefilter slot, which queues a retry using the actual
+captured slot; later eras can precompute immediately.
+The EventBus callback only queues this work. One background calculation runs at
+a time, and epoch transitions received while it runs are coalesced to the newest
+pending event. This prevents the minutes-long calculation from blocking
+subscriber drain during bulk-sync epoch bursts while avoiding obsolete
+intermediate calculations.
+
+The application engine verifies the frozen input bundle and
+requires an exact pool output set, valid leader reward accounts, complete
+account outputs, application-boundary output slots, and totals that fit the
+available reward pot. Recalculation replaces the full output set so a result
+with fewer rows cannot retain stale rewards. Reward output rows are keyed by
+snapshot epoch: snapshot `S` corresponds to earned epoch `S+1` and spendable
+epoch `S+3`.
+
 ### Rollback Support
 
 On chain rollback past an epoch boundary:
@@ -2478,5 +2515,8 @@ On chain rollback past an epoch boundary:
   repaired when possible, but their nonce is left unchanged because it cannot be
   safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
-  writes (`network_state`) from governance refunds and POOLREAP deposit refunds
-  are slot-keyed, so they are reverted by slot and re-derived on forward replay
+  writes (`network_state`) are slot-keyed, so reward application, governance,
+  MIR, and POOLREAP effects can be reverted and re-derived on forward replay
+- Precomputed reward outputs are deleted by captured/boundary slot. Removing
+  them also resets the derived `reward_ada_pots.rewards` value for the
+  corresponding pot epoch so forward replay recalculates it
