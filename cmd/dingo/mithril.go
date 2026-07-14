@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/blinklabs-io/dingo/internal/config"
@@ -67,21 +68,21 @@ func resolveAggregatorURL(
 }
 
 // resolveMithrilBackend normalizes the configured Mithril artifact
-// backend, applying the node default (v2) when unset.
+// backend, applying the node default (v2) when unset. The accepted set
+// comes from mithril.AcceptedBackends so a backend added there is
+// recognized here without a manual update.
 func resolveMithrilBackend(backend string) (string, error) {
-	switch backend {
-	case "":
+	if backend == "" {
 		return mithril.BackendV2, nil
-	case mithril.BackendV1, mithril.BackendV2:
-		return backend, nil
-	default:
-		return "", fmt.Errorf(
-			"unsupported Mithril backend %q (expected %q or %q)",
-			backend,
-			mithril.BackendV1,
-			mithril.BackendV2,
-		)
 	}
+	if slices.Contains(mithril.AcceptedBackends(), backend) {
+		return backend, nil
+	}
+	return "", fmt.Errorf(
+		"unsupported Mithril backend %q (expected one of %q)",
+		backend,
+		mithril.AcceptedBackends(),
+	)
 }
 
 func mithrilListCommand() *cobra.Command {

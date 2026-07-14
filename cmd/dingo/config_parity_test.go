@@ -28,7 +28,12 @@ import (
 // it validates against (config.AcceptedChainsyncStrategies and
 // config.AcceptedMithrilBackends) are duplicated from those downstream
 // parsers. These parity tests live in cmd/dingo, which can import all
-// three, and guard against drift in both directions:
+// three. The canonical sets are not hand-maintained: they come from
+// the parser packages' exported accepted-value lists
+// (chainsync.AcceptedHeaderSyncStrategyNames, mithril.AcceptedBackends),
+// which the parsers themselves derive from, so a value added to a
+// parser fails these tests until config's duplicated list is updated.
+// The tests guard drift in both directions:
 //
 //   - forward: every value config accepts must be accepted by the real
 //     parser, so a config never passes Validate() only to fail at
@@ -40,19 +45,11 @@ import (
 // TestChainsyncStrategyWhitelistParity checks config.AcceptedChainsyncStrategies
 // against chainsync.ParseHeaderSyncStrategy.
 func TestChainsyncStrategyWhitelistParity(t *testing.T) {
-	// canonical is the contract of chainsync.ParseHeaderSyncStrategy;
-	// it mirrors that function's switch. The set-equality check below
-	// ties config's list to it, and the parse check ties it to the real
-	// parser, so a change to the parser's switch fails this test until
-	// both this list and config's list are updated.
-	canonical := []string{
-		"", "primary", "parallel", "round-robin", "roundrobin", "round_robin",
-	}
 	assertWhitelistParity(
 		t,
 		"chainsync.strategy",
 		config.AcceptedChainsyncStrategies,
-		canonical,
+		chainsync.AcceptedHeaderSyncStrategyNames(),
 		func(v string) error {
 			_, err := chainsync.ParseHeaderSyncStrategy(v)
 			return err
@@ -63,10 +60,9 @@ func TestChainsyncStrategyWhitelistParity(t *testing.T) {
 // TestMithrilBackendWhitelistParity checks config.AcceptedMithrilBackends
 // against resolveMithrilBackend.
 func TestMithrilBackendWhitelistParity(t *testing.T) {
-	// canonical is the contract of resolveMithrilBackend: the empty
-	// string (which selects v2) plus the two backend constants it
-	// switches on.
-	canonical := []string{"", mithril.BackendV1, mithril.BackendV2}
+	// resolveMithrilBackend accepts mithril.AcceptedBackends plus the
+	// empty string, which selects the default (v2).
+	canonical := append([]string{""}, mithril.AcceptedBackends()...)
 	assertWhitelistParity(
 		t,
 		"mithril.backend",
@@ -100,13 +96,14 @@ func assertWhitelistParity(
 		}
 	}
 	// Reverse: every value in the parser's contract must actually parse
-	// (anchoring the contract to the real parser) and config's set must
-	// match the contract exactly.
+	// (anchoring the exported accepted list to the real parser) and
+	// config's set must match the contract exactly.
 	for _, v := range canonical {
 		if err := accepts(v); err != nil {
 			t.Errorf(
 				"%s: canonical value %q is rejected by the parser; "+
-					"update the canonical set: %v",
+					"the parser package's exported accepted list "+
+					"disagrees with its parser: %v",
 				name, v, err,
 			)
 		}

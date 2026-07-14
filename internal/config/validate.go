@@ -32,18 +32,20 @@ const (
 	maxPort             = 65535
 )
 
-// AcceptedChainsyncStrategies mirrors the values accepted by
-// chainsync.ParseHeaderSyncStrategy. internal/config cannot import
-// chainsync without pulling node subsystems into the config package, so
-// the two lists are kept in sync by a parity test in cmd/dingo (which
-// can import both).
+// AcceptedChainsyncStrategies mirrors
+// chainsync.AcceptedHeaderSyncStrategyNames (the accepted-name list
+// chainsync.ParseHeaderSyncStrategy is derived from). internal/config
+// cannot import chainsync without pulling node subsystems into the
+// config package, so the two lists are kept in sync by a parity test in
+// cmd/dingo (which can import both).
 var AcceptedChainsyncStrategies = []string{
 	"", "primary", "parallel", "round-robin", "roundrobin", "round_robin",
 }
 
-// AcceptedMithrilBackends mirrors the values accepted by cmd/dingo's
-// resolveMithrilBackend (empty selects v2). Kept in sync by the same
-// parity test in cmd/dingo as AcceptedChainsyncStrategies.
+// AcceptedMithrilBackends mirrors mithril.AcceptedBackends plus the
+// empty string (which selects the default v2), matching cmd/dingo's
+// resolveMithrilBackend. Kept in sync by the same parity test in
+// cmd/dingo as AcceptedChainsyncStrategies.
 var AcceptedMithrilBackends = []string{"", "v1", "v2"}
 
 // Validate checks the fully merged configuration (defaults, YAML,
