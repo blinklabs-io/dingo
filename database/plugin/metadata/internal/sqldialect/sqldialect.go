@@ -48,10 +48,10 @@ func TransactionTableName(db *gorm.DB) string {
 
 // IntegerCastType returns the backend-native integer type used to CAST the
 // text-encoded (types.Uint64) columns before arithmetic or numeric
-// comparison. utxo.amount, account.reward, and reward_live_stake's
-// utxo_stake/reward_stake/total_stake columns are all stored as
-// decimal-string TEXT (see types.Uint64.Value) regardless of backend, so any
-// SUM, arithmetic, or ordering comparison touching them must cast first:
+// comparison. The utxo.amount and account.reward columns used by the metadata
+// stake and voting-power queries are stored as decimal-string TEXT (see
+// types.Uint64.Value) regardless of backend, so any SUM, arithmetic, or
+// ordering comparison touching them must cast first:
 // sqlite is loosely typed and tolerates INTEGER; mysql needs UNSIGNED to
 // preserve values above math.MaxInt64 exactly (a signed cast would
 // overflow); postgres needs BIGINT and, unlike sqlite/mysql, never
