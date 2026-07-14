@@ -750,6 +750,7 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 		tmpAccount = &models.Account{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
+			CreatedSlot:   models.AccountCreatedSlotUnset,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
@@ -761,6 +762,9 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 // record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
 func saveAccount(account *models.Account, db *gorm.DB) error {
+	if account.CreatedSlot == models.AccountCreatedSlotUnset {
+		account.CreatedSlot = account.AddedSlot
+	}
 	if account.ID == 0 {
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
@@ -1906,6 +1910,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -1954,6 +1959,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						result := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -3438,6 +3444,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						r := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{
@@ -3479,6 +3486,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
 						r := db.Clauses(clause.OnConflict{
 							Columns: []clause.Column{

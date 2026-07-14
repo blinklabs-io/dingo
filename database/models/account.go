@@ -19,14 +19,28 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/btcsuite/btcd/btcutil/bech32"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var ErrAccountNotFound = errors.New("account not found")
+
+// AccountCreatedSlotUnset is the sentinel the account create helpers stamp on a
+// freshly built (not-yet-persisted) account so the save helpers can resolve
+// Account.CreatedSlot to the account's AddedSlot at insert time without
+// overwriting the immutable CreatedSlot of an existing row (which is loaded from
+// the database and is never equal to this sentinel). It is math.MaxInt64 rather
+// than ^uint64(0) because database/sql cannot bind a uint64 with the high bit
+// set, and no real slot ever reaches it.
+const AccountCreatedSlotUnset = uint64(math.MaxInt64)
 
 const (
 	DrepTypeAddrKeyHash uint64 = iota
@@ -92,6 +106,12 @@ type Account struct {
 	Drep          []byte `gorm:"index;size:28;index:idx_account_drep_active_staking_key,priority:1"`
 	ID            uint   `gorm:"primarykey"`
 	AddedSlot     uint64 `gorm:"index"`
+	// CreatedSlot is the slot at which this account row was first created
+	// (0 for Shelley-genesis delegated accounts). Unlike AddedSlot it is
+	// immutable after creation — never bumped by later delegation/registration
+	// changes. See AccountCreatedSlotUnset for the sentinel used by the
+	// create/save helpers.
+	CreatedSlot   uint64 `gorm:"not null;default:0"`
 	CertificateID uint   `gorm:"index"`
 	Reward        types.Uint64
 	// DrepType is the DRep delegation type code, an internal enum
@@ -247,6 +267,197 @@ func normalizeAccountRewardDeltaTxHash(db *gorm.DB, logger *slog.Logger) error {
 	}
 	if err := db.Migrator().AlterColumn(&AccountRewardDelta{}, "TxHash"); err != nil {
 		return fmt.Errorf("alter account_reward_delta tx_hash not null: %w", err)
+	}
+	return nil
+}
+
+// accountCreatedSlotBackfillPhase is the backfill_checkpoint phase key that
+// durably records one-time completion of the created_slot backfill.
+const accountCreatedSlotBackfillPhase = "account_created_slot"
+
+const createdSlotBackfillChunk = 400
+
+// BackfillAccountCreatedSlot stamps Account.CreatedSlot for pre-existing rows
+// from their earliest registration certificate. Genesis-delegated accounts,
+// which have no registration certificate, correctly keep the default 0.
+func BackfillAccountCreatedSlot(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&Account{}) {
+		return nil
+	}
+	done, err := accountCreatedSlotBackfillCompleted(db)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+	regTables := []string{
+		(&StakeRegistration{}).TableName(),
+		(&StakeRegistrationDelegation{}).TableName(),
+		(&StakeVoteRegistrationDelegation{}).TableName(),
+		(&VoteRegistrationDelegation{}).TableName(),
+		(&Registration{}).TableName(),
+	}
+	type regRow struct {
+		CredentialTag uint8
+		StakingKey    []byte
+		MinSlot       uint64
+	}
+	earliest := make(map[string]uint64)
+	for _, table := range regTables {
+		if !db.Migrator().HasTable(table) {
+			continue
+		}
+		var rows []regRow
+		if err := db.Table(table).
+			Select("credential_tag, staking_key, MIN(added_slot) AS min_slot").
+			Group("credential_tag, staking_key").
+			Scan(&rows).Error; err != nil {
+			return fmt.Errorf("created_slot backfill scan %s: %w", table, err)
+		}
+		for _, row := range rows {
+			key := StakeCredentialRef{
+				Tag: row.CredentialTag,
+				Key: row.StakingKey,
+			}.MapKey()
+			if current, ok := earliest[key]; !ok || row.MinSlot < current {
+				earliest[key] = row.MinSlot
+			}
+		}
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		updated, err := applyAccountCreatedSlotBackfill(tx, earliest)
+		if err != nil {
+			return err
+		}
+		if updated > 0 {
+			logger.Info(
+				"backfilled account created_slot from registration history",
+				"accounts", updated,
+			)
+		}
+		return markAccountCreatedSlotBackfillComplete(tx)
+	})
+}
+
+func applyAccountCreatedSlotBackfill(
+	tx *gorm.DB,
+	earliest map[string]uint64,
+) (int64, error) {
+	if len(earliest) == 0 {
+		return 0, nil
+	}
+	if tx.Name() == "sqlite" {
+		return applyAccountCreatedSlotBackfillPerSlot(tx, earliest)
+	}
+	return applyAccountCreatedSlotBackfillCase(tx, earliest)
+}
+
+func applyAccountCreatedSlotBackfillPerSlot(
+	tx *gorm.DB,
+	earliest map[string]uint64,
+) (int64, error) {
+	bySlot := make(map[uint64][][]any)
+	for key, slot := range earliest {
+		bySlot[slot] = append(bySlot[slot], []any{key[0], []byte(key[1:])})
+	}
+	var updated int64
+	for slot, pairs := range bySlot {
+		for chunk := range slices.Chunk(pairs, createdSlotBackfillChunk) {
+			result := tx.Model(&Account{}).
+				Where("(credential_tag, staking_key) IN ?", chunk).
+				Where("created_slot = 0").
+				Update("created_slot", slot)
+			if result.Error != nil {
+				return updated, fmt.Errorf(
+					"created_slot backfill update: %w", result.Error,
+				)
+			}
+			updated += result.RowsAffected
+		}
+	}
+	return updated, nil
+}
+
+func applyAccountCreatedSlotBackfillCase(
+	tx *gorm.DB,
+	earliest map[string]uint64,
+) (int64, error) {
+	type credSlot struct {
+		key  []byte
+		slot uint64
+		tag  uint8
+	}
+	all := make([]credSlot, 0, len(earliest))
+	for key, slot := range earliest {
+		all = append(all, credSlot{tag: key[0], key: []byte(key[1:]), slot: slot})
+	}
+	var updated int64
+	for chunk := range slices.Chunk(all, createdSlotBackfillChunk) {
+		var caseSQL strings.Builder
+		caseSQL.WriteString("CASE")
+		caseArgs := make([]any, 0, len(chunk)*2)
+		inPairs := make([][]any, 0, len(chunk))
+		for _, item := range chunk {
+			caseSQL.WriteString(
+				" WHEN credential_tag = ? AND staking_key = ? THEN ",
+			)
+			caseSQL.WriteString(strconv.FormatUint(item.slot, 10))
+			caseArgs = append(caseArgs, item.tag, item.key)
+			inPairs = append(inPairs, []any{item.tag, item.key})
+		}
+		caseSQL.WriteString(" END")
+		result := tx.Model(&Account{}).
+			Where("created_slot = 0").
+			Where("(credential_tag, staking_key) IN ?", inPairs).
+			Update("created_slot", gorm.Expr(caseSQL.String(), caseArgs...))
+		if result.Error != nil {
+			return updated, fmt.Errorf(
+				"created_slot backfill update: %w", result.Error,
+			)
+		}
+		updated += result.RowsAffected
+	}
+	return updated, nil
+}
+
+func accountCreatedSlotBackfillCompleted(db *gorm.DB) (bool, error) {
+	if !db.Migrator().HasTable(&BackfillCheckpoint{}) {
+		return false, nil
+	}
+	var checkpoint BackfillCheckpoint
+	err := db.Where("phase = ?", accountCreatedSlotBackfillPhase).
+		First(&checkpoint).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf(
+			"check account created_slot backfill checkpoint: %w", err,
+		)
+	}
+	return checkpoint.Completed, nil
+}
+
+func markAccountCreatedSlotBackfillComplete(db *gorm.DB) error {
+	now := time.Now()
+	checkpoint := BackfillCheckpoint{
+		Phase:     accountCreatedSlotBackfillPhase,
+		StartedAt: now,
+		UpdatedAt: now,
+		Completed: true,
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "phase"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"updated_at",
+			"completed",
+		}),
+	}).Create(&checkpoint).Error; err != nil {
+		return fmt.Errorf("mark account created_slot backfill complete: %w", err)
 	}
 	return nil
 }

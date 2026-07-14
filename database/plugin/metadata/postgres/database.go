@@ -347,6 +347,10 @@ func (d *MetadataStorePostgres) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Remember whether this is an existing account table before AutoMigrate adds
+	// created_slot. The backfill has its own durable completion marker, so an
+	// interrupted attempt is retried on the next startup.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -369,6 +373,11 @@ func (d *MetadataStorePostgres) Start() error {
 		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
+		}
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf("account created_slot backfill failed: %w", err)
 		}
 	}
 	return nil
