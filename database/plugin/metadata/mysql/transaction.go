@@ -1044,7 +1044,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	if result.Error != nil {
@@ -2745,7 +2745,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}},
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	needsIdFetch := tmpTx.ID == 0

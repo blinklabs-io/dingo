@@ -227,7 +227,7 @@ func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
 	assert.Equal(t, []byte{0x20}, keys.PaymentKey)
 }
 
-func TestBatchAccumulator_ZeroValueProducerAmount(t *testing.T) {
+func TestBatchAccumulator_ZeroValue_InFlightProducerAmount(t *testing.T) {
 	t.Parallel()
 	var batch BatchAccumulator
 	txID := bytes.Repeat([]byte{0xaa}, 32)

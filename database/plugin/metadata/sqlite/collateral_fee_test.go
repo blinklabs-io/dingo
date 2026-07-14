@@ -197,6 +197,83 @@ func TestCollateralFeePendingProducer(t *testing.T) {
 	assert.Equal(t, uint64(250_000), fee)
 }
 
+// TestCollateralFeeReplayCorrectsStaleValue verifies the normal and batched
+// SQLite transaction upsert paths refresh a previously stored collateral fee.
+// This matters when ingestion resumes or replays after the collateral inputs
+// become available.
+func TestCollateralFeeReplayCorrectsStaleValue(t *testing.T) {
+	testCases := []struct {
+		name   string
+		ingest func(
+			*MetadataStoreSqlite,
+			lcommon.Transaction,
+			ocommon.Point,
+		) error
+	}{
+		{
+			name: "normal",
+			ingest: func(
+				store *MetadataStoreSqlite,
+				tx lcommon.Transaction,
+				point ocommon.Point,
+			) error {
+				return store.SetTransaction(tx, point, 0, nil, nil)
+			},
+		},
+		{
+			name: "batched",
+			ingest: func(
+				store *MetadataStoreSqlite,
+				tx lcommon.Transaction,
+				point ocommon.Point,
+			) error {
+				return store.SetTransactionBatched(
+					tx,
+					point,
+					0,
+					nil,
+					NewBatchAccumulator(),
+					nil,
+				)
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			store := setupTestDB(t)
+			db := store.DB()
+			producerHash := collateralFeeTestHash(0xf2)
+			txHash := collateralFeeTestHash(0x05)
+			seedCollateralFeeUtxo(t, db, producerHash, 0, 750_000)
+			require.NoError(t, db.Create(&models.Transaction{
+				Hash:          txHash.Bytes(),
+				CollateralFee: types.Uint64(1),
+			}).Error)
+
+			tx := &mockTransaction{
+				hash:    txHash,
+				isValid: false,
+				collateral: []lcommon.TransactionInput{
+					mockTransactionInput{hash: producerHash, index: 0},
+				},
+			}
+			point := ocommon.Point{
+				Slot: 75,
+				Hash: collateralFeeTestHash(0xf3).Bytes(),
+			}
+			require.NoError(t, testCase.ingest(store, tx, point))
+
+			var row models.Transaction
+			require.NoError(
+				t,
+				db.Where("hash = ?", txHash.Bytes()).Take(&row).Error,
+			)
+			assert.Equal(t, uint64(750_000), uint64(row.CollateralFee))
+		})
+	}
+}
+
 // TestGapBlockCollateralFeeInvalidTransaction verifies that ingesting a
 // phase-2-invalid transaction through the Mithril gap-block path records its
 // consumed collateral (inputs minus collateral return) as the fee-pot

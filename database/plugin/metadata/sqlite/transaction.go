@@ -1133,7 +1133,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	needsIdFetch := tmpTx.ID == 0
@@ -2874,8 +2874,14 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		if _, err := execRawOnConn(
 			db,
 			`UPDATE "transaction" SET "block_hash" = ?, "block_index" = ?, `+
-				`"slot" = ? WHERE "hash" = ?`,
-			[]any{tmpTx.BlockHash, tmpTx.BlockIndex, tmpTx.Slot, txHash},
+				`"slot" = ?, "collateral_fee" = ? WHERE "hash" = ?`,
+			[]any{
+				tmpTx.BlockHash,
+				tmpTx.BlockIndex,
+				tmpTx.Slot,
+				tmpTx.CollateralFee,
+				txHash,
+			},
 		); err != nil {
 			return fmt.Errorf(
 				"update existing transaction (batched) at slot %d, txHash %x: %w",
