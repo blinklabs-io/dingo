@@ -77,19 +77,40 @@ func TestChainGrowthRate(t *testing.T) {
 	targetSlot := startTip.SlotNumber + measureSlots
 	measureTimeout := time.Duration(measureSlots)*cfg.SlotDuration() +
 		cfg.ExpectedBlockTime()*5
-	h.WaitForNodeSlot(dingoEndpoint, targetSlot, measureTimeout)
 
-	// Record the ending point
-	endTip, err := h.GetChainTip(dingoEndpoint)
-	require.NoError(t, err, "failed to get end tip")
+	// With activeSlotsCoeff=0.4 we expect ~40 blocks in 100 slots.
+	// Require at least 8 (20% of expected) as a conservative lower bound
+	// that accounts for random variance and possible rollbacks.
+	const minBlocks = uint64(8)
+	minBlock := startTip.BlockNumber + minBlocks
+	var endTip devnet.ChainTip
+	require.Eventually(t, func() bool {
+		tip, err := h.GetChainTip(dingoEndpoint)
+		if err != nil {
+			t.Logf("growth check: error querying %s: %v",
+				dingoEndpoint.Name, err)
+			return false
+		}
+		endTip = tip
+		t.Logf(
+			"growth check: %s at slot %d, block %d",
+			dingoEndpoint.Name, tip.SlotNumber, tip.BlockNumber,
+		)
+		return tip.SlotNumber >= targetSlot &&
+			tip.BlockNumber >= minBlock
+	}, measureTimeout, 2*time.Second,
+		"%s did not reach slot %d and block %d within %s",
+		dingoEndpoint.Name, targetSlot, minBlock, measureTimeout,
+	)
 	t.Logf(
 		"end tip: slot=%d block=%d",
 		endTip.SlotNumber, endTip.BlockNumber,
 	)
 
-	require.GreaterOrEqual(t, endTip.BlockNumber, startTip.BlockNumber,
-		"end block number should not be less than start (possible rollback)",
-	)
+	// The require.Eventually above already guarantees
+	// endTip.BlockNumber >= startTip.BlockNumber + minBlocks, so the
+	// subtraction below cannot underflow and a rollback below the start tip
+	// would have failed the Eventually rather than reaching here.
 	blocksProduced := endTip.BlockNumber - startTip.BlockNumber
 	slotsElapsed := endTip.SlotNumber - startTip.SlotNumber
 	if slotsElapsed == 0 {
@@ -104,10 +125,6 @@ func TestChainGrowthRate(t *testing.T) {
 		cfg.ExpectedBlocksPerSlot()*100,
 	)
 
-	// With activeSlotsCoeff=0.4 we expect ~40 blocks in 100 slots.
-	// Require at least 8 (20% of expected) as a conservative lower bound
-	// that accounts for random variance and possible rollbacks.
-	const minBlocks = uint64(8)
 	require.GreaterOrEqual(t, blocksProduced, minBlocks,
 		"chain should produce at least %d blocks in %d slots "+
 			"(activeSlotsCoeff=%.2f)",
