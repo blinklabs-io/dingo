@@ -127,11 +127,23 @@ func ProcessEpoch(
 		TreasuryWithdrawalRemaining:    treasuryWithdrawalRemaining,
 		TreasuryWithdrawalRemainingSet: true,
 	}
+	// A boundary transaction can commit before the separate tip advance. If
+	// restart replays that boundary, stake-reward application first rewrites
+	// the absolute network-state pot row, so proposals already marked enacted
+	// at this exact boundary must replay their treasury side effects.
+	replayedEnacted, err := in.DB.GetEnactedGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get boundary-enacted proposals: %w", err)
+	}
 	ratified, err := in.DB.GetRatifiedGovernanceProposals(in.Txn)
 	if err != nil {
 		return nil, fmt.Errorf("get ratified proposals: %w", err)
 	}
-	for _, proposal := range ratified {
+	enactProposal := func(proposal *models.GovernanceProposal, replay bool) error {
 		enactCtx.PParams = out.UpdatedPParams
 		res, err := EnactProposal(enactCtx, proposal)
 		if err != nil {
@@ -140,14 +152,16 @@ func ProcessEpoch(
 			// continuing would leave the proposal unmarked-enacted,
 			// so the next tick would re-apply it. Returning the
 			// error lets the surrounding DB transaction roll back.
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"enact proposal %s#%d: %w",
 				shortHash(proposal.TxHash),
 				proposal.ActionIndex,
 				err,
 			)
 		}
-		out.EnactedCount++
+		if !replay {
+			out.EnactedCount++
+		}
 		if res.PParamsChanged {
 			out.UpdatedPParams = res.UpdatedPParams
 			out.PParamsChanged = true
@@ -155,6 +169,17 @@ func ProcessEpoch(
 				lcommon.GovActionTypeHardForkInitiation {
 				out.HardForkInitiated = true
 			}
+		}
+		return nil
+	}
+	for _, proposal := range replayedEnacted {
+		if err := enactProposal(proposal, true); err != nil {
+			return nil, err
+		}
+	}
+	for _, proposal := range ratified {
+		if err := enactProposal(proposal, false); err != nil {
+			return nil, err
 		}
 	}
 
@@ -170,28 +195,52 @@ func ProcessEpoch(
 	if err != nil {
 		return nil, fmt.Errorf("get expiring proposals: %w", err)
 	}
-	for _, p := range expired {
+	// Same replay window as enacted proposals: expired deposits that were
+	// routed to treasury must be restored after the reward pot reset.
+	replayedExpired, err := in.DB.GetExpiredGovernanceProposalsAt(
+		in.NewEpoch,
+		in.BoundarySlot,
+		in.Txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get boundary-expired proposals: %w", err)
+	}
+	expireProposal := func(p *models.GovernanceProposal, replay bool) error {
 		if err := refundProposalDeposit(
 			in.DB,
 			in.Txn,
 			p,
 			in.BoundarySlot,
 		); err != nil {
-			return nil, fmt.Errorf(
+			return fmt.Errorf(
 				"refund expired proposal deposit %s#%d: %w",
 				shortHash(p.TxHash),
 				p.ActionIndex,
 				err,
 			)
 		}
+		if replay {
+			return nil
+		}
 		expiredEpoch := in.NewEpoch
 		expiredSlot := in.BoundarySlot
 		p.ExpiredEpoch = &expiredEpoch
 		p.ExpiredSlot = &expiredSlot
 		if err := in.DB.SetGovernanceProposal(p, in.Txn); err != nil {
-			return nil, fmt.Errorf("mark expired: %w", err)
+			return fmt.Errorf("mark expired: %w", err)
 		}
 		out.ExpiredCount++
+		return nil
+	}
+	for _, p := range replayedExpired {
+		if err := expireProposal(p, true); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range expired {
+		if err := expireProposal(p, false); err != nil {
+			return nil, err
+		}
 	}
 
 	// --- ORPHAN REMOVAL --------------------------------------------------
@@ -204,9 +253,14 @@ func ProcessEpoch(
 	// over the dependency graph seeded with every enacted and expired
 	// proposal from this tick.
 	orphanSeeds := make(
-		[]*models.GovernanceProposal, 0, len(ratified)+len(expired),
+		[]*models.GovernanceProposal,
+		0,
+		len(replayedEnacted)+len(ratified)+
+			len(replayedExpired)+len(expired),
 	)
+	orphanSeeds = append(orphanSeeds, replayedEnacted...)
 	orphanSeeds = append(orphanSeeds, ratified...)
+	orphanSeeds = append(orphanSeeds, replayedExpired...)
 	orphanSeeds = append(orphanSeeds, expired...)
 	orphanCount, err := removeOrphanedProposals(
 		in.DB, in.Txn, orphanSeeds, in.NewEpoch, in.BoundarySlot, in.Logger,

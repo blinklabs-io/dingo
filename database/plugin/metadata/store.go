@@ -1202,12 +1202,30 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
+	// the given epoch-boundary slot. Used to replay enactment side effects when
+	// stake reward pot reset is reapplied after a boundary commit crash.
+	GetEnactedGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark expired proposals and return deposits.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
+	// the given epoch-boundary slot. Used to replay deposit-return side effects
+	// when stake reward pot reset is reapplied after a boundary commit crash.
+	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 

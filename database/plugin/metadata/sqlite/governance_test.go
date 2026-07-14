@@ -561,6 +561,77 @@ func TestGetActiveGovernanceProposals_DeterministicOrder(t *testing.T) {
 	assert.Equal(t, "https://c.example.com", got[2].AnchorURL)
 }
 
+func TestGetExpiredGovernanceProposalsAt(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	targetEpoch := uint64(110)
+	targetSlot := uint64(5000)
+	uint64Ptr := func(value uint64) *uint64 { return &value }
+	newProposal := func(
+		name string,
+		proposedEpoch uint64,
+		addedSlot uint64,
+		actionIndex uint32,
+	) models.GovernanceProposal {
+		return models.GovernanceProposal{
+			TxHash:        []byte(name),
+			ActionIndex:   actionIndex,
+			ActionType:    uint8(6),
+			ProposedEpoch: proposedEpoch,
+			ExpiresEpoch:  targetEpoch - 1,
+			ExpiredEpoch:  &targetEpoch,
+			ExpiredSlot:   &targetSlot,
+			AnchorURL:     name,
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     addedSlot,
+		}
+	}
+
+	// Insert the matching rows in reverse order. The expected result exercises
+	// every tie-break in governanceProposalOrder.
+	matching := []models.GovernanceProposal{
+		newProposal("match-c", 101, 3000, 0),
+		newProposal("match-b", 100, 2000, 0),
+		newProposal("match-a", 100, 1000, 1),
+		newProposal("match-a", 100, 1000, 0),
+	}
+	for i := range matching {
+		require.NoError(t, store.SetGovernanceProposal(&matching[i], nil))
+	}
+
+	wrongEpoch := newProposal("wrong-expired-epoch", 90, 900, 0)
+	wrongEpoch.ExpiredEpoch = uint64Ptr(targetEpoch - 1)
+	wrongSlot := newProposal("wrong-expired-slot", 90, 800, 0)
+	wrongSlot.ExpiredSlot = uint64Ptr(targetSlot - 1)
+	enacted := newProposal("already-enacted", 90, 700, 0)
+	enacted.EnactedEpoch = uint64Ptr(targetEpoch)
+	deleted := newProposal("soft-deleted", 90, 600, 0)
+	deleted.DeletedSlot = uint64Ptr(targetSlot)
+	for _, proposal := range []*models.GovernanceProposal{
+		&wrongEpoch,
+		&wrongSlot,
+		&enacted,
+		&deleted,
+	} {
+		require.NoError(t, store.SetGovernanceProposal(proposal, nil))
+	}
+
+	got, err := store.GetExpiredGovernanceProposalsAt(
+		targetEpoch,
+		targetSlot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	assert.Equal(t, uint32(0), got[0].ActionIndex)
+	assert.Equal(t, uint32(1), got[1].ActionIndex)
+	assert.Equal(t, "match-b", got[2].AnchorURL)
+	assert.Equal(t, "match-c", got[3].AnchorURL)
+}
+
 func TestGetRatifiedGovernanceProposals(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)
@@ -630,6 +701,73 @@ func TestGetRatifiedGovernanceProposals(t *testing.T) {
 		"https://ratifiedA.example.com",
 		ratified[0].AnchorURL,
 	)
+}
+
+func TestGetEnactedGovernanceProposalsAt(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+
+	targetEpoch := uint64(110)
+	targetSlot := uint64(5000)
+	uint64Ptr := func(value uint64) *uint64 { return &value }
+	newProposal := func(
+		name string,
+		ratifiedEpoch uint64,
+		ratifiedSlot uint64,
+	) models.GovernanceProposal {
+		return models.GovernanceProposal{
+			TxHash:        []byte(name),
+			ActionType:    uint8(6),
+			ProposedEpoch: 100,
+			ExpiresEpoch:  120,
+			RatifiedEpoch: &ratifiedEpoch,
+			RatifiedSlot:  &ratifiedSlot,
+			EnactedEpoch:  &targetEpoch,
+			EnactedSlot:   &targetSlot,
+			AnchorURL:     name,
+			AnchorHash:    []byte("anchor_hash_1234567890123456789012"),
+			Deposit:       500,
+			ReturnAddress: []byte("return_addr_1234567890123456789"),
+			AddedSlot:     1000,
+		}
+	}
+
+	// Ratification time is the leading replay-order key, independent of
+	// insertion order.
+	matching := []models.GovernanceProposal{
+		newProposal("ratified-later", 102, 4000),
+		newProposal("ratified-earlier", 101, 3000),
+	}
+	for i := range matching {
+		require.NoError(t, store.SetGovernanceProposal(&matching[i], nil))
+	}
+
+	wrongEpoch := newProposal("wrong-enacted-epoch", 100, 2000)
+	wrongEpoch.EnactedEpoch = uint64Ptr(targetEpoch - 1)
+	wrongSlot := newProposal("wrong-enacted-slot", 100, 1900)
+	wrongSlot.EnactedSlot = uint64Ptr(targetSlot - 1)
+	unratified := newProposal("unratified", 100, 1800)
+	unratified.RatifiedEpoch = nil
+	deleted := newProposal("soft-deleted", 100, 1700)
+	deleted.DeletedSlot = uint64Ptr(targetSlot)
+	for _, proposal := range []*models.GovernanceProposal{
+		&wrongEpoch,
+		&wrongSlot,
+		&unratified,
+		&deleted,
+	} {
+		require.NoError(t, store.SetGovernanceProposal(proposal, nil))
+	}
+
+	got, err := store.GetEnactedGovernanceProposalsAt(
+		targetEpoch,
+		targetSlot,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "ratified-earlier", got[0].AnchorURL)
+	assert.Equal(t, "ratified-later", got[1].AnchorURL)
 }
 
 func TestGetLastEnactedGovernanceProposal(t *testing.T) {
