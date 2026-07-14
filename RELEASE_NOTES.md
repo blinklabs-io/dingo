@@ -1,5 +1,39 @@
 # Dingo Releases
 
+## v0.64.0 (July 14, 2026)
+
+**Title:** Governance replay recovery and simpler pool imports
+
+**Date:** July 14, 2026
+
+**Version:** v0.64.0
+
+This release restores governance side effects after epoch-boundary restarts, simplifies pool imports through the database interface, and keeps the in repository release history current.
+
+### ✨ What's New
+
+* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration record through one higher level call, which removes manual write transaction setup and stops invalid transaction handles before writes escape the intended boundary.
+
+### 💪 Improvements
+
+* Reviewed **keep the in repository release history current with the previous patch notes:** The repository release history now includes the previous patch entry, which keeps recent release context easier to review.
+
+### 🔧 Fixes
+
+* Fixed **preserve governance side effects across epoch boundary replay:** Nodes now restore governance treasury withdrawals and expired proposal deposit refunds after a restart at an epoch boundary, which keeps treasury, reserves, and reward account balances consistent during replay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.63.1 (July 14, 2026)
 
 **Title:** Blockfrost asset completeness, calmer logs, and steadier maintenance
