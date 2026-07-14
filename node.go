@@ -507,6 +507,9 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
 	}
+	if err := n.backfillRewardLiveStake(); err != nil {
+		return err
+	}
 
 	// Create and start the Midnight indexer before LedgerState.Start so that
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
@@ -1286,6 +1289,36 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// backfillRewardLiveStake repairs databases created before the live reward
+// stake aggregate existed. It runs after commit-timestamp recovery and before
+// ledger processing can advance the chain, so the next epoch-boundary snapshot
+// cannot observe a partially populated aggregate.
+func (n *Node) backfillRewardLiveStake() error {
+	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
+		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("check reward live stake backfill: %w", err)
+		}
+		if !needed {
+			return nil
+		}
+		tip, err := n.db.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+		}
+		n.config.logger.Info(
+			"rebuilding reward live stake aggregate",
+			"slot", tip.Point.Slot,
+		)
+		if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
+			return fmt.Errorf("backfill reward live stake: %w", err)
+		}
+		return nil
+	})
 }
 
 // startDeferredIndexMaintenance finishes lazy deferred-index rebuilds

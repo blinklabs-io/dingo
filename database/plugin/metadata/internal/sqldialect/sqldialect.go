@@ -19,6 +19,7 @@
 package sqldialect
 
 import (
+	"fmt"
 	"strings"
 
 	"gorm.io/gorm"
@@ -54,16 +55,49 @@ func TransactionTableName(db *gorm.DB) string {
 // ordering comparison touching them must cast first:
 // sqlite is loosely typed and tolerates INTEGER; mysql needs UNSIGNED to
 // preserve values above math.MaxInt64 exactly (a signed cast would
-// overflow); postgres needs BIGINT and, unlike sqlite/mysql, never
+// overflow); postgres needs NUMERIC and, unlike sqlite/mysql, never
 // implicitly coerces TEXT to a numeric type, so postgres queries fail
 // outright without the cast.
 func IntegerCastType(db *gorm.DB) string {
 	switch Name(db) {
 	case "postgres":
-		return "BIGINT"
+		return "NUMERIC"
 	case "mysql":
 		return "UNSIGNED"
 	default:
 		return "INTEGER"
 	}
+}
+
+// TextCastType returns the CAST target for the decimal-string representation
+// stored in types.Uint64 columns.
+func TextCastType(db *gorm.DB) string {
+	if Name(db) == "mysql" {
+		return "CHAR"
+	}
+	return "TEXT"
+}
+
+// BoolLiteral renders a boolean literal for raw SQL.
+func BoolLiteral(db *gorm.DB, value bool) string {
+	if Name(db) == "mysql" || Name(db) == "postgres" {
+		if value {
+			return "TRUE"
+		}
+		return "FALSE"
+	}
+	if value {
+		return "1"
+	}
+	return "0"
+}
+
+// ArithmeticParam returns the bind fragment for a types.Uint64 operand used
+// directly in arithmetic. MySQL and Postgres require an explicit numeric cast
+// so a bound decimal string never promotes the expression to floating point.
+func ArithmeticParam(db *gorm.DB) string {
+	if Name(db) == "postgres" || Name(db) == "mysql" {
+		return fmt.Sprintf("CAST(? AS %s)", IntegerCastType(db))
+	}
+	return "?"
 }

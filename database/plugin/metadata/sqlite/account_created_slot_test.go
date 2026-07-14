@@ -172,6 +172,30 @@ func TestSaveAccountStampsCreatedSlot(t *testing.T) {
 	assert.Equal(t, uint64(900), reloaded.AddedSlot)
 }
 
+func TestGetOrCreateAccountReactivationClearsStaleDelegations(t *testing.T) {
+	t.Parallel()
+	store := setupTestStore(t)
+	key := createdSlotTestHash(0x91)
+	require.NoError(t, store.DB().Create(&models.Account{
+		CredentialTag: 0,
+		StakingKey:    key,
+		Pool:          createdSlotTestHash(0x92),
+		Drep:          createdSlotTestHash(0x93),
+		DrepType:      2,
+		Active:        false,
+	}).Error)
+	require.NoError(t, store.DB().Model(&models.Account{}).
+		Where("credential_tag = ? AND staking_key = ?", 0, key).
+		Update("active", false).Error)
+
+	account, err := store.getOrCreateAccount(0, key, nil)
+	require.NoError(t, err)
+	assert.True(t, account.Active)
+	assert.Empty(t, account.Pool)
+	assert.Empty(t, account.Drep)
+	assert.Zero(t, account.DrepType)
+}
+
 func TestSaveAccountKeepsEarliestCreatedSlotAcrossStaleCopies(t *testing.T) {
 	t.Parallel()
 	store := setupTestStore(t)

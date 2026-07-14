@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -40,6 +41,26 @@ type UtxoAddressKeys struct {
 	StakingKey    []byte `gorm:"column:staking_key"`
 	CredentialTag uint8  `gorm:"column:credential_tag"`
 	OutputIdx     uint32 `gorm:"column:output_idx"`
+}
+
+type utxoRewardStakeRef struct {
+	CredentialTag uint8  `gorm:"column:credential_tag"`
+	StakingKey    []byte `gorm:"column:staking_key"`
+	AddedSlot     uint64 `gorm:"column:added_slot"`
+}
+
+func rewardStakeRefsFromUtxoRewardStakeRefs(
+	rows []utxoRewardStakeRef,
+) map[string]rewardCredentialSlotRef {
+	refs := make(map[string]rewardCredentialSlotRef)
+	for _, row := range rows {
+		addRewardStakeRef(
+			refs,
+			models.NewStakeCredentialRef(row.CredentialTag, row.StakingKey),
+			row.AddedSlot,
+		)
+	}
+	return refs
 }
 
 // GetUtxo returns a Utxo by reference
@@ -644,12 +665,31 @@ func (d *MetadataStoreSqlite) DeleteUtxo(
 	if err != nil {
 		return err
 	}
-	result := db.Where("tx_id = ? AND output_idx = ?", utxoId.Hash, utxoId.Idx).
-		Delete(&models.Utxo{})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		tipSlot, err := rewardstate.CurrentTipSlot(tx)
+		if err != nil {
+			return err
+		}
+		refs, err := rewardStakeRefsFromLiveUtxoIDs(
+			tx,
+			[]models.UtxoId{utxoId},
+			tipSlot,
+		)
+		if err != nil {
+			return err
+		}
+		result := tx.Where(
+			"tx_id = ? AND output_idx = ?", utxoId.Hash, utxoId.Idx,
+		).Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxos(
@@ -663,25 +703,39 @@ func (d *MetadataStoreSqlite) DeleteUtxos(
 	if err != nil {
 		return err
 	}
-	// Process in chunks to avoid SQLite bind parameter limits
-	for i := 0; i < len(utxos); i += batchChunkSize {
-		end := min(i+batchChunkSize, len(utxos))
-		chunk := utxos[i:end]
+	mutation := func(tx *gorm.DB) error {
+		tipSlot, err := rewardstate.CurrentTipSlot(tx)
+		if err != nil {
+			return err
+		}
+		refs, err := rewardStakeRefsFromLiveUtxoIDs(tx, utxos, tipSlot)
+		if err != nil {
+			return err
+		}
+		// Process in chunks to avoid SQLite bind parameter limits
+		for i := 0; i < len(utxos); i += batchChunkSize {
+			end := min(i+batchChunkSize, len(utxos))
+			chunk := utxos[i:end]
 
-		// Build batch delete with OR conditions for this chunk (preallocated slices)
-		conditions := make([]string, 0, len(chunk))
-		args := make([]any, 0, len(chunk)*2)
-		for _, u := range chunk {
-			conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
-			args = append(args, u.Hash, u.Idx)
+			// Build batch delete with OR conditions for this chunk (preallocated slices)
+			conditions := make([]string, 0, len(chunk))
+			args := make([]any, 0, len(chunk)*2)
+			for _, u := range chunk {
+				conditions = append(conditions, "(tx_id = ? AND output_idx = ?)")
+				args = append(args, u.Hash, u.Idx)
+			}
+			query := strings.Join(conditions, " OR ")
+			result := tx.Where(query, args...).Delete(&models.Utxo{})
+			if result.Error != nil {
+				return result.Error
+			}
 		}
-		query := strings.Join(conditions, " OR ")
-		result := db.Where(query, args...).Delete(&models.Utxo{})
-		if result.Error != nil {
-			return result.Error
-		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
@@ -692,12 +746,31 @@ func (d *MetadataStoreSqlite) DeleteUtxosAfterSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Where("added_slot > ?", slot).
-		Delete(&models.Utxo{})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		var rows []utxoRewardStakeRef
+		if err := tx.Model(&models.Utxo{}).
+			Where("added_slot > ?", slot).
+			Select("credential_tag", "staking_key").
+			Group("credential_tag, staking_key").
+			Find(&rows).Error; err != nil {
+			return err
+		}
+		refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+		// Pin the recompute slot to the rollback target rather than the deleted
+		// UTxOs' own added_slot (which is > slot), mirroring
+		// SetUtxosNotDeletedAfterSlot, so the live-stake refresh resolves
+		// delegation state as of the rollback boundary.
+		pinRewardStakeRefsToSlot(refs, slot)
+		result := tx.Where("added_slot > ?", slot).Delete(&models.Utxo{})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // AddUtxos saves a batch of UTxOs directly
@@ -714,16 +787,28 @@ func (d *MetadataStoreSqlite) AddUtxos(
 		return err
 	}
 
-	items := make([]models.Utxo, 0, len(utxos))
-	for _, utxo := range utxos {
-		items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
-	}
+	mutation := func(tx *gorm.DB) error {
+		items := make([]models.Utxo, 0, len(utxos))
+		for _, utxo := range utxos {
+			items = append(items, models.UtxoLedgerToModel(utxo.Utxo, utxo.Slot))
+		}
 
-	result := db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
-		DoNothing: true,
-	}).Create(&items)
-	return result.Error
+		result := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "tx_id"}, {Name: "output_idx"}},
+			DoNothing: true,
+		}).Create(&items)
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(
+			tx,
+			rewardStakeRefsFromUtxos(items),
+		)
+	}
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at the given slot and
@@ -740,56 +825,73 @@ func (d *MetadataStoreSqlite) SetUtxoDeletedAtSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Model(&models.Utxo{}).
-		Where(
-			"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
-			input.Id().Bytes(),
-			input.Index(),
-			slot,
-		).
-		Updates(map[string]any{
-			"deleted_slot":   slot,
-			"spent_at_tx_id": spenderTxHash,
-		})
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		var count int64
-		existsResult := db.Model(&models.Utxo{}).
+	mutation := func(tx *gorm.DB) error {
+		result := tx.Model(&models.Utxo{}).
 			Where(
-				"tx_id = ? AND output_idx = ?",
+				"tx_id = ? AND output_idx = ? AND spent_at_tx_id IS NULL AND (deleted_slot = 0 OR deleted_slot = ?)",
 				input.Id().Bytes(),
 				input.Index(),
+				slot,
 			).
-			Count(&count)
-		if existsResult.Error != nil {
-			return existsResult.Error
+			Updates(map[string]any{
+				"deleted_slot":   slot,
+				"spent_at_tx_id": spenderTxHash,
+			})
+		if result.Error != nil {
+			return result.Error
 		}
-		if count == 0 {
+		if result.RowsAffected == 0 {
+			var count int64
+			existsResult := tx.Model(&models.Utxo{}).
+				Where(
+					"tx_id = ? AND output_idx = ?",
+					input.Id().Bytes(),
+					input.Index(),
+				).
+				Count(&count)
+			if existsResult.Error != nil {
+				return existsResult.Error
+			}
+			if count == 0 {
+				return fmt.Errorf(
+					"%w: %x:%d",
+					types.ErrUtxoNotFound,
+					input.Id().Bytes(),
+					input.Index(),
+				)
+			}
 			return fmt.Errorf(
 				"%w: %x:%d",
-				types.ErrUtxoNotFound,
+				types.ErrUtxoConflict,
 				input.Id().Bytes(),
 				input.Index(),
 			)
 		}
-		return fmt.Errorf(
-			"%w: %x:%d",
-			types.ErrUtxoConflict,
-			input.Id().Bytes(),
-			input.Index(),
+		if result.RowsAffected != 1 {
+			return fmt.Errorf(
+				"%w: %x:%d",
+				types.ErrUtxoConflict,
+				input.Id().Bytes(),
+				input.Index(),
+			)
+		}
+		refs, err := rewardStakeRefsFromUtxoIDs(
+			tx,
+			[]models.UtxoId{{
+				Hash: input.Id().Bytes(),
+				Idx:  input.Index(),
+			}},
+			slot,
 		)
+		if err != nil {
+			return err
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	if result.RowsAffected != 1 {
-		return fmt.Errorf(
-			"%w: %x:%d",
-			types.ErrUtxoConflict,
-			input.Id().Bytes(),
-			input.Index(),
-		)
+	if txn != nil {
+		return mutation(db)
 	}
-	return nil
+	return db.Transaction(mutation)
 }
 
 // SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
@@ -804,16 +906,32 @@ func (d *MetadataStoreSqlite) SetUtxosNotDeletedAfterSlot(
 	if err != nil {
 		return err
 	}
-	result := db.Model(models.Utxo{}).
-		Where("deleted_slot > ?", slot).
-		Updates(map[string]any{
-			"deleted_slot":   0,
-			"spent_at_tx_id": nil,
-		})
-	if result.Error != nil {
-		return result.Error
+	mutation := func(tx *gorm.DB) error {
+		var rows []utxoRewardStakeRef
+		if err := tx.Model(&models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Select("credential_tag", "staking_key").
+			Group("credential_tag, staking_key").
+			Find(&rows).Error; err != nil {
+			return err
+		}
+		refs := rewardStakeRefsFromUtxoRewardStakeRefs(rows)
+		pinRewardStakeRefsToSlot(refs, slot)
+		result := tx.Model(models.Utxo{}).
+			Where("deleted_slot > ?", slot).
+			Updates(map[string]any{
+				"deleted_slot":   0,
+				"spent_at_tx_id": nil,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		return refreshRewardLiveStakeAggregates(tx, refs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }
 
 // liveUtxoIterPageSize bounds how many rows are fetched per page from
@@ -878,33 +996,50 @@ func (d *MetadataStoreSqlite) MarkUtxosDeletedAtSlot(
 	if err != nil {
 		return err
 	}
-	for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
-		end := min(start+markUtxosDeletedChunkSize, len(refs))
-		chunk := refs[start:end]
-		// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
-		// across drivers, so build an OR chain with parallel
-		// (tx_id, output_idx) equality predicates instead.
-		var (
-			clauses strings.Builder
-			args    = make([]any, 0, 2*len(chunk))
-		)
-		for i, r := range chunk {
-			if i > 0 {
-				clauses.WriteString(" OR ")
+	mutation := func(tx *gorm.DB) error {
+		utxoIDs := make([]models.UtxoId, 0, len(refs))
+		for _, ref := range refs {
+			utxoIDs = append(utxoIDs, models.UtxoId{
+				Hash: ref.TxId,
+				Idx:  ref.OutputIdx,
+			})
+		}
+		rewardRefs, err := rewardStakeRefsFromUtxoIDs(tx, utxoIDs, atSlot)
+		if err != nil {
+			return err
+		}
+		for start := 0; start < len(refs); start += markUtxosDeletedChunkSize {
+			end := min(start+markUtxosDeletedChunkSize, len(refs))
+			chunk := refs[start:end]
+			// GORM's tuple-IN handling unpacks []byte arguments byte-by-byte
+			// across drivers, so build an OR chain with parallel
+			// (tx_id, output_idx) equality predicates instead.
+			var (
+				clauses strings.Builder
+				args    = make([]any, 0, 2*len(chunk))
+			)
+			for i, r := range chunk {
+				if i > 0 {
+					clauses.WriteString(" OR ")
+				}
+				clauses.WriteString("(tx_id = ? AND output_idx = ?)")
+				args = append(args, r.TxId, r.OutputIdx)
 			}
-			clauses.WriteString("(tx_id = ? AND output_idx = ?)")
-			args = append(args, r.TxId, r.OutputIdx)
+			whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
+			updateArgs := append([]any{atSlot}, args...)
+			result := tx.Exec(
+				"UPDATE "+utxoRefIndexedTable()+
+					" SET deleted_slot = ? WHERE "+whereClause,
+				updateArgs...,
+			)
+			if result.Error != nil {
+				return result.Error
+			}
 		}
-		whereClause := "deleted_slot = 0 AND (" + clauses.String() + ")"
-		updateArgs := append([]any{atSlot}, args...)
-		result := db.Exec(
-			"UPDATE "+utxoRefIndexedTable()+
-				" SET deleted_slot = ? WHERE "+whereClause,
-			updateArgs...,
-		)
-		if result.Error != nil {
-			return result.Error
-		}
+		return refreshRewardLiveStakeAggregates(tx, rewardRefs)
 	}
-	return nil
+	if txn != nil {
+		return mutation(db)
+	}
+	return db.Transaction(mutation)
 }

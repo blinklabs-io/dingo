@@ -33,6 +33,7 @@ import (
 	"github.com/blinklabs-io/plutigo/data"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -220,13 +221,13 @@ func (r *setTransactionSQLRecorder) Trace(
 	r.statements = append(r.statements, sql)
 }
 
-func (r *setTransactionSQLRecorder) countUtxoSelects() int {
+func (r *setTransactionSQLRecorder) countUtxoLookupSelects() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	count := 0
 	for _, stmt := range r.statements {
 		normalized := strings.ToUpper(stmt)
-		if strings.Contains(normalized, "SELECT") &&
+		if strings.Contains(normalized, "SELECT *") &&
 			strings.Contains(normalized, "FROM \"UTXO\"") {
 			count++
 		}
@@ -621,7 +622,7 @@ func TestPostgresSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
 	}
 
 	// Verify exactly one batch SELECT was used per input class.
-	if got := recorder.countUtxoSelects(); got != 3 {
+	if got := recorder.countUtxoLookupSelects(); got != 3 {
 		t.Fatalf("expected 3 batched UTxO SELECTs, got %d", got)
 	}
 
@@ -750,6 +751,116 @@ func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 			"expected rollback to restore reward balance %d, got %d",
 			uint64(account.Reward),
 			uint64(got.Reward),
+		)
+	}
+}
+
+// TestPostgresConcurrentWithdrawalReplayAtDifferentSlots verifies the account
+// row lock serializes the slot-independent withdrawal replay check. The
+// account_reward_delta unique index includes added_slot for credit events, so
+// the database constraint alone cannot reject these two replay rows.
+func TestPostgresConcurrentWithdrawalReplayAtDifferentSlots(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+
+	stakeKey := bytes.Repeat([]byte{0xE3}, lcommon.AddressHashSize)
+	txHash := bytes.Repeat([]byte{0x73}, 32)
+	if result := store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).Delete(&models.AccountRewardDelta{}); result.Error != nil {
+		t.Fatalf("delete stale reward deltas: %v", result.Error)
+	}
+	if result := store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).Delete(&models.Account{}); result.Error != nil {
+		t.Fatalf("delete stale account: %v", result.Error)
+	}
+	account := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Reward:        types.Uint64(100),
+		Active:        true,
+	}
+	if result := store.DB().Create(account); result.Error != nil {
+		t.Fatalf("create account: %v", result.Error)
+	}
+
+	// Hold the account lock while both withdrawals reach their locking read.
+	// This makes the race deterministic: without the lock in the implementation,
+	// both calls pass the replay check and instead block later on the UPDATE.
+	blocker := store.DB().Begin()
+	if blocker.Error != nil {
+		t.Fatalf("begin blocker transaction: %v", blocker.Error)
+	}
+	t.Cleanup(func() { _ = blocker.Rollback().Error })
+	var lockedAccount models.Account
+	if err := blocker.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", account.ID).
+		First(&lockedAccount).Error; err != nil {
+		t.Fatalf("lock account: %v", err)
+	}
+
+	errCh := make(chan error, 2)
+	for _, slot := range []uint64{100, 300} {
+		go func(slot uint64) {
+			errCh <- store.ApplyAccountRewardWithdrawal(
+				0, stakeKey, 100, slot, txHash, nil,
+			)
+		}(slot)
+	}
+
+	dbtestutil.WaitForCondition(t, func() bool {
+		var blocked int64
+		result := store.DB().Raw(`
+			SELECT COUNT(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'`,
+		).Scan(&blocked)
+		return result.Error == nil && blocked >= 2
+	}, 5*time.Second, "both withdrawal transactions to wait on the account lock")
+
+	if err := blocker.Commit().Error; err != nil {
+		t.Fatalf("release account lock: %v", err)
+	}
+	for range 2 {
+		if err := dbtestutil.RequireReceive(
+			t, errCh, 5*time.Second, "concurrent withdrawal result",
+		); err != nil {
+			t.Fatalf("apply concurrent withdrawal: %v", err)
+		}
+	}
+
+	var deltas []models.AccountRewardDelta
+	if result := store.DB().Where(
+		"withdrawal = ? AND tx_hash = ? AND credential_tag = ? AND staking_key = ?",
+		true, txHash, 0, stakeKey,
+	).Find(&deltas); result.Error != nil {
+		t.Fatalf("get withdrawal deltas: %v", result.Error)
+	}
+	if len(deltas) != 1 {
+		t.Fatalf("expected one withdrawal delta, got %d", len(deltas))
+	}
+	if deltas[0].PreviousReward != account.Reward {
+		t.Fatalf(
+			"expected previous reward %d, got %d",
+			uint64(account.Reward),
+			uint64(deltas[0].PreviousReward),
+		)
+	}
+	if err := store.DeleteAccountRewardsAfterSlot(99, nil); err != nil {
+		t.Fatalf("rollback withdrawal: %v", err)
+	}
+	var restored models.Account
+	if result := store.DB().Where("id = ?", account.ID).First(&restored); result.Error != nil {
+		t.Fatalf("get account after rollback: %v", result.Error)
+	}
+	if restored.Reward != account.Reward {
+		t.Fatalf(
+			"expected rollback to restore reward %d once, got %d",
+			uint64(account.Reward),
+			uint64(restored.Reward),
 		)
 	}
 }
@@ -947,7 +1058,7 @@ func TestPostgresSetAccountPreservesCertificateID(t *testing.T) {
 	pgStore := newTestPostgresStore(t)
 	defer pgStore.Close() //nolint:errcheck
 
-	stakeKey := []byte("test_stake_key_123456789012345678901234567890")
+	stakeKey := bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize)
 
 	// First, create an account with a CertificateID via direct DB access
 	account := &models.Account{
@@ -1338,9 +1449,7 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte(
-			"staking_key_test_12345678901234567890123456789012",
-		)
+		stakingKey := bytes.Repeat([]byte{0x32}, lcommon.AddressHashSize)
 		pool1 := []byte("pool1_12345678901234567890123456789012")
 		pool2 := []byte("pool2_12345678901234567890123456789012")
 
@@ -1442,7 +1551,7 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.Account{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
-		stakingKey := []byte("staking_key_new_12345678901234567890123456789012")
+		stakingKey := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
 
 		// Create account registered at slot 2000 (no prior registration)
 		account := models.Account{

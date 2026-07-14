@@ -318,6 +318,20 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
+	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
+	// the registration whose parameters the ledger's pool-params map held
+	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
+	// submitted during that epoch are future params (promoted after SNAP)
+	// and excluded; pools that freshly entered the params map during the
+	// epoch use their earliest in-epoch certificate.
+	GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash,
+		uint64, // epochStartSlot
+		uint64, // endedEpoch
+		uint64, // snapshotSlot
+		types.Txn,
+	) ([]models.PoolRegistration, error)
+
 	// GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
 	// Returns nil if no active pool uses this VRF key.
 	GetPoolByVrfKeyHash(
@@ -399,6 +413,18 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+	// canonical account and live UTxO metadata. Node startup uses it as an
+	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
+	RebuildRewardLiveStake(uint64, types.Txn) error
+
+	// RewardLiveStakeNeedsBackfill reports whether the reward_live_stake
+	// aggregate needs a one-time RebuildRewardLiveStake pass: true when any
+	// canonical account or live-UTxO credential is missing from the aggregate.
+	// This detects both empty and partially populated upgraded databases without
+	// misfiring on a legitimately fresh, empty database.
+	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(
@@ -428,7 +454,9 @@ type MetadataStore interface {
 	) (map[string]*models.Account, error)
 
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
-	// validated transaction withdrawal and records rollback state.
+	// validated transaction withdrawal and records rollback state. txHash must
+	// identify the withdrawing transaction; callers that pass nil cannot safely
+	// apply more than one hashless withdrawal for the same credential.
 	ApplyAccountRewardWithdrawal(
 		uint8, // credentialTag
 		[]byte, // stakeKey
@@ -866,6 +894,10 @@ type MetadataStore interface {
 	// RecomputeGapCollateralFee recomputes and persists the collateral fee
 	// for a phase-2-invalid gap-block transaction after its consumed
 	// collateral inputs have been recovered into the metadata UTxO table.
+	// SetGapBlockTransaction computes the collateral fee before those inputs
+	// exist, so for a transaction that declares no total collateral the fee
+	// is undercounted until this recompute runs. It is a no-op for valid
+	// transactions (which have no collateral fee).
 	RecomputeGapCollateralFee(
 		lcommon.Transaction,
 		ocommon.Point,

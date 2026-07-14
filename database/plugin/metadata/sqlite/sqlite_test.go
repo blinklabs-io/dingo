@@ -1420,7 +1420,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			}
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x91}, 28)
 		poolHash1 := []byte("pool_hash_1_12345678901234567890123456789012")
 		poolHash2 := []byte("pool_hash_2_12345678901234567890123456789012")
 
@@ -1549,7 +1549,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_active_test_12345678901234567890")
+			stakingKey := bytes.Repeat([]byte{0x92}, 28)
 
 			// Create an account that is currently inactive (deregistered at slot 2000)
 			account := models.Account{
@@ -1649,7 +1649,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_inactive_test_123456789012345678")
+			stakingKey := bytes.Repeat([]byte{0x93}, 28)
 
 			// Create an account that was re-registered at slot 2000 (currently active)
 			account := models.Account{
@@ -1768,7 +1768,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x94}, 28)
 
 		// Create an account registered at slot 2000 (after rollback point)
 		account := models.Account{

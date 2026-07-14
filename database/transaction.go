@@ -372,6 +372,9 @@ func (d *Database) SetGapBlockTransaction(
 			"set gap block transaction metadata: %w", err,
 		)
 	}
+	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
+	// the consumed inputs spent by this tx (utxo.spent_at_tx_id is a FK to
+	// transaction.hash), so the transaction row has to exist first.
 	if err := d.ensureGapConsumedUtxos(
 		tx,
 		point,
@@ -379,6 +382,12 @@ func (d *Database) SetGapBlockTransaction(
 	); err != nil {
 		return err
 	}
+	// For a phase-2-invalid transaction the consumed set is its collateral
+	// inputs. SetGapBlockTransaction above computed the collateral fee before
+	// ensureGapConsumedUtxos recovered those inputs from the blob store, so
+	// when the tx declares no total collateral the fee was computed from an
+	// incomplete UTxO view and undercounts. Recompute it now that the inputs
+	// are materialized so the epoch fee pot is correct.
 	if err := d.metadata.RecomputeGapCollateralFee(
 		tx, point, txn.Metadata(),
 	); err != nil {

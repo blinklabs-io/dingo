@@ -14,7 +14,37 @@
 
 package database
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/blinklabs-io/dingo/database/types"
+)
+
+// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+// canonical account and live UTxO metadata.
+func (d *Database) RebuildRewardLiveStake(slot uint64, txn *Txn) error {
+	if txn == nil {
+		return d.MetadataTxn(true).Do(func(t *Txn) error {
+			return d.metadata.RebuildRewardLiveStake(slot, t.Metadata())
+		})
+	}
+	if txn.db != d || txn.Metadata() == nil {
+		return fmt.Errorf("rebuild reward live stake: %w", types.ErrTxnWrongType)
+	}
+	if !txn.IsReadWrite() {
+		return fmt.Errorf(
+			"rebuild reward live stake: %w",
+			types.ErrTxnWrongType,
+		)
+	}
+	if err := d.metadata.RebuildRewardLiveStake(
+		slot,
+		txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf("rebuild reward live stake at slot %d: %w", slot, err)
+	}
+	return nil
+}
 
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.

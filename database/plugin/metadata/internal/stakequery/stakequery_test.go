@@ -28,3 +28,13 @@ func TestPoolQueryChunkSizeDefault(t *testing.T) {
 	const stakeQueryArgs = 2
 	require.LessOrEqual(t, len(cteArgs)+stakeQueryArgs+chunkSize, 999)
 }
+
+func TestPreEpochPoolQueryChunkSizeSQLite(t *testing.T) {
+	chunkSize := preEpochPoolQueryChunkSize(
+		"sqlite",
+		defaultPoolQueryChunkSize,
+	)
+	require.Equal(t, defaultPoolQueryChunkSize/2, chunkSize)
+	// The query binds the pool chunk twice plus three scalar arguments.
+	require.LessOrEqual(t, 2*chunkSize+3, 999)
+}

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -563,7 +564,24 @@ func (d *MetadataStorePostgres) DeleteUtxo(
 	utxoId models.UtxoId,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.DeleteUtxo(utxoId, newPostgresTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	tipSlot, err := rewardstate.CurrentTipSlot(db)
+	if err != nil {
+		return err
+	}
+	refs, err := rewardStakeRefsFromLiveUtxoIDs(
+		db,
+		[]models.UtxoId{utxoId},
+		tipSlot,
+	)
 	if err != nil {
 		return err
 	}
@@ -572,7 +590,7 @@ func (d *MetadataStorePostgres) DeleteUtxo(
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 func (d *MetadataStorePostgres) DeleteUtxos(
@@ -582,7 +600,20 @@ func (d *MetadataStorePostgres) DeleteUtxos(
 	if len(utxos) == 0 {
 		return nil
 	}
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.DeleteUtxos(utxos, newPostgresTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	tipSlot, err := rewardstate.CurrentTipSlot(db)
+	if err != nil {
+		return err
+	}
+	refs, err := rewardStakeRefsFromLiveUtxoIDs(db, utxos, tipSlot)
 	if err != nil {
 		return err
 	}
@@ -604,23 +635,40 @@ func (d *MetadataStorePostgres) DeleteUtxos(
 			return result.Error
 		}
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 func (d *MetadataStorePostgres) DeleteUtxosAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.DeleteUtxosAfterSlot(slot, newPostgresTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
+	var rows []models.Utxo
+	if err := db.Where("added_slot > ?", slot).
+		Select("credential_tag", "staking_key").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	refs := rewardStakeRefsFromUtxos(rows)
+	// Pin the recompute slot to the rollback target rather than the deleted
+	// UTxOs' own added_slot (which is > slot), mirroring
+	// SetUtxosNotDeletedAfterSlot, so the live-stake refresh resolves
+	// delegation state as of the rollback boundary.
+	pinRewardStakeRefsToSlot(refs, slot)
 	result := db.Where("added_slot > ?", slot).
 		Delete(&models.Utxo{})
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // AddUtxos saves a batch of UTxOs
@@ -630,6 +678,11 @@ func (d *MetadataStorePostgres) AddUtxos(
 ) error {
 	if len(utxos) == 0 {
 		return nil
+	}
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.AddUtxos(utxos, newPostgresTxn(tx))
+		})
 	}
 
 	items := make([]models.Utxo, 0, len(utxos))
@@ -649,7 +702,10 @@ func (d *MetadataStorePostgres) AddUtxos(
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(
+		db,
+		rewardStakeRefsFromUtxos(items),
+	)
 }
 
 // SetUtxoDeletedAtSlot marks a UTxO as deleted at a given slot and
@@ -662,6 +718,13 @@ func (d *MetadataStorePostgres) SetUtxoDeletedAtSlot(
 	spenderTxHash []byte,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.SetUtxoDeletedAtSlot(
+				utxoId, slot, spenderTxHash, newPostgresTxn(tx),
+			)
+		})
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
@@ -715,7 +778,18 @@ func (d *MetadataStorePostgres) SetUtxoDeletedAtSlot(
 			utxoId.Index(),
 		)
 	}
-	return nil
+	refs, err := rewardStakeRefsFromUtxoIDs(
+		db,
+		[]models.UtxoId{{
+			Hash: utxoId.Id().Bytes(),
+			Idx:  utxoId.Index(),
+		}},
+		slot,
+	)
+	if err != nil {
+		return err
+	}
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // SetUtxosNotDeletedAfterSlot marks a list of Utxos as not deleted after a given slot.
@@ -726,10 +800,23 @@ func (d *MetadataStorePostgres) SetUtxosNotDeletedAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.SetUtxosNotDeletedAfterSlot(slot, newPostgresTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
 	}
+	var rows []models.Utxo
+	if err := db.Where("deleted_slot > ?", slot).
+		Select("credential_tag", "staking_key").
+		Find(&rows).Error; err != nil {
+		return err
+	}
+	refs := rewardStakeRefsFromUtxos(rows)
+	pinRewardStakeRefsToSlot(refs, slot)
 	result := db.Model(models.Utxo{}).
 		Where("deleted_slot > ?", slot).
 		Updates(map[string]any{
@@ -739,7 +826,7 @@ func (d *MetadataStorePostgres) SetUtxosNotDeletedAfterSlot(
 	if result.Error != nil {
 		return result.Error
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, refs)
 }
 
 // liveUtxoIterPageSize bounds how many rows are fetched per page from
@@ -793,7 +880,25 @@ func (d *MetadataStorePostgres) MarkUtxosDeletedAtSlot(
 	if len(refs) == 0 {
 		return nil
 	}
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.MarkUtxosDeletedAtSlot(
+				newPostgresTxn(tx), refs, atSlot,
+			)
+		})
+	}
 	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	utxoIDs := make([]models.UtxoId, 0, len(refs))
+	for _, ref := range refs {
+		utxoIDs = append(utxoIDs, models.UtxoId{
+			Hash: ref.TxId,
+			Idx:  ref.OutputIdx,
+		})
+	}
+	rewardRefs, err := rewardStakeRefsFromUtxoIDs(db, utxoIDs, atSlot)
 	if err != nil {
 		return err
 	}
@@ -822,5 +927,5 @@ func (d *MetadataStorePostgres) MarkUtxosDeletedAtSlot(
 			return result.Error
 		}
 	}
-	return nil
+	return refreshRewardLiveStakeAggregates(db, rewardRefs)
 }

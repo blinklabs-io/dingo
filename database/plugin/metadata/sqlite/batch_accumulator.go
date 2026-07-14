@@ -71,10 +71,14 @@ func NewBatchAccumulator() *BatchAccumulator {
 	}
 }
 
-func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+func (b *BatchAccumulator) ensureProducedIndex() {
 	if b.producedByRef == nil {
 		b.producedByRef = make(map[string]models.Utxo)
 	}
+}
+
+func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+	b.ensureProducedIndex()
 	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
@@ -155,6 +159,10 @@ func (b *BatchAccumulator) HasInFlightProducer(
 	return ok
 }
 
+// InFlightProducerAmount returns the lovelace amount of an output produced
+// earlier in the current batch (and not yet flushed), so collateral-fee
+// computation for a later invalid transaction can resolve it without the
+// database row existing yet.
 func (b *BatchAccumulator) InFlightProducerAmount(
 	txId []byte,
 	outputIdx uint32,
@@ -324,6 +332,27 @@ func (d *MetadataStoreSqlite) FlushBatch(
 		}
 		if err := batchSpendUtxos(db, batch.UtxoSpends); err != nil {
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
+		}
+		rewardRefs := rewardStakeRefsFromUtxos(batch.UtxoOutputs)
+		addRewardStakeRefsFromUtxos(rewardRefs, batch.CollateralRets)
+		spendRefs, err := rewardStakeRefsFromUtxoSpends(
+			db,
+			batch.UtxoSpends,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"flush batch: query reward stake spend refs: %w",
+				err,
+			)
+		}
+		for _, item := range spendRefs {
+			addRewardStakeRef(rewardRefs, item.ref, item.slot)
+		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardRefs,
+		); err != nil {
+			return fmt.Errorf("flush batch: refresh reward live stake: %w", err)
 		}
 
 		if err := insertKeyWitnesses(db, batch.KeyWitnesses); err != nil {

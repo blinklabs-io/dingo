@@ -31,6 +31,8 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	metadatasqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
@@ -41,6 +43,71 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
+	require.True(t, ok)
+	stakeKey := make([]byte, 28)
+	stakeKey[0] = 0x51
+	missingStakeKey := make([]byte, 28)
+	missingStakeKey[0] = 0x52
+	require.NoError(t, store.DB().Create([]models.Account{
+		{
+			StakingKey: stakeKey,
+			Pool:       make([]byte, 28),
+			AddedSlot:  50,
+			Active:     true,
+		},
+		{
+			StakingKey: missingStakeKey,
+			Pool:       make([]byte, 28),
+			AddedSlot:  60,
+			Active:     true,
+		},
+	}).Error)
+	// Simulate a post-upgrade write that populated only one credential. The
+	// startup check must detect the missing canonical credential, not merely
+	// test whether reward_live_stake is empty.
+	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Registered:    true,
+		UpdatedSlot:   75,
+	}).Error)
+	require.NoError(t, db.SetTip(ochainsync.Tip{
+		Point: ocommon.NewPoint(100, make([]byte, 32)),
+	}, nil))
+	needed, err := db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.True(t, needed)
+
+	n := &Node{
+		db: db,
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	require.NoError(t, n.backfillRewardLiveStake())
+
+	needed, err = db.Metadata().RewardLiveStakeNeedsBackfill(nil)
+	require.NoError(t, err)
+	require.False(t, needed)
+	for _, key := range [][]byte{stakeKey, missingStakeKey} {
+		var live models.RewardLiveStake
+		require.NoError(t, store.DB().Where(
+			"credential_tag = ? AND staking_key = ?", 0, key,
+		).First(&live).Error)
+		require.Equal(t, uint64(100), live.UpdatedSlot)
+	}
+}
 
 func newNodeTestConnId(id uint) ouroboros.ConnectionId {
 	return ouroboros.ConnectionId{

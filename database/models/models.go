@@ -67,6 +67,7 @@ var MigrateModels = []any{
 	&RegistrationDrep{},
 	&Redeemer{},
 	&RewardAdaPots{},
+	&RewardLiveStake{},
 	&RewardPoolInput{},
 	&RewardSnapshot{},
 	&ResignCommitteeCold{},

@@ -319,10 +319,12 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	require.NoError(t, gormDB.Create(&models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolHash,
-		AddedSlot:   2000,
-		Pledge:      2_000_000,
-		Cost:        500_000_000,
-		Margin:      &types.Rat{Rat: big.NewRat(1, 10)},
+		// This in-epoch re-registration is future parameters and must not
+		// replace the registration active at the start of epoch 0.
+		AddedSlot: 750,
+		Pledge:    2_000_000,
+		Cost:      500_000_000,
+		Margin:    &types.Rat{Rat: big.NewRat(1, 10)},
 	}).Error)
 	require.NoError(t, gormDB.Create(&models.PoolOpCertSequence{
 		PoolKeyHash: poolHash,
