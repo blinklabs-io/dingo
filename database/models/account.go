@@ -363,6 +363,7 @@ func backfillAccountCreatedSlotFromTable(
 		var rows []accountCreatedSlotRegistration
 		query := tx.Table(table).
 			Select("credential_tag, staking_key, MIN(added_slot) AS min_slot").
+			Where("staking_key IS NOT NULL").
 			Group("credential_tag, staking_key").
 			Order("credential_tag, staking_key").
 			Limit(createdSlotBackfillChunk)

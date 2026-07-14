@@ -808,13 +808,31 @@ func insertMissingDeregistrationAccount(
 	account *models.Account,
 	db *gorm.DB,
 ) error {
-	return db.Clauses(clause.OnConflict{
+	credentialTag := account.CredentialTag
+	stakingKey := account.StakingKey
+	if err := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
 			{Name: "credential_tag"},
 			{Name: "staking_key"},
 		},
 		DoNothing: true,
-	}).Create(account).Error
+	}).Create(account).Error; err != nil {
+		return err
+	}
+
+	// Create does not populate account when the conflict action is a no-op.
+	// Use a locking (current) read so this also sees a row committed after an
+	// earlier consistent read in a repeatable-read transaction. The subsequent
+	// deregistration can then update by ID without replacing delegation fields
+	// with the placeholder's zero values.
+	var persisted models.Account
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+		"credential_tag = ? AND staking_key = ?", credentialTag, stakingKey,
+	).First(&persisted).Error; err != nil {
+		return err
+	}
+	*account = persisted
+	return nil
 }
 
 // saveCertRecord saves a certificate record and returns any error
