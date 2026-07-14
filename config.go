@@ -722,9 +722,9 @@ func WithStrictUtxoValidation(strict bool) ConfigOptionFunc {
 }
 
 // WithStrictLeaderEligibility specifies whether a block is rejected (rather
-// than warned about and skipped) when the stake snapshot or active slot
-// coefficient needed for Praos leader eligibility is unavailable. See
-// ledger.LedgerStateConfig.StrictLeaderEligibility.
+// than warned about and skipped) when the total active stake is zero or the
+// active slot coefficient is unavailable or non-positive during Praos leader
+// eligibility checking. See ledger.LedgerStateConfig.StrictLeaderEligibility.
 func WithStrictLeaderEligibility(strict bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.strictLeaderEligibility = strict

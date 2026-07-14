@@ -1698,16 +1698,21 @@ snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
 `StrictUtxoValidation` is one of a small family of opt-in fail-fast toggles
-(default off) that let an operator turn a graceful-degradation fallback into a
-hard error where the tolerant behavior only makes sense during bootstrap.
-`StrictLeaderEligibility` (`ledger/verify_header.go`) turns the warn-and-skip
-that fires when the stake snapshot or active slot coefficient needed for Praos
-leader eligibility is unavailable into a block rejection — safe to enable only
-after genesis bootstrap, where those inputs exist. `StrictSlotClock`
+(default off), each covering a specific point where the node otherwise
+continues on missing or unreadable runtime state. The tolerant default is
+appropriate for different reasons per toggle — sometimes bootstrap-only,
+sometimes an ordinarily-transient runtime failure — so they are individual
+flags rather than one global switch. `StrictLeaderEligibility`
+(`ledger/verify_header.go`) turns the warn-and-skip that fires when the total
+active stake is zero or the active slot coefficient is unavailable into a block
+rejection; here the tolerant path exists for genesis bootstrap, so enable it
+only on an established node where those inputs exist. `StrictSlotClock`
 (`ledger/state.go` `validateTxCore`) rejects a transaction when the slot clock
-cannot be read instead of falling back to the snapshot tip slot. All three are
-wired identically: `internal/config` field + CLI flag → `dingo.WithX` option →
-the consuming component's config struct.
+cannot be read instead of falling back to the snapshot tip slot; here the
+tolerant path absorbs ordinarily-transient clock read failures during normal
+operation, so leaving it off is reasonable indefinitely. All three are wired
+identically: `internal/config` field + CLI flag → `dingo.WithX` option → the
+consuming component's config struct.
 
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between

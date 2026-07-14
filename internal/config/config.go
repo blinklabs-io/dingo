@@ -452,13 +452,16 @@ func validateRuntimeConfig(cfg *Config) error {
 			)
 		}
 	}
-	// StorageMode is validated on the CLI flag path by normalizeStorageMode,
-	// but an invalid value from YAML/env used to fall through to a runtime
-	// check at node startup. Validate it at load so all three sources fail
-	// identically. Empty is allowed: the default ("core") is applied
-	// elsewhere.
-	switch strings.ToLower(strings.TrimSpace(cfg.StorageMode)) {
+	// StorageMode is normalized+validated on the CLI flag path by
+	// normalizeStorageMode, but an invalid value from YAML/env used to fall
+	// through to a runtime check at node startup. Normalize and validate it
+	// here too so all three sources behave identically: without the
+	// normalization "API" or a value with surrounding whitespace would pass
+	// load but then fail the case-sensitive check at node startup. Empty is
+	// allowed: the default ("core") is applied elsewhere.
+	switch normalized := strings.ToLower(strings.TrimSpace(cfg.StorageMode)); normalized {
 	case "", storageModeCore, storageModeAPI:
+		cfg.StorageMode = normalized
 	default:
 		return fmt.Errorf(
 			"invalid storage mode %q: must be %q or %q",
@@ -685,8 +688,8 @@ type Config struct {
 	// a non-genesis chainsync intersect point without a Mithril snapshot.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
 	// StrictLeaderEligibility rejects a block (instead of logging a warning
-	// and skipping the check) when the active stake snapshot or active slot
-	// coefficient needed to verify Praos leader eligibility is unavailable.
+	// and skipping the leader eligibility check) when the total active stake
+	// is zero or the active slot coefficient is unavailable or non-positive.
 	// Leave disabled during genesis bootstrap, where these are legitimately
 	// absent until the first stake snapshot is written; enable it on an
 	// established node to fail fast if eligibility can no longer be checked.

@@ -89,6 +89,24 @@ func TestLoad_ValidStorageModeAccepted(t *testing.T) {
 	}
 }
 
+// TestLoad_StorageModeNormalized verifies a mixed-case/whitespace value is
+// normalized at load, so it behaves like the CLI path instead of passing
+// load and then failing the case-sensitive check at node startup.
+func TestLoad_StorageModeNormalized(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte("storageMode: \"  API  \"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.StorageMode != "api" {
+		t.Errorf("StorageMode = %q, want normalized %q", cfg.StorageMode, "api")
+	}
+}
+
 // TestLoad_InvalidDurationStringsRejected verifies malformed duration
 // strings fail at load rather than being silently ignored (and the default
 // used) at the point they are eventually parsed.

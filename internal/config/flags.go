@@ -62,7 +62,7 @@ var flagSpecs = []flagSpec{
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
 	boolFlag("StrictUtxoValidation", "strict-utxo-validation", "error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered"),
-	boolFlag("StrictLeaderEligibility", "strict-leader-eligibility", "reject a block instead of skipping the check when the stake snapshot or active slot coefficient needed for Praos leader eligibility is unavailable (leave off during genesis bootstrap)"),
+	boolFlag("StrictLeaderEligibility", "strict-leader-eligibility", "reject a block instead of skipping the leader eligibility check when the total active stake is zero or the active slot coefficient is unavailable (leave off during genesis bootstrap)"),
 	boolFlag("StrictSlotClock", "strict-slot-clock", "reject a transaction instead of falling back to the snapshot tip slot when the slot clock cannot be read during validation"),
 	boolFlag("Tracing", "tracing", "enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)"),
 	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),

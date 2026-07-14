@@ -368,11 +368,12 @@ validateHistorical: false
 # CLI: --strict-utxo-validation
 strictUtxoValidation: false
 
-# Reject a block (instead of logging a warning and skipping the check) when
-# the active stake snapshot or active slot coefficient needed to verify Praos
-# leader eligibility is unavailable. Leave disabled during genesis bootstrap,
-# where these are legitimately absent until the first stake snapshot is
-# written; enable it on an established node to fail fast. (default: false)
+# Reject a block (instead of logging a warning and skipping the leader
+# eligibility check) when the total active stake is zero or the active slot
+# coefficient is unavailable or non-positive. These are legitimately absent
+# during genesis bootstrap, before the first stake snapshot is written, so
+# leave this disabled while bootstrapping; enable it on an established node to
+# fail fast. (default: false)
 # CLI: --strict-leader-eligibility
 strictLeaderEligibility: false
 

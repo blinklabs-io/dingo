@@ -460,11 +460,11 @@ type LedgerStateConfig struct {
 	// Leios certificate / endorser-availability surface is complete (#2587).
 	SkipDijkstraTxValidation bool
 	ValidateHistorical       bool
-	// StrictLeaderEligibility rejects a block when the stake snapshot or
-	// active slot coefficient needed for Praos leader eligibility is
-	// unavailable, instead of logging a warning and skipping the check.
-	// Off by default so genesis bootstrap (where these are legitimately
-	// absent) is not broken.
+	// StrictLeaderEligibility rejects a block when the total active stake is
+	// zero or the active slot coefficient is unavailable or non-positive
+	// during Praos leader eligibility checking, instead of logging a warning
+	// and skipping the check. Off by default so genesis bootstrap (where
+	// these are legitimately absent) is not broken.
 	StrictLeaderEligibility bool
 	// StrictSlotClock rejects a transaction when the slot clock cannot be
 	// read during validation, instead of falling back to the snapshot tip
@@ -6613,7 +6613,9 @@ func (ls *LedgerState) validateTxCore(
 	currentSlot, currentSlotErr := ls.CurrentSlot()
 	if currentSlotErr != nil {
 		if ls.config.StrictSlotClock {
-			ls.metrics.slotClockFallbacks.Inc()
+			// No fallback happens on this path, so the fallback counter
+			// is intentionally not incremented -- it must keep meaning
+			// "validated against the tip slot instead of failing".
 			return fmt.Errorf(
 				"slot clock unavailable during tx validation: %w",
 				currentSlotErr,
