@@ -672,7 +672,7 @@ When `Node.Run()` is called, components are initialized in this order:
 14. ConnectionManager creation and event wiring
 15. PeerGovernor creation/start (topology + churn + ledger peers)
 16. ConnectionManager listener start
-17. Stalled client recycler (background goroutine)
+17. Chainsync stall recycler (background goroutine)
 18. UTxO RPC server (if API storage mode and port configured)
 19. Bark C2/archive server (if port configured)
 20. Midnight gRPC server (if API storage mode and midnight port configured)
@@ -689,6 +689,9 @@ Graceful shutdown proceeds in phases:
 
 ```
 Phase 1: Stop accepting new work
+  Chainsync stall recycler (WaitGroup-tracked; shutdown blocks until
+  the recycler goroutine exits, so it cannot still be running once
+  ledger/database teardown begins),
   Midnight indexer (unsubscribes from BlockEventType),
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
