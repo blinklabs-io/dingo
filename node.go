@@ -87,6 +87,7 @@ type Node struct {
 	cancel                           context.CancelFunc
 	shutdownOnce                     sync.Once
 	shutdownErr                      error
+	chainsyncStallRecyclerWG         sync.WaitGroup
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 }
@@ -995,63 +996,19 @@ func (n *Node) Run(ctx context.Context) error {
 	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
 	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
 	//nolint:gosec // G118: cancel func stored in started slice.
-	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
-	started = append(started, recyclerCancel)
-	go func(interval, grace, cooldown time.Duration) {
-		for {
-			if recyclerCtx.Err() != nil {
-				return
-			}
-			if !n.runStallCheckerLoop(func() {
-				ticker := time.NewTicker(interval)
-				defer ticker.Stop()
-				recycleAt := make(map[string]time.Time)
-				lastRecycled := make(map[string]time.Time)
-				lastProgressSlot := n.ledgerState.Tip().Point.Slot
-				lastProgressAt := time.Now()
-				plateauRecoveryThreshold := plateauThreshold(
-					chainsyncCfg.StallTimeout,
-				)
-				for {
-					select {
-					case <-recyclerCtx.Done():
-						return
-					case <-ticker.C:
-						n.runStallCheckerTick(func() {
-							now := time.Now()
-							localTip := n.ledgerState.Tip()
-							localTipSlot := localTip.Point.Slot
-							if n.chainSelector != nil {
-								n.chainSelector.SetLocalTip(localTip)
-								if k := n.ledgerState.SecurityParam(); k > 0 {
-									n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
-								}
-							}
-							n.processChainsyncRecyclerTick(
-								now,
-								localTipSlot,
-								chainsyncCfg,
-								recycleAt,
-								lastRecycled,
-								&lastProgressSlot,
-								&lastProgressAt,
-								plateauRecoveryThreshold,
-								grace,
-								cooldown,
-							)
-						})
-					}
-				}
-			}) {
-				return
-			}
-			select {
-			case <-recyclerCtx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-		}
-	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
+	recyclerCancel := n.startChainsyncStallRecycler(
+		n.ctx,
+		chainsyncCfg,
+		stallCheckInterval,
+		stallRecoveryGrace,
+		stallRecycleCooldown,
+	)
+	// On startup failure or panic, cancel the recycler and wait for it before
+	// unwinding later components that the recycler can still touch.
+	started = append(started, func() {
+		recyclerCancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
 	// Configure UTxO RPC (only in API mode with a non-zero port)
 	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(

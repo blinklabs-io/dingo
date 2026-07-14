@@ -15,6 +15,7 @@
 package dingo
 
 import (
+	"context"
 	"runtime/debug"
 	"time"
 
@@ -133,6 +134,112 @@ func isLedgerApplicationBacklog(
 	}
 	applyBacklog := primaryChainTipSlot - appliedTipSlot
 	return applyBacklog >= headerGap
+}
+
+func (n *Node) startChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+	interval time.Duration,
+	grace time.Duration,
+	cooldown time.Duration,
+) context.CancelFunc {
+	recyclerCtx, recyclerCancel := context.WithCancel(ctx)
+	// Track the recycler as a node-owned background worker so shutdown can
+	// wait for it before closing the dependencies it reads or publishes to.
+	n.chainsyncStallRecyclerWG.Add(1)
+	go func() {
+		// Mark the worker complete no matter whether it exits by cancellation
+		// or after a recovered panic stops the outer loop.
+		defer n.chainsyncStallRecyclerWG.Done()
+		n.runChainsyncStallRecycler(
+			recyclerCtx,
+			chainsyncCfg,
+			interval,
+			grace,
+			cooldown,
+		)
+	}()
+	return recyclerCancel
+}
+
+func (n *Node) runChainsyncStallRecycler(
+	ctx context.Context,
+	chainsyncCfg chainsync.Config,
+	interval time.Duration,
+	grace time.Duration,
+	cooldown time.Duration,
+) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		// Keep the existing panic-recovery behavior: a panic in the loop is
+		// logged and the recycler restarts unless shutdown was requested.
+		if !n.runStallCheckerLoop(func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			recycleAt := make(map[string]time.Time)
+			lastRecycled := make(map[string]time.Time)
+			lastProgressSlot := n.ledgerState.Tip().Point.Slot
+			lastProgressAt := time.Now()
+			plateauRecoveryThreshold := plateauThreshold(
+				chainsyncCfg.StallTimeout,
+			)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					n.runStallCheckerTick(func() {
+						now := time.Now()
+						localTip := n.ledgerState.Tip()
+						localTipSlot := localTip.Point.Slot
+						if n.chainSelector != nil {
+							n.chainSelector.SetLocalTip(localTip)
+							if k := n.ledgerState.SecurityParam(); k > 0 {
+								n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
+							}
+						}
+						n.processChainsyncRecyclerTick(
+							now,
+							localTipSlot,
+							chainsyncCfg,
+							recycleAt,
+							lastRecycled,
+							&lastProgressSlot,
+							&lastProgressAt,
+							plateauRecoveryThreshold,
+							grace,
+							cooldown,
+						)
+					})
+				}
+			}
+		}) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+func (n *Node) waitChainsyncStallRecycler(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.chainsyncStallRecyclerWG.Wait()
+	}()
+	// WaitGroup.Wait cannot be selected on directly, so bridge completion to a
+	// channel and still honor the node's bounded shutdown context.
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (n *Node) processChainsyncRecyclerTick(

@@ -63,6 +63,36 @@ func (m nodeTestSecurityParamLedger) SecurityParam() int {
 	return m.securityParam
 }
 
+type nodeTestLogSignalHandler struct {
+	message string
+	seen    chan struct{}
+}
+
+func (h nodeTestLogSignalHandler) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h nodeTestLogSignalHandler) Handle(
+	_ context.Context,
+	record slog.Record,
+) error {
+	if record.Message == h.message {
+		select {
+		case h.seen <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (h nodeTestLogSignalHandler) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h nodeTestLogSignalHandler) WithGroup(string) slog.Handler {
+	return h
+}
+
 func nodeTestHashBytes(seed string) []byte {
 	sum := sha256.Sum256([]byte(seed))
 	return append([]byte(nil), sum[:]...)
@@ -1007,6 +1037,95 @@ func TestRunStallCheckerLoopRecoversAndSupportsRestart(t *testing.T) {
 	})
 
 	assert.Equal(t, int32(2), attempts.Load())
+}
+
+// TestChainsyncStallRecyclerExitsOnCancel verifies that the recycler goroutine
+// observes cancellation and releases the node lifecycle wait group.
+func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
+	// Build the minimal ledger-backed node state needed for recycler startup.
+	// Use a long tick interval so the test only exercises cancellation.
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState: ledgerState,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{StallTimeout: time.Second},
+		time.Hour,
+		time.Second,
+		time.Second,
+	)
+
+	// Cancel both the recycler child context and parent context; either path
+	// should cause the recycler loop to return.
+	recyclerCancel()
+	cancel()
+
+	// Convert the wait group completion into a channel so the assertion can
+	// use the test timeout helper instead of sleeping.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.chainsyncStallRecyclerWG.Wait()
+	}()
+	testutil.RequireReceive(
+		t,
+		done,
+		time.Second,
+		"chainsync stall recycler exit",
+	)
+}
+
+// TestStopWaitsForChainsyncStallRecycler verifies shutdown blocks while the
+// recycler is still tracked as running and continues once it exits.
+func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {
+	// Signal when shutdown reaches phase 1 so the test can assert ordering
+	// without relying on a sleep.
+	phaseStarted := make(chan struct{}, 1)
+	n := &Node{
+		config: Config{
+			logger: slog.New(nodeTestLogSignalHandler{
+				message: "shutdown phase 1: stopping new work",
+				seen:    phaseStarted,
+			}),
+			shutdownTimeout: time.Second,
+		},
+	}
+	// Simulate an in-flight recycler goroutine by incrementing its lifecycle
+	// wait group without starting the actual recycler loop.
+	n.chainsyncStallRecyclerWG.Add(1)
+
+	// Start shutdown in the background; it should block on the recycler wait
+	// group before any later dependency teardown can complete.
+	stopDone := make(chan error, 1)
+	go func() {
+		stopDone <- n.Stop()
+	}()
+
+	// Once phase 1 starts, Stop must still be waiting because the recycler
+	// wait group has not been released yet.
+	testutil.RequireReceive(
+		t,
+		phaseStarted,
+		time.Second,
+		"shutdown phase 1 start",
+	)
+	select {
+	case err := <-stopDone:
+		t.Fatalf("Stop returned before recycler exited: %v", err)
+	default:
+	}
+
+	// Release the simulated recycler and verify shutdown can now finish.
+	n.chainsyncStallRecyclerWG.Done()
+	require.NoError(
+		t,
+		testutil.RequireReceive(t, stopDone, time.Second, "node Stop"),
+	)
 }
 
 func TestStopReturnsSameShutdownErrorAfterFirstCall(t *testing.T) {

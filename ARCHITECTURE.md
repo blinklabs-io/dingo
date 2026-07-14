@@ -689,6 +689,9 @@ Graceful shutdown proceeds in phases:
 
 ```
 Phase 1: Stop accepting new work
+  Chainsync stall recycler (WaitGroup-tracked; shutdown blocks until
+  the recycler goroutine exits, so it cannot still be running once
+  ledger/database teardown begins),
   Midnight indexer (unsubscribes from BlockEventType),
   Block forger, leader election, chain selector,
   peer governor, snapshot manager, UTxO RPC,
