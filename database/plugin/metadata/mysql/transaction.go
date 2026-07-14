@@ -766,21 +766,28 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		account.CreatedSlot = account.AddedSlot
 	}
 	if account.ID == 0 {
+		updates := clause.AssignmentColumns(
+			[]string{
+				"added_slot",
+				"pool",
+				"drep",
+				"drep_type",
+				"active",
+				"certificate_id",
+			},
+		)
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: "created_slot"},
+			Value: gorm.Expr(
+				"LEAST(created_slot, VALUES(created_slot))",
+			),
+		})
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
-			DoUpdates: clause.AssignmentColumns(
-				[]string{
-					"added_slot",
-					"pool",
-					"drep",
-					"drep_type",
-					"active",
-					"certificate_id",
-				},
-			),
+			DoUpdates: updates,
 		}).Create(account)
 		if result.Error != nil {
 			return result.Error
@@ -792,6 +799,22 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		}
 	}
 	return nil
+}
+
+// insertMissingDeregistrationAccount creates the placeholder used when a
+// deregistration is observed before its account. A concurrent or repeated
+// deregistration must not replace any fields on an account that already exists.
+func insertMissingDeregistrationAccount(
+	account *models.Account,
+	db *gorm.DB,
+) error {
+	return db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
+		DoNothing: true,
+	}).Create(account).Error
 }
 
 // saveCertRecord saves a certificate record and returns any error
@@ -1900,7 +1923,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1911,15 +1934,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 							CredentialTag: credentialTag,
 							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -1949,7 +1965,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1960,15 +1976,8 @@ func (d *MetadataStoreMysql) SetTransaction(
 							CredentialTag: credentialTag,
 							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -3425,7 +3434,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3435,15 +3444,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 							CredentialTag: credentialTag,
 							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false
@@ -3467,7 +3469,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3477,15 +3479,8 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 							CredentialTag: credentialTag,
 							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false

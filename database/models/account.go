@@ -277,9 +277,10 @@ const accountCreatedSlotBackfillPhase = "account_created_slot"
 
 const createdSlotBackfillChunk = 400
 
-// BackfillAccountCreatedSlot stamps Account.CreatedSlot for pre-existing rows
-// from their earliest registration certificate. Genesis-delegated accounts,
-// which have no registration certificate, correctly keep the default 0.
+// BackfillAccountCreatedSlot stamps Account.CreatedSlot for pre-existing,
+// certificate-created rows from their earliest registration certificate.
+// Genesis-created accounts keep the default 0 even if they were registered
+// again later.
 func BackfillAccountCreatedSlot(db *gorm.DB, logger *slog.Logger) error {
 	if logger == nil {
 		logger = slog.Default()
@@ -301,37 +302,36 @@ func BackfillAccountCreatedSlot(db *gorm.DB, logger *slog.Logger) error {
 		(&VoteRegistrationDelegation{}).TableName(),
 		(&Registration{}).TableName(),
 	}
-	type regRow struct {
-		CredentialTag uint8
-		StakingKey    []byte
-		MinSlot       uint64
+	genesisEvidenceTables := []string{
+		(&Registration{}).TableName(),
+		(&StakeDelegation{}).TableName(),
+		(&StakeVoteDelegation{}).TableName(),
+		(&VoteDelegation{}).TableName(),
 	}
-	earliest := make(map[string]uint64)
-	for _, table := range regTables {
-		if !db.Migrator().HasTable(table) {
-			continue
-		}
-		var rows []regRow
-		if err := db.Table(table).
-			Select("credential_tag, staking_key, MIN(added_slot) AS min_slot").
-			Group("credential_tag, staking_key").
-			Scan(&rows).Error; err != nil {
-			return fmt.Errorf("created_slot backfill scan %s: %w", table, err)
-		}
-		for _, row := range rows {
-			key := StakeCredentialRef{
-				Tag: row.CredentialTag,
-				Key: row.StakingKey,
-			}.MapKey()
-			if current, ok := earliest[key]; !ok || row.MinSlot < current {
-				earliest[key] = row.MinSlot
-			}
+	existingGenesisEvidenceTables := make([]string, 0, len(genesisEvidenceTables))
+	for _, table := range genesisEvidenceTables {
+		if db.Migrator().HasTable(table) {
+			existingGenesisEvidenceTables = append(
+				existingGenesisEvidenceTables,
+				table,
+			)
 		}
 	}
 	return db.Transaction(func(tx *gorm.DB) error {
-		updated, err := applyAccountCreatedSlotBackfill(tx, earliest)
-		if err != nil {
-			return err
+		var updated int64
+		for _, table := range regTables {
+			if !tx.Migrator().HasTable(table) {
+				continue
+			}
+			tableUpdated, err := backfillAccountCreatedSlotFromTable(
+				tx,
+				table,
+				existingGenesisEvidenceTables,
+			)
+			if err != nil {
+				return err
+			}
+			updated += tableUpdated
 		}
 		if updated > 0 {
 			logger.Info(
@@ -343,22 +343,114 @@ func BackfillAccountCreatedSlot(db *gorm.DB, logger *slog.Logger) error {
 	})
 }
 
+type accountCreatedSlotRegistration struct {
+	CredentialTag uint8
+	StakingKey    []byte
+	MinSlot       uint64
+}
+
+func backfillAccountCreatedSlotFromTable(
+	tx *gorm.DB,
+	table string,
+	genesisEvidenceTables []string,
+) (int64, error) {
+	var (
+		lastTag uint8
+		lastKey []byte
+		updated int64
+	)
+	for {
+		var rows []accountCreatedSlotRegistration
+		query := tx.Table(table).
+			Select("credential_tag, staking_key, MIN(added_slot) AS min_slot").
+			Group("credential_tag, staking_key").
+			Order("credential_tag, staking_key").
+			Limit(createdSlotBackfillChunk)
+		if lastKey != nil {
+			query = query.Where(
+				"credential_tag > ? OR (credential_tag = ? AND staking_key > ?)",
+				lastTag,
+				lastTag,
+				lastKey,
+			)
+		}
+		if err := query.Scan(&rows).Error; err != nil {
+			return updated, fmt.Errorf(
+				"created_slot backfill scan %s: %w",
+				table,
+				err,
+			)
+		}
+		if len(rows) == 0 {
+			return updated, nil
+		}
+		earliest := make(map[string]uint64, len(rows))
+		for _, row := range rows {
+			key := StakeCredentialRef{
+				Tag: row.CredentialTag,
+				Key: row.StakingKey,
+			}.MapKey()
+			earliest[key] = row.MinSlot
+		}
+		chunkUpdated, err := applyAccountCreatedSlotBackfill(
+			tx,
+			earliest,
+			genesisEvidenceTables,
+		)
+		if err != nil {
+			return updated, fmt.Errorf(
+				"created_slot backfill update from %s: %w",
+				table,
+				err,
+			)
+		}
+		updated += chunkUpdated
+		last := rows[len(rows)-1]
+		lastTag = last.CredentialTag
+		lastKey = slices.Clone(last.StakingKey)
+	}
+}
+
 func applyAccountCreatedSlotBackfill(
 	tx *gorm.DB,
 	earliest map[string]uint64,
+	genesisEvidenceTables []string,
 ) (int64, error) {
-	if len(earliest) == 0 {
-		return 0, nil
-	}
 	if tx.Name() == "sqlite" {
-		return applyAccountCreatedSlotBackfillPerSlot(tx, earliest)
+		return applyAccountCreatedSlotBackfillPerSlot(
+			tx,
+			earliest,
+			genesisEvidenceTables,
+		)
 	}
-	return applyAccountCreatedSlotBackfillCase(tx, earliest)
+	return applyAccountCreatedSlotBackfillCase(
+		tx,
+		earliest,
+		genesisEvidenceTables,
+	)
+}
+
+func withoutGenesisCreatedAccount(
+	tx *gorm.DB,
+	genesisEvidenceTables []string,
+) *gorm.DB {
+	tx = tx.Where("account.certificate_id <> 0")
+	for _, table := range genesisEvidenceTables {
+		evidence := tx.Session(&gorm.Session{NewDB: true}).
+			Table(table + " AS genesis_evidence").
+			Select("1").
+			Where("genesis_evidence.credential_tag = account.credential_tag").
+			Where("genesis_evidence.staking_key = account.staking_key").
+			Where("genesis_evidence.added_slot = 0")
+		tx = tx.Where("NOT EXISTS (?)", evidence)
+	}
+	return tx
 }
 
 func applyAccountCreatedSlotBackfillPerSlot(
 	tx *gorm.DB,
 	earliest map[string]uint64,
+	genesisEvidenceTables []string,
 ) (int64, error) {
 	bySlot := make(map[uint64][][]any)
 	for key, slot := range earliest {
@@ -366,18 +458,17 @@ func applyAccountCreatedSlotBackfillPerSlot(
 	}
 	var updated int64
 	for slot, pairs := range bySlot {
-		for chunk := range slices.Chunk(pairs, createdSlotBackfillChunk) {
-			result := tx.Model(&Account{}).
-				Where("(credential_tag, staking_key) IN ?", chunk).
-				Where("created_slot = 0").
-				Update("created_slot", slot)
-			if result.Error != nil {
-				return updated, fmt.Errorf(
-					"created_slot backfill update: %w", result.Error,
-				)
-			}
-			updated += result.RowsAffected
+		result := withoutGenesisCreatedAccount(
+			tx.Model(&Account{}),
+			genesisEvidenceTables,
+		).
+			Where("(credential_tag, staking_key) IN ?", pairs).
+			Where("created_slot = 0 OR created_slot > ?", slot).
+			Update("created_slot", slot)
+		if result.Error != nil {
+			return updated, result.Error
 		}
+		updated += result.RowsAffected
 	}
 	return updated, nil
 }
@@ -385,43 +476,32 @@ func applyAccountCreatedSlotBackfillPerSlot(
 func applyAccountCreatedSlotBackfillCase(
 	tx *gorm.DB,
 	earliest map[string]uint64,
+	genesisEvidenceTables []string,
 ) (int64, error) {
-	type credSlot struct {
-		key  []byte
-		slot uint64
-		tag  uint8
-	}
-	all := make([]credSlot, 0, len(earliest))
+	var caseSQL strings.Builder
+	caseSQL.WriteString("CASE")
+	caseArgs := make([]any, 0, len(earliest)*2)
+	inPairs := make([][]any, 0, len(earliest))
 	for key, slot := range earliest {
-		all = append(all, credSlot{tag: key[0], key: []byte(key[1:]), slot: slot})
+		caseSQL.WriteString(
+			" WHEN credential_tag = ? AND staking_key = ? THEN ",
+		)
+		caseSQL.WriteString(strconv.FormatUint(slot, 10))
+		caseArgs = append(caseArgs, key[0], []byte(key[1:]))
+		inPairs = append(inPairs, []any{key[0], []byte(key[1:])})
 	}
-	var updated int64
-	for chunk := range slices.Chunk(all, createdSlotBackfillChunk) {
-		var caseSQL strings.Builder
-		caseSQL.WriteString("CASE")
-		caseArgs := make([]any, 0, len(chunk)*2)
-		inPairs := make([][]any, 0, len(chunk))
-		for _, item := range chunk {
-			caseSQL.WriteString(
-				" WHEN credential_tag = ? AND staking_key = ? THEN ",
-			)
-			caseSQL.WriteString(strconv.FormatUint(item.slot, 10))
-			caseArgs = append(caseArgs, item.tag, item.key)
-			inPairs = append(inPairs, []any{item.tag, item.key})
-		}
-		caseSQL.WriteString(" END")
-		result := tx.Model(&Account{}).
-			Where("created_slot = 0").
-			Where("(credential_tag, staking_key) IN ?", inPairs).
-			Update("created_slot", gorm.Expr(caseSQL.String(), caseArgs...))
-		if result.Error != nil {
-			return updated, fmt.Errorf(
-				"created_slot backfill update: %w", result.Error,
-			)
-		}
-		updated += result.RowsAffected
+	caseSQL.WriteString(" END")
+	result := withoutGenesisCreatedAccount(
+		tx.Model(&Account{}),
+		genesisEvidenceTables,
+	).
+		Where("(credential_tag, staking_key) IN ?", inPairs).
+		Where("created_slot = 0 OR created_slot > "+caseSQL.String(), caseArgs...).
+		Update("created_slot", gorm.Expr(caseSQL.String(), caseArgs...))
+	if result.Error != nil {
+		return 0, result.Error
 	}
-	return updated, nil
+	return result.RowsAffected, nil
 }
 
 func accountCreatedSlotBackfillCompleted(db *gorm.DB) (bool, error) {

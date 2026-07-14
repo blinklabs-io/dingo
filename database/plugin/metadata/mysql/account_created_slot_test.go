@@ -15,15 +15,26 @@ func TestMysqlBackfillAccountCreatedSlotCaseUpdate(t *testing.T) {
 	store := newTestMysqlStore(t)
 	defer store.Close() //nolint:errcheck
 	db := store.DB()
-	db.Where("1 = 1").Delete(&models.StakeRegistration{})
-	db.Where("1 = 1").Delete(&models.Account{})
-	db.Where("phase = ?", "account_created_slot").
-		Delete(&models.BackfillCheckpoint{})
+	for _, history := range []any{
+		&models.StakeRegistration{},
+		&models.StakeRegistrationDelegation{},
+		&models.StakeVoteRegistrationDelegation{},
+		&models.VoteRegistrationDelegation{},
+		&models.Registration{},
+		&models.StakeDelegation{},
+		&models.StakeVoteDelegation{},
+		&models.VoteDelegation{},
+	} {
+		require.NoError(t, db.Where("1 = 1").Delete(history).Error)
+	}
+	require.NoError(t, db.Where("1 = 1").Delete(&models.Account{}).Error)
+	require.NoError(t, db.Where("phase = ?", "account_created_slot").
+		Delete(&models.BackfillCheckpoint{}).Error)
 
 	registered := bytes.Repeat([]byte{0x71}, 28)
 	genesis := bytes.Repeat([]byte{0x72}, 28)
 	require.NoError(t, db.Create(&[]models.Account{
-		{StakingKey: registered, Active: true},
+		{StakingKey: registered, CertificateID: 1, Active: true},
 		{StakingKey: genesis, Active: true},
 	}).Error)
 	require.NoError(t, db.Create(&[]models.StakeRegistration{

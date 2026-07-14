@@ -865,27 +865,54 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 		account.CreatedSlot = account.AddedSlot
 	}
 	if account.ID == 0 {
+		updates := clause.AssignmentColumns(
+			[]string{
+				"added_slot",
+				"pool",
+				"drep",
+				"drep_type",
+				"active",
+				"certificate_id",
+			},
+		)
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: "created_slot"},
+			Value: gorm.Expr(
+				"MIN(account.created_slot, excluded.created_slot)",
+			),
+		})
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
-			DoUpdates: clause.AssignmentColumns(
-				[]string{
-					"added_slot",
-					"pool",
-					"drep",
-					"drep_type",
-					"active",
-					"certificate_id",
-				},
-			),
+			DoUpdates: updates,
 		}).Create(account)
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := db.Save(account)
+		// Multiple callers can load the sentinel row inserted by
+		// getOrCreateAccount before any of them stamps CreatedSlot. Update
+		// the first-seen slot atomically so a later-slot caller cannot win
+		// the race merely by saving last. MIN also keeps genesis slot 0
+		// immutable.
+		result := db.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Updates(map[string]any{
+				"staking_key":    account.StakingKey,
+				"credential_tag": account.CredentialTag,
+				"pool":           account.Pool,
+				"drep":           account.Drep,
+				"added_slot":     account.AddedSlot,
+				"created_slot": gorm.Expr(
+					"MIN(created_slot, ?)", account.CreatedSlot,
+				),
+				"certificate_id": account.CertificateID,
+				"reward":         account.Reward,
+				"drep_type":      account.DrepType,
+				"active":         account.Active,
+			})
 		if result.Error != nil {
 			return result.Error
 		}
@@ -2006,27 +2033,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
-					}
-					if tmpAccount == nil {
-						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-							CreatedSlot:   models.AccountCreatedSlotUnset,
-						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
-						}
 					}
 
 					tmpAccount.Active = false
@@ -2055,27 +2064,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
-					}
-					if tmpAccount == nil {
-						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-							CreatedSlot:   models.AccountCreatedSlotUnset,
-						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
-						}
 					}
 
 					tmpAccount.Active = false
@@ -3632,26 +3623,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
-					}
-					if tmpAccount == nil {
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-							CreatedSlot:   models.AccountCreatedSlotUnset,
-						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
-						}
 					}
 					tmpAccount.Active = false
 					tmpAccount.AddedSlot = point.Slot
@@ -3674,26 +3648,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
-					}
-					if tmpAccount == nil {
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-							CreatedSlot:   models.AccountCreatedSlotUnset,
-						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
-						}
 					}
 					tmpAccount.Active = false
 					tmpAccount.AddedSlot = point.Slot
