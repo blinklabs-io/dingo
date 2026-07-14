@@ -195,6 +195,13 @@ func TestLoad_NonPositiveDurationEnvRejected(t *testing.T) {
 			t.Fatal("expected error for zero shutdown timeout via env, got nil")
 		}
 	})
+	t.Run("ledgerCatchupTimeout", func(t *testing.T) {
+		resetGlobalConfig()
+		t.Setenv("DINGO_LEDGER_CATCHUP_TIMEOUT", "0s")
+		if _, err := LoadConfig(""); err == nil {
+			t.Fatal("expected error for zero ledger catchup timeout via env, got nil")
+		}
+	})
 }
 
 // TestApplyFlags_NonPositiveDurationRejected covers the CLI-flag input path.
