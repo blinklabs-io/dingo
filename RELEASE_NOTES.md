@@ -43,32 +43,32 @@ Thank you for trying!
 
 ### 🇯🇵 日本語
 
-**タイトル:** Blockfrost の資産情報補完、落ち着いたログ、依存関係の更新
+**タイトル:** Blockfrost の資産情報補完、静かなログ、安定した保守更新
 
 **日付:** July 14, 2026
 
 **バージョン:** v0.63.1
 
-このリリースでは、Blockfrost の資産データをより完全に返し、Mithril と peer の日常ログを落ち着かせ、transaction submission と同期処理に対する自動検証を広げながら、runtime と example の依存関係を更新します。
+このリリースでは、Blockfrost の資産データをより完全に返し、Mithril と peer の日常ログを静かにし、付属のサポート更新と example を新しくしながら、transaction submission と同期処理の自動検証を広げます。
 
 ### 💪 改善
 
-* 更新しました **より新しい Cardano network 設定データを取り込むこと:** container build は新しい Cardano 設定セットを使うようになり、tracer data を更新し、Musashi network 設定を新しくします。
-* 強化しました **より安全な upstream の concurrency control 動作を使うこと:** 同梱の concurrency library は、不正な負の重みを受け取ったときに内部状態を壊す前に即座に停止します。
-* 刷新しました **health check 依存関係を最新に保つこと:** Dingo は新しい health library で build されるようになり、health endpoint と設定はそのまま維持します。
-* 改良しました **新しい operating system support 更新を取り込むこと:** runtime は設定変更なしで upstream の system fix を取り込みます。
-* 補強しました **crypto、terminal、text の support library を新しくすること:** Dingo はこれらの support library に対する upstream の保守更新を取り込み、設定や API の変更は不要です。
-* 調整しました **Blockfrost explorer example を最新の Vite patch に保つこと:** example の local frontend 作業は、修正版の build と development tooling を使うようになります。
-* 最適化しました **Sundae preview example を最新の Vite patch に保つこと:** example の local development は、新しい Vite の保守リリースを使うようになります。
-* 整合しました **Sundae preview example を新しい upstream SDK で動かすこと:** example は外部向けの動作を変えずに、新しい SDK version を install して実行します。
-* 拡充しました **transaction submission handler のカバー範囲を広げること:** より広い自動 protocol check によって、今後の更新でも transaction submission の挙動を安定して保ちやすくなります。
-* 拡張しました **server side の chain synchronization 経路をより直接カバーすること:** 追加の自動 protocol check によって、server side の同期挙動に対する回帰を早く見つけやすくなります。
+* 更新しました **より新しい Cardano network 設定を取り込むこと:** コンテナビルドは新しい Cardano 設定セットを使うようになり、tracer data を更新し、Musashi network 設定を新しくします。
+* 強化しました **同梱の並行処理保護をより安全にすること:** 同梱の並行処理サポートは、不正な負の値を受け取ると内部状態を壊す前に即座に停止します。
+* 刷新しました **health check サポートを最新に保つこと:** Dingo は新しい health check サポートを使い、health endpoint と設定はそのまま維持します。
+* 改良しました **新しい system support fix を取り込むこと:** Dingo は設定変更なしで現在の system support fix を取り込みます。
+* 補強しました **security、terminal、text のサポート更新を取り込むこと:** Dingo はこれらのサポート更新を取り込み、設定や外部動作の変更は不要です。
+* 調整しました **Blockfrost explorer example を最新の frontend tooling patch に保つこと:** example の local frontend 作業は、修正版の build と development tool を使うようになります。
+* 最適化しました **Sundae preview example を最新の frontend tooling patch に保つこと:** example の local development は、新しい frontend の保守更新を使うようになります。
+* 整合しました **Sundae preview example を新しい Sundae library で動かすこと:** example は外部向けの動作を変えずに、新しい library version を install して実行します。
+* 拡充しました **transaction submission のカバー範囲を広げること:** より広い自動確認によって、今後の更新でも transaction submission の挙動を安定して保ちやすくなります。
+* 拡張しました **server の同期経路をより直接カバーすること:** 追加の自動確認によって、server の同期挙動に対する回帰を早く見つけやすくなります。
 
 ### 🔧 修正
 
 * 補完しました **Blockfrost 応答で asset の mint history と metadata をより完全に返すこと:** Blockfrost の asset query は mint history と metadata field をより確実に埋めるようになり、下流での asset 確認をより完全にします。
 * 明確化しました **Mithril の warning log を読みやすくすること:** Mithril 関連の warning 出力は、日常の運用確認で混乱しにくい表現になります。
-* 抑制しました **無害な重複接続の shutdown を info log に下げること:** 通常の peer connection 競合で起きる benign な EOF 終了は error ではなく info として扱い、実際の handshake failure は引き続き error のままです。
+* 抑制しました **無害な重複接続の shutdown を info log に下げること:** 通常の peer 接続競合で起きる無害な切断は error ではなく info として扱い、実際の接続失敗は引き続き error のままです。
 
 ### 推奨ネットワーク互換性 ⚠️
 
@@ -84,32 +84,32 @@ Thank you for trying!
 
 ### 🇪🇸 Español
 
-**Título:** Mayor detalle de activos en Blockfrost, registros más tranquilos y dependencias actualizadas
+**Título:** Mayor detalle de activos en Blockfrost, registros más tranquilos y mantenimiento más estable
 
 **Fecha:** July 14, 2026
 
 **Versión:** v0.63.1
 
-Esta versión completa más datos de activos en Blockfrost, reduce el ruido habitual en los registros de Mithril y de pares, y actualiza dependencias del runtime y de los ejemplos mientras amplía la cobertura automatizada para los flujos de envío de transacciones y sincronización.
+Esta versión completa más datos de activos en Blockfrost, reduce el ruido habitual en los registros de Mithril y de pares, y renueva componentes de soporte y ejemplos mientras amplía la cobertura automatizada para los flujos de envío de transacciones y sincronización.
 
 ### 💪 Mejoras
 
-* Actualizó **incorporar datos más recientes de configuración de red de Cardano:** Las compilaciones en contenedor ahora usan un conjunto más reciente de configuración de Cardano, lo que renueva los datos de trazado y actualiza la configuración de Musashi.
-* Reforzó **usar un comportamiento ascendente más seguro para el control de concurrencia:** La biblioteca de concurrencia incluida ahora falla de inmediato ante pesos negativos no válidos en lugar de arriesgar un estado interno dañado.
-* Renovó **mantener al día las dependencias de comprobación de salud:** Dingo ahora compila con la versión más reciente de la biblioteca de salud y mantiene sin cambios los endpoints y la configuración.
-* Modernizó **incorporar actualizaciones más recientes de soporte del sistema operativo:** El runtime ahora recibe correcciones actuales del sistema ascendente sin requerir cambios de configuración.
-* Refrescó **incluir bibliotecas más recientes de soporte criptográfico, de terminal y de texto:** Dingo ahora incorpora mantenimiento ascendente más reciente en estas bibliotecas sin cambiar la configuración ni las API.
-* Pulió **mantener el ejemplo de Blockfrost explorer en el último parche de Vite:** El trabajo local de frontend para el ejemplo ahora usa la versión corregida de las herramientas de compilación y desarrollo.
-* Optimizó **mantener el ejemplo de Sundae preview en el último parche de Vite:** El desarrollo local del ejemplo ahora usa la versión de mantenimiento más reciente de Vite.
-* Alineó **ejecutar el ejemplo de Sundae preview con un SDK ascendente más nuevo:** El ejemplo ahora se instala y se ejecuta con la versión más reciente del SDK sin cambiar su comportamiento externo.
-* Amplió **cubrir con más profundidad los controladores de envío de transacciones:** Una cobertura automatizada más amplia ayuda a mantener estable el comportamiento del envío de transacciones en futuras actualizaciones.
-* Extendió **cubrir de forma más directa las rutas de sincronización del lado del servidor:** Comprobaciones automatizadas adicionales ayudan a detectar antes regresiones en el comportamiento de sincronización del lado del servidor.
+* Actualizó **incorporar ajustes más recientes de red de Cardano:** Las compilaciones en contenedor ahora usan un conjunto más reciente de configuración de Cardano, lo que renueva los datos de trazado y actualiza la configuración de Musashi.
+* Reforzó **usar protecciones incluidas más seguras para la concurrencia:** El soporte de concurrencia incluido ahora falla de inmediato ante valores negativos no válidos en lugar de arriesgar un estado interno dañado.
+* Renovó **mantener al día el soporte de comprobación de salud:** Dingo ahora usa soporte más reciente para la comprobación de salud y mantiene sin cambios los endpoints y la configuración.
+* Modernizó **incorporar correcciones más recientes de soporte del sistema:** Dingo ahora recibe correcciones actuales de soporte del sistema sin requerir cambios de configuración.
+* Refrescó **incluir soporte más reciente de seguridad, terminal y texto:** Dingo ahora incorpora estas actualizaciones de mantenimiento sin cambiar la configuración ni el comportamiento externo.
+* Pulió **mantener el ejemplo de Blockfrost explorer en el último parche de herramientas de frontend:** El trabajo local de frontend para el ejemplo ahora usa la versión corregida de las herramientas de compilación y desarrollo.
+* Optimizó **mantener el ejemplo de Sundae preview en el último parche de herramientas de frontend:** El desarrollo local del ejemplo ahora usa la versión de mantenimiento más reciente para el frontend.
+* Alineó **ejecutar el ejemplo de Sundae preview con una biblioteca más nueva de Sundae:** El ejemplo ahora se instala y se ejecuta con la versión más reciente de la biblioteca sin cambiar su comportamiento externo.
+* Amplió **cubrir con más profundidad los flujos de envío de transacciones:** Una cobertura automatizada más amplia ayuda a mantener estable ese comportamiento en futuras actualizaciones.
+* Extendió **cubrir de forma más directa las rutas de sincronización del servidor:** Comprobaciones automatizadas adicionales ayudan a detectar antes regresiones en ese comportamiento.
 
 ### 🔧 Correcciones
 
 * Completó **devolver con más detalle el historial de acuñación y los metadatos en las respuestas de Blockfrost:** Las consultas de activos de Blockfrost ahora rellenan esos campos con más fiabilidad, lo que vuelve más completa la inspección posterior de activos.
 * Aclaró **hacer más legibles los registros de advertencia de Mithril:** La salida de advertencia relacionada con Mithril ahora usa una redacción más clara, lo que reduce la confusión durante la revisión operativa habitual.
-* Atenuó **bajar a registros informativos los cierres inofensivos de conexiones duplicadas:** Las carreras normales entre conexiones de pares ya no muestran cierres EOF benignos como errores, mientras los fallos reales de handshake siguen apareciendo como errores.
+* Atenuó **bajar a registros informativos los cierres inofensivos de conexiones duplicadas:** Las carreras normales entre conexiones de pares ya no muestran cierres inofensivos como errores, mientras los fallos reales de conexión siguen apareciendo como errores.
 
 ### Compatibilidad de red recomendada ⚠️
 
