@@ -8,7 +8,7 @@
 
 **Version:** v0.64.0
 
-This release restores governance side effects after restarts at an epoch boundary and simplifies pool imports through the database interface.
+This release restores governance side effects after restarts at an epoch boundary and makes it easier to import pools through the database interface.
 
 ### ✨ What's New
 
@@ -38,7 +38,7 @@ Thank you for trying!
 
 **バージョン:** v0.64.0
 
-このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface からの pool import を簡単にします。
+このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface を通じた pool の取り込みを簡単にします。
 
 ### ✨ 新機能
 
@@ -68,7 +68,7 @@ Thank you for trying!
 
 **Versión:** v0.64.0
 
-Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época y simplifica las importaciones de pools mediante la interfaz de base de datos.
+Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época y facilita la importación de pools mediante la interfaz de base de datos.
 
 ### ✨ Novedades
 
