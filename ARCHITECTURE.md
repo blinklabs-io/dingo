@@ -1710,9 +1710,11 @@ only on an established node where those inputs exist. `StrictSlotClock`
 (`ledger/state.go` `validateTxCore`) rejects a transaction when the slot clock
 cannot be read instead of falling back to the snapshot tip slot; here the
 tolerant path absorbs ordinarily-transient clock read failures during normal
-operation, so leaving it off is reasonable indefinitely. All three are wired
-identically: `internal/config` field + CLI flag → `dingo.WithX` option → the
-consuming component's config struct.
+operation, so it may remain off when transient fallback is acceptable — but a
+*persistent* clock failure silently degrades validation to a stale
+`snapshotTipSlot`, so enable it to fail fast when clock failures persist. All
+three are wired identically: `internal/config` field + CLI flag →
+`dingo.WithX` option → the consuming component's config struct.
 
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
