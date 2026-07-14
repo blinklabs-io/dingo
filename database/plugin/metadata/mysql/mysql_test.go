@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
+	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -1787,4 +1788,135 @@ func TestStartRejectsInvalidDatabaseNameFromDSN(t *testing.T) {
 	if !strings.Contains(err.Error(), "mysql config dsn") {
 		t.Fatalf("expected DSN config error, got: %v", err)
 	}
+}
+
+// TestMysqlRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits proves the
+// AddAccountRewardByCredential delta-update path (a single UPDATE of
+// reward_stake/total_stake, added as an efficiency fix for the epoch-boundary
+// reward rollover which credits ~every delegator's account) computes exact
+// totals against real MySQL across two sequential credits, and leaves every
+// other reward_live_stake column untouched. reward_stake/total_stake are
+// stored as longtext/varchar decimal strings, so this also proves the
+// CAST(...AS UNSIGNED)/CAST(...AS CHAR) delta SQL round-trips correctly.
+func TestMysqlRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits(t *testing.T) {
+	store := newTestMysqlStore(t)
+
+	poolA := bytes.Repeat([]byte{0x8a}, 28)
+	stakeA := bytes.Repeat([]byte{0x8b}, 28)
+	utxoHash := bytes.Repeat([]byte{0x8c}, 32)
+
+	cleanup := func() {
+		db := store.DB()
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.RewardLiveStake{})
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.AccountRewardDelta{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Utxo{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Account{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.PoolRegistration{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.Pool{})
+	}
+	cleanup()
+	t.Cleanup(func() {
+		cleanup()
+		_ = store.Close()
+	})
+
+	pool := models.Pool{PoolKeyHash: poolA}
+	require.NoError(t, store.DB().
+		Where("pool_key_hash = ?", poolA).
+		FirstOrCreate(&pool).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolA,
+		AddedSlot:   0,
+	}).Error)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Pool:          poolA,
+		Reward:        1_000,
+		Active:        true,
+		AddedSlot:     10,
+	}))
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:          utxoHash,
+		OutputIdx:     0,
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Amount:        2_000_000,
+		AddedSlot:     10,
+	}))
+
+	// Sanity: the row already exists before crediting, so both credits below
+	// exercise the delta-update path rather than falling back to a full
+	// refresh (which only happens when no row exists yet).
+	var seeded models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&seeded).Error)
+	require.Equal(t, types.Uint64(1_000), seeded.RewardStake)
+	require.Equal(t, types.Uint64(2_000_000), seeded.UtxoStake)
+	require.Equal(t, types.Uint64(2_001_000), seeded.TotalStake)
+
+	const credit1 = uint64(500_000_000)
+	const credit2 = uint64(123_456_789)
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit1, 11, bytes.Repeat([]byte{0x01}, 32), nil,
+	))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit2, 12, bytes.Repeat([]byte{0x02}, 32), nil,
+	))
+
+	wantReward := types.Uint64(1_000 + credit1 + credit2)
+	wantTotal := types.Uint64(2_000_000 + 1_000 + credit1 + credit2)
+
+	var got models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&got).Error)
+	require.Equal(
+		t, wantReward, got.RewardStake,
+		"reward_stake must equal the exact sum of both credits",
+	)
+	require.Equal(
+		t, wantTotal, got.TotalStake,
+		"total_stake must equal the exact sum of utxo_stake and both credits",
+	)
+	require.Equal(
+		t, types.Uint64(2_000_000), got.UtxoStake,
+		"utxo_stake must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, poolA, got.PoolKeyHash,
+		"pool delegation must be untouched by the reward-credit delta",
+	)
+	require.True(
+		t, got.Registered,
+		"registered flag must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, uint64(12), got.UpdatedSlot,
+		"updated_slot must reflect the latest credit's slot",
+	)
+
+	// Cross-check against ground truth: a full rebuild from source tables
+	// must land on the exact same totals the delta path produced.
+	txn, err := store.BeginTxn()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, store.RebuildRewardLiveStake(12, txn))
+	txnDB, err := store.resolveDB(txn)
+	require.NoError(t, err)
+	var rebuilt models.RewardLiveStake
+	require.NoError(t, txnDB.Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&rebuilt).Error)
+	require.Equal(t, wantReward, rebuilt.RewardStake)
+	require.Equal(t, wantTotal, rebuilt.TotalStake)
 }
