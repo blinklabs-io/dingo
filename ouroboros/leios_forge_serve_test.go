@@ -130,6 +130,52 @@ func TestLeiosForgedEBLogOtherPeerDoesNotConsumeFailedRetry(t *testing.T) {
 	log.complete(reconnected, true)
 }
 
+func TestLeiosForgedEBLogReconnectClearsConsecutiveRetries(t *testing.T) {
+	log := newLeiosForgedEBLog()
+	const firstFailedConn = "peer-a"
+	const secondFailedConn = "peer-b"
+	log.registerConn(firstFailedConn)
+	log.registerConn(secondFailedConn)
+	first := ocommon.Point{Slot: 1, Hash: []byte{1}}
+	second := ocommon.Point{Slot: 2, Hash: []byte{2}}
+	log.append(leiosForgedEBEntry{point: &first})
+	log.append(leiosForgedEBEntry{point: &second})
+
+	entry, _ := log.next(firstFailedConn)
+	require.NotNil(t, entry)
+	require.Equal(t, first, *entry.point)
+	log.complete(firstFailedConn, false)
+	log.removeConn(firstFailedConn)
+
+	entry, _ = log.next(secondFailedConn)
+	require.NotNil(t, entry)
+	require.Equal(t, first, *entry.point)
+	log.complete(secondFailedConn, true)
+	entry, _ = log.next(secondFailedConn)
+	require.NotNil(t, entry)
+	require.Equal(t, second, *entry.point)
+	log.complete(secondFailedConn, false)
+	log.removeConn(secondFailedConn)
+
+	const reconnected = "peer-reconnected"
+	log.registerConn(reconnected)
+	entry, _ = log.next(reconnected)
+	require.NotNil(t, entry)
+	require.Equal(t, first, *entry.point)
+	log.complete(reconnected, true)
+	entry, _ = log.next(reconnected)
+	require.NotNil(t, entry)
+	require.Equal(t, second, *entry.point)
+	log.complete(reconnected, true)
+	log.removeConn(reconnected)
+
+	require.Empty(t, log.retries)
+	const laterConn = "peer-later"
+	log.registerConn(laterConn)
+	entry, _ = log.next(laterConn)
+	require.Nil(t, entry)
+}
+
 // TestServeForgedEndorserBlockTxs verifies that a locally-forged endorser
 // block's transaction bodies are stored alongside its manifest so the
 // leios-fetch server can serve them, in manifest order, honoring the requested

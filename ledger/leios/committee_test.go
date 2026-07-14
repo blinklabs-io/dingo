@@ -216,6 +216,16 @@ func TestComputeCommitteeMalformedPoolKeyHash(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCommitteeConstructorsRejectWrongPoolKeyHashLength(t *testing.T) {
+	poolStakes := map[string]uint64{hex.EncodeToString(make([]byte, 27)): 100}
+
+	_, err := ComputeCommittee(1, 0, poolStakes, 100, big.NewRat(1, 1))
+	require.ErrorContains(t, err, "must be 28 bytes")
+
+	_, err = ComputePrototypeCommittee(1, 0, poolStakes, 100)
+	require.ErrorContains(t, err, "must be 28 bytes")
+}
+
 func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
 	// Products of stake and rational components overflow uint64; the
 	// comparison must be exact in big.Int.

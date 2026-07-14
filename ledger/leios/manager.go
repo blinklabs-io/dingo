@@ -183,6 +183,12 @@ type pendingPrototypeVote struct {
 	seenAt  time.Time
 }
 
+type acquiredEbRecord struct {
+	slot   uint64
+	epoch  uint64
+	seenAt time.Time
+}
+
 // maxPendingPrototypeCandidatesPerVoter bounds alternate signatures retained
 // while an announcing ranking block is unknown. More than one candidate is
 // required because signatures cannot be verified until the announcement maps
@@ -240,12 +246,16 @@ type VoteManager struct {
 	maxVotes   int
 	maxRecords int
 
-	mu       sync.Mutex
-	running  bool
-	stopping bool
-	cancel   context.CancelFunc
-	loopWg   sync.WaitGroup
-	subs     []managerSubscription
+	mu sync.Mutex
+	// prototypeEmissionMu linearizes local vote commit/publication with
+	// rollback pruning. This avoids holding mu while publishing an EventBus
+	// event, whose subscribers are outside the manager's lock hierarchy.
+	prototypeEmissionMu sync.Mutex
+	running             bool
+	stopping            bool
+	cancel              context.CancelFunc
+	loopWg              sync.WaitGroup
+	subs                []managerSubscription
 
 	committees         map[uint64]*epochEntry
 	votesById          map[lcommon.LeiosVoteId]*storedVote
@@ -256,10 +266,14 @@ type VoteManager struct {
 	wakeCh             chan struct{}     // closed and replaced on every insert
 	tallies            map[tallyKey]*ebTally
 	announcements      map[lcommon.Blake2b256]announcementRecord
-	acquiredEbs        map[lcommon.Blake2b256]time.Time
+	acquiredEbs        map[lcommon.Blake2b256]acquiredEbRecord
 	votedAnnouncements map[lcommon.Blake2b256]struct{}
 	pendingVotes       map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote
-	pendingVoteCount   int
+	// pendingVoteCount is the sum of all pending candidate slices;
+	// pendingVoteCountByConn partitions that same total by origin connection.
+	// Every admission and removal must update both counters together.
+	pendingVoteCount       int
+	pendingVoteCountByConn map[string]int
 
 	votingPool []byte // local pool key hash; nil disables voting
 	votingKey  *VoteSigningKey
@@ -322,11 +336,12 @@ func NewVoteManager(cfg VoteManagerConfig) (*VoteManager, error) {
 		wakeCh:             make(chan struct{}),
 		tallies:            make(map[tallyKey]*ebTally),
 		announcements:      make(map[lcommon.Blake2b256]announcementRecord),
-		acquiredEbs:        make(map[lcommon.Blake2b256]time.Time),
+		acquiredEbs:        make(map[lcommon.Blake2b256]acquiredEbRecord),
 		votedAnnouncements: make(map[lcommon.Blake2b256]struct{}),
 		pendingVotes: make(
 			map[lcommon.Blake2b256]map[uint64][]pendingPrototypeVote,
 		),
+		pendingVoteCountByConn: make(map[string]int),
 	}
 	if cfg.PromRegistry != nil {
 		m.metrics = initVoteManagerMetrics(cfg.PromRegistry)
@@ -639,7 +654,16 @@ func (m *VoteManager) HandleVote(
 			"voter_id", vote.VoterId,
 		)
 	}
-	m.insertVote(connKey, vote, epoch, committee, member, verified, tau, lcommon.Blake2b256{})
+	m.insertVote(
+		connKey,
+		vote,
+		epoch,
+		committee,
+		member,
+		verified,
+		tau,
+		lcommon.Blake2b256{},
+	)
 	return nil
 }
 
@@ -773,19 +797,49 @@ func (m *VoteManager) queuePrototypeVoteLocked(
 		// Prefer recent alternatives over permanently reserving this voter id
 		// for the first unverified arrivals. Verification is impossible until
 		// the ranking block resolves the epoch committee.
+		evictedConn := candidates[0].connKey
 		candidates = candidates[1:]
 		m.pendingVoteCount--
+		m.decrementPendingConnectionLocked(evictedConn)
 		if m.metrics != nil {
 			m.metrics.votesRejectedTotal.WithLabelValues("pending_candidates").
 				Inc()
 		}
 	}
 	if m.pendingVoteCount >= m.maxRecords {
-		if m.metrics != nil {
-			m.metrics.votesRejectedTotal.WithLabelValues("pending_capacity").
-				Inc()
+		mostRepresentedConn := ""
+		mostRepresentedCount := 0
+		for candidateConn, count := range m.pendingVoteCountByConn {
+			if count > mostRepresentedCount {
+				mostRepresentedConn = candidateConn
+				mostRepresentedCount = count
+			}
 		}
-		return
+		// At capacity, make room when the incoming connection is less
+		// represented than the largest incumbent. This lets the queue use its
+		// full capacity with one healthy peer while preventing that peer from
+		// excluding later peers entirely.
+		if mostRepresentedCount > m.pendingVoteCountByConn[connKey] {
+			if !m.evictOldestPendingForConnectionLocked(mostRepresentedConn) {
+				if m.metrics != nil {
+					m.metrics.votesRejectedTotal.WithLabelValues("pending_capacity").
+						Inc()
+				}
+				return
+			}
+			byVoter = m.pendingVotes[vote.AnnouncingRbHash]
+			if byVoter == nil {
+				byVoter = make(map[uint64][]pendingPrototypeVote)
+				m.pendingVotes[vote.AnnouncingRbHash] = byVoter
+			}
+			candidates = byVoter[vote.VoterId]
+		} else {
+			if m.metrics != nil {
+				m.metrics.votesRejectedTotal.WithLabelValues("pending_capacity").
+					Inc()
+			}
+			return
+		}
 	}
 	copyVote := vote
 	copyVote.VoteSignature = slices.Clone(vote.VoteSignature)
@@ -795,6 +849,75 @@ func (m *VoteManager) queuePrototypeVoteLocked(
 		seenAt:  now,
 	})
 	m.pendingVoteCount++
+	m.pendingVoteCountByConn[connKey]++
+}
+
+func (m *VoteManager) evictOldestPendingForConnectionLocked(
+	connKey string,
+) bool {
+	var oldestRb lcommon.Blake2b256
+	var oldestVoter uint64
+	oldestIndex := -1
+	var oldestTime time.Time
+	for rbHash, byVoter := range m.pendingVotes {
+		for voterId, candidates := range byVoter {
+			for idx, candidate := range candidates {
+				if candidate.connKey != connKey ||
+					(oldestIndex >= 0 && !candidate.seenAt.Before(oldestTime)) {
+					continue
+				}
+				oldestRb = rbHash
+				oldestVoter = voterId
+				oldestIndex = idx
+				oldestTime = candidate.seenAt
+			}
+		}
+	}
+	if oldestIndex < 0 {
+		return false
+	}
+	byVoter, ok := m.pendingVotes[oldestRb]
+	if !ok {
+		return false
+	}
+	candidates, ok := byVoter[oldestVoter]
+	if !ok || oldestIndex >= len(candidates) {
+		return false
+	}
+	candidates = slices.Delete(candidates, oldestIndex, oldestIndex+1)
+	if len(candidates) == 0 {
+		delete(byVoter, oldestVoter)
+	} else {
+		byVoter[oldestVoter] = candidates
+	}
+	if len(byVoter) == 0 {
+		delete(m.pendingVotes, oldestRb)
+	}
+	m.pendingVoteCount--
+	m.decrementPendingConnectionLocked(connKey)
+	return true
+}
+
+func (m *VoteManager) decrementPendingConnectionLocked(connKey string) {
+	if m.pendingVoteCountByConn[connKey] <= 1 {
+		delete(m.pendingVoteCountByConn, connKey)
+		return
+	}
+	m.pendingVoteCountByConn[connKey]--
+}
+
+func (m *VoteManager) removePendingAnnouncementLocked(
+	rbHash lcommon.Blake2b256,
+) map[uint64][]pendingPrototypeVote {
+	pendingMap := m.pendingVotes[rbHash]
+	delete(m.pendingVotes, rbHash)
+	for _, candidates := range pendingMap {
+		for _, candidate := range candidates {
+			m.pendingVoteCount--
+			m.decrementPendingConnectionLocked(candidate.connKey)
+		}
+	}
+	return pendingMap
 }
 
 func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
@@ -803,10 +926,11 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 		if record.seenAt.Before(cutoff) {
 			delete(m.announcements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
 		}
 	}
-	for ebHash, seenAt := range m.acquiredEbs {
-		if seenAt.Before(cutoff) {
+	for ebHash, record := range m.acquiredEbs {
+		if record.seenAt.Before(cutoff) {
 			delete(m.acquiredEbs, ebHash)
 		}
 	}
@@ -816,6 +940,7 @@ func (m *VoteManager) prunePrototypeStateLocked(now time.Time) {
 			for _, pending := range candidates {
 				if pending.seenAt.Before(cutoff) {
 					m.pendingVoteCount--
+					m.decrementPendingConnectionLocked(pending.connKey)
 					continue
 				}
 				kept = append(kept, pending)
@@ -843,11 +968,11 @@ func (m *VoteManager) insertVote(
 	verified bool,
 	tau *big.Rat,
 	announcingRbHash lcommon.Blake2b256,
-) {
+) bool {
 	raw, err := vote.MarshalCBOR()
 	if err != nil {
 		m.rejectVote("encoding", vote, err)
-		return
+		return false
 	}
 	voteId := lcommon.LeiosVoteId{
 		SlotNo:  vote.SlotNo,
@@ -856,6 +981,24 @@ func (m *VoteManager) insertVote(
 	now := m.now()
 
 	m.mu.Lock()
+	if announcingRbHash != (lcommon.Blake2b256{}) {
+		current, ok := m.announcements[announcingRbHash]
+		if !ok || current.slot != vote.SlotNo || current.epoch != epoch ||
+			current.ebHash != vote.EndorserBlockHash {
+			m.mu.Unlock()
+			return false
+		}
+		if originConn == "" {
+			if _, acquired := m.acquiredEbs[current.ebHash]; !acquired {
+				m.mu.Unlock()
+				return false
+			}
+			if _, voted := m.votedAnnouncements[announcingRbHash]; voted {
+				m.mu.Unlock()
+				return false
+			}
+		}
+	}
 	// Prune before the dedup check so an expired entry cannot block a
 	// fresh vote with the same id.
 	m.pruneExpiredLocked(now)
@@ -870,7 +1013,7 @@ func (m *VoteManager) insertVote(
 			// serving: a size-evicted vote stays unservable until its
 			// record dies, which avoids serving-store churn under
 			// re-delivery.
-			return
+			return false
 		}
 		// Equivocation: same voter and slot, different endorser
 		// block. The first vote wins for as long as its record
@@ -885,7 +1028,7 @@ func (m *VoteManager) insertVote(
 			"kept_endorser_block_hash", record.ebHash.String(),
 			"dropped_endorser_block_hash", vote.EndorserBlockHash.String(),
 		)
-		return
+		return false
 	}
 	if originConn != "" && !verified && len(m.voteRecords) >= m.maxRecords {
 		// Reject rather than evict: dropping a record would let a
@@ -906,7 +1049,10 @@ func (m *VoteManager) insertVote(
 			vote,
 			errors.New("vote record ledger full"),
 		)
-		return
+		return false
+	}
+	if originConn == "" && announcingRbHash != (lcommon.Blake2b256{}) {
+		m.votedAnnouncements[announcingRbHash] = struct{}{}
 	}
 	m.voteRecords[voteId] = voteRecord{
 		ebHash:           vote.EndorserBlockHash,
@@ -974,6 +1120,7 @@ func (m *VoteManager) insertVote(
 			event.NewEvent(EbQuorumEventType, *quorumEvt),
 		)
 	}
+	return true
 }
 
 // evaluateQuorumLocked checks the tally against the quorum threshold and
@@ -1211,13 +1358,24 @@ func (m *VoteManager) VotesByIds(
 // HandleEndorserBlock records acquisition. The current prototype votes only
 // after a selected ranking block announces the acquired EB.
 func (m *VoteManager) HandleEndorserBlock(
-	_ uint64,
+	slot uint64,
 	ebHash lcommon.Blake2b256,
 ) {
+	epoch, err := m.epochProvider.EpochForSlot(slot)
+	if err != nil {
+		m.logger.Debug(
+			"cannot resolve acquired endorser block epoch",
+			"error",
+			err,
+		)
+		return
+	}
 	m.mu.Lock()
 	now := m.now()
 	m.prunePrototypeStateLocked(now)
-	m.acquiredEbs[ebHash] = now
+	m.acquiredEbs[ebHash] = acquiredEbRecord{
+		slot: slot, epoch: epoch, seenAt: now,
+	}
 	var ready []struct {
 		rbHash lcommon.Blake2b256
 		record announcementRecord
@@ -1306,24 +1464,21 @@ func (m *VoteManager) emitPrototypeVote(
 		"announcing_rb_hash", rbHash.String(),
 		"endorser_block_hash", record.ebHash.String(),
 	)
-	m.mu.Lock()
-	if _, exists := m.votedAnnouncements[rbHash]; exists {
-		m.mu.Unlock()
-		return
-	}
-	m.votedAnnouncements[rbHash] = struct{}{}
-	m.mu.Unlock()
-	m.insertVote(
+	m.prototypeEmissionMu.Lock()
+	inserted := m.insertVote(
 		"", vote, record.epoch, committee, member, true, tau, rbHash,
 	)
-	m.eventBus.Publish(VoteEmittedEventType, event.NewEvent(
-		VoteEmittedEventType,
-		VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{
-			AnnouncingRbHash: rbHash,
-			VoterId:          voterId,
-			VoteSignature:    sig,
-		}},
-	))
+	if inserted {
+		m.eventBus.Publish(VoteEmittedEventType, event.NewEvent(
+			VoteEmittedEventType,
+			VoteEmittedEvent{Vote: lcommon.LeiosPrototypeVote{
+				AnnouncingRbHash: rbHash,
+				VoterId:          voterId,
+				VoteSignature:    sig,
+			}},
+		))
+	}
+	m.prototypeEmissionMu.Unlock()
 }
 
 // RemoveConnection drops the vote-serving cursor for a closed connection.
@@ -1413,11 +1568,7 @@ func (m *VoteManager) ObserveAnnouncement(
 	m.prunePrototypeStateLocked(record.seenAt)
 	m.announcements[rbHash] = record
 	_, acquired := m.acquiredEbs[ebHash]
-	pendingMap := m.pendingVotes[rbHash]
-	delete(m.pendingVotes, rbHash)
-	for _, candidates := range pendingMap {
-		m.pendingVoteCount -= len(candidates)
-	}
+	pendingMap := m.removePendingAnnouncementLocked(rbHash)
 	m.mu.Unlock()
 	if acquired {
 		m.emitPrototypeVote(rbHash, record)
@@ -1450,8 +1601,11 @@ func (m *VoteManager) handleEpochTransition(
 	if evt.NewEpoch >= 1 {
 		keepFrom = evt.NewEpoch - 1
 	}
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.prunePrototypeStateLocked(m.now())
 	for epoch := range m.committees {
 		if epoch < keepFrom {
 			delete(m.committees, epoch)
@@ -1476,6 +1630,12 @@ func (m *VoteManager) handleEpochTransition(
 		if record.epoch < keepFrom {
 			delete(m.announcements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for ebHash, record := range m.acquiredEbs {
+		if record.epoch < keepFrom {
+			delete(m.acquiredEbs, ebHash)
 		}
 	}
 	m.updateRecordsGaugeLocked()
@@ -1491,6 +1651,8 @@ func (m *VoteManager) handleEpochTransition(
 // change the stake snapshots committees derive from, and recomputation is
 // cheap.
 func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
+	m.prototypeEmissionMu.Lock()
+	defer m.prototypeEmissionMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.filterVotesLocked(func(sv *storedVote) bool {
@@ -1513,6 +1675,12 @@ func (m *VoteManager) handleRollback(evt chain.ChainRollbackEvent) {
 		if record.slot > evt.Point.Slot {
 			delete(m.announcements, rbHash)
 			delete(m.votedAnnouncements, rbHash)
+			m.removePendingAnnouncementLocked(rbHash)
+		}
+	}
+	for ebHash, record := range m.acquiredEbs {
+		if record.slot > evt.Point.Slot {
+			delete(m.acquiredEbs, ebHash)
 		}
 	}
 	m.updateRecordsGaugeLocked()

@@ -155,7 +155,10 @@ func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
 			if l.retries[reserved.index] <= 0 {
 				delete(l.retries, reserved.index)
 			}
-			delete(l.retryCursors, connKey)
+			l.advanceRetryCursorLocked(
+				connKey,
+				l.cursors[connKey],
+			)
 		}
 	} else {
 		if !reserved.retry {
@@ -164,6 +167,29 @@ func (l *leiosForgedEBLog) complete(connKey string, delivered bool) {
 		l.retryCursors[connKey] = reserved.index
 	}
 	l.pruneLocked()
+}
+
+// advanceRetryCursorLocked moves connKey's retry claim to the oldest pending
+// retry at or after cursor. A reconnect may need to discharge several failed
+// entries from the same stream; retaining the claim makes each such delivery
+// decrement its corresponding retry count.
+// Callers must hold l.mu.
+func (l *leiosForgedEBLog) advanceRetryCursorLocked(
+	connKey string,
+	cursor int,
+) {
+	delete(l.retryCursors, connKey)
+	nextRetry := l.base + len(l.items)
+	found := false
+	for retry := range l.retries {
+		if retry >= cursor && retry < nextRetry {
+			nextRetry = retry
+			found = true
+		}
+	}
+	if found {
+		l.retryCursors[connKey] = nextRetry
+	}
 }
 
 // removeConn unregisters a connection cursor and prunes newly freed entries.

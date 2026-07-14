@@ -96,6 +96,29 @@ type fakeParamsProvider struct {
 	err    error
 }
 
+type blockingParamsProvider struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingParamsProvider() *blockingParamsProvider {
+	return &blockingParamsProvider{
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (f *blockingParamsProvider) LeiosCommitteeParameters() (
+	*big.Rat,
+	*big.Rat,
+	error,
+) {
+	f.once.Do(func() { close(f.entered) })
+	<-f.release
+	return big.NewRat(1, 1), big.NewRat(7, 10), nil
+}
+
 func (f *fakeParamsProvider) LeiosCommitteeParameters() (
 	*big.Rat,
 	*big.Rat,
@@ -840,6 +863,33 @@ func TestVoteManagerQueuedInvalidPrototypeVoteDoesNotSuppressValidVote(
 	assert.Equal(t, valid.VoteSignature, resolved.VoteSignature)
 }
 
+func TestVoteManagerPendingPrototypeVotesFairAtCapacity(t *testing.T) {
+	fixture := newManagerFixture(t)
+	fixture.mgr.maxRecords = 4
+	for i := range 4 {
+		rbHash := lcommon.NewBlake2b256(
+			[]byte(fmt.Sprintf("attacker-rb-%d", i)),
+		)
+		require.NoError(t, fixture.mgr.HandlePrototypeVote(
+			"attacker",
+			fixture.makePrototypeVote(t, uint64(i), rbHash),
+		))
+	}
+
+	legitimateRb := lcommon.NewBlake2b256([]byte("legitimate-rb"))
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"legitimate-peer",
+		fixture.makePrototypeVote(t, 4, legitimateRb),
+	))
+
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Equal(t, 4, fixture.mgr.pendingVoteCount)
+	assert.Equal(t, 3, fixture.mgr.pendingVoteCountByConn["attacker"])
+	assert.Equal(t, 1, fixture.mgr.pendingVoteCountByConn["legitimate-peer"])
+	assert.Contains(t, fixture.mgr.pendingVotes, legitimateRb)
+}
+
 func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 	fixture := newManagerFixture(
 		t,
@@ -903,7 +953,9 @@ func TestVoteManagerPrototypeQuorumPreservesSigningContext(t *testing.T) {
 	))
 }
 
-func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(t *testing.T) {
+func TestVoteManagerPrototypeTalliesAreSeparatedByAnnouncingBlock(
+	t *testing.T,
+) {
 	fixture := newManagerFixture(
 		t,
 		func(_ *managerFixture, cfg *VoteManagerConfig) {
@@ -1201,6 +1253,49 @@ func TestVoteManagerEpochTransitionPrunes(t *testing.T) {
 		1,
 		"previous-epoch votes are retained",
 	)
+}
+
+func TestVoteManagerEpochTransitionPrunesPrototypeStateAndCounts(t *testing.T) {
+	fixture := newManagerFixture(t)
+	oldRb := lcommon.NewBlake2b256([]byte("old-rb"))
+	oldEb := lcommon.NewBlake2b256([]byte("old-eb"))
+	currentRb := lcommon.NewBlake2b256([]byte("current-rb"))
+	currentEb := lcommon.NewBlake2b256([]byte("current-eb"))
+
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"old-peer", fixture.makePrototypeVote(t, 0, oldRb),
+	))
+	require.NoError(t, fixture.mgr.HandlePrototypeVote(
+		"current-peer", fixture.makePrototypeVote(t, 1, currentRb),
+	))
+	now := fixture.mgr.now()
+	fixture.mgr.mu.Lock()
+	fixture.mgr.announcements[oldRb] = announcementRecord{
+		slot: 350, epoch: 3, ebHash: oldEb, seenAt: now,
+	}
+	fixture.mgr.announcements[currentRb] = announcementRecord{
+		slot: 577, epoch: 5, ebHash: currentEb, seenAt: now,
+	}
+	fixture.mgr.mu.Unlock()
+	fixture.mgr.HandleEndorserBlock(350, oldEb)
+	fixture.mgr.HandleEndorserBlock(577, currentEb)
+
+	fixture.mgr.handleEpochTransition(event.EpochTransitionEvent{
+		PreviousEpoch: 5,
+		NewEpoch:      6,
+	})
+
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.NotContains(t, fixture.mgr.announcements, oldRb)
+	assert.NotContains(t, fixture.mgr.pendingVotes, oldRb)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, oldEb)
+	assert.Contains(t, fixture.mgr.announcements, currentRb)
+	assert.Contains(t, fixture.mgr.pendingVotes, currentRb)
+	assert.Contains(t, fixture.mgr.acquiredEbs, currentEb)
+	assert.Equal(t, 1, fixture.mgr.pendingVoteCount)
+	assert.Empty(t, fixture.mgr.pendingVoteCountByConn["old-peer"])
+	assert.Equal(t, 1, fixture.mgr.pendingVoteCountByConn["current-peer"])
 }
 
 func TestVoteManagerTTLPrune(t *testing.T) {
@@ -1924,4 +2019,92 @@ func TestVoteManagerRollbackAllowsReVoteForNewChain(t *testing.T) {
 	_, err := cbor.Decode(raws[0], &stored)
 	require.NoError(t, err)
 	assert.Equal(t, ebHashB, stored.EndorserBlockHash)
+}
+
+func TestVoteManagerRollbackRejectsInFlightLocalPrototypeVote(t *testing.T) {
+	params := newBlockingParamsProvider()
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.ParamsProvider = params
+		},
+	)
+	subId, emittedCh := fixture.eventBus.Subscribe(VoteEmittedEventType)
+	defer fixture.eventBus.Unsubscribe(VoteEmittedEventType, subId)
+	member := fixture.members[3]
+	var poolKeyHash lcommon.PoolKeyHash
+	copy(poolKeyHash[:], member.PoolKeyHash)
+	fixture.mgr.EnableVoting(poolKeyHash, fixture.keys[3])
+	rbHash := lcommon.NewBlake2b256([]byte("rolled-back-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("rolled-back-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fixture.mgr.HandleEndorserBlock(577, ebHash)
+	}()
+	testutil.RequireReceive(
+		t,
+		params.entered,
+		2*time.Second,
+		"committee lookup",
+	)
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: 550},
+	})
+	close(params.release)
+	testutil.RequireReceive(t, done, 2*time.Second, "in-flight emission exit")
+
+	testutil.RequireNoReceive(
+		t, emittedCh, 300*time.Millisecond,
+		"rolled-back announcement must not publish a local vote",
+	)
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 577, VoterId: 3,
+	}}))
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.NotContains(t, fixture.mgr.announcements, rbHash)
+	assert.NotContains(t, fixture.mgr.acquiredEbs, ebHash)
+	assert.NotContains(t, fixture.mgr.votedAnnouncements, rbHash)
+}
+
+func TestVoteManagerRollbackRejectsInFlightResolvedPrototypeVote(t *testing.T) {
+	params := newBlockingParamsProvider()
+	fixture := newManagerFixture(
+		t,
+		func(_ *managerFixture, cfg *VoteManagerConfig) {
+			cfg.ParamsProvider = params
+		},
+	)
+	rbHash := lcommon.NewBlake2b256([]byte("rolled-back-rb"))
+	ebHash := lcommon.NewBlake2b256([]byte("rolled-back-eb"))
+	fixture.mgr.ObserveAnnouncement(577, rbHash, ebHash)
+	vote := fixture.makePrototypeVote(t, 3, rbHash)
+	done := make(chan error, 1)
+	go func() {
+		done <- fixture.mgr.HandlePrototypeVote("peer", vote)
+	}()
+	testutil.RequireReceive(
+		t,
+		params.entered,
+		2*time.Second,
+		"committee lookup",
+	)
+	fixture.mgr.handleRollback(chain.ChainRollbackEvent{
+		Point: ocommon.Point{Slot: 550},
+	})
+	close(params.release)
+	require.NoError(t, testutil.RequireReceive(
+		t, done, 2*time.Second, "resolved vote exit",
+	))
+
+	assert.Empty(t, fixture.mgr.VotesByIds([]lcommon.LeiosVoteId{{
+		SlotNo: 577, VoterId: 3,
+	}}))
+	fixture.mgr.mu.Lock()
+	defer fixture.mgr.mu.Unlock()
+	assert.Empty(t, fixture.mgr.tallies)
+	assert.Empty(t, fixture.mgr.voteRecords)
 }

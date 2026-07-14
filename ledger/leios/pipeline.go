@@ -580,6 +580,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		m.updateGaugesLocked(cur)
 		return
 	}
+	firstCertification := !eb.certified
 	eb.certified = true
 	if eb.certificates == nil {
 		eb.certificates = make(
@@ -587,7 +588,7 @@ func (m *PipelineManager) handleEbQuorum(evt EbQuorumEvent) {
 		)
 	}
 	eb.certificates[evt.AnnouncingRbHash] = evt.Certificate
-	if m.metrics != nil {
+	if m.metrics != nil && firstCertification {
 		m.metrics.ebCertifiedTotal.Inc()
 	}
 	m.logger.Info(
@@ -644,7 +645,12 @@ func (m *PipelineManager) EligibleCertifiedEbs() []EligibleEb {
 			if !eb.certified || eb.equivocated || eb.embedded {
 				continue
 			}
-			if stageFor(inst.produceSlot, cur, m.timing, true) != StageEligible {
+			if stageFor(
+				inst.produceSlot,
+				cur,
+				m.timing,
+				true,
+			) != StageEligible {
 				continue
 			}
 			for rbHash, cert := range eb.certificates {

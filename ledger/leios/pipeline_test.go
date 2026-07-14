@@ -310,6 +310,47 @@ func TestEbEquivocationMetricCountsOncePerSlot(t *testing.T) {
 	)
 }
 
+func TestEbCertifiedMetricCountsEbOnceAcrossAnnouncementContexts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	mgr, err := NewPipelineManager(PipelineManagerConfig{
+		EventBus:      event.NewEventBus(nil, nil),
+		SlotProvider:  &fakeSlotProvider{slot: 300},
+		EpochProvider: &fakeEpochProvider{},
+		Timing:        DefaultPipelineTiming(),
+		PromRegistry:  reg,
+	})
+	require.NoError(t, err)
+
+	hash := ebHashFor("eb-a")
+	for _, rbHash := range []lcommon.Blake2b256{
+		ebHashFor("announcing-rb-a"),
+		ebHashFor("announcing-rb-b"),
+	} {
+		mgr.handleEbQuorum(EbQuorumEvent{
+			SlotNo:            300,
+			EndorserBlockHash: hash,
+			AnnouncingRbHash:  rbHash,
+			Certificate:       &lcommon.LeiosEbCertificate{},
+		})
+	}
+
+	assert.Equal(
+		t,
+		float64(1),
+		promtestutil.ToFloat64(mgr.metrics.ebCertifiedTotal),
+		"certification is an EB-level transition, not a certificate count",
+	)
+	mgr.mu.Lock()
+	eb := mgr.byHash[hash]
+	if eb == nil {
+		mgr.mu.Unlock()
+		t.Fatal("certified EB is not tracked")
+	}
+	certificateCount := len(eb.certificates)
+	mgr.mu.Unlock()
+	assert.Equal(t, 2, certificateCount)
+}
+
 func TestEbQuorumPastCertifyDeadlineRejected(t *testing.T) {
 	tm := DefaultPipelineTiming()
 	const slot = 300
@@ -366,7 +407,9 @@ func TestLateCertMetricCounted(t *testing.T) {
 	assert.Equal(
 		t,
 		float64(1),
-		promtestutil.ToFloat64(mgr.metrics.certsRejectedTotal.WithLabelValues("late")),
+		promtestutil.ToFloat64(
+			mgr.metrics.certsRejectedTotal.WithLabelValues("late"),
+		),
 	)
 }
 

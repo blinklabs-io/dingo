@@ -58,6 +58,75 @@ type Committee struct {
 	byPoolHex        map[string]uint64 // hex pool key hash -> VoterId
 }
 
+type poolStake struct {
+	hash  []byte
+	stake uint64
+}
+
+// prepareCommitteePools parses and validates the stake distribution shared by
+// both committee constructors. Keeping this in one place ensures they accept
+// the same pool identifiers and exclude the same zero-stake entries.
+func prepareCommitteePools(
+	poolStakes map[string]uint64,
+	totalActiveStake uint64,
+) ([]poolStake, error) {
+	pools := make([]poolStake, 0, len(poolStakes))
+	for hashHex, stake := range poolStakes {
+		if stake == 0 {
+			continue
+		}
+		hash, err := hex.DecodeString(hashHex)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"malformed pool key hash %q: %w",
+				hashHex,
+				err,
+			)
+		}
+		if len(hash) != voterPoolKeyHashSize {
+			return nil, fmt.Errorf(
+				"malformed pool key hash %q: must be %d bytes",
+				hashHex,
+				voterPoolKeyHashSize,
+			)
+		}
+		pools = append(pools, poolStake{hash: hash, stake: stake})
+	}
+	if len(pools) == 0 || totalActiveStake == 0 {
+		return nil, ErrEmptyStakeDistribution
+	}
+	return pools, nil
+}
+
+// buildCommittee assigns the member indices and lookup map shared by both
+// constructors after they have applied their protocol-specific ordering and
+// selection rules.
+func buildCommittee(
+	epoch uint64,
+	snapshotEpoch uint64,
+	totalActiveStake uint64,
+	pools []poolStake,
+) *Committee {
+	committee := &Committee{
+		Epoch:            epoch,
+		SnapshotEpoch:    snapshotEpoch,
+		Members:          make([]CommitteeMember, 0, len(pools)),
+		TotalActiveStake: totalActiveStake,
+		byPoolHex:        make(map[string]uint64, len(pools)),
+	}
+	for _, pool := range pools {
+		voterId := uint64(len(committee.Members))
+		committee.Members = append(committee.Members, CommitteeMember{
+			VoterId:     voterId,
+			PoolKeyHash: pool.hash,
+			Stake:       pool.stake,
+		})
+		committee.byPoolHex[hex.EncodeToString(pool.hash)] = voterId
+		committee.CommitteeStake += pool.stake
+	}
+	return committee
+}
+
 // CommitteeSnapshotEpoch returns the epoch whose mark stake snapshot is active
 // for the given epoch. This must stay in lockstep with Praos leader election.
 func CommitteeSnapshotEpoch(epoch uint64) uint64 {
@@ -84,27 +153,9 @@ func ComputeCommittee(
 		committeeStakeCoverage.Cmp(one) > 0 {
 		return nil, ErrInvalidCommitteeStakeCoverage
 	}
-	type poolStake struct {
-		hash  []byte
-		stake uint64
-	}
-	pools := make([]poolStake, 0, len(poolStakes))
-	for hashHex, stake := range poolStakes {
-		if stake == 0 {
-			continue
-		}
-		hash, err := hex.DecodeString(hashHex)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"malformed pool key hash %q: %w",
-				hashHex,
-				err,
-			)
-		}
-		pools = append(pools, poolStake{hash: hash, stake: stake})
-	}
-	if len(pools) == 0 || totalActiveStake == 0 {
-		return nil, ErrEmptyStakeDistribution
+	pools, err := prepareCommitteePools(poolStakes, totalActiveStake)
+	if err != nil {
+		return nil, err
 	}
 	slices.SortFunc(pools, func(a, b poolStake) int {
 		// Stake descending, pool key hash ascending for equal stake
@@ -125,22 +176,9 @@ func ComputeCommittee(
 	)
 	cumStake := new(big.Int)
 	scaledCum := new(big.Int)
-	committee := &Committee{
-		Epoch:            epoch,
-		SnapshotEpoch:    snapshotEpoch,
-		Members:          make([]CommitteeMember, 0, len(pools)),
-		TotalActiveStake: totalActiveStake,
-		byPoolHex:        make(map[string]uint64, len(pools)),
-	}
+	selectedCount := 0
 	for _, pool := range pools {
-		voterId := uint64(len(committee.Members))
-		committee.Members = append(committee.Members, CommitteeMember{
-			VoterId:     voterId,
-			PoolKeyHash: pool.hash,
-			Stake:       pool.stake,
-		})
-		committee.byPoolHex[hex.EncodeToString(pool.hash)] = voterId
-		committee.CommitteeStake += pool.stake
+		selectedCount++
 		cumStake.Add(cumStake, new(big.Int).SetUint64(pool.stake))
 		scaledCum.Mul(cumStake, committeeStakeCoverage.Denom())
 		if scaledCum.Cmp(target) >= 0 {
@@ -154,11 +192,16 @@ func ComputeCommittee(
 		return nil, fmt.Errorf(
 			"committee stake coverage target %s unreachable: pool stake %d of total active stake %d",
 			committeeStakeCoverage.RatString(),
-			committee.CommitteeStake,
+			cumStake.Uint64(),
 			totalActiveStake,
 		)
 	}
-	return committee, nil
+	return buildCommittee(
+		epoch,
+		snapshotEpoch,
+		totalActiveStake,
+		pools[:selectedCount],
+	), nil
 }
 
 // ComputePrototypeCommittee reproduces the committee construction used by
@@ -171,32 +214,9 @@ func ComputePrototypeCommittee(
 	poolStakes map[string]uint64,
 	totalActiveStake uint64,
 ) (*Committee, error) {
-	type poolStake struct {
-		hash  []byte
-		stake uint64
-	}
-	pools := make([]poolStake, 0, len(poolStakes))
-	for hashHex, stake := range poolStakes {
-		if stake == 0 {
-			continue
-		}
-		hash, err := hex.DecodeString(hashHex)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"malformed pool key hash %q: %w", hashHex, err,
-			)
-		}
-		if len(hash) != voterPoolKeyHashSize {
-			return nil, fmt.Errorf(
-				"malformed pool key hash %q: must be %d bytes",
-				hashHex,
-				voterPoolKeyHashSize,
-			)
-		}
-		pools = append(pools, poolStake{hash: hash, stake: stake})
-	}
-	if len(pools) == 0 || totalActiveStake == 0 {
-		return nil, ErrEmptyStakeDistribution
+	pools, err := prepareCommitteePools(poolStakes, totalActiveStake)
+	if err != nil {
+		return nil, err
 	}
 	slices.SortFunc(pools, func(a, b poolStake) int {
 		if a.stake != b.stake {
@@ -207,22 +227,7 @@ func ComputePrototypeCommittee(
 		}
 		return bytes.Compare(a.hash, b.hash)
 	})
-	committee := &Committee{
-		Epoch:            epoch,
-		SnapshotEpoch:    snapshotEpoch,
-		Members:          make([]CommitteeMember, 0, len(pools)),
-		TotalActiveStake: totalActiveStake,
-		byPoolHex:        make(map[string]uint64, len(pools)),
-	}
-	for _, pool := range pools {
-		voterId := uint64(len(committee.Members))
-		committee.Members = append(committee.Members, CommitteeMember{
-			VoterId: voterId, PoolKeyHash: pool.hash, Stake: pool.stake,
-		})
-		committee.byPoolHex[hex.EncodeToString(pool.hash)] = voterId
-		committee.CommitteeStake += pool.stake
-	}
-	return committee, nil
+	return buildCommittee(epoch, snapshotEpoch, totalActiveStake, pools), nil
 }
 
 // Size returns the number of committee members.
