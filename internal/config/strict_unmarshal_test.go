@@ -86,6 +86,51 @@ databse:
 	}
 }
 
+// TestLoad_UnknownDatabaseChildKeyRejected guards against a typo'd key
+// directly under "database:" (e.g. "blbo" instead of "blob") silently
+// vanishing. tempConfig's databaseConfig struct only declares Blob/
+// Metadata fields and is decoded leniently, so before this check an
+// unrecognized child key was dropped with no error and the intended
+// plugin config silently fell back to defaults instead of applying.
+func TestLoad_UnknownDatabaseChildKeyRejected(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := writeStrictTestConfig(t, `
+network: "preview"
+database:
+  blbo:
+    plugin: badger
+`)
+	_, err := LoadConfig(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for unknown key under database:, got nil")
+	}
+	if !strings.Contains(err.Error(), "blbo") {
+		t.Errorf("error %q does not mention the unknown key", err.Error())
+	}
+}
+
+// TestLoad_UnknownDatabaseChildKeyRejectedInWrappedMode is the wrapped-mode
+// ("config:" section present) counterpart of
+// TestLoad_UnknownDatabaseChildKeyRejected, since "database:" is a sibling
+// of "config:" in both modes.
+func TestLoad_UnknownDatabaseChildKeyRejectedInWrappedMode(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := writeStrictTestConfig(t, `
+config:
+  network: "preview"
+database:
+  metadtaa:
+    plugin: sqlite
+`)
+	_, err := LoadConfig(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for unknown key under database:, got nil")
+	}
+	if !strings.Contains(err.Error(), "metadtaa") {
+		t.Errorf("error %q does not mention the unknown key", err.Error())
+	}
+}
+
 func TestLoad_FlatSiblingPluginSectionsStillLoad(t *testing.T) {
 	resetGlobalConfig()
 	tmpFile := writeStrictTestConfig(t, `

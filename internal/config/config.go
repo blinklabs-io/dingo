@@ -311,6 +311,41 @@ func validateWrappedRootKeys(root *yaml.Node) error {
 	return nil
 }
 
+// databaseSectionKeys are the only keys allowed directly under a
+// top-level "database:" mapping. tempConfig's databaseConfig struct only
+// declares Blob/Metadata fields and is decoded leniently, so a typo here
+// (e.g. "blbo" instead of "blob") would otherwise be silently dropped:
+// the section falls back to plugin defaults with no error.
+var databaseSectionKeys = map[string]struct{}{
+	"blob":     {},
+	"metadata": {},
+}
+
+// validateDatabaseSectionKeys returns an error if the root document has a
+// top-level "database:" mapping containing any key other than blob or
+// metadata.
+func validateDatabaseSectionKeys(root *yaml.Node) error {
+	dbNode := mappingValue(root, "database")
+	if dbNode == nil || dbNode.Kind != yaml.MappingNode {
+		return nil
+	}
+	var unknown []string
+	for i := 0; i+1 < len(dbNode.Content); i += 2 {
+		key := dbNode.Content[i].Value
+		if _, ok := databaseSectionKeys[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return fmt.Errorf(
+			"unknown key(s) %v under \"database:\" (expected only blob or metadata)",
+			unknown,
+		)
+	}
+	return nil
+}
+
 // strictUnmarshalConfig decodes data into out, returning an error if the
 // document contains any field not present in the Config struct. An empty
 // document decodes as a no-op, matching yaml.Unmarshal's behavior for
@@ -1014,6 +1049,11 @@ func LoadConfig(configFile string) (*Config, error) {
 		var root yaml.Node
 		if err := yaml.Unmarshal(buf, &root); err != nil {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
+		}
+		if len(root.Content) > 0 {
+			if err := validateDatabaseSectionKeys(root.Content[0]); err != nil {
+				return nil, err
+			}
 		}
 
 		// If config section exists, use it for main config
