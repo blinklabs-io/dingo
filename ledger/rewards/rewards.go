@@ -621,6 +621,7 @@ func validateParameters(params Parameters) error {
 func validateSnapshot(snapshot Snapshot) error {
 	seenPools := make(map[PoolID]struct{}, len(snapshot.Pools))
 	seenDelegators := make(map[string]PoolID)
+	credentialEligibility := make(map[string]bool)
 	var totalDelegated uint64
 	for _, pool := range snapshot.Pools {
 		if _, ok := seenPools[pool.ID]; ok {
@@ -634,6 +635,13 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validateCredential(
 			pool.RewardAccount,
 			fmt.Sprintf("pool %s reward account", pool.ID.String()),
+		); err != nil {
+			return err
+		}
+		if err := validateCredentialEligibility(
+			credentialEligibility,
+			pool.RewardAccount,
+			pool.RewardAccountEligible,
 		); err != nil {
 			return err
 		}
@@ -658,6 +666,7 @@ func validateSnapshot(snapshot Snapshot) error {
 		if err := validatePoolDelegators(pool); err != nil {
 			return err
 		}
+		var computedOwnerStake uint64
 		for owner := range pool.Owners {
 			if owner.Tag != 0 {
 				return fmt.Errorf(
@@ -668,8 +677,45 @@ func validateSnapshot(snapshot Snapshot) error {
 					owner.Tag,
 				)
 			}
+			ownerStake, found := poolDelegatorStake(pool.Delegators, owner)
+			if !found {
+				return fmt.Errorf(
+					"%w: pool %s owner %x is not a delegator",
+					ErrInvalidParameters,
+					pool.ID.String(),
+					owner.Hash,
+				)
+			}
+			var overflow bool
+			computedOwnerStake, overflow = addUint64(
+				computedOwnerStake,
+				ownerStake,
+			)
+			if overflow {
+				return fmt.Errorf(
+					"%w: pool %s owner stake overflow",
+					ErrInvalidParameters,
+					pool.ID.String(),
+				)
+			}
+		}
+		if computedOwnerStake != pool.OwnerStake {
+			return fmt.Errorf(
+				"%w: pool %s computed owner stake %d does not match owner stake %d",
+				ErrInvalidParameters,
+				pool.ID.String(),
+				computedOwnerStake,
+				pool.OwnerStake,
+			)
 		}
 		for _, delegator := range pool.Delegators {
+			if err := validateCredentialEligibility(
+				credentialEligibility,
+				delegator.Credential,
+				delegator.Eligible,
+			); err != nil {
+				return err
+			}
 			key := delegator.Credential.Key()
 			if existingPool, ok := seenDelegators[key]; ok {
 				return fmt.Errorf(
@@ -703,6 +749,32 @@ func validateSnapshot(snapshot Snapshot) error {
 		)
 	}
 	return nil
+}
+
+func validateCredentialEligibility(
+	eligibility map[string]bool,
+	credential Credential,
+	eligible bool,
+) error {
+	key := credential.Key()
+	if existing, ok := eligibility[key]; ok && existing != eligible {
+		return fmt.Errorf(
+			"%w: credential %x has conflicting reward eligibility",
+			ErrInvalidParameters,
+			credential.Hash,
+		)
+	}
+	eligibility[key] = eligible
+	return nil
+}
+
+func poolDelegatorStake(delegators []Delegator, credential Credential) (uint64, bool) {
+	for _, delegator := range delegators {
+		if delegator.Credential == credential {
+			return delegator.Stake, true
+		}
+	}
+	return 0, false
 }
 
 func validateCredential(credential Credential, label string) error {
@@ -777,8 +849,7 @@ func calculatePoolRewards(
 		PoolID:     pool.ID,
 		OwnerStake: pool.OwnerStake,
 	}
-	if pool.BlocksProduced == 0 ||
-		pool.DelegatedStake == 0 ||
+	if pool.DelegatedStake == 0 ||
 		pool.Pledge > pool.OwnerStake {
 		return ret, nil
 	}

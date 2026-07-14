@@ -117,6 +117,7 @@ func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing
 						ownerKey: {},
 					},
 					Delegators: []Delegator{
+						{Credential: ownerKey, Stake: 0, Registered: true, Eligible: true},
 						{
 							Credential: scriptWithOwnerHash,
 							Stake:      1_000,
@@ -141,6 +142,7 @@ func TestCalculateScriptCredentialWithOwnerHashStillEarnsMemberReward(t *testing
 
 func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
 	poolID := testPoolID(1)
+	owner := testCredential(0, 2)
 
 	result, err := Calculate(
 		Pots{Reserves: 100_000_000},
@@ -159,7 +161,12 @@ func TestCalculatePledgeFailureZerosPoolReward(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
+					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -248,6 +255,7 @@ func TestCalculateNoActiveStakeReturnsAvailableRewardsToReserves(t *testing.T) {
 
 func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 	poolID := testPoolID(1)
+	owner := testCredential(0, 2)
 	params := testParams()
 	params.TreasuryExpansion = big.NewRat(1, 5)
 
@@ -272,7 +280,12 @@ func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
+					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -289,6 +302,7 @@ func TestCalculateTreasuryTaxUsesIncentivesAndFees(t *testing.T) {
 
 func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 	poolID := testPoolID(1)
+	owner := testCredential(0, 2)
 	params := testParams()
 	params.Decentralization = big.NewRat(1, 2)
 
@@ -309,7 +323,12 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 					TotalBlocks:             5,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
+					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -324,6 +343,7 @@ func TestCalculateNetworkEfficiencyIncludesDecentralization(t *testing.T) {
 
 func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T) {
 	poolID := testPoolID(1)
+	owner := testCredential(0, 2)
 	params := testParams()
 	params.Decentralization = big.NewRat(4, 5)
 	snapshot := Snapshot{
@@ -339,7 +359,12 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T)
 				OwnerStake:              500,
 				RewardAccountRegistered: true,
 				RewardAccountEligible:   true,
-				Owners:                  map[Credential]struct{}{},
+				Owners: map[Credential]struct{}{
+					owner: {},
+				},
+				Delegators: []Delegator{
+					{Credential: owner, Stake: 500, Registered: true, Eligible: true},
+				},
 			},
 		},
 	}
@@ -354,8 +379,9 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T)
 	require.Equal(t, big.NewRat(2, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(1_000_000), result.Undistributed)
-	require.Equal(t, uint64(100_000_000), result.UpdatedPots.Reserves)
+	require.Equal(t, uint64(46_283), result.EffectiveRewards)
+	require.Equal(t, uint64(953_717), result.Undistributed)
+	require.Equal(t, uint64(99_953_717), result.UpdatedPots.Reserves)
 
 	params.Decentralization = big.NewRat(1, 1)
 	result, err = Calculate(Pots{Reserves: 100_000_000}, snapshot, params)
@@ -363,10 +389,12 @@ func TestCalculateNetworkEfficiencyHonorsDecentralizationThreshold(t *testing.T)
 	require.Equal(t, big.NewRat(0, 1), result.ExpectedBlocks)
 	require.Equal(t, big.NewRat(1, 1), result.Efficiency)
 	require.Equal(t, uint64(1_000_000), result.Incentives)
-	require.Equal(t, uint64(1_000_000), result.Undistributed)
+	require.Equal(t, uint64(46_283), result.EffectiveRewards)
+	require.Equal(t, uint64(953_717), result.Undistributed)
 }
 
 func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -390,8 +418,11 @@ func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
 						{Credential: member, Stake: 500, Registered: false, Eligible: false},
 					},
 				},
@@ -416,6 +447,7 @@ func TestCalculateRoutesUnspendableRewardsToTreasury(t *testing.T) {
 }
 
 func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 	params := babbageParams()
@@ -443,8 +475,11 @@ func TestCalculatePotDeltasMatchReferenceSemantics(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
 						{Credential: member, Stake: 500, Registered: true, Eligible: true},
 					},
 				},
@@ -476,6 +511,8 @@ func TestCalculateRejectsRewardsAboveAvailablePot(t *testing.T) {
 	params.MaxLovelaceSupply = 1_000
 	params.OptimalPoolCount = 1
 
+	// The inconsistent block counts intentionally drive apparent performance
+	// above one so the calculated rewards exceed the available pot.
 	_, err := Calculate(
 		Pots{
 			Fees: 1_000_000,
@@ -506,6 +543,7 @@ func TestCalculateRejectsRewardsAboveAvailablePot(t *testing.T) {
 }
 
 func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -529,8 +567,11 @@ func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
 						{Credential: member, Stake: 500, Registered: false, Eligible: false},
 					},
 				},
@@ -549,6 +590,7 @@ func TestCalculatePreBabbageFilteredRewardsReturnToReserves(t *testing.T) {
 }
 
 func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -572,8 +614,11 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: false},
 						{Credential: member, Stake: 500, Registered: true, Eligible: false},
 					},
 				},
@@ -593,6 +638,7 @@ func TestCalculatePreBabbageFinalUnregisteredRewardsGoToTreasury(t *testing.T) {
 }
 
 func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -616,8 +662,11 @@ func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testi
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: false, Eligible: true},
 						{Credential: member, Stake: 500, Registered: false, Eligible: true},
 					},
 				},
@@ -636,6 +685,7 @@ func TestCalculatePreBabbagePrefilteredRewardsIgnoreCurrentRegistration(t *testi
 }
 
 func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
+	owner := testCredential(0, 2)
 	shared := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -658,8 +708,11 @@ func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
 						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
 					},
 				},
@@ -681,6 +734,8 @@ func TestCalculateShelleyFiltersMultipleRewardsForSameCredential(t *testing.T) {
 
 func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 	shared := testCredential(0, 3)
+	ownerA := testCredential(0, 1)
+	ownerB := testCredential(0, 2)
 	poolA := testPoolID(1)
 	poolB := testPoolID(2)
 
@@ -703,7 +758,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerB: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 				{
 					ID:                      poolA,
@@ -717,7 +777,12 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerA: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -740,6 +805,8 @@ func TestCalculateShelleyFiltersLeaderRewardsByPoolOrder(t *testing.T) {
 
 func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) {
 	shared := testCredential(0, 3)
+	ownerA := testCredential(0, 1)
+	ownerB := testCredential(0, 2)
 	poolA := testPoolID(1)
 	poolB := testPoolID(2)
 
@@ -762,8 +829,11 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerA: {},
+					},
 					Delegators: []Delegator{
+						{Credential: ownerA, Stake: 500, Registered: false, Eligible: false},
 						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
 					},
 				},
@@ -779,7 +849,12 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerB: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -801,6 +876,8 @@ func TestCalculateShelleyFiltersLeaderBeforeLowerPoolMemberReward(t *testing.T) 
 
 func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(t *testing.T) {
 	shared := testCredential(0, 3)
+	ownerA := testCredential(0, 1)
+	ownerB := testCredential(0, 2)
 	poolA := testPoolID(1)
 	poolB := testPoolID(2)
 
@@ -823,8 +900,11 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerB: {},
+					},
 					Delegators: []Delegator{
+						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
 						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
 					},
 				},
@@ -840,7 +920,12 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerA: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -860,6 +945,7 @@ func TestCalculateShelleyDropsMemberRewardsForSharedRewardCredentialAcrossPools(
 }
 
 func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T) {
+	owner := testCredential(0, 2)
 	shared := testCredential(0, 3)
 	poolID := testPoolID(1)
 
@@ -882,8 +968,11 @@ func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: true, Eligible: true},
 						{Credential: shared, Stake: 500, Registered: true, Eligible: true},
 					},
 				},
@@ -906,6 +995,8 @@ func TestCalculateAllegraAggregatesMultipleRewardsForSameCredential(t *testing.T
 
 func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 	shared := testCredential(0, 3)
+	ownerA := testCredential(0, 1)
+	ownerB := testCredential(0, 2)
 	poolA := testPoolID(1)
 	poolB := testPoolID(2)
 
@@ -928,7 +1019,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerB: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 				{
 					ID:                      poolA,
@@ -942,7 +1038,12 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerA: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -964,6 +1065,8 @@ func TestCalculateAllegraKeepsSameCredentialRewardsAcrossPools(t *testing.T) {
 
 func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 	shared := testCredential(0, 3)
+	ownerA := testCredential(0, 1)
+	ownerB := testCredential(0, 2)
 	poolA := testPoolID(1)
 	poolB := testPoolID(2)
 
@@ -985,7 +1088,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 					BlocksProduced:          5,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerB: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerB, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 				{
 					ID:                      poolA,
@@ -998,7 +1106,12 @@ func TestCalculateUsesGlobalBlockTotalWhenPoolTotalsAbsent(t *testing.T) {
 					BlocksProduced:          5,
 					RewardAccountRegistered: true,
 					RewardAccountEligible:   true,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						ownerA: {},
+					},
+					Delegators: []Delegator{
+						{Credential: ownerA, Stake: 500, Registered: true, Eligible: true},
+					},
 				},
 			},
 		},
@@ -1169,6 +1282,7 @@ func TestCalculateRewardPotMatchesCFCalculatorEtaBoundaryVectors(t *testing.T) {
 			}
 
 			testSnapshot := snapshot
+			testSnapshot.Pools = append([]Pool(nil), snapshot.Pools...)
 			testSnapshot.Pools[0].BlocksProduced = tc.totalBlocks
 			testSnapshot.Pools[0].TotalBlocks = tc.totalBlocks
 
@@ -1297,6 +1411,80 @@ func TestCalculateRejectsOwnerStakeAboveDelegatedStake(t *testing.T) {
 	)
 	require.ErrorIs(t, err, ErrInvalidParameters)
 	require.ErrorContains(t, err, "owner stake 10 exceeds delegated stake 9")
+}
+
+func TestCalculateRejectsOwnerMissingFromDelegators(t *testing.T) {
+	owner := testCredential(0, 2)
+	_, err := Calculate(
+		Pots{},
+		Snapshot{
+			TotalActiveStake: 1,
+			Pools: []Pool{
+				{
+					ID:             testPoolID(1),
+					DelegatedStake: 1,
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
+				},
+			},
+		},
+		testParams(),
+	)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	require.ErrorContains(t, err, "owner")
+	require.ErrorContains(t, err, "is not a delegator")
+}
+
+func TestCalculateRejectsIncorrectOwnerStake(t *testing.T) {
+	owner := testCredential(0, 2)
+	_, err := Calculate(
+		Pots{},
+		Snapshot{
+			TotalActiveStake: 5,
+			Pools: []Pool{
+				{
+					ID:             testPoolID(1),
+					DelegatedStake: 5,
+					OwnerStake:     5,
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
+					Delegators: []Delegator{
+						{Credential: owner, Stake: 4},
+					},
+				},
+			},
+		},
+		testParams(),
+	)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	require.ErrorContains(t, err, "computed owner stake 4")
+	require.ErrorContains(t, err, "does not match owner stake 5")
+}
+
+func TestCalculateRejectsConflictingCredentialEligibility(t *testing.T) {
+	shared := testCredential(0, 3)
+	_, err := Calculate(
+		Pots{},
+		Snapshot{
+			TotalActiveStake: 1,
+			Pools: []Pool{
+				{
+					ID:                    testPoolID(1),
+					RewardAccount:         shared,
+					RewardAccountEligible: true,
+					DelegatedStake:        1,
+					Delegators: []Delegator{
+						{Credential: shared, Stake: 1, Eligible: false},
+					},
+				},
+			},
+		},
+		testParams(),
+	)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	require.ErrorContains(t, err, "conflicting reward eligibility")
 }
 
 func TestCalculateRejectsScriptPoolOwner(t *testing.T) {
@@ -1573,6 +1761,7 @@ func TestCalculateRejectsReserveRefundOverflow(t *testing.T) {
 }
 
 func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
+	owner := testCredential(0, 2)
 	member := testCredential(0, 3)
 	poolID := testPoolID(1)
 	params := babbageParams()
@@ -1597,8 +1786,11 @@ func TestCalculateRejectsUnspendableTreasuryOverflow(t *testing.T) {
 					TotalBlocks:             10,
 					RewardAccountRegistered: false,
 					RewardAccountEligible:   false,
-					Owners:                  map[Credential]struct{}{},
+					Owners: map[Credential]struct{}{
+						owner: {},
+					},
 					Delegators: []Delegator{
+						{Credential: owner, Stake: 500, Registered: false, Eligible: false},
 						{Credential: member, Stake: 500, Registered: false, Eligible: false},
 					},
 				},

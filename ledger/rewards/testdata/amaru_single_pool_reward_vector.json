@@ -47,7 +47,22 @@
         "total_blocks": 10,
         "reward_account_registered": true,
         "reward_account_eligible": true,
+        "owners": [
+          {
+            "tag": 0,
+            "hash": "02020202020202020202020202020202020202020202020202020202"
+          }
+        ],
         "delegators": [
+          {
+            "credential": {
+              "tag": 0,
+              "hash": "02020202020202020202020202020202020202020202020202020202"
+            },
+            "stake": 500,
+            "registered": true,
+            "eligible": true
+          },
           {
             "credential": {
               "tag": 0,
