@@ -82,6 +82,49 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Mayor detalle de activos en Blockfrost, registros más tranquilos y dependencias actualizadas
+
+**Fecha:** July 14, 2026
+
+**Versión:** v0.63.1
+
+Esta versión completa más datos de activos en Blockfrost, reduce el ruido habitual en los registros de Mithril y de pares, y actualiza dependencias del runtime y de los ejemplos mientras amplía la cobertura automatizada para los flujos de envío de transacciones y sincronización.
+
+### 💪 Mejoras
+
+* Actualizó **incorporar datos más recientes de configuración de red de Cardano:** Las compilaciones en contenedor ahora usan un conjunto más reciente de configuración de Cardano, lo que renueva los datos de trazado y actualiza la configuración de Musashi.
+* Reforzó **usar un comportamiento ascendente más seguro para el control de concurrencia:** La biblioteca de concurrencia incluida ahora falla de inmediato ante pesos negativos no válidos en lugar de arriesgar un estado interno dañado.
+* Renovó **mantener al día las dependencias de comprobación de salud:** Dingo ahora compila con la versión más reciente de la biblioteca de salud y mantiene sin cambios los endpoints y la configuración.
+* Modernizó **incorporar actualizaciones más recientes de soporte del sistema operativo:** El runtime ahora recibe correcciones actuales del sistema ascendente sin requerir cambios de configuración.
+* Refrescó **incluir bibliotecas más recientes de soporte criptográfico, de terminal y de texto:** Dingo ahora incorpora mantenimiento ascendente más reciente en estas bibliotecas sin cambiar la configuración ni las API.
+* Pulió **mantener el ejemplo de Blockfrost explorer en el último parche de Vite:** El trabajo local de frontend para el ejemplo ahora usa la versión corregida de las herramientas de compilación y desarrollo.
+* Optimizó **mantener el ejemplo de Sundae preview en el último parche de Vite:** El desarrollo local del ejemplo ahora usa la versión de mantenimiento más reciente de Vite.
+* Alineó **ejecutar el ejemplo de Sundae preview con un SDK ascendente más nuevo:** El ejemplo ahora se instala y se ejecuta con la versión más reciente del SDK sin cambiar su comportamiento externo.
+* Amplió **cubrir con más profundidad los controladores de envío de transacciones:** Una cobertura automatizada más amplia ayuda a mantener estable el comportamiento del envío de transacciones en futuras actualizaciones.
+* Extendió **cubrir de forma más directa las rutas de sincronización del lado del servidor:** Comprobaciones automatizadas adicionales ayudan a detectar antes regresiones en el comportamiento de sincronización del lado del servidor.
+
+### 🔧 Correcciones
+
+* Completó **devolver con más detalle el historial de acuñación y los metadatos en las respuestas de Blockfrost:** Las consultas de activos de Blockfrost ahora rellenan esos campos con más fiabilidad, lo que vuelve más completa la inspección posterior de activos.
+* Aclaró **hacer más legibles los registros de advertencia de Mithril:** La salida de advertencia relacionada con Mithril ahora usa una redacción más clara, lo que reduce la confusión durante la revisión operativa habitual.
+* Atenuó **bajar a registros informativos los cierres inofensivos de conexiones duplicadas:** Las carreras normales entre conexiones de pares ya no muestran cierres EOF benignos como errores, mientras los fallos reales de handshake siguen apareciendo como errores.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.63.0 (July 10, 2026)
 
 **Title:** MidnightState expansion, API correctness, and stricter inbound ledger validation
