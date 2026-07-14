@@ -18,6 +18,7 @@ import (
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -78,15 +79,22 @@ func (d *Database) GetPool(
 	return ret, nil
 }
 
-// ImportPool upserts a pool and creates a registration record. When txn is nil
-// a write transaction is opened, committed on success and rolled back on error
-// via Txn.Do.
+// ImportPool upserts a pool and creates a registration record. A supplied txn
+// must be writable and include a metadata handle. When txn is nil a write
+// transaction is opened, committed on success and rolled back on error via
+// Txn.Do.
 func (d *Database) ImportPool(
 	txn *Txn,
 	pool *models.Pool,
 	reg *models.PoolRegistration,
 ) error {
 	if txn != nil {
+		if txn.Metadata() == nil {
+			return fmt.Errorf("import pool: %w", types.ErrNilTxn)
+		}
+		if !txn.IsReadWrite() {
+			return fmt.Errorf("import pool: %w", types.ErrTxnWrongType)
+		}
 		return d.metadata.ImportPool(pool, reg, txn.Metadata())
 	}
 	return d.MetadataTxn(true).Do(func(t *Txn) error {
