@@ -379,6 +379,13 @@ func (d *Database) SetGapBlockTransaction(
 	); err != nil {
 		return err
 	}
+	if err := d.metadata.RecomputeGapCollateralFee(
+		tx, point, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"recompute gap block collateral fee: %w", err,
+		)
+	}
 
 	if owned {
 		if err := txn.Commit(); err != nil {

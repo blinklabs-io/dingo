@@ -227,6 +227,32 @@ func TestBatchAccumulator_MergeFromIndex(t *testing.T) {
 	assert.Equal(t, []byte{0x20}, keys.PaymentKey)
 }
 
+func TestBatchAccumulator_ZeroValueProducerAmount(t *testing.T) {
+	t.Parallel()
+	var batch BatchAccumulator
+	txID := bytes.Repeat([]byte{0xaa}, 32)
+	batch.AddUtxoOutput(models.Utxo{
+		TxId: txID, OutputIdx: 3, Amount: 123,
+	})
+	amount, ok := batch.InFlightProducerAmount(txID, 3)
+	require.True(t, ok)
+	assert.Equal(t, uint64(123), amount)
+
+	batch.Reset()
+	_, ok = batch.InFlightProducerAmount(txID, 3)
+	assert.False(t, ok)
+
+	var dst BatchAccumulator
+	var src BatchAccumulator
+	src.AddCollateralReturn(models.Utxo{
+		TxId: txID, OutputIdx: 4, Amount: 456,
+	})
+	dst.MergeFrom(&src)
+	amount, ok = dst.InFlightProducerAmount(txID, 4)
+	require.True(t, ok)
+	assert.Equal(t, uint64(456), amount)
+}
+
 func TestFlushBatch_Witnesses(t *testing.T) {
 	t.Parallel()
 	store := setupTestDBWithMode(t, "api")

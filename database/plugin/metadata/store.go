@@ -293,6 +293,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, uint64, error)
 
+	// SumTransactionFeesInSlotRange sums the fee-pot contributions in the
+	// inclusive slot range: declared fees of valid transactions plus
+	// consumed collateral of phase-2-invalid transactions.
+	SumTransactionFeesInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, error)
+
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
 		[]lcommon.PoolKeyHash,
@@ -851,6 +860,15 @@ type MetadataStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		types.Txn,
+	) error
+
+	// RecomputeGapCollateralFee recomputes and persists the collateral fee
+	// for a phase-2-invalid gap-block transaction after its consumed
+	// collateral inputs have been recovered into the metadata UTxO table.
+	RecomputeGapCollateralFee(
+		lcommon.Transaction,
+		ocommon.Point,
 		types.Txn,
 	) error
 

@@ -1694,7 +1694,12 @@ is always expected to be fully recoverable from the snapshot import.
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
 (the "gap blocks") for their transaction effects, including consumed-input
-reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. The trust
+reconciliation via `ensureGapConsumedUtxos`, but without VRF folding. Because a
+phase-2-invalid transaction's collateral fee is computed from the metadata UTxO
+rows and those consumed inputs are only recovered by `ensureGapConsumedUtxos`
+after the transaction row is created, `SetGapBlockTransaction` then calls
+`RecomputeGapCollateralFee` to recompute and persist `transaction.collateral_fee`
+once the inputs exist, so the epoch fee pot is not undercounted. The trust
 boundary is then recorded at the post-gap chain tip (`mithril/sync_import.go`),
 ahead of the evolving nonce persisted at the ledger-state slot. Because live
 chainsync folds nonces only past the trust boundary, the candidate nonce carried

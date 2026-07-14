@@ -51,10 +51,22 @@ type BatchAccumulator struct {
 	UtxoSpends     []utxoSpend
 	CollateralRets []models.Utxo
 	DeleteTxIDs    []uint
+	producedByRef  map[string]models.Utxo
+}
+
+func utxoRefKey(txId []byte, outputIdx uint32) string {
+	return fmt.Sprintf("%x:%d", txId, outputIdx)
 }
 
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{}
+	return &BatchAccumulator{producedByRef: make(map[string]models.Utxo)}
+}
+
+func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+	if b.producedByRef == nil {
+		b.producedByRef = make(map[string]models.Utxo)
+	}
+	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
 // NewBatchAccumulator creates an accumulator for this metadata store.
@@ -95,6 +107,7 @@ func (b *BatchAccumulator) AddAddressTx(at models.AddressTransaction) {
 // AddUtxoOutput appends a produced UTxO record to the batch.
 func (b *BatchAccumulator) AddUtxoOutput(u models.Utxo) {
 	b.UtxoOutputs = append(b.UtxoOutputs, u)
+	b.indexProducedUtxo(u)
 }
 
 // AddUtxoSpend appends a consumed UTxO record to the batch.
@@ -105,6 +118,18 @@ func (b *BatchAccumulator) AddUtxoSpend(s utxoSpend) {
 // AddCollateralReturn appends a collateral return UTxO to the batch.
 func (b *BatchAccumulator) AddCollateralReturn(u models.Utxo) {
 	b.CollateralRets = append(b.CollateralRets, u)
+	b.indexProducedUtxo(u)
+}
+
+func (b *BatchAccumulator) InFlightProducerAmount(
+	txId []byte,
+	outputIdx uint32,
+) (uint64, bool) {
+	u, ok := b.producedByRef[utxoRefKey(txId, outputIdx)]
+	if !ok {
+		return 0, false
+	}
+	return uint64(u.Amount), true
 }
 
 // AddDeleteTxID appends a transaction ID scheduled for idempotent
@@ -126,6 +151,7 @@ func (b *BatchAccumulator) Reset() {
 	b.UtxoSpends = b.UtxoSpends[:0]
 	b.CollateralRets = b.CollateralRets[:0]
 	b.DeleteTxIDs = b.DeleteTxIDs[:0]
+	clear(b.producedByRef)
 }
 
 // Len returns the number of accumulated metadata rows. It is intentionally a
@@ -162,6 +188,12 @@ func (b *BatchAccumulator) MergeFrom(other *BatchAccumulator) {
 	b.UtxoSpends = append(b.UtxoSpends, other.UtxoSpends...)
 	b.CollateralRets = append(b.CollateralRets, other.CollateralRets...)
 	b.DeleteTxIDs = append(b.DeleteTxIDs, other.DeleteTxIDs...)
+	for _, u := range other.UtxoOutputs {
+		b.indexProducedUtxo(u)
+	}
+	for _, u := range other.CollateralRets {
+		b.indexProducedUtxo(u)
+	}
 }
 
 // FlushBatch writes all accumulated records in a deterministic order.

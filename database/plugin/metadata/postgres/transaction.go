@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -132,6 +133,27 @@ func (d *MetadataStorePostgres) GetTransactionSlotByHash(
 		return 0, false, result.Error
 	}
 	return row.Slot, true, nil
+}
+
+// SumTransactionFeesInSlotRange sums declared fees for valid transactions
+// and consumed collateral for phase-2-invalid transactions.
+func (d *MetadataStorePostgres) SumTransactionFeesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	if err := db.Model(&models.Transaction{}).
+		Select("COALESCE(SUM(CASE WHEN valid THEN CAST(fee AS BIGINT) ELSE CAST(collateral_fee AS BIGINT) END), 0)").
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
+	}
+	return total, nil
 }
 
 // GetTransactionIDByHash returns the primary-key ID of the transaction
@@ -821,15 +843,27 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	collateralReturn := tx.CollateralReturn()
 	for _, utxo := range tx.Produced() {
@@ -906,6 +940,38 @@ func (d *MetadataStorePostgres) SetGapBlockTransaction(
 	return nil
 }
 
+func (d *MetadataStorePostgres) RecomputeGapCollateralFee(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	if tx.IsValid() {
+		return nil
+	}
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
+	if err := db.Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Update("collateral_fee", types.Uint64(collateralFee)).Error; err != nil {
+		return fmt.Errorf("update collateral fee for gap tx %x: %w", txHash, err)
+	}
+	return nil
+}
+
 // SetTransaction adds a new transaction to the database and processes all certificates
 func (d *MetadataStorePostgres) SetTransaction(
 	tx lcommon.Transaction,
@@ -928,15 +994,27 @@ func (d *MetadataStorePostgres) SetTransaction(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(db, tx, nil)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -2608,15 +2686,29 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, batch.InFlightProducerAmount,
+	)
+	if err != nil {
+		return fmt.Errorf("compute collateral fee for tx %x: %w", txHash, err)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
