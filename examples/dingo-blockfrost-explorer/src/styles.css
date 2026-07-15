@@ -909,6 +909,18 @@ pre {
   overflow-wrap: anywhere;
 }
 
+.utxo-feature {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.2rem 0;
+}
+
+.utxo-feature small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .lookup-form {
   display: grid;
   gap: 12px;

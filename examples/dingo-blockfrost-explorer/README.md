@@ -40,7 +40,7 @@ asset, metadata, account, DRep, and pool data from Dingo's API indexes.
 
 ### Kubernetes
 
-The example Helm values use `ghcr.io/blinklabs-io/dingo:0.52.0`, enable all
+The example Helm values use `ghcr.io/blinklabs-io/dingo:0.64.0`, enable all
 API ports, and keep the chart-created Dingo Service internal to the cluster.
 Apply the separate API Service when the frontend proxy needs a Kubernetes
 LoadBalancer:
@@ -103,11 +103,15 @@ is temporarily unavailable.
 - Transaction lookup with UTxOs, metadata, certificates, withdrawals, redeemers,
   pool updates/retires, metadata CBOR, transaction CBOR, and required signers
 - Payment address visible balance, UTxOs, native assets, and transaction history
+- Native asset details with CIP-25 metadata, aggregate mint/burn activity, and
+  paginated current holder addresses
+- Datum hashes, inline datums, and reference script hashes on address and
+  transaction UTxOs
 - Stake account summary, payment addresses, delegations, registrations, rewards
 
 The UI deliberately marks cexplorer-style aggregate views that Dingo's current
-public Blockfrost surface does not expose yet, such as asset holder lists,
-asset mint history, pool delegators, arbitrary block transaction lists, script
+public Blockfrost surface does not expose yet, such as individual asset mint
+transactions, pool delegators, arbitrary block transaction lists, script
 indexes, and historical epoch block lists.
 
 ## Local Checks

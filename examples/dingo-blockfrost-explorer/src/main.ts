@@ -224,7 +224,14 @@ type AssetResponse = {
   initial_mint_tx_hash: string;
   mint_or_burn_count: number;
   onchain_metadata: unknown | null;
+  onchain_metadata_standard: string | null;
+  onchain_metadata_extra: string | null;
   metadata: unknown | null;
+};
+
+type AssetAddressResponse = {
+  address: string;
+  quantity: string;
 };
 
 type AccountResponse = {
@@ -1272,7 +1279,7 @@ async function runDetailLookup(tab: DetailTab, query: string, syncRoute = true):
         await renderAccountLookup(query);
         break;
       case "asset":
-        renderAssetResult(await blockfrostFetch<AssetResponse>(`/api/v0/assets/${encodeURIComponent(query)}`));
+        await renderAssetLookup(query);
         break;
       case "epoch":
         await renderEpochLookup(query);
@@ -2109,9 +2116,26 @@ async function renderAccountLookup(stakeAddress: string): Promise<void> {
   `;
 }
 
-function renderAssetResult(asset: AssetResponse): void {
+async function renderAssetLookup(assetID: string): Promise<void> {
+  const encodedAssetID = encodeURIComponent(assetID);
+  const [asset, holders] = await Promise.all([
+    blockfrostFetch<AssetResponse>(`/api/v0/assets/${encodedAssetID}`),
+    optionalFetchPage<AssetAddressResponse>(
+      `/api/v0/assets/${encodedAssetID}/addresses?count=25&page=1&order=desc`,
+    ),
+  ]);
+  renderAssetResult(asset, holders);
+}
+
+function renderAssetResult(
+  asset: AssetResponse,
+  holders?: { items: AssetAddressResponse[]; total?: number },
+): void {
   els.resultTitle.textContent = "Asset";
-  setResultMeta(asset.fingerprint);
+  const holderSummary = holders
+    ? `${formatMaybeTotal(holders.total)} holder${holders.total === 1 ? "" : "s"}`
+    : "no live holders";
+  setResultMeta(`${asset.fingerprint} | ${holderSummary}`);
   els.resultContent.innerHTML = `
     ${detailGrid([
       ["Asset", html(copyField(asset.asset))],
@@ -2121,10 +2145,25 @@ function renderAssetResult(asset: AssetResponse): void {
       ["Quantity", formatIntegerString(asset.quantity)],
       ["Mint/burn", formatInteger(asset.mint_or_burn_count)],
       ["Initial mint", html(txCell(asset.initial_mint_tx_hash))],
+      ["Metadata standard", asset.onchain_metadata_standard ?? "-"],
     ])}
+    <section class="subsection">
+      <h3>Current Holders</h3>
+      ${dataTable(
+        ["Address", "Quantity"],
+        (holders?.items ?? []).map((holder) => [
+          html(addressCell(holder.address)),
+          formatIntegerString(holder.quantity),
+        ]),
+        "No live holders returned.",
+      )}
+      ${holders?.total !== undefined && holders.total > holders.items.length
+        ? capabilityNote(`Showing the top ${formatInteger(holders.items.length)} of ${formatInteger(holders.total)} holder addresses by quantity.`)
+        : ""}
+    </section>
     ${asset.onchain_metadata ? renderJSONSection("On-chain Metadata", asset.onchain_metadata) : ""}
     ${asset.metadata ? renderJSONSection("Metadata", asset.metadata) : ""}
-    ${capabilityNote("Dingo's current Blockfrost endpoints expose asset detail by asset ID. Holder lists, mint history, and fingerprint lookup need additional Dingo explorer endpoints.")}
+    ${capabilityNote("Dingo exposes current asset holders and aggregate mint/burn information by asset ID. Fingerprint lookup and individual mint/burn transaction history are not exposed yet.")}
   `;
 }
 
@@ -3085,11 +3124,12 @@ function addressCell(address: string): string {
 
 function renderInputList(inputs: TransactionInputResponse[]): string {
   return dataTable(
-    ["Address", "Input", "Amount"],
+    ["Address", "Input", "Amount", "Datum / script"],
     inputs.map((input) => [
       html(addressCell(input.address)),
       html(`${txCell(input.tx_hash)} #${formatInteger(input.output_index)}`),
       html(formatAmountSummary(input.amount)),
+      html(renderUtxoFeatures(input)),
     ]),
     "No inputs returned.",
   );
@@ -3097,12 +3137,13 @@ function renderInputList(inputs: TransactionInputResponse[]): string {
 
 function renderOutputList(outputs: TransactionOutputResponse[]): string {
   return dataTable(
-    ["Address", "Index", "Amount", "Status"],
+    ["Address", "Index", "Amount", "Status", "Datum / script"],
     outputs.map((output) => [
       html(addressCell(output.address)),
       `#${formatInteger(output.output_index)}`,
       html(formatAmountSummary(output.amount)),
       output.consumed_by_tx ? html(`Spent by ${txCell(output.consumed_by_tx)}`) : "Unspent",
+      html(renderUtxoFeatures(output)),
     ]),
     "No outputs returned.",
   );
@@ -3110,14 +3151,41 @@ function renderOutputList(outputs: TransactionOutputResponse[]): string {
 
 function renderAddressUTXOList(utxos: AddressUTXOResponse[]): string {
   return dataTable(
-    ["Output", "Amount", "Block"],
+    ["Output", "Amount", "Block", "Datum / script"],
     utxos.map((utxo) => [
       html(`${txCell(utxo.tx_hash)} #${formatInteger(utxo.output_index)}`),
       html(formatAmountSummary(utxo.amount)),
       html(blockCell(utxo.block)),
+      html(renderUtxoFeatures(utxo)),
     ]),
     "No UTxOs returned.",
   );
+}
+
+function renderUtxoFeatures(utxo: {
+  data_hash: string | null;
+  inline_datum: string | null;
+  reference_script_hash: string | null;
+}): string {
+  const rows: Array<[string, string]> = [];
+  if (utxo.data_hash) {
+    rows.push(["Datum hash", copyField(utxo.data_hash, shortHash(utxo.data_hash, 8))]);
+  }
+  if (utxo.inline_datum) {
+    rows.push(["Inline datum", copyField(utxo.inline_datum, shortHash(utxo.inline_datum, 8))]);
+  }
+  if (utxo.reference_script_hash) {
+    rows.push([
+      "Reference script",
+      copyField(utxo.reference_script_hash, shortHash(utxo.reference_script_hash, 8)),
+    ]);
+  }
+  if (rows.length === 0) {
+    return "-";
+  }
+  return rows
+    .map(([label, value]) => `<span class="utxo-feature"><small>${escapeHtml(label)}</small>${value}</span>`)
+    .join("");
 }
 
 function renderPoolList(pools: PoolExtendedResponse[]): string {
