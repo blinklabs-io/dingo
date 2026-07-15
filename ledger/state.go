@@ -535,6 +535,7 @@ type slotBattleRecorderHolder struct {
 // as one logical unit at epoch/era boundaries and during rollback. Published
 // snapshots are immutable.
 type consensusSnapshot struct {
+	generation     uint64
 	currentEpoch   models.Epoch
 	currentEra     eras.EraDesc
 	currentPParams lcommon.ProtocolParameters
@@ -546,6 +547,7 @@ type consensusSnapshot struct {
 // tipSnapshot contains the applied tip and the Praos block nonce belonging to
 // that tip. Published snapshots are immutable.
 type tipSnapshot struct {
+	generation           uint64
 	currentTip           ochainsync.Tip
 	currentTipBlockNonce []byte
 }
@@ -554,6 +556,9 @@ type LedgerState struct {
 	metrics   stateMetrics
 	consensus atomic.Pointer[consensusSnapshot]
 	tip       atomic.Pointer[tipSnapshot]
+	// snapshotGeneration is incremented while writers are serialized by Lock.
+	// It lets readers that need both snapshots reject adjacent publications.
+	snapshotGeneration uint64
 	// The fields below are writer-owned working state. Lock-free readers use
 	// consensus and tip snapshots; writers update these fields under Lock and
 	// publish a fresh immutable snapshot before unlocking.
@@ -784,7 +789,10 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 // writer-owned fields. Callers must hold ls.Lock, except during construction
 // and single-threaded startup before the LedgerState is made visible.
 func (ls *LedgerState) publishSnapshotsLocked() {
+	ls.snapshotGeneration++
+	generation := ls.snapshotGeneration
 	ls.consensus.Store(&consensusSnapshot{
+		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
 		currentPParams: ls.currentPParams,
@@ -793,9 +801,31 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		transitionInfo: ls.transitionInfo,
 	})
 	ls.tip.Store(&tipSnapshot{
+		generation:           generation,
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	})
+}
+
+// loadStateSnapshots returns consensus and tip state from the same publication
+// generation. A writer stores the two pointers sequentially, so readers that
+// need both retry during the small interval between those stores.
+func (ls *LedgerState) loadStateSnapshots() (
+	*consensusSnapshot,
+	*tipSnapshot,
+) {
+	for {
+		consensusState := ls.consensus.Load()
+		tipState := ls.tip.Load()
+		if consensusState == nil || tipState == nil {
+			// Support zero-value white-box fixtures. Production states publish
+			// both snapshots in NewLedgerState before becoming visible.
+			return ls.loadConsensusSnapshot(), ls.loadTipSnapshot()
+		}
+		if consensusState.generation == tipState.generation {
+			return consensusState, tipState
+		}
+	}
 }
 
 func (ls *LedgerState) loadConsensusSnapshot() *consensusSnapshot {
@@ -805,6 +835,7 @@ func (ls *LedgerState) loadConsensusSnapshot() *consensusSnapshot {
 	// Support zero-value LedgerState fixtures. Production states initialize
 	// snapshots in NewLedgerState before they become concurrently visible.
 	return &consensusSnapshot{
+		generation:     ls.snapshotGeneration,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
 		currentPParams: ls.currentPParams,
@@ -819,6 +850,7 @@ func (ls *LedgerState) loadTipSnapshot() *tipSnapshot {
 		return snapshot
 	}
 	return &tipSnapshot{
+		generation:           ls.snapshotGeneration,
 		currentTip:           cloneTip(ls.currentTip),
 		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
 	}
@@ -1526,11 +1558,11 @@ func (ls *LedgerState) handleSlotTicks() {
 
 	for tick := range ls.slotTickChan {
 		// Get current state snapshot
-		consensusState := ls.loadConsensusSnapshot()
+		consensusState, tipState := ls.loadStateSnapshots()
 		currentEpoch := consensusState.currentEpoch
 		currentEra := consensusState.currentEra
 		currentPParams := consensusState.currentPParams
-		tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+		tipSlot := tipState.currentTip.Point.Slot
 
 		// Update wall-clock-based metrics every tick
 		// (must run even when chain is stalled or catching up)
@@ -2563,8 +2595,8 @@ func (ls *LedgerState) calculateStabilityWindowForEra(eraId uint) uint64 {
 	return window.Uint64()
 }
 
-// CurrentTransitionInfo returns a snapshot of the current TransitionInfo
-// under a read lock.  Callers must not hold ls.RLock() when calling this.
+// CurrentTransitionInfo returns the current TransitionInfo from the lock-free
+// consensus snapshot.
 func (ls *LedgerState) CurrentTransitionInfo() hardfork.TransitionInfo {
 	return ls.loadConsensusSnapshot().transitionInfo
 }
@@ -6106,10 +6138,10 @@ func consensusModeForEraID(eraID uint) consensus.ConsensusMode {
 // epoch has already crossed the nonce stability cutoff and the next leader
 // schedule can be precomputed immediately.
 func (ls *LedgerState) NextEpochNonceReadyEpoch() (uint64, bool) {
-	consensusState := ls.loadConsensusSnapshot()
+	consensusState, tipState := ls.loadStateSnapshots()
 	currentEpoch := consensusState.currentEpoch
 	currentEra := consensusState.currentEra
-	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	tipSlot := tipState.currentTip.Point.Slot
 
 	if currentEra.Id == 0 {
 		return 0, false
@@ -6676,9 +6708,9 @@ func (ls *LedgerState) validateTxCore(
 	tx lcommon.Transaction,
 	buildLV func(txn *database.Txn) *LedgerView,
 ) error {
-	consensusState := ls.loadConsensusSnapshot()
+	consensusState, tipState := ls.loadStateSnapshots()
 	snapshotEra := consensusState.currentEra
-	snapshotTipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	snapshotTipSlot := tipState.currentTip.Point.Slot
 	snapshotPParams := consensusState.currentPParams
 	snapshotPrevEraPParams := consensusState.prevEraPParams
 	currentSlot, currentSlotErr := ls.CurrentSlot()

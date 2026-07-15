@@ -94,7 +94,7 @@ func (ls *LedgerState) queryChainBlockNo() (any, error) {
 }
 
 func (ls *LedgerState) queryChainPoint() (any, error) {
-	return ls.loadTipSnapshot().currentTip.Point, nil
+	return cloneTip(ls.loadTipSnapshot().currentTip).Point, nil
 }
 
 func (ls *LedgerState) queryHardFork(
@@ -156,8 +156,8 @@ func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
 	// Read the tip, current era, and transition info from the lock-free
 	// snapshots so this (potentially slow) DB-querying path never contends
 	// with the ledger write lock.
-	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
-	consensusState := ls.loadConsensusSnapshot()
+	consensusState, tipState := ls.loadStateSnapshots()
+	tipSlot := tipState.currentTip.Point.Slot
 	currentEraId := consensusState.currentEra.Id
 	transitionInfo := consensusState.transitionInfo
 

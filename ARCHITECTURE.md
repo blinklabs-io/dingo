@@ -2117,9 +2117,10 @@ privately, update the writer-owned state, and publish a complete replacement
 snapshot before unlocking. Slice-backed epoch nonces, tip hashes, and block
 nonces are copied at publication boundaries and published snapshots must never
 be mutated. Each snapshot is internally consistent, but a caller loading both
-snapshot pointers may observe adjacent publication generations; code requiring
-one exact cross-snapshot commit must remain under the ledger lock or explicitly
-retry.
+snapshot pointers could otherwise observe adjacent publication generations.
+Each publication therefore stamps both snapshots with one generation, and code
+requiring fields from both uses a paired-load helper that retries until the
+generations match.
 
 ## Configuration
 

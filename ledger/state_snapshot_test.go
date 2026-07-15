@@ -137,3 +137,58 @@ func TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders(
 	default:
 	}
 }
+
+// TestLedgerStatePairedSnapshotsUseOneGeneration verifies that callers which
+// combine consensus and tip fields never observe adjacent publications while a
+// writer is between the two atomic stores.
+func TestLedgerStatePairedSnapshotsUseOneGeneration(t *testing.T) {
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+
+	const generations = 1_000
+	var wg sync.WaitGroup
+	errCh := make(chan error, 1)
+	done := make(chan struct{})
+
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				consensusState, tipState := ls.loadStateSnapshots()
+				if consensusState.generation != tipState.generation ||
+					consensusState.currentEpoch.EpochId !=
+						tipState.currentTip.Point.Slot {
+					select {
+					case errCh <- fmt.Errorf(
+						"cross-snapshot generation was torn",
+					):
+					default:
+					}
+					return
+				}
+			}
+		}()
+	}
+
+	for generation := 1; generation <= generations; generation++ {
+		ls.Lock()
+		ls.currentEpoch.EpochId = uint64(generation)
+		ls.currentTip.Point.Slot = uint64(generation)
+		ls.publishSnapshotsLocked()
+		ls.Unlock()
+	}
+	close(done)
+	wg.Wait()
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	default:
+	}
+}
