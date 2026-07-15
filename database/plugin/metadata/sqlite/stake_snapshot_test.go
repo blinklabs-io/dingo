@@ -773,6 +773,73 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
 	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
 }
 
+// TestGetStakeByPoolsAtSlotIncludesRewardBalance covers issue #2813: the live
+// mark snapshot must add each delegator's reward-account balance to their live
+// UTxO lovelace. A credential with both a live UTxO and a reward balance sums
+// both, and a credential whose entire stake sits in its reward balance (no live
+// UTxO) now yields non-zero stake instead of collapsing to zero.
+func TestGetStakeByPoolsAtSlotIncludesRewardBalance(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	poolA := bytes.Repeat([]byte{0xA2}, 28)
+	poolB := bytes.Repeat([]byte{0xB2}, 28)
+	stakeUtxoReward := bytes.Repeat([]byte{0x04}, 28) // live UTxO + reward
+	stakeRewardOnly := bytes.Repeat([]byte{0x05}, 28) // reward only, no UTxO
+	stakeUtxoNoReward := bytes.Repeat([]byte{0x06}, 28)
+
+	accounts := []models.Account{
+		{
+			StakingKey: stakeUtxoReward, Pool: poolA, AddedSlot: 10,
+			Active: true, Reward: types.Uint64(50),
+		},
+		{
+			StakingKey: stakeRewardOnly, Pool: poolA, AddedSlot: 10,
+			Active: true, Reward: types.Uint64(30),
+		},
+		{
+			StakingKey: stakeUtxoNoReward, Pool: poolB, AddedSlot: 10,
+			Active: true,
+		},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x31}, 32), OutputIdx: 0,
+			StakingKey: stakeUtxoReward, Amount: 100, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x32}, 32), OutputIdx: 0,
+			StakingKey: stakeUtxoNoReward, Amount: 40, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{poolA, poolB},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+
+	// Pool A: (100 UTxO + 50 reward) + (0 UTxO + 30 reward) = 180
+	require.Equal(t, uint64(180), stakes[string(poolA)],
+		"pool A stake should add reward balances to live UTxO lovelace")
+	require.Equal(t, uint64(2), delegators[string(poolA)])
+	// Reward-only credential still counts and contributes its reward.
+	// Pool B: 40 UTxO + 0 reward = 40 (baseline, reward absent)
+	require.Equal(t, uint64(40), stakes[string(poolB)],
+		"pool B stake unchanged when reward balance is zero")
+	require.Equal(t, uint64(1), delegators[string(poolB)])
+}
+
 func TestGetStakeByPoolsUsesStakeCredentialUtxoIndex(t *testing.T) {
 	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)

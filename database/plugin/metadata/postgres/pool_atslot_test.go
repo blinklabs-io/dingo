@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/stretchr/testify/require"
 )
 
@@ -119,4 +120,55 @@ func TestGetStakeByPoolsAggregatesTextAmountsPostgres(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(12), stakes[string(pool)])
 	require.Equal(t, uint64(1), delegators[string(pool)])
+}
+
+// TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres covers issue #2813 on
+// postgres: the reward-account balance is cast to BIGINT and added to live UTxO
+// lovelace via MAX(CAST(account.reward AS BIGINT)), and a reward-only credential
+// with no live UTxO yields non-zero stake.
+func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+	db := store.DB()
+
+	poolA := bytes.Repeat([]byte{0xA2}, 28)
+	poolB := bytes.Repeat([]byte{0xB2}, 28)
+	stakeUtxoReward := bytes.Repeat([]byte{0x75}, 28)
+	stakeRewardOnly := bytes.Repeat([]byte{0x76}, 28)
+	stakeUtxoNoReward := bytes.Repeat([]byte{0x77}, 28)
+
+	cleanup := func() {
+		for _, k := range [][]byte{stakeUtxoReward, stakeRewardOnly, stakeUtxoNoReward} {
+			_ = db.Where("staking_key = ?", k).Delete(&models.Account{}).Error
+			_ = db.Where("staking_key = ?", k).Delete(&models.Utxo{}).Error
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	accounts := []models.Account{
+		{StakingKey: stakeUtxoReward, Pool: poolA, AddedSlot: 10, Active: true, Reward: types.Uint64(50)},
+		{StakingKey: stakeRewardOnly, Pool: poolA, AddedSlot: 10, Active: true, Reward: types.Uint64(30)},
+		{StakingKey: stakeUtxoNoReward, Pool: poolB, AddedSlot: 10, Active: true},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+	utxos := []models.Utxo{
+		{TxId: bytes.Repeat([]byte{0x41}, 32), OutputIdx: 0, StakingKey: stakeUtxoReward, Amount: 100, AddedSlot: 20},
+		{TxId: bytes.Repeat([]byte{0x42}, 32), OutputIdx: 0, StakingKey: stakeUtxoNoReward, Amount: 40, AddedSlot: 20},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{poolA, poolB}, 80, nil,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(180), stakes[string(poolA)])
+	require.Equal(t, uint64(2), delegators[string(poolA)])
+	require.Equal(t, uint64(40), stakes[string(poolB)])
+	require.Equal(t, uint64(1), delegators[string(poolB)])
 }

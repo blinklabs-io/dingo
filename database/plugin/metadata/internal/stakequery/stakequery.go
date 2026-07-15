@@ -60,24 +60,47 @@ func GetStakeByPoolsAtSlot(
 
 	cte, args := activeDelegationCTE(db, slot)
 
-	// utxo.amount is stored as text by types.Uint64 on postgres and mysql, so
-	// SUM() over the raw column fails there ("function sum(text) does not
-	// exist" / "UNION types text and integer cannot be matched"). Cast to the
-	// backend's native integer type first, mirroring the DRep voting-power
-	// queries. sqlite is loosely typed but the cast keeps the backends
-	// consistent.
+	// utxo.amount and account.reward are stored as text by types.Uint64 on
+	// postgres and mysql, so SUM()/arithmetic over the raw columns fails there
+	// ("function sum(text) does not exist" / "UNION types text and integer
+	// cannot be matched"). Cast to the backend's native integer type first,
+	// mirroring the DRep voting-power queries. sqlite is loosely typed but the
+	// cast keeps the backends consistent.
+	//
+	// Per-credential stake is live UTxO lovelace PLUS the delegator's
+	// reward-account balance (issue #2813): summing UTxOs alone undercounts
+	// each pool's mark stake by ~10% (worse for pools whose delegators hold
+	// most of their stake as rewards), understating sigma so that canonical
+	// blocks fail the "VRF leader value exceeds stake-derived threshold"
+	// check and wedge networks that enforce it (preview/preprod/mainnet).
+	// The reward term is added at the credential level exactly once via
+	// MAX(account.reward): idx_account_credential is unique per
+	// (credential_tag, staking_key), so MAX picks the single reward value
+	// without multiplying it across the UTxO join fan-out (SUM would).
+	//
+	// CAVEAT (interim fix): account.reward is the LIVE balance, which drifts
+	// from the reward balance at the boundary slot. This greatly reduces the
+	// gross undercount and unblocks pools whose delegators' entire stake sits
+	// in rewards, but it is NOT consensus-exact. The boundary-accurate source
+	// is the #1959 reward engine sampling the reward at the snapshot slot,
+	// which is not wired into snapshots yet. Do NOT enable
+	// SkipLeaderStakeThresholdCheck on non-musashi networks as a workaround.
 	query := cte + fmt.Sprintf(`,
 active_delegator_stake AS (
 	SELECT active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
 		active_delegation.staking_key,
-		COALESCE(SUM(CAST(utxo.amount AS %s)), 0) AS total_stake
+		COALESCE(SUM(CAST(utxo.amount AS %[1]s)), 0)
+			+ COALESCE(MAX(CAST(account.reward AS %[1]s)), 0) AS total_stake
 	FROM active_delegation
 	LEFT JOIN utxo
 		ON utxo.credential_tag = active_delegation.credential_tag
 		AND utxo.staking_key = active_delegation.staking_key
 		AND utxo.added_slot <= ?
 		AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+	LEFT JOIN account
+		ON account.credential_tag = active_delegation.credential_tag
+		AND account.staking_key = active_delegation.staking_key
 	WHERE active_delegation.pool_key_hash IN ?
 	GROUP BY active_delegation.pool_key_hash,
 		active_delegation.credential_tag,

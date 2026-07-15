@@ -387,7 +387,7 @@ process the same pointer unless the claim expires before a result is recorded.
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. `"mark"` rows store lovelace stake totals captured from slot-aware delegation and UTxO state at `captured_slot` and are used by the normal Praos epoch-2 rotation. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
+| `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. `"mark"` rows store lovelace stake totals captured from slot-aware delegation and UTxO state at `captured_slot`, plus each delegator's live `account.reward` balance (issue #2813; interim source, not boundary-exact), and are used by the normal Praos epoch-2 rotation. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state. |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots at an epoch boundary. |
 | `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward-calculation snapshot metadata. |
@@ -870,12 +870,26 @@ Historical stake by pool for epoch-boundary snapshots. The query resolves the
 latest registration/deregistration and pool-delegation certificate for each
 stake credential at or before the requested slot, treats current `account` rows
 as synthetic state only when no relevant certificate history exists for
-imported/bootstrap data, and sums only UTxOs live at that slot:
+imported/bootstrap data, and computes each delegator's stake as UTxOs live at
+that slot plus the delegator's reward-account balance.
 
-`utxo.amount` is stored as text (`types.Uint64`) on postgres and mysql, so it is
-cast to the backend's native integer type before summation (`INTEGER` on sqlite,
-`BIGINT` on postgres, `UNSIGNED` on mysql), matching the DRep voting-power
-queries:
+The reward term (issue #2813) is required for parity with Mithril-imported mark
+rows: summing live UTxOs alone omits reward balances and understates per-pool
+mark stake by ~10% (worse for pools whose delegators hold most stake as
+rewards), which understates sigma so canonical blocks fail the leader-threshold
+VRF check and wedge networks that enforce it. It is added at the credential
+level exactly once via `MAX(account.reward)` — `idx_account_credential` is
+unique per `(credential_tag, staking_key)`, so `MAX` picks the single reward
+without multiplying it across the UTxO join fan-out that `SUM` would. This is an
+interim source: `account.reward` is the live balance, which drifts from the
+reward balance at the boundary slot, so the total is not consensus-exact; the
+boundary-accurate source is the reward engine sampling the reward at the
+snapshot slot.
+
+`utxo.amount` and `account.reward` are both stored as text (`types.Uint64`) on
+postgres and mysql, so each is cast to the backend's native integer type before
+arithmetic (`INTEGER` on sqlite, `BIGINT` on postgres, `UNSIGNED` on mysql),
+matching the DRep voting-power queries:
 
 ```sql
 -- Predicate used by sqlite/postgres/mysql implementations after resolving
@@ -884,13 +898,17 @@ WITH active_delegator_stake AS (
   SELECT active_delegation.pool_key_hash,
          active_delegation.credential_tag,
          active_delegation.staking_key,
-         COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0) AS total_stake
+         COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0)
+           + COALESCE(MAX(CAST(account.reward AS BIGINT)), 0) AS total_stake
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
    AND utxo.staking_key = active_delegation.staking_key
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
+  LEFT JOIN account
+    ON account.credential_tag = active_delegation.credential_tag
+   AND account.staking_key = active_delegation.staking_key
   WHERE active_delegation.pool_key_hash IN (...)
   GROUP BY active_delegation.pool_key_hash,
            active_delegation.credential_tag,
