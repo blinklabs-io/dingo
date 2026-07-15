@@ -374,6 +374,9 @@ func (d *MetadataStorePostgres) GetPoolRegistrationsAtSlot(
 			err,
 		)
 	}
+	if err := stakequery.PopulatePoolRegistrationOwners(db, registrations); err != nil {
+		return nil, err
+	}
 	return registrations, nil
 }
 
@@ -478,6 +481,37 @@ func (d *MetadataStorePostgres) GetPoolRegistrations(
 		ret = append(ret, tmpCert)
 	}
 	return ret, nil
+}
+
+// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool, the
+// registration whose parameters the ledger's pool-params map held during the
+// ended epoch [epochStartSlot, snapshotSlot]. See
+// stakequery.EffectivePoolRegistrationsForEpoch for the selection rules.
+func (d *MetadataStorePostgres) GetPoolRegistrationsEffectiveForEpoch(
+	pkhs []lcommon.PoolKeyHash,
+	epochStartSlot uint64,
+	endedEpoch uint64,
+	snapshotSlot uint64,
+	txn types.Txn,
+) ([]models.PoolRegistration, error) {
+	if len(pkhs) == 0 {
+		return []models.PoolRegistration{}, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	hashes := make([][]byte, 0, len(pkhs))
+	for _, pkh := range pkhs {
+		hashes = append(hashes, pkh.Bytes())
+	}
+	return stakequery.EffectivePoolRegistrationsForEpoch(
+		db,
+		hashes,
+		epochStartSlot,
+		endedEpoch,
+		snapshotSlot,
+	)
 }
 
 // GetPoolByVrfKeyHash retrieves an active pool by its VRF key hash.
@@ -1169,4 +1203,18 @@ func (d *MetadataStorePostgres) GetStakeByPoolsAtSlot(
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
 	}
 	return stakes, delegators, nil
+}
+
+func (d *MetadataStorePostgres) GetPoolOwnerStakeAtSlot(
+	ownerKeyHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return stakequery.GetPoolOwnerStakeAtSlot(
+		db, ownerKeyHashes, slot,
+	)
 }

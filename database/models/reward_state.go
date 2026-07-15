@@ -14,7 +14,13 @@
 
 package models
 
-import "github.com/blinklabs-io/dingo/database/types"
+import (
+	"fmt"
+	"log/slog"
+
+	"github.com/blinklabs-io/dingo/database/types"
+	"gorm.io/gorm"
+)
 
 // RewardAdaPots captures the reward-related ADA pots at an epoch boundary.
 type RewardAdaPots struct {
@@ -51,20 +57,73 @@ func (RewardSnapshot) TableName() string {
 
 // RewardPoolInput captures per-pool inputs needed by reward calculation.
 type RewardPoolInput struct {
-	Margin             *types.Rat
-	PoolKeyHash        []byte `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:2;size:28;not null"`
-	BlocksProduced     *uint64
-	TotalBlocksInEpoch *uint64
-	ID                 uint         `gorm:"primarykey"`
-	Epoch              uint64       `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:1;not null"`
-	Pledge             types.Uint64 `gorm:"not null"`
-	DelegatedStake     types.Uint64 `gorm:"not null"`
-	Cost               types.Uint64 `gorm:"not null"`
-	DelegatorCount     uint64       `gorm:"not null"`
-	CapturedSlot       uint64       `gorm:"index;not null"`
-	BoundarySlot       uint64       `gorm:"index;not null"`
+	Margin                     *types.Rat
+	PoolKeyHash                []byte `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:2;size:28;not null"`
+	RewardAccount              []byte `gorm:"size:28"`
+	BlocksProduced             *uint64
+	TotalBlocksInEpoch         *uint64
+	ID                         uint         `gorm:"primarykey"`
+	Epoch                      uint64       `gorm:"uniqueIndex:idx_reward_pool_input_epoch_pool,priority:1;not null"`
+	Pledge                     types.Uint64 `gorm:"not null"`
+	DelegatedStake             types.Uint64 `gorm:"not null"`
+	OwnerStake                 types.Uint64 `gorm:"not null;default:0"`
+	Cost                       types.Uint64 `gorm:"not null"`
+	DelegatorCount             uint64       `gorm:"not null"`
+	RewardAccountCredentialTag uint8        `gorm:"not null;default:0"`
+	CapturedSlot               uint64       `gorm:"index;not null"`
+	BoundarySlot               uint64       `gorm:"index;not null"`
 }
 
 func (RewardPoolInput) TableName() string {
 	return "reward_pool_input"
+}
+
+// RewardLiveStake is the live per-stake-credential aggregate maintained for a
+// future reward-snapshot consumer. UtxoStake and RewardStake are stored
+// separately so rollback/account-reward repair can refresh only the affected
+// credential while TotalStake remains directly queryable.
+type RewardLiveStake struct {
+	PoolKeyHash   []byte       `gorm:"size:28"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:2;size:28;not null"`
+	ID            uint         `gorm:"primarykey"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_live_stake_cred,priority:1;not null;default:0"`
+	UtxoStake     types.Uint64 `gorm:"not null"`
+	RewardStake   types.Uint64 `gorm:"not null"`
+	TotalStake    types.Uint64 `gorm:"not null"`
+	Registered    bool         `gorm:"not null"`
+	// PoolDelegation* records the certificate order used to derive PoolKeyHash.
+	// It is rollback/rebuild bookkeeping; consumers must apply any pool
+	// registration-recency eligibility rule when snapshot capture is wired.
+	PoolDelegationSlot       uint64 `gorm:"not null;default:0"`
+	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
+	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
+	UpdatedSlot              uint64 `gorm:"index;not null"`
+}
+
+func (RewardLiveStake) TableName() string {
+	return "reward_live_stake"
+}
+
+// MigrateRewardLiveStakePoolIndex drops the legacy pool/total_stake index.
+// The aggregate has no pool-ordered query consumer yet, and retaining the
+// index prevents MySQL from changing total_stake's numeric column type during
+// AutoMigrate because the previous schema represented it as TEXT.
+func MigrateRewardLiveStakePoolIndex(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&RewardLiveStake{}) ||
+		!db.Migrator().HasIndex(&RewardLiveStake{}, "idx_reward_live_stake_pool") {
+		return nil
+	}
+	logger.Info(
+		"dropping legacy reward_live_stake pool/total_stake index",
+	)
+	if err := db.Migrator().DropIndex(
+		&RewardLiveStake{},
+		"idx_reward_live_stake_pool",
+	); err != nil {
+		return fmt.Errorf("drop reward_live_stake pool index: %w", err)
+	}
+	return nil
 }

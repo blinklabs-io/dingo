@@ -100,6 +100,9 @@ func ForTransaction(
 		retAmount := ret.Amount()
 		if retAmount != nil && retAmount.Sign() > 0 {
 			if !retAmount.IsUint64() || retAmount.Uint64() > sum {
+				// An oversized return, or one larger than the resolved input
+				// sum, cannot produce a valid uint64 consumed balance. Clamp
+				// conservatively to an unresolved lower bound of zero.
 				return 0, false, nil
 			}
 			sum -= retAmount.Uint64()

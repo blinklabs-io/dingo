@@ -217,13 +217,13 @@ func (r *setTransactionSQLRecorder) Trace(
 	r.statements = append(r.statements, sql)
 }
 
-func (r *setTransactionSQLRecorder) countUtxoSelects() int {
+func (r *setTransactionSQLRecorder) countUtxoLookupSelects() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	count := 0
 	for _, stmt := range r.statements {
 		normalized := strings.ToUpper(stmt)
-		if strings.Contains(normalized, "SELECT") &&
+		if strings.Contains(normalized, "SELECT *") &&
 			strings.Contains(normalized, "FROM `UTXO`") {
 			count++
 		}
@@ -564,7 +564,7 @@ func TestMysqlSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
 	}
 
 	// Verify exactly one batch SELECT was used per input class.
-	if got := recorder.countUtxoSelects(); got != 3 {
+	if got := recorder.countUtxoLookupSelects(); got != 3 {
 		t.Fatalf("expected 3 batched UTxO SELECTs, got %d", got)
 	}
 

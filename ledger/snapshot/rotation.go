@@ -17,6 +17,7 @@ package snapshot
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"math/big"
 
@@ -25,6 +26,10 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+)
+
+var errRewardInputEpochUnavailable = errors.New(
+	"reward input epoch metadata unavailable",
 )
 
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
@@ -56,7 +61,11 @@ func (m *Manager) saveSnapshot(
 	metaTxn := txn.Metadata()
 
 	// Save pool stake snapshots
-	snapshots := make([]*models.PoolStakeSnapshot, 0, len(distribution.PoolStakes))
+	snapshots := make(
+		[]*models.PoolStakeSnapshot,
+		0,
+		len(distribution.PoolStakes),
+	)
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
@@ -83,6 +92,11 @@ func (m *Manager) saveSnapshot(
 		}
 	}
 
+	if err := meta.DeletePoolStakeSnapshotsForEpoch(
+		epoch, snapshotType, metaTxn,
+	); err != nil {
+		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
+	}
 	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {
 		return fmt.Errorf("save pool snapshots: %w", err)
 	}
@@ -124,6 +138,24 @@ func (m *Manager) saveRewardStateInputs(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 ) error {
+	inputs, err := m.rewardPoolInputs(
+		epoch,
+		distribution,
+		evt,
+		meta,
+		metaTxn,
+	)
+	if err != nil {
+		if errors.Is(err, errRewardInputEpochUnavailable) {
+			m.logger.Warn(
+				"skipping reward inputs without ended-epoch metadata",
+				"component", "snapshot",
+				"epoch", epoch,
+			)
+			return nil
+		}
+		return err
+	}
 	snapshot := &models.RewardSnapshot{
 		Epoch:            epoch,
 		SnapshotType:     snapshotType,
@@ -137,17 +169,6 @@ func (m *Manager) saveRewardStateInputs(
 	}
 	if err := meta.SaveRewardSnapshot(snapshot, metaTxn); err != nil {
 		return fmt.Errorf("save reward snapshot: %w", err)
-	}
-
-	inputs, err := m.rewardPoolInputs(
-		epoch,
-		distribution,
-		evt,
-		meta,
-		metaTxn,
-	)
-	if err != nil {
-		return err
 	}
 	if err := meta.SaveRewardPoolInputs(inputs, metaTxn); err != nil {
 		return fmt.Errorf("save reward pool inputs: %w", err)
@@ -179,8 +200,29 @@ func (m *Manager) rewardPoolInputs(
 	if err != nil {
 		return nil, err
 	}
-	registrations, err := meta.GetPoolRegistrationsAtSlot(
+	endedEpoch := uint64(0)
+	if epoch > 0 {
+		endedEpoch = epoch - 1
+	}
+	epochInfo, err := meta.GetEpoch(endedEpoch, metaTxn)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"get ended epoch %d for reward pool parameters: %w",
+			endedEpoch,
+			err,
+		)
+	}
+	if epochInfo == nil {
+		return nil, fmt.Errorf(
+			"%w: ended epoch %d not found for reward pool parameters",
+			errRewardInputEpochUnavailable,
+			endedEpoch,
+		)
+	}
+	registrations, err := meta.GetPoolRegistrationsEffectiveForEpoch(
 		poolKeys,
+		epochInfo.StartSlot,
+		endedEpoch,
 		distribution.Slot,
 		metaTxn,
 	)
@@ -191,8 +233,20 @@ func (m *Manager) rewardPoolInputs(
 		map[string]models.PoolRegistration,
 		len(registrations),
 	)
+	ownerKeys := make([][]byte, 0)
 	for _, registration := range registrations {
 		registrationByHash[string(registration.PoolKeyHash)] = registration
+		for _, owner := range registration.Owners {
+			ownerKeys = append(ownerKeys, owner.KeyHash)
+		}
+	}
+	ownerStakes, err := meta.GetPoolOwnerStakeAtSlot(
+		ownerKeys,
+		distribution.Slot,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get historical pool-owner stake: %w", err)
 	}
 
 	inputs := make([]*models.RewardPoolInput, 0, len(distribution.PoolStakes))
@@ -217,6 +271,17 @@ func (m *Manager) rewardPoolInputs(
 			input.Pledge = registration.Pledge
 			input.Cost = registration.Cost
 			input.Margin = cloneRat(registration.Margin)
+			input.RewardAccount = append(
+				[]byte(nil), registration.RewardAccount...,
+			)
+			input.RewardAccountCredentialTag = registration.RewardAccountCredentialTag
+			for _, owner := range registration.Owners {
+				input.OwnerStake += types.Uint64(
+					ownerStakes[types.PoolCredentialStakeKey(
+						poolKey[:], 0, owner.KeyHash,
+					)],
+				)
+			}
 		} else {
 			m.logger.Warn(
 				"missing pool registration while saving reward inputs",

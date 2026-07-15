@@ -51,21 +51,33 @@ type BatchAccumulator struct {
 	UtxoSpends     []utxoSpend
 	CollateralRets []models.Utxo
 	DeleteTxIDs    []uint
-	producedByRef  map[string]models.Utxo
+	// producedByRef indexes produced outputs and collateral returns by their
+	// "%x:%d" tx-id/output-index ref so InFlightProducerAmount resolves an
+	// unflushed producer in O(1) rather than scanning the whole batch. Mirrors
+	// the sqlite accumulator. Mutating paths allocate it lazily so a zero-valued
+	// BatchAccumulator remains usable.
+	producedByRef map[string]models.Utxo
 }
 
+// utxoRefKey builds the "%x:%d" lookup key used by the in-flight producer index.
 func utxoRefKey(txId []byte, outputIdx uint32) string {
 	return fmt.Sprintf("%x:%d", txId, outputIdx)
 }
 
 func NewBatchAccumulator() *BatchAccumulator {
-	return &BatchAccumulator{producedByRef: make(map[string]models.Utxo)}
+	return &BatchAccumulator{
+		producedByRef: make(map[string]models.Utxo),
+	}
 }
 
-func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+func (b *BatchAccumulator) ensureProducedIndex() {
 	if b.producedByRef == nil {
 		b.producedByRef = make(map[string]models.Utxo)
 	}
+}
+
+func (b *BatchAccumulator) indexProducedUtxo(u models.Utxo) {
+	b.ensureProducedIndex()
 	b.producedByRef[utxoRefKey(u.TxId, u.OutputIdx)] = u
 }
 
@@ -121,6 +133,10 @@ func (b *BatchAccumulator) AddCollateralReturn(u models.Utxo) {
 	b.indexProducedUtxo(u)
 }
 
+// InFlightProducerAmount returns the lovelace amount of an output produced
+// earlier in the current batch (and not yet flushed), so collateral-fee
+// computation for a later invalid transaction can resolve it without the
+// database row existing yet.
 func (b *BatchAccumulator) InFlightProducerAmount(
 	txId []byte,
 	outputIdx uint32,
@@ -263,6 +279,27 @@ func (d *MetadataStoreMysql) FlushBatch(
 		}
 		if err := batchSpendUtxos(db, batch.UtxoSpends); err != nil {
 			return fmt.Errorf("flush batch: spend utxos: %w", err)
+		}
+		rewardRefs := rewardStakeRefsFromUtxos(batch.UtxoOutputs)
+		addRewardStakeRefsFromUtxos(rewardRefs, batch.CollateralRets)
+		spendRefs, err := rewardStakeRefsFromUtxoSpends(
+			db,
+			batch.UtxoSpends,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"flush batch: query reward stake spend refs: %w",
+				err,
+			)
+		}
+		for _, item := range spendRefs {
+			addRewardStakeRef(rewardRefs, item.ref, item.slot)
+		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardRefs,
+		); err != nil {
+			return fmt.Errorf("flush batch: refresh reward live stake: %w", err)
 		}
 
 		if err := batchCreate(db, batch.KeyWitnesses); err != nil {

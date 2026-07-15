@@ -2124,6 +2124,43 @@ LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
 
 Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
 
+### Reward Metadata State
+
+The metadata plugins persist ADA pots, reward snapshot metadata, per-pool
+inputs, and a live per-credential stake aggregate. SQLite, MySQL, and
+PostgreSQL share reward-state query behavior through
+`database/plugin/metadata/internal/`.
+
+`RewardLiveStake` is maintained as groundwork for a future reward snapshot
+consumer; the current epoch-boundary Mark snapshot path still uses the
+slot-aware full-UTxO query. Metadata write
+paths refresh only credentials touched by UTxO creation/spending, account
+registration or delegation, and reward credits or withdrawals, in the same
+transaction as the source change. Refresh derives total stake, registration,
+current pool delegation, and delegation certificate order; rollback therefore
+restores the aggregate from the same historical metadata used by normal account
+and UTxO repair. Malformed non-empty stake credentials are rejected before they
+enter the aggregate. The aggregate currently attributes only base-address stake:
+UTxO metadata does not retain the pointer triple needed to resolve pointer
+addresses to stake credentials, so lovelace at otherwise resolvable pointer
+addresses is omitted. Consumers must not treat `RewardLiveStake` as an exact
+replacement for the ledger stake distribution for eras where pointer-address
+stake matters.
+
+`RebuildRewardLiveStake` provides a composition-neutral full rebuild from the
+union of account credentials and live UTxO stake credentials. It retains
+UTxO-only credentials as unregistered and undelegated so a later registration
+can activate their existing stake without losing it. `RewardLiveStakeNeedsBackfill`
+distinguishes an upgraded database with accounts but no aggregate rows from a
+legitimately fresh empty database. Node startup performs the check and rebuild
+after database recovery and before ledger processing. Mithril import does not
+currently invoke this rebuild directly; the next normal node startup does.
+
+Pool registration lookup reconstructs the parameters effective during the
+ended epoch for the existing per-pool input capture. Reward calculation and
+application are outside the scope of this metadata layer and are not yet wired
+to the live aggregate.
+
 ### Query Interface
 
 The `LedgerView` provides stake distribution queries:

@@ -665,7 +665,7 @@ func (r StakeCredentialRef) MapKey() string {
 // TxHash so rollback can restore the cleared reward balance.
 //
 // The unique index idx_account_reward_delta_w_tx_s_slot includes AddedSlot.
-// Withdrawal deltas are keyed by their (non-empty) TxHash, so each is unique
+// Withdrawal writers use TxHash and the credential as their logical replay key,
 // regardless of slot. Credit deltas (deposit refunds, MIR, POOLREAP) use an
 // event discriminator in TxHash when one is available and otherwise use the
 // normalized empty value. Without AddedSlot, repeated per-epoch credits to a

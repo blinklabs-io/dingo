@@ -945,6 +945,83 @@ func TestRollbackUtxoRestoration(t *testing.T) {
 	)
 }
 
+func TestDeleteSpentUtxoDoesNotRefreshLiveStakeAtHistoricalSlot(
+	t *testing.T,
+) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	stakeKey := bytes.Repeat([]byte{0xA7}, 28)
+	txID := bytes.Repeat([]byte{0xB7}, 32)
+	record := models.Utxo{
+		TxId:          txID,
+		OutputIdx:     0,
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		AddedSlot:     10,
+		DeletedSlot:   20,
+		Amount:        types.Uint64(50),
+	}
+	rewardState := models.RewardLiveStake{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		PoolKeyHash:   bytes.Repeat([]byte{0xC7}, 28),
+		UtxoStake:     types.Uint64(0),
+		RewardStake:   types.Uint64(7),
+		TotalStake:    types.Uint64(7),
+		Registered:    true,
+		UpdatedSlot:   100,
+	}
+	require.NoError(t, store.DB().Create(&record).Error)
+	require.NoError(t, store.DB().Create(&rewardState).Error)
+
+	require.NoError(t, store.DeleteUtxo(models.UtxoId{
+		Hash: txID,
+		Idx:  0,
+	}, nil))
+
+	var got models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).First(&got).Error)
+	require.Equal(t, rewardState.PoolKeyHash, got.PoolKeyHash)
+	require.Equal(t, rewardState.RewardStake, got.RewardStake)
+	require.Equal(t, rewardState.TotalStake, got.TotalStake)
+	require.Equal(t, rewardState.UpdatedSlot, got.UpdatedSlot)
+}
+
+func TestDeleteLiveUtxoRefreshesLiveStakeAtTipSlot(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+	stakeKey := bytes.Repeat([]byte{0xA8}, 28)
+	poolKey := bytes.Repeat([]byte{0xC8}, 28)
+	txID := bytes.Repeat([]byte{0xB8}, 32)
+	require.NoError(t, store.DB().Create(&models.Tip{ID: 1, Slot: 100}).Error)
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: stakeKey, CredentialTag: 0, Pool: poolKey,
+		Reward: types.Uint64(7), Active: true, AddedSlot: 20,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.Utxo{
+		TxId: txID, OutputIdx: 0, StakingKey: stakeKey,
+		CredentialTag: 0, AddedSlot: 10, Amount: types.Uint64(50),
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.RewardLiveStake{
+		StakingKey: stakeKey, CredentialTag: 0, PoolKeyHash: poolKey,
+		UtxoStake: types.Uint64(50), RewardStake: types.Uint64(7),
+		TotalStake: types.Uint64(57), Registered: true, UpdatedSlot: 20,
+	}).Error)
+
+	require.NoError(t, store.DeleteUtxo(models.UtxoId{Hash: txID, Idx: 0}, nil))
+
+	var got models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).First(&got).Error)
+	require.Equal(t, types.Uint64(0), got.UtxoStake)
+	require.Equal(t, types.Uint64(7), got.TotalStake)
+	require.Equal(t, uint64(100), got.UpdatedSlot)
+}
+
 // TestRollbackTransactionDeletion tests that
 // DeleteTransactionsAfterSlot removes transactions and restores
 // UTxO state correctly.
