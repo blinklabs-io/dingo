@@ -123,9 +123,9 @@ func TestGetStakeByPoolsAggregatesTextAmountsPostgres(t *testing.T) {
 }
 
 // TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres covers issue #2813 on
-// postgres: the reward-account balance is cast to BIGINT and added to live UTxO
-// lovelace via MAX(CAST(account.reward AS BIGINT)), and a reward-only credential
-// with no live UTxO yields non-zero stake.
+// postgres: the reconstructed reward-account balance is cast to BIGINT and
+// added to live UTxO lovelace, and a reward-only credential with no live UTxO
+// yields non-zero stake.
 func TestGetStakeByPoolsAtSlotIncludesRewardBalancePostgres(t *testing.T) {
 	store := newTestPostgresStore(t)
 	defer store.Close() //nolint:errcheck

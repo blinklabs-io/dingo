@@ -70,9 +70,9 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccountsMysql(t *testing.T) {
 }
 
 // TestGetStakeByPoolsAtSlotIncludesRewardBalanceMysql covers issue #2813 on
-// mysql: the reward-account balance is cast to UNSIGNED and added to live UTxO
-// lovelace via MAX(CAST(account.reward AS UNSIGNED)), and a reward-only
-// credential with no live UTxO yields non-zero stake.
+// mysql: the reconstructed reward-account balance is cast to UNSIGNED and
+// added to live UTxO lovelace, and a reward-only credential with no live UTxO
+// yields non-zero stake.
 func TestGetStakeByPoolsAtSlotIncludesRewardBalanceMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
 	defer store.Close() //nolint:errcheck

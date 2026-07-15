@@ -773,11 +773,11 @@ func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
 	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
 }
 
-// TestGetStakeByPoolsAtSlotIncludesRewardBalance covers issue #2813: the live
-// mark snapshot must add each delegator's reward-account balance to their live
-// UTxO lovelace. A credential with both a live UTxO and a reward balance sums
-// both, and a credential whose entire stake sits in its reward balance (no live
-// UTxO) now yields non-zero stake instead of collapsing to zero.
+// TestGetStakeByPoolsAtSlotIncludesRewardBalance covers issue #2813: a mark
+// snapshot must add each delegator's reward-account balance to their live UTxO
+// lovelace. A credential with both a live UTxO and a reward balance sums both,
+// and a credential whose entire stake sits in its reward balance (no live UTxO)
+// yields non-zero stake instead of collapsing to zero.
 func TestGetStakeByPoolsAtSlotIncludesRewardBalance(t *testing.T) {
 	t.Parallel()
 	store := setupStakeSnapshotTestStore(t)
@@ -838,6 +838,74 @@ func TestGetStakeByPoolsAtSlotIncludesRewardBalance(t *testing.T) {
 	require.Equal(t, uint64(40), stakes[string(poolB)],
 		"pool B stake unchanged when reward balance is zero")
 	require.Equal(t, uint64(1), delegators[string(poolB)])
+}
+
+// TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance proves that credits and
+// withdrawals after a snapshot boundary cannot change that snapshot's stake.
+func TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	pool := bytes.Repeat([]byte{0xA3}, 28)
+	stakeKey := bytes.Repeat([]byte{0x07}, 28)
+	account := models.Account{
+		StakingKey: stakeKey,
+		Pool:       pool,
+		AddedSlot:  10,
+		Active:     true,
+		Reward:     types.Uint64(50),
+	}
+	require.NoError(t, db.Create(&account).Error)
+
+	// The boundary balance is 50. A later credit raises it to 70, a
+	// withdrawal clears it, and another later credit leaves the live balance
+	// at 25. Neither the live 25 nor the intermediate 70 belongs at slot 80.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0,
+		stakeKey,
+		20,
+		90,
+		bytes.Repeat([]byte{0x41}, 32),
+		nil,
+	))
+	require.NoError(t, store.ApplyAccountRewardWithdrawal(
+		0,
+		stakeKey,
+		70,
+		100,
+		bytes.Repeat([]byte{0x42}, 32),
+		nil,
+	))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0,
+		stakeKey,
+		25,
+		110,
+		bytes.Repeat([]byte{0x43}, 32),
+		nil,
+	))
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(50), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
+
+	// After the withdrawal, reversing the sole later credit must recover the
+	// cleared balance rather than use the current 25.
+	stakes, delegators, err = store.GetStakeByPoolsAtSlot(
+		[][]byte{pool},
+		105,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
 }
 
 func TestGetStakeByPoolsUsesStakeCredentialUtxoIndex(t *testing.T) {

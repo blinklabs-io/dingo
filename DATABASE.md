@@ -877,19 +877,20 @@ The reward term (issue #2813) is required for parity with Mithril-imported mark
 rows: summing live UTxOs alone omits reward balances and understates per-pool
 mark stake by ~10% (worse for pools whose delegators hold most stake as
 rewards), which understates sigma so canonical blocks fail the leader-threshold
-VRF check and wedge networks that enforce it. It is added at the credential
-level exactly once via `MAX(account.reward)` — `idx_account_credential` is
-unique per `(credential_tag, staking_key)`, so `MAX` picks the single reward
-without multiplying it across the UTxO join fan-out that `SUM` would. This is an
-interim source: `account.reward` is the live balance, which drifts from the
-reward balance at the boundary slot, so the total is not consensus-exact; the
-boundary-accurate source is the reward engine sampling the reward at the
-snapshot slot.
+VRF check and wedge networks that enforce it. The query reconstructs each
+credential's reward balance at the requested slot from `account.reward` and
+`account_reward_delta`: without a later withdrawal it subtracts all later
+credits from the live balance; with a later withdrawal it starts from the first
+withdrawal's `previous_reward` and subtracts credits between the requested slot
+and that withdrawal. Events after the first withdrawal cannot affect its
+recorded pre-withdrawal balance. The resulting historical reward is added once
+per credential via `MAX(historical_reward.reward)`, avoiding multiplication
+across the UTxO join fan-out.
 
-`utxo.amount` and `account.reward` are both stored as text (`types.Uint64`) on
-postgres and mysql, so each is cast to the backend's native integer type before
-arithmetic (`INTEGER` on sqlite, `BIGINT` on postgres, `UNSIGNED` on mysql),
-matching the DRep voting-power queries:
+`utxo.amount`, `account.reward`, and the reward-delta amounts are stored as text
+(`types.Uint64`) on postgres and mysql, so each is cast to the backend's native
+integer type before arithmetic (`INTEGER` on sqlite, `BIGINT` on postgres,
+`UNSIGNED` on mysql), matching the DRep voting-power queries:
 
 ```sql
 -- Predicate used by sqlite/postgres/mysql implementations after resolving
@@ -899,16 +900,16 @@ WITH active_delegator_stake AS (
          active_delegation.credential_tag,
          active_delegation.staking_key,
          COALESCE(SUM(CAST(utxo.amount AS BIGINT)), 0)
-           + COALESCE(MAX(CAST(account.reward AS BIGINT)), 0) AS total_stake
+           + COALESCE(MAX(historical_reward.reward), 0) AS total_stake
   FROM active_delegation
   LEFT JOIN utxo
     ON utxo.credential_tag = active_delegation.credential_tag
    AND utxo.staking_key = active_delegation.staking_key
    AND utxo.added_slot <= $1
    AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > $1)
-  LEFT JOIN account
-    ON account.credential_tag = active_delegation.credential_tag
-   AND account.staking_key = active_delegation.staking_key
+  LEFT JOIN historical_reward
+    ON historical_reward.credential_tag = active_delegation.credential_tag
+   AND historical_reward.staking_key = active_delegation.staking_key
   WHERE active_delegation.pool_key_hash IN (...)
   GROUP BY active_delegation.pool_key_hash,
            active_delegation.credential_tag,
