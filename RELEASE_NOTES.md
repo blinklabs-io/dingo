@@ -1,5 +1,41 @@
 # Dingo Releases
 
+## v0.65.0 (July 15, 2026)
+
+**Title:** Reward metadata groundwork, accurate Mark stake, and faster Leios failover
+
+**Date:** July 15, 2026
+
+**Version:** v0.65.0
+
+This release lays the groundwork for fuller reward metadata, corrects historical Mark stake totals, improves Leios catch up failover on slow relays, and refreshes TypeScript toolchains in the example projects.
+
+### ✨ What's New
+
+* Added **rebuild fuller reward metadata state at startup:** Reward snapshots now keep more reward state, including pool reward and owner stake details, and operators upgrading existing databases can rebuild missing live reward stake metadata before ledger processing resumes. This groundwork keeps rollback and withdrawal replay handling more consistent without introducing the full reward formula in this release.
+
+### 💪 Improvements
+
+* Updated **use TypeScript 7.0.2 in the Blockfrost explorer example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+* Refreshed **use TypeScript 7.0.2 in the Sundae preview example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+
+### 🔧 Fixes
+
+* Fixed **include reward account balances in Mark stake snapshots:** Historical pool stake totals now keep delegator reward balances alongside live UTxO stake, which prevents false leader threshold failures and preserves reward only stake at the snapshot slot.
+* Improved **fail over Leios historical fetches faster on slow or busy relays:** Historical catch up now abandons slow fetch attempts sooner, prefers recently healthy peers, and skips busy connections so backfill keeps moving instead of stalling on one relay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.64.0 (July 14, 2026)
 
 **Title:** Governance replay recovery and simpler pool imports
