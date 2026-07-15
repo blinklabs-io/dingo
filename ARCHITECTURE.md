@@ -1024,7 +1024,7 @@ Key models in `database/models/`:
 | `PoolStakeSnapshot` | Per-pool stake at epoch boundary |
 | `EpochSummary` | Network-wide aggregates per epoch |
 | `BackfillCheckpoint` | Mithril backfill progress tracking |
-| `NetworkState` | Network-wide state tracking (treasury/reserves); updated at the epoch boundary by treasury withdrawals, donations, and unclaimed pool-retirement deposit refunds |
+| `NetworkState` | Network-wide treasury/reserves state; initialized from genesis circulation or imported Mithril account state, then updated at epoch boundaries by rewards, treasury withdrawals, donations, MIR, and unclaimed pool-retirement deposit refunds |
 | `NetworkDonation` | Per-block treasury donations, applied to treasury at the epoch boundary |
 | `GovernanceAction` | Governance proposals |
 | `CommitteeMember` | Constitutional committee members |
@@ -1032,6 +1032,15 @@ Key models in `database/models/`:
 ## Blockchain State Management
 
 The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
+
+During from-genesis startup, the synthetic genesis block transaction creates
+the combined Byron and Shelley genesis UTxOs and atomically writes the slot-0
+`NetworkState`: treasury starts at zero and reserves start at
+`maxLovelaceSupply - genesis circulation`. Epoch reward and pot transitions
+therefore build from the same initial account state as cardano-ledger.
+When a matching synthetic genesis block already exists, startup backfills this
+baseline only if `network_state` is empty. A non-empty history is not rewritten,
+because prior pot transitions cannot be repaired safely without replay.
 
 ```
                        LedgerState
@@ -1655,6 +1664,11 @@ snapshot manager to ensure the initial stake snapshot state before starting the
 client APIs. If the imported database already contains a non-empty Mark snapshot
 window for the current epoch, N-1, and N-2, the snapshot manager reuses that
 window instead of recalculating stake distribution from live UTxO state.
+
+Ledger-state import decodes treasury and reserves from the certified
+`NewEpochState.AccountState` and writes them to `NetworkState` at the imported
+tip. It does not derive a genesis baseline, because the imported account state
+already includes every pot transition through that tip.
 
 Ledger-state import also persists `NewEpochState.pool-distr` as
 `pool_stake_snapshot` rows with snapshot type `"actv"` for the imported epoch.

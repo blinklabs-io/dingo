@@ -2827,9 +2827,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 	if ls.currentTip.Point.Slot > 0 {
 		// Validate existing chain data matches the current genesis config.
 		// If genesis CBOR exists in the blob store with the expected hash,
-		// the database was created with a matching genesis — nothing to do.
+		// the database was created with a matching genesis. Older databases
+		// may still be missing the slot-0 network-state baseline.
 		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
-			return nil
+			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
 		// This indicates the database was created for a different
@@ -2878,6 +2879,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Group genesis UTxOs by transaction hash
 		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
+		genesisReserves, err := genesisReserveBalance(
+			shelleyGenesis.MaxLovelaceSupply,
+			genesisUtxos,
+		)
+		if err != nil {
+			return fmt.Errorf("calculate genesis reserves: %w", err)
+		}
 		txUtxos := make(map[[32]byte][]lcommon.Utxo)
 		for i := range genesisUtxos {
 			txHash := genesisUtxos[i].Id.Id()
@@ -2970,12 +2978,26 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 		}
 
+		// The initial reserves are the maximum supply that was not placed in
+		// circulation by either genesis configuration. All later epoch, MIR,
+		// governance, and donation updates build from this slot-0 baseline.
+		if err := ls.db.Metadata().SetNetworkState(
+			0,
+			genesisReserves,
+			0,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("set genesis network state: %w", err)
+		}
+
 		ls.config.Logger.Info(
 			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
 				len(txUtxos),
 				len(genesisUtxos),
 			),
 			"component", "ledger",
+			"treasury", 0,
+			"reserves", genesisReserves,
 		)
 
 		// Load genesis staking data (pool registrations + delegations)
@@ -3032,6 +3054,45 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return nil
 	})
 	return err
+}
+
+// ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
+// for a matching pre-existing genesis database that has no network-state rows.
+func (ls *LedgerState) ensureGenesisNetworkState() error {
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return fmt.Errorf("get existing network state: %w", err)
+	}
+	if state != nil {
+		return nil
+	}
+
+	byronUtxos, err := ls.config.CardanoNodeConfig.ByronGenesis().GenesisUtxos()
+	if err != nil {
+		return fmt.Errorf("generate Byron genesis UTxOs: %w", err)
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyUtxos, err := shelleyGenesis.GenesisUtxos()
+	if err != nil {
+		return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
+	}
+	reserves, err := genesisReserveBalance(
+		shelleyGenesis.MaxLovelaceSupply,
+		slices.Concat(byronUtxos, shelleyUtxos),
+	)
+	if err != nil {
+		return fmt.Errorf("calculate genesis reserves: %w", err)
+	}
+	if err := ls.db.Metadata().SetNetworkState(0, reserves, 0, nil); err != nil {
+		return fmt.Errorf("set missing genesis network state: %w", err)
+	}
+	ls.config.Logger.Info(
+		"initialized missing genesis network state",
+		"component", "ledger",
+		"treasury", 0,
+		"reserves", reserves,
+	)
+	return nil
 }
 
 // buildGenesisBlockCbor creates a CBOR structure representing a synthetic
