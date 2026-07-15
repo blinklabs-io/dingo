@@ -2097,12 +2097,29 @@ Database operations and event delivery use worker pools for controlled concurren
 | Pattern | Usage |
 |---------|-------|
 | Goroutine Management | Tracked WaitGroups for clean shutdown |
-| Mutex Protection | RWMutex for read-heavy operations |
-| Atomic Operations | Atomic types for metrics counters |
+| Mutex Protection | Ledger writer serialization and mutable operational state |
+| Atomic Operations | Immutable ledger read snapshots and metrics counters |
 | Channel Communication | EventBus async delivery |
 | Context Cancellation | Graceful shutdown signals |
 | Worker Pools | Database operations and event delivery |
 | sync.Once | Ensure single shutdown execution |
+
+`LedgerState` publishes its read-mostly state through two immutable
+copy-on-write snapshots. The consensus snapshot groups the current epoch, era,
+current and previous-era protocol parameters, epoch cache, and hard-fork
+transition information. The tip snapshot groups the applied chain tip with the
+Praos block nonce belonging to that tip. Hot query paths load these snapshots
+through `atomic.Pointer` without acquiring the state's `RWMutex`; `reachedTip`
+is an `atomic.Bool`.
+
+Ledger writers remain serialized by the existing mutex. They compute changes
+privately, update the writer-owned state, and publish a complete replacement
+snapshot before unlocking. Slice-backed epoch nonces, tip hashes, and block
+nonces are copied at publication boundaries and published snapshots must never
+be mutated. Each snapshot is internally consistent, but a caller loading both
+snapshot pointers may observe adjacent publication generations; code requiring
+one exact cross-snapshot commit must remain under the ledger lock or explicitly
+retry.
 
 ## Configuration
 

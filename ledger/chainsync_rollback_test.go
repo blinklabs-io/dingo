@@ -1675,6 +1675,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = append([]byte(nil), currentNonce...)
 	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
 
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},

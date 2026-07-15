@@ -85,22 +85,16 @@ func (ls *LedgerState) querySystemStart() (any, error) {
 }
 
 func (ls *LedgerState) queryChainBlockNo() (any, error) {
-	ls.RLock()
-	point := ls.currentTip.Point
-	blockNumber := ls.currentTip.BlockNumber
-	ls.RUnlock()
+	tip := ls.loadTipSnapshot().currentTip
 	// WithOrigin BlockNo: [0] at genesis, [1, blockNo] once a block exists.
-	if len(point.Hash) == 0 {
+	if len(tip.Point.Hash) == 0 {
 		return []any{0}, nil
 	}
-	return []any{1, blockNumber}, nil
+	return []any{1, tip.BlockNumber}, nil
 }
 
 func (ls *LedgerState) queryChainPoint() (any, error) {
-	ls.RLock()
-	point := ls.currentTip.Point
-	ls.RUnlock()
-	return point, nil
+	return ls.loadTipSnapshot().currentTip.Point, nil
 }
 
 func (ls *LedgerState) queryHardFork(
@@ -108,10 +102,7 @@ func (ls *LedgerState) queryHardFork(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.HardForkCurrentEraQuery:
-		ls.RLock()
-		eraId := ls.currentEra.Id
-		ls.RUnlock()
-		return eraId, nil
+		return ls.loadConsensusSnapshot().currentEra.Id, nil
 	case *olocalstatequery.HardForkEraHistoryQuery:
 		return ls.queryHardForkEraHistory()
 	default:
@@ -162,14 +153,13 @@ type eraBoundData struct {
 }
 
 func (ls *LedgerState) queryHardForkEraHistory() (any, error) {
-	// Snapshot the tip, current era, and transition info under the read lock
-	// so we can use them without holding the lock during the (potentially
-	// slow) DB queries below.
-	ls.RLock()
-	tipSlot := ls.currentTip.Point.Slot
-	currentEraId := ls.currentEra.Id
-	transitionInfo := ls.transitionInfo
-	ls.RUnlock()
+	// Read the tip, current era, and transition info from the lock-free
+	// snapshots so this (potentially slow) DB-querying path never contends
+	// with the ledger write lock.
+	tipSlot := ls.loadTipSnapshot().currentTip.Point.Slot
+	consensusState := ls.loadConsensusSnapshot()
+	currentEraId := consensusState.currentEra.Id
+	transitionInfo := consensusState.transitionInfo
 
 	shape := ls.eraShape()
 	if len(shape.Eras) == 0 {
@@ -429,15 +419,9 @@ func (ls *LedgerState) queryShelley(
 ) (any, error) {
 	switch q := query.Query.(type) {
 	case *olocalstatequery.ShelleyEpochNoQuery:
-		ls.RLock()
-		epochId := ls.currentEpoch.EpochId
-		ls.RUnlock()
-		return []any{epochId}, nil
+		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
-		ls.RLock()
-		pparams := ls.currentPParams
-		ls.RUnlock()
-		return []any{pparams}, nil
+		return []any{ls.loadConsensusSnapshot().currentPParams}, nil
 	case *olocalstatequery.ShelleyGenesisConfigQuery:
 		return ls.queryShelleyGenesisConfig()
 	case *olocalstatequery.ShelleyUtxoByAddressQuery:
@@ -589,9 +573,8 @@ func (ls *LedgerState) queryShelleyAccountState() (any, error) {
 // drepDeposit returns the current dRepDeposit protocol parameter, which is the
 // deposit every DRep locks at registration. Returns 0 outside Conway.
 func (ls *LedgerState) drepDeposit() uint64 {
-	ls.RLock()
-	defer ls.RUnlock()
-	if cpp, ok := ls.currentPParams.(*conway.ConwayProtocolParameters); ok &&
+	pparams := ls.loadConsensusSnapshot().currentPParams
+	if cpp, ok := pparams.(*conway.ConwayProtocolParameters); ok &&
 		cpp != nil {
 		return cpp.DRepDeposit
 	}

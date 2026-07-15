@@ -2413,6 +2413,7 @@ func BenchmarkBlockfetchVerifiedHeaderDispatch(b *testing.B) {
 	}
 	ledgerState.currentEpoch = epoch
 	ledgerState.epochCache = []models.Epoch{epoch}
+	ledgerState.publishSnapshotsLocked()
 
 	if err := ledgerState.chain.AddBlockHeader(testBlock.block.Header()); err != nil {
 		b.Fatalf("seed header queue: %v", err)
