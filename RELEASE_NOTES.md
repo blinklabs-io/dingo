@@ -1,5 +1,115 @@
 # Dingo Releases
 
+## v0.65.0 (July 15, 2026)
+
+**Title:** Reward metadata groundwork, steadier Mark stake snapshots, and faster Leios failover
+
+**Date:** July 15, 2026
+
+**Version:** v0.65.0
+
+This release gives upgraded databases a startup rebuild path for fuller reward metadata, corrects historical Mark stake totals, improves Leios catch up failover on slow or busy relays, and refreshes TypeScript toolchains in the example projects.
+
+### ✨ What's New
+
+* Added **rebuild fuller reward metadata state at startup:** Reward snapshots now keep more reward state, including pool reward and owner stake details, and operators upgrading existing databases can rebuild missing live reward stake metadata before ledger processing resumes. This groundwork keeps rollback recovery and reward withdrawal replay more consistent without changing reward formulas in this release.
+
+### 💪 Improvements
+
+* Updated **use TypeScript 7.0.2 in the Blockfrost explorer example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+* Refreshed **use TypeScript 7.0.2 in the Sundae preview example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+
+### 🔧 Fixes
+
+* Fixed **include reward account balances in Mark stake snapshots:** Historical pool stake totals now count each delegator's reward balance together with live UTxO stake, which prevents false leader eligibility failures and preserves stake for delegators who hold only rewards at the snapshot slot.
+* Improved **fail over Leios historical fetches faster on slow or busy relays:** Historical catch up now abandons slow fetch attempts sooner, prefers recently healthy peers, and skips busy connections so backfill keeps moving instead of stalling on one relay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** reward metadata 基盤、安定した Mark stake snapshot、Leios フェイルオーバー高速化
+
+**日付:** July 15, 2026
+
+**バージョン:** v0.65.0
+
+このリリースでは、既存 database の更新時により完全な reward metadata を起動時に再構築できるようにし、履歴 Mark stake 合計を是正し、遅い relay や busy connection での Leios catch up フェイルオーバーを改善し、example project の TypeScript toolchain を更新します。
+
+### ✨ 新機能
+
+* 追加しました **起動時により完全な reward metadata state を再構築できること:** Reward snapshot は pool reward と owner stake を含む、より多くの reward state を保持するようになり、既存 database を更新する operator は ledger 処理を再開する前に不足している live reward stake metadata を再構築できます。この基盤により、今回のリリースで reward formula 自体を変えずに、rollback recovery と reward withdrawal replay の整合性を高めます。
+
+### 💪 改善
+
+* 更新しました **Blockfrost explorer example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+* 刷新しました **Sundae preview example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+
+### 🔧 修正
+
+* 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake とあわせて delegator ごとの reward balance も数えるようになり、leader eligibility の誤判定を防ぎ、snapshot slot で reward のみを持つ delegator の stake も維持します。
+* 改善しました **遅い relay や busy connection から Leios の履歴 fetch をより早く切り替えること:** 履歴 catch up は遅い fetch をより早く打ち切り、最近健全だった peer を優先し、busy connection を待たずにスキップするため、backfill が一つの relay で止まりにくくなります。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Base de metadatos de recompensas, instantáneas de Mark stake más estables y failover más rápido de Leios
+
+**Fecha:** July 15, 2026
+
+**Versión:** v0.65.0
+
+Esta versión ofrece a las bases de datos actualizadas una ruta de reconstrucción al iniciar para un estado de metadatos de recompensas más completo, corrige los totales históricos de Mark stake, mejora el failover de catch up de Leios en relays lentos u ocupados y renueva las cadenas de herramientas TypeScript en los proyectos de ejemplo.
+
+### ✨ Novedades
+
+* Agregó **reconstruir un estado de metadatos de recompensas más completo al iniciar:** Las instantáneas de recompensas ahora conservan más estado de recompensas, incluidos los detalles de la cuenta de recompensas del pool y del stake del propietario, y los operadores que actualizan bases de datos existentes pueden reconstruir el metadato faltante de live reward stake antes de que se reanude el procesamiento del ledger. Esta base mantiene más consistente la recuperación tras rollback y el replay de retiros sin cambiar las fórmulas de recompensas en esta versión.
+
+### 💪 Mejoras
+
+* Actualizó **usar TypeScript 7.0.2 en el ejemplo de Blockfrost explorer:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+* Renovó **usar TypeScript 7.0.2 en el ejemplo de Sundae preview:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+
+### 🔧 Correcciones
+
+* Corrigió **incluir saldos de cuentas de recompensas en las instantáneas de Mark stake:** Los totales históricos de stake por pool ahora cuentan el saldo de recompensas de cada delegador junto con el stake UTxO en vivo, lo que evita falsos fallos de elegibilidad del líder y preserva el stake de delegadores que solo mantienen recompensas en el slot de la instantánea.
+* Mejoró **cambiar antes las consultas históricas de Leios cuando un relay va lento o está ocupado:** El catch up histórico ahora abandona antes los intentos lentos, prioriza pares que respondieron bien hace poco y omite conexiones ocupadas para que el backfill siga avanzando en lugar de quedarse detenido en un relay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.64.0 (July 14, 2026)
 
 **Title:** Governance replay recovery and simpler pool imports
