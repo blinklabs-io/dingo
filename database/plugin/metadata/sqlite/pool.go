@@ -488,53 +488,11 @@ func (d *MetadataStoreSqlite) GetPoolRegistrationsAtSlot(
 		registrations = append(registrations, chunk...)
 	}
 
-	if err := d.populatePoolRegistrationOwners(db, registrations); err != nil {
+	if err := stakequery.PopulatePoolRegistrationOwners(db, registrations); err != nil {
 		return nil, err
 	}
 
 	return registrations, nil
-}
-
-func (d *MetadataStoreSqlite) populatePoolRegistrationOwners(
-	db *gorm.DB,
-	registrations []models.PoolRegistration,
-) error {
-	if len(registrations) == 0 {
-		return nil
-	}
-	ids := make([]uint, 0, len(registrations))
-	for _, registration := range registrations {
-		ids = append(ids, registration.ID)
-	}
-	var owners []models.PoolRegistrationOwner
-	for start := 0; start < len(ids); start += sqliteBindVarLimit {
-		end := min(start+sqliteBindVarLimit, len(ids))
-		var chunkOwners []models.PoolRegistrationOwner
-		if err := db.Where(
-			"pool_registration_id IN ?",
-			ids[start:end],
-		).Find(&chunkOwners).Error; err != nil {
-			return fmt.Errorf(
-				"GetPoolRegistrationsAtSlot: query owners: %w",
-				err,
-			)
-		}
-		owners = append(owners, chunkOwners...)
-	}
-	ownersByRegistration := make(
-		map[uint][]models.PoolRegistrationOwner,
-		len(registrations),
-	)
-	for _, owner := range owners {
-		ownersByRegistration[owner.PoolRegistrationID] = append(
-			ownersByRegistration[owner.PoolRegistrationID],
-			owner,
-		)
-	}
-	for i := range registrations {
-		registrations[i].Owners = ownersByRegistration[registrations[i].ID]
-	}
-	return nil
 }
 
 // GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool, the
@@ -1306,4 +1264,18 @@ func (d *MetadataStoreSqlite) GetStakeByPoolsAtSlot(
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
 	}
 	return stakes, delegators, nil
+}
+
+func (d *MetadataStoreSqlite) GetPoolOwnerStakeAtSlot(
+	ownerKeyHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return stakequery.GetPoolOwnerStakeAtSlot(
+		db, ownerKeyHashes, slot,
+	)
 }

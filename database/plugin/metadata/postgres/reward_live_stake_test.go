@@ -46,6 +46,29 @@ func TestPostgresRebuildRewardLiveStake(t *testing.T) {
 	require.NoError(t, store.DB().Where(
 		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
 	).First(&got).Error)
+	require.Equal(t, types.Uint64(36_000_000_000_000_007), got.UtxoStake)
+	require.Equal(t, types.Uint64(9_007_199_254_740_993), got.RewardStake)
 	require.Equal(t, types.Uint64(45_007_199_254_741_000), got.TotalStake)
+	require.Equal(t, poolKey, got.PoolKeyHash)
+	require.True(t, got.Registered)
 	require.Equal(t, uint64(99), got.UpdatedSlot)
+}
+
+func TestRewardStakeRefsFromUtxoRewardStakeCredentialsUsesBoundarySlot(
+	t *testing.T,
+) {
+	stakeKey := bytes.Repeat([]byte{0xA6}, 28)
+	refs := rewardStakeRefsFromUtxoRewardStakeCredentials(
+		[]utxoRewardStakeCredential{{
+			CredentialTag: 1,
+			StakingKey:    stakeKey,
+		}},
+		123,
+	)
+
+	ref := models.NewStakeCredentialRef(1, stakeKey)
+	got, ok := refs[ref.MapKey()]
+	require.True(t, ok)
+	require.Equal(t, ref, got.ref)
+	require.Equal(t, uint64(123), got.slot)
 }

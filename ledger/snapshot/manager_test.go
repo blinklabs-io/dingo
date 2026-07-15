@@ -316,6 +316,26 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	}, 500)
 	var pool models.Pool
 	require.NoError(t, gormDB.Where("pool_key_hash = ?", poolHash).First(&pool).Error)
+	var effectiveRegistration models.PoolRegistration
+	require.NoError(t, gormDB.Where(
+		"pool_id = ? AND added_slot = ?", pool.ID, 500,
+	).First(&effectiveRegistration).Error)
+	rewardAccount := []byte("reward_account_1234567890123")
+	require.Len(t, rewardAccount, 28)
+	require.NoError(t, gormDB.Model(&effectiveRegistration).Updates(map[string]any{
+		"reward_account":                rewardAccount,
+		"reward_account_credential_tag": uint8(1),
+	}).Error)
+	require.NoError(t, gormDB.Create(&models.PoolRegistrationOwner{
+		PoolRegistrationID: effectiveRegistration.ID,
+		PoolID:             pool.ID,
+		KeyHash:            []byte("reward_staking_key_123456789"),
+	}).Error)
+	// Reward balance is part of the historical Mark stake and therefore of
+	// owner stake as well.
+	require.NoError(t, gormDB.Model(&models.Account{}).Where(
+		"staking_key = ?", []byte("reward_staking_key_123456789"),
+	).Update("reward", types.Uint64(7_000_000)).Error)
 	require.NoError(t, gormDB.Create(&models.PoolRegistration{
 		PoolID:      pool.ID,
 		PoolKeyHash: poolHash,
@@ -357,7 +377,7 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
 	require.NoError(t, err)
 	require.NotNil(t, rewardSnapshot)
-	require.Equal(t, uint64(50_000_000), uint64(rewardSnapshot.TotalActiveStake))
+	require.Equal(t, uint64(57_000_000), uint64(rewardSnapshot.TotalActiveStake))
 	require.Equal(t, uint64(1), rewardSnapshot.TotalPoolCount)
 	require.Equal(t, uint64(1), rewardSnapshot.TotalDelegators)
 	require.Equal(t, uint64(1000), rewardSnapshot.CapturedSlot)
@@ -374,12 +394,50 @@ func TestHandleEpochTransitionPersistsRewardStateInputs(t *testing.T) {
 	require.NotNil(t, inputs[0].TotalBlocksInEpoch)
 	require.Equal(t, uint64(2), *inputs[0].TotalBlocksInEpoch)
 	require.Equal(t, uint64(1_000_000), uint64(inputs[0].Pledge))
-	require.Equal(t, uint64(50_000_000), uint64(inputs[0].DelegatedStake))
+	require.Equal(t, uint64(57_000_000), uint64(inputs[0].DelegatedStake))
+	require.Equal(t, uint64(57_000_000), uint64(inputs[0].OwnerStake))
+	require.Equal(t, rewardAccount, inputs[0].RewardAccount)
+	require.Equal(t, uint8(1), inputs[0].RewardAccountCredentialTag)
 	require.Equal(t, uint64(340_000_000), uint64(inputs[0].Cost))
 	require.Equal(t, "1/100", inputs[0].Margin.String())
 	require.Equal(t, uint64(1), inputs[0].DelegatorCount)
 	require.Equal(t, uint64(1000), inputs[0].CapturedSlot)
 	require.Equal(t, uint64(432000), inputs[0].BoundarySlot)
+}
+
+func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
+	db, sqliteStore := setupTestDB(t)
+	require.NoError(t, sqliteStore.DB().Create(&models.Epoch{
+		EpochId:       0,
+		StartSlot:     0,
+		LengthInSlots: 1_000,
+	}).Error)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:          7,
+			SnapshotType:   models.PoolStakeSnapshotTypeMark,
+			PoolKeyHash:    make([]byte, 28),
+			TotalStake:     1,
+			DelegatorCount: 1,
+			CapturedSlot:   100,
+		}, nil,
+	))
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.captureMarkSnapshot(
+		context.Background(),
+		event.EpochTransitionEvent{
+			NewEpoch:     7,
+			SnapshotSlot: 200,
+			BoundarySlot: 200,
+		},
+	))
+
+	rows, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		7, models.PoolStakeSnapshotTypeMark, nil,
+	)
+	require.NoError(t, err)
+	require.Empty(t, rows)
 }
 
 // TestCaptureGenesisSnapshot_NoPools verifies that when no pools exist

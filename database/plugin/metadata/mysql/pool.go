@@ -343,47 +343,10 @@ func (d *MetadataStoreMysql) GetPoolRegistrationsAtSlot(
 			err,
 		)
 	}
-	if err := d.populatePoolRegistrationOwners(db, registrations); err != nil {
+	if err := stakequery.PopulatePoolRegistrationOwners(db, registrations); err != nil {
 		return nil, err
 	}
 	return registrations, nil
-}
-
-func (d *MetadataStoreMysql) populatePoolRegistrationOwners(
-	db *gorm.DB,
-	registrations []models.PoolRegistration,
-) error {
-	if len(registrations) == 0 {
-		return nil
-	}
-	ids := make([]uint, 0, len(registrations))
-	for _, registration := range registrations {
-		ids = append(ids, registration.ID)
-	}
-	var owners []models.PoolRegistrationOwner
-	if err := db.Where(
-		"pool_registration_id IN ?",
-		ids,
-	).Find(&owners).Error; err != nil {
-		return fmt.Errorf(
-			"GetPoolRegistrationsAtSlot: query owners: %w",
-			err,
-		)
-	}
-	ownersByRegistration := make(
-		map[uint][]models.PoolRegistrationOwner,
-		len(registrations),
-	)
-	for _, owner := range owners {
-		ownersByRegistration[owner.PoolRegistrationID] = append(
-			ownersByRegistration[owner.PoolRegistrationID],
-			owner,
-		)
-	}
-	for i := range registrations {
-		registrations[i].Owners = ownersByRegistration[registrations[i].ID]
-	}
-	return nil
 }
 
 // certOrderInfo holds block_index and cert_index for same-slot comparison.
@@ -1189,4 +1152,18 @@ func (d *MetadataStoreMysql) GetStakeByPoolsAtSlot(
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
 	}
 	return stakes, delegators, nil
+}
+
+func (d *MetadataStoreMysql) GetPoolOwnerStakeAtSlot(
+	ownerKeyHashes [][]byte,
+	slot uint64,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return stakequery.GetPoolOwnerStakeAtSlot(
+		db, ownerKeyHashes, slot,
+	)
 }

@@ -61,7 +61,11 @@ func (m *Manager) saveSnapshot(
 	metaTxn := txn.Metadata()
 
 	// Save pool stake snapshots
-	snapshots := make([]*models.PoolStakeSnapshot, 0, len(distribution.PoolStakes))
+	snapshots := make(
+		[]*models.PoolStakeSnapshot,
+		0,
+		len(distribution.PoolStakes),
+	)
 	for poolKeyHash, stake := range distribution.PoolStakes {
 		delegators := distribution.DelegatorCount[poolKeyHash]
 		snapshots = append(snapshots, &models.PoolStakeSnapshot{
@@ -88,6 +92,11 @@ func (m *Manager) saveSnapshot(
 		}
 	}
 
+	if err := meta.DeletePoolStakeSnapshotsForEpoch(
+		epoch, snapshotType, metaTxn,
+	); err != nil {
+		return fmt.Errorf("replace pool snapshots: delete prior set: %w", err)
+	}
 	if err := meta.SavePoolStakeSnapshots(snapshots, metaTxn); err != nil {
 		return fmt.Errorf("save pool snapshots: %w", err)
 	}
@@ -224,8 +233,20 @@ func (m *Manager) rewardPoolInputs(
 		map[string]models.PoolRegistration,
 		len(registrations),
 	)
+	ownerKeys := make([][]byte, 0)
 	for _, registration := range registrations {
 		registrationByHash[string(registration.PoolKeyHash)] = registration
+		for _, owner := range registration.Owners {
+			ownerKeys = append(ownerKeys, owner.KeyHash)
+		}
+	}
+	ownerStakes, err := meta.GetPoolOwnerStakeAtSlot(
+		ownerKeys,
+		distribution.Slot,
+		metaTxn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get historical pool-owner stake: %w", err)
 	}
 
 	inputs := make([]*models.RewardPoolInput, 0, len(distribution.PoolStakes))
@@ -250,6 +271,17 @@ func (m *Manager) rewardPoolInputs(
 			input.Pledge = registration.Pledge
 			input.Cost = registration.Cost
 			input.Margin = cloneRat(registration.Margin)
+			input.RewardAccount = append(
+				[]byte(nil), registration.RewardAccount...,
+			)
+			input.RewardAccountCredentialTag = registration.RewardAccountCredentialTag
+			for _, owner := range registration.Owners {
+				input.OwnerStake += types.Uint64(
+					ownerStakes[poolCredentialStakeKey(
+						poolKey[:], 0, owner.KeyHash,
+					)],
+				)
+			}
 		} else {
 			m.logger.Warn(
 				"missing pool registration while saving reward inputs",
@@ -262,6 +294,18 @@ func (m *Manager) rewardPoolInputs(
 		inputs = append(inputs, input)
 	}
 	return inputs, nil
+}
+
+func poolCredentialStakeKey(
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+) string {
+	key := make([]byte, 0, len(poolKeyHash)+1+len(stakingKey))
+	key = append(key, poolKeyHash...)
+	key = append(key, credentialTag)
+	key = append(key, stakingKey...)
+	return string(key)
 }
 
 func rewardPoolBlockCounts(

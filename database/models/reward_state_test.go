@@ -69,6 +69,12 @@ func TestRewardPoolInputMigrationDefaultsOwnerStake(t *testing.T) {
 	var migrated RewardPoolInput
 	require.NoError(t, db.First(&migrated).Error)
 	require.Zero(t, uint64(migrated.OwnerStake))
+	require.Equal(t, uint64(1), migrated.Epoch)
+	require.Equal(t, uint64(1), uint64(migrated.Pledge))
+	require.Equal(t, uint64(2), uint64(migrated.DelegatedStake))
+	require.Equal(t, uint64(3), uint64(migrated.Cost))
+	require.Equal(t, uint64(4), migrated.CapturedSlot)
+	require.Equal(t, uint64(5), migrated.BoundarySlot)
 }
 
 func TestMigrateRewardLiveStakePoolIndex(t *testing.T) {

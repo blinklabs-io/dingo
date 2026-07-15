@@ -80,20 +80,6 @@ func addRewardStakeRef(
 	refs[key] = rewardCredentialSlotRef{ref: ref, slot: slot}
 }
 
-// pinRewardStakeRefsToSlot rewrites every ref's recompute slot to slot. The
-// rollback paths (DeleteUtxosAfterSlot / SetUtxosNotDeletedAfterSlot) use this
-// to pin the live-stake recompute to the rollback boundary rather than the
-// affected UTxOs' own slots.
-func pinRewardStakeRefsToSlot(
-	refs map[string]rewardCredentialSlotRef,
-	slot uint64,
-) {
-	for key, item := range refs {
-		item.slot = slot
-		refs[key] = item
-	}
-}
-
 // toLocalRefs converts the shared package's credential/slot map (returned by
 // the DB-query helpers, which have no reason to know this package's local
 // rewardCredentialSlotRef type) into this package's local map type.

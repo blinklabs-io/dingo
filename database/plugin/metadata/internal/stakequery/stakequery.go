@@ -58,27 +58,50 @@ func GetStakeByPoolsAtSlot(
 		return stakeMap, delegatorMap, nil
 	}
 
-	cte, args := activeDelegationCTE(db, slot)
+	query, args := historicalDelegatorStakeCTE(
+		db, slot, "active_delegation.pool_key_hash IN ?",
+	)
+	query += `
+SELECT pool_key_hash,
+	COUNT(*) AS delegator_count,
+	COALESCE(SUM(total_stake), 0) AS total_stake
+FROM active_delegator_stake
+GROUP BY pool_key_hash`
 
-	// utxo.amount, account.reward, and account_reward_delta amounts are stored as
-	// text by types.Uint64 on
-	// postgres and mysql, so SUM()/arithmetic over the raw columns fails there
-	// ("function sum(text) does not exist" / "UNION types text and integer
-	// cannot be matched"). Cast to the backend's native integer type first,
-	// mirroring the DRep voting-power queries. sqlite is loosely typed but the
-	// cast keeps the backends consistent.
-	//
-	// Per-credential stake is live UTxO lovelace PLUS the delegator's
-	// reward-account balance (issue #2813): summing UTxOs alone undercounts
-	// each pool's mark stake by ~10% (worse for pools whose delegators hold
-	// most of their stake as rewards), understating sigma so that canonical
-	// blocks fail the "VRF leader value exceeds stake-derived threshold"
-	// check and wedge networks that enforce it (preview/preprod/mainnet).
-	// Reward balances are reconstructed at slot from the rollback journal. If
-	// there is no later withdrawal, subtract all later credits from the live
-	// balance. If there is one, its PreviousReward is the balance immediately
-	// before that withdrawal; subtract only credits between slot and that first
-	// withdrawal. Later events cannot affect that recorded balance.
+	type stakeResult struct {
+		PoolKeyHash    []byte `gorm:"column:pool_key_hash"`
+		DelegatorCount uint64 `gorm:"column:delegator_count"`
+		TotalStake     uint64 `gorm:"column:total_stake"`
+	}
+	var results []stakeResult
+	chunkSize := poolQueryChunkSize(db)
+	for start := 0; start < len(poolKeyHashes); start += chunkSize {
+		end := min(start+chunkSize, len(poolKeyHashes))
+		chunk := poolKeyHashes[start:end]
+		queryArgs := append(append([]any(nil), args...), chunk)
+		var chunkResults []stakeResult
+		if err := db.Raw(query, queryArgs...).Scan(&chunkResults).Error; err != nil {
+			return nil, nil, fmt.Errorf(
+				"query historical stake: %w",
+				err,
+			)
+		}
+		results = append(results, chunkResults...)
+	}
+	for _, row := range results {
+		delegatorMap[string(row.PoolKeyHash)] = row.DelegatorCount
+		stakeMap[string(row.PoolKeyHash)] = row.TotalStake
+	}
+
+	return stakeMap, delegatorMap, nil
+}
+
+func historicalDelegatorStakeCTE(
+	db *gorm.DB,
+	slot uint64,
+	predicate string,
+) (string, []any) {
+	cte, args := activeDelegationCTE(db, slot)
 	query := cte + fmt.Sprintf(`,
 ranked_future_withdrawal AS (
 	SELECT withdrawal.credential_tag,
@@ -160,46 +183,69 @@ active_delegator_stake AS (
 	LEFT JOIN historical_reward
 		ON historical_reward.credential_tag = active_delegation.credential_tag
 		AND historical_reward.staking_key = active_delegation.staking_key
-	WHERE active_delegation.pool_key_hash IN ?
+	WHERE %[2]s
 	GROUP BY active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
 		active_delegation.staking_key
-)
-SELECT pool_key_hash,
-	COUNT(*) AS delegator_count,
-	COALESCE(SUM(total_stake), 0) AS total_stake
-FROM active_delegator_stake
-GROUP BY pool_key_hash`, utxoAmountCastType(db))
+)`, utxoAmountCastType(db), predicate)
+	args = append(args, slot, slot, slot, slot)
+	return query, args
+}
 
-	type stakeResult struct {
-		PoolKeyHash    []byte `gorm:"column:pool_key_hash"`
-		DelegatorCount uint64 `gorm:"column:delegator_count"`
-		TotalStake     uint64 `gorm:"column:total_stake"`
+// PoolCredentialStakeKey produces an unambiguous binary map key for a pool and
+// one of its stake credentials.
+func PoolCredentialStakeKey(
+	poolKeyHash []byte,
+	credentialTag uint8,
+	stakingKey []byte,
+) string {
+	key := make([]byte, 0, len(poolKeyHash)+1+len(stakingKey))
+	key = append(key, poolKeyHash...)
+	key = append(key, credentialTag)
+	key = append(key, stakingKey...)
+	return string(key)
+}
+
+// GetPoolOwnerStakeAtSlot returns stake only for the requested key-hash owner
+// credentials, and only under the pool to which each credential was delegated
+// at slot. The result cardinality is bounded by the owner set, not by all pool
+// delegators.
+func GetPoolOwnerStakeAtSlot(
+	db *gorm.DB,
+	ownerKeys [][]byte,
+	slot uint64,
+) (map[string]uint64, error) {
+	out := make(map[string]uint64)
+	if len(ownerKeys) == 0 {
+		return out, nil
 	}
-	var results []stakeResult
+	query, args := historicalDelegatorStakeCTE(
+		db, slot,
+		"active_delegation.credential_tag = 0 "+
+			"AND active_delegation.staking_key IN ?",
+	)
+	query += `
+SELECT pool_key_hash, staking_key, total_stake
+FROM active_delegator_stake`
+
+	type ownerStakeRow struct {
+		PoolKeyHash []byte `gorm:"column:pool_key_hash"`
+		StakingKey  []byte `gorm:"column:staking_key"`
+		TotalStake  uint64 `gorm:"column:total_stake"`
+	}
 	chunkSize := poolQueryChunkSize(db)
-	for start := 0; start < len(poolKeyHashes); start += chunkSize {
-		end := min(start+chunkSize, len(poolKeyHashes))
-		chunk := poolKeyHashes[start:end]
-		queryArgs := append(
-			append([]any(nil), args...),
-			slot, slot, slot, slot, chunk,
-		)
-		var chunkResults []stakeResult
-		if err := db.Raw(query, queryArgs...).Scan(&chunkResults).Error; err != nil {
-			return nil, nil, fmt.Errorf(
-				"query historical stake: %w",
-				err,
-			)
+	for start := 0; start < len(ownerKeys); start += chunkSize {
+		end := min(start+chunkSize, len(ownerKeys))
+		queryArgs := append(append([]any(nil), args...), ownerKeys[start:end])
+		var rows []ownerStakeRow
+		if err := db.Raw(query, queryArgs...).Scan(&rows).Error; err != nil {
+			return nil, fmt.Errorf("query historical pool-owner stake: %w", err)
 		}
-		results = append(results, chunkResults...)
+		for _, row := range rows {
+			out[PoolCredentialStakeKey(row.PoolKeyHash, 0, row.StakingKey)] = row.TotalStake
+		}
 	}
-	for _, row := range results {
-		delegatorMap[string(row.PoolKeyHash)] = row.DelegatorCount
-		stakeMap[string(row.PoolKeyHash)] = row.TotalStake
-	}
-
-	return stakeMap, delegatorMap, nil
+	return out, nil
 }
 
 func poolQueryChunkSize(db *gorm.DB) int {
@@ -282,7 +328,9 @@ INNER JOIN %[2]s tx
 WHERE %[1]s.added_slot <= ?`, source.table, txTable, source.registered))
 		args = append(args, source.certType, slot)
 	}
-	registrationFallbackTables := registrationFallbackBlockTables(registrationSrcs)
+	registrationFallbackTables := registrationFallbackBlockTables(
+		registrationSrcs,
+	)
 	registrationParts = append(registrationParts, `
 SELECT account.credential_tag,
 	account.staking_key,
@@ -404,7 +452,9 @@ func delegationFallbackBlockTables(
 	return tables
 }
 
-func registrationFallbackBlockTables(registrationSrcs []registrationSource) []string {
+func registrationFallbackBlockTables(
+	registrationSrcs []registrationSource,
+) []string {
 	tables := make([]string, 0, len(registrationSrcs))
 	for _, source := range registrationSrcs {
 		tables = append(tables, source.table)
@@ -412,7 +462,10 @@ func registrationFallbackBlockTables(registrationSrcs []registrationSource) []st
 	return tables
 }
 
-func noCredentialHistoryPredicate(accountAlias string, tableNames []string) string {
+func noCredentialHistoryPredicate(
+	accountAlias string,
+	tableNames []string,
+) string {
 	var out strings.Builder
 	for _, tableName := range tableNames {
 		fmt.Fprintf(&out, `
@@ -442,8 +495,10 @@ func delegationSources() []delegationSource {
 			certType: uint(lcommon.CertificateTypeStakeVoteDelegation),
 		},
 		{
-			table:    "stake_vote_registration_delegation",
-			certType: uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+			table: "stake_vote_registration_delegation",
+			certType: uint(
+				lcommon.CertificateTypeStakeVoteRegistrationDelegation,
+			),
 		},
 	}
 }
@@ -461,13 +516,17 @@ func registrationSources() []registrationSource {
 			registered: 1,
 		},
 		{
-			table:      "stake_registration_delegation",
-			certType:   uint(lcommon.CertificateTypeStakeRegistrationDelegation),
+			table: "stake_registration_delegation",
+			certType: uint(
+				lcommon.CertificateTypeStakeRegistrationDelegation,
+			),
 			registered: 1,
 		},
 		{
-			table:      "stake_vote_registration_delegation",
-			certType:   uint(lcommon.CertificateTypeStakeVoteRegistrationDelegation),
+			table: "stake_vote_registration_delegation",
+			certType: uint(
+				lcommon.CertificateTypeStakeVoteRegistrationDelegation,
+			),
 			registered: 1,
 		},
 		{

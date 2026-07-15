@@ -173,14 +173,16 @@ SELECT id FROM ranked WHERE rn = 1`,
 	for start := 0; start < len(regIDs); start += chunkSize {
 		end := min(start+chunkSize, len(regIDs))
 		var chunkRegs []models.PoolRegistration
-		if err := db.Preload("Owners").
-			Where("id IN ?", regIDs[start:end]).
+		if err := db.Where("id IN ?", regIDs[start:end]).
 			Find(&chunkRegs).Error; err != nil {
 			return nil, fmt.Errorf(
 				"load effective pool registrations: %w", err,
 			)
 		}
 		registrations = append(registrations, chunkRegs...)
+	}
+	if err := PopulatePoolRegistrationOwners(db, registrations); err != nil {
+		return nil, fmt.Errorf("load effective pool registrations: %w", err)
 	}
 	return registrations, nil
 }

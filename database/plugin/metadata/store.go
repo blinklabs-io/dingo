@@ -413,6 +413,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
+	// owner key hashes, keyed by pool plus credential. An owner is included only
+	// when that credential was delegated to the pool at the requested slot.
+	GetPoolOwnerStakeAtSlot(
+		[][]byte, // ownerKeyHashes
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, error)
+
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
 	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.

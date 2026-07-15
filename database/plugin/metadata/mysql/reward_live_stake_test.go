@@ -93,6 +93,25 @@ func TestMysqlRebuildRewardLiveStake(t *testing.T) {
 	require.Equal(t, uint64(99), got.UpdatedSlot)
 }
 
+func TestRewardStakeRefsFromUtxoRewardStakeCredentialsUsesBoundarySlot(
+	t *testing.T,
+) {
+	stakeKey := bytes.Repeat([]byte{0xA5}, 28)
+	refs := rewardStakeRefsFromUtxoRewardStakeCredentials(
+		[]utxoRewardStakeCredential{{
+			CredentialTag: 1,
+			StakingKey:    stakeKey,
+		}},
+		123,
+	)
+
+	ref := models.NewStakeCredentialRef(1, stakeKey)
+	got, ok := refs[ref.MapKey()]
+	require.True(t, ok)
+	require.Equal(t, ref, got.ref)
+	require.Equal(t, uint64(123), got.slot)
+}
+
 func TestMysqlConcurrentWithdrawalReplayAtDifferentSlots(t *testing.T) {
 	store := newTestMysqlStore(t)
 	t.Cleanup(func() { _ = store.Close() })

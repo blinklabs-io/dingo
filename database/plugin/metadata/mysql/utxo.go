@@ -40,6 +40,29 @@ type UtxoRef struct {
 	OutputIdx uint32
 }
 
+// utxoRewardStakeCredential is the narrow UTxO projection needed to refresh
+// reward live stake at a rollback boundary. The boundary slot is supplied by
+// the caller rather than being read from these deliberately partial rows.
+type utxoRewardStakeCredential struct {
+	CredentialTag uint8  `gorm:"column:credential_tag"`
+	StakingKey    []byte `gorm:"column:staking_key"`
+}
+
+func rewardStakeRefsFromUtxoRewardStakeCredentials(
+	rows []utxoRewardStakeCredential,
+	slot uint64,
+) map[string]rewardCredentialSlotRef {
+	refs := make(map[string]rewardCredentialSlotRef)
+	for _, row := range rows {
+		addRewardStakeRef(
+			refs,
+			models.NewStakeCredentialRef(row.CredentialTag, row.StakingKey),
+			slot,
+		)
+	}
+	return refs
+}
+
 // GetUtxo returns a Utxo by reference
 func (d *MetadataStoreMysql) GetUtxo(
 	txId []byte,
@@ -651,18 +674,15 @@ func (d *MetadataStoreMysql) DeleteUtxosAfterSlot(
 	if err != nil {
 		return err
 	}
-	var rows []models.Utxo
-	if err := db.Where("added_slot > ?", slot).
+	var rows []utxoRewardStakeCredential
+	if err := db.Model(&models.Utxo{}).
+		Where("added_slot > ?", slot).
 		Select("credential_tag", "staking_key").
+		Group("credential_tag, staking_key").
 		Find(&rows).Error; err != nil {
 		return err
 	}
-	refs := rewardStakeRefsFromUtxos(rows)
-	// Pin the recompute slot to the rollback target rather than the deleted
-	// UTxOs' own added_slot (which is > slot), mirroring
-	// SetUtxosNotDeletedAfterSlot, so the live-stake refresh resolves
-	// delegation state as of the rollback boundary.
-	pinRewardStakeRefsToSlot(refs, slot)
+	refs := rewardStakeRefsFromUtxoRewardStakeCredentials(rows, slot)
 	result := db.Where("added_slot > ?", slot).
 		Delete(&models.Utxo{})
 	if result.Error != nil {
@@ -808,14 +828,15 @@ func (d *MetadataStoreMysql) SetUtxosNotDeletedAfterSlot(
 	if err != nil {
 		return err
 	}
-	var rows []models.Utxo
-	if err := db.Where("deleted_slot > ?", slot).
+	var rows []utxoRewardStakeCredential
+	if err := db.Model(&models.Utxo{}).
+		Where("deleted_slot > ?", slot).
 		Select("credential_tag", "staking_key").
+		Group("credential_tag, staking_key").
 		Find(&rows).Error; err != nil {
 		return err
 	}
-	refs := rewardStakeRefsFromUtxos(rows)
-	pinRewardStakeRefsToSlot(refs, slot)
+	refs := rewardStakeRefsFromUtxoRewardStakeCredentials(rows, slot)
 	result := db.Model(models.Utxo{}).
 		Where("deleted_slot > ?", slot).
 		Updates(map[string]any{
