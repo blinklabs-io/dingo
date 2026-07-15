@@ -52,8 +52,9 @@ var AcceptedMithrilBackends = []string{"", "v1", "v2"}
 // environment, CLI flags) for invalid values and nonsensical
 // combinations. Every problem found is returned, joined into a single
 // error, so the operator can fix them all in one pass. It is called
-// from cmd/dingo after CLI flags have been applied, before any
-// services start; LoadConfig alone does not see CLI flag values.
+// from cmd/dingo after CLI flags have been applied and ApplyDefaults
+// has filled in derived defaults, before any services start;
+// LoadConfig alone does not see CLI flag values.
 //
 // effectiveMode is the run mode the invocation will actually execute.
 // For the bare `dingo` process it is c.RunMode, but the one-shot

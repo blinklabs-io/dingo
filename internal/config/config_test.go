@@ -28,8 +28,8 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		// MempoolCapacity left as the zero sentinel; LoadConfig fills
-		// it in from RunMode after CLI/env/YAML processing.
+		// MempoolCapacity left as the zero sentinel; ApplyDefaults
+		// fills it in from RunMode after all sources are merged.
 		MempoolCapacity:             0,
 		EvictionWatermark:           0.90,
 		RejectionWatermark:          0.95,
@@ -225,6 +225,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
+	// LoadConfig only parses and merges; derived defaults (runMode,
+	// mempool capacity, watermarks) are filled in afterwards
+	cfg.ApplyDefaults()
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
@@ -688,7 +691,12 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_WatermarkValidation(t *testing.T) {
+// TestWatermarkDefaultingAndValidation covers the post-merge pipeline
+// for the mempool watermarks: ApplyDefaults fills unset (zero) values
+// and validate rejects out-of-range ones. LoadConfig itself no longer
+// judges watermark values, so a CLI flag can still override a bad YAML
+// value before validation.
+func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	tests := []struct {
 		name       string
 		eviction   float64
@@ -784,7 +792,12 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			globalConfig.RejectionWatermark = tt.rejection
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			cfg.ApplyDefaults()
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf(
@@ -926,7 +939,7 @@ database:
 	}
 }
 
-func TestLoadConfig_NetworkNameValidation(t *testing.T) {
+func TestNetworkNameValidation(t *testing.T) {
 	validTests := []struct {
 		name    string
 		network string
@@ -1037,7 +1050,14 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			globalConfig.Network = tt.network
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			// LoadConfig only parses and merges; a CLI flag may still
+			// replace the network name, so the traversal guard runs in
+			// validate on the final value.
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if err == nil {
 				t.Fatal(
 					"expected error for invalid network name, got nil",
@@ -1472,6 +1492,7 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig: %v", err)
 			}
+			cfg.ApplyDefaults()
 			if cfg.MempoolCapacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity: got %d, want %d",

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -399,6 +400,133 @@ func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
 			"expected preprod peer snapshot network magic 1, got %d",
 			topologyConfig.PeerSnapshot.NetworkMagic,
 		)
+	}
+}
+
+// loadConfigThroughPipeline runs the full cmd/dingo configuration
+// pipeline — LoadConfig, ApplyFlags, ApplyDefaults — on the given YAML
+// and CLI arguments and returns the merged config alongside the
+// validation result, mirroring PersistentPreRunE in cmd/dingo.
+func loadConfigThroughPipeline(
+	t *testing.T,
+	yaml string,
+	args []string,
+) (*Config, error) {
+	t.Helper()
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("ApplyFlags: %v", err)
+	}
+	cfg.ApplyDefaults()
+	return cfg, cfg.validate(cfg.RunMode, minUnprivilegedPort)
+}
+
+// TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
+// regression test: a higher-precedence CLI flag must be able to replace
+// an invalid YAML runMode, so LoadConfig cannot reject the value before
+// flags are merged.
+func TestPipeline_FlagOverridesInvalidYAMLRunMode(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"runMode: \"bogus\"\n",
+		[]string{"--run-mode=serve"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.RunMode != RunModeServe {
+		t.Errorf("RunMode = %q, want %q", cfg.RunMode, RunModeServe)
+	}
+}
+
+// TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride pins the other
+// side of the precedence fix: with no flag override, the invalid YAML
+// value must still be rejected — by Validate on the merged config, not
+// by LoadConfig.
+func TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride(t *testing.T) {
+	_, err := loadConfigThroughPipeline(t, "runMode: \"bogus\"\n", nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid runMode") {
+		t.Fatalf("expected invalid runMode error, got: %v", err)
+	}
+}
+
+// TestPipeline_MempoolCapacityDefaultsFromFlagRunMode is a defaulting
+// regression test: the run-mode-derived MempoolCapacity default must be
+// chosen from the final merged mode, including one set only by a CLI
+// flag.
+func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		expected int64
+	}{
+		{
+			name:     "leios via flag",
+			args:     []string{"--run-mode=leios"},
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "serve via flag",
+			args:     []string{"--run-mode=serve"},
+			expected: DefaultMempoolCapacityPraos,
+		},
+		{
+			name:     "no mode configured anywhere",
+			args:     nil,
+			expected: DefaultMempoolCapacityPraos,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfigThroughPipeline(t, "", tc.args)
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+			if cfg.MempoolCapacity != tc.expected {
+				t.Errorf(
+					"MempoolCapacity = %d, want %d",
+					cfg.MempoolCapacity, tc.expected,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_AggregatesErrorsAcrossSettings pins error aggregation on
+// the merged config: LoadConfig no longer fails on the first bad value,
+// so every problem must surface together in the single Validate pass.
+func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
+	yaml := "runMode: \"bogus\"\n" +
+		"evictionWatermark: 2.0\n" +
+		"blockProducer: true\n" +
+		"chainsync:\n  strategy: \"fastest\"\n"
+	_, err := loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil {
+		t.Fatal("expected validation errors, got nil")
+	}
+	for _, want := range []string{
+		"invalid runMode",
+		"invalid evictionWatermark",
+		"blockProducer enabled but missing required key paths",
+		"invalid chainsync.strategy",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got: %v", want, err)
+		}
 	}
 }
 

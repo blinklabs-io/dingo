@@ -450,6 +450,12 @@ DSN Override:
 			cfg.ImmutableDbPath = args[0]
 		}
 
+		// Every configuration source is merged at this point (defaults,
+		// YAML, environment, CLI flags, and the load positional
+		// argument), so defaults derived from other settings can now be
+		// filled in and the final configuration validated.
+		cfg.ApplyDefaults()
+
 		if err := cfg.Validate(effectiveRunMode(cmd, cfg)); err != nil {
 			return fmt.Errorf("invalid configuration: %w", err)
 		}

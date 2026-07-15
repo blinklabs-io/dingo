@@ -992,104 +992,18 @@ func LoadConfig(configFile string) (*Config, error) {
 		)
 	}
 
-	// Validate and default RunMode
-	if !globalConfig.RunMode.Valid() {
-		return nil, fmt.Errorf(
-			"invalid runMode: %q (must be 'serve', 'load', 'dev', or 'leios')",
-			globalConfig.RunMode,
-		)
-	}
-	if globalConfig.RunMode == "" {
-		globalConfig.RunMode = RunModeServe
-	}
-	if !globalConfig.StartEra.Valid() {
-		return nil, fmt.Errorf(
-			"invalid startEra: %q (must be empty or 'dijkstra')",
-			globalConfig.StartEra,
-		)
-	}
-
-	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
-	// already been merged at this point; an explicit non-zero setting
-	// from any of those layers wins per existing config priority.
-	if globalConfig.MempoolCapacity == 0 {
-		if globalConfig.RunMode == RunModeLeios {
-			globalConfig.MempoolCapacity = DefaultMempoolCapacityLeios
-		} else {
-			globalConfig.MempoolCapacity = DefaultMempoolCapacityPraos
-		}
-	}
-
-	// Validate block producer configuration
-	if globalConfig.BlockProducer {
-		var missing []string
-		if globalConfig.ShelleyVRFKey == "" {
-			missing = append(missing, "shelleyVrfKey")
-		}
-		if globalConfig.ShelleyKESKey == "" {
-			missing = append(missing, "shelleyKesKey")
-		}
-		if globalConfig.ShelleyOperationalCertificate == "" {
-			missing = append(missing, "shelleyOperationalCertificate")
-		}
-		if len(missing) > 0 {
-			return nil, fmt.Errorf(
-				"blockProducer enabled but missing required key paths: %v",
-				missing,
-			)
-		}
-	}
-
-	// Default unset watermarks. In Go, unset float64 fields are 0,
-	// which is indistinguishable from an explicit 0. We default 0 to
-	// the standard value; the subsequent validation rejects any value
-	// that ends up <= 0 after defaulting.
-	if globalConfig.EvictionWatermark == 0 {
-		globalConfig.EvictionWatermark = DefaultEvictionWatermark
-	}
-	if globalConfig.RejectionWatermark == 0 {
-		globalConfig.RejectionWatermark = DefaultRejectionWatermark
-	}
-	if globalConfig.EvictionWatermark <= 0 ||
-		globalConfig.EvictionWatermark >= 1.0 {
-		return nil, fmt.Errorf(
-			"invalid evictionWatermark: %f (must be in range (0, 1))",
-			globalConfig.EvictionWatermark,
-		)
-	}
-	if globalConfig.RejectionWatermark <= 0 ||
-		globalConfig.RejectionWatermark > 1.0 {
-		return nil, fmt.Errorf(
-			"invalid rejectionWatermark: %f (must be in range (0, 1])",
-			globalConfig.RejectionWatermark,
-		)
-	}
-	if globalConfig.EvictionWatermark >= globalConfig.RejectionWatermark {
-		return nil, fmt.Errorf(
-			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
-			globalConfig.EvictionWatermark,
-			globalConfig.RejectionWatermark,
-		)
-	}
-	if globalConfig.ForgeSyncToleranceSlots == 0 {
-		globalConfig.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
-	}
-	if globalConfig.ForgeStaleGapThresholdSlots == 0 {
-		globalConfig.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
-	}
-	if globalConfig.HistoryExpiry.Frequency <= 0 {
-		globalConfig.HistoryExpiry.Frequency = time.Hour
-	}
-
-	// Validate network name to prevent path traversal (INT-03). An
-	// empty network is allowed here so a networkMagic-only
-	// configuration can load; Validate() enforces that network or
-	// networkMagic is set.
-	if globalConfig.Network != "" {
-		if err := ValidateNetworkName(globalConfig.Network); err != nil {
-			return nil, err
-		}
-	}
+	// LoadConfig only parses and merges configuration sources; it makes
+	// no semantic judgments about the merged values. CLI flags are a
+	// higher-precedence source merged afterwards by ApplyFlags, so any
+	// defaulting or validation here would act on values a flag may
+	// still override — defaults derived from the final configuration
+	// are applied by ApplyDefaults, and semantic checks run in
+	// Validate, both called after ApplyFlags.
+	//
+	// The Midnight network defaults applied here are the exception:
+	// they let a config loaded without CLI flags resolve its per-network
+	// values, and ApplyFlags compensates for a network change by
+	// clearing the previous network's defaults and reapplying.
 	applyMidnightNetworkDefaults(globalConfig)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
@@ -1102,6 +1016,46 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, fmt.Errorf("error loading topology: %+w", err)
 	}
 	return globalConfig, nil
+}
+
+// ApplyDefaults fills in unset values whose defaults depend on other
+// settings in the fully merged configuration — most notably
+// MempoolCapacity, whose default is chosen by RunMode. It must run
+// after every configuration source has been merged (defaults, YAML,
+// environment, and CLI flags via ApplyFlags): defaulting earlier would
+// derive values from settings a higher-precedence source is still
+// allowed to change. Call it before Validate; Validate rejects any
+// value that is still invalid after defaulting.
+func (c *Config) ApplyDefaults() {
+	// An empty runMode selects the standard serving mode
+	if c.RunMode == "" {
+		c.RunMode = RunModeServe
+	}
+	// Unset MempoolCapacity defaults based on RunMode
+	if c.MempoolCapacity == 0 {
+		if c.RunMode == RunModeLeios {
+			c.MempoolCapacity = DefaultMempoolCapacityLeios
+		} else {
+			c.MempoolCapacity = DefaultMempoolCapacityPraos
+		}
+	}
+	// Unset float64 fields are 0, which is indistinguishable from an
+	// explicit 0; both select the standard watermark
+	if c.EvictionWatermark == 0 {
+		c.EvictionWatermark = DefaultEvictionWatermark
+	}
+	if c.RejectionWatermark == 0 {
+		c.RejectionWatermark = DefaultRejectionWatermark
+	}
+	if c.ForgeSyncToleranceSlots == 0 {
+		c.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
+	}
+	if c.ForgeStaleGapThresholdSlots == 0 {
+		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	if c.HistoryExpiry.Frequency <= 0 {
+		c.HistoryExpiry.Frequency = time.Hour
+	}
 }
 
 func GetConfig() *Config {

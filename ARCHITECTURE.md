@@ -1794,9 +1794,16 @@ Configuration priority (highest to lowest):
 3. YAML config file (`dingo.yaml`)
 4. Hardcoded defaults
 
-After all sources are merged (including CLI flags), `Config.Validate()`
-(`internal/config`) checks the resulting configuration before any services
-start: mode enums, listener port ranges (privileged/out-of-range/duplicate),
+`LoadConfig` (`internal/config`) only parses and merges the YAML and
+environment sources; it makes no semantic judgments about the merged values,
+because CLI flags are a higher-precedence source merged afterwards by
+`ApplyFlags` and may still replace an invalid or unset value. Once every
+source is merged, `Config.ApplyDefaults()` fills in unset values whose
+defaults are derived from other settings (an empty `runMode` selects `serve`;
+`mempoolCapacity` defaults by run mode — Leios raises it — and the watermarks,
+forge slot thresholds, and history-expiry frequency take their standard
+values), and then `Config.Validate()` checks the resulting configuration
+before any services start: mode enums, listener port ranges (privileged/out-of-range/duplicate),
 load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
 pairing, mempool watermarks, block-producer credential paths, and
 duration/strategy strings that are otherwise only parsed at their point of use.
