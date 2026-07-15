@@ -421,7 +421,6 @@ func ImportLedgerState(
 			"component", "ledgerstate",
 		)
 	}
-
 	// Import stake snapshots
 	if !models.IsPhaseCompleted(
 		completedPhase,
@@ -535,6 +534,17 @@ func ImportLedgerState(
 			return fmt.Errorf("reconciling stale ledger state: %w", err)
 		}
 	}
+
+	if err := cfg.Database.RebuildRewardLiveStake(slot, nil); err != nil {
+		return fmt.Errorf("rebuilding reward live stake: %w", err)
+	}
+	progress(ImportProgress{
+		Stage:       "reward_live_stake",
+		Current:     1,
+		Total:       1,
+		Percent:     100,
+		Description: "reward live stake rebuilt",
+	})
 
 	// Set the chain tip
 	if !models.IsPhaseCompleted(

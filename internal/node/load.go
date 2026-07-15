@@ -28,8 +28,10 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -46,6 +48,20 @@ const (
 
 	immutableUtxoOffsetsSyncStateKey = "immutable_utxo_offsets_tip"
 )
+
+// newLedgerStateForLoad is replaceable in tests so load-mode composition can
+// be verified without replaying a full ImmutableDB fixture.
+var newLedgerStateForLoad = ledger.NewLedgerState
+
+// installEpochBoundarySnapshotHookForLoad is replaceable in tests so load-mode
+// composition can verify the hook is installed without starting ledger workers.
+var installEpochBoundarySnapshotHookForLoad = func(
+	ls *ledger.LedgerState,
+	fn func(*database.Txn, event.EpochTransitionEvent) error,
+) error {
+	ls.SetEpochBoundarySnapshotHook(fn)
+	return nil
+}
 
 func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
 	return LoadWithDB(ctx, cfg, logger, immutableDir, nil)
@@ -92,6 +108,24 @@ func ensureDB(
 		return nil, nil, fmt.Errorf("creating database: %w", err)
 	}
 	return newDB, func() { newDB.Close() }, nil
+}
+
+// captureLoadGenesisSnapshot captures the genesis (epoch 0) mark stake
+// snapshot during a `dingo load` replay, mirroring the guard node.go applies
+// around the equivalent call (see handleGenesisSnapshotError): a block
+// producer cannot elect leaders without this snapshot, so a capture failure
+// is fatal, while a relay or replay-only load only warns and continues.
+func captureLoadGenesisSnapshot(
+	ctx context.Context,
+	snapshotMgr *snapshot.Manager,
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	return snapshot.HandleGenesisSnapshotError(
+		cfg.BlockProducer,
+		logger,
+		snapshotMgr.CaptureGenesisSnapshot(ctx),
+	)
 }
 
 // WithBulkLoadPragmas enables bulk-load optimizations on the metadata
@@ -299,8 +333,9 @@ func LoadWithDB(
 	if c == nil {
 		return errors.New("primary chain not available")
 	}
+	snapshotMgr := snapshot.NewManager(db, nil, logger)
 	// Load state
-	ls, err := ledger.NewLedgerState(
+	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
 			Database:              db,
 			ChainManager:          cm,
@@ -319,10 +354,29 @@ func LoadWithDB(
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	if err := installEpochBoundarySnapshotHookForLoad(
+		ls,
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return snapshotMgr.CaptureEpochBoundarySnapshot(ctx, txn, evt)
+		},
+	); err != nil {
+		return fmt.Errorf("installing epoch-boundary snapshot hook: %w", err)
+	}
 	if err := ls.Start(context.WithoutCancel(ctx)); err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
 	defer ls.Close()
+
+	// Capture the genesis stake snapshot (epoch 0) now that ls.Start has
+	// applied genesis (including any Shelley-genesis staking), mirroring
+	// node.go's normal startup path. Without this, replaying a devnet chain
+	// with genesis staking through `dingo load` never creates the epoch-0
+	// mark RewardSnapshot, silently skipping the first reward round applied
+	// at the epoch-3 boundary (#1959). This must run before any epoch
+	// boundaries are processed below.
+	if err := captureLoadGenesisSnapshot(ctx, snapshotMgr, cfg, logger); err != nil {
+		return err
+	}
 
 	replayCtx, cancelReplay := context.WithCancel(ctx)
 	defer cancelReplay()
