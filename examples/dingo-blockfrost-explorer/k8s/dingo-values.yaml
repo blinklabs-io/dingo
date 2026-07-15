@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/blinklabs-io/dingo
-  tag: "0.52.0"
+  tag: "0.64.0"
   pullPolicy: IfNotPresent
 
 mithril:
