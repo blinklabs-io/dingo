@@ -16,7 +16,8 @@ dependencies live in this directory's `go.mod`.
 - Active DReps from `drep`
 - DRep vote, update, registration, and delegation views
 - Stake credential lookup from `account`, either pasted manually or derived
-  locally from a CIP-30 wallet reward address
+  locally from a CIP-30 wallet reward address, including the immutable slot at
+  which Dingo first observed the account
 - Links out to Preview GovTool for proposal and voting workflows
 
 ## Bootstrap Dingo Quickly
