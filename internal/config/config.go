@@ -1053,7 +1053,10 @@ func (c *Config) ApplyDefaults() {
 	if c.ForgeStaleGapThresholdSlots == 0 {
 		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
 	}
-	if c.HistoryExpiry.Frequency <= 0 {
+	// Only an unset (zero) frequency takes the default; an explicitly
+	// negative value is preserved so Validate can reject it instead of
+	// the node silently starting the expiry worker on the default cadence
+	if c.HistoryExpiry.Frequency == 0 {
 		c.HistoryExpiry.Frequency = time.Hour
 	}
 }

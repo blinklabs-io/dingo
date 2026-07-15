@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -500,6 +501,61 @@ func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
 				t.Errorf(
 					"MempoolCapacity = %d, want %d",
 					cfg.MempoolCapacity, tc.expected,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_NegativeHistoryExpiryFrequencyRejected pins the
+// explicit-negative-frequency contract for every configuration source:
+// ApplyDefaults only fills in an unset (zero) historyExpiry.frequency,
+// so a configured negative value must survive defaulting and fail
+// validation instead of silently starting the expiry worker on the
+// one-hour default cadence.
+func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		env  map[string]string
+		args []string
+	}{
+		{
+			name: "yaml",
+			yaml: "historyExpiry:\n  enabled: true\n  frequency: -1s\n",
+		},
+		{
+			name: "environment",
+			env: map[string]string{
+				"DINGO_HISTORY_EXPIRY_ENABLED":   "true",
+				"DINGO_HISTORY_EXPIRY_FREQUENCY": "-1s",
+			},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"--history-expiry-enabled=true",
+				"--history-expiry-frequency=-1s",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := loadConfigThroughPipeline(t, tc.yaml, tc.args)
+			if err == nil ||
+				!strings.Contains(err.Error(), "invalid historyExpiry.frequency") {
+				t.Fatalf(
+					"expected invalid historyExpiry.frequency error, got: %v",
+					err,
+				)
+			}
+			if cfg.HistoryExpiry.Frequency != -time.Second {
+				t.Errorf(
+					"Frequency = %s, want -1s preserved through defaulting",
+					cfg.HistoryExpiry.Frequency,
 				)
 			}
 		})

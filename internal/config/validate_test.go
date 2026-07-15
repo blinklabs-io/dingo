@@ -17,6 +17,7 @@ package config
 import (
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,7 @@ func validTestConfig() *Config {
 		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
 		Cache:                DefaultCacheConfig(),
 		Chainsync:            DefaultChainsyncConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight:             DefaultMidnightConfig(),
 		Mithril: MithrilConfig{
 			Enabled: true,
@@ -75,6 +77,20 @@ func TestValidate(t *testing.T) {
 			name:    "invalid storage mode",
 			modify:  func(c *Config) { c.StorageMode = "full" },
 			wantErr: "invalid storageMode",
+		},
+		{
+			name: "negative history expiry frequency",
+			modify: func(c *Config) {
+				c.HistoryExpiry.Frequency = -time.Second
+			},
+			wantErr: "invalid historyExpiry.frequency",
+		},
+		{
+			name: "zero history expiry frequency",
+			modify: func(c *Config) {
+				c.HistoryExpiry.Frequency = 0
+			},
+			wantErr: "invalid historyExpiry.frequency",
 		},
 		{
 			name:    "load mode without immutable db path",

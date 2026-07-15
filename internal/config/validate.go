@@ -352,6 +352,17 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	// History expiry cadence. ApplyDefaults only fills in an unset
+	// (zero) frequency, so a non-positive value here was configured
+	// explicitly — reject it rather than let the expiry worker start
+	// on a cadence the operator did not choose.
+	if c.HistoryExpiry.Frequency <= 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid historyExpiry.frequency: %s (must be positive)",
+			c.HistoryExpiry.Frequency,
+		))
+	}
+
 	// Chainsync; accepted strategy names come from
 	// AcceptedChainsyncStrategies, kept in sync with
 	// chainsync.ParseHeaderSyncStrategy by a parity test in cmd/dingo.
