@@ -160,6 +160,192 @@ func GetPoolInputs(
 	return inputs, nil
 }
 
+// DedupePoolKeyHashes returns poolKeyHashes with duplicates removed.
+func DedupePoolKeyHashes(poolKeyHashes [][]byte) [][]byte {
+	if len(poolKeyHashes) <= 1 {
+		return poolKeyHashes
+	}
+	seen := make(map[string]struct{}, len(poolKeyHashes))
+	ret := make([][]byte, 0, len(poolKeyHashes))
+	for _, poolKeyHash := range poolKeyHashes {
+		key := string(poolKeyHash)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ret = append(ret, poolKeyHash)
+	}
+	return ret
+}
+
+// StakeInputsAtSlot returns positive registered stake from the maintained live
+// reward aggregate for the requested pools.
+func StakeInputsAtSlot(
+	db *gorm.DB,
+	poolKeyHashes [][]byte,
+	chunkSize int,
+) ([]*models.RewardStakeInput, error) {
+	if len(poolKeyHashes) == 0 {
+		return nil, nil
+	}
+	poolKeyHashes = DedupePoolKeyHashes(poolKeyHashes)
+	query := fmt.Sprintf(`
+		SELECT rls.*
+		FROM reward_live_stake rls
+		WHERE rls.pool_key_hash IN ?
+			AND rls.registered = ?
+			AND CAST(rls.total_stake AS %s) > ?
+		ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC, rls.staking_key ASC
+	`, integerCastType(db))
+
+	rows := make([]models.RewardLiveStake, 0)
+	for start := 0; start < len(poolKeyHashes); start += chunkSize {
+		end := min(start+chunkSize, len(poolKeyHashes))
+		var chunkRows []models.RewardLiveStake
+		if err := db.Raw(
+			query,
+			poolKeyHashes[start:end],
+			true,
+			0,
+		).Scan(&chunkRows).Error; err != nil {
+			return nil, fmt.Errorf("query stake inputs: %w", err)
+		}
+		rows = append(rows, chunkRows...)
+	}
+
+	ret := make([]*models.RewardStakeInput, 0, len(rows))
+	for _, row := range rows {
+		ret = append(ret, &models.RewardStakeInput{
+			PoolKeyHash:   append([]byte(nil), row.PoolKeyHash...),
+			StakingKey:    append([]byte(nil), row.StakingKey...),
+			CredentialTag: row.CredentialTag,
+			Stake:         row.TotalStake,
+			Registered:    true,
+		})
+	}
+	return ret, nil
+}
+
+// SaveStakeInputs saves per-credential reward snapshot inputs.
+func SaveStakeInputs(db *gorm.DB, inputs []*models.RewardStakeInput) error {
+	if len(inputs) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "epoch"},
+			{Name: "pool_key_hash"},
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"stake", "owner", "registered", "captured_slot", "boundary_slot",
+		}),
+	}).CreateInBatches(inputs, rewardSaveBatchSize).Error; err != nil {
+		return fmt.Errorf("save reward stake inputs: %w", err)
+	}
+	return nil
+}
+
+// GetStakeInputs retrieves all per-credential reward inputs for an epoch.
+func GetStakeInputs(db *gorm.DB, epoch uint64) ([]*models.RewardStakeInput, error) {
+	var inputs []*models.RewardStakeInput
+	result := db.Where("epoch = ?", epoch).
+		Order("pool_key_hash ASC, credential_tag ASC, staking_key ASC").
+		Find(&inputs)
+	return inputs, result.Error
+}
+
+// DeleteInputsForEpoch deletes reward-calculation input rows for an epoch.
+func DeleteInputsForEpoch(db *gorm.DB, epoch uint64, txn types.Txn) error {
+	deleteRows := func(tx *gorm.DB) error {
+		if err := tx.Where("epoch = ?", epoch).Delete(&models.RewardPoolInput{}).Error; err != nil {
+			return fmt.Errorf("delete reward pool inputs for epoch %d: %w", epoch, err)
+		}
+		if err := tx.Where("epoch = ?", epoch).Delete(&models.RewardStakeInput{}).Error; err != nil {
+			return fmt.Errorf("delete reward stake inputs for epoch %d: %w", epoch, err)
+		}
+		return nil
+	}
+	if txn != nil {
+		return deleteRows(db)
+	}
+	return db.Transaction(deleteRows)
+}
+
+// DeleteOutputsForEpoch deletes reward-calculation output rows for an epoch.
+func DeleteOutputsForEpoch(db *gorm.DB, epoch uint64, txn types.Txn) error {
+	deleteRows := func(tx *gorm.DB) error {
+		if err := tx.Where("epoch = ?", epoch).Delete(&models.RewardPoolOutput{}).Error; err != nil {
+			return fmt.Errorf("delete reward pool outputs for epoch %d: %w", epoch, err)
+		}
+		if err := tx.Where("epoch = ?", epoch).Delete(&models.RewardAccountOutput{}).Error; err != nil {
+			return fmt.Errorf("delete reward account outputs for epoch %d: %w", epoch, err)
+		}
+		return nil
+	}
+	if txn != nil {
+		return deleteRows(db)
+	}
+	return db.Transaction(deleteRows)
+}
+
+// SavePoolOutputs saves per-pool reward calculation outputs.
+func SavePoolOutputs(db *gorm.DB, outputs []*models.RewardPoolOutput) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "epoch"}, {Name: "pool_key_hash"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"apparent_performance", "optimal_reward", "total_reward",
+			"leader_reward", "member_reward_total", "owner_stake",
+			"undistributed", "unspendable", "captured_slot", "boundary_slot",
+		}),
+	}).CreateInBatches(outputs, rewardSaveBatchSize).Error; err != nil {
+		return fmt.Errorf("save reward pool outputs: %w", err)
+	}
+	return nil
+}
+
+// GetPoolOutputs retrieves per-pool reward calculation outputs.
+func GetPoolOutputs(db *gorm.DB, epoch uint64) ([]*models.RewardPoolOutput, error) {
+	var outputs []*models.RewardPoolOutput
+	result := db.Where("epoch = ?", epoch).Order("pool_key_hash ASC").Find(&outputs)
+	return outputs, result.Error
+}
+
+// SaveAccountOutputs saves per-account reward calculation outputs.
+func SaveAccountOutputs(db *gorm.DB, outputs []*models.RewardAccountOutput) error {
+	if len(outputs) == 0 {
+		return nil
+	}
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "epoch"},
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+			{Name: "pool_key_hash"},
+			{Name: "reward_type"},
+		},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"amount", "spendable", "captured_slot", "boundary_slot",
+		}),
+	}).CreateInBatches(outputs, rewardSaveBatchSize).Error; err != nil {
+		return fmt.Errorf("save reward account outputs: %w", err)
+	}
+	return nil
+}
+
+// GetAccountOutputs retrieves per-account reward calculation outputs.
+func GetAccountOutputs(db *gorm.DB, epoch uint64) ([]*models.RewardAccountOutput, error) {
+	var outputs []*models.RewardAccountOutput
+	result := db.Where("epoch = ?", epoch).
+		Order("credential_tag ASC, staking_key ASC, pool_key_hash ASC, reward_type ASC").
+		Find(&outputs)
+	return outputs, result.Error
+}
+
 // DeleteStateAfterSlot deletes reward-state rows captured from rolled-back
 // blocks. When txn is non-nil, db is used as-is; otherwise the deletes are
 // wrapped in their own transaction.
@@ -188,6 +374,17 @@ func DeleteStateAfterSlot(
 			slot,
 		).Delete(&models.RewardPoolInput{}).Error; err != nil {
 			return fmt.Errorf("delete reward pool inputs after slot: %w", err)
+		}
+		for _, model := range []any{
+			&models.RewardStakeInput{},
+			&models.RewardPoolOutput{},
+			&models.RewardAccountOutput{},
+		} {
+			if err := tx.Where(
+				"captured_slot > ? OR boundary_slot > ?", slot, slot,
+			).Delete(model).Error; err != nil {
+				return fmt.Errorf("delete reward state after slot: %w", err)
+			}
 		}
 		return nil
 	}
@@ -218,6 +415,15 @@ func DeleteStateBeforeEpoch(
 		if err := tx.Where("epoch < ?", epoch).
 			Delete(&models.RewardPoolInput{}).Error; err != nil {
 			return fmt.Errorf("delete reward pool inputs before epoch: %w", err)
+		}
+		for _, model := range []any{
+			&models.RewardStakeInput{},
+			&models.RewardPoolOutput{},
+			&models.RewardAccountOutput{},
+		} {
+			if err := tx.Where("epoch < ?", epoch).Delete(model).Error; err != nil {
+				return fmt.Errorf("delete reward state before epoch: %w", err)
+			}
 		}
 		return nil
 	}

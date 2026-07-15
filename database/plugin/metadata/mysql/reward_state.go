@@ -24,6 +24,8 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
+const rewardStakeInputPoolBatchSize = 1000
+
 // SaveRewardAdaPots saves reward-related ADA pots for an epoch.
 func (d *MetadataStoreMysql) SaveRewardAdaPots(
 	pots *models.RewardAdaPots,
@@ -98,6 +100,82 @@ func (d *MetadataStoreMysql) GetRewardPoolInputs(
 		return nil, err
 	}
 	return rewardstate.GetPoolInputs(db, epoch)
+}
+
+func (d *MetadataStoreMysql) GetRewardStakeInputsAtSlot(poolKeyHashes [][]byte, _ uint64, txn types.Txn) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: resolve db: %w", err)
+	}
+	inputs, err := rewardstate.StakeInputsAtSlot(db, poolKeyHashes, rewardStakeInputPoolBatchSize)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: %w", err)
+	}
+	return inputs, nil
+}
+
+func (d *MetadataStoreMysql) SaveRewardStakeInputs(inputs []*models.RewardStakeInput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveStakeInputs(db, inputs)
+}
+
+func (d *MetadataStoreMysql) GetRewardStakeInputs(epoch uint64, txn types.Txn) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetStakeInputs(db, epoch)
+}
+
+func (d *MetadataStoreMysql) DeleteRewardInputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward inputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteInputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStoreMysql) DeleteRewardOutputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward outputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteOutputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStoreMysql) SaveRewardPoolOutputs(outputs []*models.RewardPoolOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SavePoolOutputs(db, outputs)
+}
+
+func (d *MetadataStoreMysql) GetRewardPoolOutputs(epoch uint64, txn types.Txn) ([]*models.RewardPoolOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetPoolOutputs(db, epoch)
+}
+
+func (d *MetadataStoreMysql) SaveRewardAccountOutputs(outputs []*models.RewardAccountOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveAccountOutputs(db, outputs)
+}
+
+func (d *MetadataStoreMysql) GetRewardAccountOutputs(epoch uint64, txn types.Txn) ([]*models.RewardAccountOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetAccountOutputs(db, epoch)
 }
 
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from

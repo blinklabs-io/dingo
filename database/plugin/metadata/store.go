@@ -422,6 +422,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, error)
 
+	// GetRewardStakeInputsAtSlot returns positive per-account delegated stake
+	// for pools from the live reward stake aggregate.
+	GetRewardStakeInputsAtSlot(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
 	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
@@ -1125,6 +1133,30 @@ type MetadataStore interface {
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
+
+	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+
+	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+
+	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
+
+	// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+	SaveRewardPoolOutputs([]*models.RewardPoolOutput, types.Txn) error
+
+	// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+	GetRewardPoolOutputs(uint64, types.Txn) ([]*models.RewardPoolOutput, error)
+
+	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+	SaveRewardAccountOutputs([]*models.RewardAccountOutput, types.Txn) error
+
+	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
 
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.

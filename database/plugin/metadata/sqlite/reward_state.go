@@ -98,6 +98,84 @@ func (d *MetadataStoreSqlite) GetRewardPoolInputs(
 	return rewardstate.GetPoolInputs(db, epoch)
 }
 
+func (d *MetadataStoreSqlite) GetRewardStakeInputsAtSlot(
+	poolKeyHashes [][]byte, _ uint64, txn types.Txn,
+) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: resolve db: %w", err)
+	}
+	inputs, err := rewardstate.StakeInputsAtSlot(db, poolKeyHashes, sqliteBindVarLimit)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: %w", err)
+	}
+	return inputs, nil
+}
+
+func (d *MetadataStoreSqlite) SaveRewardStakeInputs(inputs []*models.RewardStakeInput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveStakeInputs(db, inputs)
+}
+
+func (d *MetadataStoreSqlite) GetRewardStakeInputs(epoch uint64, txn types.Txn) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetStakeInputs(db, epoch)
+}
+
+func (d *MetadataStoreSqlite) DeleteRewardInputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward inputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteInputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStoreSqlite) DeleteRewardOutputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward outputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteOutputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStoreSqlite) SaveRewardPoolOutputs(outputs []*models.RewardPoolOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SavePoolOutputs(db, outputs)
+}
+
+func (d *MetadataStoreSqlite) GetRewardPoolOutputs(epoch uint64, txn types.Txn) ([]*models.RewardPoolOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetPoolOutputs(db, epoch)
+}
+
+func (d *MetadataStoreSqlite) SaveRewardAccountOutputs(outputs []*models.RewardAccountOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveAccountOutputs(db, outputs)
+}
+
+func (d *MetadataStoreSqlite) GetRewardAccountOutputs(epoch uint64, txn types.Txn) ([]*models.RewardAccountOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetAccountOutputs(db, epoch)
+}
+
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from
 // rolled-back blocks.
 func (d *MetadataStoreSqlite) DeleteRewardStateAfterSlot(

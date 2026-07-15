@@ -2121,6 +2121,8 @@ LedgerState --> Epoch Transition --> EventBus (EpochTransitionEvent)
 |-------|---------|
 | `PoolStakeSnapshot` | Per-pool stake snapshot (epoch, type, pool hash, stake numerator, optional denominator, delegator count) |
 | `EpochSummary` | Network-wide aggregates (total stake, pool count, delegator count, epoch nonce) |
+| `RewardLiveStake` | Live per-stake-credential reward aggregate maintained by metadata writes |
+| `RewardSnapshot` / `RewardPoolInput` / `RewardStakeInput` | Frozen reward-calculation snapshot inputs captured at epoch boundaries |
 
 Snapshot types: `"mark"` for epoch-boundary lovelace totals, `"set"` and `"go"` for historical rotation metadata, and `"actv"` for Mithril-imported active `pool-distr` fractions.
 
@@ -2131,10 +2133,9 @@ inputs, and a live per-credential stake aggregate. SQLite, MySQL, and
 PostgreSQL share reward-state query behavior through
 `database/plugin/metadata/internal/`.
 
-`RewardLiveStake` is maintained as groundwork for a future reward snapshot
-consumer; the current epoch-boundary Mark snapshot path still uses the
-slot-aware full-UTxO query. Metadata write
-paths refresh only credentials touched by UTxO creation/spending, account
+`RewardLiveStake` supplies the credential-level input bundle for reward
+snapshots; the leader-election Mark snapshot remains on its independent,
+slot-aware path. Metadata write paths refresh only credentials touched by UTxO creation/spending, account
 registration or delegation, and reward credits or withdrawals, in the same
 transaction as the source change. Refresh derives total stake, registration,
 current pool delegation, and delegation certificate order; rollback therefore
@@ -2157,9 +2158,29 @@ after database recovery and before ledger processing. Mithril import does not
 currently invoke this rebuild directly; the next normal node startup does.
 
 Pool registration lookup reconstructs the parameters effective during the
-ended epoch for the existing per-pool input capture. Reward calculation and
-application are outside the scope of this metadata layer and are not yet wired
-to the live aggregate.
+ended epoch for per-pool input capture. Reward calculation and application
+remain outside the snapshot manager's responsibility.
+
+Reward snapshots consume `RewardLiveStake` instead of scanning the full UTxO
+table at the epoch boundary. The snapshot manager copies the registered,
+delegated subset into `RewardStakeInput` and derives `RewardPoolInput` rows,
+freezing stake and pool parameters for delayed reward calculation without
+holding epoch rollover on a full live-state scan.
+
+Snapshot replacement removes stale pools or stake credentials from an earlier
+provisional capture and invalidates precomputed reward outputs for that snapshot
+epoch. Reward input totals must agree with the reduced, reward-eligible pool
+distribution. A pool with missing or malformed registration data is excluded,
+with a warning, from the reward input bundle instead of aborting capture for all
+pools. This does not alter its `PoolStakeSnapshot` or `EpochSummary` stake used
+by leader-election and governance consumers.
+
+Post-Mithril bootstrap can seed recent historical `PoolStakeSnapshot` Mark rows
+for leader-election and governance consumers. Those synthetic rows do not get
+`RewardSnapshot` or reward-input bundles unless the live aggregate represents
+the target boundary exactly; without a historical reward-input backfill, reward
+application skips the missing bundle rather than treating current stake as
+historical stake.
 
 ### Query Interface
 
@@ -2176,9 +2197,16 @@ poolStake, err := ledgerView.GetPoolStake(epoch, poolKeyHash)
 totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 ```
 
-### Event-Driven Capture
+### Boundary Capture And Events
 
-`EpochTransitionEvent` triggers snapshot capture:
+`Manager.CaptureEpochBoundarySnapshot` is the authoritative capture API for
+composition code to call inside the ledger rollover transaction at the
+cardano-ledger SNAP point: after delayed rewards and MIR, before POOLREAP,
+protocol-parameter updates, governance enactment, donations, and the new epoch
+row. It replaces the epoch's Mark rows and reward input bundle using the same
+transaction view as the surrounding boundary changes.
+
+`EpochTransitionEvent` remains the asynchronous rotation and cleanup signal:
 
 ```go
 type EpochTransitionEvent struct {
@@ -2195,6 +2223,17 @@ Epoch transition events may come from block processing or the slot clock. The
 slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
+The event loop treats an existing Mark `RewardSnapshot` as authoritative: it
+skips fallback capture and continues with rotation and cleanup, preventing a
+later event from replacing the transaction-phase SNAP view with post-POOLREAP
+state.
+
+The fallback write repeats that authoritative-row check inside its own database
+transaction before deleting or replacing anything. This closes the race where
+a slot-clock event begins a live-distribution calculation before authoritative
+capture commits, then otherwise writes its stale result after the commit. The
+authoritative path does not use this guard and can replace an earlier fallback
+capture.
 
 ### Epoch Boundary State Transitions
 
