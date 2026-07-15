@@ -61,6 +61,10 @@ const leiosBackfillConnCooldownMaxShift = 5
 // cut short.
 const leiosBackfillPerAttemptTimeout = 30 * time.Second
 
+var errLeiosBackfillConnBusy = errors.New(
+	"leios backfill: connection fetch already in progress",
+)
+
 // leiosBackfillAffinityWindow is how recently a connection must have served a
 // backfill fetch to be preferred (positive peer affinity) over never-tried
 // connections. It complements the per-connection failure cooldown: cooldown
@@ -149,23 +153,33 @@ func (o *Ouroboros) FetchEndorserBlockByPoint(
 // fetchEndorserBlockOnConn fetches the manifest (if not already cached) and all
 // transaction bodies for point on a single connection, holding that
 // connection's fetch guard so the strict request/response leios-fetch client is
-// never used concurrently with a tip-driven fetch. It records the connection's
+// never used concurrently with a tip-driven fetch. A connection whose guard is
+// already held is skipped so time queued behind that fetch cannot consume an
+// unbounded amount of the caller's failover window. It records the connection's
 // cooldown outcome (markFetchFailed on error, markFetchOK on success) while the
-// guard is still held, so concurrent backfill fetches on the same connection
-// publish their cooldown state in fetch-completion order rather than racing.
+// guard is still held, so backfill fetches on the same connection publish their
+// cooldown state in fetch-completion order rather than racing.
 func (o *Ouroboros) fetchEndorserBlockOnConn(
 	connId ouroboros.ConnectionId,
 	client *oleiosfetch.Client,
 	point ocommon.Point,
 ) (err error) {
 	g := o.leiosFetchGuardFor(connId)
-	g.mu.Lock()
+	// The strict leios-fetch client cannot accept a second request while a
+	// tip-driven or backfill fetch is in progress. Do not wait here: the
+	// per-attempt deadline below would otherwise start only after the wait and
+	// failover could stall indefinitely behind the existing fetch. Busy is not a
+	// peer failure, so return before installing the cooldown outcome defer.
+	if !g.mu.TryLock() {
+		return errLeiosBackfillConnBusy
+	}
 	defer g.mu.Unlock()
 	// Bound this connection's attempt so a slow-but-alive relay cannot park the
 	// whole backfill on one peer (issue #2819); on expiry the tx fetch returns a
 	// deadline error, this attempt is marked failed, and FetchEndorserBlockByPoint
-	// moves on to the next connection. Measured from lock acquisition so it covers
-	// only serving time on this connection, not time queued behind another fetch.
+	// moves on to the next connection. Busy connections are skipped above, so the
+	// deadline can cover only serving time without leaving lock acquisition
+	// unbounded.
 	deadline := time.Now().Add(leiosBackfillPerAttemptTimeout)
 	// Runs before the deferred Unlock above (LIFO), so the cooldown state is
 	// published while the guard is still held and stays ordered with the fetch.

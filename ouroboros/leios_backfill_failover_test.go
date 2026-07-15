@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/protocol"
@@ -135,6 +136,47 @@ func TestLeiosBackfillConnOrderPreservesRotation(t *testing.T) {
 	)
 }
 
+// TestFetchEndorserBlockOnConnSkipsBusyConnection verifies that lock
+// acquisition is not outside the per-attempt budget. A tip-driven fetch may
+// hold the same guard, in which case backfill must return immediately so its
+// caller can try another peer. Contention is not a peer failure and therefore
+// must not change the connection's cooldown state.
+func TestFetchEndorserBlockOnConnSkipsBusyConnection(t *testing.T) {
+	t.Parallel()
+	o := NewOuroboros(OuroborosConfig{})
+	connId := namedConnId("busy")
+	point := ocommon.Point{Slot: 100, Hash: []byte{0x03}}
+	// Keep the failure path safe: if a regression blocks until the test releases
+	// the guard, the awakened fetch can finish from this empty cached block
+	// without dereferencing the nil client below.
+	o.leiosEndorserBlocks[leiosBlockKey(point.Hash)] = &leiosEndorserBlockData{
+		point:      point,
+		txCount:    0,
+		insertedAt: time.Now(),
+	}
+	g := o.leiosFetchGuardFor(connId)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- o.fetchEndorserBlockOnConn(
+			connId,
+			nil,
+			point,
+		)
+	}()
+	err := testutil.RequireReceive(
+		t,
+		errCh,
+		time.Second,
+		"busy leios-fetch connection should be skipped",
+	)
+	require.ErrorIs(t, err, errLeiosBackfillConnBusy)
+	require.Zero(t, g.consecutiveFailures.Load())
+	require.False(t, g.inCooldown(time.Now()))
+}
+
 // TestFetchLeiosEbTxsBatchedUntilPastDeadline verifies that a per-attempt
 // deadline already in the past makes the fetch return immediately without
 // issuing a single request, so FetchEndorserBlockByPoint can fail over to
@@ -156,6 +198,18 @@ func TestFetchLeiosEbTxsBatchedUntilPastDeadline(t *testing.T) {
 	require.Contains(t, err.Error(), "deadline")
 	require.Empty(t, txs)
 	require.Zero(t, requester.calls, "no request should be issued past the deadline")
+}
+
+// TestLeiosFetchResponseTimeoutFitsBackfillAttempt ensures a single request
+// that receives no response cannot add more than one per-connection attempt
+// budget before the fetch loop gets another chance to fail over.
+func TestLeiosFetchResponseTimeoutFitsBackfillAttempt(t *testing.T) {
+	t.Parallel()
+	require.LessOrEqual(
+		t,
+		leiosFetchResponseTimeout,
+		leiosBackfillPerAttemptTimeout,
+	)
 }
 
 // dribbleBlockTxsRequester simulates a slow-but-alive relay that always serves a
