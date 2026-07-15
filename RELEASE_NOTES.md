@@ -36,6 +36,30 @@ This release lays the groundwork for fuller reward metadata, corrects historical
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** reward metadata 基盤、Mark stake 精度、Leios フェイルオーバー高速化
+
+**日付:** July 15, 2026
+
+**バージョン:** v0.65.0
+
+このリリースでは、reward metadata の状態をより充実させる基盤を整え、履歴 Mark stake 合計を是正し、遅い relay 上での Leios catch up フェイルオーバーを改善し、example project の TypeScript toolchain を更新します。
+
+### ✨ 新機能
+
+* 追加しました **起動時により完全な reward metadata state を再構築できること:** Reward snapshot は pool reward と owner stake を含む、より多くの reward state を保持するようになり、既存 database を更新する operator は ledger 処理を再開する前に不足している live reward stake metadata を再構築できます。この基盤により、今回のリリースで full reward formula を導入せずに、rollback と withdrawal replay の整合性を高めます。
+
+### 💪 改善
+
+* 更新しました **Blockfrost explorer example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+* 刷新しました **Sundae preview example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+
+### 🔧 修正
+
+* 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake に加えて delegator の reward balance も保持するようになり、leader threshold の誤判定を防ぎ、snapshot slot で reward のみを持つ stake も維持します。
+* 改善しました **遅い relay や busy connection から Leios の履歴 fetch をより早く切り替えること:** 履歴 catch up は遅い fetch をより早く打ち切り、最近健全だった peer を優先し、busy connection を待たずにスキップするため、backfill が一つの relay で止まりにくくなります。
+
 ## v0.64.0 (July 14, 2026)
 
 **Title:** Governance replay recovery and simpler pool imports
