@@ -163,6 +163,7 @@ type drepVote struct {
 type accountSummary struct {
 	StakingKey    string `json:"stakingKey"`
 	CredentialTag uint8  `json:"credentialTag"`
+	CreatedSlot   uint64 `json:"createdSlot"`
 	Reward        string `json:"reward"`
 	Active        bool   `json:"active"`
 }
@@ -179,6 +180,7 @@ type drepHistoryItem struct {
 type stakeLookup struct {
 	StakingKey    string `json:"stakingKey"`
 	CredentialTag uint8  `json:"credentialTag"`
+	CreatedSlot   uint64 `json:"createdSlot"`
 	Pool          string `json:"pool,omitempty"`
 	DRep          string `json:"drep,omitempty"`
 	DRepType      int64  `json:"drepType"`
@@ -745,6 +747,7 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 		SELECT
 			encode(staking_key, 'hex'),
 			credential_tag,
+			created_slot,
 			COALESCE(encode(pool, 'hex'), ''),
 			COALESCE(encode(drep, 'hex'), ''),
 			drep_type,
@@ -756,6 +759,7 @@ func (a *app) handleStakeLookup(w http.ResponseWriter, r *http.Request) {
 	`, credential, credentialTag).Scan(
 		&ret.StakingKey,
 		&ret.CredentialTag,
+		&ret.CreatedSlot,
 		&ret.Pool,
 		&ret.DRep,
 		&ret.DRepType,
@@ -870,7 +874,7 @@ func (a *app) drepDelegations(
 	credentialTag uint8,
 ) ([]accountSummary, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT encode(staking_key, 'hex'), credential_tag, reward::text, active
+		SELECT encode(staking_key, 'hex'), credential_tag, created_slot, reward::text, active
 		FROM account
 		WHERE drep = decode($1, 'hex')
 			AND drep_type = $2
@@ -888,6 +892,7 @@ func (a *app) drepDelegations(
 		if err := rows.Scan(
 			&item.StakingKey,
 			&item.CredentialTag,
+			&item.CreatedSlot,
 			&item.Reward,
 			&item.Active,
 		); err != nil {
