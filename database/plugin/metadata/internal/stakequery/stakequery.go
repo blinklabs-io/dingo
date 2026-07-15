@@ -60,24 +60,106 @@ func GetStakeByPoolsAtSlot(
 
 	cte, args := activeDelegationCTE(db, slot)
 
-	// utxo.amount is stored as text by types.Uint64 on postgres and mysql, so
-	// SUM() over the raw column fails there ("function sum(text) does not
-	// exist" / "UNION types text and integer cannot be matched"). Cast to the
-	// backend's native integer type first, mirroring the DRep voting-power
-	// queries. sqlite is loosely typed but the cast keeps the backends
-	// consistent.
+	// utxo.amount, account.reward, and account_reward_delta amounts are stored as
+	// text by types.Uint64 on
+	// postgres and mysql, so SUM()/arithmetic over the raw columns fails there
+	// ("function sum(text) does not exist" / "UNION types text and integer
+	// cannot be matched"). Cast to the backend's native integer type first,
+	// mirroring the DRep voting-power queries. sqlite is loosely typed but the
+	// cast keeps the backends consistent.
+	//
+	// Per-credential stake is live UTxO lovelace PLUS the delegator's
+	// reward-account balance (issue #2813): summing UTxOs alone undercounts
+	// each pool's mark stake by ~10% (worse for pools whose delegators hold
+	// most of their stake as rewards), understating sigma so that canonical
+	// blocks fail the "VRF leader value exceeds stake-derived threshold"
+	// check and wedge networks that enforce it (preview/preprod/mainnet).
+	// Reward balances are reconstructed at slot from the rollback journal. If
+	// there is no later withdrawal, subtract all later credits from the live
+	// balance. If there is one, its PreviousReward is the balance immediately
+	// before that withdrawal; subtract only credits between slot and that first
+	// withdrawal. Later events cannot affect that recorded balance.
 	query := cte + fmt.Sprintf(`,
+ranked_future_withdrawal AS (
+	SELECT withdrawal.credential_tag,
+		withdrawal.staking_key,
+		withdrawal.id,
+		withdrawal.added_slot,
+		CAST(withdrawal.previous_reward AS %[1]s) AS previous_reward,
+		ROW_NUMBER() OVER (
+			PARTITION BY withdrawal.credential_tag, withdrawal.staking_key
+			ORDER BY withdrawal.added_slot, withdrawal.id
+		) AS event_order
+	FROM account_reward_delta withdrawal
+	WHERE withdrawal.withdrawal = TRUE
+		AND withdrawal.added_slot > ?
+),
+first_future_withdrawal AS (
+	SELECT credential_tag,
+		staking_key,
+		id,
+		added_slot,
+		previous_reward
+	FROM ranked_future_withdrawal
+	WHERE event_order = 1
+),
+future_credit AS (
+	SELECT credit.credential_tag,
+		credit.staking_key,
+		COALESCE(SUM(CAST(credit.amount AS %[1]s)), 0) AS total,
+		COALESCE(SUM(CASE
+			WHEN first_future_withdrawal.id IS NOT NULL
+				AND (credit.added_slot < first_future_withdrawal.added_slot
+					OR (credit.added_slot = first_future_withdrawal.added_slot
+						AND credit.id < first_future_withdrawal.id))
+			THEN CAST(credit.amount AS %[1]s)
+			ELSE 0
+		END), 0) AS before_first_withdrawal
+	FROM account_reward_delta credit
+	LEFT JOIN first_future_withdrawal
+		ON first_future_withdrawal.credential_tag = credit.credential_tag
+		AND first_future_withdrawal.staking_key = credit.staking_key
+	WHERE credit.withdrawal = FALSE
+		AND credit.added_slot > ?
+	GROUP BY credit.credential_tag,
+		credit.staking_key
+),
+historical_reward AS (
+	SELECT active_delegation.credential_tag,
+		active_delegation.staking_key,
+		CASE
+			WHEN first_future_withdrawal.id IS NOT NULL THEN
+				first_future_withdrawal.previous_reward
+					- COALESCE(future_credit.before_first_withdrawal, 0)
+			ELSE COALESCE(CAST(account.reward AS %[1]s), 0)
+				- COALESCE(future_credit.total, 0)
+		END AS reward
+	FROM active_delegation
+	LEFT JOIN account
+		ON account.credential_tag = active_delegation.credential_tag
+		AND account.staking_key = active_delegation.staking_key
+	LEFT JOIN first_future_withdrawal
+		ON first_future_withdrawal.credential_tag = active_delegation.credential_tag
+		AND first_future_withdrawal.staking_key = active_delegation.staking_key
+	LEFT JOIN future_credit
+		ON future_credit.credential_tag = active_delegation.credential_tag
+		AND future_credit.staking_key = active_delegation.staking_key
+),
 active_delegator_stake AS (
 	SELECT active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
 		active_delegation.staking_key,
-		COALESCE(SUM(CAST(utxo.amount AS %s)), 0) AS total_stake
+		COALESCE(SUM(CAST(utxo.amount AS %[1]s)), 0)
+			+ COALESCE(MAX(historical_reward.reward), 0) AS total_stake
 	FROM active_delegation
 	LEFT JOIN utxo
 		ON utxo.credential_tag = active_delegation.credential_tag
 		AND utxo.staking_key = active_delegation.staking_key
 		AND utxo.added_slot <= ?
 		AND (utxo.deleted_slot = 0 OR utxo.deleted_slot > ?)
+	LEFT JOIN historical_reward
+		ON historical_reward.credential_tag = active_delegation.credential_tag
+		AND historical_reward.staking_key = active_delegation.staking_key
 	WHERE active_delegation.pool_key_hash IN ?
 	GROUP BY active_delegation.pool_key_hash,
 		active_delegation.credential_tag,
@@ -99,7 +181,10 @@ GROUP BY pool_key_hash`, utxoAmountCastType(db))
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
 		end := min(start+chunkSize, len(poolKeyHashes))
 		chunk := poolKeyHashes[start:end]
-		queryArgs := append(append([]any(nil), args...), slot, slot, chunk)
+		queryArgs := append(
+			append([]any(nil), args...),
+			slot, slot, slot, slot, chunk,
+		)
 		var chunkResults []stakeResult
 		if err := db.Raw(query, queryArgs...).Scan(&chunkResults).Error; err != nil {
 			return nil, nil, fmt.Errorf(
