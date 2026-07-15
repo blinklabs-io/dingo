@@ -1,5 +1,97 @@
 # Dingo Releases
 
+## v0.64.0 (July 14, 2026)
+
+**Title:** Governance replay recovery and simpler pool imports
+
+**Date:** July 14, 2026
+
+**Version:** v0.64.0
+
+This release restores governance side effects after restarts at an epoch boundary and makes it easier to import pools through the database interface in a single call.
+
+### ✨ What's New
+
+* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration details through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
+
+### 🔧 Fixes
+
+* Fixed **preserve governance side effects across epoch boundary replay:** Nodes now restore governance treasury withdrawals and expired proposal deposit refunds after a restart at an epoch boundary, which keeps treasury, reserves, and reward account balances consistent during replay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** Governance replay の回復と pool import の簡素化
+
+**日付:** July 14, 2026
+
+**バージョン:** v0.64.0
+
+このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface を通じた pool の取り込みを一回の呼び出しで行いやすくします。
+
+### ✨ 新機能
+
+* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその登録情報を一回の呼び出しで取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
+
+### 🔧 修正
+
+* 修正しました **epoch boundary の replay で governance の副作用を保つこと:** Node は epoch boundary での再起動後も governance の treasury withdrawal と期限切れ proposal の deposit refund を復元し、replay 中の treasury、reserves、reward account の balance 整合性を保ちます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Recuperación del replay de gobernanza e importaciones de pools más simples
+
+**Fecha:** July 14, 2026
+
+**Versión:** v0.64.0
+
+Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época y facilita la importación de pools mediante la interfaz de base de datos con una sola llamada.
+
+### ✨ Novedades
+
+* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y sus datos de registro con una sola llamada, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
+
+### 🔧 Correcciones
+
+* Corrigió **conservar los efectos de gobernanza durante el replay del límite de época:** Los nodos ahora restauran los retiros del tesoro de gobernanza y los reembolsos de depósitos de propuestas vencidas después de un reinicio en un límite de época, lo que mantiene coherentes los saldos del tesoro, las reservas y las cuentas de recompensa durante el replay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.63.1 (July 14, 2026)
 
 **Title:** Blockfrost asset completeness, calmer logs, and steadier maintenance
