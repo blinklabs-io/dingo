@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/sqldialect"
+	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"gorm.io/gorm"
 )
@@ -192,20 +193,6 @@ active_delegator_stake AS (
 	return query, args
 }
 
-// PoolCredentialStakeKey produces an unambiguous binary map key for a pool and
-// one of its stake credentials.
-func PoolCredentialStakeKey(
-	poolKeyHash []byte,
-	credentialTag uint8,
-	stakingKey []byte,
-) string {
-	key := make([]byte, 0, len(poolKeyHash)+1+len(stakingKey))
-	key = append(key, poolKeyHash...)
-	key = append(key, credentialTag)
-	key = append(key, stakingKey...)
-	return string(key)
-}
-
 // GetPoolOwnerStakeAtSlot returns stake only for the requested key-hash owner
 // credentials, and only under the pool to which each credential was delegated
 // at slot. The result cardinality is bounded by the owner set, not by all pool
@@ -242,7 +229,9 @@ FROM active_delegator_stake`
 			return nil, fmt.Errorf("query historical pool-owner stake: %w", err)
 		}
 		for _, row := range rows {
-			out[PoolCredentialStakeKey(row.PoolKeyHash, 0, row.StakingKey)] = row.TotalStake
+			out[types.PoolCredentialStakeKey(
+				row.PoolKeyHash, 0, row.StakingKey,
+			)] = row.TotalStake
 		}
 	}
 	return out, nil

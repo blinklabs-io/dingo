@@ -277,7 +277,7 @@ func (m *Manager) rewardPoolInputs(
 			input.RewardAccountCredentialTag = registration.RewardAccountCredentialTag
 			for _, owner := range registration.Owners {
 				input.OwnerStake += types.Uint64(
-					ownerStakes[poolCredentialStakeKey(
+					ownerStakes[types.PoolCredentialStakeKey(
 						poolKey[:], 0, owner.KeyHash,
 					)],
 				)
@@ -294,18 +294,6 @@ func (m *Manager) rewardPoolInputs(
 		inputs = append(inputs, input)
 	}
 	return inputs, nil
-}
-
-func poolCredentialStakeKey(
-	poolKeyHash []byte,
-	credentialTag uint8,
-	stakingKey []byte,
-) string {
-	key := make([]byte, 0, len(poolKeyHash)+1+len(stakingKey))
-	key = append(key, poolKeyHash...)
-	key = append(key, credentialTag)
-	key = append(key, stakingKey...)
-	return string(key)
 }
 
 func rewardPoolBlockCounts(
