@@ -228,6 +228,18 @@ func setTestLedgerTip(
 		field.Type(),
 		unsafe.Pointer(field.UnsafeAddr()),
 	).Elem().Set(reflect.ValueOf(tip))
+
+	// NewLedgerState publishes an origin tip snapshot during construction.
+	// These white-box tests replace currentTip directly, so clear that initial
+	// snapshot and let the ledger's test-fixture fallback rebuild its reader
+	// view from the value above. Otherwise GetIntersectPoint keeps observing
+	// origin even though the fixture's writer-owned tip has advanced.
+	snapshotField := reflect.ValueOf(ls).Elem().FieldByName("tip")
+	require.True(t, snapshotField.IsValid())
+	reflect.NewAt(
+		snapshotField.Type(),
+		unsafe.Pointer(snapshotField.UnsafeAddr()),
+	).Elem().Set(reflect.Zero(snapshotField.Type()))
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
