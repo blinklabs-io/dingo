@@ -1449,6 +1449,23 @@ trust-boundary reasons) place the peer on the deny list for a cooldown in
 addition to closing the connection, so the node does not redial a peer that
 will deterministically be rejected again moments later.
 
+The per-connection rollback loop detector (`rollbackHistory` in
+`LedgerState`) records recent rollback points per connection and breaks a
+loop if the same point recurs past a threshold within a window. Two rules keep
+it from suppressing legitimate rollbacks (issue #2790). First, a rollback the
+node successfully applies is forward progress toward the peer's chain, so its
+records are cleared from `rollbackHistory` on the successful cross
+(`clearRollbackHistoryForPoint`), so a legitimately repeated but crossable
+rollback does not accumulate toward the threshold. Second, even when a point
+does reach the threshold, the detector only breaks the loop if the rollback is
+genuinely un-crossable: `rollbackIsAppliable` mirrors the pre-checks
+`rollbackChainAndState` uses (target block present and within the security
+parameter K via `chain.ValidateRollback`, and at/above the Mithril anchor),
+and a rollback that would succeed is applied even on the repeat rather than
+suppressed. Only a rollback the node cannot cross takes the skip path, which
+would otherwise wedge the node in a reconnect loop behind a legitimately
+advancing peer.
+
 When the local chain has diverged from the network, an upstream peer can
 repeatedly ask us to roll back to a canonical point we cannot cross to
 (the block is missing below our diverged tip, the rollback exceeds K, or it
@@ -1460,7 +1477,10 @@ un-crossable rollbacks; once the same point recurs past a threshold within a
 window it surfaces the stuck-divergence condition as a throttled operator
 error plus the `dingo_chainsync_unrecoverable_rollback_total` metric, since a
 node in this state cannot self-recover and needs operator intervention
-(e.g. re-bootstrapping from a Mithril snapshot).
+(e.g. re-bootstrapping from a Mithril snapshot). When the per-connection loop
+detector itself breaks a loop by skipping a rollback it can no longer cross,
+it feeds that same point-keyed tracker so the escalation and metric fire on
+the skip path too, rather than silently suppressing the rollback.
 
 Topology configuration is loaded from an explicit topology file when provided,
 otherwise from the embedded `network/topology.json` for built-in networks,
