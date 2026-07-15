@@ -12,7 +12,7 @@ This release lays the groundwork for fuller reward metadata, corrects historical
 
 ### ✨ What's New
 
-* Added **rebuild fuller reward metadata state at startup:** Reward snapshots now keep more reward state, including pool reward and owner stake details, and operators upgrading existing databases can rebuild missing live reward stake metadata before ledger processing resumes. This groundwork keeps rollback and withdrawal replay handling more consistent without introducing the full reward formula in this release.
+* Added **rebuild fuller reward metadata state at startup:** Reward snapshots now keep more reward state, including pool reward and owner stake details, and operators upgrading existing databases can rebuild missing live reward stake metadata before ledger processing resumes. This groundwork keeps rollback recovery and reward withdrawal replay more consistent without changing reward formulas in this release.
 
 ### 💪 Improvements
 
@@ -21,7 +21,7 @@ This release lays the groundwork for fuller reward metadata, corrects historical
 
 ### 🔧 Fixes
 
-* Fixed **include reward account balances in Mark stake snapshots:** Historical pool stake totals now keep delegator reward balances alongside live UTxO stake, which prevents false leader threshold failures and preserves reward only stake at the snapshot slot.
+* Fixed **include reward account balances in Mark stake snapshots:** Historical pool stake totals now count each delegator's reward balance together with live UTxO stake, which prevents false leader eligibility failures and preserves stake for delegators who hold only rewards at the snapshot slot.
 * Improved **fail over Leios historical fetches faster on slow or busy relays:** Historical catch up now abandons slow fetch attempts sooner, prefers recently healthy peers, and skips busy connections so backfill keeps moving instead of stalling on one relay.
 
 ### Recommended Network Compatibility ⚠️
@@ -48,7 +48,7 @@ Thank you for trying!
 
 ### ✨ 新機能
 
-* 追加しました **起動時により完全な reward metadata state を再構築できること:** Reward snapshot は pool reward と owner stake を含む、より多くの reward state を保持するようになり、既存 database を更新する operator は ledger 処理を再開する前に不足している live reward stake metadata を再構築できます。この基盤により、今回のリリースで full reward formula を導入せずに、rollback と withdrawal replay の整合性を高めます。
+* 追加しました **起動時により完全な reward metadata state を再構築できること:** Reward snapshot は pool reward と owner stake を含む、より多くの reward state を保持するようになり、既存 database を更新する operator は ledger 処理を再開する前に不足している live reward stake metadata を再構築できます。この基盤により、今回のリリースで reward formula 自体を変えずに、rollback recovery と reward withdrawal replay の整合性を高めます。
 
 ### 💪 改善
 
@@ -57,7 +57,7 @@ Thank you for trying!
 
 ### 🔧 修正
 
-* 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake に加えて delegator の reward balance も保持するようになり、leader threshold の誤判定を防ぎ、snapshot slot で reward のみを持つ stake も維持します。
+* 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake とあわせて delegator ごとの reward balance も数えるようになり、leader eligibility の誤判定を防ぎ、snapshot slot で reward のみを持つ delegator の stake も維持します。
 * 改善しました **遅い relay や busy connection から Leios の履歴 fetch をより早く切り替えること:** 履歴 catch up は遅い fetch をより早く打ち切り、最近健全だった peer を優先し、busy connection を待たずにスキップするため、backfill が一つの relay で止まりにくくなります。
 
 ### 推奨ネットワーク互換性 ⚠️
@@ -84,7 +84,7 @@ Esta versión sienta la base para un estado de metadatos de recompensas más com
 
 ### ✨ Novedades
 
-* Agregó **reconstruir un estado de metadatos de recompensas más completo al iniciar:** Las instantáneas de recompensas ahora conservan más estado de recompensas, incluidos los detalles de la cuenta de recompensas del pool y del stake del propietario, y los operadores que actualizan bases de datos existentes pueden reconstruir el metadato faltante de live reward stake antes de que se reanude el procesamiento del ledger. Esta base mantiene más consistente el rollback y el replay de retiros sin introducir todavía la fórmula completa de recompensas en esta versión.
+* Agregó **reconstruir un estado de metadatos de recompensas más completo al iniciar:** Las instantáneas de recompensas ahora conservan más estado de recompensas, incluidos los detalles de la cuenta de recompensas del pool y del stake del propietario, y los operadores que actualizan bases de datos existentes pueden reconstruir el metadato faltante de live reward stake antes de que se reanude el procesamiento del ledger. Esta base mantiene más consistente la recuperación tras rollback y el replay de retiros sin cambiar las fórmulas de recompensas en esta versión.
 
 ### 💪 Mejoras
 
@@ -93,7 +93,7 @@ Esta versión sienta la base para un estado de metadatos de recompensas más com
 
 ### 🔧 Correcciones
 
-* Corrigió **incluir saldos de cuentas de recompensas en las instantáneas de Mark stake:** Los totales históricos de stake por pool ahora conservan los saldos de recompensas de cada delegador junto con el stake UTxO en vivo, lo que evita falsos fallos de umbral de liderazgo y preserva el stake solo de recompensa en el slot de la instantánea.
+* Corrigió **incluir saldos de cuentas de recompensas en las instantáneas de Mark stake:** Los totales históricos de stake por pool ahora cuentan el saldo de recompensas de cada delegador junto con el stake UTxO en vivo, lo que evita falsos fallos de elegibilidad del líder y preserva el stake de delegadores que solo mantienen recompensas en el slot de la instantánea.
 * Mejoró **cambiar antes las consultas históricas de Leios cuando un relay va lento o está ocupado:** El catch up histórico ahora abandona antes los intentos lentos, prioriza pares que respondieron bien hace poco y omite conexiones ocupadas para que el backfill siga avanzando en lugar de quedarse detenido en un relay.
 
 ### Compatibilidad de red recomendada ⚠️
