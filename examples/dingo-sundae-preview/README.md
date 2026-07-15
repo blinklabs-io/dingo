@@ -26,7 +26,8 @@ cd examples/dingo-sundae-preview
 ./scripts/port-forward-dingo.sh
 ```
 
-The chart uses a `LoadBalancer` service and enables only `DINGO_UTXORPC_PORT`.
+The example values pin Dingo `0.64.0`. The chart uses a `LoadBalancer` service
+and enables only `DINGO_UTXORPC_PORT`.
 If the load balancer is not reachable from the dev host, keep the port-forward
 open while running the frontend.
 
