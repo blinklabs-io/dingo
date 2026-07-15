@@ -2,13 +2,13 @@
 
 ## v0.65.0 (July 15, 2026)
 
-**Title:** Reward metadata groundwork, accurate Mark stake, and faster Leios failover
+**Title:** Reward metadata groundwork, steadier Mark stake snapshots, and faster Leios failover
 
 **Date:** July 15, 2026
 
 **Version:** v0.65.0
 
-This release lays the groundwork for fuller reward metadata, corrects historical Mark stake totals, improves Leios catch up failover on slow relays, and refreshes TypeScript toolchains in the example projects.
+This release gives upgraded databases a startup rebuild path for fuller reward metadata, corrects historical Mark stake totals, improves Leios catch up failover on slow or busy relays, and refreshes TypeScript toolchains in the example projects.
 
 ### ✨ What's New
 
@@ -38,13 +38,13 @@ Thank you for trying!
 
 ### 🇯🇵 日本語
 
-**タイトル:** reward metadata 基盤、Mark stake 精度、Leios フェイルオーバー高速化
+**タイトル:** reward metadata 基盤、安定した Mark stake snapshot、Leios フェイルオーバー高速化
 
 **日付:** July 15, 2026
 
 **バージョン:** v0.65.0
 
-このリリースでは、reward metadata の状態をより充実させる基盤を整え、履歴 Mark stake 合計を是正し、遅い relay 上での Leios catch up フェイルオーバーを改善し、example project の TypeScript toolchain を更新します。
+このリリースでは、既存 database の更新時により完全な reward metadata を起動時に再構築できるようにし、履歴 Mark stake 合計を是正し、遅い relay や busy connection での Leios catch up フェイルオーバーを改善し、example project の TypeScript toolchain を更新します。
 
 ### ✨ 新機能
 
@@ -74,13 +74,13 @@ Thank you for trying!
 
 ### 🇪🇸 Español
 
-**Título:** Base de metadatos de recompensas, Mark stake preciso y failover más rápido de Leios
+**Título:** Base de metadatos de recompensas, instantáneas de Mark stake más estables y failover más rápido de Leios
 
 **Fecha:** July 15, 2026
 
 **Versión:** v0.65.0
 
-Esta versión sienta la base para un estado de metadatos de recompensas más completo, corrige los totales históricos de Mark stake, mejora el failover de catch up de Leios en relays lentos y renueva las cadenas de herramientas TypeScript en los proyectos de ejemplo.
+Esta versión ofrece a las bases de datos actualizadas una ruta de reconstrucción al iniciar para un estado de metadatos de recompensas más completo, corrige los totales históricos de Mark stake, mejora el failover de catch up de Leios en relays lentos u ocupados y renueva las cadenas de herramientas TypeScript en los proyectos de ejemplo.
 
 ### ✨ Novedades
 
