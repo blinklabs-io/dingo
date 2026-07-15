@@ -728,6 +728,12 @@ type leiosFetchGuard struct {
 	// wrong (hash-mismatching) or unservable/stalling responses is
 	// deprioritized for progressively longer; markFetchOK resets it.
 	consecutiveFailures atomic.Int32
+	// lastOKNano is the unix-nano time of this connection's most recent
+	// successful backfill fetch, used for positive peer affinity: the backfill
+	// connection selector prefers a connection that recently served an endorser
+	// block over never-tried ones (see recentlySucceeded). markFetchOK sets it;
+	// markFetchFailed clears it so a now-flaky connection loses the preference.
+	lastOKNano atomic.Int64
 }
 
 // markFetchFailed puts this connection on a cooldown after a failed or
@@ -740,6 +746,9 @@ type leiosFetchGuard struct {
 // still falls back to cooled connections when none are healthy -- so a
 // persistently-bad connection is deprioritized but never permanently starved.
 func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
+	// A fresh failure drops the positive-affinity preference so a connection
+	// that just started failing is no longer treated as recently-proven.
+	g.lastOKNano.Store(0)
 	n := g.consecutiveFailures.Add(1)
 	d := base
 	if n > 1 {
@@ -756,11 +765,31 @@ func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
 	g.cooledUntilNano.Store(now.Add(d).UnixNano())
 }
 
-// markFetchOK clears any cooldown and resets the failure escalation after a
-// successful fetch on this connection.
+// markFetchOK clears any cooldown, resets the failure escalation, and records
+// the success time (for positive peer affinity) after a successful fetch on this
+// connection.
 func (g *leiosFetchGuard) markFetchOK() {
 	g.consecutiveFailures.Store(0)
 	g.cooledUntilNano.Store(0)
+	g.lastOKNano.Store(time.Now().UnixNano())
+}
+
+// recentlySucceeded reports whether this connection served a backfill fetch
+// within window as of now. The backfill connection selector uses it for
+// positive peer affinity, preferring a recently-proven connection over
+// never-tried ones. A window <= 0 treats any past success as recent.
+func (g *leiosFetchGuard) recentlySucceeded(
+	now time.Time,
+	window time.Duration,
+) bool {
+	last := g.lastOKNano.Load()
+	if last <= 0 {
+		return false
+	}
+	if window <= 0 {
+		return true
+	}
+	return now.UnixNano()-last < int64(window)
 }
 
 // inCooldown reports whether this connection is still cooling down from a
@@ -828,10 +857,34 @@ const leiosTxFetchMaxRoundsPerWindow = leiosTxFetchWindowSize
 // placed at their absolute index, so the result is in index order; on an error
 // or a no-progress request it returns the contiguous prefix fetched so far,
 // letting callers treat the fetch as best-effort.
+//
+// This is the tip-driven entry point (no per-attempt deadline); the by-point
+// backfill path uses fetchLeiosEbTxsBatchedUntil to bound one connection's
+// attempt so it can fail over to another peer.
 func (o *Ouroboros) fetchLeiosEbTxsBatched(
 	client leiosBlockTxsRequester,
 	point ocommon.Point,
 	txCount int,
+) ([]cbor.RawMessage, error) {
+	return o.fetchLeiosEbTxsBatchedUntil(client, point, txCount, time.Time{})
+}
+
+// fetchLeiosEbTxsBatchedUntil is fetchLeiosEbTxsBatched with an optional
+// per-attempt deadline. When deadline is non-zero the fetch abandons the attempt
+// and returns the contiguous prefix fetched so far (with a deadline error) once
+// it elapses, instead of continuing to re-request from a slow-but-alive relay
+// that keeps dribbling transactions within the leios-fetch protocol timeout (so
+// that timeout never fires) yet never promptly completes. The check is between
+// request rounds — each individual round is still bounded by the underlying
+// protocol timeout — so an attempt overshoots the deadline by at most one round;
+// this lets the by-point backfill fail over to another connection rather than
+// parking the whole ledger apply loop on one peer (issue #2819). A zero deadline
+// disables the bound, preserving the tip-path behavior.
+func (o *Ouroboros) fetchLeiosEbTxsBatchedUntil(
+	client leiosBlockTxsRequester,
+	point ocommon.Point,
+	txCount int,
+	deadline time.Time,
 ) ([]cbor.RawMessage, error) {
 	if client == nil {
 		return nil, errors.New("leios-fetch client unavailable")
@@ -867,6 +920,14 @@ func (o *Ouroboros) fetchLeiosEbTxsBatched(
 		)
 		if len(needed) == 0 {
 			break // every transaction fetched
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			got := leiosCollectTxs(result)
+			return got, fmt.Errorf(
+				"leios-fetch attempt deadline exceeded after %d/%d transactions",
+				len(got),
+				txCount,
+			)
 		}
 		if round >= maxRounds {
 			return leiosCollectTxs(result), fmt.Errorf(
