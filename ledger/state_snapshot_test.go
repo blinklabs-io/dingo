@@ -35,10 +35,12 @@ func TestLedgerStateSnapshotPublicationIsImmutable(t *testing.T) {
 
 	oldConsensus := ls.consensus.Load()
 	oldTip := ls.tip.Load()
-	// Mutate both the scalar and slice-backed writer state, then publish a new
-	// generation. The retained snapshots must continue to expose generation 7.
+	// Replace slice-backed epoch-cache state before mutation, matching the
+	// production copy-on-write invariant, then publish a new generation. The
+	// retained snapshots must continue to expose generation 7.
 	ls.currentEpoch.EpochId = 8
 	ls.currentEpoch.Nonce[0] = 8
+	ls.epochCache = cloneEpochs(ls.epochCache)
 	ls.epochCache[0].Nonce[0] = 8
 	ls.currentTip.Point.Hash[0] = 8
 	ls.currentTipBlockNonce[0] = 18

@@ -797,7 +797,10 @@ func (ls *LedgerState) publishSnapshotsLocked() {
 		currentEra:     ls.currentEra,
 		currentPParams: ls.currentPParams,
 		prevEraPParams: ls.prevEraPParams,
-		epochCache:     cloneEpochs(ls.epochCache),
+		// epochCache is immutable after publication. Writers replace it with a
+		// fresh slice, so tip-only publications can safely reuse the existing
+		// cache instead of copying the full epoch history for every block.
+		epochCache:     ls.epochCache,
 		transitionInfo: ls.transitionInfo,
 	})
 	ls.tip.Store(&tipSnapshot{
@@ -996,13 +999,17 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
 	ls.evaluateHardForkInitiationStability()
-	// Publish the transitionInfo changes made above (single-threaded startup,
-	// no lock required) before any snapshot-reading goroutine becomes
-	// runnable. Without this, a restart that reconstructs TransitionKnown /
+	// Publish the transitionInfo changes made above before any snapshot-reading
+	// goroutine becomes runnable. The HFI stability evaluation above may launch
+	// an asynchronous tally, so serialize this publication with its completion
+	// path and every other snapshot writer. Without this, a restart that
+	// reconstructs TransitionKnown /
 	// TransitionImpossible here would leave every snapshot-based reader
 	// (CurrentTransitionInfo, ConsensusModeForEpoch, ...) on the stale
 	// pre-loadTip() value until the next unrelated write path republishes.
+	ls.Lock()
 	ls.publishSnapshotsLocked()
+	ls.Unlock()
 	if err := ls.reconcilePrimaryChainTipWithLedgerTip(); err != nil {
 		return fmt.Errorf("failed to reconcile primary chain tip: %w", err)
 	}
