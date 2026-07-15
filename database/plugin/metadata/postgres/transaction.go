@@ -772,6 +772,7 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 		tmpAccount = &models.Account{
 			StakingKey:    stakeKey,
 			CredentialTag: credentialTag,
+			CreatedSlot:   models.AccountCreatedSlotUnset,
 		}
 	} else if !tmpAccount.Active {
 		tmpAccount.Active = true
@@ -783,22 +784,32 @@ func (d *MetadataStorePostgres) getOrCreateAccount(
 // record when `account.ID == 0` (with an upsert on credential tag + staking key) or saves
 // the existing record otherwise.
 func saveAccount(account *models.Account, db *gorm.DB) error {
+	if account.CreatedSlot == models.AccountCreatedSlotUnset {
+		account.CreatedSlot = account.AddedSlot
+	}
 	if account.ID == 0 {
+		updates := clause.AssignmentColumns(
+			[]string{
+				"added_slot",
+				"pool",
+				"drep",
+				"drep_type",
+				"active",
+				"certificate_id",
+			},
+		)
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: "created_slot"},
+			Value: gorm.Expr(
+				"LEAST(\"account\".\"created_slot\", EXCLUDED.\"created_slot\")",
+			),
+		})
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
-			DoUpdates: clause.AssignmentColumns(
-				[]string{
-					"added_slot",
-					"pool",
-					"drep",
-					"drep_type",
-					"active",
-					"certificate_id",
-				},
-			),
+			DoUpdates: updates,
 		},
 			clause.Returning{Columns: []clause.Column{{Name: "id"}}},
 		).Create(account)
@@ -811,6 +822,39 @@ func saveAccount(account *models.Account, db *gorm.DB) error {
 			return result.Error
 		}
 	}
+	return nil
+}
+
+// insertMissingDeregistrationAccount creates the placeholder used when a
+// deregistration is observed before its account. A concurrent or repeated
+// deregistration must not replace any fields on an account that already exists.
+func insertMissingDeregistrationAccount(
+	account *models.Account,
+	db *gorm.DB,
+) error {
+	credentialTag := account.CredentialTag
+	stakingKey := account.StakingKey
+	if err := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "credential_tag"},
+			{Name: "staking_key"},
+		},
+		DoNothing: true,
+	}).Create(account).Error; err != nil {
+		return err
+	}
+
+	// Create does not populate account when the conflict action is a no-op.
+	// Reload with a locking read so the subsequent deregistration updates the
+	// existing row by ID without replacing its delegation fields with the
+	// placeholder's zero values.
+	var persisted models.Account
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).Where(
+		"credential_tag = ? AND staking_key = ?", credentialTag, stakingKey,
+	).First(&persisted).Error; err != nil {
+		return err
+	}
+	*account = persisted
 	return nil
 }
 
@@ -1975,7 +2019,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -1984,16 +2028,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -2023,7 +2061,7 @@ func (d *MetadataStorePostgres) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
@@ -2032,16 +2070,10 @@ func (d *MetadataStorePostgres) SetTransaction(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate: %w", err)
 						}
 					}
 
@@ -3522,7 +3554,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3530,16 +3562,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false
@@ -3563,7 +3589,7 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, true, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
@@ -3571,16 +3597,10 @@ func (d *MetadataStorePostgres) SetTransactionBatched(
 						tmpAccount = &models.Account{
 							StakingKey:    stakeKey,
 							CredentialTag: credentialTag,
+							CreatedSlot:   models.AccountCreatedSlotUnset,
 						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
+						if err := insertMissingDeregistrationAccount(tmpAccount, db); err != nil {
+							return fmt.Errorf("process certificate (batched): %w", err)
 						}
 					}
 					tmpAccount.Active = false
