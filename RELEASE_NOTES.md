@@ -60,6 +60,56 @@ Thank you for trying!
 * 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake に加えて delegator の reward balance も保持するようになり、leader threshold の誤判定を防ぎ、snapshot slot で reward のみを持つ stake も維持します。
 * 改善しました **遅い relay や busy connection から Leios の履歴 fetch をより早く切り替えること:** 履歴 catch up は遅い fetch をより早く打ち切り、最近健全だった peer を優先し、busy connection を待たずにスキップするため、backfill が一つの relay で止まりにくくなります。
 
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Base de metadatos de recompensas, Mark stake preciso y failover más rápido de Leios
+
+**Fecha:** July 15, 2026
+
+**Versión:** v0.65.0
+
+Esta versión sienta la base para un estado de metadatos de recompensas más completo, corrige los totales históricos de Mark stake, mejora el failover de catch up de Leios en relays lentos y renueva las cadenas de herramientas TypeScript en los proyectos de ejemplo.
+
+### ✨ Novedades
+
+* Agregó **reconstruir un estado de metadatos de recompensas más completo al iniciar:** Las instantáneas de recompensas ahora conservan más estado de recompensas, incluidos los detalles de la cuenta de recompensas del pool y del stake del propietario, y los operadores que actualizan bases de datos existentes pueden reconstruir el metadato faltante de live reward stake antes de que se reanude el procesamiento del ledger. Esta base mantiene más consistente el rollback y el replay de retiros sin introducir todavía la fórmula completa de recompensas en esta versión.
+
+### 💪 Mejoras
+
+* Actualizó **usar TypeScript 7.0.2 en el ejemplo de Blockfrost explorer:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+* Renovó **usar TypeScript 7.0.2 en el ejemplo de Sundae preview:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+
+### 🔧 Correcciones
+
+* Corrigió **incluir saldos de cuentas de recompensas en las instantáneas de Mark stake:** Los totales históricos de stake por pool ahora conservan los saldos de recompensas de cada delegador junto con el stake UTxO en vivo, lo que evita falsos fallos de umbral de liderazgo y preserva el stake solo de recompensa en el slot de la instantánea.
+* Mejoró **cambiar antes las consultas históricas de Leios cuando un relay va lento o está ocupado:** El catch up histórico ahora abandona antes los intentos lentos, prioriza pares que respondieron bien hace poco y omite conexiones ocupadas para que el backfill siga avanzando en lugar de quedarse detenido en un relay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.64.0 (July 14, 2026)
 
 **Title:** Governance replay recovery and simpler pool imports
