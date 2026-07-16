@@ -338,10 +338,9 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 }
 
 // CaptureEpochBoundarySnapshot captures the Mark snapshot using the caller's
-// open epoch-boundary transaction. Ledger invokes this at the cardano-ledger
-// SNAP point, after delayed rewards and MIR are applied but before POOLREAP,
-// pparam updates, governance enactment, and donation accounting can mutate the
-// live aggregate further.
+// open epoch-boundary transaction. Ledger invokes this hook last in the current
+// rollover ordering, after POOLREAP, governance enactment, donation accounting,
+// and the new epoch row have been applied.
 func (m *Manager) CaptureEpochBoundarySnapshot(
 	ctx context.Context,
 	txn *database.Txn,
@@ -419,7 +418,7 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 	return nil
 }
 
-func (m *Manager) calculateLiveStakeDistribution(
+func (m *Manager) calculateSnapshotDistribution(
 	ctx context.Context,
 	slot uint64,
 ) (*StakeDistribution, error) {
@@ -436,10 +435,9 @@ func (m *Manager) captureMarkSnapshot(
 ) error {
 	start := time.Now()
 
-	// Calculate stake distribution from the live reward aggregate. This path
-	// is only a fallback for event-driven capture; the authoritative reward
-	// input bundle is captured in CaptureEpochBoundarySnapshot when wired.
-	distribution, err := m.calculateLiveStakeDistribution(
+	// Calculate canonical, slot-aware leader-election pool totals and attach
+	// RewardLiveStake credential inputs for reward capture.
+	distribution, err := m.calculateSnapshotDistribution(
 		ctx,
 		evt.SnapshotSlot,
 	)
@@ -454,7 +452,7 @@ func (m *Manager) captureMarkSnapshot(
 	// Save as Mark snapshot for the new epoch. At a normal epoch
 	// transition live Pool/Account state matches the boundary, so
 	// the CIP-1694 reward-account auto-vote resolves correctly.
-	if err := m.saveSnapshot(
+	saved, err := m.saveSnapshot(
 		ctx,
 		evt.NewEpoch,
 		"mark",
@@ -469,12 +467,16 @@ func (m *Manager) captureMarkSnapshot(
 		// transaction, that it isn't about to clobber an authoritative
 		// snapshot that landed in the meantime.
 		true,
-	); err != nil {
+	)
+	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
 			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
 		}
 		return fmt.Errorf("save mark snapshot: %w", err)
+	}
+	if !saved {
+		return nil
 	}
 
 	if m.metrics != nil {
@@ -550,7 +552,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	successCount := uint64(0)
 	lastSuccessfulEpoch := uint64(0)
 
-	distribution, err := m.calculateLiveStakeDistribution(ctx, 0)
+	distribution, err := m.calculateSnapshotDistribution(ctx, 0)
 	if err != nil {
 		if m.metrics != nil {
 			m.metrics.captureFailureTotal.Inc()
@@ -583,7 +585,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 				"start_slot", lastEpoch.StartSlot,
 				"total_pools", distribution.TotalPools,
 			)
-			dist2, err2 := m.calculateLiveStakeDistribution(
+			dist2, err2 := m.calculateSnapshotDistribution(
 				ctx, lastEpoch.StartSlot,
 			)
 			if err2 != nil {
@@ -633,7 +635,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	// For post-Mithril bootstrap currentEpochId > 0 and `distribution`
 	// plus the live tables reflect that later epoch — passing true here
 	// would freeze today's delegation/reward map onto an epoch-0 row.
-	if err := m.saveSnapshot(
+	if _, err := m.saveSnapshot(
 		ctx, 0, "mark", distribution, evt,
 		currentEpochId == 0,
 		currentEpochId == 0,
@@ -673,7 +675,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 			// data as historical inputs. Those rows go in with
 			// RewardAccountAutoVoteResolved=false and no reward input
 			// bundle.
-			if err := m.saveSnapshot(
+			if _, err := m.saveSnapshot(
 				ctx, seedEpoch, "mark", distribution, seedEvt,
 				offset == 0,
 				offset == 0,

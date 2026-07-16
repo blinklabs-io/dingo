@@ -56,8 +56,10 @@ type Txn struct {
 	metadataTxn types.Txn
 	lock        sync.Mutex
 	finished    bool
+	committed   bool
 	readWrite   bool
 	afterCommit []func()
+	dispatching bool
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
@@ -132,15 +134,43 @@ func (t *Txn) IsReadWrite() bool {
 // Callbacks run in registration order, once, only on a successful Commit; a
 // rollback or a failed commit never fires them. Use it for side effects that
 // must reflect committed state only — e.g. metrics that must not count work a
-// rollback discards. Callbacks run after the commit lock is released, so a
-// callback must not call back into this transaction's own methods.
+// rollback discards. Registration concurrent with, or after, a successful
+// Commit joins the serialized callback drain instead of being lost. Callbacks
+// run without the transaction lock held, so they may register another callback.
 func (t *Txn) AfterCommit(fn func()) {
 	if fn == nil {
 		return
 	}
 	t.lock.Lock()
-	defer t.lock.Unlock()
+	if t.finished && !t.committed {
+		t.lock.Unlock()
+		return
+	}
 	t.afterCommit = append(t.afterCommit, fn)
+	if !t.committed || t.dispatching {
+		t.lock.Unlock()
+		return
+	}
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
+}
+
+func (t *Txn) dispatchAfterCommit() {
+	for {
+		t.lock.Lock()
+		callbacks := t.afterCommit
+		t.afterCommit = nil
+		if len(callbacks) == 0 {
+			t.dispatching = false
+			t.lock.Unlock()
+			return
+		}
+		t.lock.Unlock()
+		for _, fn := range callbacks {
+			fn()
+		}
+	}
 }
 
 type savepointTxn interface {
@@ -218,32 +248,21 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	committed := false
-	defer func() {
-		// Snapshot the callbacks under the lock, release it, then run any
-		// registered after-commit callbacks only when the commit actually
-		// succeeded. Running them after unlock keeps a callback from
-		// deadlocking on this transaction's own lock.
-		callbacks := t.afterCommit
-		t.lock.Unlock()
-		if !committed {
-			return
-		}
-		for _, fn := range callbacks {
-			fn()
-		}
-	}()
 	if t.finished {
+		t.lock.Unlock()
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finished = true
+		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
-		return t.rollback()
+		err := t.rollback()
+		t.lock.Unlock()
+		return err
 	}
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
@@ -255,6 +274,7 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
@@ -267,6 +287,7 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
 	}
@@ -286,16 +307,22 @@ func (t *Txn) Commit() error {
 				)
 				// Return PartialCommitError so callers can detect with
 				// errors.Is(err, types.ErrPartialCommit) and trigger recovery
-				return PartialCommitError{
+				ret := PartialCommitError{
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
+				t.lock.Unlock()
+				return ret
 			}
+			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.finished = true
-	committed = true
+	t.committed = true
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
 	return nil
 }
 

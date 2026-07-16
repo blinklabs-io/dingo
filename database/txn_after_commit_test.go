@@ -16,9 +16,27 @@ package database
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
+
+type blockingAfterCommitTxn struct {
+	commitStarted chan struct{}
+	allowCommit   chan struct{}
+}
+
+func (t *blockingAfterCommitTxn) Commit() error {
+	close(t.commitStarted)
+	<-t.allowCommit
+	return nil
+}
+
+func (*blockingAfterCommitTxn) Rollback() error {
+	return nil
+}
 
 // TestTxnAfterCommitRunsOnCommit verifies after-commit callbacks fire, once and
 // in registration order, only after a read-write transaction commits.
@@ -65,4 +83,84 @@ func TestTxnAfterCommitSkippedOnReadOnly(t *testing.T) {
 	require.NoError(t, txn.Commit())
 	require.False(t, fired,
 		"read-only commit must not fire after-commit callbacks")
+}
+
+func TestTxnAfterCommitConcurrentWithCommitIsNotLost(t *testing.T) {
+	backend := &blockingAfterCommitTxn{
+		commitStarted: make(chan struct{}),
+		allowCommit:   make(chan struct{}),
+	}
+	txn := &Txn{
+		metadataTxn: backend,
+		readWrite:   true,
+	}
+	commitDone := make(chan error, 1)
+	go func() {
+		commitDone <- txn.Commit()
+	}()
+	testutil.RequireReceive(
+		t,
+		backend.commitStarted,
+		time.Second,
+		"backend commit started",
+	)
+
+	callbackFired := make(chan struct{})
+	registrationStarted := make(chan struct{})
+	registrationDone := make(chan struct{})
+	go func() {
+		close(registrationStarted)
+		txn.AfterCommit(func() { close(callbackFired) })
+		close(registrationDone)
+	}()
+
+	testutil.RequireReceive(
+		t,
+		registrationStarted,
+		time.Second,
+		"concurrent callback registration started",
+	)
+	close(backend.allowCommit)
+	require.NoError(t, testutil.RequireReceive(
+		t,
+		commitDone,
+		time.Second,
+		"transaction commit",
+	))
+	testutil.RequireReceive(
+		t,
+		registrationDone,
+		time.Second,
+		"concurrent callback registration",
+	)
+	testutil.RequireReceive(
+		t,
+		callbackFired,
+		time.Second,
+		"concurrently registered callback",
+	)
+}
+
+func TestTxnAfterCommitRegisteredAfterCommitRuns(t *testing.T) {
+	db := openTestDB(t)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Commit())
+
+	fired := false
+	txn.AfterCommit(func() { fired = true })
+	require.True(t, fired,
+		"registration after a successful commit must dispatch immediately")
+}
+
+func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
+	db := openTestDB(t)
+	txn := db.Transaction(true)
+	var order []int
+	txn.AfterCommit(func() {
+		order = append(order, 1)
+		txn.AfterCommit(func() { order = append(order, 2) })
+	})
+
+	require.NoError(t, txn.Commit())
+	require.Equal(t, []int{1, 2}, order)
 }

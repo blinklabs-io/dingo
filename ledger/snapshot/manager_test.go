@@ -19,12 +19,17 @@ import (
 	"context"
 	"math/big"
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	promtest "github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -473,6 +478,137 @@ func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.Empty(t, rows)
+}
+
+func TestFallbackCaptureWithoutRewardMarkerDoesNotWrite(t *testing.T) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+	poolHash := []byte("poolN_12345678901234567890AB")
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  bytes.Repeat([]byte{0x42}, 28),
+			utxoAmounts: []types.Uint64{25_000_000},
+		},
+	}, 500)
+	priorPool := bytes.Repeat([]byte{0x99}, 28)
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:          7,
+			SnapshotType:   "mark",
+			PoolKeyHash:    priorPool,
+			TotalStake:     1,
+			DelegatorCount: 1,
+			CapturedSlot:   100,
+		},
+		nil,
+	))
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   6, // deliberately absent: no reward marker bundle
+		NewEpoch:        7,
+		BoundarySlot:    3_024_000,
+		ProtocolVersion: 8,
+		SnapshotSlot:    431_999,
+	}
+	distribution, err := mgr.calculateSnapshotDistribution(
+		context.Background(),
+		evt.SnapshotSlot,
+	)
+	require.NoError(t, err)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		evt.NewEpoch,
+		"mark",
+		distribution,
+		evt,
+		true,
+		true,
+		true,
+	)
+	require.NoError(t, err)
+	require.False(t, saved)
+
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		7, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	require.Equal(t, priorPool, snapshots[0].PoolKeyHash)
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(7, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, rewardSnapshot)
+	epochSummary, err := db.Metadata().GetEpochSummary(7, nil)
+	require.NoError(t, err)
+	require.Nil(t, epochSummary)
+}
+
+func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+	poolHash := []byte("poolM_12345678901234567890AB")
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{
+			stakingKey:  bytes.Repeat([]byte{0x43}, 28),
+			utxoAmounts: []types.Uint64{25_000_000},
+		},
+	}, 500)
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	mgr.SetPromRegistry(prometheus.NewRegistry())
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch:   0,
+		NewEpoch:        1,
+		BoundarySlot:    432_000,
+		EpochNonce:      []byte{0x01, 0x02, 0x03},
+		ProtocolVersion: 8,
+		SnapshotSlot:    431_999,
+	}
+	txn := db.Transaction(true)
+	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
+		context.Background(),
+		txn,
+		evt,
+	))
+	require.NoError(t, txn.Commit())
+
+	histogramCount := func() uint64 {
+		metric := &dto.Metric{}
+		require.NoError(t, mgr.metrics.captureDurationSeconds.Write(metric))
+		return metric.GetHistogram().GetSampleCount()
+	}
+	require.Equal(t, float64(1), promtest.ToFloat64(
+		mgr.metrics.captureSuccessTotal,
+	))
+	require.Equal(t, uint64(1), histogramCount())
+
+	fallbackEvt := evt
+	fallbackEvt.EpochNonce = nil
+	require.NoError(t, mgr.captureMarkSnapshot(
+		context.Background(),
+		fallbackEvt,
+	))
+	require.Equal(t, float64(1), promtest.ToFloat64(
+		mgr.metrics.captureSuccessTotal,
+	))
+	require.Equal(t, uint64(1), histogramCount(),
+		"marker-refused fallback is not a successful capture duration")
+	require.Equal(t, float64(1), promtest.ToFloat64(
+		mgr.metrics.lastSuccessfulEpoch,
+	))
+	require.Equal(t, float64(25_000_000), promtest.ToFloat64(
+		mgr.metrics.captureTotalStakeLovelace,
+	))
 }
 
 func TestHandleEpochTransitionCapturesSelfDelegatedOwnerStake(t *testing.T) {
@@ -1068,6 +1204,19 @@ func TestHandleEpochTransitionRefreshesProvisionalSlotSnapshot(t *testing.T) {
 	require.NotNil(t, rewardSnapshot)
 	require.Equal(t, []byte{0x04, 0x05, 0x06}, rewardSnapshot.EpochNonce)
 	require.Equal(t, uint64(75_000_000), uint64(rewardSnapshot.TotalActiveStake))
+
+	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+		1, "mark", poolHash, nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, poolSnapshot)
+	require.Equal(t, uint64(50_000_000), uint64(poolSnapshot.TotalStake),
+		"leader-election Mark stake must remain slot-accurate")
+	epochSummary, err := db.Metadata().GetEpochSummary(1, nil)
+	require.NoError(t, err)
+	require.NotNil(t, epochSummary)
+	require.Equal(t, uint64(50_000_000), uint64(epochSummary.TotalActiveStake),
+		"epoch summary must use the leader-election Mark aggregate")
 }
 
 func TestHandleEpochTransitionReplacesStaleSnapshotRows(t *testing.T) {
@@ -1477,204 +1626,206 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 	require.Equal(t, uint64(600), distribution.TotalStake)
 }
 
-// TestFallbackCaptureRespectsAuthoritativeMarkSnapshot is a regression test
-// for a TOCTOU race between the two mark-snapshot capture paths at an epoch
-// boundary:
-//
-//  1. The authoritative path, CaptureEpochBoundarySnapshot, runs
-//     synchronously inside the epoch-rollover write transaction at the exact
-//     SNAP point.
-//  2. A fallback, event-driven path (captureMarkSnapshot, invoked by
-//     handleEpochTransition off a wall-clock slot-clock tick) computes the
-//     live distribution and writes it separately.
-//
-// In production, handleEpochTransition checks
-// authoritativeMarkRewardSnapshotExists before calling captureMarkSnapshot,
-// but that check is a fresh, out-of-transaction read: near the tip, the
-// slot-clock event can fire and pass that check *before* the authoritative
-// write commits, then captureMarkSnapshot spends time scanning the live
-// aggregate (during which the authoritative write commits), and its own
-// write would land afterward, clobbering the authoritative rows.
-//
-// This test exercises captureMarkSnapshot directly (bypassing
-// handleEpochTransition's outer check entirely) to prove that the guard now
-// lives where it actually matters: inside saveSnapshot/saveSnapshotInTxn,
-// re-checked as the first statement of the write transaction that performs
-// the deletes.
-func TestFallbackCaptureRespectsAuthoritativeMarkSnapshot(t *testing.T) {
-	db := setupTestDB(t)
-	seedEpochs(t, db, []models.Epoch{
-		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
-	})
-
-	poolHash := []byte("poolX_12345678901234567890AB")
-	stakingKey := bytes.Repeat([]byte{0xaa}, 28)
-	seedPoolAndDelegations(t, db, poolHash, []struct {
-		stakingKey  []byte
-		utxoAmounts []types.Uint64
-	}{
-		{
-			stakingKey:  stakingKey,
-			utxoAmounts: []types.Uint64{50_000_000},
-		},
-	}, 500)
-
-	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
-
-	authoritativeEvt := event.EpochTransitionEvent{
-		PreviousEpoch:   0,
-		NewEpoch:        1,
-		BoundarySlot:    432000,
-		EpochNonce:      []byte{0x01, 0x02, 0x03},
-		ProtocolVersion: 8,
-		SnapshotSlot:    431999,
+// TestConcurrentFallbackAndAuthoritativeCaptureSerialization forces both
+// mark-capture orderings with overlapping write transactions. Deterministic
+// channel barriers make the fallback pass its non-locking pre-check while the
+// authoritative row is still uncommitted, then prove the shared marker claim
+// blocks the fallback write. The inverse case proves authoritative capture can
+// still replace a provisional fallback.
+func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
+	newFixture := func(t *testing.T) (
+		*Manager,
+		[]byte,
+		event.EpochTransitionEvent,
+	) {
+		t.Helper()
+		db := setupTestDB(t)
+		seedEpochs(t, db, []models.Epoch{
+			{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		})
+		poolHash := []byte("poolX_12345678901234567890AB")
+		seedPoolAndDelegations(t, db, poolHash, []struct {
+			stakingKey  []byte
+			utxoAmounts []types.Uint64
+		}{
+			{
+				stakingKey:  bytes.Repeat([]byte{0xaa}, 28),
+				utxoAmounts: []types.Uint64{50_000_000},
+			},
+		}, 500)
+		return NewManager(db, event.NewEventBus(nil, nil), nil), poolHash,
+			event.EpochTransitionEvent{
+				PreviousEpoch:   0,
+				NewEpoch:        1,
+				BoundarySlot:    432000,
+				EpochNonce:      []byte{0x01, 0x02, 0x03},
+				ProtocolVersion: 8,
+				SnapshotSlot:    431999,
+			}
 	}
 
-	// Authoritative capture: synchronous, inside the rollover's write
-	// transaction, at the exact SNAP point.
-	txn := db.Transaction(true)
-	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
-		context.Background(),
-		txn,
-		authoritativeEvt,
-	))
-	require.NoError(t, txn.Commit())
+	t.Run("fallback cannot overwrite authoritative", func(t *testing.T) {
+		mgr, poolHash, authoritativeEvt := newFixture(t)
+		db := mgr.db
+		fallbackEvt := authoritativeEvt
+		fallbackEvt.EpochNonce = nil
 
-	before, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
-	require.NoError(t, err)
-	require.NotNil(t, before)
-	require.Equal(t, uint64(50_000_000), uint64(before.TotalActiveStake))
-	require.Equal(t, uint64(431999), before.CapturedSlot)
-	require.Equal(t, []byte{0x01, 0x02, 0x03}, before.EpochNonce)
+		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
+			context.Background(),
+			fallbackEvt.SnapshotSlot,
+		)
+		require.NoError(t, err)
+		for poolKey := range fallbackDistribution.PoolStakes {
+			fallbackDistribution.PoolStakes[poolKey] = 75_000_000
+		}
+		fallbackDistribution.TotalStake = 75_000_000
+		fallbackDistribution.StakeInputs[0].Stake = 75_000_000
 
-	// More live state lands after the authoritative commit — exactly what
-	// the fallback's live-aggregate scan would pick up if it ran later.
-	txId := make([]byte, 32)
-	copy(txId, []byte("post_boundary_utxo_1234567890AB"))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		StakingKey: stakingKey,
-		Amount:     25_000_000,
-		AddedSlot:  432000,
-	}))
+		authoritativeStaged := make(chan struct{})
+		allowAuthoritativeCommit := make(chan struct{})
+		authoritativeDone := make(chan error, 1)
+		go func() {
+			txn := db.Transaction(true)
+			err := mgr.CaptureEpochBoundarySnapshot(
+				context.Background(),
+				txn,
+				authoritativeEvt,
+			)
+			close(authoritativeStaged)
+			<-allowAuthoritativeCommit
+			if err == nil {
+				err = txn.Commit()
+			} else {
+				_ = txn.Rollback()
+			}
+			authoritativeDone <- err
+		}()
 
-	// Fallback capture, called directly with a nil-nonce event matching the
-	// real slot-clock event shape, simulating the fallback path reaching its
-	// write after the authoritative commit landed.
-	fallbackEvt := authoritativeEvt
-	fallbackEvt.EpochNonce = nil
-	require.NoError(t, mgr.captureMarkSnapshot(context.Background(), fallbackEvt))
+		fallbackChecked := make(chan struct{})
+		fallbackDone := make(chan struct {
+			saved bool
+			err   error
+		}, 1)
+		go func() {
+			<-authoritativeStaged
+			exists, err := mgr.authoritativeMarkRewardSnapshotExists(
+				fallbackEvt,
+				nil,
+			)
+			if err != nil || exists {
+				fallbackDone <- struct {
+					saved bool
+					err   error
+				}{err: err}
+				return
+			}
+			close(fallbackChecked)
+			saved, err := mgr.saveSnapshot(
+				context.Background(),
+				fallbackEvt.NewEpoch,
+				"mark",
+				fallbackDistribution,
+				fallbackEvt,
+				true,
+				true,
+				true,
+			)
+			fallbackDone <- struct {
+				saved bool
+				err   error
+			}{saved: saved, err: err}
+		}()
 
-	after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
-	require.NoError(t, err)
-	require.NotNil(t, after)
-	require.Equal(t, uint64(50_000_000), uint64(after.TotalActiveStake),
-		"fallback capture must not clobber the authoritative snapshot's stake total")
-	require.Equal(t, uint64(431999), after.CapturedSlot,
-		"fallback capture must not overwrite the authoritative captured slot")
-	require.Equal(t, []byte{0x01, 0x02, 0x03}, after.EpochNonce,
-		"fallback capture must not erase the authoritative epoch nonce")
+		testutil.RequireReceive(
+			t, authoritativeStaged, 5*time.Second,
+			"authoritative snapshot staged",
+		)
+		testutil.RequireReceive(
+			t, fallbackChecked, 5*time.Second,
+			"fallback pre-check before authoritative commit",
+		)
+		close(allowAuthoritativeCommit)
+		require.NoError(t, testutil.RequireReceive(
+			t, authoritativeDone, 5*time.Second,
+			"authoritative snapshot commit",
+		))
+		fallbackResult := testutil.RequireReceive(
+			t, fallbackDone, 5*time.Second,
+			"fallback marker claim",
+		)
+		require.NoError(t, fallbackResult.err)
+		require.False(t, fallbackResult.saved)
 
-	afterInputs, err := db.Metadata().GetRewardStakeInputs(1, nil)
-	require.NoError(t, err)
-	require.Len(t, afterInputs, 1,
-		"fallback capture must not add the post-boundary stake input")
-	require.Equal(t, uint64(50_000_000), uint64(afterInputs[0].Stake))
+		after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, after)
+		require.True(t, after.Authoritative)
+		require.Equal(t, uint64(50_000_000), uint64(after.TotalActiveStake))
+		require.Equal(t, authoritativeEvt.EpochNonce, after.EpochNonce)
 
-	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
-		1, "mark", poolHash, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(50_000_000), uint64(poolSnapshot.TotalStake),
-		"fallback capture must not clobber the authoritative pool stake snapshot")
-}
-
-// TestAuthoritativeCaptureOverwritesFallbackSnapshot is the inverse of
-// TestFallbackCaptureRespectsAuthoritativeMarkSnapshot: when the fallback
-// (event-driven) capture lands first — the normal, non-racy case where the
-// wall-clock tick fires and there is no concurrent authoritative writer —
-// the authoritative CaptureEpochBoundarySnapshot path must still be free to
-// overwrite those provisional rows when it later runs at the exact SNAP
-// point. The in-transaction guard added to close the TOCTOU race must only
-// block the fallback direction, never this one.
-func TestAuthoritativeCaptureOverwritesFallbackSnapshot(t *testing.T) {
-	db := setupTestDB(t)
-	seedEpochs(t, db, []models.Epoch{
-		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
+			1, "mark", poolHash, nil,
+		)
+		require.NoError(t, err)
+		require.NotNil(t, poolSnapshot)
+		require.Equal(t, uint64(50_000_000), uint64(poolSnapshot.TotalStake))
 	})
 
-	poolHash := []byte("poolY_12345678901234567890AB")
-	stakingKey := bytes.Repeat([]byte{0xbb}, 28)
-	seedPoolAndDelegations(t, db, poolHash, []struct {
-		stakingKey  []byte
-		utxoAmounts []types.Uint64
-	}{
-		{
-			stakingKey:  stakingKey,
-			utxoAmounts: []types.Uint64{10_000_000},
-		},
-	}, 500)
+	t.Run("authoritative replaces provisional fallback", func(t *testing.T) {
+		mgr, _, authoritativeEvt := newFixture(t)
+		db := mgr.db
+		fallbackEvt := authoritativeEvt
+		fallbackEvt.EpochNonce = nil
 
-	eventBus := event.NewEventBus(nil, nil)
-	mgr := NewManager(db, eventBus, nil)
+		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
+			context.Background(),
+			fallbackEvt.SnapshotSlot,
+		)
+		require.NoError(t, err)
+		fallbackTxn := db.Transaction(true)
+		require.NoError(t, mgr.saveSnapshotInTxn(
+			fallbackEvt.NewEpoch,
+			"mark",
+			fallbackDistribution,
+			fallbackEvt,
+			true,
+			true,
+			true,
+			fallbackTxn,
+		))
 
-	fallbackEvt := event.EpochTransitionEvent{
-		PreviousEpoch:   0,
-		NewEpoch:        1,
-		BoundarySlot:    432000,
-		EpochNonce:      nil,
-		ProtocolVersion: 8,
-		SnapshotSlot:    431999,
-	}
+		authoritativeStarted := make(chan struct{})
+		authoritativeDone := make(chan error, 1)
+		go func() {
+			close(authoritativeStarted)
+			txn := db.Transaction(true)
+			err := mgr.CaptureEpochBoundarySnapshot(
+				context.Background(),
+				txn,
+				authoritativeEvt,
+			)
+			if err == nil {
+				err = txn.Commit()
+			} else {
+				_ = txn.Rollback()
+			}
+			authoritativeDone <- err
+		}()
 
-	// Fallback capture lands first (the normal case: the slot-clock tick
-	// fires with no concurrent authoritative writer).
-	require.NoError(t, mgr.captureMarkSnapshot(context.Background(), fallbackEvt))
+		testutil.RequireReceive(
+			t, authoritativeStarted, 5*time.Second,
+			"authoritative capture started",
+		)
+		require.NoError(t, fallbackTxn.Commit())
+		require.NoError(t, testutil.RequireReceive(
+			t, authoritativeDone, 5*time.Second,
+			"authoritative replacement commit",
+		))
 
-	fallbackSnap, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
-	require.NoError(t, err)
-	require.NotNil(t, fallbackSnap)
-	require.Equal(t, uint64(10_000_000), uint64(fallbackSnap.TotalActiveStake))
-	require.Empty(t, fallbackSnap.EpochNonce)
-
-	// More stake lands before the authoritative SNAP point actually runs.
-	txId := make([]byte, 32)
-	copy(txId, []byte("authoritative_utxo_1234567890AB"))
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-		TxId:       txId,
-		OutputIdx:  0,
-		StakingKey: stakingKey,
-		Amount:     40_000_000,
-		AddedSlot:  432000,
-	}))
-
-	authoritativeEvt := fallbackEvt
-	authoritativeEvt.EpochNonce = []byte{0x0a, 0x0b, 0x0c}
-
-	txn := db.Transaction(true)
-	require.NoError(t, mgr.CaptureEpochBoundarySnapshot(
-		context.Background(),
-		txn,
-		authoritativeEvt,
-	))
-	require.NoError(t, txn.Commit())
-
-	after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
-	require.NoError(t, err)
-	require.NotNil(t, after)
-	require.Equal(t, uint64(50_000_000), uint64(after.TotalActiveStake),
-		"authoritative capture must overwrite the fallback-written snapshot")
-	require.Equal(t, []byte{0x0a, 0x0b, 0x0c}, after.EpochNonce,
-		"authoritative capture must persist the real epoch nonce")
-
-	poolSnapshot, err := db.Metadata().GetPoolStakeSnapshot(
-		1, "mark", poolHash, nil,
-	)
-	require.NoError(t, err)
-	require.NotNil(t, poolSnapshot)
-	require.Equal(t, uint64(50_000_000), uint64(poolSnapshot.TotalStake),
-		"authoritative capture must overwrite the fallback pool stake snapshot")
+		after, err := db.Metadata().GetRewardSnapshot(1, "mark", nil)
+		require.NoError(t, err)
+		require.NotNil(t, after)
+		require.True(t, after.Authoritative)
+		require.Equal(t, authoritativeEvt.EpochNonce, after.EpochNonce)
+	})
 }

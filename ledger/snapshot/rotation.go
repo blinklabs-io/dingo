@@ -37,7 +37,7 @@ var errRewardInputEpochUnavailable = errors.New(
 
 // errFallbackSupersededByAuthoritative is returned internally by
 // saveSnapshotInTxn (never to an outside caller — saveSnapshot translates it
-// into a nil, logged no-op) when a fallback, non-authoritative write's
+// into saved=false, nil) when a fallback, non-authoritative write's
 // in-transaction re-check finds that an authoritative mark snapshot has
 // already landed for the target epoch/boundary. See saveSnapshot's
 // checkAuthoritativeMark parameter.
@@ -45,7 +45,13 @@ var errFallbackSupersededByAuthoritative = errors.New(
 	"snapshot: authoritative mark snapshot already captured",
 )
 
+var errFallbackRewardMarkerUnavailable = errors.New(
+	"snapshot: fallback reward snapshot marker unavailable",
+)
+
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
+// It returns saved=false with no error when a fallback is superseded or cannot
+// claim the shared reward marker.
 //
 // resolveAutoVote controls whether the CIP-1694 reward-account auto-vote is
 // computed against the live Pool/Account tables and frozen onto the snapshot
@@ -85,7 +91,7 @@ func (m *Manager) saveSnapshot(
 	resolveAutoVote bool,
 	persistRewardInputs bool,
 	checkAuthoritativeMark bool,
-) error {
+) (bool, error) {
 	_ = ctx
 	txn := m.db.Transaction(true) // read-write transaction
 	defer func() { _ = txn.Rollback() }()
@@ -100,19 +106,31 @@ func (m *Manager) saveSnapshot(
 		checkAuthoritativeMark,
 		txn,
 	); err != nil {
-		if errors.Is(err, errFallbackSupersededByAuthoritative) {
+		switch {
+		case errors.Is(err, errFallbackSupersededByAuthoritative):
 			m.logger.Debug(
 				"authoritative mark snapshot landed concurrently; discarding fallback capture",
 				"component", "snapshot",
 				"epoch", epoch,
 				"snapshot_type", snapshotType,
 			)
-			return nil
+			return false, nil
+		case errors.Is(err, errFallbackRewardMarkerUnavailable):
+			m.logger.Debug(
+				"reward snapshot marker unavailable; discarding fallback capture",
+				"component", "snapshot",
+				"epoch", epoch,
+				"snapshot_type", snapshotType,
+			)
+			return false, nil
 		}
-		return err
+		return false, err
 	}
 
-	return txn.Commit()
+	if err := txn.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) saveSnapshotInTxn(
@@ -137,7 +155,8 @@ func (m *Manager) saveSnapshotInTxn(
 	// (reward_snapshot, then pool_stake_snapshot, then the reward input rows),
 	// which keeps a concurrent authoritative-vs-fallback capture deadlock-free on
 	// MySQL/Postgres. bundle is nil when reward inputs are disabled for this
-	// call, or skipped because the ended-epoch metadata is not yet available.
+	// call, or skipped because the ended-epoch metadata is not yet available;
+	// fallback capture aborts before any Mark write in the latter case.
 	var bundle *rewardStateBundle
 	if persistRewardInputs {
 		var err error
@@ -171,17 +190,11 @@ func (m *Manager) saveSnapshotInTxn(
 			}
 		}
 	case checkAuthoritativeMark:
-		// No reward_snapshot marker to gate on (reward inputs disabled or
-		// skipped for want of ended-epoch metadata), but this is still a
-		// fallback capture: guard the pool-stake snapshot write against an
-		// authoritative row already recorded for this boundary.
-		exists, err := m.authoritativeMarkRewardSnapshotExists(evt, metaTxn)
-		if err != nil {
-			return fmt.Errorf("recheck existing mark snapshot: %w", err)
-		}
-		if exists {
-			return errFallbackSupersededByAuthoritative
-		}
+		// A fallback must claim the same lockable reward_snapshot marker as
+		// authoritative capture before it can replace Mark rows. Without a
+		// bundle there is no marker to serialize on, so abort the whole fallback
+		// rather than relying on a non-locking existence check.
+		return errFallbackRewardMarkerUnavailable
 	}
 
 	// Save pool stake snapshots
@@ -285,9 +298,13 @@ func (m *Manager) buildRewardStateInputs(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 ) (*rewardStateBundle, error) {
+	rewardDistribution, err := rewardStakeDistribution(distribution)
+	if err != nil {
+		return nil, err
+	}
 	poolInputs, stakeInputs, effective, err := m.rewardInputsSkippingDegradedPools(
 		epoch,
-		distribution,
+		rewardDistribution,
 		evt,
 		meta,
 		metaTxn,
@@ -319,6 +336,63 @@ func (m *Manager) buildRewardStateInputs(
 		poolInputs:  poolInputs,
 		stakeInputs: stakeInputs,
 	}, nil
+}
+
+// rewardStakeDistribution derives reward pool totals solely from the
+// RewardLiveStake credential inputs attached to dist. The caller's PoolStakes
+// and aggregate fields remain the canonical leader-election distribution.
+func rewardStakeDistribution(
+	dist *StakeDistribution,
+) (*StakeDistribution, error) {
+	if dist == nil {
+		return nil, errors.New("missing stake distribution")
+	}
+	reward := &StakeDistribution{
+		Slot:           dist.Slot,
+		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
+		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
+		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	}
+	for _, input := range reward.StakeInputs {
+		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
+			return nil, fmt.Errorf(
+				"invalid reward stake input pool key length %d",
+				len(input.PoolKeyHash),
+			)
+		}
+		if len(input.StakingKey) != len(lcommon.PoolKeyHash{}) {
+			return nil, fmt.Errorf(
+				"invalid reward stake input credential length %d",
+				len(input.StakingKey),
+			)
+		}
+		if input.CredentialTag > 1 {
+			return nil, fmt.Errorf(
+				"invalid reward stake input credential tag %d",
+				input.CredentialTag,
+			)
+		}
+		if input.Stake == 0 {
+			continue
+		}
+		var poolKey lcommon.PoolKeyHash
+		copy(poolKey[:], input.PoolKeyHash)
+		current := reward.PoolStakes[poolKey]
+		if current > ^uint64(0)-input.Stake {
+			return nil, fmt.Errorf(
+				"delegated stake overflow for pool %x",
+				poolKey[:],
+			)
+		}
+		if reward.TotalStake > ^uint64(0)-input.Stake {
+			return nil, errors.New("total active stake overflow")
+		}
+		reward.PoolStakes[poolKey] = current + input.Stake
+		reward.DelegatorCount[poolKey]++
+		reward.TotalStake += input.Stake
+	}
+	reward.TotalPools = uint64(len(reward.PoolStakes))
+	return reward, nil
 }
 
 // saveRewardStateInputRows replaces the per-pool and per-credential reward input

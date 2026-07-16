@@ -2168,8 +2168,10 @@ remain outside the snapshot manager's responsibility.
 Reward snapshots consume `RewardLiveStake` instead of scanning the full UTxO
 table at the epoch boundary. The snapshot manager copies the registered,
 delegated subset into `RewardStakeInput` and derives `RewardPoolInput` rows,
-freezing stake and pool parameters for delayed reward calculation without
-holding epoch rollover on a full live-state scan.
+including reward snapshot aggregates, from those credential inputs. This
+freezes stake and pool parameters for delayed reward calculation without
+holding epoch rollover on a full live-state scan or replacing the independent
+leader-election Mark totals.
 
 Snapshot replacement removes stale pools or stake credentials from an earlier
 provisional capture and invalidates precomputed reward outputs for that snapshot
@@ -2230,7 +2232,10 @@ so they advance only once that transaction commits durably; a rollback or failed
 commit must not report a snapshot that never persisted. This matches the fallback
 `captureMarkSnapshot`, whose own transaction has already committed before it
 records success. Failure counters and the capture-duration histogram are recorded
-inline, since they measure the attempt itself.
+inline, since they measure the attempt itself. `database.Txn.AfterCommit`
+serializes callback dispatch with commit completion: registrations racing with,
+or arriving after, a successful commit are drained rather than silently lost,
+while failed commits and rollbacks still discard them.
 
 `EpochTransitionEvent` remains the asynchronous rotation and cleanup signal, and
 the event-driven `captureMarkSnapshot` is the fallback capture used when the
@@ -2260,7 +2265,10 @@ provisional row. The fallback capture claims the `(epoch, mark)` marker
 atomically — INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck — as
 the first write of its transaction, before the pool-stake snapshot, and is
 superseded (skips the whole capture) whenever an authoritative row already
-exists. Because the marker is the first row both paths write, they acquire the
+exists. If reward inputs cannot produce a marker (for example, ended-epoch
+metadata is unavailable), the fallback skips all Mark writes rather than
+persisting pool rows without the shared lock. Because the marker is the first
+row both paths write, they acquire the
 `reward_snapshot` row lock in the same order, which keeps a concurrent
 authoritative-vs-fallback capture both race-free and deadlock-free on
 MySQL/Postgres; SQLite is already serial. `handleEpochTransition`'s pre-check

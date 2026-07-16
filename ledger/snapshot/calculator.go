@@ -84,19 +84,19 @@ func (c *Calculator) calculateStakeDistributionInTxn(
 	txn *database.Txn,
 	slot uint64,
 ) (*StakeDistribution, error) {
-	dist := &StakeDistribution{
-		Slot:           slot,
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
-	}
-
-	err := c.calculateFromRewardLiveStake(ctx, txn, slot, dist)
+	dist, err := c.calculateHistoricalStakeDistributionInTxn(ctx, txn, slot)
 	if err != nil {
-		return nil, fmt.Errorf("calculate from reward live stake: %w", err)
+		return nil, err
 	}
 
-	// Count total pools
-	dist.TotalPools = uint64(len(dist.PoolStakes))
+	stakeInputs, err := c.rewardStakeInputsInTxn(ctx, txn, slot)
+	if err != nil {
+		return nil, fmt.Errorf("calculate reward stake inputs: %w", err)
+	}
+	dist.StakeInputs = stakeInputs
+	if _, err := rewardStakeDistribution(dist); err != nil {
+		return nil, fmt.Errorf("validate reward stake inputs: %w", err)
+	}
 
 	return dist, nil
 }
@@ -123,15 +123,14 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 	return dist, nil
 }
 
-// calculateFromRewardLiveStake copies stake from the live reward aggregate
-// maintained by metadata writes. It is used by epoch-boundary capture while the
-// caller's transaction holds the exact SNAP-state view.
-func (c *Calculator) calculateFromRewardLiveStake(
+// rewardStakeInputsInTxn copies per-credential reward inputs from the live
+// reward aggregate. Leader-election pool totals remain on the canonical,
+// slot-aware path in calculateHistoricalStakeDistributionInTxn.
+func (c *Calculator) rewardStakeInputsInTxn(
 	ctx context.Context,
 	txn *database.Txn,
 	slot uint64,
-	dist *StakeDistribution,
-) error {
+) ([]StakeInput, error) {
 	meta := c.db.Metadata()
 	metaTxn := (*txn).Metadata()
 
@@ -139,42 +138,25 @@ func (c *Calculator) calculateFromRewardLiveStake(
 	// Returns types.ErrNoEpochData (wrapped) if epoch data is not yet synced.
 	pools, err := c.getActivePoolsAtSlot(ctx, meta, metaTxn, slot)
 	if err != nil {
-		return fmt.Errorf("get active pools: %w", err)
+		return nil, fmt.Errorf("get active pools: %w", err)
 	}
 
 	// If no pools found, return empty distribution (not an error)
 	if len(pools) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// Batch fetch delegated stake for all pools in a single query
-	stakeMap, delegatorMap, err := c.getBatchPoolsDelegatedStake(
+	// Batch fetch reward credential inputs for all pools in a single query.
+	stakeMap, err := c.getBatchPoolsDelegatedStake(
 		ctx,
 		meta,
 		metaTxn,
 		pools,
 	)
 	if err != nil {
-		return fmt.Errorf("get batch pools delegated stake: %w", err)
+		return nil, fmt.Errorf("get batch reward stake inputs: %w", err)
 	}
-	dist.StakeInputs = stakeMap.inputs
-
-	// Populate distribution from the batched results
-	for _, poolHash := range pools {
-		delegators := delegatorMap.values[poolHash]
-		if delegators > 0 {
-			// Record pool with delegators
-			stake := stakeMap.values[poolHash]
-			if dist.TotalStake > ^uint64(0)-stake {
-				return errors.New("total active stake overflow")
-			}
-			dist.PoolStakes[poolHash] = stake
-			dist.DelegatorCount[poolHash] = delegators
-			dist.TotalStake += stake
-		}
-	}
-
-	return nil
+	return stakeMap.inputs, nil
 }
 
 // calculateFromHistoricalStake computes slot-accurate pool totals without
@@ -262,17 +244,14 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
-) (*rewardStakeAggregation, *rewardDelegatorAggregation, error) {
+) (*rewardStakeAggregation, error) {
 	// Initialize result maps
 	stakeMap := &rewardStakeAggregation{
 		values: make(map[lcommon.PoolKeyHash]uint64, len(pools)),
 	}
-	delegatorMap := &rewardDelegatorAggregation{
-		values: make(map[lcommon.PoolKeyHash]uint64, len(pools)),
-	}
 
 	if len(pools) == 0 {
-		return stakeMap, delegatorMap, nil
+		return stakeMap, nil
 	}
 
 	// Convert pool key hashes to [][]byte for the metadata store query
@@ -288,26 +267,26 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 		metaTxn,
 	)
 	if err != nil {
-		return nil, nil, fmt.Errorf("get reward stake inputs: %w", err)
+		return nil, fmt.Errorf("get reward stake inputs: %w", err)
 	}
 	for _, input := range inputs {
 		if input == nil {
-			return nil, nil, errors.New("nil reward stake input")
+			return nil, errors.New("nil reward stake input")
 		}
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"invalid reward stake input pool key length %d",
 				len(input.PoolKeyHash),
 			)
 		}
 		if len(input.StakingKey) != len(lcommon.PoolKeyHash{}) {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"invalid reward stake input credential length %d",
 				len(input.StakingKey),
 			)
 		}
 		if input.CredentialTag > 1 {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"invalid reward stake input credential tag %d",
 				input.CredentialTag,
 			)
@@ -319,7 +298,7 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 			continue
 		}
 		if stakeMap.values[poolHash] > ^uint64(0)-stake {
-			return nil, nil, fmt.Errorf(
+			return nil, fmt.Errorf(
 				"delegated stake overflow for pool %x",
 				poolHash[:],
 			)
@@ -332,16 +311,9 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 			Registered:    input.Registered,
 		})
 		stakeMap.values[poolHash] += stake
-		if delegatorMap.values[poolHash] == ^uint64(0) {
-			return nil, nil, fmt.Errorf(
-				"delegator count overflow for pool %x",
-				poolHash[:],
-			)
-		}
-		delegatorMap.values[poolHash]++
 	}
 
-	return stakeMap, delegatorMap, nil
+	return stakeMap, nil
 }
 
 func (c *Calculator) getBatchPoolsHistoricalStake(
@@ -383,9 +355,5 @@ func (c *Calculator) getBatchPoolsHistoricalStake(
 
 type rewardStakeAggregation struct {
 	inputs []StakeInput
-	values map[lcommon.PoolKeyHash]uint64
-}
-
-type rewardDelegatorAggregation struct {
 	values map[lcommon.PoolKeyHash]uint64
 }
