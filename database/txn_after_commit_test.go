@@ -164,3 +164,35 @@ func TestTxnAfterCommitCallbackCanRegisterCallback(t *testing.T) {
 	require.NoError(t, txn.Commit())
 	require.Equal(t, []int{1, 2}, order)
 }
+
+// TestTxnAfterCommitPanicIsContained verifies a panicking after-commit callback
+// is contained: it neither aborts the remaining callbacks in the same drain nor
+// permanently wedges the dispatch machinery for callbacks registered afterward.
+// A panic that escaped dispatchAfterCommit would leave dispatching=true, so
+// every later AfterCommit registration would silently append and return without
+// ever draining.
+func TestTxnAfterCommitPanicIsContained(t *testing.T) {
+	db := openTestDB(t)
+	txn := db.Transaction(true)
+
+	var ran []string
+	txn.AfterCommit(func() { ran = append(ran, "a") })
+	txn.AfterCommit(func() {
+		ran = append(ran, "b-panic")
+		panic("boom")
+	})
+	txn.AfterCommit(func() { ran = append(ran, "c") })
+
+	// Commit must not propagate the callback panic, and every callback in the
+	// batch must run despite one of them panicking.
+	require.NotPanics(t, func() { require.NoError(t, txn.Commit()) })
+	require.Equal(t, []string{"a", "b-panic", "c"}, ran,
+		"a panicking callback must not abort the other callbacks in the drain")
+
+	// A registration after the panicking drain must still dispatch immediately,
+	// proving dispatching was reset rather than left stuck true.
+	postCommitRan := false
+	txn.AfterCommit(func() { postCommitRan = true })
+	require.True(t, postCommitRan,
+		"registration after a panicking drain must still dispatch")
+}

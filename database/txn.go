@@ -137,6 +137,9 @@ func (t *Txn) IsReadWrite() bool {
 // rollback discards. Registration concurrent with, or after, a successful
 // Commit joins the serialized callback drain instead of being lost. Callbacks
 // run without the transaction lock held, so they may register another callback.
+// A callback that panics has its panic recovered and logged: it does not
+// propagate to Commit's caller, abort the other callbacks in the drain, or
+// wedge the dispatch loop for callbacks registered afterward.
 func (t *Txn) AfterCommit(fn func()) {
 	if fn == nil {
 		return
@@ -168,9 +171,28 @@ func (t *Txn) dispatchAfterCommit() {
 		}
 		t.lock.Unlock()
 		for _, fn := range callbacks {
-			fn()
+			t.runAfterCommitCallback(fn)
 		}
 	}
+}
+
+// runAfterCommitCallback runs a single after-commit callback, recovering and
+// logging any panic. Callbacks run detached from the transaction (after the
+// durable commit, without the txn lock), so a panic must not escape the drain
+// loop: an escaping panic would leave dispatching=true, silently stranding
+// every callback registered afterward, and would drop the callbacks already
+// dequeued for this drain. Panics are logged, not propagated.
+func (t *Txn) runAfterCommitCallback(fn func()) {
+	defer func() {
+		if r := recover(); r != nil && t.db != nil {
+			t.db.logger.Error(
+				"panic in after-commit callback",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn()
 }
 
 type savepointTxn interface {

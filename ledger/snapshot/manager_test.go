@@ -480,7 +480,14 @@ func TestCaptureMarkSnapshotReplacesPriorPoolSet(t *testing.T) {
 	require.Empty(t, rows)
 }
 
-func TestFallbackCaptureWithoutRewardMarkerDoesNotWrite(t *testing.T) {
+// TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot verifies that when the
+// event-driven fallback capture cannot build a reward bundle (the ended epoch's
+// metadata is not yet available), it still persists the Mark pool-stake snapshot
+// and epoch summary — the leader-election data that must be captured on every
+// epoch transition — while skipping only the reward_snapshot marker and reward
+// input rows it cannot build. Silently skipping the Mark snapshot here would
+// leave a fallback-only deployment with no stake distribution for the epoch.
+func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{
 		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
@@ -532,20 +539,30 @@ func TestFallbackCaptureWithoutRewardMarkerDoesNotWrite(t *testing.T) {
 		true,
 	)
 	require.NoError(t, err)
-	require.False(t, saved)
+	require.True(t, saved,
+		"fallback must still persist the Mark snapshot without a reward bundle")
 
+	// The prior pool row is replaced by the freshly captured distribution.
 	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
 		7, "mark", nil,
 	)
 	require.NoError(t, err)
 	require.Len(t, snapshots, 1)
-	require.Equal(t, priorPool, snapshots[0].PoolKeyHash)
-	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(7, "mark", nil)
-	require.NoError(t, err)
-	require.Nil(t, rewardSnapshot)
+	require.Equal(t, poolHash, snapshots[0].PoolKeyHash,
+		"the captured Mark snapshot must replace the prior pool set")
+	require.NotEqual(t, priorPool, snapshots[0].PoolKeyHash)
+
+	// The epoch summary (leader-election readiness) is written alongside it.
 	epochSummary, err := db.Metadata().GetEpochSummary(7, nil)
 	require.NoError(t, err)
-	require.Nil(t, epochSummary)
+	require.NotNil(t, epochSummary)
+	require.True(t, epochSummary.SnapshotReady)
+
+	// No reward bundle could be built, so no reward_snapshot marker is written.
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(7, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, rewardSnapshot,
+		"no reward marker is written when the ended-epoch metadata is unavailable")
 }
 
 func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {

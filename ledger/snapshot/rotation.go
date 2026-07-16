@@ -45,13 +45,9 @@ var errFallbackSupersededByAuthoritative = errors.New(
 	"snapshot: authoritative mark snapshot already captured",
 )
 
-var errFallbackRewardMarkerUnavailable = errors.New(
-	"snapshot: fallback reward snapshot marker unavailable",
-)
-
 // saveSnapshot saves a stake distribution as a snapshot of the given type.
-// It returns saved=false with no error when a fallback is superseded or cannot
-// claim the shared reward marker.
+// It returns saved=false with no error when a fallback capture is superseded by
+// an authoritative capture that already landed for the target epoch.
 //
 // resolveAutoVote controls whether the CIP-1694 reward-account auto-vote is
 // computed against the live Pool/Account tables and frozen onto the snapshot
@@ -115,14 +111,6 @@ func (m *Manager) saveSnapshot(
 				"snapshot_type", snapshotType,
 			)
 			return false, nil
-		case errors.Is(err, errFallbackRewardMarkerUnavailable):
-			m.logger.Debug(
-				"reward snapshot marker unavailable; discarding fallback capture",
-				"component", "snapshot",
-				"epoch", epoch,
-				"snapshot_type", snapshotType,
-			)
-			return false, nil
 		}
 		return false, err
 	}
@@ -155,8 +143,12 @@ func (m *Manager) saveSnapshotInTxn(
 	// (reward_snapshot, then pool_stake_snapshot, then the reward input rows),
 	// which keeps a concurrent authoritative-vs-fallback capture deadlock-free on
 	// MySQL/Postgres. bundle is nil when reward inputs are disabled for this
-	// call, or skipped because the ended-epoch metadata is not yet available;
-	// fallback capture aborts before any Mark write in the latter case.
+	// call, or skipped because the ended-epoch metadata is not yet available. In
+	// either case there is no reward marker or reward-input row to write, so both
+	// the authoritative and fallback capture paths fall through and still persist
+	// the Mark pool-stake snapshot and epoch summary below — the leader-election
+	// data that must be captured on every epoch transition regardless of
+	// reward-input availability.
 	var bundle *rewardStateBundle
 	if persistRewardInputs {
 		var err error
@@ -168,8 +160,7 @@ func (m *Manager) saveSnapshotInTxn(
 		}
 	}
 
-	switch {
-	case bundle != nil:
+	if bundle != nil {
 		bundle.snapshot.Authoritative = authoritative
 		if authoritative {
 			// Authoritative capture: overwrite any provisional row.
@@ -189,12 +180,6 @@ func (m *Manager) saveSnapshotInTxn(
 				return errFallbackSupersededByAuthoritative
 			}
 		}
-	case checkAuthoritativeMark:
-		// A fallback must claim the same lockable reward_snapshot marker as
-		// authoritative capture before it can replace Mark rows. Without a
-		// bundle there is no marker to serialize on, so abort the whole fallback
-		// rather than relying on a non-locking existence check.
-		return errFallbackRewardMarkerUnavailable
 	}
 
 	// Save pool stake snapshots
