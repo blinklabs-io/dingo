@@ -5009,6 +5009,8 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 // repair needs no candidate; the nonce repair is skipped when the candidate is
 // missing/invalid or the previous epoch's lab could not be verified. It is a
 // pure function of already-stored chain data and is idempotent across restarts.
+// The writer-owned epoch cache must have been replaced with a fresh DB-loaded
+// slice and must not have been published before this in-place repair runs.
 func (ls *LedgerState) healEmptyLabNonces() {
 	if ls.healEmptyLabNoncesInPlace(ls.epochCache) {
 		clear(ls.epochNonceHexCache)
@@ -5028,6 +5030,9 @@ func (ls *LedgerState) healEmptyLabNonces() {
 // processed.
 const healLabNonceRecentEpochs = 8
 
+// healEmptyLabNoncesInPlace mutates epoch entries and their nonce slices.
+// Callers must pass a freshly owned, unpublished slice; passing an epoch cache
+// already exposed through consensusSnapshot would corrupt concurrent readers.
 func (ls *LedgerState) healEmptyLabNoncesInPlace(epochs []models.Epoch) bool {
 	repaired := false
 	var (
