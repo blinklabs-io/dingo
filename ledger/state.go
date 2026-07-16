@@ -990,11 +990,11 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	ls.evaluateTriggerAtEpoch()
 	ls.evaluateTransitionImpossible()
 	ls.evaluateHardForkInitiationStability()
-	// Publish the transitionInfo changes made above before any snapshot-reading
-	// goroutine becomes runnable. The HFI stability evaluation above may launch
-	// an asynchronous tally, so serialize this publication with its completion
-	// path and every other snapshot writer. Without this, a restart that
-	// reconstructs TransitionKnown /
+	// Publish the transitionInfo changes made above so snapshot readers observe
+	// the reconstructed startup state. The HFI stability evaluation above may
+	// launch an asynchronous tally, so serialize this publication with its
+	// completion path and every other snapshot writer. Without this, a restart
+	// that reconstructs TransitionKnown /
 	// TransitionImpossible here would leave every snapshot-based reader
 	// (CurrentTransitionInfo, ConsensusModeForEpoch, ...) on the stale
 	// pre-loadTip() value until the next unrelated write path republishes.
@@ -4706,8 +4706,11 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 			return
 		}
 		ls.Lock()
+		shouldPublish := false
 		defer func() {
-			ls.publishSnapshotsLocked()
+			if shouldPublish {
+				ls.publishSnapshotsLocked()
+			}
 			ls.Unlock()
 		}()
 		// Generation guard: a rollback that landed while the tally
@@ -4730,6 +4733,7 @@ func (ls *LedgerState) evaluateHardForkInitiationStability() {
 		ls.transitionInfo = hardfork.NewTransitionKnown(
 			ls.currentEpoch.EpochId + 1,
 		)
+		shouldPublish = true
 	}()
 }
 

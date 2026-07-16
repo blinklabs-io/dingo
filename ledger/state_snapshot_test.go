@@ -319,10 +319,11 @@ func TestLedgerStateTipGetterReturnsDefensiveHashCopy(t *testing.T) {
 	require.Equal(t, byte(1), ls.Tip().Point.Hash[0])
 }
 
-// TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders verifies that
-// readers never observe fields from different generations within either the
-// consensus snapshot or the tip snapshot while a writer repeatedly publishes.
-func TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders(
+// TestLedgerStateSnapshotLoadersDoNotRaceWithWriters guards the loader path
+// against regressing from atomic snapshot loads to reads of live writer-owned
+// fields. Intra-snapshot consistency itself is guaranteed by atomic.Pointer;
+// this test's primary value is its execution under the race detector.
+func TestLedgerStateSnapshotLoadersDoNotRaceWithWriters(
 	t *testing.T,
 ) {
 	ls := &LedgerState{}
@@ -333,8 +334,9 @@ func TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders(
 	errCh := make(chan error, 1)
 	done := make(chan struct{})
 
-	// Readers continuously validate generation markers encoded in the paired
-	// fields. Any mismatched marker would indicate a torn snapshot read.
+	// Readers continuously exercise both atomic loaders. Matching markers make
+	// an accidental return to independently-read live fields fail logically as
+	// well as through the race detector.
 	for range 8 {
 		wg.Add(1)
 		go func() {
@@ -349,7 +351,7 @@ func TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders(
 				if consensusState.currentEpoch.EpochId !=
 					uint64(consensusState.currentEra.Id) {
 					select {
-					case errCh <- fmt.Errorf("torn consensus snapshot"):
+					case errCh <- fmt.Errorf("inconsistent consensus read"):
 					default:
 					}
 					return
@@ -359,7 +361,7 @@ func TestLedgerStateSnapshotsStayConsistentWithConcurrentReaders(
 					tipState.currentTip.Point.Slot !=
 						uint64(tipState.currentTipBlockNonce[0]) {
 					select {
-					case errCh <- fmt.Errorf("torn tip snapshot"):
+					case errCh <- fmt.Errorf("inconsistent tip read"):
 					default:
 					}
 					return
