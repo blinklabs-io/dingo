@@ -16,9 +16,9 @@ on:
         type: boolean
         default: false
       moog_tag:
-        description: 'Pinned Moog CLI tag (defaults to repository variable MOOG_TAG)'
+        description: 'Moog CLI release tag'
         type: string
-        default: ''
+        default: 'v2.0.1'
 
 concurrency:
   group: antithesis
@@ -220,30 +220,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
 
-      - name: Get latest Moog release tag
+      - name: Resolve Moog release
         id: moog-release
         run: |
-          TAG="${MOOG_TAG_INPUT:-}"
-          if [ -z "$TAG" ]; then
-            TAG=$(gh api repos/cardano-foundation/moog/releases/latest --jq '.tag_name')
-          fi
+          TAG="${MOOG_TAG_INPUT:-v2.0.1}"
+          VERSION="${TAG#v}"
+          TAG="v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Moog release: $TAG"
         env:
-          GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_TAG_INPUT: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
+          MOOG_TAG_INPUT: ${{ inputs.moog_tag }}
 
       - name: Download and install Moog
         run: |
+          set -euo pipefail
+          ASSET="moog-${MOOG_VERSION}-x86_64-linux-musl.tar.gz"
+          CHECKSUMS="moog-${MOOG_VERSION}-x86_64-linux.SHA256SUMS"
           gh release download "$MOOG_TAG" \
             -R cardano-foundation/moog \
-            -p "moog-*-linux64.tar.gz" -O moog.tar.gz
-          tar xzf moog.tar.gz
+            -p "$ASSET" \
+            -p "$CHECKSUMS"
+          grep -F "  $ASSET" "$CHECKSUMS" | sha256sum --check --strict -
+          tar xzf "$ASSET"
           sudo install -m 0755 moog /usr/local/bin/moog
-          moog --version
+          moog --version | grep -F "moog $MOOG_VERSION"
         env:
           GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
           MOOG_TAG: ${{ steps.moog-release.outputs.tag }}
+          MOOG_VERSION: ${{ steps.moog-release.outputs.version }}
 
       - name: Configure wallet
         run: echo "$MOOG_WALLET" | base64 -d > wallet.json
