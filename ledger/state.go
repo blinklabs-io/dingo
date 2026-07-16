@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -158,7 +159,13 @@ func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
 	defer func() {
 		if r := recover(); r != nil {
 			result.Error = fmt.Errorf("panic: %v", r)
-			slog.Error("worker panic during operation", "panic", r)
+			// recover() suppresses the runtime's own stack trace, so
+			// capture one here or the panic becomes undiagnosable.
+			slog.Error(
+				"worker panic during operation",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
 		}
 		p.sendResult(op, result)
 	}()
@@ -453,6 +460,17 @@ type LedgerStateConfig struct {
 	// Leios certificate / endorser-availability surface is complete (#2587).
 	SkipDijkstraTxValidation bool
 	ValidateHistorical       bool
+	// StrictLeaderEligibility rejects a block when the total active stake is
+	// zero or the active slot coefficient is unavailable or non-positive
+	// during Praos leader eligibility checking, instead of logging a warning
+	// and skipping the check. Off by default so genesis bootstrap (where
+	// these are legitimately absent) is not broken.
+	StrictLeaderEligibility bool
+	// StrictSlotClock rejects a transaction when the slot clock cannot be
+	// read during validation, instead of falling back to the snapshot tip
+	// slot. Off by default; the fallback is normally harmless for transient
+	// clock errors.
+	StrictSlotClock          bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool
 	TrustedReplay            bool
@@ -4635,6 +4653,19 @@ func (ls *LedgerState) computePParams(
 		}
 	}
 	if pparams == nil {
+		// A decode-capable era with no stored pparams is expected only at
+		// the very start of that era (before its first pparams row is
+		// written); later it signals stored params went missing. Byron
+		// (nil DecodePParamsFunc) always lands here by design, so only log
+		// for eras that are supposed to have stored pparams.
+		if era.DecodePParamsFunc != nil {
+			ls.config.Logger.Debug(
+				"no stored pparams for epoch, computing from genesis config",
+				"epoch", epoch.EpochId,
+				"era", era.Id,
+				"component", "ledger",
+			)
+		}
 		var err error
 		pparams, err = ls.computeGenesisProtocolParameters(era)
 		if err != nil {
@@ -4665,10 +4696,15 @@ func (ls *LedgerState) computePParams(
 					nil,
 				)
 				if prevErr != nil {
+					// prevEraPParams stays nil, so era-1 transactions in
+					// the era-overlap window fall back to the current
+					// era's parameters (see validateTxCore). Surface the
+					// consequence rather than logging a bare failure.
 					ls.config.Logger.Warn(
-						"failed to load previous-era pparams",
+						"failed to load previous-era pparams; era-1 transactions will be validated against current-era parameters",
 						"epoch", ep.EpochId,
 						"era", ep.EraId,
+						"current_era", era.Id,
 						"error", prevErr,
 					)
 				} else if prevPP != nil {
@@ -6602,8 +6638,23 @@ func (ls *LedgerState) validateTxCore(
 	snapshotPParams := ls.currentPParams
 	snapshotPrevEraPParams := ls.prevEraPParams
 	ls.RUnlock()
+	// A slot clock read error normally degrades gracefully to the snapshot
+	// tip slot: it is monitored via the slotClockFallbacks metric (plus the
+	// debug log below), so sustained occurrences stay visible without
+	// failing tx validation on a transient error. Operators who prefer
+	// fail-fast can set StrictSlotClock, which rejects the transaction
+	// instead of validating it against a stale reference slot (issue #1649).
 	currentSlot, currentSlotErr := ls.CurrentSlot()
 	if currentSlotErr != nil {
+		if ls.config.StrictSlotClock {
+			// No fallback happens on this path, so the fallback counter
+			// is intentionally not incremented -- it must keep meaning
+			// "validated against the tip slot instead of failing".
+			return fmt.Errorf(
+				"slot clock unavailable during tx validation: %w",
+				currentSlotErr,
+			)
+		}
 		ls.config.Logger.Debug(
 			"slot clock unavailable during tx validation, falling back to snapshot tip slot",
 			"error",

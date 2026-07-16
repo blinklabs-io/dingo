@@ -29,6 +29,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// DefaultConfig is the source of truth for New's plugin defaulting below,
+// used by direct callers of this package (library usage, tests) that
+// don't go through internal/config. The CLI path resolves BlobPlugin/
+// MetadataPlugin earlier via the internal/config.DefaultBlobPlugin/
+// DefaultMetadataPlugin constants, which are kept in sync with these
+// values by TestDatabaseDefaultsMatchInternalConfigDefaults in
+// internal/config.
 var DefaultConfig = &Config{
 	BlobPlugin:     "badger",
 	DataDir:        ".dingo",
@@ -164,9 +171,21 @@ func New(
 	// Apply defaults for empty fields
 	if configCopy.BlobPlugin == "" {
 		configCopy.BlobPlugin = DefaultConfig.BlobPlugin
+		if configCopy.Logger != nil {
+			configCopy.Logger.Debug(
+				"no blob plugin configured, using default",
+				"plugin", configCopy.BlobPlugin,
+			)
+		}
 	}
 	if configCopy.MetadataPlugin == "" {
 		configCopy.MetadataPlugin = DefaultConfig.MetadataPlugin
+		if configCopy.Logger != nil {
+			configCopy.Logger.Debug(
+				"no metadata plugin configured, using default",
+				"plugin", configCopy.MetadataPlugin,
+			)
+		}
 	}
 	if configCopy.StorageMode == "" {
 		configCopy.StorageMode = types.StorageModeCore

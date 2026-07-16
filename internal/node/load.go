@@ -302,13 +302,15 @@ func LoadWithDB(
 	// Load state
 	ls, err := ledger.NewLedgerState(
 		ledger.LedgerStateConfig{
-			Database:              db,
-			ChainManager:          cm,
-			Logger:                logger,
-			CardanoNodeConfig:     nodeCfg,
-			ValidateHistorical:    cfg.ValidateHistorical,
-			TrustedReplay:         true,
-			ManualBlockProcessing: true,
+			Database:                db,
+			ChainManager:            cm,
+			Logger:                  logger,
+			CardanoNodeConfig:       nodeCfg,
+			ValidateHistorical:      cfg.ValidateHistorical,
+			StrictLeaderEligibility: cfg.StrictLeaderEligibility,
+			StrictSlotClock:         cfg.StrictSlotClock,
+			TrustedReplay:           true,
+			ManualBlockProcessing:   true,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,

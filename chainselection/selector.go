@@ -20,6 +20,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -1412,9 +1413,12 @@ func (cs *ChainSelector) evaluationLoop() {
 func (cs *ChainSelector) runEvaluationTick() {
 	defer func() {
 		if r := recover(); r != nil {
+			// recover() suppresses the runtime's own stack trace, so
+			// capture one here or the panic becomes undiagnosable.
 			cs.config.Logger.Error(
 				"panic in evaluation tick, continuing",
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 		}
 	}()
@@ -1428,6 +1432,7 @@ func (cs *ChainSelector) runTriggeredEvaluation() {
 			cs.config.Logger.Error(
 				"panic in triggered evaluation, continuing",
 				"panic", r,
+				"stack", string(debug.Stack()),
 			)
 		}
 	}()

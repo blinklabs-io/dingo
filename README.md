@@ -428,15 +428,16 @@ Leave the mode-sensitive Badger settings unset if you want Dingo's storage-mode 
 
 Google Cloud Storage Options:
 - `bucket` - GCS bucket name
-- `project-id` - Google Cloud project ID
-- `prefix` - Path prefix within bucket
+
+Project and credentials are always resolved via Application Default Credentials; there is no plugin config option for project ID or a bucket key prefix.
 
 AWS S3 Options:
+- `endpoint` - S3 endpoint
 - `bucket` - S3 bucket name
 - `region` - AWS region
 - `prefix` - Path prefix within bucket
-- `access-key-id` - AWS access key ID (optional - uses default credential chain if not provided)
-- `secret-access-key` - AWS secret access key (optional - uses default credential chain if not provided)
+
+Credentials are always resolved via the AWS SDK's default credential chain (env vars, shared config, IAM role, etc.); there is no plugin config option for static credentials.
 
 SQLite Options:
 - `data-dir` - Path to SQLite database file

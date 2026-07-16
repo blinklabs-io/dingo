@@ -19,8 +19,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/big"
+	"runtime/debug"
 	"slices"
 	"strings"
 
@@ -1098,7 +1100,16 @@ func buildConwayScriptPurpose(
 	witnessDatums map[lcommon.Blake2b256]*lcommon.Datum,
 ) (purpose script.ScriptPurpose, ok bool) {
 	defer func() {
-		if recover() != nil {
+		if r := recover(); r != nil {
+			// recover() suppresses the runtime's own stack trace, so
+			// capture one here or the panic becomes undiagnosable.
+			slog.Default().Error(
+				"panic building conway script purpose",
+				"panic", r,
+				"redeemer_tag", redeemerKey.Tag,
+				"redeemer_index", redeemerKey.Index,
+				"stack", string(debug.Stack()),
+			)
 			purpose = nil
 			ok = false
 		}

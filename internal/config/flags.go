@@ -62,6 +62,8 @@ var flagSpecs = []flagSpec{
 	boolFlag("IntersectTip", "intersect-tip", "start from current tip"),
 	boolFlag("ValidateHistorical", "validate-historical", "validate historical blocks"),
 	boolFlag("StrictUtxoValidation", "strict-utxo-validation", "error instead of skipping when a consumed UTxO past the Mithril sync boundary cannot be found or recovered"),
+	boolFlag("StrictLeaderEligibility", "strict-leader-eligibility", "reject a block instead of skipping the leader eligibility check when the total active stake is zero or the active slot coefficient is unavailable or non-positive (leave off during genesis bootstrap)"),
+	boolFlag("StrictSlotClock", "strict-slot-clock", "reject a transaction instead of falling back to the snapshot tip slot when the slot clock cannot be read during validation"),
 	boolFlag("Tracing", "tracing", "enable OpenTelemetry tracing (configure destination with OTEL_EXPORTER_OTLP_* env vars)"),
 	boolFlag("TracingStdout", "tracing-stdout", "export traces to stdout instead of OTLP (requires --tracing; for debugging)"),
 
@@ -200,6 +202,28 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
+	// --debug is registered directly on the root command by cmd/dingo/main.go
+	// (not part of flagSpecs, since it also toggles AddSource on the logger,
+	// not just a Config field). It is the highest-precedence logging
+	// override: cmd/dingo/main.go's newLogger forces debug level regardless
+	// of the configured Logging.Level. Apply that override to cfg here,
+	// before validation, so a Logging.Level value ValidateRuntimeConfig
+	// would otherwise reject is superseded instead of failing startup.
+	// GetBool returns false (with an error we ignore) when "debug" isn't
+	// registered, e.g. a bare *cobra.Command built by a test or library
+	// caller -- that's equivalent to --debug not being passed.
+	if debugOverride, _ := flags.GetBool("debug"); debugOverride {
+		cfg.Logging.Level = "debug"
+	}
+	// Semantic validation runs here, after flags (including the --debug
+	// override above) have been merged in, so a valid
+	// --port/--logging-level/--chainsync-strategy/--mithril-backend/--debug
+	// flag can override a semantically invalid YAML/env value instead of
+	// LoadConfig rejecting it beforehand. See ValidateRuntimeConfig's doc
+	// comment.
+	if err := ValidateRuntimeConfig(cfg); err != nil {
+		return err
+	}
 	globalConfig = cfg
 	if _, err := LoadTopologyConfig(); err != nil {
 		return fmt.Errorf("loading topology after flags: %w", err)
@@ -580,8 +604,8 @@ func normalizeStorageMode(v string) (string, error) {
 
 // normalizeLoggingValue lower-cases a logging format/level flag so values are
 // accepted case-insensitively (e.g. --logging-format=JSON). It does not
-// validate: unknown values are handled by the logger's warn-and-fallback path,
-// keeping flag, env, and YAML behavior identical.
+// validate itself: ValidateRuntimeConfig, called at the end of ApplyFlags,
+// rejects unknown values for flag, env, and YAML alike.
 func normalizeLoggingValue(v string) (string, error) {
 	return strings.ToLower(strings.TrimSpace(v)), nil
 }

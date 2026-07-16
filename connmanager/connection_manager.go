@@ -17,6 +17,7 @@ package connmanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -835,6 +836,13 @@ func (c *ConnectionManager) HandleConnectionRecycleRequestedEvent(
 ) {
 	e, ok := evt.Data.(ConnectionRecycleRequestedEvent)
 	if !ok {
+		// A mismatched event payload means a recycle request is being
+		// dropped silently; log it rather than swallowing, matching the
+		// event-type-assertion handling elsewhere (peergov, ouroboros).
+		c.config.Logger.Warn(
+			"unexpected event data type in HandleConnectionRecycleRequestedEvent",
+			"type", fmt.Sprintf("%T", evt.Data),
+		)
 		return
 	}
 	conn := c.GetConnectionById(e.ConnectionId)

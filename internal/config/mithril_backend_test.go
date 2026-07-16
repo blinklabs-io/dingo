@@ -55,6 +55,23 @@ mithril:
 	assert.Equal(t, "v1", cfg.Mithril.Backend)
 }
 
+// TestMithrilBackendInvalidValueRejected verifies ValidateRuntimeConfig
+// rejects an invalid Mithril backend. LoadConfig alone does not run this
+// validation -- see ValidateRuntimeConfig's doc comment -- so it is called
+// explicitly here, as a non-CLI caller of this package would.
+func TestMithrilBackendInvalidValueRejected(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := writeMithrilBackendTestConfig(t, `
+network: "preview"
+mithril:
+  backend: "v3"
+`)
+	cfg, err := LoadConfig(tmpFile)
+	require.NoError(t, err)
+	err = ValidateRuntimeConfig(cfg)
+	require.Error(t, err, "invalid Mithril backend should be rejected")
+}
+
 func TestMithrilBackendEnvOverride(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("DINGO_MITHRIL_BACKEND", "v1")

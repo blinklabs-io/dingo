@@ -52,10 +52,9 @@ database:
     gcs:
       # Google Cloud Storage bucket name
       bucket: ""
-      # Google Cloud project ID
-      project-id: ""
-      # Path prefix within the bucket
-      prefix: ""
+      # Project and credentials are always resolved via Application
+      # Default Credentials. There is no plugin config option for
+      # project ID or a bucket key prefix.
     s3:
       # AWS Endpoint
       endpoint: ""
@@ -65,10 +64,9 @@ database:
       region: ""
       # Path prefix within the bucket
       prefix: ""
-      # AWS access key ID (optional - uses default credential chain if not set)
-      access-key-id: ""
-      # AWS secret access key (optional - uses default credential chain if not set)
-      secret-access-key: ""
+      # Credentials are always resolved via the AWS SDK's default
+      # credential chain (env vars, shared config, IAM role, etc.).
+      # There is no plugin config option for static credentials.
 
   # Metadata storage plugin configuration
   metadata:
@@ -369,6 +367,22 @@ validateHistorical: false
 # Can be overridden with the CARDANO_STRICT_UTXO_VALIDATION environment variable
 # CLI: --strict-utxo-validation
 strictUtxoValidation: false
+
+# Reject a block (instead of logging a warning and skipping the leader
+# eligibility check) when the total active stake is zero or the active slot
+# coefficient is unavailable or non-positive. These are legitimately absent
+# during genesis bootstrap, before the first stake snapshot is written, so
+# leave this disabled while bootstrapping; enable it on an established node to
+# fail fast. (default: false)
+# CLI: --strict-leader-eligibility
+strictLeaderEligibility: false
+
+# Reject a transaction (instead of falling back to the snapshot tip slot) when
+# the slot clock cannot be read during validation. The fallback is normally
+# harmless for transient clock errors; enable this to fail fast rather than
+# validate against a stale reference slot. (default: false)
+# CLI: --strict-slot-clock
+strictSlotClock: false
 
 # Peer targets - target number of peers in each state
 # These are goals the system works toward, not hard limits.

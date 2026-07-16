@@ -41,6 +41,16 @@ flowchart LR
     Blob --> KV
 ```
 
+### Plugin Configuration Validation
+
+`plugin.ProcessConfig` (`database/plugin/register.go`) strictly validates the `database.blob.*` and `database.metadata.*` sections of the YAML config against the plugins actually compiled into the running binary:
+
+- For a plugin name that matches a compiled-in plugin (e.g. `badger`, always built; `sqlite`, always built), every key under that section must match one of that plugin's declared options. An unrecognized key (e.g. `database.blob.badger.buckit`, a typo for `bucket`) fails config load instead of being silently ignored.
+- For a plugin name that does not match any compiled-in plugin, config load fails with `unknown <blob|metadata> plugin "<name>" in config` (e.g. a typo'd section name such as `badgre`), **unless** the name is one of the build-tag-gated plugins (`gcs`, `s3` for blob; `mysql`, `postgres` for metadata) that are only compiled in under `-tags dingo_extra_plugins`. A default build tolerates a `database.blob.gcs:`/`database.blob.s3:`/`database.metadata.mysql:`/`database.metadata.postgres:` section without validating its keys, since the plugin (and its option list) isn't registered in that build to validate against; selecting one of these as the active `BlobPlugin`/`MetadataPlugin` still fails at startup with `MissingPluginError` regardless of build.
+- Building with `dingo_extra_plugins` registers `gcs`/`s3`/`mysql`/`postgres` like any other plugin, so their sections then get the same strict per-key validation as `badger`/`sqlite`.
+
+This means the same config file can behave differently across builds: a typo under an extra-plugin section (e.g. `database.blob.gcs.buckit`) is only caught in an extra-plugins build, since a default build has no registered option list for `gcs` to check against.
+
 ## SQL Conventions
 
 - Table and column names are snake_case GORM names unless a model has an explicit `gorm:"column:..."` tag.

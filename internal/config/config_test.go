@@ -78,7 +78,6 @@ func resetGlobalConfig() {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-badgerCacheSize: 8388608
 mempoolCapacity: 2097152
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
@@ -401,6 +400,31 @@ chainsync:
 			"expected Chainsync.Strategy to be parallel, got %q",
 			cfg.Chainsync.Strategy,
 		)
+	}
+}
+
+// TestLoad_InvalidChainsyncStrategyRejected verifies ValidateRuntimeConfig
+// rejects an invalid chainsync.strategy. LoadConfig alone does not run this
+// validation -- see ValidateRuntimeConfig's doc comment -- so it is called
+// explicitly here, as a non-CLI caller of this package would.
+func TestLoad_InvalidChainsyncStrategyRejected(t *testing.T) {
+	resetGlobalConfig()
+	yamlContent := `
+chainsync:
+  strategy: bogus
+`
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "chainsync-strategy.yaml")
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error from LoadConfig, got: %v", err)
+	}
+	if err := ValidateRuntimeConfig(cfg); err == nil {
+		t.Fatal("expected error for invalid chainsync.strategy, got nil")
 	}
 }
 
@@ -827,7 +851,7 @@ database:
   metadata:
     plugin: "sqlite"
     sqlite:
-      db-path: "/tmp/test.db"
+      data-dir: "/tmp/test.db"
 `
 	tmpDir := t.TempDir()
 	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")

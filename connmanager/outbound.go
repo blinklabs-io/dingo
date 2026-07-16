@@ -45,12 +45,30 @@ func (c *ConnectionManager) CreateOutboundConn(
 	if c.config.OutboundSourcePort > 0 {
 		// Setup connection to use our listening port as the source port
 		// This is required for peer sharing to be useful
-		clientAddr, _ = net.ResolveTCPAddr(
+		resolvedAddr, resolveErr := net.ResolveTCPAddr(
 			"tcp",
 			fmt.Sprintf(":%d", c.config.OutboundSourcePort),
 		)
-		dialer.LocalAddr = clientAddr
-		dialer.Control = socketControl
+		if resolveErr != nil {
+			// internal/config.ValidateRuntimeConfig rejects an
+			// out-of-range relayPort (which OutboundSourcePort is
+			// derived from) once CLI/env/YAML have all merged, so this
+			// should be unreachable via normal configuration. Kept as a
+			// backstop for direct API callers of this package that set
+			// OutboundSourcePort without going through internal/config
+			// at all.
+			c.config.Logger.Warn(
+				"outbound: failed to resolve source port, dialing without source-port reuse",
+				"role", "client",
+				"address", address,
+				"outbound_source_port", c.config.OutboundSourcePort,
+				"error", resolveErr,
+			)
+		} else {
+			clientAddr = resolvedAddr
+			dialer.LocalAddr = clientAddr
+			dialer.Control = socketControl
+		}
 	}
 	c.config.Logger.Debug(
 		"establishing TCP connection to: "+address,

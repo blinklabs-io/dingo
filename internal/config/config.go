@@ -15,16 +15,20 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
@@ -141,7 +145,11 @@ func (e StartEra) IsDijkstra() bool {
 }
 
 type tempConfig struct {
-	Config   *Config                   `yaml:"config,omitempty"`
+	// Config is decoded as a raw node (rather than *Config) so the
+	// wrapped "config:" section can later be strict-decoded directly,
+	// without a lossy round trip through a lenient decode first. Must
+	// be a value (not pointer) yaml.Node for yaml.v3 to populate it.
+	Config   yaml.Node                 `yaml:"config,omitempty"`
 	Database *databaseConfig           `yaml:"database,omitempty"`
 	Blob     map[string]map[string]any `yaml:"blob,omitempty"`
 	Metadata map[string]map[string]any `yaml:"metadata,omitempty"`
@@ -244,6 +252,282 @@ func mappingValue(node *yaml.Node, key string) *yaml.Node {
 func midnightYAMLFieldSet(field string) bool {
 	_, ok := midnightYAMLFields[field]
 	return ok
+}
+
+// removeMappingKeys deletes the given top-level keys from a YAML mapping
+// node in place. Used to strip sibling sections (blob/metadata/database)
+// that are handled separately, before strict-decoding the remainder into
+// Config.
+func removeMappingKeys(node *yaml.Node, keys []string) {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return
+	}
+	remove := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		remove[k] = struct{}{}
+	}
+	filtered := make([]*yaml.Node, 0, len(node.Content))
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if _, ok := remove[node.Content[i].Value]; ok {
+			continue
+		}
+		filtered = append(filtered, node.Content[i], node.Content[i+1])
+	}
+	node.Content = filtered
+}
+
+// wrappedModeRootKeys are the only top-level keys allowed in a config file
+// that uses a wrapped "config:" section. database/blob/metadata are
+// handled as siblings of "config" (see LoadConfig); anything else at the
+// root in wrapped mode is either a typo (e.g. "databse") or a field that
+// belongs nested inside "config:" instead.
+var wrappedModeRootKeys = map[string]struct{}{
+	"config":   {},
+	"database": {},
+	"blob":     {},
+	"metadata": {},
+}
+
+// validateWrappedRootKeys returns an error if the root mapping node
+// contains any key outside wrappedModeRootKeys.
+func validateWrappedRootKeys(root *yaml.Node) error {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+	var unknown []string
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		key := root.Content[i].Value
+		if _, ok := wrappedModeRootKeys[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return fmt.Errorf(
+			"unknown top-level key(s) %v (expected only config, database, blob, or metadata when using a wrapped \"config:\" section)",
+			unknown,
+		)
+	}
+	return nil
+}
+
+// databaseSectionKeys are the only keys allowed directly under a
+// top-level "database:" mapping. tempConfig's databaseConfig struct only
+// declares Blob/Metadata fields and is decoded leniently, so a typo here
+// (e.g. "blbo" instead of "blob") would otherwise be silently dropped:
+// the section falls back to plugin defaults with no error.
+var databaseSectionKeys = map[string]struct{}{
+	"blob":     {},
+	"metadata": {},
+}
+
+// validateDatabaseSectionKeys returns an error if the root document has a
+// top-level "database:" mapping containing any key other than blob or
+// metadata.
+func validateDatabaseSectionKeys(root *yaml.Node) error {
+	dbNode := mappingValue(root, "database")
+	if dbNode == nil || dbNode.Kind != yaml.MappingNode {
+		return nil
+	}
+	var unknown []string
+	for i := 0; i+1 < len(dbNode.Content); i += 2 {
+		key := dbNode.Content[i].Value
+		if _, ok := databaseSectionKeys[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return fmt.Errorf(
+			"unknown key(s) %v under \"database:\" (expected only blob or metadata)",
+			unknown,
+		)
+	}
+	return nil
+}
+
+// strictUnmarshalConfig decodes data into out, returning an error if the
+// document contains any field not present in the Config struct. An empty
+// document decodes as a no-op, matching yaml.Unmarshal's behavior for
+// empty input (yaml.Decoder.Decode returns io.EOF instead).
+func strictUnmarshalConfig(data []byte, out *Config) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
+}
+
+// ValidateRuntimeConfig validates fields whose invalid values were
+// historically only caught later (at logger setup, node startup, by the
+// mithril subcommand, or as a silent runtime fallback) instead of at
+// config load.
+//
+// LoadConfig deliberately does NOT call this: CLI flags are applied after
+// LoadConfig returns (see ApplyFlags), and CLI > env > YAML > defaults
+// precedence means a valid CLI flag must be able to override a semantically
+// invalid YAML/env value. Validating inside LoadConfig would reject that
+// value before the override had a chance to apply, failing startup on a
+// config that a valid flag would have fixed.
+//
+// ApplyFlags calls this after applying flags, which is the enforcement point
+// for normal CLI startup (LoadConfig followed by ApplyFlags). Callers that
+// use LoadConfig without ApplyFlags -- library callers or tests that don't
+// go through CLI flag parsing -- must call ValidateRuntimeConfig explicitly
+// to get equivalent validation.
+func ValidateRuntimeConfig(cfg *Config) error {
+	// RelayPort doubles as the outbound source port (see
+	// internal/node/node.go's WithOutboundSourcePort(cfg.RelayPort)),
+	// used for peer-sharing-friendly source-port reuse. An out-of-range
+	// value used to only be caught when dialing, where it silently fell
+	// back to dialing without source-port reuse; catch it here instead.
+	if cfg.RelayPort > 65535 {
+		return fmt.Errorf(
+			"invalid relayPort: %d (must be 0 to disable, or 1-65535)",
+			cfg.RelayPort,
+		)
+	}
+	// ApplyFlags forces cfg.Logging.Level to "debug" before calling this
+	// function when the --debug flag is set, so a --debug run is never
+	// rejected here even if the configured level is invalid: --debug
+	// supersedes it at the point the logger is actually built.
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
+	case "", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf(
+			"invalid logging.level: %q (must be one of debug, info, warn, error)",
+			cfg.Logging.Level,
+		)
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Format)) {
+	case "", "text", "json":
+	default:
+		return fmt.Errorf(
+			"invalid logging.format: %q (must be one of text, json)",
+			cfg.Logging.Format,
+		)
+	}
+	// Validated locally, matching chainsync.ParseHeaderSyncStrategy's
+	// accepted values, rather than importing the chainsync package:
+	// internal/config is a foundational package imported by nearly
+	// everything, so it shouldn't depend on a runtime/protocol package
+	// for a single string switch.
+	switch strings.ToLower(strings.TrimSpace(cfg.Chainsync.Strategy)) {
+	case "", "primary", "parallel", "round-robin", "roundrobin", "round_robin":
+	default:
+		return fmt.Errorf(
+			"invalid header sync strategy %q (want primary, parallel, or round-robin)",
+			cfg.Chainsync.Strategy,
+		)
+	}
+	// The valid values mirror mithril.BackendV1/BackendV2; the mithril
+	// package can't be imported here without an import cycle (mithril ->
+	// internal/node -> dingo -> internal/config).
+	const (
+		mithrilBackendV1 = "v1"
+		mithrilBackendV2 = "v2"
+	)
+	if cfg.Mithril.Backend != "" &&
+		cfg.Mithril.Backend != mithrilBackendV1 &&
+		cfg.Mithril.Backend != mithrilBackendV2 {
+		return fmt.Errorf(
+			"unsupported Mithril backend %q (expected %q or %q)",
+			cfg.Mithril.Backend,
+			mithrilBackendV1,
+			mithrilBackendV2,
+		)
+	}
+	// Port fields double as listen/connect ports; a value above 65535 is
+	// invalid and used to surface only as a bind failure at runtime (well
+	// after config load) rather than at parse time. Reject them here so a
+	// typo fails fast. 0 means "disabled" for every port below, so it is
+	// always allowed. RelayPort is validated separately above because it
+	// has its own source-port-reuse semantics.
+	for _, p := range []struct {
+		name  string
+		value uint
+	}{
+		{"privatePort", cfg.PrivatePort},
+		{"utxorpcPort", cfg.UtxorpcPort},
+		{"barkPort", cfg.BarkPort},
+		{"metricsPort", cfg.MetricsPort},
+		{"debugPort", cfg.DebugPort},
+		{"blockfrostPort", cfg.BlockfrostPort},
+		{"meshPort", cfg.MeshPort},
+		{"midnight.port", cfg.Midnight.Port},
+	} {
+		if p.value > 65535 {
+			return fmt.Errorf(
+				"invalid %s: %d (must be 0 to disable, or 1-65535)",
+				p.name,
+				p.value,
+			)
+		}
+	}
+	// StorageMode is normalized+validated on the CLI flag path by
+	// normalizeStorageMode, but an invalid value from YAML/env used to fall
+	// through to a runtime check at node startup. Normalize and validate it
+	// here too so all three sources behave identically: without the
+	// normalization "API" or a value with surrounding whitespace would pass
+	// load but then fail the case-sensitive check at node startup. Empty is
+	// allowed: the default ("core") is applied elsewhere.
+	switch normalized := strings.ToLower(strings.TrimSpace(cfg.StorageMode)); normalized {
+	case "", storageModeCore, storageModeAPI:
+		cfg.StorageMode = normalized
+	default:
+		return fmt.Errorf(
+			"invalid storage mode %q: must be %q or %q",
+			cfg.StorageMode,
+			storageModeCore,
+			storageModeAPI,
+		)
+	}
+	// Positive-only duration fields. These were parsed lazily (at node
+	// startup), so a typo such as "30x" was silently ignored and the default
+	// used. Worse, their consumers silently substitute a default for any
+	// non-positive value (configuredShutdownTimeout falls back to 30s for
+	// <= 0; chainsync applies its configured timeout only when > 0), so a
+	// "0s" or negative value here is just another flavor of the silent
+	// fallback this change removes. Require a positive duration. Empty means
+	// "use the default", so it is skipped.
+	for _, d := range []struct {
+		name  string
+		value string
+	}{
+		{"shutdownTimeout", cfg.ShutdownTimeout},
+		{"ledgerCatchupTimeout", cfg.LedgerCatchupTimeout},
+		{"chainsync.stallTimeout", cfg.Chainsync.StallTimeout},
+	} {
+		if d.value == "" {
+			continue
+		}
+		parsed, err := time.ParseDuration(d.value)
+		if err != nil {
+			return fmt.Errorf("invalid %s %q: %w", d.name, d.value, err)
+		}
+		if parsed <= 0 {
+			return fmt.Errorf(
+				"invalid %s %q: must be a positive duration",
+				d.name,
+				d.value,
+			)
+		}
+	}
+	// mithril.downloadIdleTimeout has documented non-positive semantics
+	// (empty and "0" both mean "use the downloader default"; a negative
+	// duration disables idle detection), so it is only checked for parse
+	// validity, not sign.
+	if cfg.Mithril.DownloadIdleTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Mithril.DownloadIdleTimeout); err != nil {
+			return fmt.Errorf(
+				"invalid mithril.downloadIdleTimeout %q: %w",
+				cfg.Mithril.DownloadIdleTimeout,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 // ChainsyncConfig holds configuration for the multi-client chainsync
@@ -440,6 +724,19 @@ type Config struct {
 	// recorded Mithril sync boundary. Leave disabled when bootstrapping from
 	// a non-genesis chainsync intersect point without a Mithril snapshot.
 	StrictUtxoValidation bool `yaml:"strictUtxoValidation" split_words:"true"`
+	// StrictLeaderEligibility rejects a block (instead of logging a warning
+	// and skipping the leader eligibility check) when the total active stake
+	// is zero or the active slot coefficient is unavailable or non-positive.
+	// Leave disabled during genesis bootstrap, where these are legitimately
+	// absent until the first stake snapshot is written; enable it on an
+	// established node to fail fast if eligibility can no longer be checked.
+	StrictLeaderEligibility bool `yaml:"strictLeaderEligibility" split_words:"true"`
+	// StrictSlotClock rejects a transaction (instead of falling back to the
+	// snapshot tip slot) when the slot clock cannot be read during
+	// validation. The fallback is normally harmless for transient clock
+	// errors, but an operator can enable this to fail fast rather than
+	// validate against a stale reference slot.
+	StrictSlotClock bool `yaml:"strictSlotClock" split_words:"true"`
 	// Tracing enables OpenTelemetry tracing. Disabled by default: with no
 	// collector listening, the OTLP exporter logs noisy connection errors.
 	// Spans are sent via OTLP HTTP; configure the destination with the
@@ -761,42 +1058,44 @@ var globalConfig = &Config{
 	// MempoolCapacity is left as the zero sentinel; LoadConfig fills
 	// it in based on RunMode (Praos vs Leios) after CLI/env/YAML have
 	// been merged.
-	MempoolCapacity:      0,
-	EvictionWatermark:    DefaultEvictionWatermark,
-	RejectionWatermark:   DefaultRejectionWatermark,
-	BindAddr:             "0.0.0.0",
-	CardanoConfig:        "", // Will be set dynamically based on network
-	DatabasePath:         ".dingo",
-	SocketPath:           "dingo.socket",
-	IntersectTip:         false,
-	ValidateHistorical:   false,
-	StrictUtxoValidation: false,
-	Tracing:              false,
-	TracingStdout:        false,
-	Network:              "preview",
-	NetworkMagic:         0,
-	MetricsPort:          12798,
-	DebugPort:            0,
-	PrivateBindAddr:      "127.0.0.1",
-	PrivatePort:          3002,
-	RelayPort:            3001,
-	BarkBaseUrl:          "",
-	BarkPort:             0,
-	UtxorpcPort:          9090,
-	CORSAllowedOrigins:   []string{"*"},
-	BlockfrostPort:       3000,
-	MeshPort:             8080,
-	Topology:             "",
-	TlsCertFilePath:      "",
-	TlsKeyFilePath:       "",
-	BlobPlugin:           DefaultBlobPlugin,
-	MetadataPlugin:       DefaultMetadataPlugin,
-	StorageMode:          "core",
-	RunMode:              RunModeServe,
-	StartEra:             StartEraDefault,
-	ImmutableDbPath:      "",
-	ShutdownTimeout:      DefaultShutdownTimeout,
-	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+	MempoolCapacity:         0,
+	EvictionWatermark:       DefaultEvictionWatermark,
+	RejectionWatermark:      DefaultRejectionWatermark,
+	BindAddr:                "0.0.0.0",
+	CardanoConfig:           "", // Will be set dynamically based on network
+	DatabasePath:            ".dingo",
+	SocketPath:              "dingo.socket",
+	IntersectTip:            false,
+	ValidateHistorical:      false,
+	StrictUtxoValidation:    false,
+	StrictLeaderEligibility: false,
+	StrictSlotClock:         false,
+	Tracing:                 false,
+	TracingStdout:           false,
+	Network:                 "preview",
+	NetworkMagic:            0,
+	MetricsPort:             12798,
+	DebugPort:               0,
+	PrivateBindAddr:         "127.0.0.1",
+	PrivatePort:             3002,
+	RelayPort:               3001,
+	BarkBaseUrl:             "",
+	BarkPort:                0,
+	UtxorpcPort:             9090,
+	CORSAllowedOrigins:      []string{"*"},
+	BlockfrostPort:          3000,
+	MeshPort:                8080,
+	Topology:                "",
+	TlsCertFilePath:         "",
+	TlsKeyFilePath:          "",
+	BlobPlugin:              DefaultBlobPlugin,
+	MetadataPlugin:          DefaultMetadataPlugin,
+	StorageMode:             "core",
+	RunMode:                 RunModeServe,
+	StartEra:                StartEraDefault,
+	ImmutableDbPath:         "",
+	ShutdownTimeout:         DefaultShutdownTimeout,
+	LedgerCatchupTimeout:    DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
@@ -864,22 +1163,57 @@ func LoadConfig(configFile string) (*Config, error) {
 			return nil, fmt.Errorf("error parsing config file: %w", err)
 		}
 
+		var root yaml.Node
+		if err := yaml.Unmarshal(buf, &root); err != nil {
+			return nil, fmt.Errorf("error parsing config file: %w", err)
+		}
+		if len(root.Content) > 0 {
+			if err := validateDatabaseSectionKeys(root.Content[0]); err != nil {
+				return nil, err
+			}
+		}
+
 		// If config section exists, use it for main config
-		if tempCfg.Config != nil {
-			// Overlay config values onto existing defaults
-			configBytes, err := yaml.Marshal(tempCfg.Config)
+		if tempCfg.Config.Kind != 0 {
+			// Wrapped mode: the root document may only contain
+			// config/database/blob/metadata. Without this check, a
+			// typo'd sibling (e.g. "databse" instead of "database")
+			// would silently vanish, since only tempCfg.Config below
+			// gets strict-decoded -- the initial lenient unmarshal above
+			// just drops anything it doesn't recognize.
+			if len(root.Content) > 0 {
+				if err := validateWrappedRootKeys(root.Content[0]); err != nil {
+					return nil, err
+				}
+			}
+			// Overlay config values onto existing defaults. Strict
+			// decoding here rejects unrecognized fields (e.g. typos)
+			// instead of silently ignoring them.
+			configBytes, err := yaml.Marshal(&tempCfg.Config)
 			if err != nil {
 				return nil, fmt.Errorf("error re-marshalling config: %w", err)
 			}
-			err = yaml.Unmarshal(configBytes, globalConfig)
-			if err != nil {
+			if err := strictUnmarshalConfig(configBytes, globalConfig); err != nil {
 				return nil, fmt.Errorf("error parsing config section: %w", err)
 			}
 		} else {
 			// Otherwise unmarshal the whole file as main config (backward
-			// compatibility)
-			err = yaml.Unmarshal(buf, globalConfig)
-			if err != nil {
+			// compatibility). The blob/metadata/database sections are
+			// sibling keys handled separately above, so strip them
+			// before strict-decoding the remainder into Config.
+			configBuf := buf
+			if len(root.Content) > 0 {
+				removeMappingKeys(
+					root.Content[0],
+					[]string{"blob", "metadata", "database"},
+				)
+				stripped, err := yaml.Marshal(&root)
+				if err != nil {
+					return nil, fmt.Errorf("error re-marshalling config: %w", err)
+				}
+				configBuf = stripped
+			}
+			if err := strictUnmarshalConfig(configBuf, globalConfig); err != nil {
 				return nil, fmt.Errorf("error parsing config file: %w", err)
 			}
 		}
@@ -972,6 +1306,14 @@ func LoadConfig(configFile string) (*Config, error) {
 			globalConfig.StartEra,
 		)
 	}
+
+	// NOTE: relayPort/logging/chainsync/mithril semantic validation is
+	// deliberately not run here. See ValidateRuntimeConfig's doc comment:
+	// CLI flags are applied after LoadConfig returns (in ApplyFlags), and a
+	// valid flag must be able to override a semantically invalid YAML/env
+	// value rather than have LoadConfig reject it first. ApplyFlags calls
+	// ValidateRuntimeConfig once flags have been merged in; callers that use
+	// LoadConfig without ApplyFlags must call it explicitly.
 
 	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
 	// already been merged at this point; an explicit non-zero setting

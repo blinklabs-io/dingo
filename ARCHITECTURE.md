@@ -1768,6 +1768,25 @@ ingestion (`ensureGapConsumedUtxos`, used while closing the range between the
 snapshot and the chain tip) is unconditionally strict already, since that range
 is always expected to be fully recoverable from the snapshot import.
 
+`StrictUtxoValidation` is one of a small family of opt-in fail-fast toggles
+(default off), each covering a specific point where the node otherwise
+continues on missing or unreadable runtime state. The tolerant default is
+appropriate for different reasons per toggle — sometimes bootstrap-only,
+sometimes an ordinarily-transient runtime failure — so they are individual
+flags rather than one global switch. `StrictLeaderEligibility`
+(`ledger/verify_header.go`) turns the warn-and-skip that fires when the total
+active stake is zero or the active slot coefficient is unavailable into a block
+rejection; here the tolerant path exists for genesis bootstrap, so enable it
+only on an established node where those inputs exist. `StrictSlotClock`
+(`ledger/state.go` `validateTxCore`) rejects a transaction when the slot clock
+cannot be read instead of falling back to the snapshot tip slot; here the
+tolerant path absorbs ordinarily-transient clock read failures during normal
+operation, so it may remain off when transient fallback is acceptable — but a
+*persistent* clock failure silently degrades validation to a stale
+`snapshotTipSlot`, so enable it to fail fast when clock failures persist. All
+three are wired identically: `internal/config` field + CLI flag →
+`dingo.WithX` option → the consuming component's config struct.
+
 The Mithril ledger-state snapshot slot normally lags the immutable-chunk tip, so
 `processPostLedgerStateBlocks`/`processGapBlocks` ingest the blocks in between
 (the "gap blocks") for their transaction effects, including consumed-input

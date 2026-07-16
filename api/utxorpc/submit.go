@@ -132,6 +132,7 @@ func (s *submitServiceServer) WaitForTx(
 			if !ok {
 				s.utxorpc.config.Logger.Warn(
 					"unexpected event data type in WaitForTx",
+					"type", fmt.Sprintf("%T", evt.Data),
 				)
 				return
 			}
@@ -398,6 +399,10 @@ func (s *submitServiceServer) WatchMempool(
 			}()
 			addEvt, ok := evt.Data.(mempool.AddTransactionEvent)
 			if !ok {
+				s.utxorpc.config.Logger.Warn(
+					"unexpected event data type in WatchMempool",
+					"type", fmt.Sprintf("%T", evt.Data),
+				)
 				return
 			}
 			txRawBytes := addEvt.Body

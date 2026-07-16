@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -240,6 +241,39 @@ func TestLeiosNotifyBlockTxsOfferCacheMissIsNonFatal(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+}
+
+// TestLeiosNotifyUnrecognizedMessageTypeLogsAndDoesNotError verifies that an
+// unhandled leios-notify message type (e.g. MsgBlockAnnouncement, which this
+// handler doesn't act on) is logged for observability rather than silently
+// dropped with no trace, while still not tearing down the connection.
+func TestLeiosNotifyUnrecognizedMessageTypeLogsAndDoesNotError(t *testing.T) {
+	var logBuf bytes.Buffer
+	cm := connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{})
+	conn, err := gouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
+	defer func() {
+		conn.ErrorChan() <- errors.New("test connection closed")
+	}()
+
+	o := NewOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+		Logger: slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{
+			Level: slog.LevelDebug,
+		})),
+	})
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		oleiosnotify.NewMsgBlockAnnouncement(cbor.RawMessage{0x00}),
+	)
+	require.NoError(t, err)
+	require.Contains(
+		t,
+		logBuf.String(),
+		"received unexpected leios-notify message type",
+	)
 }
 
 var errLeiosEndorserBlockNotCached = errors.New("leios endorser block not cached")
