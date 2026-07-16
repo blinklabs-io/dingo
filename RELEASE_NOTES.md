@@ -12,7 +12,7 @@ This release restores Leios committee formation on Musashi and other Dijkstra-ba
 
 ### 🔧 Fixes
 
-* Restored **keep Leios committee formation working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now use the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation, voting, and endorser block certification continue without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
+* Restored **keep Leios committee formation working when committee parameters are unset:** Musashi and other Dijkstra-based deployments now use the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation, voting, and endorser block certification continue without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -64,7 +64,7 @@ Esta versión restablece la formación del comité de Leios en Musashi y en otro
 
 ### 🔧 Correcciones
 
-* Restableció **mantener activa la formación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite que la formación del comité, la votación y la certificación de bloques endosadores continúen sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+* Restableció **mantener activa la formación del comité de Leios cuando los parámetros del comité quedan sin definir:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite que la formación del comité, la votación y la certificación de bloques endosadores continúen sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
 
 ### Compatibilidad de red recomendada ⚠️
 
