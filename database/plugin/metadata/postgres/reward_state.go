@@ -17,6 +17,7 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -60,6 +61,61 @@ func (d *MetadataStorePostgres) SaveRewardSnapshot(
 	return rewardstate.SaveSnapshot(db, snapshot)
 }
 
+// ClaimFallbackRewardSnapshot atomically reserves the reward snapshot marker
+// for a fallback capture.
+func (d *MetadataStorePostgres) ClaimFallbackRewardSnapshot(
+	snapshot *models.RewardSnapshot,
+	txn types.Txn,
+) (bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return false, fmt.Errorf("ClaimFallbackRewardSnapshot: resolve db: %w", err)
+	}
+	return rewardstate.ClaimFallbackSnapshot(db, snapshot, txn)
+}
+
+// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that has no
+// reward-input bundle against the authoritative capture.
+func (d *MetadataStorePostgres) ClaimFallbackRewardSnapshotGuard(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (bool, uint, error) {
+	if txn == nil {
+		return false, 0, errors.New(
+			"ClaimFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return false, 0, fmt.Errorf(
+			"ClaimFallbackRewardSnapshotGuard: resolve db: %w",
+			err,
+		)
+	}
+	return rewardstate.ClaimFallbackSnapshotGuard(db, epoch, snapshotType)
+}
+
+// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row.
+func (d *MetadataStorePostgres) ReleaseFallbackRewardSnapshotGuard(
+	guardID uint,
+	txn types.Txn,
+) error {
+	if txn == nil {
+		return errors.New(
+			"ReleaseFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"ReleaseFallbackRewardSnapshotGuard: resolve db: %w",
+			err,
+		)
+	}
+	return rewardstate.ReleaseFallbackSnapshotGuard(db, guardID)
+}
+
 // GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
 func (d *MetadataStorePostgres) GetRewardSnapshot(
 	epoch uint64,
@@ -98,6 +154,82 @@ func (d *MetadataStorePostgres) GetRewardPoolInputs(
 		return nil, err
 	}
 	return rewardstate.GetPoolInputs(db, epoch)
+}
+
+func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]byte, txn types.Txn) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsForPools: resolve db: %w", err)
+	}
+	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, 1000)
+	if err != nil {
+		return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
+	}
+	return inputs, nil
+}
+
+func (d *MetadataStorePostgres) SaveRewardStakeInputs(inputs []*models.RewardStakeInput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveStakeInputs(db, inputs)
+}
+
+func (d *MetadataStorePostgres) GetRewardStakeInputs(epoch uint64, txn types.Txn) ([]*models.RewardStakeInput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetStakeInputs(db, epoch)
+}
+
+func (d *MetadataStorePostgres) DeleteRewardInputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward inputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteInputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStorePostgres) DeleteRewardOutputsForEpoch(epoch uint64, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf("delete reward outputs for epoch: resolve db: %w", err)
+	}
+	return rewardstate.DeleteOutputsForEpoch(db, epoch, txn)
+}
+
+func (d *MetadataStorePostgres) SaveRewardPoolOutputs(outputs []*models.RewardPoolOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SavePoolOutputs(db, outputs)
+}
+
+func (d *MetadataStorePostgres) GetRewardPoolOutputs(epoch uint64, txn types.Txn) ([]*models.RewardPoolOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetPoolOutputs(db, epoch)
+}
+
+func (d *MetadataStorePostgres) SaveRewardAccountOutputs(outputs []*models.RewardAccountOutput, txn types.Txn) error {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	return rewardstate.SaveAccountOutputs(db, outputs)
+}
+
+func (d *MetadataStorePostgres) GetRewardAccountOutputs(epoch uint64, txn types.Txn) ([]*models.RewardAccountOutput, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	return rewardstate.GetAccountOutputs(db, epoch)
 }
 
 // DeleteRewardStateAfterSlot deletes reward-state rows captured from

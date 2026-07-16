@@ -422,6 +422,15 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, error)
 
+	// GetRewardStakeInputsForPools returns positive per-account delegated stake
+	// for pools from the live reward stake aggregate. The aggregate always
+	// reflects the caller's transaction view, so there is no slot argument:
+	// callers scope the result by opening the transaction at the desired point.
+	GetRewardStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
 	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
 	// canonical account and live UTxO metadata. Node startup uses it as an
 	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
@@ -1101,9 +1110,41 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
-	// SaveRewardSnapshot saves reward snapshot metadata for an epoch.
+	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
+	// overwriting any existing row for the (epoch, snapshot_type) pair
+	// (including its authoritative flag). Used by the authoritative
+	// epoch-rollover capture, which must always win over a fallback row.
 	SaveRewardSnapshot(
 		*models.RewardSnapshot,
+		types.Txn,
+	) error
+
+	// ClaimFallbackRewardSnapshot atomically reserves the (epoch, snapshot_type)
+	// reward snapshot marker for a fallback (non-authoritative) capture,
+	// returning false when an authoritative snapshot already occupies it so the
+	// caller abandons the fallback rather than overwriting the authoritative
+	// row. See rewardstate.ClaimFallbackSnapshot.
+	ClaimFallbackRewardSnapshot(
+		*models.RewardSnapshot,
+		types.Txn,
+	) (bool, error)
+
+	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that cannot
+	// persist reward inputs against the authoritative epoch-rollover capture.
+	// It returns proceed=false when an authoritative row already exists. A
+	// non-zero guard ID identifies a temporary row that the caller must delete
+	// in the same transaction before commit.
+	ClaimFallbackRewardSnapshotGuard(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (bool, uint, error)
+
+	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
+	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
+	// that claimed the guard.
+	ReleaseFallbackRewardSnapshotGuard(
+		uint, // guardID
 		types.Txn,
 	) error
 
@@ -1125,6 +1166,30 @@ type MetadataStore interface {
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
+
+	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+
+	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+
+	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
+
+	// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+	SaveRewardPoolOutputs([]*models.RewardPoolOutput, types.Txn) error
+
+	// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+	GetRewardPoolOutputs(uint64, types.Txn) ([]*models.RewardPoolOutput, error)
+
+	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+	SaveRewardAccountOutputs([]*models.RewardAccountOutput, types.Txn) error
+
+	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
 
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.

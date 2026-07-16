@@ -49,6 +49,12 @@ type RewardSnapshot struct {
 	BoundarySlot     uint64       `gorm:"index;not null"`
 	EpochNonce       []byte       `gorm:"size:32"`
 	ProtocolVersion  uint         `gorm:"not null"`
+	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
+	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
+	// event-driven fallback capture (captureMarkSnapshot) never overwrites an
+	// authoritative row: it either claims a fresh row or is superseded. Defaults
+	// to false, so pre-existing rows and fallback captures read as provisional.
+	Authoritative bool `gorm:"not null;default:false"`
 }
 
 func (RewardSnapshot) TableName() string {
@@ -78,6 +84,24 @@ func (RewardPoolInput) TableName() string {
 	return "reward_pool_input"
 }
 
+// RewardStakeInput captures per-credential stake at the reward snapshot.
+type RewardStakeInput struct {
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:2;size:28;not null"`
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:4;size:28;not null"`
+	ID            uint         `gorm:"primarykey"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:1;not null"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_stake_input_epoch_pool_cred,priority:3;not null;default:0"`
+	Stake         types.Uint64 `gorm:"not null"`
+	Owner         bool         `gorm:"not null;default:false"`
+	Registered    bool         `gorm:"not null"`
+	CapturedSlot  uint64       `gorm:"index;not null"`
+	BoundarySlot  uint64       `gorm:"index;not null"`
+}
+
+func (RewardStakeInput) TableName() string {
+	return "reward_stake_input"
+}
+
 // RewardLiveStake is the live per-stake-credential aggregate maintained for a
 // future reward-snapshot consumer. UtxoStake and RewardStake are stored
 // separately so rollback/account-reward repair can refresh only the affected
@@ -102,6 +126,45 @@ type RewardLiveStake struct {
 
 func (RewardLiveStake) TableName() string {
 	return "reward_live_stake"
+}
+
+// RewardPoolOutput captures per-pool reward calculation output for an epoch.
+type RewardPoolOutput struct {
+	ApparentPerformance *types.Rat
+	PoolKeyHash         []byte       `gorm:"uniqueIndex:idx_reward_pool_output_epoch_pool,priority:2;size:28;not null"`
+	ID                  uint         `gorm:"primarykey"`
+	Epoch               uint64       `gorm:"uniqueIndex:idx_reward_pool_output_epoch_pool,priority:1;not null"`
+	OptimalReward       types.Uint64 `gorm:"not null"`
+	TotalReward         types.Uint64 `gorm:"not null"`
+	LeaderReward        types.Uint64 `gorm:"not null"`
+	MemberRewardTotal   types.Uint64 `gorm:"not null"`
+	OwnerStake          types.Uint64 `gorm:"not null"`
+	Undistributed       types.Uint64 `gorm:"not null"`
+	Unspendable         types.Uint64 `gorm:"not null"`
+	CapturedSlot        uint64       `gorm:"index;not null"`
+	BoundarySlot        uint64       `gorm:"index;not null"`
+}
+
+func (RewardPoolOutput) TableName() string {
+	return "reward_pool_output"
+}
+
+// RewardAccountOutput captures per-account reward calculation output.
+type RewardAccountOutput struct {
+	StakingKey    []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:3;size:28;not null"`
+	PoolKeyHash   []byte       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:4;size:28;not null"`
+	RewardType    string       `gorm:"type:varchar(16);uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:5;not null"`
+	ID            uint         `gorm:"primarykey"`
+	Epoch         uint64       `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:1;not null"`
+	CredentialTag uint8        `gorm:"uniqueIndex:idx_reward_account_output_epoch_cred_pool_type,priority:2;not null;default:0"`
+	Amount        types.Uint64 `gorm:"not null"`
+	Spendable     bool         `gorm:"not null"`
+	CapturedSlot  uint64       `gorm:"index;not null"`
+	BoundarySlot  uint64       `gorm:"index;not null"`
+}
+
+func (RewardAccountOutput) TableName() string {
+	return "reward_account_output"
 }
 
 // MigrateRewardLiveStakePoolIndex drops the legacy pool/total_stake index.

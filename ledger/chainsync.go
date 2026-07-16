@@ -3974,7 +3974,74 @@ func (ls *LedgerState) processEpochRollover(
 		"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 		"component", "ledger",
 	)
+
+	// SNAP point: capture the authoritative mark snapshot inside this rollover
+	// transaction, now that the new epoch record (and its nonce/boundary slot)
+	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
+	// CaptureGenesisSnapshot at startup.
+	if err := ls.captureEpochBoundarySnapshot(txn, currentEpoch, result); err != nil {
+		return nil, err
+	}
+
 	return result, nil
+}
+
+// captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
+// inside the epoch-rollover write transaction so the mark snapshot commits
+// atomically with the epoch it describes (and the event-driven fallback then
+// skips it). The capture is wrapped in a metadata savepoint: a capture failure
+// rolls back only the snapshot's own writes and lets the rollover proceed,
+// deferring to the fallback rather than wedging the epoch boundary. The capture
+// writes only metadata, so a metadata savepoint fully covers it.
+func (ls *LedgerState) captureEpochBoundarySnapshot(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	result *EpochRolloverResult,
+) error {
+	hook := ls.epochBoundarySnapshotHook()
+	if hook == nil {
+		return nil
+	}
+	newEpoch := result.NewCurrentEpoch
+	snapshotSlot := newEpoch.StartSlot
+	if snapshotSlot > 0 {
+		snapshotSlot--
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      newEpoch.EpochId,
+		BoundarySlot:  newEpoch.StartSlot,
+		EpochNonce:    newEpoch.Nonce,
+		ProtocolVersion: ls.protocolMajorForEvent(
+			result.NewCurrentPParams, result.NewCurrentEra,
+		),
+		SnapshotSlot: snapshotSlot,
+	}
+	const savepoint = "epoch_boundary_snapshot"
+	if err := txn.SavePoint(savepoint); err != nil {
+		ls.config.Logger.Warn(
+			"epoch-boundary snapshot savepoint unavailable; deferring to fallback capture",
+			"error", err,
+			"epoch", newEpoch.EpochId,
+			"component", "ledger",
+		)
+		return nil
+	}
+	if err := hook(txn, evt); err != nil {
+		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
+			return fmt.Errorf(
+				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",
+				err, rbErr,
+			)
+		}
+		ls.config.Logger.Warn(
+			"authoritative epoch-boundary snapshot capture failed; deferring to fallback capture",
+			"error", err,
+			"epoch", newEpoch.EpochId,
+			"component", "ledger",
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {
