@@ -4891,6 +4891,10 @@ func (ls *LedgerState) PrepareEpochCacheForStartup() error {
 
 func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) error {
 	ls.epochCache = epochs
+	// Publish every mutation made by this startup writer, including partial
+	// state on error returns, so snapshot readers can never retain a stale view
+	// if this helper is reused outside fatal startup handling in the future.
+	defer ls.publishSnapshotsLocked()
 	clear(ls.epochNonceHexCache)
 	if len(epochs) > 0 {
 		// Recover epoch records whose LastEpochBlockNonce was persisted empty
@@ -4906,7 +4910,6 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 		ls.currentEra = *eraDesc
 		// Update metrics
 		ls.metrics.epochNum.Set(float64(ls.currentEpoch.EpochId))
-		ls.publishSnapshotsLocked()
 		return nil
 	}
 	// Populate initial epoch
@@ -4969,7 +4972,6 @@ func (ls *LedgerState) setEpochCache(txn *database.Txn, epochs []models.Epoch) e
 	ls.currentPParams = rolloverResult.NewCurrentPParams
 	ls.checkpointWrittenForEpoch = rolloverResult.CheckpointWrittenForEpoch
 	ls.metrics.epochNum.Set(rolloverResult.NewEpochNum)
-	ls.publishSnapshotsLocked()
 	return nil
 }
 

@@ -80,6 +80,30 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
 }
 
+// TestSetEpochCachePublishesPartialStateOnError verifies that startup cache
+// mutations are published even when validation returns an error afterward.
+func TestSetEpochCachePublishesPartialStateOnError(t *testing.T) {
+	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
+	previousGeneration := ls.consensus.Load().generation
+	invalidEpoch := models.Epoch{
+		EpochId:   7,
+		StartSlot: 0,
+		EraId:     ^uint(0),
+	}
+
+	err := ls.setEpochCache(nil, []models.Epoch{invalidEpoch})
+	require.ErrorContains(t, err, "unknown era ID")
+
+	// The deferred publication must expose the mutation through the atomic
+	// reader path despite setEpochCache returning before normal completion.
+	snapshot := ls.consensus.Load()
+	require.Equal(t, previousGeneration+1, snapshot.generation)
+	require.Equal(t, invalidEpoch.EpochId, snapshot.currentEpoch.EpochId)
+	require.Equal(t, invalidEpoch.EraId, snapshot.currentEpoch.EraId)
+	require.Len(t, snapshot.epochCache, 1)
+}
+
 // TestAdvanceEpochCachePreservesPublishedSnapshot exercises the production
 // writer and verifies that extending the cache cannot alter a retained view.
 func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
