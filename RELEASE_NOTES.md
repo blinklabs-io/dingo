@@ -8,11 +8,11 @@
 
 **Version:** v0.65.1
 
-This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the network configuration leaves committee parameters unset, so voting and endorser block certification can proceed without editing a pinned network configuration. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
+This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the network configuration leaves committee parameters unset, so voting and endorser block certification can continue without editing a pinned network configuration. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
 
 ### 🔧 Fixes
 
-* Restored **keep Leios committee voting working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now fall back to the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation and endorser block certification proceed without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
+* Restored **keep Leios committee formation working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now use the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation, voting, and endorser block certification continue without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
 
 ### Recommended Network Compatibility ⚠️
 
