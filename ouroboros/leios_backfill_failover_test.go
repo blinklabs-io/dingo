@@ -81,13 +81,16 @@ func TestLeiosBackfillConnOrderAffinity(t *testing.T) {
 	connIds := []ouroboros.ConnectionId{fresh, cooled, proven}
 
 	now := time.Now()
+	provenGuard := &leiosFetchGuard{}
+	freshGuard := &leiosFetchGuard{}
+	cooledGuard := &leiosFetchGuard{}
 	guards := map[ouroboros.ConnectionId]*leiosFetchGuard{
-		proven: {},
-		fresh:  {},
-		cooled: {},
+		proven: provenGuard,
+		fresh:  freshGuard,
+		cooled: cooledGuard,
 	}
-	guards[proven].markFetchOK()
-	guards[cooled].markFetchFailed(now, leiosBackfillConnCooldown)
+	provenGuard.markFetchOK()
+	cooledGuard.markFetchFailed(now, leiosBackfillConnCooldown)
 	guardFor := func(id ouroboros.ConnectionId) *leiosFetchGuard {
 		return guards[id]
 	}

@@ -517,21 +517,25 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 
 	// The header is preserved byte-for-byte so the served block's hash is
 	// unchanged.
-	var origTop, mergedTop []cbor.RawMessage
+	origTop := make([]cbor.RawMessage, 0)
+	mergedTop := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(certRB, &origTop)
 	require.NoError(t, err)
 	_, err = cbor.Decode(merged, &mergedTop)
 	require.NoError(t, err)
+	require.Len(t, origTop, 2)
 	require.Len(t, mergedTop, 2)
 	require.Equal(t, []byte(origTop[0]), []byte(mergedTop[0]))
 
 	// The transaction segment now holds the endorser block's transactions; the
 	// invalid, certificate, and peras segments are preserved.
-	var origBody, mergedBody []cbor.RawMessage
+	origBody := make([]cbor.RawMessage, 0)
+	mergedBody := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(origTop[1], &origBody)
 	require.NoError(t, err)
 	_, err = cbor.Decode(mergedTop[1], &mergedBody)
 	require.NoError(t, err)
+	require.Len(t, origBody, 4)
 	require.Len(t, mergedBody, 4)
 	require.Equal(t, []byte(origBody[0]), []byte(mergedBody[0]))
 	require.Equal(t, []byte(origBody[2]), []byte(mergedBody[2]))

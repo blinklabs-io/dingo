@@ -146,11 +146,9 @@ func (n *Node) startChainsyncStallRecycler(
 	recyclerCtx, recyclerCancel := context.WithCancel(ctx)
 	// Track the recycler as a node-owned background worker so shutdown can
 	// wait for it before closing the dependencies it reads or publishes to.
-	n.chainsyncStallRecyclerWG.Add(1)
-	go func() {
+	n.chainsyncStallRecyclerWG.Go(func() {
 		// Mark the worker complete no matter whether it exits by cancellation
 		// or after a recovered panic stops the outer loop.
-		defer n.chainsyncStallRecyclerWG.Done()
 		n.runChainsyncStallRecycler(
 			recyclerCtx,
 			chainsyncCfg,
@@ -158,7 +156,7 @@ func (n *Node) startChainsyncStallRecycler(
 			grace,
 			cooldown,
 		)
-	}()
+	})
 	return recyclerCancel
 }
 

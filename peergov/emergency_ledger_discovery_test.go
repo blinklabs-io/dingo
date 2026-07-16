@@ -30,7 +30,7 @@ import (
 // upstream peers (client connections from a topology source).
 func addEligibleUpstreamPeers(pg *PeerGovernor, n int) {
 	pg.mu.Lock()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		addr := "10.10.0." + strconv.Itoa(i+1) + ":3001"
 		pg.peers = append(pg.peers, &Peer{
 			Address:           addr,

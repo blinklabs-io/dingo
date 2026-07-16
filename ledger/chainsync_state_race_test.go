@@ -29,22 +29,18 @@ func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
 	const iterations = 1000
 
 	var wg sync.WaitGroup
-	for worker := 0; worker < 2; worker++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for slot := 0; slot < iterations; slot++ {
+	for range 2 {
+		wg.Go(func() {
+			for slot := range iterations {
 				_ = ls.shouldVerifyChainsyncHeaderCrypto(uint64(slot))
 				_, _ = ls.validationStateSnapshot()
 				_ = ls.mithrilLedgerSlotSnapshot()
 			}
-		}()
+		})
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < iterations; i++ {
+	wg.Go(func() {
+		for i := range iterations {
 			ls.Lock()
 			ls.validationEnabled = i%2 == 0
 			ls.mithrilLedgerSlot = uint64(i % 128)
@@ -60,7 +56,7 @@ func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
 				SyncingChainsyncState,
 			)
 		}
-	}()
+	})
 
 	wg.Wait()
 }

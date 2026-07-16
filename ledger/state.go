@@ -3781,7 +3781,14 @@ func (ls *LedgerState) ledgerProcessBlock(
 	// checked at header verification.
 	opCert, hasOpCert := opCertFromHeader(block.Header())
 	var opCertPoolKeyHash lcommon.PoolKeyHash
+	var opCertIssueNumber uint64
 	if hasOpCert {
+		if opCert == nil {
+			return nil, errors.New(
+				"block header reported an operational certificate but returned nil",
+			)
+		}
+		opCertIssueNumber = opCert.IssueNumber
 		opCertPoolKeyHash = lcommon.PoolKeyHash(block.IssuerVkey().Hash())
 		// Counter monotonicity is the stateful half of inbound opcert
 		// validation: read the pool's last-seen counter before processing this
@@ -3811,7 +3818,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 			if err := validateOpCertCounter(
 				stored,
 				found,
-				opCert.IssueNumber,
+				opCertIssueNumber,
 				opCertNoGapRuleApplies(block.Era().Id),
 			); err != nil {
 				return nil, fmt.Errorf("pool %x: %w", opCertPoolKeyHash, err)
@@ -4131,7 +4138,7 @@ func (ls *LedgerState) ledgerProcessBlock(
 	if hasOpCert {
 		if err := ls.db.UpdatePoolOpCertSequence(
 			opCertPoolKeyHash,
-			opCert.IssueNumber,
+			opCertIssueNumber,
 			point.Slot,
 			txn,
 		); err != nil {
@@ -5540,6 +5547,9 @@ func (ls *LedgerState) withMithrilTrustBoundaryIntersectPoint(
 			bytes.Equal(existing.Hash, point.Hash) {
 			return points
 		}
+	}
+	if len(points) == 0 {
+		return []ocommon.Point{point}
 	}
 
 	insertAt := len(points)
