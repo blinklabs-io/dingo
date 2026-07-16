@@ -23,12 +23,10 @@ import (
 	"log/slog"
 	"maps"
 	"net"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/chainselection"
@@ -218,28 +216,11 @@ func newTestLedgerState(t *testing.T) *ledger.LedgerState {
 
 func setTestLedgerTip(
 	t *testing.T,
-	ls *ledger.LedgerState,
+	o *Ouroboros,
 	tip ochainsync.Tip,
 ) {
 	t.Helper()
-	field := reflect.ValueOf(ls).Elem().FieldByName("currentTip")
-	require.True(t, field.IsValid())
-	reflect.NewAt(
-		field.Type(),
-		unsafe.Pointer(field.UnsafeAddr()),
-	).Elem().Set(reflect.ValueOf(tip))
-
-	// NewLedgerState publishes an origin tip snapshot during construction.
-	// These white-box tests replace currentTip directly, so clear that initial
-	// snapshot and let the ledger's test-fixture fallback rebuild its reader
-	// view from the value above. Otherwise GetIntersectPoint keeps observing
-	// origin even though the fixture's writer-owned tip has advanced.
-	snapshotField := reflect.ValueOf(ls).Elem().FieldByName("tip")
-	require.True(t, snapshotField.IsValid())
-	reflect.NewAt(
-		snapshotField.Type(),
-		unsafe.Pointer(snapshotField.UnsafeAddr()),
-	).Elem().Set(reflect.Zero(snapshotField.Type()))
+	o.LedgerState.SetTipForTesting(tip)
 }
 
 func snapshotChainsyncNtNTimeouts() map[string]struct {
@@ -537,7 +518,7 @@ func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(
 	}
 	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
 	point := ocommon.NewPoint(block.SlotNumber(), block.Hash().Bytes())
-	setTestLedgerTip(t, o.LedgerState, ochainsync.Tip{
+	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point:       point,
 		BlockNumber: block.BlockNumber(),
 	})
@@ -580,7 +561,7 @@ func TestChainsyncServerFindIntersect_MissingIntersection(
 		cbor:      []byte{0x80},
 	}
 	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
-	setTestLedgerTip(t, o.LedgerState, ochainsync.Tip{
+	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			block.SlotNumber(),
 			block.Hash().Bytes(),
@@ -618,7 +599,7 @@ func TestChainsyncServerFindIntersect_LedgerErrorPropagates(
 		cbor:      []byte{0x80},
 	}
 	require.NoError(t, o.LedgerState.Chain().AddBlock(block, nil))
-	setTestLedgerTip(t, o.LedgerState, ochainsync.Tip{
+	setTestLedgerTip(t, o, ochainsync.Tip{
 		Point: ocommon.NewPoint(
 			block.SlotNumber(),
 			block.Hash().Bytes(),

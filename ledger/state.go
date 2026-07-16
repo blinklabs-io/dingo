@@ -826,11 +826,6 @@ func (ls *LedgerState) loadStateSnapshots() (
 	for {
 		consensusState := ls.consensus.Load()
 		tipState := ls.tip.Load()
-		if consensusState == nil || tipState == nil {
-			// Support zero-value white-box fixtures. Production states publish
-			// both snapshots in NewLedgerState before becoming visible.
-			return ls.loadConsensusSnapshot(), ls.loadTipSnapshot()
-		}
 		if consensusState.generation == tipState.generation {
 			return consensusState, tipState
 		}
@@ -838,31 +833,21 @@ func (ls *LedgerState) loadStateSnapshots() (
 }
 
 func (ls *LedgerState) loadConsensusSnapshot() *consensusSnapshot {
-	if snapshot := ls.consensus.Load(); snapshot != nil {
-		return snapshot
-	}
-	// Support zero-value LedgerState fixtures. Production states initialize
-	// snapshots in NewLedgerState before they become concurrently visible.
-	return &consensusSnapshot{
-		generation:     ls.snapshotGeneration,
-		currentEpoch:   cloneEpoch(ls.currentEpoch),
-		currentEra:     ls.currentEra,
-		currentPParams: ls.currentPParams,
-		prevEraPParams: ls.prevEraPParams,
-		epochCache:     cloneEpochs(ls.epochCache),
-		transitionInfo: ls.transitionInfo,
-	}
+	return ls.consensus.Load()
 }
 
 func (ls *LedgerState) loadTipSnapshot() *tipSnapshot {
-	if snapshot := ls.tip.Load(); snapshot != nil {
-		return snapshot
-	}
-	return &tipSnapshot{
-		generation:           ls.snapshotGeneration,
-		currentTip:           cloneTip(ls.currentTip),
-		currentTipBlockNonce: cloneSnapshotBytes(ls.currentTipBlockNonce),
-	}
+	return ls.tip.Load()
+}
+
+// SetTipForTesting replaces the in-memory tip and publishes a matching
+// snapshot generation. It exists for black-box tests that cannot use the
+// ledger package's white-box snapshot helpers.
+func (ls *LedgerState) SetTipForTesting(tip ochainsync.Tip) {
+	ls.Lock()
+	defer ls.Unlock()
+	ls.currentTip = cloneTip(tip)
+	ls.publishSnapshotsLocked()
 }
 
 func (ls *LedgerState) eraList() []eras.EraDesc {
