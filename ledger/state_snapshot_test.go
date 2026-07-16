@@ -2,9 +2,13 @@ package ledger
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -68,6 +72,47 @@ func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
 	ls.epochCache = append(ls.epochCache, models.Epoch{EpochId: 8})
 	ls.epochCache[0].EpochId = 9
 
+	require.Len(t, oldConsensus.epochCache, 1)
+	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
+}
+
+// TestAdvanceEpochCachePreservesPublishedSnapshot exercises the production
+// writer and verifies that extending the cache cannot alter a retained view.
+func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
+	// An empty nonce selects the deterministic initial-epoch path, allowing the
+	// production writer to run without seeding block-nonce database records.
+	initialEpoch := models.Epoch{
+		EpochId:       7,
+		StartSlot:     70,
+		LengthInSlots: 10,
+		SlotLength:    1_000,
+		EraId:         eras.ConwayEraDesc.Id,
+	}
+	ls := &LedgerState{
+		currentEpoch: initialEpoch,
+		currentEra:   eras.ConwayEraDesc,
+		epochCache:   []models.Epoch{initialEpoch},
+		config: LedgerStateConfig{
+			CardanoNodeConfig: &cardano.CardanoNodeConfig{
+				ShelleyGenesisHash: strings.Repeat("01", 32),
+			},
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+	}
+	// Keep the exact snapshot pointer that a concurrent reader may retain while
+	// advanceEpochCache publishes the next generation.
+	ls.publishSnapshotsLocked()
+	oldConsensus := ls.consensus.Load()
+
+	// Exercise the real header-verification writer rather than reproducing its
+	// copy-on-write logic inside this test.
+	require.NoError(t, ls.advanceEpochCache())
+
+	// The current view must advance, while the retained view must remain on the
+	// original cache and epoch values.
+	newConsensus := ls.consensus.Load()
+	require.Len(t, newConsensus.epochCache, 2)
+	require.Equal(t, uint64(8), newConsensus.epochCache[1].EpochId)
 	require.Len(t, oldConsensus.epochCache, 1)
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
 }
