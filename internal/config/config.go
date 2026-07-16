@@ -388,6 +388,10 @@ func ValidateRuntimeConfig(cfg *Config) error {
 			cfg.RelayPort,
 		)
 	}
+	// ApplyFlags forces cfg.Logging.Level to "debug" before calling this
+	// function when the --debug flag is set, so a --debug run is never
+	// rejected here even if the configured level is invalid: --debug
+	// supersedes it at the point the logger is actually built.
 	switch strings.ToLower(strings.TrimSpace(cfg.Logging.Level)) {
 	case "", "debug", "info", "warn", "warning", "error":
 	default:

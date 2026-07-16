@@ -80,6 +80,96 @@ func TestApplyFlags_ValidShutdownTimeoutOverridesInvalidYAML(t *testing.T) {
 	}
 }
 
+// registerDebugFlag simulates cmd/dingo/main.go's root-level --debug flag,
+// which ApplyFlags reads directly off the FlagSet (it isn't part of
+// flagSpecs/RegisterFlags -- see ApplyFlags' doc comment on the debug
+// override).
+func registerDebugFlag(cmd *cobra.Command) {
+	cmd.PersistentFlags().BoolP("debug", "D", false, "enable debug logging")
+}
+
+// TestApplyFlags_DebugOverridesInvalidYAMLLoggingLevel is the ordering
+// regression for the --debug override: an invalid logging.level from YAML
+// must not fail startup when --debug is passed, since --debug forces debug
+// level at the point cmd/dingo/main.go builds the logger regardless of the
+// configured level.
+func TestApplyFlags_DebugOverridesInvalidYAMLLoggingLevel(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte("logging:\n  level: bogus\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail on a value --debug can supersede: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	registerDebugFlag(cmd)
+	if err := cmd.ParseFlags([]string{"--debug"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("--debug should override an invalid YAML logging.level: %v", err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("Logging.Level = %q, want debug", cfg.Logging.Level)
+	}
+}
+
+// TestApplyFlags_DebugOverridesInvalidEnvLoggingLevel is the env-var
+// counterpart: DINGO_LOGGING_LEVEL=bogus plus --debug must still start
+// cleanly.
+func TestApplyFlags_DebugOverridesInvalidEnvLoggingLevel(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("DINGO_LOGGING_LEVEL", "bogus")
+	cfg, err := LoadConfig("")
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail on a value --debug can supersede: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	registerDebugFlag(cmd)
+	if err := cmd.ParseFlags([]string{"--debug"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("--debug should override an invalid env logging level: %v", err)
+	}
+	if cfg.Logging.Level != "debug" {
+		t.Errorf("Logging.Level = %q, want debug", cfg.Logging.Level)
+	}
+}
+
+// TestApplyFlags_InvalidLoggingLevelStillRejectedWithoutDebug is the control:
+// without --debug, an invalid logging.level must still be rejected.
+func TestApplyFlags_InvalidLoggingLevelStillRejectedWithoutDebug(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte("logging:\n  level: bogus\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	registerDebugFlag(cmd)
+	if err := cmd.ParseFlags(nil); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err == nil {
+		t.Fatal("expected error for invalid logging.level without --debug, got nil")
+	}
+}
+
 func TestApplyFlags_InvalidRelayPortRejected(t *testing.T) {
 	resetGlobalConfig()
 	cfg, err := LoadConfig("")

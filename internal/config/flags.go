@@ -202,8 +202,22 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
-	// Semantic validation runs here, after flags have been merged in, so a
-	// valid --port/--logging-level/--chainsync-strategy/--mithril-backend
+	// --debug is registered directly on the root command by cmd/dingo/main.go
+	// (not part of flagSpecs, since it also toggles AddSource on the logger,
+	// not just a Config field). It is the highest-precedence logging
+	// override: cmd/dingo/main.go's newLogger forces debug level regardless
+	// of the configured Logging.Level. Apply that override to cfg here,
+	// before validation, so a Logging.Level value ValidateRuntimeConfig
+	// would otherwise reject is superseded instead of failing startup.
+	// GetBool returns false (with an error we ignore) when "debug" isn't
+	// registered, e.g. a bare *cobra.Command built by a test or library
+	// caller -- that's equivalent to --debug not being passed.
+	if debugOverride, _ := flags.GetBool("debug"); debugOverride {
+		cfg.Logging.Level = "debug"
+	}
+	// Semantic validation runs here, after flags (including the --debug
+	// override above) have been merged in, so a valid
+	// --port/--logging-level/--chainsync-strategy/--mithril-backend/--debug
 	// flag can override a semantically invalid YAML/env value instead of
 	// LoadConfig rejecting it beforehand. See ValidateRuntimeConfig's doc
 	// comment.
