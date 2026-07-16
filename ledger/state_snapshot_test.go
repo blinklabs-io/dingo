@@ -4,14 +4,18 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
@@ -115,6 +119,165 @@ func TestAdvanceEpochCachePreservesPublishedSnapshot(t *testing.T) {
 	require.Equal(t, uint64(8), newConsensus.epochCache[1].EpochId)
 	require.Len(t, oldConsensus.epochCache, 1)
 	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
+}
+
+// TestEpochRolloverPParamsClonePreservesPublishedSnapshot verifies that epoch
+// updates mutate a transaction-owned parameter value, not a retained snapshot.
+func TestEpochRolloverPParamsClonePreservesPublishedSnapshot(t *testing.T) {
+	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
+	original := &shelley.ShelleyProtocolParameters{
+		MinFeeA:          44,
+		A0:               rat(),
+		Rho:              rat(),
+		Tau:              rat(),
+		Decentralization: rat(),
+	}
+	ls := &LedgerState{
+		currentEra:     eras.ShelleyEraDesc,
+		currentPParams: original,
+	}
+	ls.publishSnapshotsLocked()
+	oldConsensus := ls.consensus.Load()
+
+	// Use the same ownership boundary as processEpochRollover, then exercise
+	// the real era update function, which mutates its concrete pointer in place.
+	owned, err := cloneProtocolParametersForEra(
+		eras.ShelleyEraDesc,
+		oldConsensus.currentPParams,
+	)
+	require.NoError(t, err)
+	newMinFeeA := uint(99)
+	updated, err := eras.PParamsUpdateShelley(
+		owned,
+		shelley.ShelleyProtocolParameterUpdate{MinFeeA: &newMinFeeA},
+	)
+	require.NoError(t, err)
+	updatedShelley := updated.(*shelley.ShelleyProtocolParameters)
+
+	// The in-place scalar update must stay isolated from the protocol parameters
+	// held by the previously published snapshot.
+	oldShelley := oldConsensus.currentPParams.(*shelley.ShelleyProtocolParameters)
+	require.Equal(t, uint(44), oldShelley.MinFeeA)
+	require.Equal(t, uint(99), updatedShelley.MinFeeA)
+}
+
+// TestProcessEpochRolloverAppliesUpdateToOwnedCopy drives the real
+// processEpochRollover writer end-to-end with a pending on-chain pparam
+// update, so the era's update function runs and mutates its concrete
+// parameter pointer in place. A previously published snapshot's pparams must
+// stay untouched; only cloneProtocolParametersForEra's copy may change.
+func TestProcessEpochRolloverAppliesUpdateToOwnedCopy(t *testing.T) {
+	shelleyGenesisJSON := `{
+		"activeSlotsCoeff": 0.05,
+		"securityParam": 432,
+		"epochLength": 432000,
+		"slotLength": 1,
+		"protocolParams": {
+			"protocolVersion": {"major": 2, "minor": 0},
+			"decentralisationParam": 1,
+			"maxBlockBodySize": 65536,
+			"maxBlockHeaderSize": 1100,
+			"maxTxSize": 16384,
+			"minFeeA": 44,
+			"minFeeB": 155381,
+			"minUTxOValue": 1000000,
+			"keyDeposit": 2000000,
+			"poolDeposit": 500000000,
+			"eMax": 18,
+			"nOpt": 150,
+			"a0": 0.3,
+			"rho": 0.003,
+			"tau": 0.2,
+			"minPoolCost": 340000000
+		},
+		"systemStart": "2022-10-25T00:00:00Z"
+	}`
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+	}
+	require.NoError(
+		t,
+		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
+	)
+
+	db, err := database.New(&database.Config{
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+		DataDir:        "",
+	})
+	require.NoError(t, err)
+	defer db.Close()
+
+	currentEpoch := models.Epoch{
+		EpochId:       5,
+		StartSlot:     500,
+		SlotLength:    1000,
+		LengthInSlots: 100,
+		EraId:         eras.ShelleyEraDesc.Id,
+	}
+	require.NoError(t, db.SetEpoch(
+		currentEpoch.StartSlot, currentEpoch.EpochId,
+		nil, nil, nil, nil,
+		currentEpoch.EraId, currentEpoch.SlotLength, currentEpoch.LengthInSlots,
+		nil,
+	))
+
+	// A pending update targeting the rollover's next epoch. Quorum defaults
+	// to 0 (no UpdateQuorum in the genesis JSON above), so a single proposal
+	// is enough for ComputeAndApplyPParamUpdates to apply it.
+	newMinFeeA := uint(99)
+	updateCbor, err := cbor.Encode(&shelley.ShelleyProtocolParameterUpdate{
+		MinFeeA: &newMinFeeA,
+	})
+	require.NoError(t, err)
+	require.NoError(t, db.SetPParamUpdate(
+		[]byte{0x01, 0x02, 0x03},
+		updateCbor,
+		currentEpoch.StartSlot+1,
+		currentEpoch.EpochId+1,
+		nil,
+	))
+
+	rat := func() *cbor.Rat { return &cbor.Rat{Rat: big.NewRat(1, 2)} }
+	original := &shelley.ShelleyProtocolParameters{
+		MinFeeA:          44,
+		A0:               rat(),
+		Rho:              rat(),
+		Tau:              rat(),
+		Decentralization: rat(),
+	}
+	ls := &LedgerState{
+		db:             db,
+		currentEra:     eras.ShelleyEraDesc,
+		currentEpoch:   currentEpoch,
+		currentPParams: original,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+	oldConsensus := ls.consensus.Load()
+
+	var result *EpochRolloverResult
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		var rolloverErr error
+		result, rolloverErr = ls.processEpochRollover(
+			txn,
+			ls.currentEpoch,
+			ls.currentEra,
+			ls.currentPParams,
+		)
+		return rolloverErr
+	}))
+
+	updatedShelley, ok := result.NewCurrentPParams.(*shelley.ShelleyProtocolParameters)
+	require.True(t, ok)
+	require.Equal(t, uint(99), updatedShelley.MinFeeA)
+
+	oldShelley := oldConsensus.currentPParams.(*shelley.ShelleyProtocolParameters)
+	require.Equal(t, uint(44), oldShelley.MinFeeA)
 }
 
 // TestLedgerStateTipGetterReturnsDefensiveHashCopy verifies that callers cannot

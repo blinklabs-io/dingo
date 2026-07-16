@@ -2112,6 +2112,12 @@ nonce belonging to that tip. Hot query paths load these snapshots through
 `atomic.Pointer` without acquiring the state's `RWMutex`; `reachedTip` is an
 `atomic.Bool`. Snapshot containers and their owned byte slices are immutable;
 protocol-parameter values are shared and consumers must treat them as read-only.
+Era-specific parameter-update functions mutate their concrete parameter
+pointer in place, so `processEpochRollover` clones the current protocol
+parameters (`cloneProtocolParametersForEra`) into a transaction-owned value
+before running them; without that clone, an epoch boundary applying an
+on-chain pparam update would mutate the pointee that a published snapshot's
+`currentPParams`/`prevEraPParams` still reference.
 
 Runtime ledger writers remain serialized by the existing mutex. They compute
 changes privately, update the writer-owned state, and publish a complete
