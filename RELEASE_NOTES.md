@@ -38,7 +38,7 @@ Thank you for trying!
 
 ### 🔧 修正
 
-* 復旧しました **committee parameter がない場合でも Leios committee formation を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、network configuration で値が未設定のときに標準の committee threshold を使うようになり、pinned な network configuration を編集しなくても committee formation、voting、endorser block certification を継続できます。結果のしきい値が不正な場合は、Dingo は引き続き明確な error で停止します。
+* 復旧しました **committee parameter が未設定でも Leios committee formation を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、network configuration で値が未設定のときに標準の committee threshold を使うようになり、pinned な network configuration を編集しなくても committee formation、voting、endorser block certification を継続できます。結果のしきい値が不正な場合は、Dingo は引き続き明確な error で停止します。
 
 ### 推奨ネットワーク互換性 ⚠️
 
