@@ -1803,7 +1803,12 @@ defaults are derived from other settings (an empty `runMode` selects `serve`;
 `mempoolCapacity` defaults by run mode — Leios raises it — and the watermarks,
 forge slot thresholds, and history-expiry frequency take their standard
 values), and then `Config.Validate()` checks the resulting configuration
-before any services start: mode enums, listener port ranges (privileged/out-of-range/duplicate),
+before any services start. Topology resolution
+(`config.LoadTopologyConfig`) runs last, only after the merged
+configuration is defaulted and valid, because it derives from the
+`network` and `topology` settings — resolving it earlier could reject a
+YAML or environment value that a CLI flag has since repaired. Validate
+checks: mode enums, listener port ranges (privileged/out-of-range/duplicate),
 load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
 pairing, mempool watermarks, block-producer credential paths, and
 duration/strategy strings that are otherwise only parsed at their point of use.

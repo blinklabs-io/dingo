@@ -460,6 +460,14 @@ DSN Override:
 			return fmt.Errorf("invalid configuration: %w", err)
 		}
 
+		// Topology derives from the network and topology settings, so it
+		// is resolved only now that the merged configuration is final and
+		// valid — resolving it earlier could reject a YAML/env value a
+		// CLI flag has since repaired.
+		if _, err := config.LoadTopologyConfig(); err != nil {
+			return fmt.Errorf("loading topology: %w", err)
+		}
+
 		cmd.SetContext(config.WithContext(cmd.Context(), cfg))
 		return nil
 	}

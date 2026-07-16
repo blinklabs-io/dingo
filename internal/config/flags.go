@@ -209,9 +209,10 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 	}
 	applyMidnightNetworkDefaults(cfg)
 	globalConfig = cfg
-	if _, err := LoadTopologyConfig(); err != nil {
-		return fmt.Errorf("loading topology after flags: %w", err)
-	}
+	// Topology is not resolved here: Network and Topology are final at
+	// this point, but the merged configuration has not been validated
+	// yet, so cmd/dingo loads topology once after ApplyDefaults and
+	// Validate.
 	return nil
 }
 

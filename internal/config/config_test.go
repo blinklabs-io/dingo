@@ -606,6 +606,11 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
 	}
 
+	// Topology is resolved separately from LoadConfig, once the merged
+	// configuration is final (see cmd/dingo)
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
 		t.Fatalf(

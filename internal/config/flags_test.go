@@ -368,7 +368,11 @@ func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	}
 }
 
-func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
+// TestTopologyResolvesFromNetworkFlag pins topology resolution to the
+// final merged configuration: LoadTopologyConfig runs only after
+// ApplyFlags (see cmd/dingo), so a --network override determines which
+// network's topology is loaded.
+func TestTopologyResolvesFromNetworkFlag(t *testing.T) {
 	resetGlobalConfig()
 
 	cfg, err := LoadConfig("")
@@ -392,9 +396,12 @@ func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
 	if cfg.Network != "preprod" {
 		t.Fatalf("expected network preprod, got %q", cfg.Network)
 	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshot == nil {
-		t.Fatal("expected topology reload to load preprod peer snapshot")
+		t.Fatal("expected topology load to use the preprod peer snapshot")
 	}
 	if topologyConfig.PeerSnapshot.NetworkMagic != 1 {
 		t.Fatalf(
@@ -405,9 +412,10 @@ func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
 }
 
 // loadConfigThroughPipeline runs the full cmd/dingo configuration
-// pipeline — LoadConfig, ApplyFlags, ApplyDefaults — on the given YAML
-// and CLI arguments and returns the merged config alongside the
-// validation result, mirroring PersistentPreRunE in cmd/dingo.
+// pipeline — LoadConfig, ApplyFlags, ApplyDefaults, validate, and
+// topology resolution — on the given YAML and CLI arguments and returns
+// the merged config alongside the validation/topology result, mirroring
+// PersistentPreRunE in cmd/dingo.
 func loadConfigThroughPipeline(
 	t *testing.T,
 	yaml string,
@@ -433,7 +441,13 @@ func loadConfigThroughPipeline(
 		t.Fatalf("ApplyFlags: %v", err)
 	}
 	cfg.ApplyDefaults()
-	return cfg, cfg.validate(cfg.RunMode, minUnprivilegedPort)
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		return cfg, err
+	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 // TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
@@ -504,6 +518,61 @@ func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork is a precedence
+// regression test for topology ordering: a traversal-shaped YAML
+// network must not abort config loading or topology resolution before
+// a --network flag replaces it. Without the override the same value
+// must still be rejected — by Validate, not LoadConfig.
+func TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork(t *testing.T) {
+	yaml := "network: \"../bad\"\n"
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--network=preview"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Errorf("Network = %q, want %q", cfg.Network, "preview")
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid network name") {
+		t.Fatalf("expected invalid network name error, got: %v", err)
+	}
+}
+
+// TestPipeline_TopologyFlagRepairsMissingYAMLTopology pins the same
+// ordering for the topology file itself: a missing YAML topology path
+// must not abort before a --topology flag replaces it, and must still
+// fail topology resolution without the override.
+func TestPipeline_TopologyFlagRepairsMissingYAMLTopology(t *testing.T) {
+	yaml := "topology: \"/nonexistent/topology.json\"\n"
+	validTopology := filepath.Join(t.TempDir(), "topology.json")
+	if err := os.WriteFile(
+		validTopology,
+		[]byte(`{"localRoots": [], "publicRoots": []}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("failed to write topology file: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--topology=" + validTopology},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Topology != validTopology {
+		t.Errorf("Topology = %q, want %q", cfg.Topology, validTopology)
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "topology") {
+		t.Fatalf("expected topology load error, got: %v", err)
 	}
 }
 

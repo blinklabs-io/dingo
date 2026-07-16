@@ -1009,12 +1009,11 @@ func LoadConfig(configFile string) (*Config, error) {
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go
 	// PersistentPreRunE). Each consumer resolves the cardano config
-	// path using cfg.Network at call time instead.
+	// path using cfg.Network at call time instead. Topology is likewise
+	// not resolved here: it derives from Network and Topology, both of
+	// which a CLI flag may still change, so cmd/dingo loads it once
+	// after the merged configuration has been defaulted and validated.
 
-	_, err = LoadTopologyConfig()
-	if err != nil {
-		return nil, fmt.Errorf("error loading topology: %+w", err)
-	}
 	return globalConfig, nil
 }
 
