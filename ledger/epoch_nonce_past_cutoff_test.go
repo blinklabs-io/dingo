@@ -142,6 +142,7 @@ func TestEpochNonce_SnapshotTipPastCutoff(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	// Header-verification (eager) path.
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=

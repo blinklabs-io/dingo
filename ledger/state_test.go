@@ -968,7 +968,7 @@ func newNonceReadyTestLedgerState(
 ) *LedgerState {
 	t.Helper()
 
-	return &LedgerState{
+	ls := &LedgerState{
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{
 			EpochId:             10,
@@ -991,6 +991,8 @@ func newNonceReadyTestLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
@@ -1111,6 +1113,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.True(t, ok)
@@ -1158,6 +1161,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	got := ls.computeNextEpochNonce(ls.currentEpoch, ls.currentEra)
 	require.Equal(t, candidateNonce, got)
@@ -1224,6 +1228,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.False(t, ok)

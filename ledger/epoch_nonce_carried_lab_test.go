@@ -107,6 +107,7 @@ func TestEpochNonceUsesCarriedLastEpochBlockNonce(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	hvNonce, _, hvCandidate, hvLab, err :=
 		ls.computeEpochNonceForSlot(epochEnd, prevEpoch)
@@ -192,6 +193,7 @@ func TestEpochNonceGenesisEdgeUsesNeutralLab(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=
 		ls.computeEpochNonceForSlot(500, initialEpoch)

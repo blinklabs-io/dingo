@@ -82,6 +82,7 @@ func TestProtocolParamsForSlot_ForecastsBumpAtBoundarySlot(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	// Slot 74: last slot of epoch 0. Still Shelley by every measure —
 	// the schedule's trigger fires AT epoch 1, not before.
