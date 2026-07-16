@@ -1454,10 +1454,16 @@ internal address (the one actually dialed), causing the node to TCP-probe
 internal addresses (a DNS-rebind attack; see issue #2435). The trade-off is
 that a multi-homed ledger relay does not get the load-spreading/backend-
 escape behavior described above; that is intentional given the untrusted
-input. Two refinements on that fallback resolution: the record locked in is
-filtered to the locally-supported address families first (same filter as the
-per-attempt path above), so a v4-only host doesn't get permanently pinned to
-an unreachable AAAA record it can never re-roll; and the write-back is
+input.
+
+Because the record chosen here — whether at discovery or in the fallback
+resolution — is what gets dialed for the peer's entire lifetime with no later
+attempt to self-correct, both resolution points filter to the
+locally-supported address families first (the same filter the per-attempt
+path above uses): `addLedgerPeer` calls `resolveLedgerDiscoveryAddress`
+rather than the generic `resolveAddress` used by every other peer source, so
+a v4-only host is never pinned to an unreachable AAAA record just because DNS
+answered with it first. Separately, the fallback resolution's write-back is
 skipped if another distinct peer entry already owns the resolved
 `NormalizedAddress`, since `peerIndexByAddress` assumes that field uniquely
 identifies a peer — colliding would misdirect that peer's connection

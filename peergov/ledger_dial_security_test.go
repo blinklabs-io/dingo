@@ -411,3 +411,39 @@ func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
 	)
 	assert.Equal(t, "198.51.100.42:3001", existing.NormalizedAddress)
 }
+
+// TestAddLedgerPeerPrefersLocallySupportedFamily verifies the common
+// discovery-time path, not just the resolveLedgerDialTarget fallback: when
+// addLedgerPeer resolves a relay hostname with mixed A/AAAA records, the
+// record it stores in NormalizedAddress must be one the local host can
+// actually dial. Without this, a v4-only host would lock onto whatever
+// record DNS happens to answer first — here an AAAA record — and
+// resolveLedgerDialTarget's fast path would then dial that unreachable
+// family for the peer's entire lifetime, since (unlike resolveDialAddress)
+// nothing ever re-resolves it.
+func TestAddLedgerPeerPrefersLocallySupportedFamily(t *testing.T) {
+	setLocalAddrFamilies(t, true, false) // v4-only host
+
+	oldLookupIP := lookupIP
+	lookupIP = func(string) ([]net.IP, error) {
+		return []net.IP{
+			net.ParseIP("2001:db8::1"), // AAAA returned first
+			net.ParseIP("198.51.100.9"),
+		}, nil
+	}
+	t.Cleanup(func() { lookupIP = oldLookupIP })
+
+	pg := newDialSpreadGovernor()
+	require.True(t, pg.addLedgerPeer("relay.example.com:3001"))
+	require.Len(t, pg.peers, 1)
+	assert.Equal(
+		t,
+		"198.51.100.9:3001",
+		pg.peers[0].NormalizedAddress,
+		"must store the IPv4 record on a v4-only host, not the first (IPv6) DNS answer",
+	)
+
+	got, err := pg.resolveLedgerDialTarget(t.Context(), pg.peers[0])
+	require.NoError(t, err)
+	assert.Equal(t, "198.51.100.9:3001", got)
+}

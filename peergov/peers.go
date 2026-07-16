@@ -276,6 +276,52 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	return net.JoinHostPort(ips[0].String(), port)
 }
 
+// resolveLedgerDiscoveryAddress resolves a ledger relay hostname at initial
+// discovery time, filtering the resolved records to the locally-supported
+// address families before picking one. This function performs blocking DNS
+// lookups and must NOT be called while holding locks.
+//
+// It is ledger-specific rather than a change to resolveAddress (shared by
+// every peer source — topology, gossip, inbound, TestPeer/DenyPeer lookups)
+// because the record chosen here matters far more than it does for those
+// other sources: resolveLedgerDialTarget's fast path reuses whatever ends up
+// in NormalizedAddress unchanged and dials it for the rest of the peer's
+// lifetime, whereas every other source re-resolves (and re-filters via
+// resolveDialAddress) on every dial attempt. Without this, a v4-only host
+// could pin a ledger peer to an unreachable AAAA record forever, since
+// there is no later attempt to self-correct the family.
+//
+// Behavior otherwise matches resolveAddress: an IP literal is normalized
+// unchanged, and a resolution failure or empty result falls back to the
+// lowercased hostname so the peer is still added (with routability decided
+// downstream) rather than dropped.
+func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return strings.ToLower(address)
+	}
+
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return net.JoinHostPort(ip.String(), port)
+	}
+
+	ips, err := lookupIP(host)
+	if err != nil || len(ips) == 0 {
+		p.config.Logger.Warn(
+			"failed to resolve ledger relay hostname",
+			"address", address,
+			"host", host,
+			"error", err,
+		)
+		return net.JoinHostPort(strings.ToLower(host), port)
+	}
+
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	return net.JoinHostPort(ips[0].String(), port)
+}
+
 // resolveDialAddress returns the concrete transport target to dial for an
 // outbound connection attempt against the given peer address.
 //
