@@ -18,11 +18,14 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/eras"
+	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
 	"github.com/stretchr/testify/require"
 )
@@ -145,5 +148,88 @@ func newAllegraAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
 	allegraEpoch := uint64(1)
 	cfg.ExperimentalHardForksEnabled = &enabled
 	cfg.TestAllegraHardForkAtEpoch = &allegraEpoch
+	return cfg
+}
+
+// TestProtocolParamsForSlot_ConcurrentPostForkCallsDoNotRaceOnCostModels
+// guards against a concurrent map write crash, not just a -race warning.
+// ProtocolParamsForSlot forecasts across a scheduled fork by calling
+// HardForkFunc directly on the published snapshot's currentPParams; if a
+// HardForkFunc wrapper shares its input's CostModels map instead of cloning
+// it (the shape gouroboros's UpgradePParams produces — it copies the
+// pparams struct but not the map), concurrent forecasts for the same
+// post-fork slot become concurrent writes into that one shared map, which
+// Go's runtime terminates the process for rather than reporting as a
+// data race. HardForkBabbage (and Conway/Dijkstra) must clone CostModels
+// before writing to it for this to be safe.
+func TestProtocolParamsForSlot_ConcurrentPostForkCallsDoNotRaceOnCostModels(
+	t *testing.T,
+) {
+	cfg := newAlonzoBabbageAtEpoch1Cfg(t)
+
+	pparams := &alonzo.AlonzoProtocolParameters{
+		ProtocolMajor: eras.AlonzoEraDesc.MaxMajorVersion,
+		CostModels: map[uint][]int64{
+			0: {1, 2, 3},
+		},
+	}
+
+	ls := &LedgerState{
+		currentEra: eras.AlonzoEraDesc,
+		currentEpoch: models.Epoch{
+			EpochId:       0,
+			StartSlot:     0,
+			LengthInSlots: 75,
+			SlotLength:    1000,
+			EraId:         eras.AlonzoEraDesc.Id,
+		},
+		currentPParams: pparams,
+		config: LedgerStateConfig{
+			CardanoNodeConfig: cfg,
+			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		},
+	}
+	ls.publishSnapshotsLocked()
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got := ls.ProtocolParamsForSlot(75)
+			babbagePParams, ok := got.(*babbage.BabbageProtocolParameters)
+			require.True(t, ok)
+			require.NotEmpty(t, babbagePParams.CostModels)
+		}()
+	}
+	wg.Wait()
+}
+
+// newAlonzoBabbageAtEpoch1Cfg schedules Babbage at epoch 1 (slot 75 with
+// epochLength=75), mirroring newAllegraAtEpoch1Cfg's shape but for the
+// CostModels-bearing Alonzo->Babbage transition.
+func newAlonzoBabbageAtEpoch1Cfg(t *testing.T) *cardano.CardanoNodeConfig {
+	t.Helper()
+	cfg := &cardano.CardanoNodeConfig{
+		ShelleyGenesisHash: strings.Repeat("11", 32),
+	}
+	require.NoError(t, cfg.LoadByronGenesisFromReader(strings.NewReader(`{
+		"protocolConsts": {
+			"k": 6,
+			"protocolMagic": 42
+		}
+	}`)))
+	require.NoError(t, cfg.LoadShelleyGenesisFromReader(strings.NewReader(`{
+		"systemStart": "2026-01-01T00:00:00Z",
+		"securityParam": 6,
+		"activeSlotsCoeff": 0.4,
+		"epochLength": 75,
+		"slotLength": 1
+	}`)))
+	enabled := true
+	babbageEpoch := uint64(1)
+	cfg.ExperimentalHardForksEnabled = &enabled
+	cfg.TestBabbageHardForkAtEpoch = &babbageEpoch
 	return cfg
 }
