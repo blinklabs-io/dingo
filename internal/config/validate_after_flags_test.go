@@ -49,12 +49,13 @@ func TestLoad_InvalidRelayPortRejected(t *testing.T) {
 	}
 }
 
-// TestApplyFlags_ValidPortOverridesInvalidYAML is the ordering regression:
-// an out-of-range relayPort from YAML must not fail startup when a valid
-// --port flag is supplied to override it. Before ValidateRuntimeConfig was
-// deferred to ApplyFlags, LoadConfig ran this validation itself and returned
-// an error here before ApplyFlags ever got a chance to apply the override.
-func TestApplyFlags_ValidPortOverridesInvalidYAML(t *testing.T) {
+// TestApplyFlags_ValidShutdownTimeoutOverridesInvalidYAML is the ordering
+// regression: a non-positive shutdownTimeout from YAML must not fail startup
+// when a valid --shutdown-timeout flag is supplied to override it. Before
+// ValidateRuntimeConfig was deferred to ApplyFlags, LoadConfig ran this
+// validation itself and returned an error here before ApplyFlags ever got a
+// chance to apply the override.
+func TestApplyFlags_ValidShutdownTimeoutOverridesInvalidYAML(t *testing.T) {
 	resetGlobalConfig()
 	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	if err := os.WriteFile(tmpFile, []byte("shutdownTimeout: \"0s\"\n"), 0o644); err != nil {
