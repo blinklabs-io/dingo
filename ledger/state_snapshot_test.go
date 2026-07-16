@@ -53,6 +53,25 @@ func TestLedgerStateSnapshotPublicationIsImmutable(t *testing.T) {
 	require.Equal(t, byte(17), oldTip.currentTipBlockNonce[0])
 }
 
+// TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend verifies that
+// publication removes spare capacity from the writer's cache view. An
+// accidental append must allocate instead of extending storage shared with a
+// snapshot retained by a concurrent reader.
+func TestLedgerStatePublishedEpochCacheRejectsInPlaceAppend(t *testing.T) {
+	cache := make([]models.Epoch, 1, 2)
+	cache[0] = models.Epoch{EpochId: 7}
+	ls := &LedgerState{epochCache: cache}
+	ls.publishSnapshotsLocked()
+
+	oldConsensus := ls.consensus.Load()
+	require.Equal(t, len(ls.epochCache), cap(ls.epochCache))
+	ls.epochCache = append(ls.epochCache, models.Epoch{EpochId: 8})
+	ls.epochCache[0].EpochId = 9
+
+	require.Len(t, oldConsensus.epochCache, 1)
+	require.Equal(t, uint64(7), oldConsensus.epochCache[0].EpochId)
+}
+
 // TestLedgerStateTipGetterReturnsDefensiveHashCopy verifies that callers cannot
 // mutate the published tip hash through the value returned by Tip.
 func TestLedgerStateTipGetterReturnsDefensiveHashCopy(t *testing.T) {

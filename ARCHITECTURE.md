@@ -2104,19 +2104,24 @@ Database operations and event delivery use worker pools for controlled concurren
 | Worker Pools | Database operations and event delivery |
 | sync.Once | Ensure single shutdown execution |
 
-`LedgerState` publishes its read-mostly state through two immutable
-copy-on-write snapshots. The consensus snapshot groups the current epoch, era,
-current and previous-era protocol parameters, epoch cache, and hard-fork
-transition information. The tip snapshot groups the applied chain tip with the
-Praos block nonce belonging to that tip. Hot query paths load these snapshots
-through `atomic.Pointer` without acquiring the state's `RWMutex`; `reachedTip`
-is an `atomic.Bool`.
+`LedgerState` publishes its read-mostly state through two copy-on-write
+snapshots. The consensus snapshot groups the current epoch, era, current and
+previous-era protocol parameters, epoch cache, and hard-fork transition
+information. The tip snapshot groups the applied chain tip with the Praos block
+nonce belonging to that tip. Hot query paths load these snapshots through
+`atomic.Pointer` without acquiring the state's `RWMutex`; `reachedTip` is an
+`atomic.Bool`. Snapshot containers and their owned byte slices are immutable;
+protocol-parameter values are shared and consumers must treat them as read-only.
 
 Ledger writers remain serialized by the existing mutex. They compute changes
 privately, update the writer-owned state, and publish a complete replacement
-snapshot before unlocking. Slice-backed epoch nonces, tip hashes, and block
-nonces are copied at publication boundaries and published snapshots must never
-be mutated. Each snapshot is internally consistent, but a caller loading both
+snapshot before unlocking. Tip hashes, block nonces, and the current epoch's
+nonce fields are copied at publication. The full historical epoch cache is
+instead shared by reference to avoid an allocation whose cost grows with chain
+age on every block: writers must replace the cache and nested nonce slices
+before modifying them. Publication caps the cache capacity so even an accidental
+append allocates a new backing array. Each snapshot is internally consistent,
+but a caller loading both
 snapshot pointers could otherwise observe adjacent publication generations.
 Each publication therefore stamps both snapshots with one generation, and code
 requiring fields from both uses a paired-load helper that retries until the

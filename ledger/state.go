@@ -533,7 +533,8 @@ type slotBattleRecorderHolder struct {
 
 // consensusSnapshot contains ledger state that is read frequently and updated
 // as one logical unit at epoch/era boundaries and during rollback. Published
-// snapshots are immutable.
+// snapshot containers and their owned slices are immutable. Protocol parameter
+// values are shared with writer state and must be treated as read-only.
 type consensusSnapshot struct {
 	generation     uint64
 	currentEpoch   models.Epoch
@@ -791,15 +792,20 @@ func cloneEpochs(values []models.Epoch) []models.Epoch {
 func (ls *LedgerState) publishSnapshotsLocked() {
 	ls.snapshotGeneration++
 	generation := ls.snapshotGeneration
+	// Prevent a later append to the writer-owned slice from reusing storage
+	// visible to an already-published snapshot. Element updates still require
+	// replacing the cache and its slice-backed Epoch fields.
+	ls.epochCache = ls.epochCache[:len(ls.epochCache):len(ls.epochCache)]
 	ls.consensus.Store(&consensusSnapshot{
 		generation:     generation,
 		currentEpoch:   cloneEpoch(ls.currentEpoch),
 		currentEra:     ls.currentEra,
 		currentPParams: ls.currentPParams,
 		prevEraPParams: ls.prevEraPParams,
-		// epochCache is immutable after publication. Writers replace it with a
-		// fresh slice, so tip-only publications can safely reuse the existing
-		// cache instead of copying the full epoch history for every block.
+		// epochCache is immutable after publication. Writers replace it for
+		// element updates; its capped capacity also forces accidental appends to
+		// allocate. Tip-only publications can therefore safely reuse it instead
+		// of copying the full epoch history for every block.
 		epochCache:     ls.epochCache,
 		transitionInfo: ls.transitionInfo,
 	})
