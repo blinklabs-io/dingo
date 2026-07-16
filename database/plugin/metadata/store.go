@@ -422,11 +422,12 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, error)
 
-	// GetRewardStakeInputsAtSlot returns positive per-account delegated stake
-	// for pools from the live reward stake aggregate.
-	GetRewardStakeInputsAtSlot(
+	// GetRewardStakeInputsForPools returns positive per-account delegated stake
+	// for pools from the live reward stake aggregate. The aggregate always
+	// reflects the caller's transaction view, so there is no slot argument:
+	// callers scope the result by opening the transaction at the desired point.
+	GetRewardStakeInputsForPools(
 		[][]byte, // poolKeyHashes
-		uint64, // slot
 		types.Txn,
 	) ([]*models.RewardStakeInput, error)
 
@@ -1109,11 +1110,24 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
-	// SaveRewardSnapshot saves reward snapshot metadata for an epoch.
+	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
+	// overwriting any existing row for the (epoch, snapshot_type) pair
+	// (including its authoritative flag). Used by the authoritative
+	// epoch-rollover capture, which must always win over a fallback row.
 	SaveRewardSnapshot(
 		*models.RewardSnapshot,
 		types.Txn,
 	) error
+
+	// ClaimFallbackRewardSnapshot atomically reserves the (epoch, snapshot_type)
+	// reward snapshot marker for a fallback (non-authoritative) capture,
+	// returning false when an authoritative snapshot already occupies it so the
+	// caller abandons the fallback rather than overwriting the authoritative
+	// row. See rewardstate.ClaimFallbackSnapshot.
+	ClaimFallbackRewardSnapshot(
+		*models.RewardSnapshot,
+		types.Txn,
+	) (bool, error)
 
 	// GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
 	GetRewardSnapshot(

@@ -583,6 +583,15 @@ func (n *Node) Run(ctx context.Context) error {
 		n.config.logger,
 	)
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Wire the authoritative epoch-boundary capture before block sync begins so
+	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
+	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
+	// only the event-driven fallback capture.
+	n.ledgerState.SetEpochBoundarySnapshotHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {

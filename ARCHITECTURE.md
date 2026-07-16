@@ -664,8 +664,12 @@ When `Node.Run()` is called, components are initialized in this order:
     across any Mithril "gap blocks" (see Mithril Bootstrap) before header
     verification computes an epoch nonce; only then does LedgerState subscribe
     to chainsync/blockfetch/chain-update EventBus events.
-10. Snapshot manager start (captures genesis snapshot, or reuses an existing
-    post-Mithril Mark snapshot window)
+10. Snapshot manager creation, then `LedgerState.SetEpochBoundarySnapshotHook`
+    wiring (authoritative epoch-boundary capture), then genesis snapshot capture
+    (or reuse of an existing post-Mithril Mark snapshot window), then manager
+    start. The hook is installed before genesis capture and block sync so every
+    subsequent epoch rollover stages its Mark snapshot inside the rollover
+    transaction.
 11. Mempool setup and injection into LedgerState/Ouroboros
 12. ChainsyncState (multi-client tracking, stall detection)
 13. ChainSelector (genesis/Praos comparison) start
@@ -2199,14 +2203,30 @@ totalStake, err := ledgerView.GetTotalActiveStake(epoch)
 
 ### Boundary Capture And Events
 
-`Manager.CaptureEpochBoundarySnapshot` is the authoritative capture API for
-composition code to call inside the ledger rollover transaction at the
-cardano-ledger SNAP point: after delayed rewards and MIR, before POOLREAP,
-protocol-parameter updates, governance enactment, donations, and the new epoch
-row. It replaces the epoch's Mark rows and reward input bundle using the same
-transaction view as the surrounding boundary changes.
+`Manager.CaptureEpochBoundarySnapshot` is the authoritative capture API. It is
+installed at node startup via `LedgerState.SetEpochBoundarySnapshotHook` (wired
+in `node.go` to the snapshot manager before block sync begins) and invoked from
+inside the `processEpochRollover` write transaction, so the epoch's Mark rows and
+reward input bundle commit atomically with the boundary state changes and share
+their transaction view. The hook runs at the end of the rollover, after the new
+epoch row exists, because the capture needs that epoch's nonce and boundary slot.
+In dingo's rollover ordering this is after POOLREAP/MIR/governance/donations
+rather than the cardano-ledger "before POOLREAP" SNAP point; for Conway (MIR is a
+no-op) and the current capture-only feature scope this matches the tested
+post-rollover state. A cardano-exact pre-POOLREAP capture would require splitting
+the rollover to compute the stake distribution early and write the rows once the
+new epoch nonce is known. This wiring is consensus-affecting and must be
+DevNet-validated before merge (see the note at the end of this section).
 
-`EpochTransitionEvent` remains the asynchronous rotation and cleanup signal:
+The capture is wrapped in a metadata savepoint: if it fails, only its own writes
+roll back and the rollover proceeds, deferring to the event-driven fallback
+rather than wedging the epoch boundary. When no hook is installed the ledger
+relies solely on the fallback capture, preserving the pre-wiring behavior.
+
+`EpochTransitionEvent` remains the asynchronous rotation and cleanup signal, and
+the event-driven `captureMarkSnapshot` is the fallback capture used when the
+authoritative capture did not run (no hook installed, or a capture failure) or
+when only a provisional slot-clock event has fired:
 
 ```go
 type EpochTransitionEvent struct {
@@ -2223,17 +2243,28 @@ Epoch transition events may come from block processing or the slot clock. The
 slot clock only emits proactive epoch transitions when the ledger tip is within
 the current era's stability window of the upstream tip; while farther behind,
 block processing owns historical epoch transitions during catch-up.
-The event loop treats an existing Mark `RewardSnapshot` as authoritative: it
-skips fallback capture and continues with rotation and cleanup, preventing a
-later event from replacing the transaction-phase SNAP view with post-POOLREAP
-state.
 
-The fallback write repeats that authoritative-row check inside its own database
-transaction before deleting or replacing anything. This closes the race where
-a slot-clock event begins a live-distribution calculation before authoritative
-capture commits, then otherwise writes its stale result after the commit. The
-authoritative path does not use this guard and can replace an earlier fallback
-capture.
+Authoritative-vs-fallback ordering is enforced by the
+`reward_snapshot.authoritative` marker (see DATABASE.md). The authoritative
+capture writes the marker with `authoritative = true` and always overwrites a
+provisional row. The fallback capture claims the `(epoch, mark)` marker
+atomically — INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck — as
+the first write of its transaction, before the pool-stake snapshot, and is
+superseded (skips the whole capture) whenever an authoritative row already
+exists. Because the marker is the first row both paths write, they acquire the
+`reward_snapshot` row lock in the same order, which keeps a concurrent
+authoritative-vs-fallback capture both race-free and deadlock-free on
+MySQL/Postgres; SQLite is already serial. `handleEpochTransition`'s pre-check
+that skips the fallback when an authoritative row exists is a best-effort
+optimization — the marker claim, not that read, is what closes the race.
+
+DevNet gate: wiring the authoritative capture into `processEpochRollover` touches
+consensus-critical epoch-boundary code (it changes the Mark `PoolStakeSnapshot`
+that leader election reads, and the exact SNAP-point placement affects
+Shelley-era replay once the reward-calculation consumer lands). It must be run
+through the DevNet harness (`internal/test/devnet/`) against cardano-node before
+merge; unit and conformance tests do not exercise the concurrent MySQL/Postgres
+capture paths.
 
 ### Epoch Boundary State Transitions
 
@@ -2261,10 +2292,17 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    warning surfaces an unexpectedly slow tally rather than letting it present as
    a silent stalled rollover.
 4. Treasury donations (`applyEpochDonations`), added after withdrawals.
+5. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
+6. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
+   `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
+   run last so the new epoch's nonce and boundary slot are available, inside a
+   metadata savepoint so a capture failure defers to the event-driven fallback
+   instead of aborting the rollover. See "Boundary Capture And Events" for the
+   SNAP-point placement caveat and the DevNet gate.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 3. The ordering is locked in by
-`TestProcessEpochRollover_OrderingInvariant`.
+visible to the withdrawals checked in step 3. The ordering of steps 1-4 is
+locked in by `TestProcessEpochRollover_OrderingInvariant`.
 
 ### Rollback Support
 

@@ -58,6 +58,19 @@ func (d *MetadataStoreSqlite) SaveRewardSnapshot(
 	return rewardstate.SaveSnapshot(db, snapshot)
 }
 
+// ClaimFallbackRewardSnapshot atomically reserves the reward snapshot marker
+// for a fallback capture.
+func (d *MetadataStoreSqlite) ClaimFallbackRewardSnapshot(
+	snapshot *models.RewardSnapshot,
+	txn types.Txn,
+) (bool, error) {
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return false, fmt.Errorf("ClaimFallbackRewardSnapshot: resolve db: %w", err)
+	}
+	return rewardstate.ClaimFallbackSnapshot(db, snapshot)
+}
+
 // GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
 func (d *MetadataStoreSqlite) GetRewardSnapshot(
 	epoch uint64,
@@ -98,16 +111,16 @@ func (d *MetadataStoreSqlite) GetRewardPoolInputs(
 	return rewardstate.GetPoolInputs(db, epoch)
 }
 
-func (d *MetadataStoreSqlite) GetRewardStakeInputsAtSlot(
-	poolKeyHashes [][]byte, _ uint64, txn types.Txn,
+func (d *MetadataStoreSqlite) GetRewardStakeInputsForPools(
+	poolKeyHashes [][]byte, txn types.Txn,
 ) ([]*models.RewardStakeInput, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
-		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: resolve db: %w", err)
+		return nil, fmt.Errorf("GetRewardStakeInputsForPools: resolve db: %w", err)
 	}
-	inputs, err := rewardstate.StakeInputsAtSlot(db, poolKeyHashes, sqliteBindVarLimit)
+	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, sqliteBindVarLimit)
 	if err != nil {
-		return nil, fmt.Errorf("GetRewardStakeInputsAtSlot: %w", err)
+		return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
 	}
 	return inputs, nil
 }

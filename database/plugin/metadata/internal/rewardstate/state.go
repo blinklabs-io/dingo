@@ -68,7 +68,11 @@ func GetAdaPots(
 	return &pots, nil
 }
 
-// SaveSnapshot saves reward snapshot metadata for an epoch.
+// SaveSnapshot saves reward snapshot metadata for an epoch. It overwrites any
+// existing row for the (epoch, snapshot_type) pair, including its authoritative
+// flag, so the authoritative epoch-rollover capture always wins over a
+// provisional fallback row. The fallback path must use ClaimFallbackSnapshot
+// instead, which refuses to overwrite an authoritative row.
 func SaveSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) error {
 	if err := db.Clauses(
 		clause.OnConflict{
@@ -84,12 +88,76 @@ func SaveSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) error {
 				"boundary_slot",
 				"epoch_nonce",
 				"protocol_version",
+				"authoritative",
 			}),
 		},
 	).Create(snapshot).Error; err != nil {
 		return fmt.Errorf("save reward snapshot: %w", err)
 	}
 	return nil
+}
+
+// ClaimFallbackSnapshot atomically reserves the (epoch, snapshot_type) reward
+// snapshot marker for a fallback (non-authoritative) capture. snapshot must
+// carry Authoritative=false. It returns proceed=false when an authoritative
+// snapshot already occupies the slot, so the caller must abandon the fallback
+// capture instead of overwriting it.
+//
+// The claim is an INSERT ... ON CONFLICT DO NOTHING followed, on conflict, by a
+// locking (SELECT ... FOR UPDATE) recheck. The row lock is what a concurrent
+// authoritative writer blocks on under MySQL/Postgres READ COMMITTED, closing
+// the check-then-write race; SQLite drops the lock clause but its single-writer
+// transaction semantics provide the same serialization. A prior non-authoritative
+// row (e.g. a slot-clock provisional) is replaced in place under the held lock.
+func ClaimFallbackSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) (bool, error) {
+	snapshot.Authoritative = false
+	res := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "epoch"},
+			{Name: "snapshot_type"},
+		},
+		DoNothing: true,
+	}).Create(snapshot)
+	if res.Error != nil {
+		return false, fmt.Errorf("claim fallback reward snapshot: %w", res.Error)
+	}
+	if res.RowsAffected == 1 {
+		// Won the slot outright: our row is the marker.
+		return true, nil
+	}
+	// A row already exists. Lock it and inspect the authoritative flag.
+	var existing models.RewardSnapshot
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where(
+			"epoch = ? AND snapshot_type = ?",
+			snapshot.Epoch,
+			snapshot.SnapshotType,
+		).First(&existing).Error; err != nil {
+		return false, fmt.Errorf("lock existing reward snapshot: %w", err)
+	}
+	if existing.Authoritative {
+		return false, nil
+	}
+	// Prior provisional (fallback) row: replace it in place while holding the
+	// lock so the refreshed boundary/nonce/totals take effect.
+	if err := db.Model(&models.RewardSnapshot{}).
+		Where(
+			"epoch = ? AND snapshot_type = ?",
+			snapshot.Epoch,
+			snapshot.SnapshotType,
+		).Updates(map[string]any{
+		"total_active_stake": snapshot.TotalActiveStake,
+		"total_pool_count":   snapshot.TotalPoolCount,
+		"total_delegators":   snapshot.TotalDelegators,
+		"captured_slot":      snapshot.CapturedSlot,
+		"boundary_slot":      snapshot.BoundarySlot,
+		"epoch_nonce":        snapshot.EpochNonce,
+		"protocol_version":   snapshot.ProtocolVersion,
+		"authoritative":      false,
+	}).Error; err != nil {
+		return false, fmt.Errorf("replace fallback reward snapshot: %w", err)
+	}
+	return true, nil
 }
 
 // GetSnapshot retrieves reward snapshot metadata for an epoch.
@@ -178,9 +246,11 @@ func DedupePoolKeyHashes(poolKeyHashes [][]byte) [][]byte {
 	return ret
 }
 
-// StakeInputsAtSlot returns positive registered stake from the maintained live
-// reward aggregate for the requested pools.
-func StakeInputsAtSlot(
+// StakeInputsForPools returns positive registered stake from the maintained
+// live reward aggregate for the requested pools. The live aggregate is
+// maintained transactionally, so the result reflects the caller's db/txn view
+// rather than any historical slot.
+func StakeInputsForPools(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,
 	chunkSize int,

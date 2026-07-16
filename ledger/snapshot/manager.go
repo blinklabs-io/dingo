@@ -294,16 +294,18 @@ func (m *Manager) handleEpochTransition(
 	return nil
 }
 
-// authoritativeMarkRewardSnapshotExists reports whether a mark reward
-// snapshot for evt.NewEpoch already reflects the exact boundary described by
-// evt (matching BoundarySlot and, when both sides have one, EpochNonce).
+// authoritativeMarkRewardSnapshotExists reports whether an authoritative
+// (reward_snapshot.authoritative = true) mark reward snapshot for evt.NewEpoch
+// already reflects the exact boundary described by evt (matching BoundarySlot
+// and, when both sides have one, EpochNonce). Provisional fallback rows return
+// false so a later block-based fallback can still refresh them.
 //
-// txn scopes the read: nil reads a fresh, out-of-transaction view (used by
-// handleEpochTransition's initial check, which is inherently racy against a
-// concurrently-committing authoritative writer); passing the metadata handle
-// of an already-open write transaction (txn.Metadata()) makes this call part
-// of that transaction, which is what closes the fallback-vs-authoritative
-// TOCTOU race in saveSnapshotInTxn below.
+// This is a best-effort pre-check (handleEpochTransition skips the fallback
+// capture when it returns true). It does not by itself close the
+// fallback-vs-authoritative race — that is handled inside saveSnapshotInTxn by
+// ClaimFallbackRewardSnapshot, which takes the reward_snapshot row lock. txn
+// scopes the read: nil reads a fresh, out-of-transaction view; passing an
+// open write transaction's metadata handle reads within that transaction.
 func (m *Manager) authoritativeMarkRewardSnapshotExists(
 	evt event.EpochTransitionEvent,
 	txn types.Txn,
@@ -313,6 +315,12 @@ func (m *Manager) authoritativeMarkRewardSnapshotExists(
 		return false, err
 	}
 	if snapshot == nil {
+		return false, nil
+	}
+	// Only an authoritative row (captured in the epoch-rollover transaction)
+	// counts as "already captured". A provisional fallback row must not block a
+	// later block-based fallback that carries the real epoch nonce.
+	if !snapshot.Authoritative {
 		return false, nil
 	}
 	if snapshot.BoundarySlot != evt.BoundarySlot {
@@ -375,6 +383,18 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 			m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
 		}
 		return fmt.Errorf("save mark snapshot: %w", err)
+	}
+
+	// Record the same success metrics as the fallback captureMarkSnapshot
+	// path. These are staged inside the caller's still-open epoch-rollover
+	// transaction, so they reflect a successful capture the same way the
+	// failure counters above are already recorded before commit.
+	if m.metrics != nil {
+		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
+		m.metrics.captureSuccessTotal.Inc()
+		m.metrics.capturePoolsTotal.Set(float64(len(distribution.PoolStakes)))
+		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
+		m.metrics.lastSuccessfulEpoch.Set(float64(evt.NewEpoch))
 	}
 
 	m.logger.Debug(

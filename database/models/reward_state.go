@@ -49,6 +49,12 @@ type RewardSnapshot struct {
 	BoundarySlot     uint64       `gorm:"index;not null"`
 	EpochNonce       []byte       `gorm:"size:32"`
 	ProtocolVersion  uint         `gorm:"not null"`
+	// Authoritative marks a snapshot captured inside the ledger epoch-rollover
+	// write transaction at the SNAP point (CaptureEpochBoundarySnapshot). The
+	// event-driven fallback capture (captureMarkSnapshot) never overwrites an
+	// authoritative row: it either claims a fresh row or is superseded. Defaults
+	// to false, so pre-existing rows and fallback captures read as provisional.
+	Authoritative bool `gorm:"not null;default:false"`
 }
 
 func (RewardSnapshot) TableName() string {

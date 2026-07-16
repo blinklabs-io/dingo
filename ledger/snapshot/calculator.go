@@ -114,7 +114,7 @@ func (c *Calculator) calculateHistoricalStakeDistributionInTxn(
 
 	err := c.calculateFromHistoricalStake(ctx, txn, slot, dist)
 	if err != nil {
-		return nil, fmt.Errorf("calculate from accounts: %w", err)
+		return nil, fmt.Errorf("calculate from historical stake: %w", err)
 	}
 
 	// Count total pools
@@ -153,7 +153,6 @@ func (c *Calculator) calculateFromRewardLiveStake(
 		meta,
 		metaTxn,
 		pools,
-		slot,
 	)
 	if err != nil {
 		return fmt.Errorf("get batch pools delegated stake: %w", err)
@@ -263,7 +262,6 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
 	pools []lcommon.PoolKeyHash,
-	slot uint64,
 ) (*rewardStakeAggregation, *rewardDelegatorAggregation, error) {
 	// Initialize result maps
 	stakeMap := &rewardStakeAggregation{
@@ -285,9 +283,8 @@ func (c *Calculator) getBatchPoolsDelegatedStake(
 		poolKeyHashBytes[i] = hashCopy
 	}
 
-	inputs, err := meta.GetRewardStakeInputsAtSlot(
+	inputs, err := meta.GetRewardStakeInputsForPools(
 		poolKeyHashBytes,
-		slot,
 		metaTxn,
 	)
 	if err != nil {

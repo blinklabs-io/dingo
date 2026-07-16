@@ -557,7 +557,8 @@ type LedgerState struct {
 	slotsPerKESPeriod                  atomic.Uint64
 	forgedBlockChecker                 atomic.Pointer[forgedBlockCheckerHolder]
 	slotBattleRecorder                 atomic.Pointer[slotBattleRecorderHolder]
-	cachedShape                        atomic.Pointer[hardfork.Shape] // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
+	cachedShape                        atomic.Pointer[hardfork.Shape]                  // lazy-built from CardanoNodeConfig; immutable for the LedgerState's lifetime
+	epochSnapshotHook                  atomic.Pointer[epochBoundarySnapshotHookHolder] // optional authoritative epoch-boundary snapshot capture (nil = event-driven fallback only)
 	reachedTip                         bool
 	currentTip                         ochainsync.Tip
 	currentEpoch                       models.Epoch
@@ -1589,6 +1590,39 @@ func (ls *LedgerState) emitNextEpochNonceReady(
 
 func (ls *LedgerState) resetNextEpochNonceReady() {
 	ls.nextNonceReadyEpoch.Store(0)
+}
+
+// epochBoundarySnapshotHookHolder wraps the optional authoritative
+// epoch-boundary snapshot capture so it can live in an atomic.Pointer. The hook
+// is invoked from inside the epoch-rollover write transaction (see
+// processEpochRollover) with that transaction's handle, so the captured mark
+// snapshot commits atomically with the epoch it belongs to.
+type epochBoundarySnapshotHookHolder struct {
+	fn func(*database.Txn, event.EpochTransitionEvent) error
+}
+
+// SetEpochBoundarySnapshotHook installs (or clears, with a nil fn) the
+// authoritative epoch-boundary snapshot capture. It is wired at node startup to
+// the snapshot manager's CaptureEpochBoundarySnapshot before block sync begins.
+// When no hook is set the ledger relies solely on the event-driven fallback
+// capture, preserving the pre-wiring behavior.
+func (ls *LedgerState) SetEpochBoundarySnapshotHook(
+	fn func(*database.Txn, event.EpochTransitionEvent) error,
+) {
+	if fn == nil {
+		ls.epochSnapshotHook.Store(nil)
+		return
+	}
+	ls.epochSnapshotHook.Store(&epochBoundarySnapshotHookHolder{fn: fn})
+}
+
+// epochBoundarySnapshotHook returns the installed authoritative capture hook, or
+// nil when none is set.
+func (ls *LedgerState) epochBoundarySnapshotHook() func(*database.Txn, event.EpochTransitionEvent) error {
+	if h := ls.epochSnapshotHook.Load(); h != nil {
+		return h.fn
+	}
+	return nil
 }
 
 func (ls *LedgerState) protocolMajorForEvent(
