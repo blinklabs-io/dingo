@@ -8,11 +8,11 @@
 
 **Version:** v0.65.1
 
-This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the genesis omits committee parameters, so voting and endorser block certification can proceed without editing a hash-pinned genesis. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
+This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the network configuration leaves committee parameters unset, so voting and endorser block certification can proceed without editing a pinned network configuration. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
 
 ### 🔧 Fixes
 
-* Restored **keep Leios committee voting working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now fall back to the standard committee thresholds when the genesis omits those values, which lets committee formation and endorser block certification proceed without editing a hash-pinned genesis. Dingo still stops with a clear error if the resulting thresholds are invalid.
+* Restored **keep Leios committee voting working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now fall back to the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation and endorser block certification proceed without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
 
 ### Recommended Network Compatibility ⚠️
 
@@ -34,11 +34,11 @@ Thank you for trying!
 
 **バージョン:** v0.65.1
 
-このリリースでは、genesis に committee parameter がない Musashi やその他の Dijkstra ベースの環境でも Leios committee formation を復旧し、hash-pinned genesis を編集せずに voting と endorser block certification を進められるようにします。Dingo は値が欠けている場合に標準の committee default を補い、しきい値の組み合わせが不正な場合は引き続き明確な error で停止します。
+このリリースでは、network configuration で committee parameter が未設定の Musashi やその他の Dijkstra ベースの環境でも Leios committee formation を復旧し、pinned な network configuration を編集せずに voting と endorser block certification を進められるようにします。Dingo は値が欠けている場合に標準の committee default を補い、しきい値の組み合わせが不正な場合は引き続き明確な error で停止します。
 
 ### 🔧 修正
 
-* 復旧しました **committee parameter がない場合でも Leios committee voting を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、genesis に値がないときに標準の committee threshold を補うようになり、hash-pinned genesis を編集しなくても committee formation と endorser block certification を進められます。結果の threshold が不正な場合は、Dingo は引き続き明確な error で停止します。
+* 復旧しました **committee parameter がない場合でも Leios committee voting を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、network configuration で値が未設定のときに標準の committee threshold を補うようになり、pinned な network configuration を編集しなくても committee formation と endorser block certification を進められます。結果の threshold が不正な場合は、Dingo は引き続き明確な error で停止します。
 
 ### 推奨ネットワーク互換性 ⚠️
 
@@ -60,11 +60,11 @@ Thank you for trying!
 
 **Versión:** v0.65.1
 
-Esta versión restablece la formación del comité de Leios en Musashi y en otros entornos basados en Dijkstra cuando el génesis omite parámetros del comité, de modo que la votación y la certificación de bloques endosadores pueden continuar sin editar un génesis fijado por hash. Dingo ahora completa los valores estándar del comité cuando faltan esos datos y sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+Esta versión restablece la formación del comité de Leios en Musashi y en otros entornos basados en Dijkstra cuando la configuración de red deja sin definir los parámetros del comité, de modo que la votación y la certificación de bloques endosadores pueden continuar sin editar una configuración de red fijada por hash. Dingo ahora completa los valores estándar del comité cuando faltan esos datos y sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
 
 ### 🔧 Correcciones
 
-* Restableció **mantener activa la votación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando el génesis omite esos valores, lo que permite continuar la formación del comité y la certificación de bloques endosadores sin editar un génesis fijado por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+* Restableció **mantener activa la votación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite continuar la formación del comité y la certificación de bloques endosadores sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
 
 ### Compatibilidad de red recomendada ⚠️
 
