@@ -360,10 +360,12 @@ func (p *PeerGovernor) resolveDialAddress(
 // peer.NormalizedAddress already holds the IP resolved at discovery time in
 // the common case, so this returns it unchanged. If that earlier resolution
 // failed and NormalizedAddress is still a hostname, a single fresh
-// resolution is performed here, checked for routability, and — on success —
-// written back to peer.NormalizedAddress under p.mu so it is locked in for
-// this and every future reconnect attempt. It must NOT be called while
-// holding p.mu.
+// resolution is performed here, filtered to the locally-supported address
+// families (so the record locked in for the rest of this peer's lifetime is
+// actually dialable, not an arbitrary first record), checked for
+// routability, and — on success — written back to peer.NormalizedAddress
+// under p.mu so it is locked in for this and every future reconnect
+// attempt. It must NOT be called while holding p.mu.
 func (p *PeerGovernor) resolveLedgerDialTarget(
 	ctx context.Context,
 	peer *Peer,
@@ -389,6 +391,13 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 	if len(ips) == 0 {
 		return "", errors.New("no addresses returned for ledger relay hostname")
 	}
+	// Filter to the address families this host can actually dial before
+	// picking the one record that gets locked in forever; an unfiltered
+	// pick could permanently pin the peer to an unreachable family (e.g. an
+	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+	// re-resolution would otherwise self-correct on the next try.
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
 	resolved := net.JoinHostPort(ips[0].String(), port)
 	if !isRoutableAddr(resolved) {
 		return "", ErrUnroutableAddress
@@ -397,7 +406,19 @@ func (p *PeerGovernor) resolveLedgerDialTarget(
 	p.mu.Lock()
 	idx := p.peerIndexByAddress(peer.NormalizedAddress)
 	if idx != -1 && p.peers[idx] != nil {
-		p.peers[idx].NormalizedAddress = resolved
+		// Guard against colliding with a distinct peer entry that already
+		// owns this resolved address (e.g. a gossip/topology peer for the
+		// same relay, or another ledger hostname that happens to resolve
+		// here). Two peers sharing NormalizedAddress breaks
+		// peerIndexByAddress's assumption that it uniquely identifies a
+		// peer, which can misdirect this peer's connection bookkeeping onto
+		// the other entry. Skip the lock-in in that case; this peer simply
+		// re-resolves (still routability-checked before every dial) on its
+		// next attempt instead of corrupting peer identity.
+		if collidingIdx := p.peerIndexByAddress(resolved); collidingIdx == -1 ||
+			collidingIdx == idx {
+			p.peers[idx].NormalizedAddress = resolved
+		}
 	}
 	p.mu.Unlock()
 

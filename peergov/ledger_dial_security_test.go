@@ -15,11 +15,14 @@
 package peergov
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -219,4 +222,192 @@ func TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget(t *test
 		calls,
 		"ledger peer with an already-resolved NormalizedAddress must not re-resolve at dial time",
 	)
+}
+
+// safeLogBuffer is a mutex-guarded io.Writer/String() pair. slog's built-in
+// handlers serialize their own writes, but that does not protect a test
+// goroutine reading the buffer concurrently with a background dial
+// goroutine's writes; bytes.Buffer itself is not safe for concurrent use.
+type safeLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityCheckedIP
+// closes a coverage gap: TestCreateOutboundConnection_LedgerPeerDialsLockedIPNotRebindTarget
+// starts from an already-locked IP, so it never actually calls isRoutableAddr.
+// This test drives a peer through the FALLBACK path instead — discovery-time
+// DNS failed, NormalizedAddress is still a hostname — through the real
+// ConnectionManager, and asserts that the address the connection manager logs
+// immediately before its OS-level dial call is the exact IP that
+// resolveLedgerDialTarget just resolved and passed through isRoutableAddr.
+// There is no separate "checked" value and "dialed" value to drift apart:
+// they are the same string, returned once and handed straight to the dialer.
+func TestCreateOutboundConnection_LedgerPeerFallbackDialsExactRoutabilityCheckedIP(
+	t *testing.T,
+) {
+	const resolvedIP = "203.0.113.77"
+	const resolvedAddr = resolvedIP + ":3001"
+
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP(resolvedIP)}, nil
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	logBuf := &safeLogBuffer{}
+	logger := slog.New(slog.NewJSONHandler(
+		logBuf,
+		&slog.HandlerOptions{Level: slog.LevelDebug},
+	))
+
+	// A cancelable (not t.Context()) base context: the assertion below only
+	// needs the pre-dial log line, which is written synchronously before the
+	// OS dial call, so the in-flight dial (which may otherwise run for the
+	// connection manager's 10s timeout against an address nothing answers
+	// on) is aborted immediately afterward instead of being waited out.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:   logger,
+		EventBus: newMockEventBus(),
+		ConnManager: connmanager.NewConnectionManager(
+			connmanager.ConnectionManagerConfig{Logger: logger},
+		),
+		DenyDuration: 30 * time.Minute,
+	})
+	pg.mu.Lock()
+	pg.ctx = ctx
+	pg.stopCh = make(chan struct{})
+	pg.mu.Unlock()
+	t.Cleanup(pg.Stop)
+
+	target := &Peer{
+		Address:           "relay5.example.com:3001",
+		NormalizedAddress: "relay5.example.com:3001", // discovery-time DNS had failed
+		Source:            PeerSourceP2PLedger,
+		State:             PeerStateCold,
+	}
+	pg.mu.Lock()
+	pg.peers = []*Peer{target}
+	pg.mu.Unlock()
+
+	go pg.createOutboundConnection(target)
+
+	require.Eventually(t, func() bool {
+		return strings.Contains(
+			logBuf.String(),
+			"establishing TCP connection to: "+resolvedAddr,
+		)
+	}, 5*time.Second, 10*time.Millisecond,
+		"the connection manager must dial exactly the IP resolveLedgerDialTarget "+
+			"resolved and routability-checked, not a separately re-resolved value")
+
+	cancel()
+}
+
+// TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily verifies
+// that a dual-stack relay hostname whose discovery-time resolution failed
+// locks in a record the local host can actually dial. Unlike
+// resolveDialAddress, this resolution never runs again for the peer's
+// lifetime, so pinning to the first (possibly unusable) DNS answer would
+// strand a v4-only host on an IPv6 record forever.
+func TestResolveLedgerDialTarget_FallbackPrefersLocallySupportedFamily(t *testing.T) {
+	setLocalAddrFamilies(t, true, false) // v4-only host
+
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
+		// AAAA record ordered first, mirroring real-world DNS answers that
+		// are not sorted by local reachability.
+		return []net.IP{
+			net.ParseIP("2001:db8::1"),
+			net.ParseIP("198.51.100.9"),
+		}, nil
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := newDialSpreadGovernor()
+	peer := &Peer{
+		Address:           "relay6.example.com:3001",
+		NormalizedAddress: "relay6.example.com:3001",
+		Source:            PeerSourceP2PLedger,
+	}
+	pg.peers = []*Peer{peer}
+
+	got, err := pg.resolveLedgerDialTarget(context.Background(), peer)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"198.51.100.9:3001",
+		got,
+		"must lock in the IPv4 record on a v4-only host, not the first (IPv6) DNS answer",
+	)
+	assert.Equal(t, "198.51.100.9:3001", peer.NormalizedAddress)
+}
+
+// TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer
+// verifies a peer-identity guard: if a ledger peer's fallback resolution
+// lands on the same IP:port that a distinct, existing peer entry already
+// uses as its NormalizedAddress (e.g. the same relay already known via
+// gossip or topology), the resolution must not be written back.
+// peerIndexByAddress assumes NormalizedAddress uniquely identifies a peer;
+// silently duplicating it would let a lookup keyed on that IP return the
+// wrong peer object and misdirect this peer's connection bookkeeping onto
+// it — potentially leaving this peer stuck endlessly reconnecting.
+func TestResolveLedgerDialTarget_DoesNotStealNormalizedAddressFromExistingPeer(
+	t *testing.T,
+) {
+	oldLookupIPAddr := lookupIPAddr
+	lookupIPAddr = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("198.51.100.42")}, nil
+	}
+	t.Cleanup(func() { lookupIPAddr = oldLookupIPAddr })
+
+	pg := newDialSpreadGovernor()
+	existing := &Peer{
+		Address:           "198.51.100.42:3001",
+		NormalizedAddress: "198.51.100.42:3001",
+		Source:            PeerSourceP2PGossip,
+	}
+	ledgerPeer := &Peer{
+		Address:           "relay7.example.com:3001",
+		NormalizedAddress: "relay7.example.com:3001", // discovery resolution had failed
+		Source:            PeerSourceP2PLedger,
+	}
+	pg.peers = []*Peer{existing, ledgerPeer}
+
+	got, err := pg.resolveLedgerDialTarget(context.Background(), ledgerPeer)
+	require.NoError(t, err)
+	assert.Equal(
+		t,
+		"198.51.100.42:3001",
+		got,
+		"this attempt must still dial the resolved, routability-checked IP",
+	)
+	assert.Equal(
+		t,
+		"relay7.example.com:3001",
+		ledgerPeer.NormalizedAddress,
+		"must not overwrite NormalizedAddress onto a value another peer already owns",
+	)
+	assert.Same(
+		t,
+		existing,
+		pg.peers[0],
+		"existing peer entry must be untouched",
+	)
+	assert.Equal(t, "198.51.100.42:3001", existing.NormalizedAddress)
 }

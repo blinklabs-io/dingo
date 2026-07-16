@@ -1454,7 +1454,15 @@ internal address (the one actually dialed), causing the node to TCP-probe
 internal addresses (a DNS-rebind attack; see issue #2435). The trade-off is
 that a multi-homed ledger relay does not get the load-spreading/backend-
 escape behavior described above; that is intentional given the untrusted
-input.
+input. Two refinements on that fallback resolution: the record locked in is
+filtered to the locally-supported address families first (same filter as the
+per-attempt path above), so a v4-only host doesn't get permanently pinned to
+an unreachable AAAA record it can never re-roll; and the write-back is
+skipped if another distinct peer entry already owns the resolved
+`NormalizedAddress`, since `peerIndexByAddress` assumes that field uniquely
+identifies a peer — colliding would misdirect that peer's connection
+bookkeeping onto this one. The peer simply re-resolves (still
+routability-checked every time) on its next attempt instead.
 
 Reconnect backoff after short-lived sessions escalates exponentially. The
 reconnect goroutine consumes and zeroes the stored delay before dialing, so
