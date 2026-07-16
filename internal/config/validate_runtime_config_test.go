@@ -25,7 +25,13 @@ import (
 
 // These tests cover fields whose invalid values used to be ignored (falling
 // back to a default) or surfaced only much later at runtime, rather than
-// failing at config load. See validateRuntimeConfig.
+// failing at config load. See ValidateRuntimeConfig.
+//
+// LoadConfig itself does not run this validation (see ValidateRuntimeConfig's
+// doc comment: a valid CLI flag, applied afterward by ApplyFlags, must be
+// able to override a semantically invalid YAML/env value). loadYAML calls
+// ValidateRuntimeConfig explicitly after LoadConfig, exercising it the same
+// way a non-CLI caller of this package would.
 
 func loadYAML(t *testing.T, body string) error {
 	t.Helper()
@@ -34,8 +40,11 @@ func loadYAML(t *testing.T, body string) error {
 	if err := os.WriteFile(tmpFile, []byte(body), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	_, err := LoadConfig(tmpFile)
-	return err
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		return err
+	}
+	return ValidateRuntimeConfig(cfg)
 }
 
 // TestLoad_OutOfRangePortsRejected verifies that every listen/connect port
@@ -102,6 +111,9 @@ func TestLoad_StorageModeNormalized(t *testing.T) {
 	cfg, err := LoadConfig(tmpFile)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
+	}
+	if err := ValidateRuntimeConfig(cfg); err != nil {
+		t.Fatalf("ValidateRuntimeConfig: %v", err)
 	}
 	if cfg.StorageMode != "api" {
 		t.Errorf("StorageMode = %q, want normalized %q", cfg.StorageMode, "api")
@@ -179,26 +191,40 @@ func TestLoad_DownloadIdleTimeoutNonPositiveAccepted(t *testing.T) {
 }
 
 // TestLoad_NonPositiveDurationEnvRejected covers the environment-variable
-// input path for the positive-only timeout fields.
+// input path for the positive-only timeout fields. ValidateRuntimeConfig is
+// called explicitly since LoadConfig alone no longer runs semantic
+// validation (see loadYAML's doc comment above).
 func TestLoad_NonPositiveDurationEnvRejected(t *testing.T) {
 	t.Run("stallTimeout", func(t *testing.T) {
 		resetGlobalConfig()
 		t.Setenv("DINGO_CHAINSYNC_STALL_TIMEOUT", "-5s")
-		if _, err := LoadConfig(""); err == nil {
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if err := ValidateRuntimeConfig(cfg); err == nil {
 			t.Fatal("expected error for negative stall timeout via env, got nil")
 		}
 	})
 	t.Run("shutdownTimeout", func(t *testing.T) {
 		resetGlobalConfig()
 		t.Setenv("CARDANO_SHUTDOWN_TIMEOUT", "0s")
-		if _, err := LoadConfig(""); err == nil {
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if err := ValidateRuntimeConfig(cfg); err == nil {
 			t.Fatal("expected error for zero shutdown timeout via env, got nil")
 		}
 	})
 	t.Run("ledgerCatchupTimeout", func(t *testing.T) {
 		resetGlobalConfig()
 		t.Setenv("DINGO_LEDGER_CATCHUP_TIMEOUT", "0s")
-		if _, err := LoadConfig(""); err == nil {
+		cfg, err := LoadConfig("")
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		if err := ValidateRuntimeConfig(cfg); err == nil {
 			t.Fatal("expected error for zero ledger catchup timeout via env, got nil")
 		}
 	})

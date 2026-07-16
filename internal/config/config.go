@@ -359,15 +359,24 @@ func strictUnmarshalConfig(data []byte, out *Config) error {
 	return nil
 }
 
-// validateRuntimeConfig validates fields whose invalid values were
+// ValidateRuntimeConfig validates fields whose invalid values were
 // historically only caught later (at logger setup, node startup, by the
 // mithril subcommand, or as a silent runtime fallback) instead of at
-// config load. Called from both LoadConfig and ApplyFlags: CLI flags are
-// applied after LoadConfig returns, so validating only in LoadConfig
-// would let a bad --logging-level, --logging-format, --chainsync-strategy,
-// --mithril-backend, or --port flag reintroduce a value already rejected
-// for YAML/env.
-func validateRuntimeConfig(cfg *Config) error {
+// config load.
+//
+// LoadConfig deliberately does NOT call this: CLI flags are applied after
+// LoadConfig returns (see ApplyFlags), and CLI > env > YAML > defaults
+// precedence means a valid CLI flag must be able to override a semantically
+// invalid YAML/env value. Validating inside LoadConfig would reject that
+// value before the override had a chance to apply, failing startup on a
+// config that a valid flag would have fixed.
+//
+// ApplyFlags calls this after applying flags, which is the enforcement point
+// for normal CLI startup (LoadConfig followed by ApplyFlags). Callers that
+// use LoadConfig without ApplyFlags -- library callers or tests that don't
+// go through CLI flag parsing -- must call ValidateRuntimeConfig explicitly
+// to get equivalent validation.
+func ValidateRuntimeConfig(cfg *Config) error {
 	// RelayPort doubles as the outbound source port (see
 	// internal/node/node.go's WithOutboundSourcePort(cfg.RelayPort)),
 	// used for peer-sharing-friendly source-port reuse. An out-of-range
@@ -1294,15 +1303,13 @@ func LoadConfig(configFile string) (*Config, error) {
 		)
 	}
 
-	// Validate relayPort/logging/chainsync/mithril fields. Also re-run at
-	// the end of ApplyFlags: CLI flags are applied after LoadConfig
-	// returns, so validating only here would let a bad --port,
-	// --logging-level, --logging-format, --chainsync-strategy, or
-	// --mithril-backend flag reintroduce a value this check already
-	// rejects for YAML/env.
-	if err := validateRuntimeConfig(globalConfig); err != nil {
-		return nil, err
-	}
+	// NOTE: relayPort/logging/chainsync/mithril semantic validation is
+	// deliberately not run here. See ValidateRuntimeConfig's doc comment:
+	// CLI flags are applied after LoadConfig returns (in ApplyFlags), and a
+	// valid flag must be able to override a semantically invalid YAML/env
+	// value rather than have LoadConfig reject it first. ApplyFlags calls
+	// ValidateRuntimeConfig once flags have been merged in; callers that use
+	// LoadConfig without ApplyFlags must call it explicitly.
 
 	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
 	// already been merged at this point; an explicit non-zero setting

@@ -23,23 +23,59 @@ import (
 )
 
 // These tests guard against CLI flags reintroducing a value that
-// LoadConfig's YAML/env validation already rejects. ApplyFlags runs after
-// LoadConfig returns, so validation must be re-run at the end of
-// ApplyFlags too -- see validateRuntimeConfig.
+// ValidateRuntimeConfig already rejects for YAML/env, and against
+// ValidateRuntimeConfig (called by ApplyFlags, not LoadConfig -- see its doc
+// comment) rejecting a bad YAML/env value that a valid CLI flag would have
+// overridden.
 
-// TestLoad_InvalidRelayPortRejected verifies that an out-of-range
-// relayPort is rejected at config load, rather than only surfacing later
-// as a silent "dial without source-port reuse" fallback in
-// connmanager's outbound dialer (relayPort doubles as the outbound
-// source port).
+// TestLoad_InvalidRelayPortRejected verifies that an out-of-range relayPort
+// is rejected by ValidateRuntimeConfig, rather than only surfacing later as a
+// silent "dial without source-port reuse" fallback in connmanager's outbound
+// dialer (relayPort doubles as the outbound source port). LoadConfig alone
+// does not run this validation, so ValidateRuntimeConfig is called
+// explicitly, as a non-CLI caller of this package would.
 func TestLoad_InvalidRelayPortRejected(t *testing.T) {
 	resetGlobalConfig()
 	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
 	if err := os.WriteFile(tmpFile, []byte("relayPort: 99999999\n"), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	if _, err := LoadConfig(tmpFile); err == nil {
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if err := ValidateRuntimeConfig(cfg); err == nil {
 		t.Fatal("expected error for out-of-range relayPort, got nil")
+	}
+}
+
+// TestApplyFlags_ValidPortOverridesInvalidYAML is the ordering regression:
+// an out-of-range relayPort from YAML must not fail startup when a valid
+// --port flag is supplied to override it. Before ValidateRuntimeConfig was
+// deferred to ApplyFlags, LoadConfig ran this validation itself and returned
+// an error here before ApplyFlags ever got a chance to apply the override.
+func TestApplyFlags_ValidPortOverridesInvalidYAML(t *testing.T) {
+	resetGlobalConfig()
+	tmpFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(tmpFile, []byte("shutdownTimeout: \"0s\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("LoadConfig should not fail on a value a later CLI flag can fix: %v", err)
+	}
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags([]string{"--shutdown-timeout=30s"}); err != nil {
+		t.Fatalf("failed to parse flags: %v", err)
+	}
+
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("valid --shutdown-timeout should override invalid YAML value: %v", err)
+	}
+	if cfg.ShutdownTimeout != "30s" {
+		t.Errorf("ShutdownTimeout = %q, want 30s", cfg.ShutdownTimeout)
 	}
 }
 

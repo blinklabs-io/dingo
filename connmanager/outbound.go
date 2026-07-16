@@ -50,13 +50,13 @@ func (c *ConnectionManager) CreateOutboundConn(
 			fmt.Sprintf(":%d", c.config.OutboundSourcePort),
 		)
 		if resolveErr != nil {
-			// internal/config.validateRuntimeConfig rejects an
+			// internal/config.ValidateRuntimeConfig rejects an
 			// out-of-range relayPort (which OutboundSourcePort is
-			// derived from) at config load and after CLI flags apply,
-			// so this should be unreachable via normal configuration.
-			// Kept as a backstop for direct API callers of this package
-			// that set OutboundSourcePort without going through
-			// internal/config at all.
+			// derived from) once CLI/env/YAML have all merged, so this
+			// should be unreachable via normal configuration. Kept as a
+			// backstop for direct API callers of this package that set
+			// OutboundSourcePort without going through internal/config
+			// at all.
 			c.config.Logger.Warn(
 				"outbound: failed to resolve source port, dialing without source-port reuse",
 				"role", "client",

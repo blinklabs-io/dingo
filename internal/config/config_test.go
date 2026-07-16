@@ -403,6 +403,10 @@ chainsync:
 	}
 }
 
+// TestLoad_InvalidChainsyncStrategyRejected verifies ValidateRuntimeConfig
+// rejects an invalid chainsync.strategy. LoadConfig alone does not run this
+// validation -- see ValidateRuntimeConfig's doc comment -- so it is called
+// explicitly here, as a non-CLI caller of this package would.
 func TestLoad_InvalidChainsyncStrategyRejected(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
@@ -415,7 +419,11 @@ chainsync:
 		t.Fatalf("failed to write config file: %v", err)
 	}
 
-	if _, err := LoadConfig(tmpFile); err == nil {
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("expected no error from LoadConfig, got: %v", err)
+	}
+	if err := ValidateRuntimeConfig(cfg); err == nil {
 		t.Fatal("expected error for invalid chainsync.strategy, got nil")
 	}
 }

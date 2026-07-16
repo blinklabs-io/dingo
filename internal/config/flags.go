@@ -202,10 +202,12 @@ func ApplyFlags(cmd *cobra.Command, cfg *Config) error {
 		clearMidnightNetworkDefaults(cfg, previousNetwork)
 	}
 	applyMidnightNetworkDefaults(cfg)
-	// Re-validate: flags applied above (e.g. --port, --logging-level,
-	// --chainsync-strategy, --mithril-backend) can reintroduce a value
-	// LoadConfig already rejected for YAML/env.
-	if err := validateRuntimeConfig(cfg); err != nil {
+	// Semantic validation runs here, after flags have been merged in, so a
+	// valid --port/--logging-level/--chainsync-strategy/--mithril-backend
+	// flag can override a semantically invalid YAML/env value instead of
+	// LoadConfig rejecting it beforehand. See ValidateRuntimeConfig's doc
+	// comment.
+	if err := ValidateRuntimeConfig(cfg); err != nil {
 		return err
 	}
 	globalConfig = cfg
@@ -588,7 +590,7 @@ func normalizeStorageMode(v string) (string, error) {
 
 // normalizeLoggingValue lower-cases a logging format/level flag so values are
 // accepted case-insensitively (e.g. --logging-format=JSON). It does not
-// validate itself: validateRuntimeConfig, called at the end of ApplyFlags,
+// validate itself: ValidateRuntimeConfig, called at the end of ApplyFlags,
 // rejects unknown values for flag, env, and YAML alike.
 func normalizeLoggingValue(v string) (string, error) {
 	return strings.ToLower(strings.TrimSpace(v)), nil
