@@ -109,55 +109,82 @@ func SaveSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) error {
 // the check-then-write race; SQLite drops the lock clause but its single-writer
 // transaction semantics provide the same serialization. A prior non-authoritative
 // row (e.g. a slot-clock provisional) is replaced in place under the held lock.
-func ClaimFallbackSnapshot(db *gorm.DB, snapshot *models.RewardSnapshot) (bool, error) {
+//
+// That lock only survives between statements while a transaction is open, so the
+// whole claim MUST run in one transaction. When the caller supplies an open
+// transaction (txn != nil) db already carries it; otherwise the claim is wrapped
+// in db.Transaction so a transactionless call cannot silently drop the lock after
+// the recheck and clobber an authoritative row a concurrent SaveSnapshot
+// committed in between. This mirrors the txn handling in DeleteInputsForEpoch and
+// DeleteState{After,Before}* below.
+func ClaimFallbackSnapshot(
+	db *gorm.DB,
+	snapshot *models.RewardSnapshot,
+	txn types.Txn,
+) (bool, error) {
 	snapshot.Authoritative = false
-	res := db.Clauses(clause.OnConflict{
-		Columns: []clause.Column{
-			{Name: "epoch"},
-			{Name: "snapshot_type"},
-		},
-		DoNothing: true,
-	}).Create(snapshot)
-	if res.Error != nil {
-		return false, fmt.Errorf("claim fallback reward snapshot: %w", res.Error)
-	}
-	if res.RowsAffected == 1 {
-		// Won the slot outright: our row is the marker.
+	claim := func(tx *gorm.DB) (bool, error) {
+		res := tx.Clauses(clause.OnConflict{
+			Columns: []clause.Column{
+				{Name: "epoch"},
+				{Name: "snapshot_type"},
+			},
+			DoNothing: true,
+		}).Create(snapshot)
+		if res.Error != nil {
+			return false, fmt.Errorf("claim fallback reward snapshot: %w", res.Error)
+		}
+		if res.RowsAffected == 1 {
+			// Won the slot outright: our row is the marker.
+			return true, nil
+		}
+		// A row already exists. Lock it and inspect the authoritative flag.
+		var existing models.RewardSnapshot
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where(
+				"epoch = ? AND snapshot_type = ?",
+				snapshot.Epoch,
+				snapshot.SnapshotType,
+			).First(&existing).Error; err != nil {
+			return false, fmt.Errorf("lock existing reward snapshot: %w", err)
+		}
+		if existing.Authoritative {
+			return false, nil
+		}
+		// Prior provisional (fallback) row: replace it in place while holding the
+		// lock so the refreshed boundary/nonce/totals take effect.
+		if err := tx.Model(&models.RewardSnapshot{}).
+			Where(
+				"epoch = ? AND snapshot_type = ?",
+				snapshot.Epoch,
+				snapshot.SnapshotType,
+			).Updates(map[string]any{
+			"total_active_stake": snapshot.TotalActiveStake,
+			"total_pool_count":   snapshot.TotalPoolCount,
+			"total_delegators":   snapshot.TotalDelegators,
+			"captured_slot":      snapshot.CapturedSlot,
+			"boundary_slot":      snapshot.BoundarySlot,
+			"epoch_nonce":        snapshot.EpochNonce,
+			"protocol_version":   snapshot.ProtocolVersion,
+			"authoritative":      false,
+		}).Error; err != nil {
+			return false, fmt.Errorf("replace fallback reward snapshot: %w", err)
+		}
 		return true, nil
 	}
-	// A row already exists. Lock it and inspect the authoritative flag.
-	var existing models.RewardSnapshot
-	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where(
-			"epoch = ? AND snapshot_type = ?",
-			snapshot.Epoch,
-			snapshot.SnapshotType,
-		).First(&existing).Error; err != nil {
-		return false, fmt.Errorf("lock existing reward snapshot: %w", err)
+
+	if txn != nil {
+		return claim(db)
 	}
-	if existing.Authoritative {
-		return false, nil
+	var proceed bool
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		var claimErr error
+		proceed, claimErr = claim(tx)
+		return claimErr
+	}); err != nil {
+		return false, err
 	}
-	// Prior provisional (fallback) row: replace it in place while holding the
-	// lock so the refreshed boundary/nonce/totals take effect.
-	if err := db.Model(&models.RewardSnapshot{}).
-		Where(
-			"epoch = ? AND snapshot_type = ?",
-			snapshot.Epoch,
-			snapshot.SnapshotType,
-		).Updates(map[string]any{
-		"total_active_stake": snapshot.TotalActiveStake,
-		"total_pool_count":   snapshot.TotalPoolCount,
-		"total_delegators":   snapshot.TotalDelegators,
-		"captured_slot":      snapshot.CapturedSlot,
-		"boundary_slot":      snapshot.BoundarySlot,
-		"epoch_nonce":        snapshot.EpochNonce,
-		"protocol_version":   snapshot.ProtocolVersion,
-		"authoritative":      false,
-	}).Error; err != nil {
-		return false, fmt.Errorf("replace fallback reward snapshot: %w", err)
-	}
-	return true, nil
+	return proceed, nil
 }
 
 // GetSnapshot retrieves reward snapshot metadata for an epoch.

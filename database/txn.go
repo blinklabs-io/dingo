@@ -57,6 +57,7 @@ type Txn struct {
 	lock        sync.Mutex
 	finished    bool
 	readWrite   bool
+	afterCommit []func()
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
@@ -125,6 +126,21 @@ func (t *Txn) Blob() types.Txn {
 // IsReadWrite reports whether the transaction was opened for writing.
 func (t *Txn) IsReadWrite() bool {
 	return t.readWrite
+}
+
+// AfterCommit registers fn to run after this transaction commits durably.
+// Callbacks run in registration order, once, only on a successful Commit; a
+// rollback or a failed commit never fires them. Use it for side effects that
+// must reflect committed state only — e.g. metrics that must not count work a
+// rollback discards. Callbacks run after the commit lock is released, so a
+// callback must not call back into this transaction's own methods.
+func (t *Txn) AfterCommit(fn func()) {
+	if fn == nil {
+		return
+	}
+	t.lock.Lock()
+	defer t.lock.Unlock()
+	t.afterCommit = append(t.afterCommit, fn)
 }
 
 type savepointTxn interface {
@@ -202,7 +218,21 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	defer t.lock.Unlock()
+	committed := false
+	defer func() {
+		// Snapshot the callbacks under the lock, release it, then run any
+		// registered after-commit callbacks only when the commit actually
+		// succeeded. Running them after unlock keeps a callback from
+		// deadlocking on this transaction's own lock.
+		callbacks := t.afterCommit
+		t.lock.Unlock()
+		if !committed {
+			return
+		}
+		for _, fn := range callbacks {
+			fn()
+		}
+	}()
 	if t.finished {
 		return nil
 	}
@@ -265,6 +295,7 @@ func (t *Txn) Commit() error {
 		}
 	}
 	t.finished = true
+	committed = true
 	return nil
 }
 

@@ -385,16 +385,26 @@ func (m *Manager) CaptureEpochBoundarySnapshot(
 		return fmt.Errorf("save mark snapshot: %w", err)
 	}
 
-	// Record the same success metrics as the fallback captureMarkSnapshot
-	// path. These are staged inside the caller's still-open epoch-rollover
-	// transaction, so they reflect a successful capture the same way the
-	// failure counters above are already recorded before commit.
+	// The capture is staged in the caller's still-open epoch-rollover
+	// transaction, so success must be reported only once that transaction
+	// commits: a rollback (including a failed commit) must not advance the
+	// success counter or the "latest snapshot" gauges to describe a snapshot
+	// that never persisted. Register them as an after-commit callback, which
+	// matches the fallback captureMarkSnapshot path whose own transaction has
+	// already committed by the time it records success. The duration histogram
+	// measures the capture work itself, so it is observed inline like the
+	// failure paths above.
 	if m.metrics != nil {
 		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
-		m.metrics.captureSuccessTotal.Inc()
-		m.metrics.capturePoolsTotal.Set(float64(len(distribution.PoolStakes)))
-		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
-		m.metrics.lastSuccessfulEpoch.Set(float64(evt.NewEpoch))
+		pools := float64(len(distribution.PoolStakes))
+		totalStake := float64(distribution.TotalStake)
+		epoch := float64(evt.NewEpoch)
+		txn.AfterCommit(func() {
+			m.metrics.captureSuccessTotal.Inc()
+			m.metrics.capturePoolsTotal.Set(pools)
+			m.metrics.captureTotalStakeLovelace.Set(totalStake)
+			m.metrics.lastSuccessfulEpoch.Set(epoch)
+		})
 	}
 
 	m.logger.Debug(

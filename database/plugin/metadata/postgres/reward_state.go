@@ -70,7 +70,7 @@ func (d *MetadataStorePostgres) ClaimFallbackRewardSnapshot(
 	if err != nil {
 		return false, fmt.Errorf("ClaimFallbackRewardSnapshot: resolve db: %w", err)
 	}
-	return rewardstate.ClaimFallbackSnapshot(db, snapshot)
+	return rewardstate.ClaimFallbackSnapshot(db, snapshot, txn)
 }
 
 // GetRewardSnapshot retrieves reward snapshot metadata for an epoch.

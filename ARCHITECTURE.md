@@ -2223,6 +2223,15 @@ roll back and the rollover proceeds, deferring to the event-driven fallback
 rather than wedging the epoch boundary. When no hook is installed the ledger
 relies solely on the fallback capture, preserving the pre-wiring behavior.
 
+Because the capture is staged inside the still-open rollover transaction, its
+success metrics (`capture_success_total`, `last_successful_epoch`, and the
+latest-snapshot pool/stake gauges) are published through `database.Txn.AfterCommit`
+so they advance only once that transaction commits durably; a rollback or failed
+commit must not report a snapshot that never persisted. This matches the fallback
+`captureMarkSnapshot`, whose own transaction has already committed before it
+records success. Failure counters and the capture-duration histogram are recorded
+inline, since they measure the attempt itself.
+
 `EpochTransitionEvent` remains the asynchronous rotation and cleanup signal, and
 the event-driven `captureMarkSnapshot` is the fallback capture used when the
 authoritative capture did not run (no hook installed, or a capture failure) or
