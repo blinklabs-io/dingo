@@ -2113,19 +2113,25 @@ nonce belonging to that tip. Hot query paths load these snapshots through
 `atomic.Bool`. Snapshot containers and their owned byte slices are immutable;
 protocol-parameter values are shared and consumers must treat them as read-only.
 
-Ledger writers remain serialized by the existing mutex. They compute changes
-privately, update the writer-owned state, and publish a complete replacement
-snapshot before unlocking. Tip hashes, block nonces, and the current epoch's
-nonce fields are copied at publication. The full historical epoch cache is
-instead shared by reference to avoid an allocation whose cost grows with chain
-age on every block: writers must replace the cache and nested nonce slices
+Runtime ledger writers remain serialized by the existing mutex. They compute
+changes privately, update the writer-owned state, and publish a complete
+replacement snapshot before unlocking. Construction and single-threaded
+startup may also publish without the mutex, but only before the `LedgerState`
+is visible to concurrent readers. Tip hashes, block nonces, and the current
+epoch's nonce fields are copied at publication. The full historical epoch cache
+is instead shared by reference to avoid an allocation whose cost grows with
+chain age on every block: writers must replace the cache and nested nonce slices
 before modifying them. Publication caps the cache capacity so even an accidental
-append allocates a new backing array. Each snapshot is internally consistent,
-but a caller loading both
-snapshot pointers could otherwise observe adjacent publication generations.
-Each publication therefore stamps both snapshots with one generation, and code
-requiring fields from both uses a paired-load helper that retries until the
-generations match.
+append allocates a new backing array.
+
+Each snapshot is internally consistent, but a caller loading both snapshot
+pointers could otherwise observe adjacent publication generations. Each
+production publication therefore stamps both snapshots with one generation,
+and code requiring fields from both uses a paired-load helper that retries until
+the generations match. A nil-snapshot fallback exists only for zero-value
+white-box test fixtures; it builds snapshots independently and does not provide
+the cross-snapshot generation guarantee. Production states initialize both
+snapshots in `NewLedgerState` before becoming visible.
 
 ## Configuration
 
