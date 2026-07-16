@@ -1437,6 +1437,39 @@ timeout or failure the attempt falls back to the unresolved address. IP-literal
 peers dial unchanged, and peer identity/dedup stays keyed on the stable
 `Address`/`NormalizedAddress`, not the rotating dial target.
 
+Ledger-discovered pool relays (`PeerSourceP2PLedger`) are the one source
+exempted from that per-attempt re-resolution, because their hostname is
+attacker-supplied via on-chain stake pool registration rather than operator-
+or protocol-controlled. `resolveLedgerDialTarget` instead resolves the
+hostname exactly once and dials that same IP on every subsequent attempt: in
+the common case the IP already locked in by `addLedgerPeer`'s discovery-time
+resolution (stored in `NormalizedAddress`, the same value `isRoutableAddr`
+checked) is reused as-is; only if that earlier resolution had failed does it
+resolve once more here, re-check routability, and write the result back to
+`NormalizedAddress` so it is locked in from then on. This guarantees the IP
+that passed the routability check is always the IP that gets dialed — without
+it, a malicious or compromised authoritative DNS server could answer a first
+lookup with a public IP (passing the check) and a later lookup with an
+internal address (the one actually dialed), causing the node to TCP-probe
+internal addresses (a DNS-rebind attack; see issue #2435). The trade-off is
+that a multi-homed ledger relay does not get the load-spreading/backend-
+escape behavior described above; that is intentional given the untrusted
+input.
+
+Because the record chosen here — whether at discovery or in the fallback
+resolution — is what gets dialed for the peer's entire lifetime with no later
+attempt to self-correct, both resolution points filter to the
+locally-supported address families first (the same filter the per-attempt
+path above uses): `addLedgerPeer` calls `resolveLedgerDiscoveryAddress`
+rather than the generic `resolveAddress` used by every other peer source, so
+a v4-only host is never pinned to an unreachable AAAA record just because DNS
+answered with it first. Separately, the fallback resolution's write-back is
+skipped if another distinct peer entry already owns the resolved
+`NormalizedAddress`, since `peerIndexByAddress` assumes that field uniquely
+identifies a peer — colliding would misdirect that peer's connection
+bookkeeping onto this one. The peer simply re-resolves (still
+routability-checked every time) on its next attempt instead.
+
 Reconnect backoff after short-lived sessions escalates exponentially. The
 reconnect goroutine consumes and zeroes the stored delay before dialing, so
 the close handler derives the next rung from a count of consecutive
