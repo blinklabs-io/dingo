@@ -129,7 +129,7 @@ jobs:
         id: txpump-push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
-          context: internal/test/antithesis
+          context: .
           file: internal/test/antithesis/Dockerfile.txpump
           outputs: "type=registry,push=true"
           platforms: linux/amd64
@@ -158,7 +158,7 @@ jobs:
         id: analysis-push
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
-          context: internal/test/antithesis
+          context: .
           file: internal/test/antithesis/Dockerfile.analysis
           outputs: "type=registry,push=true"
           platforms: linux/amd64
