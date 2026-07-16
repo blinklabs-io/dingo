@@ -26,6 +26,60 @@ This release restores Leios committee formation on Musashi and other Dijkstra-ba
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** Musashi で committee parameter が未設定でも Leios committee formation を復旧
+
+**日付:** July 16, 2026
+
+**バージョン:** v0.65.1
+
+このリリースでは、genesis に committee parameter がない Musashi やその他の Dijkstra ベースの環境でも Leios committee formation を復旧し、hash-pinned genesis を編集せずに voting と endorser block certification を進められるようにします。Dingo は値が欠けている場合に標準の committee default を補い、しきい値の組み合わせが不正な場合は引き続き明確な error で停止します。
+
+### 🔧 修正
+
+* 復旧しました **committee parameter がない場合でも Leios committee voting を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、genesis に値がないときに標準の committee threshold を補うようになり、hash-pinned genesis を編集しなくても committee formation と endorser block certification を進められます。結果の threshold が不正な場合は、Dingo は引き続き明確な error で停止します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Restaurar la formación del comité de Leios cuando Musashi omite parámetros del comité
+
+**Fecha:** July 16, 2026
+
+**Versión:** v0.65.1
+
+Esta versión restablece la formación del comité de Leios en Musashi y en otros entornos basados en Dijkstra cuando el génesis omite parámetros del comité, de modo que la votación y la certificación de bloques endosadores pueden continuar sin editar un génesis fijado por hash. Dingo ahora completa los valores estándar del comité cuando faltan esos datos y sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+
+### 🔧 Correcciones
+
+* Restableció **mantener activa la votación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando el génesis omite esos valores, lo que permite continuar la formación del comité y la certificación de bloques endosadores sin editar un génesis fijado por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.65.0 (July 15, 2026)
 
 **Title:** Reward metadata groundwork, steadier Mark stake snapshots, and faster Leios failover
