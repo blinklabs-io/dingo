@@ -81,11 +81,12 @@ func TestApplyFlags_ValidShutdownTimeoutOverridesInvalidYAML(t *testing.T) {
 }
 
 // registerDebugFlag simulates cmd/dingo/main.go's root-level --debug flag,
-// which ApplyFlags reads directly off the FlagSet (it isn't part of
-// flagSpecs/RegisterFlags -- see ApplyFlags' doc comment on the debug
-// override).
+// which ApplyFlags reads directly off cmd.Root().PersistentFlags() (it isn't
+// part of flagSpecs/RegisterFlags -- see ApplyFlags' doc comment on the
+// debug override). Registers on cmd.Root() rather than cmd itself so this
+// stays correct even if a caller passes a command nested under a parent.
 func registerDebugFlag(cmd *cobra.Command) {
-	cmd.PersistentFlags().BoolP("debug", "D", false, "enable debug logging")
+	cmd.Root().PersistentFlags().BoolP("debug", "D", false, "enable debug logging")
 }
 
 // TestApplyFlags_DebugOverridesInvalidYAMLLoggingLevel is the ordering
@@ -121,9 +122,12 @@ func TestApplyFlags_DebugOverridesInvalidYAMLLoggingLevel(t *testing.T) {
 
 // TestApplyFlags_DebugOverridesInvalidEnvLoggingLevel is the env-var
 // counterpart: DINGO_LOGGING_LEVEL=bogus plus --debug must still start
-// cleanly.
+// cleanly. HOME is pointed at an empty temp dir so LoadConfig("")'s
+// ~/.dingo/dingo.yaml fallback can't pick up a real config file on the
+// runner and interfere with the env-only path under test.
 func TestApplyFlags_DebugOverridesInvalidEnvLoggingLevel(t *testing.T) {
 	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DINGO_LOGGING_LEVEL", "bogus")
 	cfg, err := LoadConfig("")
 	if err != nil {
