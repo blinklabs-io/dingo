@@ -1,5 +1,31 @@
 # Dingo Releases
 
+## v0.65.1 (July 16, 2026)
+
+**Title:** Restore Leios committee formation when Musashi omits committee parameters
+
+**Date:** July 16, 2026
+
+**Version:** v0.65.1
+
+This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the genesis omits committee parameters, so voting and endorser block certification can proceed without editing a hash-pinned genesis. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
+
+### 🔧 Fixes
+
+* Restored **keep Leios committee voting working when committee parameters are absent:** Musashi and other Dijkstra-based deployments now fall back to the standard committee thresholds when the genesis omits those values, which lets committee formation and endorser block certification proceed without editing a hash-pinned genesis. Dingo still stops with a clear error if the resulting thresholds are invalid.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
 ## v0.65.0 (July 15, 2026)
 
 **Title:** Reward metadata groundwork, steadier Mark stake snapshots, and faster Leios failover
