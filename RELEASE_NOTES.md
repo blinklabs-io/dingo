@@ -64,7 +64,7 @@ Esta versión restablece la formación del comité de Leios en Musashi y en otro
 
 ### 🔧 Correcciones
 
-* Restableció **mantener activa la votación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite continuar la formación del comité y la certificación de bloques endosadores sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+* Restableció **mantener activa la formación del comité de Leios cuando faltan parámetros del comité:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite que la formación del comité, la votación y la certificación de bloques endosadores continúen sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
 
 ### Compatibilidad de red recomendada ⚠️
 
