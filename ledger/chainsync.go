@@ -1359,7 +1359,34 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				skipRollback = false
 			}
 		}
+		// A rollback the node can actually apply (target block present,
+		// within the security parameter K, at/above the Mithril anchor)
+		// must be crossed even when the same point repeats. Suppressing a
+		// crossable rollback wedges the node behind a legitimately advancing
+		// peer and turns a transient fork into an unrecoverable reconnect
+		// loop (issue #2790). Only a rollback the node genuinely cannot
+		// cross is a true loop to break; those fall through to the skip +
+		// #2728 escalation below.
+		if skipRollback && ls.rollbackIsAppliable(e.Point) {
+			ls.config.Logger.Info(
+				"allowing repeated crossable rollback to converge to peer",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"count", slotCount,
+			)
+			skipRollback = false
+		}
 		if skipRollback {
+			// Surface the stuck condition through the point-keyed tracker
+			// that survives the resync reset+reconnect cycle. Without this
+			// the skip silently breaks the loop and the #2728 escalation
+			// (operator error + metric) never fires, hiding a node that
+			// cannot self-recover (issue #2790 bullet 6).
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackLoop,
+				e.ConnectionId,
+			)
 			ls.config.Logger.Warn(
 				"rollback loop detected, skipping rollback to break loop",
 				"component", "ledger",
@@ -1591,7 +1618,60 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// un-crossable-rollback tracking is stale. Clear it so a later,
 	// unrelated divergence starts counting from zero (see issue #2728).
 	ls.clearUnrecoverableRollbacks()
+	// Crossing to the point is forward progress toward the peer's chain, so
+	// drop this point's per-connection loop-detector records too. A rollback
+	// we actually applied must not count toward the repeat-loop threshold on
+	// a later, legitimate rollback to the same fork point; leaving the
+	// records accumulates crossable rollbacks until the loop detector
+	// suppresses one, wedging the node in a reconnect loop behind a
+	// legitimately advancing peer (issue #2790).
+	ls.clearRollbackHistoryForPoint(e.Point)
 	return nil
+}
+
+// rollbackIsAppliable reports whether rollbackChainAndState(point) would
+// succeed right now, without mutating any state. It mirrors the pre-checks
+// rollbackChainAndState relies on for its block-not-found / exceeds-K /
+// exceeds-Mithril failures: the point must sit at or above the Mithril trust
+// anchor, and the chain must be able to roll back to it (target block present
+// and within the security parameter K, verified via chain.ValidateRollback).
+//
+// The loop detector uses this to decide whether a repeated rollback is a
+// crossable point that must be applied (issue #2790) rather than a genuinely
+// un-crossable loop to break.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
+	if ls.chain == nil {
+		return false
+	}
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return false
+	}
+	return ls.chain.ValidateRollback(point) == nil
+}
+
+// clearRollbackHistoryForPoint removes per-connection loop-detector records
+// for a rollback point the node has successfully applied. A crossable rollback
+// we actually crossed made forward progress toward the peer's chain, so it
+// must not count toward the repeat-loop threshold that breaks pathological
+// loops. Rollbacks the node genuinely cannot cross never reach this path and
+// are tracked separately by the survives-reset unrecoverableRollbacks map.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	if len(ls.rollbackHistory) == 0 {
+		return
+	}
+	filtered := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if pointMatches(r.point, point) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	ls.rollbackHistory = filtered
 }
 
 // resetChainsyncResyncState clears chainsync-local recovery state before a
