@@ -2266,14 +2266,20 @@ atomically — INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck �
 the first write of its transaction, before the pool-stake snapshot, and is
 superseded (skips the whole capture) whenever an authoritative row already
 exists. If reward inputs cannot produce a marker (for example, ended-epoch
-metadata is unavailable), the fallback skips all Mark writes rather than
-persisting pool rows without the shared lock. Because the marker is the first
-row both paths write, they acquire the
-`reward_snapshot` row lock in the same order, which keeps a concurrent
+metadata is unavailable), the fallback temporarily inserts-or-locks the same
+`(epoch, mark)` key before replacing leader-election Mark rows. It deletes only
+a temporary row that its transaction inserted; an existing provisional row is
+locked but left untouched. The delete is staged before commit, while the
+row/unique-key lock remains held through commit, so the fallback can still
+persist `pool_stake_snapshot` and `epoch_summary` without leaving a durable
+`reward_snapshot` row that falsely implies reward inputs exist. Because the
+marker or temporary guard is the first row both paths write, they acquire the
+`reward_snapshot` key/row lock in the same order, which keeps a concurrent
 authoritative-vs-fallback capture both race-free and deadlock-free on
 MySQL/Postgres; SQLite is already serial. `handleEpochTransition`'s pre-check
 that skips the fallback when an authoritative row exists is a best-effort
-optimization — the marker claim, not that read, is what closes the race.
+optimization — the transactional marker/guard claim, not that read, is what
+closes the race.
 
 DevNet gate: wiring the authoritative capture into `processEpochRollover` touches
 consensus-critical epoch-boundary code (it changes the Mark `PoolStakeSnapshot`

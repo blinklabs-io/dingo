@@ -235,3 +235,76 @@ func TestClaimFallbackRewardSnapshotFreshAndReplace(t *testing.T) {
 	require.Equal(t, uint64(200), uint64(got.TotalActiveStake),
 		"second fallback claim must replace the provisional row in place")
 }
+
+func TestFallbackRewardSnapshotGuardTemporaryRow(t *testing.T) {
+	db := setupTestDB(t)
+	meta := db.Metadata()
+	txn := db.Transaction(true)
+
+	proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
+		7,
+		"mark",
+		txn.Metadata(),
+	)
+	require.NoError(t, err)
+	require.True(t, proceed)
+	require.NotZero(t, guardID)
+
+	guard, err := meta.GetRewardSnapshot(7, "mark", txn.Metadata())
+	require.NoError(t, err)
+	require.NotNil(t, guard)
+	require.False(t, guard.Authoritative)
+
+	require.NoError(t, meta.ReleaseFallbackRewardSnapshotGuard(
+		guardID,
+		txn.Metadata(),
+	))
+	require.NoError(t, txn.Commit())
+
+	guard, err = meta.GetRewardSnapshot(7, "mark", nil)
+	require.NoError(t, err)
+	require.Nil(t, guard,
+		"the temporary serialization row must not survive commit")
+}
+
+func TestFallbackRewardSnapshotGuardRefusesAuthoritative(t *testing.T) {
+	db := setupTestDB(t)
+	meta := db.Metadata()
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:         8,
+		SnapshotType:  "mark",
+		CapturedSlot:  80,
+		BoundarySlot:  81,
+		Authoritative: true,
+	}, nil))
+
+	txn := db.Transaction(true)
+	proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
+		8,
+		"mark",
+		txn.Metadata(),
+	)
+	require.NoError(t, err)
+	require.False(t, proceed)
+	require.Zero(t, guardID)
+	require.NoError(t, txn.Rollback())
+
+	got, err := meta.GetRewardSnapshot(8, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.True(t, got.Authoritative)
+	require.Equal(t, uint64(80), got.CapturedSlot)
+}
+
+func TestFallbackRewardSnapshotGuardRequiresTransaction(t *testing.T) {
+	db := setupTestDB(t)
+	meta := db.Metadata()
+
+	_, _, err := meta.ClaimFallbackRewardSnapshotGuard(9, "mark", nil)
+	require.ErrorContains(t, err, "transaction is required")
+	require.ErrorContains(
+		t,
+		meta.ReleaseFallbackRewardSnapshotGuard(1, nil),
+		"transaction is required",
+	)
+}

@@ -187,6 +187,101 @@ func ClaimFallbackSnapshot(
 	return proceed, nil
 }
 
+// ClaimFallbackSnapshotGuard serializes a fallback snapshot capture that has no
+// reward-input bundle against the authoritative capture without leaving a
+// reward_snapshot row behind. It claims the same unique (epoch, snapshot_type)
+// key used by SaveSnapshot. When the key is absent, it inserts a temporary row
+// and returns its ID; the caller must delete that row in the same transaction
+// after its other snapshot writes are staged. When a provisional row already
+// exists, it is locked and left untouched. An authoritative row refuses the
+// fallback.
+//
+// The insert-or-lock sequence must remain inside the caller's open transaction:
+// the temporary row is the lockable key that makes a concurrent authoritative
+// SaveSnapshot wait until the fallback either commits or rolls back.
+func ClaimFallbackSnapshotGuard(
+	db *gorm.DB,
+	epoch uint64,
+	snapshotType string,
+) (bool, uint, error) {
+	guard := &models.RewardSnapshot{
+		Epoch:        epoch,
+		SnapshotType: snapshotType,
+	}
+	res := db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "epoch"},
+			{Name: "snapshot_type"},
+		},
+		DoNothing: true,
+	}).Create(guard)
+	if res.Error != nil {
+		return false, 0, fmt.Errorf(
+			"claim fallback reward snapshot guard: %w",
+			res.Error,
+		)
+	}
+	if res.RowsAffected == 1 {
+		if guard.ID == 0 {
+			if err := db.Where(
+				"epoch = ? AND snapshot_type = ?",
+				epoch,
+				snapshotType,
+			).First(guard).Error; err != nil {
+				return false, 0, fmt.Errorf(
+					"load fallback reward snapshot guard: %w",
+					err,
+				)
+			}
+		}
+		return true, guard.ID, nil
+	}
+
+	var existing models.RewardSnapshot
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where(
+			"epoch = ? AND snapshot_type = ?",
+			epoch,
+			snapshotType,
+		).First(&existing).Error; err != nil {
+		return false, 0, fmt.Errorf(
+			"lock existing reward snapshot guard: %w",
+			err,
+		)
+	}
+	if existing.Authoritative {
+		return false, 0, nil
+	}
+	return true, 0, nil
+}
+
+// ReleaseFallbackSnapshotGuard deletes a temporary guard row by primary key.
+// The caller still holds the row lock in the same transaction, so no
+// authoritative writer can replace the row between the claim and this delete.
+func ReleaseFallbackSnapshotGuard(db *gorm.DB, guardID uint) error {
+	if guardID == 0 {
+		return nil
+	}
+	result := db.Where(
+		"id = ? AND authoritative = ?",
+		guardID,
+		false,
+	).Delete(&models.RewardSnapshot{})
+	if result.Error != nil {
+		return fmt.Errorf(
+			"release fallback reward snapshot guard: %w",
+			result.Error,
+		)
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf(
+			"release fallback reward snapshot guard: expected 1 row, deleted %d",
+			result.RowsAffected,
+		)
+	}
+	return nil
+}
+
 // GetSnapshot retrieves reward snapshot metadata for an epoch.
 func GetSnapshot(
 	db *gorm.DB,

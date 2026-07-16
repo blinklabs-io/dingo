@@ -68,14 +68,15 @@ var errFallbackSupersededByAuthoritative = errors.New(
 //
 // checkAuthoritativeMark must be true only for the fallback (event-driven)
 // mark-snapshot capture path (captureMarkSnapshot); the authoritative
-// CaptureEpochBoundarySnapshot path always passes false. It maps directly onto
-// the reward_snapshot.authoritative marker: a false value (authoritative
-// capture) writes the marker with authoritative=true and always overwrites any
-// provisional row, while a true value (fallback capture) claims the marker with
-// authoritative=false via ClaimFallbackRewardSnapshot and is superseded (this
-// method returns errFallbackSupersededByAuthoritative) whenever an authoritative
-// row already exists. The claim is the first write in saveSnapshotInTxn, so a
-// concurrent authoritative writer blocks on the same reward_snapshot row lock
+// CaptureEpochBoundarySnapshot path always passes false. A fallback claims the
+// lockable reward_snapshot key before replacing Mark rows and is superseded
+// (this method returns errFallbackSupersededByAuthoritative) whenever an
+// authoritative row already exists. When reward inputs are available, the
+// normal ClaimFallbackRewardSnapshot marker provides that guard. Without
+// ended-epoch metadata, ClaimFallbackRewardSnapshotGuard temporarily claims the
+// same key and removes only the row it inserted before commit, preserving the
+// invariant that no reward_snapshot remains without reward inputs. In both
+// cases a concurrent authoritative writer blocks on the same key/row lock
 // (MySQL/Postgres) or is serialized by single-writer semantics (SQLite),
 // closing the check-then-write race outright rather than merely narrowing it.
 func (m *Manager) saveSnapshot(
@@ -144,11 +145,11 @@ func (m *Manager) saveSnapshotInTxn(
 	// which keeps a concurrent authoritative-vs-fallback capture deadlock-free on
 	// MySQL/Postgres. bundle is nil when reward inputs are disabled for this
 	// call, or skipped because the ended-epoch metadata is not yet available. In
-	// either case there is no reward marker or reward-input row to write, so both
-	// the authoritative and fallback capture paths fall through and still persist
-	// the Mark pool-stake snapshot and epoch summary below — the leader-election
-	// data that must be captured on every epoch transition regardless of
-	// reward-input availability.
+	// either case there is no durable reward marker or reward-input row to write,
+	// so both the authoritative and fallback capture paths fall through and still
+	// persist the Mark pool-stake snapshot and epoch summary below — the
+	// leader-election data that must be captured on every epoch transition
+	// regardless of reward-input availability.
 	var bundle *rewardStateBundle
 	if persistRewardInputs {
 		var err error
@@ -160,6 +161,7 @@ func (m *Manager) saveSnapshotInTxn(
 		}
 	}
 
+	var temporaryFallbackGuardID uint
 	if bundle != nil {
 		bundle.snapshot.Authoritative = authoritative
 		if authoritative {
@@ -180,6 +182,24 @@ func (m *Manager) saveSnapshotInTxn(
 				return errFallbackSupersededByAuthoritative
 			}
 		}
+	} else if checkAuthoritativeMark {
+		// No reward bundle means there is no durable reward_snapshot marker to
+		// claim. Temporarily claim the same unique key so a fallback still
+		// serializes against authoritative rollover before replacing Mark rows.
+		// The helper leaves an existing provisional row untouched and returns a
+		// non-zero ID only when this transaction inserted the temporary row.
+		proceed, guardID, err := meta.ClaimFallbackRewardSnapshotGuard(
+			epoch,
+			snapshotType,
+			metaTxn,
+		)
+		if err != nil {
+			return fmt.Errorf("claim fallback reward snapshot guard: %w", err)
+		}
+		if !proceed {
+			return errFallbackSupersededByAuthoritative
+		}
+		temporaryFallbackGuardID = guardID
 	}
 
 	// Save pool stake snapshots
@@ -246,6 +266,19 @@ func (m *Manager) saveSnapshotInTxn(
 			epoch, bundle, meta, metaTxn,
 		); err != nil {
 			return fmt.Errorf("save reward state inputs: %w", err)
+		}
+	}
+
+	// A no-bundle fallback uses a temporary reward_snapshot row only as a
+	// lockable serialization key. Delete exactly the row this transaction
+	// inserted; the database retains its row/unique-key locks until commit, so a
+	// waiting authoritative upsert cannot pass this capture before then.
+	if temporaryFallbackGuardID != 0 {
+		if err := meta.ReleaseFallbackRewardSnapshotGuard(
+			temporaryFallbackGuardID,
+			metaTxn,
+		); err != nil {
+			return fmt.Errorf("release fallback reward snapshot guard: %w", err)
 		}
 	}
 

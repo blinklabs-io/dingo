@@ -1129,6 +1129,25 @@ type MetadataStore interface {
 		types.Txn,
 	) (bool, error)
 
+	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that cannot
+	// persist reward inputs against the authoritative epoch-rollover capture.
+	// It returns proceed=false when an authoritative row already exists. A
+	// non-zero guard ID identifies a temporary row that the caller must delete
+	// in the same transaction before commit.
+	ClaimFallbackRewardSnapshotGuard(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (bool, uint, error)
+
+	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
+	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
+	// that claimed the guard.
+	ReleaseFallbackRewardSnapshotGuard(
+		uint, // guardID
+		types.Txn,
+	) error
+
 	// GetRewardSnapshot retrieves reward snapshot metadata for an epoch.
 	GetRewardSnapshot(
 		uint64, // epoch

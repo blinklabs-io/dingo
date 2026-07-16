@@ -17,6 +17,7 @@
 package mysql
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -73,6 +74,48 @@ func (d *MetadataStoreMysql) ClaimFallbackRewardSnapshot(
 		return false, fmt.Errorf("ClaimFallbackRewardSnapshot: resolve db: %w", err)
 	}
 	return rewardstate.ClaimFallbackSnapshot(db, snapshot, txn)
+}
+
+// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that has no
+// reward-input bundle against the authoritative capture.
+func (d *MetadataStoreMysql) ClaimFallbackRewardSnapshotGuard(
+	epoch uint64,
+	snapshotType string,
+	txn types.Txn,
+) (bool, uint, error) {
+	if txn == nil {
+		return false, 0, errors.New(
+			"ClaimFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return false, 0, fmt.Errorf(
+			"ClaimFallbackRewardSnapshotGuard: resolve db: %w",
+			err,
+		)
+	}
+	return rewardstate.ClaimFallbackSnapshotGuard(db, epoch, snapshotType)
+}
+
+// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row.
+func (d *MetadataStoreMysql) ReleaseFallbackRewardSnapshotGuard(
+	guardID uint,
+	txn types.Txn,
+) error {
+	if txn == nil {
+		return errors.New(
+			"ReleaseFallbackRewardSnapshotGuard: transaction is required",
+		)
+	}
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return fmt.Errorf(
+			"ReleaseFallbackRewardSnapshotGuard: resolve db: %w",
+			err,
+		)
+	}
+	return rewardstate.ReleaseFallbackSnapshotGuard(db, guardID)
 }
 
 // GetRewardSnapshot retrieves reward snapshot metadata for an epoch.

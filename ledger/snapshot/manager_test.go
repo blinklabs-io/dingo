@@ -550,7 +550,6 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	require.Len(t, snapshots, 1)
 	require.Equal(t, poolHash, snapshots[0].PoolKeyHash,
 		"the captured Mark snapshot must replace the prior pool set")
-	require.NotEqual(t, priorPool, snapshots[0].PoolKeyHash)
 
 	// The epoch summary (leader-election readiness) is written alongside it.
 	epochSummary, err := db.Metadata().GetEpochSummary(7, nil)
@@ -563,6 +562,94 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, rewardSnapshot,
 		"no reward marker is written when the ended-epoch metadata is unavailable")
+}
+
+func TestFallbackWithoutRewardInputsPreservesAuthoritativeMark(t *testing.T) {
+	db := setupTestDB(t)
+	authoritativePool := bytes.Repeat([]byte{0xa1}, 28)
+	fallbackPool := bytes.Repeat([]byte{0xb2}, 28)
+	require.NoError(t, db.Metadata().SaveRewardSnapshot(
+		&models.RewardSnapshot{
+			Epoch:            7,
+			SnapshotType:     "mark",
+			TotalActiveStake: 10,
+			TotalPoolCount:   1,
+			TotalDelegators:  1,
+			CapturedSlot:     100,
+			BoundarySlot:     3_024_000,
+			EpochNonce:       []byte{0xaa},
+			ProtocolVersion:  8,
+			Authoritative:    true,
+		},
+		nil,
+	))
+	require.NoError(t, db.Metadata().SavePoolStakeSnapshot(
+		&models.PoolStakeSnapshot{
+			Epoch:          7,
+			SnapshotType:   "mark",
+			PoolKeyHash:    authoritativePool,
+			TotalStake:     10,
+			DelegatorCount: 1,
+			CapturedSlot:   100,
+		},
+		nil,
+	))
+
+	var fallbackPoolKey lcommon.PoolKeyHash
+	copy(fallbackPoolKey[:], fallbackPool)
+	distribution := &StakeDistribution{
+		Slot: 200,
+		PoolStakes: map[lcommon.PoolKeyHash]uint64{
+			fallbackPoolKey: 99,
+		},
+		DelegatorCount: map[lcommon.PoolKeyHash]uint64{
+			fallbackPoolKey: 1,
+		},
+		StakeInputs: []StakeInput{{
+			PoolKeyHash: fallbackPool,
+			StakingKey:  bytes.Repeat([]byte{0xc3}, 28),
+			Stake:       99,
+			Registered:  true,
+		}},
+		TotalStake: 99,
+		TotalPools: 1,
+	}
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	saved, err := mgr.saveSnapshot(
+		context.Background(),
+		7,
+		"mark",
+		distribution,
+		event.EpochTransitionEvent{
+			PreviousEpoch:   6, // deliberately absent: no reward-input bundle
+			NewEpoch:        7,
+			BoundarySlot:    3_024_000,
+			ProtocolVersion: 8,
+			SnapshotSlot:    200,
+		},
+		false,
+		true,
+		true,
+	)
+	require.NoError(t, err)
+	require.False(t, saved)
+
+	snapshots, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		7,
+		"mark",
+		nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, snapshots, 1)
+	require.Equal(t, authoritativePool, snapshots[0].PoolKeyHash)
+	require.Equal(t, uint64(10), uint64(snapshots[0].TotalStake))
+
+	rewardSnapshot, err := db.Metadata().GetRewardSnapshot(7, "mark", nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardSnapshot)
+	require.True(t, rewardSnapshot.Authoritative)
+	require.Equal(t, uint64(10), uint64(rewardSnapshot.TotalActiveStake))
+	require.Equal(t, []byte{0xaa}, rewardSnapshot.EpochNonce)
 }
 
 func TestFallbackAuthoritativeNoopDoesNotRecordSuccessMetrics(t *testing.T) {
@@ -1646,9 +1733,9 @@ func TestRewardInputsSkippingDegradedPoolsExcludesOnlyBadPools(t *testing.T) {
 // TestConcurrentFallbackAndAuthoritativeCaptureSerialization forces both
 // mark-capture orderings with overlapping write transactions. Deterministic
 // channel barriers make the fallback pass its non-locking pre-check while the
-// authoritative row is still uncommitted, then prove the shared marker claim
-// blocks the fallback write. The inverse case proves authoritative capture can
-// still replace a provisional fallback.
+// authoritative row is still uncommitted, then prove the shared marker/guard
+// claim blocks the fallback write. The inverse case proves authoritative
+// capture can still replace a provisional fallback.
 func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 	newFixture := func(t *testing.T) (
 		*Manager,
@@ -1685,6 +1772,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		mgr, poolHash, authoritativeEvt := newFixture(t)
 		db := mgr.db
 		fallbackEvt := authoritativeEvt
+		fallbackEvt.PreviousEpoch = 6 // deliberately absent: no reward bundle
 		fallbackEvt.EpochNonce = nil
 
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
