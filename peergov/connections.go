@@ -26,6 +26,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 func isConnectionCancellationError(err error) bool {
@@ -304,16 +305,33 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			continue
 		}
 
-		// Re-resolve hostname-based peers on every attempt and rotate the
-		// dial target across all resolved records so load spreads across
+		// Determine the dial target for this attempt. Ledger-discovered
+		// pool relays are resolved once and locked to that IP (see
+		// resolveLedgerDialTarget): their hostname is attacker-supplied via
+		// on-chain stake pool registration, so re-resolving it at dial time
+		// would let a malicious DNS server pass the routability check with
+		// one IP and dial an internal one with another (DNS rebind). Every
+		// other source re-resolves on each attempt and rotates the dial
+		// target across all resolved records so load spreads across
 		// load-balancer backends and a stuck/unhealthy backend is escaped
-		// on the next attempt without a process restart. IP-literal peers
-		// are returned unchanged. Peer identity/dedup is keyed on
+		// without a process restart; those hostnames are operator- or
+		// protocol-controlled, not attacker-supplied. IP-literal peers are
+		// returned unchanged either way. Peer identity/dedup is keyed on
 		// peer.Address / NormalizedAddress and is unaffected.
-		conn, err := p.config.ConnManager.CreateOutboundConn(
-			p.ctx,
-			p.resolveDialAddress(p.ctx, peer.Address),
-		)
+		var dialTarget string
+		var err error
+		if peer.Source == PeerSourceP2PLedger {
+			dialTarget, err = p.resolveLedgerDialTarget(p.ctx, peer)
+		} else {
+			dialTarget = p.resolveDialAddress(p.ctx, peer.Address)
+		}
+		var conn *ouroboros.Connection
+		if err == nil {
+			conn, err = p.config.ConnManager.CreateOutboundConn(
+				p.ctx,
+				dialTarget,
+			)
+		}
 		if err == nil {
 			connId := conn.Id()
 			p.mu.Lock()

@@ -341,6 +341,69 @@ func (p *PeerGovernor) resolveDialAddress(
 	return net.JoinHostPort(ip.String(), port)
 }
 
+// resolveLedgerDialTarget returns the concrete IP:port to dial for a
+// ledger-discovered pool relay peer, locking that choice onto the peer so
+// every subsequent dial attempt reuses the same resolved IP instead of
+// asking DNS again.
+//
+// Ledger relay hostnames are supplied by pool operators via on-chain stake
+// pool registration — input outside the node's control. If the routability
+// check performed when the relay was discovered (isRoutableAddr, via
+// resolveAddress in addLedgerPeer) and the actual dial each triggered their
+// own DNS lookup, a malicious or compromised authoritative DNS server could
+// answer the discovery-time lookup with a public IP (passing the check) and
+// a later lookup with an internal address (the one actually dialed) — a DNS
+// rebind that would cause the node to TCP-probe internal addresses.
+// Resolving exactly once and always dialing that resolved IP closes the
+// gap.
+//
+// peer.NormalizedAddress already holds the IP resolved at discovery time in
+// the common case, so this returns it unchanged. If that earlier resolution
+// failed and NormalizedAddress is still a hostname, a single fresh
+// resolution is performed here, checked for routability, and — on success —
+// written back to peer.NormalizedAddress under p.mu so it is locked in for
+// this and every future reconnect attempt. It must NOT be called while
+// holding p.mu.
+func (p *PeerGovernor) resolveLedgerDialTarget(
+	ctx context.Context,
+	peer *Peer,
+) (string, error) {
+	host, port, err := net.SplitHostPort(peer.NormalizedAddress)
+	if err != nil {
+		return "", err
+	}
+	if net.ParseIP(host) != nil {
+		// Resolved and locked in at discovery time.
+		return peer.NormalizedAddress, nil
+	}
+
+	// Discovery-time resolution didn't produce an IP (e.g. it failed and
+	// fell back to the lowercased hostname). Resolve once now, bounded so a
+	// hung or slow resolver cannot wedge the dial loop.
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", errors.New("no addresses returned for ledger relay hostname")
+	}
+	resolved := net.JoinHostPort(ips[0].String(), port)
+	if !isRoutableAddr(resolved) {
+		return "", ErrUnroutableAddress
+	}
+
+	p.mu.Lock()
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx != -1 && p.peers[idx] != nil {
+		p.peers[idx].NormalizedAddress = resolved
+	}
+	p.mu.Unlock()
+
+	return resolved, nil
+}
+
 // localAddrFamilies detects which IP families the local host can route to.
 // It is a package var so tests can inject a deterministic result independent
 // of the host's real network interfaces.
