@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -135,6 +136,41 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
 
+	totalEpochs := len(epochs)
+	var epochsDone atomic.Int64
+	start := time.Now()
+
+	// Periodic progress ticker so long backfills (hundreds of epochs, each
+	// with up to thousands of per-pool requests) still surface liveness in
+	// the logs even if no single epoch has completed since the last tick.
+	progressDone := make(chan struct{})
+	var progressWg sync.WaitGroup
+	progressWg.Go(func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				done := epochsDone.Load()
+				elapsed := time.Since(start)
+				var eta time.Duration
+				if done > 0 {
+					eta = time.Duration(int64(elapsed) / done * int64(totalEpochs-int(done)))
+				}
+				logger.Info("koiosparity: fetch progress",
+					"network", cfg.Network,
+					"epochs_done", done,
+					"epochs_total", totalEpochs,
+					"percent", fmt.Sprintf("%.1f", float64(done)/float64(totalEpochs)*100),
+					"elapsed", elapsed.Round(time.Second),
+					"eta", eta.Round(time.Second),
+				)
+			case <-progressDone:
+				return
+			}
+		}
+	})
+
 loop:
 	for _, epoch := range epochs {
 		select {
@@ -160,10 +196,20 @@ loop:
 			result.EpochsFetched++
 			result.PoolsFetched += cnt
 			mu.Unlock()
+			done := epochsDone.Add(1)
+			logger.Info("koiosparity: epoch fetched",
+				"network", cfg.Network,
+				"epoch", epoch,
+				"pools", cnt,
+				"epochs_done", done,
+				"epochs_total", totalEpochs,
+			)
 		}(epoch)
 	}
 
 	wg.Wait()
+	close(progressDone)
+	progressWg.Wait()
 
 	// Check cancellation before consuming errCh so a clean shutdown returns
 	// ctx.Err() rather than a mid-flight epoch error.
@@ -245,6 +291,30 @@ func fetchEpoch(
 	var poolWg sync.WaitGroup
 	var poolMu sync.Mutex
 	poolErrCh := make(chan error, 1)
+	var poolsDone atomic.Int64
+	poolTotal := len(poolIDs)
+
+	// A single epoch can require a request per pool (up to ~1200 on preview),
+	// so surface progress mid-epoch rather than only after it fully commits.
+	poolProgressDone := make(chan struct{})
+	var poolProgressWg sync.WaitGroup
+	poolProgressWg.Go(func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				logger.Info("koiosparity: epoch pool fetch progress",
+					"network", network,
+					"epoch", epoch,
+					"pools_done", poolsDone.Load(),
+					"pools_total", poolTotal,
+				)
+			case <-poolProgressDone:
+				return
+			}
+		}
+	})
 
 	// Use a labeled break so that on cancellation we stop spawning new workers
 	// but still drain already-started goroutines via poolWg.Wait() below.
@@ -262,6 +332,7 @@ outer:
 		go func(id string) {
 			defer poolWg.Done()
 			defer func() { <-poolSem }()
+			defer poolsDone.Add(1)
 
 			item, histErr := koios.GetPoolEpochHistory(ctx, id, epoch)
 			if histErr != nil {
@@ -290,6 +361,8 @@ outer:
 	}
 
 	poolWg.Wait() // always drain started goroutines before returning
+	close(poolProgressDone)
+	poolProgressWg.Wait()
 
 	// If context was cancelled, report that rather than any pool error.
 	if ctx.Err() != nil {
@@ -320,11 +393,5 @@ outer:
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
 
-	poolCount := len(poolRows)
-	logger.Debug("koiosparity: epoch fetched",
-		"network", network,
-		"epoch", epoch,
-		"pools", poolCount,
-	)
-	return poolCount, nil
+	return len(poolRows), nil
 }
