@@ -1981,6 +1981,18 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 may be transient). Results are stored in `check_mismatches` and summarised in
 `check_epoch_status`.
 
+Epochs 0-1 predate a valid Shelley "go" stake snapshot (mark→set→go takes 3
+epoch boundaries, so the go snapshot backing epoch E's active_stake needs
+E-2 >= 0) and Koios permanently returns `active_stake=null` there — `fetch`
+commits a `pre_staking` marker row instead of erroring, so `check` skips
+comparison for that epoch and it's never re-proposed by future `fetch` runs.
+A null `active_stake` on any other epoch is treated as a real, retryable
+error (Koios backend lag or an upstream problem), not silently marked
+permanent. `fetch` also cancels the rest of its in-flight batch as soon as any
+epoch hits such an error, rather than continuing to grind through a
+potentially hours-long backfill before surfacing the failure — a rerun
+resumes only the epochs still missing from the cache.
+
 **Commands:** `run` (default), `fetch`, `check`, `status`, `explain`, `watch`.
 
 ### Bark (`bark/`)

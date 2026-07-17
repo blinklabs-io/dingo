@@ -132,6 +132,14 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 	result := &FetchResult{FromEpoch: fromEpoch, ThroughEpoch: throughEpoch}
 	var mu sync.Mutex
 
+	// fetchCtx is cancelled the moment any epoch hits a real (non-pre-staking)
+	// error, so a failure surfaces immediately instead of waiting out the rest
+	// of a batch that can run for hours. The final ctx.Err() check below still
+	// inspects the original, un-derived ctx so a genuine caller cancellation is
+	// never confused with this internal fail-fast cancellation.
+	fetchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	sem := make(chan struct{}, cfg.Concurrency)
 	var wg sync.WaitGroup
 	errCh := make(chan error, 1)
@@ -174,7 +182,7 @@ func Fetch(ctx context.Context, cfg FetchConfig, logger *slog.Logger) (*FetchRes
 loop:
 	for _, epoch := range epochs {
 		select {
-		case <-ctx.Done():
+		case <-fetchCtx.Done():
 			break loop
 		case sem <- struct{}{}:
 		}
@@ -184,12 +192,18 @@ loop:
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			cnt, fetchErr := fetchEpoch(ctx, koios, cache, cfg.Network, epoch, poolIDs, logger)
+			cnt, fetchErr := fetchEpoch(fetchCtx, koios, cache, cfg.Network, epoch, poolIDs, logger)
 			if fetchErr != nil {
 				select {
 				case errCh <- fmt.Errorf("epoch %d: %w", epoch, fetchErr):
 				default:
 				}
+				// Stop dispatching/running further epochs immediately rather
+				// than grinding through the rest of a potentially hours-long
+				// batch once we already know this run will fail. Epochs that
+				// don't finish committing just stay uncached and are retried
+				// (along with any not-yet-attempted epochs) on the next run.
+				cancel()
 				return
 			}
 			mu.Lock()
@@ -254,11 +268,51 @@ func fetchEpoch(
 	// Validate all rejection conditions before any DB writes so an incomplete
 	// or pre-staking epoch response never partially modifies the cache.
 
-	// active_stake null means this epoch predates staking (e.g. epoch 0 on
-	// preview). Without a reference value the comparison would be meaningless,
-	// so reject the epoch here so it stays uncached and is never checked.
+	// Epochs 0 and 1 predate a valid "go" stake snapshot and can never have a
+	// comparable active_stake — not a heuristic, but exact Shelley ledger
+	// mechanics (formal-ledger-specifications, Ledger.Conway.Specification.Rewards):
+	// a stake snapshot taken as "mark" at the boundary into epoch N+1 becomes
+	// "set" at the boundary into epoch N+2, then "go" (the one used for reward /
+	// active-stake calculation) at the boundary into epoch N+3. So the go
+	// snapshot used for epoch E's active_stake was captured at the boundary
+	// into epoch E-2, which only exists once E >= 2 (both preview and preprod
+	// start their own epoch numbering at 0, so this is network-independent).
+	// Koios returns active_stake=null here permanently — commit a PreStaking
+	// marker so GetUncachedEpochs stops proposing these two epochs on every
+	// future fetch run.
+	//
+	// A null active_stake on any OTHER epoch is not this condition — it means
+	// Koios's backend hasn't finished processing a just-closed epoch yet (see
+	// the end_time==0 check below) or something is genuinely wrong upstream.
+	// Treating that as permanent pre-staking would silently and permanently
+	// stop comparing a real epoch, so it is rejected as a retryable error
+	// instead of being cached.
+	const preStakingThroughEpoch = 1
+	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch {
+		var epochEndTime time.Time
+		if info.EndTime != 0 {
+			epochEndTime = time.Unix(info.EndTime, 0).UTC()
+		}
+		if err := cache.CommitEpochData(KoiosEpochInfo{
+			Network:      network,
+			Epoch:        epoch,
+			PreStaking:   true,
+			EpochEndTime: epochEndTime,
+			FetchedAt:    time.Now(),
+		}, nil); err != nil {
+			return 0, fmt.Errorf("commit pre-staking marker: %w", err)
+		}
+		logger.Info("koiosparity: epoch predates staking, marking permanently unfetchable",
+			"network", network,
+			"epoch", epoch,
+		)
+		return 0, nil
+	}
 	if info.ActiveStake == nil {
-		return 0, fmt.Errorf("epoch %d: koios returned null active_stake — epoch predates staking and cannot be compared", epoch)
+		return 0, fmt.Errorf(
+			"epoch %d: koios returned null active_stake unexpectedly (only epochs <= %d predate a valid stake snapshot)",
+			epoch, preStakingThroughEpoch,
+		)
 	}
 	activeStake := *info.ActiveStake
 

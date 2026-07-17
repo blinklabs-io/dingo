@@ -38,7 +38,12 @@ type KoiosEpochInfo struct {
 	Fees         string    `gorm:"not null"`
 	TotalRewards string    `gorm:"not null"`
 	EpochEndTime time.Time // when the epoch actually closed (from Koios end_time); zero for old cache rows
-	FetchedAt    time.Time `gorm:"not null"`
+	// PreStaking marks an epoch where Koios returned active_stake=null (e.g.
+	// epochs 0-1 on preview, before the first stake snapshot exists). There is
+	// no reference value to ever compare against, so fetch commits this marker
+	// instead of erroring/retrying forever, and check skips comparison entirely.
+	PreStaking bool      `gorm:"not null;default:false"`
+	FetchedAt  time.Time `gorm:"not null"`
 }
 
 func (KoiosEpochInfo) TableName() string { return "koios_epoch_info" }
@@ -185,7 +190,7 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 			{Name: "epoch"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"active_stake", "fees", "total_rewards", "epoch_end_time", "fetched_at",
+			"active_stake", "fees", "total_rewards", "epoch_end_time", "pre_staking", "fetched_at",
 		}),
 	}).Create(&info).Error
 }
@@ -229,7 +234,7 @@ func (c *Cache) CommitEpochData(info KoiosEpochInfo, rows []KoiosPoolEpoch) erro
 				{Name: "epoch"},
 			},
 			DoUpdates: clause.AssignmentColumns([]string{
-				"active_stake", "fees", "total_rewards", "epoch_end_time", "fetched_at",
+				"active_stake", "fees", "total_rewards", "epoch_end_time", "pre_staking", "fetched_at",
 			}),
 		}).Create(&info).Error
 	})
