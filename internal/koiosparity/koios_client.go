@@ -27,9 +27,19 @@ import (
 )
 
 const (
-	koiosPageSize     = 1000
-	koiosMaxRetries   = 3
-	koiosRetryBackoff = 2 * time.Second
+	koiosPageSize   = 1000
+	koiosMaxRetries = 3
+
+	// Koios publishes rate limiting as a daily request quota, not a
+	// per-second window (https://koios.rest/pricing/Pricing.html): the
+	// unauthenticated Public tier caps at 5,000 req/day and is shared across
+	// every anonymous caller, while an API key (Free tier and up) gets
+	// 50,000+ req/day on its own allotment. No per-second/burst figure is
+	// published for either tier, so these backoffs are a conservative
+	// heuristic — deliberately longer for the shared anonymous pool — not a
+	// value derived from a documented rate.
+	koiosRetryBackoffAnon  = 5 * time.Second
+	koiosRetryBackoffKeyed = 2 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -85,6 +95,17 @@ func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 	}, nil
 }
 
+// retryBackoff returns the base retry backoff for this client's tier: longer
+// for the shared anonymous pool, shorter once an API key gives it its own
+// daily quota (see the koiosRetryBackoff* comment for why these aren't
+// derived from a published per-second rate).
+func (k *KoiosClient) retryBackoff() time.Duration {
+	if k.apiKey != "" {
+		return koiosRetryBackoffKeyed
+	}
+	return koiosRetryBackoffAnon
+}
+
 // get executes a GET request against the Koios API with optional Range header.
 // rangeStart/rangeEnd < 0 means no Range header.
 func (k *KoiosClient) get(
@@ -105,6 +126,7 @@ func (k *KoiosClient) get(
 		req.Header.Set("Range", fmt.Sprintf("%d-%d", rangeStart, rangeEnd))
 	}
 
+	backoff := k.retryBackoff()
 	var resp *http.Response
 	for attempt := range koiosMaxRetries {
 		resp, err = k.http.Do(req.Clone(ctx))
@@ -116,7 +138,7 @@ func (k *KoiosClient) get(
 						return nil, ctxErr
 					}
 					return nil, context.Canceled
-				case <-time.After(koiosRetryBackoff):
+				case <-time.After(backoff):
 				}
 				continue
 			}
@@ -128,7 +150,20 @@ func (k *KoiosClient) get(
 			return nil, errors.New("koios: http.Do returned nil response without error")
 		}
 		if resp.StatusCode == http.StatusTooManyRequests {
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			// Koios returns this exact message when the tier's request quota is
+			// exhausted (as opposed to a transient burst throttle). Retrying
+			// with backoff cannot help — the quota only resets on Koios's
+			// schedule or with a higher-tier API key — so fail immediately
+			// instead of burning the retry budget.
+			if strings.Contains(string(body), "Exceeded Tier Limit") {
+				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
+				if k.apiKey != "" {
+					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
+				}
+				return nil, fmt.Errorf("koios tier quota exceeded on %s: %s (%s)", path, strings.TrimSpace(string(body)), hint)
+			}
 			if attempt < koiosMaxRetries-1 {
 				select {
 				case <-ctx.Done():
@@ -136,11 +171,11 @@ func (k *KoiosClient) get(
 						return nil, ctxErr
 					}
 					return nil, context.Canceled
-				case <-time.After(koiosRetryBackoff * time.Duration(attempt+1)):
+				case <-time.After(backoff * time.Duration(attempt+1)):
 				}
 				continue
 			}
-			return nil, fmt.Errorf("koios rate-limited after %d retries on %s", koiosMaxRetries, path)
+			return nil, fmt.Errorf("koios rate-limited after %d retries on %s: %s", koiosMaxRetries, path, strings.TrimSpace(string(body)))
 		}
 		break
 	}
