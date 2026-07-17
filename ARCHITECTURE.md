@@ -2134,10 +2134,13 @@ Each snapshot is internally consistent, but a caller loading both snapshot
 pointers could otherwise observe adjacent publication generations. Each
 production publication therefore stamps both snapshots with one generation,
 and code requiring fields from both uses a paired-load helper that retries until
-the generations match. A nil-snapshot fallback exists only for zero-value
-white-box test fixtures; it builds snapshots independently and does not provide
-the cross-snapshot generation guarantee. Production states initialize both
-snapshots in `NewLedgerState` before becoming visible.
+the generations match. The load helpers dereference `consensus.Load()` /
+`tip.Load()` directly and do not nil-check: `NewLedgerState` always calls
+`publishSnapshotsLocked()` before the state becomes visible, so production
+snapshots are never nil. White-box test fixtures that construct `LedgerState{}`
+directly must call `publishSnapshotsLocked()` (or `NewLedgerState` /
+`SetTipForTesting`) themselves before exercising any snapshot-reading path, or
+the read will nil-dereference.
 
 ## Configuration
 
