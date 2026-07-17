@@ -135,3 +135,96 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 			"wantOrder in this test.",
 		targetFunc, wantOrder, observedFiltered)
 }
+
+// TestProcessEpochRollover_RewardOrdering pins the placement of the stake
+// reward application and the ADA-pot capture relative to the rest of the
+// epoch boundary. The delayed reward update (applyStakeRewards) must run
+// before governance reads the treasury, and the ADA-pot snapshot
+// (saveRewardAdaPotsForEpoch) must run after every boundary treasury/reserves
+// mutation so it observes the fully settled pots. It uses the same structural
+// AST approach as TestProcessEpochRollover_OrderingInvariant so a reorder
+// fails loudly even when unit tests pass.
+func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
+	const targetFunc = "processEpochRollover"
+
+	// In source order: reward application first, then the governance/pparam
+	// core, then the ADA-pot capture last.
+	wantOrder := []string{
+		"applyStakeRewards",            // (1) delayed reward update, pre-governance
+		"ComputeAndApplyPParamUpdates", // pparam updates
+		"ProcessEpoch",                 // governance enact (reads treasury)
+		"applyIntraEraHardForkRule",    // last treasury/reserves mutation
+		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
+	}
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err, "parse chainsync.go")
+
+	var fnDecl *ast.FuncDecl
+	for _, decl := range file.Decls {
+		fd, ok := decl.(*ast.FuncDecl)
+		if !ok {
+			continue
+		}
+		if fd.Name.Name == targetFunc {
+			fnDecl = fd
+			break
+		}
+	}
+	require.NotNil(t, fnDecl, "%s not found in chainsync.go", targetFunc)
+	require.NotNil(t, fnDecl.Body, "%s has no body", targetFunc)
+
+	wanted := make(map[string]struct{}, len(wantOrder))
+	for _, m := range wantOrder {
+		wanted[m] = struct{}{}
+	}
+	type hit struct {
+		marker string
+		pos    token.Pos
+	}
+	var hits []hit
+	ast.Inspect(fnDecl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		var name string
+		switch fn := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			name = fn.Sel.Name
+		case *ast.Ident:
+			name = fn.Name
+		default:
+			return true
+		}
+		if _, ok := wanted[name]; ok {
+			hits = append(hits, hit{marker: name, pos: call.Pos()})
+		}
+		return true
+	})
+
+	seen := make(map[string]bool, len(wantOrder))
+	var observed []string
+	for _, h := range hits {
+		if seen[h.marker] {
+			continue
+		}
+		seen[h.marker] = true
+		observed = append(observed, h.marker)
+	}
+
+	for _, m := range wantOrder {
+		require.True(t, seen[m],
+			"reward marker %q not found in %s body — was it renamed or "+
+				"removed? Stake reward application and ADA-pot capture must "+
+				"stay wired into the epoch rollover.",
+			m, targetFunc)
+	}
+
+	require.Equal(t, wantOrder, observed,
+		"reward call sequence in %s drifted. applyStakeRewards must precede "+
+			"governance and saveRewardAdaPotsForEpoch must follow every "+
+			"boundary treasury/reserves mutation. Expected %v, observed %v.",
+		targetFunc, wantOrder, observed)
+}

@@ -1064,6 +1064,29 @@ func leaderRewardChecked(
 	return ret, nil
 }
 
+// MemberReward computes the reward for a single non-owner pool member from the
+// pool's total reward, cost, margin, the member's stake, and the pool's total
+// delegated stake. It mirrors the member split applied in Calculate (the margin
+// is normalized identically) and is exported so the precompute-reuse validator
+// can re-derive and verify a persisted member reward amount without recomputing
+// the whole epoch. Keeping this the same code path Calculate uses guarantees the
+// validator cannot drift from the authoritative calculation.
+func MemberReward(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	memberStake uint64,
+	poolStake uint64,
+) (uint64, error) {
+	return memberRewardChecked(
+		poolReward,
+		cost,
+		normalizedMargin(margin),
+		memberStake,
+		poolStake,
+	)
+}
+
 func memberRewardChecked(
 	poolReward uint64,
 	cost uint64,

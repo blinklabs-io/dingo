@@ -43,9 +43,8 @@ import (
 )
 
 // The rollover stack consumes the application entry points below.
-const stakeRewardSourcePrefix = "dingo:stake-reward:" //nolint:unused
+const stakeRewardSourcePrefix = "dingo:stake-reward:"
 
-//nolint:unused // wired by the separately reviewed reward-rollover change
 func (ls *LedgerState) applyStakeRewards(
 	txn *database.Txn,
 	newEpoch uint64,
@@ -299,7 +298,6 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 	}, true, nil
 }
 
-//nolint:unused // reached from applyStakeRewards once rollover wiring lands
 func (ls *LedgerState) applyStakeRewardApplication(
 	txn *database.Txn,
 	app *stakeRewardApplication,
@@ -480,6 +478,14 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
+	if !precomputedRewardAccountAmountsMatchInputs(
+		poolInputs,
+		poolOutputs,
+		stakeInputs,
+		accountOutputs,
+	) {
+		return nil, false, nil
+	}
 	if !precomputedRewardOutputsMatchBoundary(
 		poolOutputs,
 		accountOutputs,
@@ -626,6 +632,117 @@ func precomputedRewardPoolOutputsMatchInputs(
 		delete(expectedOwnerStake, key)
 	}
 	return len(expectedOwnerStake) == 0
+}
+
+// precomputedRewardAccountAmountsMatchInputs re-derives each persisted account
+// reward amount from the frozen pool/stake inputs and rejects the reuse if any
+// output's amount does not match.
+//
+// precomputedRewardAccountOutputsMatchInputs proves each output maps to a valid
+// leader/member of its pool, and precomputedRewardOutputsComplete proves the
+// global, per-pool, and per-pool-per-type totals. None of those pin an
+// individual recipient's share, so a reward redistributed among the members of
+// a single pool (member A's row carrying member B's amount, B's row absent)
+// preserves every checked aggregate and would otherwise be accepted and applied
+// to the wrong accounts. Re-deriving each amount closes that gap: a redistributed
+// or absorbed share fails this per-recipient check, while a share dropped without
+// an absorber still fails the per-pool total check. A leader row's amount is
+// pinned directly to the pool output's stored leader reward.
+//
+// Only the amounts of rows that exist are re-derived here; which rows must exist
+// (prefilter/zero-reward omission, era-specific dedup) is already governed by the
+// membership, per-pool-total, and prefilter-leader checks. The amount of a row
+// that exists is the stake-derived value in every era, because era dedup only
+// drops rows, it never rewrites amounts.
+func precomputedRewardAccountAmountsMatchInputs(
+	poolInputs []*models.RewardPoolInput,
+	poolOutputs []*models.RewardPoolOutput,
+	stakeInputs []*models.RewardStakeInput,
+	accountOutputs []*models.RewardAccountOutput,
+) bool {
+	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
+	for _, input := range poolInputs {
+		if input == nil {
+			return false
+		}
+		poolInputByKey[string(input.PoolKeyHash)] = input
+	}
+	poolOutputByKey := make(map[string]*models.RewardPoolOutput, len(poolOutputs))
+	for _, output := range poolOutputs {
+		if output == nil {
+			return false
+		}
+		poolOutputByKey[string(output.PoolKeyHash)] = output
+	}
+	// Member stake keyed by pool + credential, matching the account output
+	// identity. Owners never receive member rewards, so they are excluded.
+	type memberStakeKey struct {
+		pool string
+		cred string
+	}
+	memberStakeByKey := make(map[memberStakeKey]uint64, len(stakeInputs))
+	for _, input := range stakeInputs {
+		if input == nil {
+			return false
+		}
+		if input.Owner {
+			continue
+		}
+		credential, err := rewards.NewCredential(
+			input.CredentialTag,
+			input.StakingKey,
+		)
+		if err != nil {
+			return false
+		}
+		memberStakeByKey[memberStakeKey{
+			pool: string(input.PoolKeyHash),
+			cred: credential.Key(),
+		}] = uint64(input.Stake)
+	}
+	// Any decode error, missing input, or amount overflow rejects reuse and
+	// defers to the authoritative fresh calculation, which surfaces a real error
+	// rather than swallowing it here.
+	for _, output := range accountOutputs {
+		reward, err := rewardFromAccountOutput(output)
+		if err != nil {
+			return false
+		}
+		poolKey := string(output.PoolKeyHash)
+		poolOutput, ok := poolOutputByKey[poolKey]
+		if !ok {
+			return false
+		}
+		switch reward.Type {
+		case rewards.RewardTypeLeader:
+			if reward.Amount != uint64(poolOutput.LeaderReward) {
+				return false
+			}
+		case rewards.RewardTypeMember:
+			poolInput, ok := poolInputByKey[poolKey]
+			if !ok {
+				return false
+			}
+			stake, ok := memberStakeByKey[memberStakeKey{
+				pool: poolKey,
+				cred: reward.Credential.Key(),
+			}]
+			if !ok {
+				return false
+			}
+			expected, err := rewards.MemberReward(
+				uint64(poolOutput.TotalReward),
+				uint64(poolInput.Cost),
+				ratOrZero(poolInput.Margin),
+				stake,
+				uint64(poolInput.DelegatedStake),
+			)
+			if err != nil || reward.Amount != expected {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func precomputedRewardAccountOutputsMatchInputs(
@@ -1648,7 +1765,6 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 	return nil
 }
 
-//nolint:unused // reached from applyStakeRewards once rollover wiring lands
 func stakeRewardUpdatedPots(app *stakeRewardApplication) (uint64, uint64, error) {
 	if app == nil || app.pots == nil {
 		return 0, 0, errors.New("missing stake reward application")
@@ -1752,7 +1868,6 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 	}, true
 }
 
-//nolint:unused // wired by the separately reviewed reward-rollover change
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	txn *database.Txn,
 	newEpoch uint64,
@@ -2783,7 +2898,6 @@ func rewardDecentralizationFromPParams(
 	return decentralization, nil
 }
 
-//nolint:unused // reached from saveRewardAdaPotsForEpoch after rollover wiring
 func rewardEpochFees(
 	meta metadata.MetadataStore,
 	metaTxn types.Txn,
@@ -2808,7 +2922,6 @@ func rewardCredentialActive(
 	return ok
 }
 
-//nolint:unused // reached from applyStakeRewardApplication after rollover wiring
 func stakeRewardSourceHash(
 	epoch uint64,
 	reward rewards.AccountReward,

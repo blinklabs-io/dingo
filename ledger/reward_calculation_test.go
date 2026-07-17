@@ -1203,7 +1203,20 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 		Active:        true,
 	}))
 	rewardCalcSetAccountActiveByCredential(t, db, 1, sharedStakeHash, false)
+	// Replace the seed's multi-delegator pool with a coherent single-member pool
+	// whose only non-owner delegator is the shared script credential (tag 1). Its
+	// persisted member reward (100) must equal the real member-reward formula so
+	// the precompute-reuse amount check accepts it: with cost 0, margin 0, and the
+	// member holding the entire 1000 delegated stake, MemberReward = TotalReward =
+	// 100. The account is inactive, so that reward is unspendable and flows to the
+	// treasury without merging into the shared credential's active tag-0 account.
 	gormDB := rewardCalcGormDB(t, db)
+	require.NoError(t, gormDB.
+		Where("epoch = ? AND pool_key_hash = ?", rewardSnapshotEpoch, poolKey).
+		Delete(&models.RewardStakeInput{}).Error)
+	require.NoError(t, gormDB.
+		Where("epoch = ? AND pool_key_hash = ?", rewardSnapshotEpoch, poolKey).
+		Delete(&models.RewardPoolInput{}).Error)
 	require.NoError(t, gormDB.
 		Model(&models.RewardSnapshot{}).
 		Where(
@@ -1212,23 +1225,31 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 			"mark",
 		).
 		Updates(map[string]any{
-			"total_active_stake": types.Uint64(1_001),
-			"total_delegators":   uint64(3),
+			"total_active_stake": types.Uint64(1_000),
+			"total_delegators":   uint64(1),
 		}).Error)
-	require.NoError(t, gormDB.
-		Model(&models.RewardPoolInput{}).
-		Where("epoch = ? AND pool_key_hash = ?", rewardSnapshotEpoch, poolKey).
-		Updates(map[string]any{
-			"delegated_stake": types.Uint64(1_001),
-			"delegator_count": uint64(3),
-		}).Error)
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      rewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardCalcHash(0x5a),
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(0, 1)},
+			Cost:                       0,
+			DelegatedStake:             1_000,
+			OwnerStake:                 0,
+			DelegatorCount:             1,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
 	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
 		{
 			Epoch:         rewardSnapshotEpoch,
 			PoolKeyHash:   poolKey,
 			CredentialTag: 1,
 			StakingKey:    sharedStakeHash,
-			Stake:         1,
+			Stake:         1_000,
 			Registered:    true,
 			CapturedSlot:  100,
 			BoundarySlot:  100,
@@ -1239,8 +1260,9 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
 			TotalReward:       100,
+			LeaderReward:      0,
 			MemberRewardTotal: 100,
-			OwnerStake:        500,
+			OwnerStake:        0,
 			CapturedSlot:      300,
 			BoundarySlot:      boundarySlot,
 		},
@@ -2152,6 +2174,114 @@ func TestPrecomputedRewardAccountOutputsMatchStakeInputs(t *testing.T) {
 				RewardType:    string(rewards.RewardTypeMember),
 				Amount:        20,
 			},
+		},
+	))
+}
+
+func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
+	poolA := rewardCalcHash(0x40)
+	rewardAccount := rewardCalcHash(0x41)
+	memberA := rewardCalcHash(0x42)
+	memberB := rewardCalcHash(0x43)
+
+	const (
+		poolReward   = uint64(1000)
+		cost         = uint64(0)
+		delegated    = uint64(300)
+		stakeA       = uint64(200)
+		stakeB       = uint64(100)
+		leaderReward = uint64(100)
+	)
+	zeroMargin := new(big.Rat)
+	wantA, err := rewards.MemberReward(poolReward, cost, zeroMargin, stakeA, delegated)
+	require.NoError(t, err)
+	wantB, err := rewards.MemberReward(poolReward, cost, zeroMargin, stakeB, delegated)
+	require.NoError(t, err)
+	// A non-uniform split is what makes a within-pool redistribution detectable;
+	// if the shares were equal, swapping them would be invisible.
+	require.NotEqual(t, wantA, wantB)
+
+	poolInputs := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:                poolA,
+			RewardAccountCredentialTag: 0,
+			RewardAccount:              rewardAccount,
+			Cost:                       types.Uint64(cost),
+			DelegatedStake:             types.Uint64(delegated),
+		},
+	}
+	poolOutputs := []*models.RewardPoolOutput{
+		{
+			PoolKeyHash:       poolA,
+			TotalReward:       types.Uint64(poolReward),
+			LeaderReward:      types.Uint64(leaderReward),
+			MemberRewardTotal: types.Uint64(wantA + wantB),
+		},
+	}
+	stakeInputs := []*models.RewardStakeInput{
+		{PoolKeyHash: poolA, CredentialTag: 0, StakingKey: memberA, Stake: types.Uint64(stakeA)},
+		{PoolKeyHash: poolA, CredentialTag: 0, StakingKey: memberB, Stake: types.Uint64(stakeB)},
+	}
+
+	leaderOut := func(amt uint64) *models.RewardAccountOutput {
+		return &models.RewardAccountOutput{
+			PoolKeyHash:   poolA,
+			CredentialTag: 0,
+			StakingKey:    rewardAccount,
+			RewardType:    string(rewards.RewardTypeLeader),
+			Amount:        types.Uint64(amt),
+		}
+	}
+	memberOut := func(key []byte, amt uint64) *models.RewardAccountOutput {
+		return &models.RewardAccountOutput{
+			PoolKeyHash:   poolA,
+			CredentialTag: 0,
+			StakingKey:    key,
+			RewardType:    string(rewards.RewardTypeMember),
+			Amount:        types.Uint64(amt),
+		}
+	}
+
+	check := func(outs []*models.RewardAccountOutput) bool {
+		return precomputedRewardAccountAmountsMatchInputs(
+			poolInputs, poolOutputs, stakeInputs, outs,
+		)
+	}
+
+	// The correct per-recipient split is accepted.
+	require.True(t, check([]*models.RewardAccountOutput{
+		leaderOut(leaderReward), memberOut(memberA, wantA), memberOut(memberB, wantB),
+	}))
+
+	// Redistribution within the pool: member A absorbs B's share and B's row is
+	// dropped. Per-pool and per-type totals are unchanged, so this is exactly the
+	// case the membership and completeness checks miss; the amount check rejects it.
+	require.False(t, check([]*models.RewardAccountOutput{
+		leaderOut(leaderReward), memberOut(memberA, wantA+wantB),
+	}))
+
+	// Both members present but with each other's amounts (aggregate identical).
+	require.False(t, check([]*models.RewardAccountOutput{
+		leaderOut(leaderReward), memberOut(memberA, wantB), memberOut(memberB, wantA),
+	}))
+
+	// A tampered leader amount is rejected (pinned to the pool output).
+	require.False(t, check([]*models.RewardAccountOutput{
+		leaderOut(leaderReward + 1), memberOut(memberA, wantA), memberOut(memberB, wantB),
+	}))
+
+	// A member output whose credential has no stake input is rejected.
+	require.False(t, check([]*models.RewardAccountOutput{
+		memberOut(memberA, wantA), memberOut(rewardCalcHash(0x44), 1),
+	}))
+
+	// Guard the invariant this fix relies on: the pre-existing membership check
+	// accepts the redistributed set, so the amount check is the only gate that
+	// catches it.
+	require.True(t, precomputedRewardAccountOutputsMatchInputs(
+		poolInputs, stakeInputs,
+		[]*models.RewardAccountOutput{
+			leaderOut(leaderReward), memberOut(memberA, wantA+wantB),
 		},
 	))
 }
