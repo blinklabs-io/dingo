@@ -23,36 +23,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestProcessEpochRollover_OrderingInvariant pins the EPOCH→HARDFORK call
-// sequence inside processEpochRollover. The order matters for correctness
-// (see the long-form comment at the top of processEpochRollover's body)
-// but is otherwise hard to test through observable side effects without
-// substantial governance + pparams + cert fixture setup.
-//
-// This is a structural lock-in test: it parses chainsync.go's AST, locates
-// the body of processEpochRollover, and asserts that the named call
-// expressions appear in the expected source order. A future refactor that
-// reorders these calls — even if all unit tests pass — will fail this
-// test loudly. The error message points to the comment block that
-// documents the invariant.
-//
-// Markers are matched by suffix on the call's selector expression so that
-// receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
-func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
-	const targetFunc = "processEpochRollover"
-
-	// In source order, the calls that must appear inside processEpochRollover.
-	// Each entry is the trailing identifier of a SelectorExpr (or a bare
-	// Ident for unqualified calls).
-	wantOrder := []string{
-		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
-		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
-		"applyMIRCerts",                // (3) Shelley-era INSTANT rule
-		"ProcessEpoch",                 // (4) Conway-style governance enact
-		"SetPParams",                   // (5) persist enacted pparams
-		"isHardForkTransition",         // (6) inter-era boundary detection
-		"applyIntraEraHardForkRule",    // (7) per-major-version HARDFORK rule
-	}
+// observeProcessEpochRolloverCallOrder parses chainsync.go, locates the body of
+// targetFunc, and reports the source-order appearance of the calls named in
+// wantOrder. It returns seen (which markers were found) and observed (the
+// markers in source order by first occurrence). Only the markers present in
+// wantOrder are considered.
+func observeProcessEpochRolloverCallOrder(t *testing.T, targetFunc string, wantOrder []string) (seen map[string]bool, observed []string) {
+	t.Helper()
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
@@ -105,8 +82,7 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 
 	// Build the observed order by first occurrence (a marker can appear
 	// in nested branches; we only care about its first appearance).
-	seen := make(map[string]bool, len(wantOrder))
-	var observed []string
+	seen = make(map[string]bool, len(wantOrder))
 	for _, h := range hits {
 		if seen[h.marker] {
 			continue
@@ -114,6 +90,41 @@ func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
 		seen[h.marker] = true
 		observed = append(observed, h.marker)
 	}
+	return seen, observed
+}
+
+// TestProcessEpochRollover_OrderingInvariant pins the EPOCH→HARDFORK call
+// sequence inside processEpochRollover. The order matters for correctness
+// (see the long-form comment at the top of processEpochRollover's body)
+// but is otherwise hard to test through observable side effects without
+// substantial governance + pparams + cert fixture setup.
+//
+// This is a structural lock-in test: it parses chainsync.go's AST, locates
+// the body of processEpochRollover, and asserts that the named call
+// expressions appear in the expected source order. A future refactor that
+// reorders these calls — even if all unit tests pass — will fail this
+// test loudly. The error message points to the comment block that
+// documents the invariant.
+//
+// Markers are matched by suffix on the call's selector expression so that
+// receiver renames (`ls.db` → `ls.metadata`) don't churn the test.
+func TestProcessEpochRollover_OrderingInvariant(t *testing.T) {
+	const targetFunc = "processEpochRollover"
+
+	// In source order, the calls that must appear inside processEpochRollover.
+	// Each entry is the trailing identifier of a SelectorExpr (or a bare
+	// Ident for unqualified calls).
+	wantOrder := []string{
+		"ComputeAndApplyPParamUpdates", // (1) Shelley-style pparam updates
+		"applyPoolRetirements",         // (2) embedded POOLREAP deposit refunds
+		"applyMIRCerts",                // (3) Shelley-era INSTANT rule
+		"ProcessEpoch",                 // (4) Conway-style governance enact
+		"SetPParams",                   // (5) persist enacted pparams
+		"isHardForkTransition",         // (6) inter-era boundary detection
+		"applyIntraEraHardForkRule",    // (7) per-major-version HARDFORK rule
+	}
+
+	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],
@@ -157,62 +168,7 @@ func TestProcessEpochRollover_RewardOrdering(t *testing.T) {
 		"saveRewardAdaPotsForEpoch",    // (last) post-boundary ADA pot capture
 	}
 
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "chainsync.go", nil, parser.SkipObjectResolution)
-	require.NoError(t, err, "parse chainsync.go")
-
-	var fnDecl *ast.FuncDecl
-	for _, decl := range file.Decls {
-		fd, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		if fd.Name.Name == targetFunc {
-			fnDecl = fd
-			break
-		}
-	}
-	require.NotNil(t, fnDecl, "%s not found in chainsync.go", targetFunc)
-	require.NotNil(t, fnDecl.Body, "%s has no body", targetFunc)
-
-	wanted := make(map[string]struct{}, len(wantOrder))
-	for _, m := range wantOrder {
-		wanted[m] = struct{}{}
-	}
-	type hit struct {
-		marker string
-		pos    token.Pos
-	}
-	var hits []hit
-	ast.Inspect(fnDecl.Body, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		var name string
-		switch fn := call.Fun.(type) {
-		case *ast.SelectorExpr:
-			name = fn.Sel.Name
-		case *ast.Ident:
-			name = fn.Name
-		default:
-			return true
-		}
-		if _, ok := wanted[name]; ok {
-			hits = append(hits, hit{marker: name, pos: call.Pos()})
-		}
-		return true
-	})
-
-	seen := make(map[string]bool, len(wantOrder))
-	var observed []string
-	for _, h := range hits {
-		if seen[h.marker] {
-			continue
-		}
-		seen[h.marker] = true
-		observed = append(observed, h.marker)
-	}
+	seen, observed := observeProcessEpochRolloverCallOrder(t, targetFunc, wantOrder)
 
 	for _, m := range wantOrder {
 		require.True(t, seen[m],

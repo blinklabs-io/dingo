@@ -895,6 +895,31 @@ func calculatePoolRewards(
 	return ret, nil
 }
 
+// CalculatePoolReward re-derives a single pool's reward fields (OptimalReward,
+// PoolReward, LeaderReward, ApparentPerformance) from frozen snapshot inputs
+// using the same arithmetic Calculate applies per pool. It lets callers
+// validate persisted pool reward outputs against the inputs instead of trusting
+// the stored values. Member distribution (MemberRewardTotal, Undistributed) is
+// not derived here because it depends on per-delegator eligibility, not the
+// pool-level reward that leader and member payouts are computed from.
+func CalculatePoolReward(
+	pool Pool,
+	availableRewards uint64,
+	totalActiveStake uint64,
+	totalCirculation uint64,
+	totalBlocks uint64,
+	params Parameters,
+) (PoolReward, error) {
+	return calculatePoolRewards(
+		pool,
+		availableRewards,
+		totalActiveStake,
+		totalCirculation,
+		totalBlocks,
+		params,
+	)
+}
+
 func expectedBlocks(params Parameters) *big.Rat {
 	nonObftSlots := new(big.Rat).Sub(oneRat(), params.Decentralization)
 	return new(big.Rat).Mul(

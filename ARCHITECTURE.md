@@ -2447,7 +2447,12 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    account is missing or inactive. Active pool membership itself is query-derived
    (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
    the retirement certificate rows remain for rollback safety.
-4. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+4. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
+   move-instantaneous-rewards certificates accumulated during the ended epoch —
+   credit their rewards to registered reward accounts and apply the pot-to-pot
+   transfers between treasury and reserves. It is a no-op for Conway+ epochs,
+   where MIR certificates are not valid and no rows exist for those slots.
+5. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
    proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -2460,14 +2465,14 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    thus the whole ledger pipeline, for hours.) A `slowGovernanceTallyThreshold`
    warning surfaces an unexpectedly slow tally rather than letting it present as
    a silent stalled rollover.
-5. Treasury donations (`applyEpochDonations`), added after withdrawals.
-6. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
+6. Treasury donations (`applyEpochDonations`), added after withdrawals.
+7. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
    reserves, treasury, and fees after every boundary treasury/reserves mutation
-   above (rewards, POOLREAP, withdrawals, donations, and any AVVM-removal
+   above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
    reserves top-up). This `reward_ada_pots` row seeds the delayed reward
    calculation for a later epoch.
-7. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
-8. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
+8. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
+9. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
    `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
    run last so the new epoch's nonce and boundary slot are available, inside a
    metadata savepoint so a capture failure defers to the event-driven fallback
@@ -2475,8 +2480,10 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    SNAP-point placement caveat and the DevNet gate.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 4. Stake rewards are applied first so
-their reserves/treasury movement is visible to governance and to the ADA-pot
+visible to the withdrawals checked in step 5. MIR certificate effects are applied
+in the same pre-governance window, so their treasury/reserves movements are also
+visible to governance and to the ADA-pot capture. Stake rewards are applied first
+so their reserves/treasury movement is visible to governance and to the ADA-pot
 capture. The governance/pparams/HARDFORK order is locked in by
 `TestProcessEpochRollover_OrderingInvariant`, and the reward bookends (stake
 reward application first, ADA-pot capture last) by
@@ -2519,12 +2526,20 @@ intermediate calculations.
 The application engine verifies the frozen input bundle and
 requires an exact pool output set, valid leader reward accounts, complete
 account outputs, application-boundary output slots, and totals that fit the
-available reward pot. It also re-derives each persisted reward amount from the
-frozen inputs — every member amount from `MemberReward(pool total, cost, margin,
-member stake, delegated stake)` and every leader amount from the pool output's
-stored leader reward — so a reward redistributed among the members of a single
-pool (which preserves the per-pool and per-type totals the aggregate checks
-verify) is rejected and recalculated rather than credited to the wrong accounts.
+available reward pot. It re-derives each persisted pool reward — the pool total
+and the leader reward — from the frozen inputs using the canonical per-pool
+arithmetic (`rewards.CalculatePoolReward`) fed by the snapshot pool inputs, the
+performance-epoch block counts, and the reward globals, and rejects any pool
+output whose stored total or leader reward diverges. This is what ties the
+per-account checks back to the inputs: those checks re-derive every member amount
+from `MemberReward(pool total, cost, margin, member stake, delegated stake)` and
+pin every leader amount to the pool output's stored leader reward, so without the
+pool-level re-derivation a stale or corrupted pool output paired with account
+outputs consistent with it would pass every aggregate check and be credited
+unverified. With both in place, a reward redistributed among the members of a
+single pool (which preserves the per-pool and per-type totals the aggregate
+checks verify), or a pool output whose reward does not match the inputs, is
+rejected and recalculated rather than credited to the wrong accounts.
 Recalculation replaces the full output set so a result with fewer rows cannot
 retain stale rewards. Reward output rows are keyed by snapshot epoch: snapshot
 `S` corresponds to earned epoch `S+1` and spendable epoch `S+3`.

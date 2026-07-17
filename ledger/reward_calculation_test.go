@@ -890,6 +890,13 @@ func TestApplyPrecomputedStakeRewardsChecksFinalAccountRegistration(t *testing.T
 
 	require.NoError(t, meta.SetEpoch(100, performanceEpoch, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil))
 	require.NoError(t, meta.SetEpoch(200, potsEpoch, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil))
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+	// Seed pool block production so the reuse pool-reward re-derivation observes
+	// the apparent performance that produced the persisted 83_333/46_283 rewards.
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(poolID, i+1, 140+i, nil))
+	}
 	require.NoError(t, db.SetPParams(
 		pparamsCbor,
 		100,
@@ -1188,7 +1195,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
 		Epoch:        potsEpoch,
 		Reserves:     100_000_000,
-		Rewards:      100,
+		Rewards:      1_000_000,
 		CapturedSlot: 300,
 	}, nil))
 	require.NoError(t, db.CreateAccount(nil, &models.Account{
@@ -1204,11 +1211,12 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 	}))
 	rewardCalcSetAccountActiveByCredential(t, db, 1, sharedStakeHash, false)
 	// Replace the seed's multi-delegator pool with a coherent single-member pool
-	// whose only non-owner delegator is the shared script credential (tag 1). Its
-	// persisted member reward (100) must equal the real member-reward formula so
-	// the precompute-reuse amount check accepts it: with cost 0, margin 0, and the
-	// member holding the entire 1000 delegated stake, MemberReward = TotalReward =
-	// 100. The account is inactive, so that reward is unspendable and flows to the
+	// whose only non-owner delegator is the shared script credential (tag 1). The
+	// reserves (100_000_000) yield an incentives-derived reward pot of 1_000_000,
+	// from which this pool's reward re-derives to 6666; the reuse pool-reward and
+	// amount checks both require that value. With cost 0, margin 0, and the member
+	// holding the entire 1000 delegated stake, MemberReward = TotalReward = 6666.
+	// The account is inactive, so that reward is unspendable and flows to the
 	// treasury without merging into the shared credential's active tag-0 account.
 	gormDB := rewardCalcGormDB(t, db)
 	require.NoError(t, gormDB.
@@ -1259,9 +1267,9 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 		{
 			Epoch:             rewardSnapshotEpoch,
 			PoolKeyHash:       poolKey,
-			TotalReward:       100,
+			TotalReward:       6666,
 			LeaderReward:      0,
-			MemberRewardTotal: 100,
+			MemberRewardTotal: 6666,
 			OwnerStake:        0,
 			CapturedSlot:      300,
 			BoundarySlot:      boundarySlot,
@@ -1274,7 +1282,7 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 			StakingKey:    sharedStakeHash,
 			PoolKeyHash:   poolKey,
 			RewardType:    string(rewards.RewardTypeMember),
-			Amount:        100,
+			Amount:        6666,
 			Spendable:     true,
 			CapturedSlot:  300,
 			BoundarySlot:  boundarySlot,
@@ -1307,12 +1315,12 @@ func TestPrecomputedStakeRewardsFinalEligibilityDoesNotMergeCredentialTags(t *te
 	poolOutputs, err := meta.GetRewardPoolOutputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.Len(t, poolOutputs, 1)
-	require.Equal(t, uint64(100), uint64(poolOutputs[0].Unspendable))
+	require.Equal(t, uint64(6666), uint64(poolOutputs[0].Unspendable))
 
 	state, err := meta.GetNetworkState(nil)
 	require.NoError(t, err)
 	require.NotNil(t, state)
-	require.Equal(t, uint64(100), uint64(state.Treasury))
+	require.Equal(t, uint64(6666), uint64(state.Treasury))
 }
 
 func TestPrecomputedStakeRewardsRequireCompletePoolOutputs(t *testing.T) {
@@ -2286,6 +2294,207 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 	))
 }
 
+func TestPrecomputedRewardPoolRewardsMatchInputs(t *testing.T) {
+	poolKey := rewardCalcHash(0x51)
+	poolID, err := rewards.NewPoolID(poolKey)
+	require.NoError(t, err)
+
+	params := rewards.Parameters{
+		Decentralization: new(big.Rat),
+		OptimalPoolCount: 10,
+		PledgeInfluence:  big.NewRat(1, 2),
+	}
+	const (
+		availableRewards = uint64(1_000_000)
+		totalActiveStake = uint64(1_000)
+		totalCirculation = uint64(10_000)
+		totalBlocks      = uint64(10)
+	)
+	blockCounts := map[string]uint64{string(poolKey): totalBlocks}
+	poolInputs := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:    poolKey,
+			Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:         500,
+			Cost:           1_000,
+			DelegatedStake: 1_000,
+			OwnerStake:     500,
+		},
+	}
+
+	expected, err := rewards.CalculatePoolReward(
+		rewards.Pool{
+			ID:             poolID,
+			Margin:         big.NewRat(1, 10),
+			Pledge:         500,
+			Cost:           1_000,
+			DelegatedStake: 1_000,
+			OwnerStake:     500,
+			BlocksProduced: totalBlocks,
+			TotalBlocks:    totalBlocks,
+		},
+		availableRewards,
+		totalActiveStake,
+		totalCirculation,
+		totalBlocks,
+		params,
+	)
+	require.NoError(t, err)
+	require.NotZero(t, expected.PoolReward)
+	require.NotZero(t, expected.LeaderReward)
+
+	check := func(outs []*models.RewardPoolOutput) bool {
+		ok, err := precomputedRewardPoolRewardsMatchInputs(
+			poolInputs,
+			outs,
+			blockCounts,
+			availableRewards,
+			totalActiveStake,
+			totalCirculation,
+			totalBlocks,
+			params,
+		)
+		require.NoError(t, err)
+		return ok
+	}
+
+	// The re-derivable pool reward is accepted.
+	require.True(t, check([]*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  poolKey,
+			TotalReward:  types.Uint64(expected.PoolReward),
+			LeaderReward: types.Uint64(expected.LeaderReward),
+		},
+	}))
+
+	// A total reward that does not match the re-derived value is rejected, even
+	// though the per-account amount check treats the stored total as authoritative.
+	require.False(t, check([]*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  poolKey,
+			TotalReward:  types.Uint64(expected.PoolReward + 1),
+			LeaderReward: types.Uint64(expected.LeaderReward),
+		},
+	}))
+
+	// A tampered leader reward is rejected.
+	require.False(t, check([]*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  poolKey,
+			TotalReward:  types.Uint64(expected.PoolReward),
+			LeaderReward: types.Uint64(expected.LeaderReward + 1),
+		},
+	}))
+
+	// A missing pool output for an input pool is rejected.
+	require.False(t, check(nil))
+}
+
+// TestPrecomputedStakeRewardsRejectPoolRewardMismatch proves the pool-reward
+// re-derivation closes the gap the per-account checks leave open: a stale or
+// corrupted pool output paired with account outputs consistent with it passes
+// every pre-existing reuse check but is rejected because the stored reward does
+// not match the value re-derived from the frozen inputs.
+func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
+	ls, db := seedRewardPrecomputeTimingState(t, 7)
+	meta := db.Metadata()
+
+	const (
+		newEpoch            = uint64(4)
+		rewardSnapshotEpoch = uint64(1)
+		potsEpoch           = uint64(3)
+		capturedSlot        = uint64(300)
+		boundarySlot        = uint64(1_200)
+	)
+	poolKey := rewardCalcHash(0x4a)
+	rewardAccount := rewardCalcHash(0x5a)
+	member := rewardCalcHash(0x6a)
+
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        potsEpoch,
+		Reserves:     100_000_000,
+		Rewards:      1_000_000,
+		CapturedSlot: capturedSlot,
+	}, nil))
+
+	// The seeded pool re-derives to TotalReward 83_333 / LeaderReward 46_283.
+	// Inflate the stored reward to double that and build account outputs that are
+	// internally consistent with the inflated total (member re-derived from the
+	// inflated total, leader assigned the remainder so nothing is undistributed).
+	const tamperedTotal = uint64(166_666)
+	memberAmt, err := rewards.MemberReward(
+		tamperedTotal,
+		1_000,
+		big.NewRat(1, 10),
+		500,
+		1_000,
+	)
+	require.NoError(t, err)
+	require.Less(t, memberAmt, tamperedTotal)
+	tamperedLeader := tamperedTotal - memberAmt
+
+	poolOutputs := []*models.RewardPoolOutput{
+		{
+			Epoch:             rewardSnapshotEpoch,
+			PoolKeyHash:       poolKey,
+			TotalReward:       types.Uint64(tamperedTotal),
+			LeaderReward:      types.Uint64(tamperedLeader),
+			MemberRewardTotal: types.Uint64(memberAmt),
+			OwnerStake:        500,
+			Undistributed:     0,
+			CapturedSlot:      capturedSlot,
+			BoundarySlot:      boundarySlot,
+		},
+	}
+	accountOutputs := []*models.RewardAccountOutput{
+		{
+			Epoch:         rewardSnapshotEpoch,
+			CredentialTag: 0,
+			StakingKey:    rewardAccount,
+			PoolKeyHash:   poolKey,
+			RewardType:    string(rewards.RewardTypeLeader),
+			Amount:        types.Uint64(tamperedLeader),
+			Spendable:     true,
+			CapturedSlot:  capturedSlot,
+			BoundarySlot:  boundarySlot,
+		},
+		{
+			Epoch:         rewardSnapshotEpoch,
+			CredentialTag: 0,
+			StakingKey:    member,
+			PoolKeyHash:   poolKey,
+			RewardType:    string(rewards.RewardTypeMember),
+			Amount:        types.Uint64(memberAmt),
+			Spendable:     true,
+			CapturedSlot:  capturedSlot,
+			BoundarySlot:  boundarySlot,
+		},
+	}
+	require.NoError(t, meta.SaveRewardPoolOutputs(poolOutputs, nil))
+	require.NoError(t, meta.SaveRewardAccountOutputs(accountOutputs, nil))
+
+	// Guard the premise: the pre-existing per-account amount and completeness
+	// checks accept this internally consistent but inflated precompute, so the
+	// pool-reward re-derivation is the only gate that rejects it.
+	poolInputs, err := meta.GetRewardPoolInputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	stakeInputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+	require.True(t, precomputedRewardAccountAmountsMatchInputs(
+		poolInputs, poolOutputs, stakeInputs, accountOutputs,
+	))
+	complete, err := precomputedRewardOutputsComplete(poolOutputs, accountOutputs, false)
+	require.NoError(t, err)
+	require.True(t, complete)
+
+	txn := db.Transaction(false)
+	defer func() { _ = txn.Rollback() }()
+	app, ok, err := ls.precomputedStakeRewardApplication(txn, newEpoch, boundarySlot)
+	require.NoError(t, err)
+	require.False(t, ok)
+	require.Nil(t, app)
+}
+
 func TestSaveStakeRewardOutputsReplacesEpochRows(t *testing.T) {
 	_, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()
@@ -2378,7 +2587,7 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(t *testin
 
 	poolKey := rewardCalcHash(0x4a)
 
-	t.Run("exact fit", func(t *testing.T) {
+	t.Run("within available accepts and accounts undistributed", func(t *testing.T) {
 		ls, db := seedRewardPrecomputeTimingState(t, 7)
 		meta := db.Metadata()
 		require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
@@ -2387,13 +2596,47 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(t *testin
 			Rewards:      1_000_000,
 			CapturedSlot: 300,
 		}, nil))
+		// A re-derivable precompute (the seeded pool re-derives to an 83_333
+		// reward: 46_283 to the leader and 37_049 to the member) is accepted,
+		// and the remainder of the 1_000_000 available pot is accounted as
+		// undistributed back to reserves. A single sub-saturated pool can never
+		// re-derive to the full available pot, so the fit-check boundary itself
+		// (sum == available) is asserted directly below rather than through the
+		// full path.
 		require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{
 			{
+				Epoch:             rewardSnapshotEpoch,
+				PoolKeyHash:       poolKey,
+				OptimalReward:     83_333,
+				TotalReward:       83_333,
+				LeaderReward:      46_283,
+				MemberRewardTotal: 37_049,
+				OwnerStake:        500,
+				Undistributed:     1,
+				CapturedSlot:      300,
+				BoundarySlot:      boundarySlot,
+			},
+		}, nil))
+		require.NoError(t, meta.SaveRewardAccountOutputs([]*models.RewardAccountOutput{
+			{
 				Epoch:         rewardSnapshotEpoch,
+				CredentialTag: 0,
+				StakingKey:    rewardCalcHash(0x5a),
 				PoolKeyHash:   poolKey,
-				TotalReward:   1_000_000,
-				OwnerStake:    500,
-				Undistributed: 1_000_000,
+				RewardType:    string(rewards.RewardTypeLeader),
+				Amount:        46_283,
+				Spendable:     true,
+				CapturedSlot:  300,
+				BoundarySlot:  boundarySlot,
+			},
+			{
+				Epoch:         rewardSnapshotEpoch,
+				CredentialTag: 0,
+				StakingKey:    rewardCalcHash(0x6a),
+				PoolKeyHash:   poolKey,
+				RewardType:    string(rewards.RewardTypeMember),
+				Amount:        37_049,
+				Spendable:     true,
 				CapturedSlot:  300,
 				BoundarySlot:  boundarySlot,
 			},
@@ -2410,7 +2653,17 @@ func TestPrecomputedStakeRewardsRejectPoolOutputsAboveAvailableRewards(t *testin
 		require.True(t, ok)
 		require.NotNil(t, app)
 		require.Equal(t, uint64(1_000_000), app.availableRewards)
-		require.Equal(t, uint64(1_000_000), app.undistributed)
+		require.Equal(t, uint64(83_332), app.effectiveRewards)
+		require.Equal(t, uint64(916_668), app.undistributed)
+
+		// The fit check accepts pool rewards summing to exactly the available
+		// pot; the "above available" subtest rejects anything past it.
+		fits, err := precomputedRewardPoolOutputsFitAvailable(
+			[]*models.RewardPoolOutput{{TotalReward: 1_000_000}},
+			1_000_000,
+		)
+		require.NoError(t, err)
+		require.True(t, fits)
 	})
 
 	t.Run("above available", func(t *testing.T) {
@@ -3086,9 +3339,13 @@ func TestPrecomputedStakeRewardsCheckPreBabbageMissingLeaderPrefilter(t *testing
 			}
 
 			require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
-				Epoch:        potsEpoch,
+				Epoch: potsEpoch,
+				// Reserves imply an incentives-derived reward pot of
+				// 1_000_000 (Rho 1/100 of 100_000_000), which the reuse
+				// pool-reward re-derivation checks against; the seeded
+				// 83_333 pool reward is only consistent with that pot.
 				Reserves:     100_000_000,
-				Rewards:      100_000,
+				Rewards:      1_000_000,
 				CapturedSlot: 200,
 			}, nil))
 			require.NoError(t, meta.SaveRewardPoolOutputs([]*models.RewardPoolOutput{

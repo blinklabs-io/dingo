@@ -493,7 +493,7 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
-	pparams, params, _, err := ls.rewardParameters(
+	pparams, params, performanceDecentralization, err := ls.rewardParameters(
 		txn,
 		epochs.performance,
 		epochs.pots,
@@ -528,6 +528,42 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, err
 	}
 	if !outputsFit {
+		return nil, false, nil
+	}
+	// Re-derive each pool's reward from the frozen inputs and reject any
+	// precomputed pool output whose stored PoolReward/LeaderReward does not
+	// match. The account-amount and completeness checks above validate the
+	// account rows only against these stored pool totals, so this is what ties
+	// them back to the snapshot inputs; see
+	// precomputedRewardPoolRewardsMatchInputs.
+	if uint64(pots.Reserves) > params.MaxLovelaceSupply {
+		return nil, false, nil
+	}
+	totalCirculation := params.MaxLovelaceSupply - uint64(pots.Reserves)
+	blockCounts, totalBlocks, err := ls.rewardBlockCounts(
+		meta,
+		metaTxn,
+		epochs.performance,
+		poolInputs,
+		performanceDecentralization,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	poolRewardsMatch, err := precomputedRewardPoolRewardsMatchInputs(
+		poolInputs,
+		poolOutputs,
+		blockCounts,
+		availableRewards,
+		uint64(rewardSnapshot.TotalActiveStake),
+		totalCirculation,
+		totalBlocks,
+		params,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	if !poolRewardsMatch {
 		return nil, false, nil
 	}
 	if params.RequiresRewardPrefilter() {
@@ -632,6 +668,76 @@ func precomputedRewardPoolOutputsMatchInputs(
 		delete(expectedOwnerStake, key)
 	}
 	return len(expectedOwnerStake) == 0
+}
+
+// precomputedRewardPoolRewardsMatchInputs re-derives each persisted pool's
+// PoolReward (stored as TotalReward) and LeaderReward from the frozen snapshot
+// inputs using the canonical reward arithmetic, and rejects the reuse if either
+// diverges. Without it the reuse path would trust the stored pool reward:
+// precomputedRewardAccountAmountsMatchInputs pins each applied leader amount to
+// poolOutput.LeaderReward and re-derives each member amount from
+// poolOutput.TotalReward, and precomputedRewardOutputsComplete only proves the
+// account rows sum to those stored totals. A stale or corrupted pool output
+// paired with account outputs consistent with it therefore passes every other
+// check and is credited to accounts unverified. The block counts and reward
+// globals come from the same sources the authoritative calculation reads
+// (rewardBlockCounts over the immutable performance epoch, availableRewards from
+// the persisted reward pot, total active/circulating stake from the snapshot and
+// ADA pots), so a legitimate precompute reproduces its stored values exactly and
+// only a divergent output is rejected.
+func precomputedRewardPoolRewardsMatchInputs(
+	poolInputs []*models.RewardPoolInput,
+	poolOutputs []*models.RewardPoolOutput,
+	blockCounts map[string]uint64,
+	availableRewards uint64,
+	totalActiveStake uint64,
+	totalCirculation uint64,
+	totalBlocks uint64,
+	params rewards.Parameters,
+) (bool, error) {
+	poolOutputByKey := make(map[string]*models.RewardPoolOutput, len(poolOutputs))
+	for _, output := range poolOutputs {
+		if output == nil {
+			return false, nil
+		}
+		poolOutputByKey[string(output.PoolKeyHash)] = output
+	}
+	for _, input := range poolInputs {
+		if input == nil {
+			return false, nil
+		}
+		key := string(input.PoolKeyHash)
+		output, ok := poolOutputByKey[key]
+		if !ok {
+			return false, nil
+		}
+		// The pool ID is not needed here: it only labels the result and the pool
+		// keys were already validated upstream by validateRewardCalculatorInputs.
+		reward, err := rewards.CalculatePoolReward(
+			rewards.Pool{
+				Margin:         ratOrZero(input.Margin),
+				Pledge:         uint64(input.Pledge),
+				Cost:           uint64(input.Cost),
+				DelegatedStake: uint64(input.DelegatedStake),
+				OwnerStake:     uint64(input.OwnerStake),
+				BlocksProduced: blockCounts[key],
+				TotalBlocks:    totalBlocks,
+			},
+			availableRewards,
+			totalActiveStake,
+			totalCirculation,
+			totalBlocks,
+			params,
+		)
+		if err != nil {
+			return false, err
+		}
+		if uint64(output.TotalReward) != reward.PoolReward ||
+			uint64(output.LeaderReward) != reward.LeaderReward {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // precomputedRewardAccountAmountsMatchInputs re-derives each persisted account
