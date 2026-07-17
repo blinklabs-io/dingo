@@ -16,8 +16,10 @@ package utxorpc
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"log/slog"
+	"net/http"
 	"testing"
 	"time"
 
@@ -143,6 +145,55 @@ func TestUtxorpc_StartStop(t *testing.T) {
 	defer cancel()
 	err = u.Stop(ctx)
 	require.NoError(t, err, "failed to stop utxorpc")
+}
+
+// TestConfigureServerTLS verifies that server TLS configurations enforce TLS
+// 1.2 as the minimum while preserving configurations that require TLS 1.3.
+func TestConfigureServerTLS(t *testing.T) {
+	// Cover newly allocated, zero-valued, insecure legacy, and stricter TLS
+	// configurations so both the default and caller-supplied paths are tested.
+	tests := []struct {
+		name       string
+		tlsConfig  *tls.Config
+		minVersion uint16
+	}{
+		{
+			name:       "nil config",
+			minVersion: tls.VersionTLS12,
+		},
+		{
+			name:       "default minimum",
+			tlsConfig:  new(tls.Config),
+			minVersion: tls.VersionTLS12,
+		},
+		{
+			name: "lower minimum",
+			tlsConfig: &tls.Config{
+				MinVersion: tls.VersionTLS11,
+			},
+			minVersion: tls.VersionTLS12,
+		},
+		{
+			name: "higher minimum",
+			tlsConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+			},
+			minVersion: tls.VersionTLS13,
+		},
+	}
+
+	// Apply the server TLS policy to each starting configuration and verify the
+	// resulting minimum version is never lower than TLS 1.2.
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := &http.Server{TLSConfig: tc.tlsConfig}
+
+			configureServerTLS(server)
+
+			require.NotNil(t, server.TLSConfig)
+			require.Equal(t, tc.minVersion, server.TLSConfig.MinVersion)
+		})
+	}
 }
 
 // TestAnyChainBlockNativeBytes_NonNil ensures that AnyChainBlock.NativeBytes

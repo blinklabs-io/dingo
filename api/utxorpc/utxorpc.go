@@ -297,6 +297,18 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 	return protocols
 }
 
+func configureServerTLS(server *http.Server) {
+	if server.TLSConfig == nil {
+		server.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		return
+	}
+	if server.TLSConfig.MinVersion < tls.VersionTLS12 {
+		server.TLSConfig.MinVersion = tls.VersionTLS12
+	}
+}
+
 func (u *Utxorpc) Stop(ctx context.Context) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -335,9 +347,7 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
-		if server.TLSConfig == nil {
-			server.TLSConfig = &tls.Config{}
-		}
+		configureServerTLS(server)
 		server.TLSConfig.Certificates = append(
 			server.TLSConfig.Certificates,
 			cert,

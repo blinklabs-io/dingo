@@ -193,6 +193,18 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 	return protocols
 }
 
+func configureServerTLS(server *http.Server) {
+	if server.TLSConfig == nil {
+		server.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		return
+	}
+	if server.TLSConfig.MinVersion < tls.VersionTLS12 {
+		server.TLSConfig.MinVersion = tls.VersionTLS12
+	}
+}
+
 // startServer starts the HTTP server with deterministic error
 // detection. It validates TLS configuration, binds the listening
 // socket and pre-loads any TLS keypair synchronously so port and
@@ -217,6 +229,7 @@ func (b *Bark) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
+		configureServerTLS(server)
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {
