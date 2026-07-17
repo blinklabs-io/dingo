@@ -111,3 +111,34 @@ func TestServerConfig(t *testing.T) {
 		})
 	}
 }
+
+// TestServerConfig_GetConfigForClient verifies that a config selected by
+// GetConfigForClient also has the minimum version policy applied, since that
+// callback's return value supersedes the base config for the connection.
+func TestServerConfig_GetConfigForClient(t *testing.T) {
+	config := ServerConfig(&tls.Config{
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return &tls.Config{MinVersion: tls.VersionTLS11}, nil
+		},
+	})
+	require.NotNil(t, config.GetConfigForClient)
+
+	selected, err := config.GetConfigForClient(&tls.ClientHelloInfo{})
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	require.Equal(t, uint16(tls.VersionTLS12), selected.MinVersion)
+}
+
+// TestServerConfig_GetConfigForClientNilResult verifies that a nil result or
+// error from the wrapped callback passes through unchanged.
+func TestServerConfig_GetConfigForClientNilResult(t *testing.T) {
+	config := ServerConfig(&tls.Config{
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			return nil, nil
+		},
+	})
+
+	selected, err := config.GetConfigForClient(&tls.ClientHelloInfo{})
+	require.NoError(t, err)
+	require.Nil(t, selected)
+}

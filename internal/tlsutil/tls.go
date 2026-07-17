@@ -39,5 +39,17 @@ func ServerConfig(config *tls.Config) *tls.Config {
 	if config.MaxVersion != 0 && config.MaxVersion < config.MinVersion {
 		config.MaxVersion = config.MinVersion
 	}
+	// GetConfigForClient, when set, supersedes this config for the
+	// connection's handshake. Wrap it so any config it selects also gets the
+	// same floor applied, or a per-client override could reintroduce TLS 1.0/1.1.
+	if orig := config.GetConfigForClient; orig != nil {
+		config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+			selected, err := orig(hello)
+			if err != nil || selected == nil {
+				return selected, err
+			}
+			return ServerConfig(selected), nil
+		}
+	}
 	return config
 }
