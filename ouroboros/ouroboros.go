@@ -89,6 +89,12 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// Waiters blocked in the NtC serving path until an endorser block's
+	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
+	// channel is closed once a complete closure is stored for that key.
+	leiosClosureWaiters map[string][]chan struct{}
+	// NtC CertRB closure-resolution metrics.
+	leiosMetrics *leiosMetrics
 
 	// Per-connection serialization and bound for asynchronous leios-fetch
 	// client operations (manifest and EB-tx fetches). The leios-fetch client
@@ -155,6 +161,11 @@ type OuroborosConfig struct {
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosClosureWaitTimeout bounds how long the NtC chainsync server
+	// waits for a certifying ranking block's endorser block transaction
+	// closure to be cached before falling back to serving the raw block.
+	// Values <= 0 are replaced with the default.
+	LeiosClosureWaitTimeout time.Duration
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
 	// (protocol 20) toward peers. This is a dingo extension that is ahead
 	// of the IOG Leios prototype: the prototype Haskell node does not run a
@@ -213,6 +224,9 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
 		cfg.ChainsyncBlockTimeout,
 	)
+	cfg.LeiosClosureWaitTimeout = effectiveLeiosClosureWaitTimeout(
+		cfg.LeiosClosureWaitTimeout,
+	)
 	o := &Ouroboros{
 		config:                   cfg,
 		EventBus:                 cfg.EventBus,
@@ -221,6 +235,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosEBLog:               newLeiosForgedEBLog(),
 	}
 	// Initialize per-peer TxSubmission rate limiter
@@ -236,6 +251,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
+		o.initLeiosMetrics()
 	}
 	return o
 }

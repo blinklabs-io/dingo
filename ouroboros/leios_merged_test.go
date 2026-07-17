@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -613,4 +615,98 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(t *testing.T
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Equal(t, []byte(certRB), got)
+}
+
+func TestCertifiedEndorserBlockHashGuards(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+
+	// A non-certifying Dijkstra block is not a CertRB.
+	_, blockRaw := testDijkstraBlockRaw(t, 1)
+	_, ok := o.certifiedEndorserBlockHash(blockRaw)
+	require.False(t, ok)
+
+	// A CertRB with no ledger state cannot resolve its parent announcement.
+	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
+	_, ok = o.certifiedEndorserBlockHash(certRB)
+	require.False(t, ok)
+}
+
+func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{mustCbor(t, "tx0")},
+		),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, o.waitForLeiosEndorserClosure(ctx, point.Hash))
+}
+
+func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	result := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
+	}()
+
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{mustCbor(t, "tx0")},
+		),
+	)
+
+	require.True(
+		t,
+		testutil.RequireReceive(
+			t,
+			result,
+			3*time.Second,
+			"closure wait to resolve after store",
+		),
+	)
+}
+
+func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	ebHash := make([]byte, lcommon.Blake2b256Size)
+	ebHash[0] = 0xbb
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, o.waitForLeiosEndorserClosure(ctx, ebHash))
+
+	o.leiosMu.RLock()
+	waiters := len(o.leiosClosureWaiters)
+	o.leiosMu.RUnlock()
+	require.Zero(t, waiters)
+}
+
+func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
+	certRB := testDijkstraCertRBRaw(t, 42, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xcc
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash)
+	require.False(t, ok)
+	require.Nil(t, merged)
 }
