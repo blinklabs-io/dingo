@@ -67,8 +67,8 @@ POSTGRES_PASSWORD=postgres POSTGRES_DATABASE=dingo_test \
 Without a `POSTGRES_PASSWORD` or `POSTGRES_DSN` set, both Postgres tests
 skip (they never fail a plain `go test ./...`). CI's `go-test-linux` job
 already runs a `postgres:16` service with those exact env vars, so the
-Postgres variant runs there automatically as its own step — no separate CI
-job needed.
+Postgres variant runs automatically as part of the existing tagged
+`go test -race ./...` step.
 
 **Schema isolation.** `database/plugin/metadata/postgres`'s own tests
 connect to the same `dingo_test` database. Since `go test ./...` runs

@@ -98,11 +98,6 @@ jobs:
         run: go build ./cmd/dingo
       - name: go-test
         run: go test -tags dingo_extra_plugins -ldflags="-s -w" -race ./...
-      - name: go-test-conformance-postgres
-        # Separate, verbose step so the PostgreSQL-backed conformance
-        # vector counts (pass/fail/total) are visible in their own CI log
-        # section instead of buried inside the go-test step's ./... output.
-        run: go test -tags dingo_extra_plugins -v -race ./internal/test/conformance/... -run Postgres
 
   # macOS and Windows jobs without Postgres service
   go-test-other:
