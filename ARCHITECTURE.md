@@ -1840,7 +1840,10 @@ DRep lookup, address UTxOs and transactions, metadata label JSON/CBOR,
 transaction content/CBOR/metadata/UTxOs/certificates/redeemers/required
 signers, and account/delegation/registration/reward endpoints. It uses an
 adapter pattern to translate between Dingo's internal state and Blockfrost
-response types and supports Blockfrost-style pagination headers.
+response types and supports Blockfrost-style pagination headers. The root
+document is served only at the literal `/` path (`GET /{$}`); any other
+unregistered path falls through to a catch-all `404` handler instead of the
+root document, matching real Blockfrost's behavior for unimplemented routes.
 
 `GET /assets/{asset}` derives its mint-history fields from the API-mode
 `asset_mint_burn` table, which the transaction indexer populates from
