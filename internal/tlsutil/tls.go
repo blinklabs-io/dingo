@@ -42,13 +42,16 @@ func ServerConfig(config *tls.Config) *tls.Config {
 	// GetConfigForClient, when set, supersedes this config for the
 	// connection's handshake. Wrap it so any config it selects also gets the
 	// same floor applied, or a per-client override could reintroduce TLS 1.0/1.1.
+	// The config it returns "may not be subsequently modified" (crypto/tls
+	// docs) and may be a shared/cached object returned to concurrent
+	// connections, so clone before mutating rather than editing it in place.
 	if orig := config.GetConfigForClient; orig != nil {
 		config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 			selected, err := orig(hello)
 			if err != nil || selected == nil {
 				return selected, err
 			}
-			return ServerConfig(selected), nil
+			return ServerConfig(selected.Clone()), nil
 		}
 	}
 	return config
