@@ -31,6 +31,7 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -297,18 +298,6 @@ func unencryptedHTTP2Protocols() *http.Protocols {
 	return protocols
 }
 
-func configureServerTLS(server *http.Server) {
-	if server.TLSConfig == nil {
-		server.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-		return
-	}
-	if server.TLSConfig.MinVersion < tls.VersionTLS12 {
-		server.TLSConfig.MinVersion = tls.VersionTLS12
-	}
-}
-
 func (u *Utxorpc) Stop(ctx context.Context) error {
 	u.mu.Lock()
 	defer u.mu.Unlock()
@@ -347,7 +336,7 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
-		configureServerTLS(server)
+		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
 		server.TLSConfig.Certificates = append(
 			server.TLSConfig.Certificates,
 			cert,

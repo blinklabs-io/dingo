@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package bark
+package tlsutil
 
 import (
 	"crypto/tls"
-	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// TestConfigureServerTLS verifies that server TLS configurations enforce TLS
-// 1.2 as the minimum while preserving configurations that require TLS 1.3.
-func TestConfigureServerTLS(t *testing.T) {
+// TestServerConfig verifies that server TLS configurations enforce TLS 1.2 as
+// the minimum while preserving configurations that require TLS 1.3.
+func TestServerConfig(t *testing.T) {
+	// Cover newly allocated, zero-valued, insecure legacy, and stricter TLS
+	// configurations so both the default and caller-supplied paths are tested.
 	tests := []struct {
 		name       string
 		tlsConfig  *tls.Config
@@ -55,14 +56,14 @@ func TestConfigureServerTLS(t *testing.T) {
 		},
 	}
 
+	// Apply the shared server policy and verify the resulting minimum version
+	// is never lower than TLS 1.2.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server := &http.Server{TLSConfig: tc.tlsConfig}
+			config := ServerConfig(tc.tlsConfig)
 
-			configureServerTLS(server)
-
-			require.NotNil(t, server.TLSConfig)
-			require.Equal(t, tc.minVersion, server.TLSConfig.MinVersion)
+			require.NotNil(t, config)
+			require.Equal(t, tc.minVersion, config.MinVersion)
 		})
 	}
 }
