@@ -30,6 +30,7 @@ func TestServerConfig(t *testing.T) {
 		name       string
 		tlsConfig  *tls.Config
 		minVersion uint16
+		maxVersion uint16
 	}{
 		{
 			name:       "nil config",
@@ -54,16 +55,47 @@ func TestServerConfig(t *testing.T) {
 			},
 			minVersion: tls.VersionTLS13,
 		},
+		{
+			// A caller-capped MaxVersion below the raised floor must not be
+			// left in place, or the resulting config can never negotiate a
+			// handshake (MinVersion > MaxVersion).
+			name: "max version below raised floor",
+			tlsConfig: &tls.Config{
+				MaxVersion: tls.VersionTLS11,
+			},
+			minVersion: tls.VersionTLS12,
+			maxVersion: tls.VersionTLS12,
+		},
+		{
+			// A MaxVersion above the floor is left untouched.
+			name: "max version above raised floor",
+			tlsConfig: &tls.Config{
+				MaxVersion: tls.VersionTLS13,
+			},
+			minVersion: tls.VersionTLS12,
+			maxVersion: tls.VersionTLS13,
+		},
+		{
+			// ECH is TLS 1.3-only; an unset minimum must be raised to 1.3,
+			// not the general 1.2 floor, or Go rejects the config.
+			name: "ECH keys with unset minimum",
+			tlsConfig: &tls.Config{
+				EncryptedClientHelloKeys: []tls.EncryptedClientHelloKey{{}},
+			},
+			minVersion: tls.VersionTLS13,
+		},
 	}
 
 	// Apply the shared server policy and verify the resulting minimum version
-	// is never lower than TLS 1.2.
+	// is never lower than TLS 1.2 (or 1.3 for ECH) and that MaxVersion never
+	// ends up below the raised MinVersion.
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			config := ServerConfig(tc.tlsConfig)
 
 			require.NotNil(t, config)
 			require.Equal(t, tc.minVersion, config.MinVersion)
+			require.Equal(t, tc.maxVersion, config.MaxVersion)
 		})
 	}
 }

@@ -23,8 +23,18 @@ func ServerConfig(config *tls.Config) *tls.Config {
 			MinVersion: tls.VersionTLS12,
 		}
 	}
-	if config.MinVersion < tls.VersionTLS12 {
-		config.MinVersion = tls.VersionTLS12
+	floor := uint16(tls.VersionTLS12)
+	// Encrypted Client Hello is a TLS 1.3-only extension; Go requires
+	// MinVersion == VersionTLS13 whenever ECH keys are configured.
+	if len(config.EncryptedClientHelloKeys) > 0 {
+		floor = tls.VersionTLS13
+	}
+	if config.MinVersion < floor {
+		config.MinVersion = floor
+	}
+	// Keep an explicit MaxVersion from making the raised floor unusable.
+	if config.MaxVersion != 0 && config.MaxVersion < config.MinVersion {
+		config.MaxVersion = config.MinVersion
 	}
 	return config
 }
