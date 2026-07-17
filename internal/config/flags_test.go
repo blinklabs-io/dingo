@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -366,7 +368,11 @@ func TestApplyFlags_NetworkMagicRejectsOverflow(t *testing.T) {
 	}
 }
 
-func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
+// TestTopologyResolvesFromNetworkFlag pins topology resolution to the
+// final merged configuration: LoadTopologyConfig runs only after
+// ApplyFlags (see cmd/dingo), so a --network override determines which
+// network's topology is loaded.
+func TestTopologyResolvesFromNetworkFlag(t *testing.T) {
 	resetGlobalConfig()
 
 	cfg, err := LoadConfig("")
@@ -390,15 +396,262 @@ func TestApplyFlags_ReloadsTopologyForNetworkFlag(t *testing.T) {
 	if cfg.Network != "preprod" {
 		t.Fatalf("expected network preprod, got %q", cfg.Network)
 	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshot == nil {
-		t.Fatal("expected topology reload to load preprod peer snapshot")
+		t.Fatal("expected topology load to use the preprod peer snapshot")
 	}
 	if topologyConfig.PeerSnapshot.NetworkMagic != 1 {
 		t.Fatalf(
 			"expected preprod peer snapshot network magic 1, got %d",
 			topologyConfig.PeerSnapshot.NetworkMagic,
 		)
+	}
+}
+
+// loadConfigThroughPipeline runs the full cmd/dingo configuration
+// pipeline — LoadConfig, ApplyFlags, ApplyDefaults, validate, and
+// topology resolution — on the given YAML and CLI arguments and returns
+// the merged config alongside the validation/topology result, mirroring
+// PersistentPreRunE in cmd/dingo.
+func loadConfigThroughPipeline(
+	t *testing.T,
+	yaml string,
+	args []string,
+) (*Config, error) {
+	t.Helper()
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(yaml), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+	if err := ApplyFlags(cmd, cfg); err != nil {
+		t.Fatalf("ApplyFlags: %v", err)
+	}
+	cfg.ApplyDefaults()
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		return cfg, err
+	}
+	if _, err := LoadTopologyConfig(); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// TestPipeline_FlagOverridesInvalidYAMLRunMode is a precedence
+// regression test: a higher-precedence CLI flag must be able to replace
+// an invalid YAML runMode, so LoadConfig cannot reject the value before
+// flags are merged.
+func TestPipeline_FlagOverridesInvalidYAMLRunMode(t *testing.T) {
+	cfg, err := loadConfigThroughPipeline(
+		t,
+		"runMode: \"bogus\"\n",
+		[]string{"--run-mode=serve"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.RunMode != RunModeServe {
+		t.Errorf("RunMode = %q, want %q", cfg.RunMode, RunModeServe)
+	}
+}
+
+// TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride pins the other
+// side of the precedence fix: with no flag override, the invalid YAML
+// value must still be rejected — by Validate on the merged config, not
+// by LoadConfig.
+func TestPipeline_InvalidYAMLRunModeRejectedWithoutOverride(t *testing.T) {
+	_, err := loadConfigThroughPipeline(t, "runMode: \"bogus\"\n", nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid runMode") {
+		t.Fatalf("expected invalid runMode error, got: %v", err)
+	}
+}
+
+// TestPipeline_MempoolCapacityDefaultsFromFlagRunMode is a defaulting
+// regression test: the run-mode-derived MempoolCapacity default must be
+// chosen from the final merged mode, including one set only by a CLI
+// flag.
+func TestPipeline_MempoolCapacityDefaultsFromFlagRunMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		expected int64
+	}{
+		{
+			name:     "leios via flag",
+			args:     []string{"--run-mode=leios"},
+			expected: DefaultMempoolCapacityLeios,
+		},
+		{
+			name:     "serve via flag",
+			args:     []string{"--run-mode=serve"},
+			expected: DefaultMempoolCapacityPraos,
+		},
+		{
+			name:     "no mode configured anywhere",
+			args:     nil,
+			expected: DefaultMempoolCapacityPraos,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := loadConfigThroughPipeline(t, "", tc.args)
+			if err != nil {
+				t.Fatalf("unexpected validation error: %v", err)
+			}
+			if cfg.MempoolCapacity != tc.expected {
+				t.Errorf(
+					"MempoolCapacity = %d, want %d",
+					cfg.MempoolCapacity, tc.expected,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork is a precedence
+// regression test for topology ordering: a traversal-shaped YAML
+// network must not abort config loading or topology resolution before
+// a --network flag replaces it. Without the override the same value
+// must still be rejected — by Validate, not LoadConfig.
+func TestPipeline_NetworkFlagRepairsInvalidYAMLNetwork(t *testing.T) {
+	yaml := "network: \"../bad\"\n"
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--network=preview"},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Network != "preview" {
+		t.Errorf("Network = %q, want %q", cfg.Network, "preview")
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid network name") {
+		t.Fatalf("expected invalid network name error, got: %v", err)
+	}
+}
+
+// TestPipeline_TopologyFlagRepairsMissingYAMLTopology pins the same
+// ordering for the topology file itself: a missing YAML topology path
+// must not abort before a --topology flag replaces it, and must still
+// fail topology resolution without the override.
+func TestPipeline_TopologyFlagRepairsMissingYAMLTopology(t *testing.T) {
+	yaml := "topology: \"/nonexistent/topology.json\"\n"
+	validTopology := filepath.Join(t.TempDir(), "topology.json")
+	if err := os.WriteFile(
+		validTopology,
+		[]byte(`{"localRoots": [], "publicRoots": []}`),
+		0o600,
+	); err != nil {
+		t.Fatalf("failed to write topology file: %v", err)
+	}
+
+	cfg, err := loadConfigThroughPipeline(
+		t, yaml, []string{"--topology=" + validTopology},
+	)
+	if err != nil {
+		t.Fatalf("expected valid config after flag override, got: %v", err)
+	}
+	if cfg.Topology != validTopology {
+		t.Errorf("Topology = %q, want %q", cfg.Topology, validTopology)
+	}
+
+	_, err = loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil || !strings.Contains(err.Error(), "topology") {
+		t.Fatalf("expected topology load error, got: %v", err)
+	}
+}
+
+// TestPipeline_NegativeHistoryExpiryFrequencyRejected pins the
+// explicit-negative-frequency contract for every configuration source:
+// ApplyDefaults only fills in an unset (zero) historyExpiry.frequency,
+// so a configured negative value must survive defaulting and fail
+// validation instead of silently starting the expiry worker on the
+// one-hour default cadence.
+func TestPipeline_NegativeHistoryExpiryFrequencyRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		env  map[string]string
+		args []string
+	}{
+		{
+			name: "yaml",
+			yaml: "historyExpiry:\n  enabled: true\n  frequency: -1s\n",
+		},
+		{
+			name: "environment",
+			env: map[string]string{
+				"DINGO_HISTORY_EXPIRY_ENABLED":   "true",
+				"DINGO_HISTORY_EXPIRY_FREQUENCY": "-1s",
+			},
+		},
+		{
+			name: "flag",
+			args: []string{
+				"--history-expiry-enabled=true",
+				"--history-expiry-frequency=-1s",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			cfg, err := loadConfigThroughPipeline(t, tc.yaml, tc.args)
+			if err == nil ||
+				!strings.Contains(err.Error(), "invalid historyExpiry.frequency") {
+				t.Fatalf(
+					"expected invalid historyExpiry.frequency error, got: %v",
+					err,
+				)
+			}
+			if cfg.HistoryExpiry.Frequency != -time.Second {
+				t.Errorf(
+					"Frequency = %s, want -1s preserved through defaulting",
+					cfg.HistoryExpiry.Frequency,
+				)
+			}
+		})
+	}
+}
+
+// TestPipeline_AggregatesErrorsAcrossSettings pins error aggregation on
+// the merged config: LoadConfig no longer fails on the first bad value,
+// so every problem must surface together in the single Validate pass.
+func TestPipeline_AggregatesErrorsAcrossSettings(t *testing.T) {
+	yaml := "runMode: \"bogus\"\n" +
+		"evictionWatermark: 2.0\n" +
+		"blockProducer: true\n" +
+		"chainsync:\n  strategy: \"fastest\"\n"
+	_, err := loadConfigThroughPipeline(t, yaml, nil)
+	if err == nil {
+		t.Fatal("expected validation errors, got nil")
+	}
+	for _, want := range []string{
+		"invalid runMode",
+		"invalid evictionWatermark",
+		"blockProducer enabled but missing required key paths",
+		"invalid chainsync.strategy",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q, got: %v", want, err)
+		}
 	}
 }
 

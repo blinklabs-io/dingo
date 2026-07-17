@@ -2113,6 +2113,50 @@ Configuration priority (highest to lowest):
 3. YAML config file (`dingo.yaml`)
 4. Hardcoded defaults
 
+`LoadConfig` (`internal/config`) only parses and merges the YAML and
+environment sources; it makes no semantic judgments about the merged values,
+because CLI flags are a higher-precedence source merged afterwards by
+`ApplyFlags` and may still replace an invalid or unset value. Once every
+source is merged, `Config.ApplyDefaults()` fills in unset values whose
+defaults are derived from other settings (an empty `runMode` selects `serve`;
+`mempoolCapacity` defaults by run mode — Leios raises it — and the watermarks,
+forge slot thresholds, and history-expiry frequency take their standard
+values), and then `Config.Validate()` checks the resulting configuration
+before any services start. Topology resolution
+(`config.LoadTopologyConfig`) runs last, only after the merged
+configuration is defaulted and valid, because it derives from the
+`network` and `topology` settings — resolving it earlier could reject a
+YAML or environment value that a CLI flag has since repaired. Validate
+checks: mode enums, listener port ranges (privileged/out-of-range/duplicate),
+load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
+pairing, mempool watermarks, block-producer credential paths, and
+duration/strategy strings that are otherwise only parsed at their point of use.
+Port checks apply only to the listeners a given invocation actually starts,
+derived from the *effective* run mode plus the storage mode: the serving modes
+start the relay, private, metrics, debug, and bark listeners (and, under `api`
+storage or a configured `dev` run mode — which forces `api` storage — the
+UTxORPC/Blockfrost/Mesh/Midnight listeners); the Mithril snapshot
+sync (`dingo sync --mithril` or `dingo mithril sync`) starts only the metrics
+and debug listeners; the read-only `mithril list`/`show` and `load` start none.
+A port configured for an inactive listener cannot bind, so it is neither
+range-checked nor counted toward a collision; two active listeners are only
+reported as colliding when their bind addresses overlap (equal, or either
+side a wildcard) — listeners on distinct specific addresses may share a
+port. The relay, private, and metrics
+ports must additionally be set in the serving modes. Because the one-shot
+subcommands run a fixed operation regardless of the configured `runMode` (which
+defaults to `serve`), `cmd/dingo` passes `Validate()` the effective run mode
+derived from the invoked command, so listener and ImmutableDB-source
+requirements match what the command actually does. All violations are reported
+together in a single startup error. The informational `version` and `list`
+subcommands — and cobra's built-in `help` and `completion` — skip config
+loading and validation entirely, so they run even when the config file is
+missing or invalid. The privileged-port check compares each active port against what the
+process may actually bind: root, Windows, and Linux `CAP_NET_BIND_SERVICE`
+allow any port, and otherwise Linux uses the kernel's
+`net.ipv4.ip_unprivileged_port_start` cutoff (1024 by default; container
+runtimes commonly set 0).
+
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)
 - Storage mode (`core` or `api`)
