@@ -25,8 +25,11 @@ func ServerConfig(config *tls.Config) *tls.Config {
 	}
 	floor := uint16(tls.VersionTLS12)
 	// Encrypted Client Hello is a TLS 1.3-only extension; Go requires
-	// MinVersion == VersionTLS13 whenever ECH keys are configured.
-	if len(config.EncryptedClientHelloKeys) > 0 {
+	// MinVersion == VersionTLS13 whenever ECH keys are configured, whether
+	// supplied statically or via the dynamic callback (which takes priority
+	// over the static field when both are set).
+	if len(config.EncryptedClientHelloKeys) > 0 ||
+		config.GetEncryptedClientHelloKeys != nil {
 		floor = tls.VersionTLS13
 	}
 	if config.MinVersion < floor {

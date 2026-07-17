@@ -84,6 +84,18 @@ func TestServerConfig(t *testing.T) {
 			},
 			minVersion: tls.VersionTLS13,
 		},
+		{
+			// GetEncryptedClientHelloKeys takes priority over the static
+			// EncryptedClientHelloKeys field, so it must independently raise
+			// the floor to 1.3.
+			name: "dynamic ECH callback with unset minimum",
+			tlsConfig: &tls.Config{
+				GetEncryptedClientHelloKeys: func(*tls.ClientHelloInfo) ([]tls.EncryptedClientHelloKey, error) {
+					return nil, nil
+				},
+			},
+			minVersion: tls.VersionTLS13,
+		},
 	}
 
 	// Apply the shared server policy and verify the resulting minimum version
