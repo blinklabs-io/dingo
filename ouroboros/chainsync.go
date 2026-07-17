@@ -491,9 +491,16 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				tip,
 			)
 		} else {
+			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+			if blockErr != nil {
+				// Do not RollForward an incomplete CertRB; return the error so
+				// the connection is torn down and the client retries from its
+				// last point once the endorser closure is available.
+				return blockErr
+			}
 			err = ctx.Server.RollForward(
 				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
+				blockCbor,
 				tip,
 			)
 		}
@@ -563,9 +570,22 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				)
 			}
 		} else {
+			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+			if blockErr != nil {
+				// Do not RollForward an incomplete CertRB; surface the error so
+				// the connection is closed and the client retries from its last
+				// point once the endorser closure is available.
+				o.reportChainsyncServerAsyncError(
+					conn,
+					ctx.ConnectionId.String(),
+					"RollForward",
+					blockErr,
+				)
+				return
+			}
 			if err := ctx.Server.RollForward(
 				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
+				blockCbor,
 				tip,
 			); err != nil {
 				o.reportChainsyncServerAsyncError(

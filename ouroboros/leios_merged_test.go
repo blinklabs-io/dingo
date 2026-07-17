@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros"
@@ -731,21 +732,21 @@ func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
 	require.NotNil(t, o.leiosMetrics)
 
-	o.recordLeiosCertRbServe("merged")
-	o.recordLeiosCertRbServe("merged_after_wait")
-	o.recordLeiosCertRbServe("raw_unresolved")
-	o.recordLeiosCertRbServe("raw_unresolved")
+	o.recordLeiosCertRbOutcome("merged")
+	o.recordLeiosCertRbOutcome("merged_after_wait")
+	o.recordLeiosCertRbOutcome("unresolved")
+	o.recordLeiosCertRbOutcome("unresolved")
 	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
 	o.recordLeiosCertRbWait("timeout", 3*time.Second)
 
 	require.Equal(t, float64(1), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbServes.WithLabelValues("merged"),
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged"),
 	))
 	require.Equal(t, float64(1), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbServes.WithLabelValues("merged_after_wait"),
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged_after_wait"),
 	))
 	require.Equal(t, float64(2), promtestutil.ToFloat64(
-		o.leiosMetrics.certRbServes.WithLabelValues("raw_unresolved"),
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("unresolved"),
 	))
 	// One histogram series per wait outcome (resolved, timeout).
 	require.Equal(t, 2, promtestutil.CollectAndCount(
@@ -759,7 +760,41 @@ func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 	require.Nil(t, o.leiosMetrics)
 	require.NotPanics(t, func() {
-		o.recordLeiosCertRbServe("merged")
+		o.recordLeiosCertRbOutcome("merged")
 		o.recordLeiosCertRbWait("timeout", time.Second)
 	})
+}
+
+func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
+	// Explicit config override wins.
+	o := NewOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosClosureWaitTimeout: 5 * time.Second,
+	})
+	require.Equal(t, 5*time.Second, o.leiosClosureWaitTimeout())
+
+	// With no override and no ledger timing, the conservative default applies
+	// (not a short constant).
+	o = NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.Equal(t, defaultLeiosClosureWaitTimeout, o.leiosClosureWaitTimeout())
+	require.GreaterOrEqual(t, defaultLeiosClosureWaitTimeout, 6*time.Second)
+}
+
+func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
+	// A certifying ranking block whose endorser closure never arrives must
+	// surface an error (so the caller closes the connection) rather than
+	// serving the raw, empty-transaction block.
+	certRB := testDijkstraCertRBRaw(t, 77, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xdd
+
+	o := NewOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosClosureWaitTimeout: 20 * time.Millisecond,
+	})
+	block := models.Block{Cbor: certRB, Slot: 77, Hash: []byte{0x77}}
+	got, err := o.serveLeiosCertRbWithWait(block, ebHash)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
 }

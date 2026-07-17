@@ -161,10 +161,11 @@ type OuroborosConfig struct {
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
-	// LeiosClosureWaitTimeout bounds how long the NtC chainsync server
-	// waits for a certifying ranking block's endorser block transaction
-	// closure to be cached before falling back to serving the raw block.
-	// Values <= 0 are replaced with the default.
+	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
+	// server waits for a certifying ranking block's endorser block transaction
+	// closure to become available before closing the connection. When 0 (the
+	// default) the wait is derived from the ledger's Leios pipeline timing
+	// (EndorserBlockWaitSlots × slot length), matching ledger application.
 	LeiosClosureWaitTimeout time.Duration
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
 	// (protocol 20) toward peers. This is a dingo extension that is ahead
@@ -223,9 +224,6 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	cfg.Logger = cfg.Logger.With("component", "ouroboros")
 	cfg.ChainsyncBlockTimeout = effectiveChainsyncBlockTimeout(
 		cfg.ChainsyncBlockTimeout,
-	)
-	cfg.LeiosClosureWaitTimeout = effectiveLeiosClosureWaitTimeout(
-		cfg.LeiosClosureWaitTimeout,
 	)
 	o := &Ouroboros{
 		config:                   cfg,
