@@ -527,6 +527,7 @@ func TestRouterRootServesRootDocument(t *testing.T) {
 	err := json.NewDecoder(w.Body).Decode(&resp)
 	require.NoError(t, err)
 	assert.Equal(t, "https://blockfrost.io/", resp.URL)
+	assert.Equal(t, "0.1.0", resp.Version)
 }
 
 func TestRouterUnimplementedRouteReturns404(t *testing.T) {
