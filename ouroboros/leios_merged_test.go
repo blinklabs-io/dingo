@@ -37,6 +37,8 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -663,6 +665,19 @@ func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
 		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
 	}()
 
+	// Register the waiter before storing so the store exercises the
+	// wake-on-signal path rather than the already-cached fast path.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			o.leiosMu.RLock()
+			defer o.leiosMu.RUnlock()
+			return len(o.leiosClosureWaiters[leiosBlockKey(point.Hash)]) > 0
+		},
+		2*time.Second,
+		"closure waiter to register",
+	)
+
 	require.NoError(
 		t,
 		o.storeLeiosEndorserBlock(
@@ -709,4 +724,42 @@ func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
 	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash)
 	require.False(t, ok)
 	require.Nil(t, merged)
+}
+
+func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
+	require.NotNil(t, o.leiosMetrics)
+
+	o.recordLeiosCertRbServe("merged")
+	o.recordLeiosCertRbServe("merged_after_wait")
+	o.recordLeiosCertRbServe("raw_unresolved")
+	o.recordLeiosCertRbServe("raw_unresolved")
+	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
+	o.recordLeiosCertRbWait("timeout", 3*time.Second)
+
+	require.Equal(t, float64(1), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbServes.WithLabelValues("merged"),
+	))
+	require.Equal(t, float64(1), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbServes.WithLabelValues("merged_after_wait"),
+	))
+	require.Equal(t, float64(2), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbServes.WithLabelValues("raw_unresolved"),
+	))
+	// One histogram series per wait outcome (resolved, timeout).
+	require.Equal(t, 2, promtestutil.CollectAndCount(
+		o.leiosMetrics.certRbWaitSeconds,
+	))
+}
+
+func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
+	// Without a PromRegistry, metrics are not initialized; recording must be
+	// a no-op rather than panicking.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.Nil(t, o.leiosMetrics)
+	require.NotPanics(t, func() {
+		o.recordLeiosCertRbServe("merged")
+		o.recordLeiosCertRbWait("timeout", time.Second)
+	})
 }

@@ -131,8 +131,11 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
 	}
-	// Wake any NtC serving path waiting on this closure once it is complete.
-	if data.completeTxCache() && len(data.txsRaw) > 0 {
+	// Wake any NtC serving path waiting on this closure once its transaction
+	// set is complete. Completeness (txsRaw count == reference count) is the
+	// same readiness predicate the resolver uses, so a waiter is only woken
+	// when a subsequent merge would succeed.
+	if data.completeTxCache() {
 		for _, key := range cacheKeys {
 			o.signalLeiosClosureWaitersLocked(key)
 		}
@@ -474,12 +477,12 @@ func (o *Ouroboros) resolveCertifiedEndorserTxs(
 	return cloneRawMessages(data.txsRaw), true
 }
 
-// leiosClosureCompleteLocked reports whether a complete, non-empty transaction
-// closure is cached in memory for the given cache key. The caller must hold
-// leiosMu.
+// leiosClosureCompleteLocked reports whether a complete transaction closure is
+// cached in memory for the given cache key, using the same readiness predicate
+// (completeTxCache) as the resolver. The caller must hold leiosMu.
 func (o *Ouroboros) leiosClosureCompleteLocked(key string) bool {
 	data, ok := o.leiosEndorserBlocks[key]
-	return ok && data.completeTxCache() && len(data.txsRaw) > 0
+	return ok && data.completeTxCache()
 }
 
 // signalLeiosClosureWaitersLocked wakes and clears every waiter registered for
