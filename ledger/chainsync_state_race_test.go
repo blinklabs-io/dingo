@@ -25,6 +25,7 @@ func TestChainsyncValidationStateConcurrentAccess(t *testing.T) {
 		validationEnabled: true,
 		mithrilLedgerSlot: 10,
 	}
+	ls.publishSnapshotsLocked()
 
 	const iterations = 1000
 

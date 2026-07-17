@@ -97,6 +97,7 @@ func HardForkDijkstra(
 	ret := gdijkstra.DijkstraProtocolParameters{
 		ConwayProtocolParameters: *conwayPParams,
 	}
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	if nodeConfig != nil {
 		dijkstraGenesis := nodeConfig.DijkstraGenesis()
 		if !isEmptyDijkstraGenesis(dijkstraGenesis) {

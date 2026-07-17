@@ -72,6 +72,7 @@ func TestChainsyncHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) {
 			EventBus: bus,
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err := ls.handleEventChainsyncBlockHeader(ChainsyncEvent{
 		ConnectionId: connId,
@@ -121,6 +122,7 @@ func TestChainsyncHeaderVerificationMissingEpochDefersToBlockfetch(
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	t.Cleanup(func() {
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -191,6 +193,7 @@ func TestChainsyncHeaderVerificationEmptyEpochNonceDefersToBlockfetch(
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	t.Cleanup(func() {
 		if ls.chainsyncBlockfetchTimeoutTimer != nil {
 			ls.chainsyncBlockfetchTimeoutTimer.Stop()
@@ -252,6 +255,7 @@ func TestBlockfetchHeaderVerificationFailurePublishesRecycleEvent(t *testing.T) 
 			EventBus: bus,
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	ls.handleEventBlockfetch(event.NewEvent(
 		BlockfetchEventType,

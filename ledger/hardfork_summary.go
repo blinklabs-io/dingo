@@ -18,7 +18,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 )
 
@@ -44,11 +43,9 @@ func (ls *LedgerState) HardForkSummary() (*hardfork.Summary, error) {
 		}
 	}
 
-	ls.RLock()
-	cache := make([]models.Epoch, len(ls.epochCache))
-	copy(cache, ls.epochCache)
-	transitionInfo := ls.transitionInfo
-	ls.RUnlock()
+	snapshot := ls.loadConsensusSnapshot()
+	cache := snapshot.epochCache
+	transitionInfo := snapshot.transitionInfo
 
 	if len(cache) == 0 {
 		return nil, errors.New("ledger: no epochs in cache")

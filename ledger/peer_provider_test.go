@@ -354,6 +354,7 @@ func TestPoolRelayProviderCacheMissFetchesFromDB(t *testing.T) {
 func TestPoolRelayProviderCurrentSlot(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	adapter, err := NewPoolRelayProvider(ls, db, nil)
 	require.NoError(t, err)

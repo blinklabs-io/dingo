@@ -128,6 +128,7 @@ func HardForkBabbage(
 		)
 	}
 	ret := babbage.UpgradePParams(*alonzoPParams)
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	// Add PlutusV2 cost model if not already present
 	// This is needed because the Babbage hard fork happens before the on-chain
 	// protocol parameter update that contains PlutusV2 cost models arrives.

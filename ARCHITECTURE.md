@@ -2097,12 +2097,50 @@ Database operations and event delivery use worker pools for controlled concurren
 | Pattern | Usage |
 |---------|-------|
 | Goroutine Management | Tracked WaitGroups for clean shutdown |
-| Mutex Protection | RWMutex for read-heavy operations |
-| Atomic Operations | Atomic types for metrics counters |
+| Mutex Protection | Ledger writer serialization and mutable operational state |
+| Atomic Operations | Immutable ledger read snapshots and metrics counters |
 | Channel Communication | EventBus async delivery |
 | Context Cancellation | Graceful shutdown signals |
 | Worker Pools | Database operations and event delivery |
 | sync.Once | Ensure single shutdown execution |
+
+`LedgerState` publishes its read-mostly state through two copy-on-write
+snapshots. The consensus snapshot groups the current epoch, era, current and
+previous-era protocol parameters, epoch cache, and hard-fork transition
+information. The tip snapshot groups the applied chain tip with the Praos block
+nonce belonging to that tip. Hot query paths load these snapshots through
+`atomic.Pointer` without acquiring the state's `RWMutex`; `reachedTip` is an
+`atomic.Bool`. Snapshot containers and their owned byte slices are immutable;
+protocol-parameter values are shared and consumers must treat them as read-only.
+Era-specific parameter-update functions mutate their concrete parameter
+pointer in place, so `processEpochRollover` clones the current protocol
+parameters (`cloneProtocolParametersForEra`) into a transaction-owned value
+before running them; without that clone, an epoch boundary applying an
+on-chain pparam update would mutate the pointee that a published snapshot's
+`currentPParams`/`prevEraPParams` still reference.
+
+Runtime ledger writers remain serialized by the existing mutex. They compute
+changes privately, update the writer-owned state, and publish a complete
+replacement snapshot before unlocking. Construction and single-threaded
+startup may also publish without the mutex, but only before the `LedgerState`
+is visible to concurrent readers. Tip hashes, block nonces, and the current
+epoch's nonce fields are copied at publication. The full historical epoch cache
+is instead shared by reference to avoid an allocation whose cost grows with
+chain age on every block: writers must replace the cache and nested nonce slices
+before modifying them. Publication caps the cache capacity so even an accidental
+append allocates a new backing array.
+
+Each snapshot is internally consistent, but a caller loading both snapshot
+pointers could otherwise observe adjacent publication generations. Each
+production publication therefore stamps both snapshots with one generation,
+and code requiring fields from both uses a paired-load helper that retries until
+the generations match. The load helpers dereference `consensus.Load()` /
+`tip.Load()` directly and do not nil-check: `NewLedgerState` always calls
+`publishSnapshotsLocked()` before the state becomes visible, so production
+snapshots are never nil. White-box test fixtures that construct `LedgerState{}`
+directly must call `publishSnapshotsLocked()` (or `NewLedgerState` /
+`SetTipForTesting`) themselves before exercising any snapshot-reading path, or
+the read will nil-dereference.
 
 ## Configuration
 

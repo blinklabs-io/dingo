@@ -421,6 +421,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 			ls.currentTipBlockNonce = tipNonce
 		}
 		clear(ls.epochNonceHexCache)
+		ls.publishSnapshotsLocked()
 		ls.Unlock()
 	} else {
 		ls.Lock()

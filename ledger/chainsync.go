@@ -3638,8 +3638,31 @@ func (ls *LedgerState) applyEpochDonations(
 	return nil
 }
 
-// Returns EpochRolloverResult with all computed state, or an error.
-// The caller is responsible for:
+// cloneProtocolParametersForEra returns an independently owned protocol-
+// parameter value using the active era's CBOR decoder.
+func cloneProtocolParametersForEra(
+	era eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	if pparams == nil {
+		return nil, nil
+	}
+	if era.DecodePParamsFunc == nil {
+		return nil, fmt.Errorf("era %d has no protocol parameter decoder", era.Id)
+	}
+	data, err := cbor.Encode(pparams)
+	if err != nil {
+		return nil, fmt.Errorf("encode protocol parameters: %w", err)
+	}
+	ret, err := era.DecodePParamsFunc(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode protocol parameters: %w", err)
+	}
+	return ret, nil
+}
+
+// processEpochRollover returns all computed state without applying it. The
+// caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
@@ -3652,10 +3675,20 @@ func (ls *LedgerState) processEpochRollover(
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
 	)
+	// Era update functions mutate their concrete protocol-parameter pointer.
+	// Give the transaction an independently owned value so a failed or
+	// in-flight rollover cannot modify parameters retained by an older snapshot.
+	ownedPParams, err := cloneProtocolParametersForEra(
+		currentEra,
+		currentPParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("clone current protocol parameters: %w", err)
+	}
 	result := &EpochRolloverResult{
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
-		NewCurrentPParams:         currentPParams,
+		NewCurrentPParams:         ownedPParams,
 	}
 
 	// Create initial epoch
@@ -3759,7 +3792,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
 		updateQuorum,
-		currentPParams,
+		ownedPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
 		txn,
