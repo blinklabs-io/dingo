@@ -197,6 +197,30 @@ func checkEpoch(
 		return nil, fmt.Errorf("delete old mismatches: %w", err)
 	}
 
+	// Pre-staking epochs (Koios active_stake=null) have no reference data to
+	// compare against — record PASS with zero mismatches rather than running
+	// comparisons against an empty pool set, which would spuriously flag every
+	// Dingo-side pool as pool_only_dingo.
+	if koiosEpoch.PreStaking {
+		if err := cache.UpsertCheckEpochStatus(CheckEpochStatus{
+			Network:       network,
+			Epoch:         epoch,
+			LastCheckedAt: now,
+			Status:        StatusPass,
+		}); err != nil {
+			return nil, fmt.Errorf("upsert check status: %w", err)
+		}
+		logger.Debug("koiosparity: epoch predates staking, skipping comparison",
+			"network", network,
+			"epoch", epoch,
+		)
+		return &EpochCompareResult{
+			Network: network,
+			Epoch:   epoch,
+			Status:  StatusPass,
+		}, nil
+	}
+
 	var allMismatches []CheckMismatch
 
 	// 1. Compare epoch-level aggregates.
