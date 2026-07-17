@@ -399,10 +399,14 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	backfill, tipWait = classifyEndorserBlockFetches(
 		infos, annByHash, 100_050, true, 100, false, neverCached,
 	)
+	backfillHashes := make([]lcommon.Blake2b256, 0, len(backfill))
+	for _, ref := range backfill {
+		backfillHashes = append(backfillHashes, ref.hash)
+	}
 	require.ElementsMatch(
 		t,
 		[]lcommon.Blake2b256{ebA, ebE},
-		[]lcommon.Blake2b256{backfill[0].hash, backfill[1].hash},
+		backfillHashes,
 	)
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)

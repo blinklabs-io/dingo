@@ -110,6 +110,7 @@ func TestConwayProtocolParametersDijkstra(t *testing.T) {
 
 	got := conwayProtocolParameters(pparams)
 	require.Same(t, &pparams.ConwayProtocolParameters, got)
+	require.NotNil(t, got)
 	require.Equal(t, uint64(42), got.GovActionValidityPeriod)
 	require.Equal(t, uint64(99), got.DRepInactivityPeriod)
 }

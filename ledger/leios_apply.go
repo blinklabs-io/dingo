@@ -107,8 +107,8 @@ func (ls *LedgerState) applyEndorserBlock(
 
 	// Decode each standalone endorser transaction, capturing its body CBOR
 	// (the first array element) for the transaction-offset entry.
-	txs := make([]lcommon.Transaction, 0, len(rawTxs))
-	bodyCbors := make([][]byte, 0, len(rawTxs))
+	txs := make([]lcommon.Transaction, len(rawTxs))
+	bodyCbors := make([][]byte, len(rawTxs))
 	for i, raw := range rawTxs {
 		// leios-fetch carries each endorser transaction CBOR-in-CBOR: the
 		// tx_list entry is a CBOR byte string wrapping the transaction's own
@@ -143,8 +143,8 @@ func (ls *LedgerState) applyEndorserBlock(
 		if err != nil {
 			return 0, 0, fmt.Errorf("decode endorser tx %d: %w", i, err)
 		}
-		txs = append(txs, tx)
-		bodyCbors = append(bodyCbors, []byte(elems[0]))
+		txs[i] = tx
+		bodyCbors[i] = []byte(elems[0])
 	}
 
 	// Reject repeated endorser transactions before recording ledger data. The
@@ -159,8 +159,8 @@ func (ls *LedgerState) applyEndorserBlock(
 		if len(keepIndexes) == 0 {
 			return 0, 0, nil
 		}
-		keptTxs := txs[:0]
-		keptBodies := bodyCbors[:0]
+		keptTxs := make([]lcommon.Transaction, 0, len(keepIndexes))
+		keptBodies := make([][]byte, 0, len(keepIndexes))
 		for _, idx := range keepIndexes {
 			keptTxs = append(keptTxs, txs[idx])
 			keptBodies = append(keptBodies, bodyCbors[idx])

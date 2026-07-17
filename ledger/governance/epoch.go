@@ -351,8 +351,8 @@ func ProcessEpoch(
 	// RATIFY loop below never calls TallyProposal, so this heavy read
 	// would be pure overhead (and a needless failure surface) on a no-op
 	// epoch boundary.
-	var drepState *DRepVotingState
-	var spoState *SPOVotingState
+	drepState := &DRepVotingState{}
+	spoState := &SPOVotingState{}
 	if len(stillActive) > 0 {
 		drepState, err = LoadDRepVotingState(in.DB, in.Txn, in.NewEpoch)
 		if err != nil {

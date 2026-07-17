@@ -620,7 +620,7 @@ func TestHandleConnectionClosedEvent_CriticalHotPeersCapsBackoff(
 
 	// Unbounded escalation would reach 1,2,4,8,16,32s; the cap holds the delay
 	// at emergencyReconnectDelay once it would exceed that, and never above it.
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		pg.mu.Lock()
 		peer.ReconnectDelay = 0
 		peer.Connection = &PeerConnection{
