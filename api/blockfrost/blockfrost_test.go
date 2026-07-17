@@ -513,6 +513,61 @@ func TestHandleRoot(t *testing.T) {
 	assert.Equal(t, "0.1.0", resp.Version)
 }
 
+func TestRouterRootServesRootDocument(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp RootResponse
+	err := json.NewDecoder(w.Body).Decode(&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "https://blockfrost.io/", resp.URL)
+}
+
+func TestRouterUnimplementedRouteReturns404(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	paths := []string{
+		"/api/v0/",
+		"/api/v0/scripts",
+		"/api/v0/pools",
+		"/does-not-exist",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+
+			assert.Equal(t, http.StatusNotFound, w.Code)
+			var resp ErrorResponse
+			err := json.NewDecoder(w.Body).Decode(&resp)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			assert.Equal(t, "Not Found", resp.Error)
+		})
+	}
+}
+
+func TestRouterImplementedRouteStillWorks(t *testing.T) {
+	mock := &mockNode{}
+	b := newTestBlockfrost(mock)
+	handler := b.handler()
+
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestHandleHealth(t *testing.T) {
 	mock := &mockNode{}
 	b := newTestBlockfrost(mock)

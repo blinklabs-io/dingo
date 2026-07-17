@@ -95,6 +95,20 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
+// handleNotFound handles any request that doesn't match a
+// registered route, including unimplemented endpoints.
+func (b *Blockfrost) handleNotFound(
+	w http.ResponseWriter,
+	_ *http.Request,
+) {
+	writeError(
+		w,
+		http.StatusNotFound,
+		"Not Found",
+		"The requested component has not been found.",
+	)
+}
+
 // handleHealth handles GET /health and returns node health
 // status.
 func (b *Blockfrost) handleHealth(
