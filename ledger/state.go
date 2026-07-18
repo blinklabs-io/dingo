@@ -569,11 +569,13 @@ type LedgerState struct {
 	chainsyncBlockfetchTimeoutTimer    *time.Timer // timeout timer for blockfetch operations
 	chainsyncBlockfetchTimerGeneration uint64      // generation counter to detect stale timer callbacks
 	currentPParams                     lcommon.ProtocolParameters
-	prevEraPParams                     lcommon.ProtocolParameters
-	transitionInfo                     hardfork.TransitionInfo
-	hfiEvalDoneEpoch                   uint64        // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
-	hfiEvalGeneration                  atomic.Uint64 // bumped on rollback to invalidate any in-flight HFI tally
-	hfiStabilityEvalInFlight           atomic.Bool   // guard against overlapping async HFI tallies
+	prevEraPParams                     lcommon.ProtocolParameters // pparams from the immediately previous era (for era-1 TX validation)
+	transitionInfo                     hardfork.TransitionInfo    // upcoming era boundary state (mirrors Haskell HFC TransitionInfo)
+	hfiEvalDoneEpoch                   uint64                     // currentEpoch.EpochId for which the HFI tally has been kicked off (held under ls.RWMutex)
+	hfiEvalGeneration                  atomic.Uint64              // bumped on rollback to invalidate any in-flight HFI tally
+	hfiStabilityEvalInFlight           atomic.Bool                // guard against overlapping async HFI tallies
+	rewardInputGeneration              atomic.Uint64              // bracketed around rollback to invalidate in-flight reward calculations
+	rewardInputRollbackActive          atomic.Int64               // non-zero while rollback can mutate reward calculation inputs
 	mempool                            MempoolProvider
 	timerCleanupConsumedUtxos          *time.Timer
 	Scheduler                          *Scheduler
@@ -630,6 +632,7 @@ type LedgerState struct {
 	chainUpdateSubID         event.EventSubscriberId
 	chainSwitchSubID         event.EventSubscriberId
 	connClosedSubID          event.EventSubscriberId
+	rewardPrecomputeSubID    event.EventSubscriberId
 
 	// rollbackMu serializes rollbackWG.Add with Close's rollbackWG.Wait
 	// to prevent Add-after-Wait panics from the TOCTOU race between
@@ -643,8 +646,16 @@ type LedgerState struct {
 	replayMu sync.Mutex
 	// replayWG tracks in-flight replayBufferedHeadersAsync goroutines so
 	// Close can drain them before the database is closed (issue #2107).
-	replayWG          sync.WaitGroup
-	validationEnabled bool
+	replayWG sync.WaitGroup
+	// rewardPrecomputeMu serializes rewardPrecomputeWG.Add with Close's
+	// rewardPrecomputeWG.Wait and protects the latest-event coalescing state so
+	// Close cannot return while precompute is still issuing database reads/writes.
+	rewardPrecomputeMu      sync.Mutex
+	rewardPrecomputeWG      sync.WaitGroup
+	rewardPrecomputeRunning bool
+	rewardPrecomputePending *event.EpochTransitionEvent
+	rewardPrecomputeRetry   *stakeRewardPrecomputeRetry
+	validationEnabled       bool
 	// Sync progress reporting (Fix 4)
 	syncProgressLastLog  time.Time     // last time we logged sync progress
 	syncProgressLastSlot uint64        // slot at last progress log (for rate calc)
@@ -915,6 +926,7 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 	// Schedule periodic process to purge consumed UTxOs outside of the rollback window
 	ls.scheduleCleanupConsumedUtxos()
 	// Load epoch info from DB
+	//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 	err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 		return ls.loadEpochs(txn)
 	}, true)
@@ -978,6 +990,10 @@ func (ls *LedgerState) Start(ctx context.Context) error {
 		ls.connClosedSubID = ls.config.EventBus.SubscribeFunc(
 			ConnectionClosedEventType,
 			ls.handleConnectionClosedEvent,
+		)
+		ls.rewardPrecomputeSubID = ls.config.EventBus.SubscribeFunc(
+			event.EpochTransitionEventType,
+			ls.handleRewardPrecomputeEpochTransition,
 		)
 	}
 	// Now that both tip and epoch are loaded, check whether the safe zone
@@ -1373,6 +1389,10 @@ func (ls *LedgerState) Close() error {
 			ConnectionClosedEventType,
 			ls.connClosedSubID,
 		)
+		ls.config.EventBus.Unsubscribe(
+			event.EpochTransitionEventType,
+			ls.rewardPrecomputeSubID,
+		)
 	}
 
 	// Wait for in-flight rollback event emission goroutines.
@@ -1416,6 +1436,22 @@ func (ls *LedgerState) Close() error {
 	ls.config.Logger.Info(
 		"header replay goroutines finished",
 		"elapsed", time.Since(replayStart).Round(time.Millisecond),
+	)
+
+	ls.config.Logger.Info("waiting for in-flight reward precompute handlers")
+	rewardStart := time.Now()
+	// closed was set before the subscriptions were removed. Taking the mutex
+	// once ensures that any handler which entered before then has either added
+	// its worker to the wait group or observed the closed state. Do not hold the
+	// mutex while waiting: the worker needs it to discard pending work and exit.
+	ls.rewardPrecomputeMu.Lock()
+	ls.rewardPrecomputePending = nil
+	ls.rewardPrecomputeRetry = nil
+	ls.rewardPrecomputeMu.Unlock()
+	ls.rewardPrecomputeWG.Wait()
+	ls.config.Logger.Info(
+		"reward precompute handlers finished",
+		"elapsed", time.Since(rewardStart).Round(time.Millisecond),
 	)
 
 	// Stop slot clock
@@ -1891,6 +1927,16 @@ func (ls *LedgerState) rollback(point ocommon.Point) error {
 	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
 		return ErrRollbackExceedsMithrilBoundary
 	}
+	// Bracket every rollback mutation so split reward precomputation cannot
+	// persist results that mixed pre- and post-rollback blocks, pots, protocol
+	// state, or account history. The active count also keeps overlapping
+	// rollbacks from exposing an apparently stable even generation.
+	ls.rewardInputRollbackActive.Add(1)
+	ls.rewardInputGeneration.Add(1)
+	defer func() {
+		ls.rewardInputGeneration.Add(1)
+		ls.rewardInputRollbackActive.Add(-1)
+	}()
 	// Track new tip value built during transaction
 	var newTip ochainsync.Tip
 	var newNonce []byte
@@ -3049,6 +3095,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 			var eraTransitions []*EraTransitionResult
 
 			// Execute transaction WITHOUT holding ls.Lock()
+			//nolint:contextcheck // SubmitAsyncDBTxn has no context-aware variant.
 			err := ls.SubmitAsyncDBTxn(func(txn *database.Txn) error {
 				workingPParams := snapshotPParams
 				workingEraId := snapshotEra.Id
@@ -3803,6 +3850,7 @@ func (ls *LedgerState) ledgerProcessBlocksFromSource(
 				checker = ls.config.ForgedBlockChecker
 				ls.publishSnapshotsLocked()
 				ls.Unlock()
+				ls.maybeQueueStakeRewardPrecomputeRetry(pendingTip.Point.Slot)
 				// Restore normal DB options outside the lock after validation is enabled
 				if wantEnableValidation && bulkLoadActive && bulkOptimizer != nil {
 					if restoreErr := bulkOptimizer.RestoreNormalPragmas(); restoreErr != nil {

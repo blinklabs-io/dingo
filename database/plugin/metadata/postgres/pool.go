@@ -232,6 +232,33 @@ func (d *MetadataStorePostgres) LatestPoolOpCertSequence(
 	return ret.Sequence, ret.Count > 0, nil
 }
 
+// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer rows in
+// the inclusive slot range.
+func (d *MetadataStorePostgres) GetPoolBlockIssuersInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) ([]models.PoolOpCertSequence, error) {
+	if endSlot < startSlot {
+		return nil, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var rows []models.PoolOpCertSequence
+	if err := db.Where(
+		"slot >= ? AND slot <= ?",
+		startSlot,
+		endSlot,
+	).
+		Order("slot ASC, pool_key_hash ASC").
+		Find(&rows).Error; err != nil {
+		return nil, fmt.Errorf("get pool block issuers in slot range: %w", err)
+	}
+	return rows, nil
+}
+
 // CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 // inclusive slot range, grouped by pool key hash.
 func (d *MetadataStorePostgres) CountPoolBlocksInSlotRange(

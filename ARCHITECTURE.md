@@ -2433,14 +2433,26 @@ capture paths.
 `processEpochRollover` (ledger) applies the Conway EPOCH rule's state changes in
 a fixed order, mirroring `cardano-ledger`'s sequencing:
 
-1. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
-2. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
+1. Delayed stake reward application (`applyStakeRewards`): apply the reward
+   update derived from the mark snapshot three epochs back — credit spendable
+   rewards through `account_reward_delta`, return undistributed rewards to
+   reserves, and route unspendable rewards to the treasury before governance
+   reads it. It is a no-op until the required reward inputs exist (the mark
+   snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
+   Precomputation".
+2. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
+3. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. Each deposit is credited to the
    pool's registered, active reward account, or added to the treasury when that
    account is missing or inactive. Active pool membership itself is query-derived
    (`GetActivePoolKeyHashesAtSlot`), so no separate pool-state delete is needed;
    the retirement certificate rows remain for rollback safety.
-3. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
+4. Embedded MIR (`applyMIRCerts`): apply the Shelley-era INSTANT rule for the
+   move-instantaneous-rewards certificates accumulated during the ended epoch —
+   credit their rewards to registered reward accounts and apply the pot-to-pot
+   transfers between treasury and reserves. It is a no-op for Conway+ epochs,
+   where MIR certificates are not valid and no rows exist for those slots.
+5. Governance enactment (`governance.ProcessEpoch`): treasury withdrawals and
    proposal-deposit returns, which observe the post-POOLREAP treasury. The
    proposal-independent voting denominators — DRep voting power
    (`LoadDRepVotingState`, the heavy `account`⋈`utxo` aggregation), the pool
@@ -2453,9 +2465,14 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    thus the whole ledger pipeline, for hours.) A `slowGovernanceTallyThreshold`
    warning surfaces an unexpectedly slow tally rather than letting it present as
    a silent stalled rollover.
-4. Treasury donations (`applyEpochDonations`), added after withdrawals.
-5. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
-6. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
+6. Treasury donations (`applyEpochDonations`), added after withdrawals.
+7. ADA-pot capture (`saveRewardAdaPotsForEpoch`): record the new epoch's
+   reserves, treasury, and fees after every boundary treasury/reserves mutation
+   above (rewards, POOLREAP, MIR, withdrawals, donations, and any AVVM-removal
+   reserves top-up). This `reward_ada_pots` row seeds the delayed reward
+   calculation for a later epoch.
+8. New epoch row (`SetEpoch`, with the computed nonce/boundary slot).
+9. Authoritative Mark snapshot capture (`captureEpochBoundarySnapshot` →
    `snapshot.Manager.CaptureEpochBoundarySnapshot`, when a hook is installed),
    run last so the new epoch's nonce and boundary slot are available, inside a
    metadata savepoint so a capture failure defers to the event-driven fallback
@@ -2463,8 +2480,69 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    SNAP-point placement caveat and the DevNet gate.
 
 POOLREAP runs before governance so any deposit that lands in the treasury is
-visible to the withdrawals checked in step 3. The ordering of steps 1-4 is
-locked in by `TestProcessEpochRollover_OrderingInvariant`.
+visible to the withdrawals checked in step 5. MIR certificate effects are applied
+in the same pre-governance window, so their treasury/reserves movements are also
+visible to governance and to the ADA-pot capture. Stake rewards are applied first
+so their reserves/treasury movement is visible to governance and to the ADA-pot
+capture. The governance/pparams/HARDFORK order is locked in by
+`TestProcessEpochRollover_OrderingInvariant`, and the reward bookends (stake
+reward application first, ADA-pot capture last) by
+`TestProcessEpochRollover_RewardOrdering`.
+
+### Reward Calculation And Precomputation
+
+Reward protocol parameters and epoch length come from the RUPD calculation
+epoch, while block-production counts use the delayed performance epoch. TPraos
+overlay slots are excluded while decentralization is non-zero. Pre-Babbage
+calculation resolves the reward prefilter from stake-account certificate
+history immediately before the first reward-update slot, using the RUPD
+randomness-stabilisation window (`4k/f`); Babbage and later forgo that filter.
+Rewards omitted by the filter return to reserves. Calculated rewards that fail
+the application-time account-registration check are unspendable and go to
+treasury. Spendable rewards are credited through `account_reward_delta`.
+
+After an epoch-transition event, ledger can precompute the next delayed reward
+update into `reward_pool_output` and `reward_account_output`. Calculation runs
+in a read-only transaction; a separate short write transaction re-reads the
+owning `RewardSnapshot` and persists only if its captured/boundary slots and
+content still match, no rollback generation spanning performance blocks, ADA
+pots, protocol state, and account certificate history changed, and no non-empty
+result was concurrently persisted or applied. Completion is inferred from the
+persisted `reward_ada_pots.rewards` total plus the output-row set rather than an
+explicit marker, so an epoch whose total reward pot is legitimately zero carries
+no distinct completion sentinel and is re-derived idempotently by the precompute
+and boundary paths instead of being short-circuited; that recomputation is
+deterministic and reproduces the same empty result, so it costs only redundant
+work, never correctness. A rollback or authoritative snapshot replacement
+therefore drops stale work and leaves the boundary path to recalculate. Pre-Babbage precomputation is deferred until applied block
+progress reaches the RUPD prefilter slot, which queues a retry using the actual
+captured slot; later eras can precompute immediately.
+The EventBus callback only queues this work. One background calculation runs at
+a time, and epoch transitions received while it runs are coalesced to the newest
+pending event. This prevents the minutes-long calculation from blocking
+subscriber drain during bulk-sync epoch bursts while avoiding obsolete
+intermediate calculations.
+
+The application engine verifies the frozen input bundle and
+requires an exact pool output set, valid leader reward accounts, complete
+account outputs, application-boundary output slots, and totals that fit the
+available reward pot. It re-derives each persisted pool reward — the pool total
+and the leader reward — from the frozen inputs using the canonical per-pool
+arithmetic (`rewards.CalculatePoolReward`) fed by the snapshot pool inputs, the
+performance-epoch block counts, and the reward globals, and rejects any pool
+output whose stored total or leader reward diverges. This is what ties the
+per-account checks back to the inputs: those checks re-derive every member amount
+from `MemberReward(pool total, cost, margin, member stake, delegated stake)` and
+pin every leader amount to the pool output's stored leader reward, so without the
+pool-level re-derivation a stale or corrupted pool output paired with account
+outputs consistent with it would pass every aggregate check and be credited
+unverified. With both in place, a reward redistributed among the members of a
+single pool (which preserves the per-pool and per-type totals the aggregate
+checks verify), or a pool output whose reward does not match the inputs, is
+rejected and recalculated rather than credited to the wrong accounts.
+Recalculation replaces the full output set so a result with fewer rows cannot
+retain stale rewards. Reward output rows are keyed by snapshot epoch: snapshot
+`S` corresponds to earned epoch `S+1` and spendable epoch `S+3`.
 
 ### Rollback Support
 
@@ -2478,5 +2556,16 @@ On chain rollback past an epoch boundary:
   repaired when possible, but their nonce is left unchanged because it cannot be
   safely recomputed from the lab alone.
 - Reward-account credits (`account_reward_delta` journal) and treasury/reserves
-  writes (`network_state`) from governance refunds and POOLREAP deposit refunds
-  are slot-keyed, so they are reverted by slot and re-derived on forward replay
+  writes (`network_state`) are slot-keyed, so reward application, governance,
+  MIR, and POOLREAP effects can be reverted and re-derived on forward replay
+- Precomputed reward outputs are deleted by captured/boundary slot. A pot row
+  retained by its earlier `captured_slot` can transiently keep a stale
+  `reward_ada_pots.rewards` total after its later-boundary outputs are removed
+  (the outputs' `boundary_slot` is a full epoch after the pot's `captured_slot`).
+  This is self-healing rather than reset in place: forward replay recomputes and
+  overwrites the value when the reward-application boundary is re-crossed, and
+  every consumer re-validates the persisted output set against the mark snapshot
+  and recomputes on mismatch, so a stale total is never applied. All reward
+  inputs (mark snapshot, performance block counts, and the pot's
+  treasury/reserves/fees) are frozen at or before the retained pot's slot, so the
+  recomputed value is numerically identical
