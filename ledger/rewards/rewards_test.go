@@ -1366,6 +1366,69 @@ func TestCalculateRejectsInvalidUnitIntervals(t *testing.T) {
 	}
 }
 
+func TestCalculatePoolRewardRejectsInvalidParameters(t *testing.T) {
+	// A pool that reaches the reward arithmetic: non-zero delegated stake and
+	// pledge within owner stake, so calculatePoolRewards does not early-return
+	// and dereferences params.Decentralization and params.PledgeInfluence.
+	pool := Pool{
+		ID:             testPoolID(1),
+		Margin:         big.NewRat(1, 10),
+		Pledge:         500,
+		Cost:           100_000,
+		DelegatedStake: 1_000,
+		OwnerStake:     500,
+		BlocksProduced: 10,
+		TotalBlocks:    10,
+	}
+	cases := []struct {
+		name    string
+		mutate  func(*Parameters)
+		message string
+	}{
+		{
+			name:    "missing decentralization",
+			mutate:  func(p *Parameters) { p.Decentralization = nil },
+			message: "missing decentralization",
+		},
+		{
+			name:    "negative decentralization",
+			mutate:  func(p *Parameters) { p.Decentralization = big.NewRat(-1, 2) },
+			message: "negative decentralization",
+		},
+		{
+			name:    "decentralization above one",
+			mutate:  func(p *Parameters) { p.Decentralization = big.NewRat(2, 1) },
+			message: "decentralization greater than one",
+		},
+		{
+			name:    "missing pledge influence",
+			mutate:  func(p *Parameters) { p.PledgeInfluence = nil },
+			message: "missing pledge influence",
+		},
+		{
+			name:    "negative pledge influence",
+			mutate:  func(p *Parameters) { p.PledgeInfluence = big.NewRat(-1, 2) },
+			message: "negative pledge influence",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params := testParams()
+			tc.mutate(&params)
+			_, err := CalculatePoolReward(
+				pool,
+				1_000_000,
+				1_000,
+				100_000_000,
+				10,
+				params,
+			)
+			require.ErrorIs(t, err, ErrInvalidParameters)
+			require.ErrorContains(t, err, tc.message)
+		})
+	}
+}
+
 func TestCalculateRejectsInvalidPoolMargins(t *testing.T) {
 	cases := []struct {
 		name   string
