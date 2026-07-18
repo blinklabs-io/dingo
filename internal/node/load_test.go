@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -480,6 +481,60 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.NotNil(t, capturedHook)
 	require.True(t, captured.TrustedReplay)
 	require.True(t, captured.ManualBlockProcessing)
+}
+
+// TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
+// recorded failures reports success, so a clean load is never turned into an
+// error.
+func TestLoadCaptureFailureTrackerCleanReturnsNil(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+	require.NoError(t, tracker.err())
+}
+
+// TestLoadCaptureFailureTrackerSurfacesFailures verifies that a recorded capture
+// failure surfaces as an error that preserves the first cause and names every
+// failed epoch. This is the load-mode safety net for #1959: the ledger
+// suppresses the authoritative capture error and load has no event-driven
+// fallback, so without this the missing mark/reward snapshot would be silent.
+func TestLoadCaptureFailureTrackerSurfacesFailures(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+
+	first := errors.New("capture epoch 3 failed")
+	tracker.record(3, first)
+	tracker.record(7, errors.New("capture epoch 7 failed"))
+
+	err := tracker.err()
+	require.Error(t, err)
+	// First error is kept as the representative cause.
+	require.ErrorIs(t, err, first)
+	// Every failed epoch is named for the operator.
+	require.Contains(t, err.Error(), "3")
+	require.Contains(t, err.Error(), "7")
+	require.Contains(t, err.Error(), "re-imported")
+}
+
+// TestLoadCaptureFailureTrackerConcurrentRecord exercises the tracker under the
+// race detector to confirm record/err are safe to call from the replay
+// goroutine while the load goroutine reads the result.
+func TestLoadCaptureFailureTrackerConcurrentRecord(t *testing.T) {
+	t.Parallel()
+	tracker := &loadCaptureFailureTracker{}
+
+	const n = 64
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := range uint64(n) {
+		go func(epoch uint64) {
+			defer wg.Done()
+			tracker.record(epoch, fmt.Errorf("capture epoch %d failed", epoch))
+		}(i)
+	}
+	wg.Wait()
+
+	err := tracker.err()
+	require.Error(t, err)
 }
 
 // TestCaptureLoadGenesisSnapshot_BlockProducerFatal verifies that

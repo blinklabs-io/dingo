@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/blinklabs-io/dingo/chain"
@@ -61,6 +62,54 @@ var installEpochBoundarySnapshotHookForLoad = func(
 ) error {
 	ls.SetEpochBoundarySnapshotHook(fn)
 	return nil
+}
+
+// loadCaptureFailureTracker records authoritative epoch-boundary snapshot
+// capture failures so `dingo load` can surface them after replay.
+//
+// Load has no event-driven snapshot fallback: LoadWithDB builds the snapshot
+// manager with a nil EventBus and never starts it, and the load ledger runs
+// without an EventBus, so no EpochTransitionEvents are ever published. The
+// ledger deliberately suppresses a failed authoritative capture (rolling back
+// its savepoint and deferring to the fallback) so an epoch boundary is never
+// wedged. During normal operation the event-driven fallback re-captures the
+// snapshot; during load there is no fallback, so a suppressed capture error
+// would silently drop that epoch's mark/reward snapshot and load would still
+// report success. A post-hoc fallback cannot substitute either: the reward
+// inputs are copied from the live reward aggregate, which only matches the
+// boundary during the in-transaction capture. This tracker lets load fail
+// loudly instead, so the operator knows the resulting database is incomplete.
+type loadCaptureFailureTracker struct {
+	mu     sync.Mutex
+	first  error
+	epochs []uint64
+}
+
+// record notes a failed capture for the given epoch. The first error is kept as
+// the representative cause; every failed epoch is accumulated for reporting.
+func (t *loadCaptureFailureTracker) record(epoch uint64, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.first == nil {
+		t.first = err
+	}
+	t.epochs = append(t.epochs, epoch)
+}
+
+// err returns a wrapped error naming every epoch whose authoritative snapshot
+// capture failed, or nil if all captures succeeded.
+func (t *loadCaptureFailureTracker) err() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.first == nil {
+		return nil
+	}
+	return fmt.Errorf(
+		"epoch-boundary snapshot capture failed for epoch(s) %v during load; "+
+			"load has no event-driven snapshot fallback, so the database is "+
+			"missing mark/reward snapshots and must be re-imported: %w",
+		t.epochs, t.first,
+	)
 }
 
 func Load(ctx context.Context, cfg *config.Config, logger *slog.Logger, immutableDir string) error {
@@ -354,10 +403,21 @@ func LoadWithDB(
 	if err != nil {
 		return fmt.Errorf("failed to load state: %w", err)
 	}
+	captureFailures := &loadCaptureFailureTracker{}
 	if err := installEpochBoundarySnapshotHookForLoad(
 		ls,
 		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
-			return snapshotMgr.CaptureEpochBoundarySnapshot(ctx, txn, evt)
+			// The ledger suppresses a failed authoritative capture and defers
+			// to the event-driven fallback, which does not exist in load mode.
+			// Record the failure so LoadWithDB can surface it after replay
+			// instead of completing with a missing mark/reward snapshot.
+			if err := snapshotMgr.CaptureEpochBoundarySnapshot(
+				ctx, txn, evt,
+			); err != nil {
+				captureFailures.record(evt.NewEpoch, err)
+				return err
+			}
+			return nil
 		},
 	); err != nil {
 		return fmt.Errorf("installing epoch-boundary snapshot hook: %w", err)
@@ -413,6 +473,12 @@ func LoadWithDB(
 		"blocks_copied", blocksCopied,
 		"tip_slot", immutableTipSlot,
 	)
+	// Surface any authoritative epoch-boundary capture the ledger suppressed:
+	// load has no fallback to recapture it, so a silent success here would leave
+	// the database missing mark/reward snapshots for those epochs.
+	if err := captureFailures.err(); err != nil {
+		return err
+	}
 	return nil
 }
 

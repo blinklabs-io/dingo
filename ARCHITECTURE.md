@@ -2363,6 +2363,19 @@ roll back and the rollover proceeds, deferring to the event-driven fallback
 rather than wedging the epoch boundary. When no hook is installed the ledger
 relies solely on the fallback capture, preserving the pre-wiring behavior.
 
+`dingo load` (immutable-DB replay) wires the authoritative hook but has no
+event-driven fallback: `LoadWithDB` builds the snapshot manager with a nil
+`EventBus` and never starts it, and the load ledger publishes no
+`EpochTransitionEvent`s. A post-hoc fallback cannot substitute either, because
+the reward inputs are copied from the live reward aggregate, which only matches
+the boundary during the in-transaction capture. So the ledger's savepoint
+deferral would otherwise turn a transient capture error into a silently missing
+mark/reward snapshot. To prevent that, `LoadWithDB` wraps the hook with a
+`loadCaptureFailureTracker` that records any suppressed capture failure and,
+after replay completes, returns it — failing the load loudly so the operator
+knows the resulting database is incomplete and must be re-imported, rather than
+finishing "successfully".
+
 Because the capture is staged inside the still-open rollover transaction, its
 success metrics (`capture_success_total`, `last_successful_epoch`, and the
 latest-snapshot pool/stake gauges) are published through `database.Txn.AfterCommit`
