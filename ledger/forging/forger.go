@@ -173,6 +173,9 @@ type LeiosCertifiedEndorserBlock struct {
 // inclusion after the certifying ranking block is adopted.
 type LeiosCertificateProvider interface {
 	EligibleCertifiedEndorserBlocks() []LeiosCertifiedEndorserBlock
+	CertifiedEndorserBlockTxHashes(
+		ebHash lcommon.Blake2b256,
+	) (hashes []string, ok bool)
 	MarkEndorserBlockEmbedded(ebHash lcommon.Blake2b256)
 }
 
@@ -208,8 +211,8 @@ type LeiosEndorserBlockAnnouncement struct {
 }
 
 // LeiosBlockData carries the Leios prototype data a Dijkstra ranking block
-// should commit to. A certifying ranking block carries a certificate and no
-// announcement; an announcing block carries an announcement and no certificate.
+// should commit to. Since prototype-2026w29 a ranking block may certify its
+// parent's endorser block and independently announce a new one.
 type LeiosBlockData struct {
 	Announcement *LeiosEndorserBlockAnnouncement
 	Certificate  *lcommon.LeiosEbCertificate
@@ -622,19 +625,40 @@ func (f *BlockForger) checkAndForgeProduction(_ context.Context) error {
 	}
 
 	leiosBlockData, embeddedEb := f.leiosBlockDataForSlot(currentSlot)
-	if leiosBlockData.Certificate == nil && f.leiosChecker != nil {
-		announcement, err := f.checkAndForgeLeiosEB(currentSlot)
-		if err != nil {
-			f.logger.Warn(
-				"leios endorser block production failed",
-				"slot", currentSlot,
-				"error", err,
-			)
-			if f.metrics != nil {
-				f.metrics.leiosEbFailed.Inc()
+	if f.leiosChecker != nil {
+		var excludedTxHashes map[string]struct{}
+		canAnnounce := true
+		if embeddedEb != nil {
+			hashes, ok := f.leiosCerts.CertifiedEndorserBlockTxHashes(*embeddedEb)
+			if !ok {
+				f.logger.Warn(
+					"leios EB announcement skipped: certified closure unavailable for mempool rebase",
+					"slot", currentSlot,
+					"eb_hash", embeddedEb.String(),
+				)
+				canAnnounce = false
 			}
-		} else if announcement != nil {
-			leiosBlockData.Announcement = announcement
+			if canAnnounce {
+				excludedTxHashes = make(map[string]struct{}, len(hashes))
+				for _, hash := range hashes {
+					excludedTxHashes[hash] = struct{}{}
+				}
+			}
+		}
+		if canAnnounce {
+			announcement, err := f.checkAndForgeLeiosEB(currentSlot, excludedTxHashes)
+			if err != nil {
+				f.logger.Warn(
+					"leios endorser block production failed",
+					"slot", currentSlot,
+					"error", err,
+				)
+				if f.metrics != nil {
+					f.metrics.leiosEbFailed.Inc()
+				}
+			} else if announcement != nil {
+				leiosBlockData.Announcement = announcement
+			}
 		}
 	}
 
@@ -914,6 +938,7 @@ func (f *BlockForger) SlotTracker() *SlotTracker {
 // construction so the EB can begin diffusing while the RB is assembled.
 func (f *BlockForger) checkAndForgeLeiosEB(
 	slot uint64,
+	excludedTxHashes map[string]struct{},
 ) (*LeiosEndorserBlockAnnouncement, error) {
 	allowed, reason, err := f.leiosChecker.MayProduceEndorserBlock(slot)
 	if err != nil {
@@ -931,7 +956,14 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 		return nil, nil
 	}
 
-	txs := f.leiosMempool.Transactions()
+	allTxs := f.leiosMempool.Transactions()
+	txs := make([]MempoolTransaction, 0, len(allTxs))
+	for _, tx := range allTxs {
+		if _, excluded := excludedTxHashes[tx.Hash]; excluded {
+			continue
+		}
+		txs = append(txs, tx)
+	}
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
 		if f.metrics != nil {

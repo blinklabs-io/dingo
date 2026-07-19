@@ -510,7 +510,7 @@ above is written for historical serving and the node-to-client inline view, and
 the endorser transactions are applied to the ledger with their full effects —
 the same `t`/`u` entries, UTxO/input rows, and certificate/governance rows as
 the CIP-conformant path — but without validation or consumed-input recovery,
-matching the reference ledger's `applyLeiosClosure` (prototype-2026w28,
+matching the reference ledger's `applyLeiosClosure` (prototype-2026w29,
 `ruleApplyTxValidation` `ValidateNone`): produced outputs and input spends are
 written, and a consumed input absent from the store is left as a no-op instead
 of driving blob recovery (`Database.SetTransactionWithOpts` with

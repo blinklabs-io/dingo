@@ -4099,10 +4099,13 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 			notWant:  []string{"Leios endorser block has no transactions"},
 		},
 		{
-			name:    "Haskell stored block",
-			ebTxs:   []cbor.RawMessage{{0x80}},
-			want:    "stored Leios endorser block without applying to UTxO",
-			notWant: []string{"Leios endorser block has no transactions"},
+			name:  "Haskell deduplicated block",
+			ebTxs: []cbor.RawMessage{{0x80}},
+			want:  "skipped already-applied Leios endorser block transactions",
+			notWant: []string{
+				"Leios endorser block has no transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
 		},
 	}
 	for _, tc := range tests {

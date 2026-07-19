@@ -342,11 +342,10 @@ func (n *Node) Run(ctx context.Context) error {
 			// available to fetch.
 			EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
 			// Two-path Leios ledger selection: the Musashi prototype
-			// (prototype-2026w27) does not apply endorser-block transactions to
-			// the UTxO (Haskell-conformant), whereas dingo's forward path applies
-			// them for real Leios throughput (CIP-conformant). Select the
-			// Haskell-conformant path on Musashi and the CIP-conformant path
-			// elsewhere.
+			// (prototype-2026w29) applies only the certified parent EB, without
+			// validation or consumed-input recovery (Haskell-conformant), whereas
+			// dingo's forward path applies the current announcement normally
+			// (CIP-conformant).
 			LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
 			// dingo's leadership stake omits reward-account balances (staking
 			// rewards are not yet computed), which spuriously rejects the
@@ -357,10 +356,9 @@ func (n *Node) Run(ctx context.Context) error {
 			// checks are waived separately inside header validation after
 			// genesis overlay slots are handled.
 			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
-			// On Musashi, endorser txs are stored but not applied, so
-			// ranking-block txs spending endorser-resident outputs disagree on
-			// validation and are trusted anyway; skip the wasted per-tx
-			// validation so block application keeps up with the production rate.
+			// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
+			// trusted by the prototype; skip dingo's per-tx validation to match it
+			// and keep block application at the production rate.
 			SkipDijkstraTxValidation:   n.config.isMusashiNetwork(),
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
