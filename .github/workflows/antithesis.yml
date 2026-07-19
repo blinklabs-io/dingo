@@ -260,6 +260,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Resolve Moog release
         id: moog-release
@@ -334,9 +336,10 @@ jobs:
         run: |
           timeout $(((DURATION_HOURS + 1) * 3600)) \
             ./internal/test/antithesis/scripts/wait-for-test.sh \
-            "${{ steps.request.outputs.id }}"
+            "$ANTITHESIS_TEST_RUN_ID"
         env:
           DURATION_HOURS: ${{ steps.duration.outputs.hours }}
+          ANTITHESIS_TEST_RUN_ID: ${{ steps.request.outputs.id }}
 
       - name: Clean up wallet
         if: always()
