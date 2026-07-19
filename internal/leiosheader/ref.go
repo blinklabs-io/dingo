@@ -28,7 +28,7 @@ type legacyEndorserBlockReferencer interface {
 }
 
 // ReferencedEndorserBlock returns the Leios endorser block named by a Dijkstra
-// ranking-block header. It supports both the current prototype-2026w27
+// ranking-block header. It supports both the current prototype-2026w29
 // [leios_certified, leios_announcement] extension and the earlier one-field
 // [eb_hash, eb_size] extension.
 func ReferencedEndorserBlock(

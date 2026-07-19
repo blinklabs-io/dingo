@@ -422,9 +422,9 @@ func leiosTestHash(b byte) []byte {
 }
 
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
-// endorser blocks are fetched on announcement; in the settled backlog they are
-// fetched only when a certifying ranking block certifies them (via its parent's
-// announcement), and uncertified historical announcements are skipped.
+// current announcements and certified parent announcements are both fetched;
+// in the settled backlog only certified parent announcements are fetched and
+// uncertified historical announcements are skipped.
 func TestClassifyEndorserBlockFetches(t *testing.T) {
 	var (
 		hashA = leiosTestHash(0xA1) // announces ebA (historical)
@@ -461,6 +461,34 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	// Only the near-head announcement (ebB) is fetched on announcement.
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)
+
+	// prototype-2026w29 permits one near-head block to certify its parent's EB
+	// and announce a new EB. Both references must be available, but only the
+	// parent's EB is applied by the certifying block.
+	nearParentHash := leiosTestHash(0xF1)
+	nearCombinedHash := leiosTestHash(0xF2)
+	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
+	nearCurrentEb := lcommon.NewBlake2b256(leiosTestHash(0x2F))
+	backfill, tipWait = classifyEndorserBlockFetches(
+		[]leiosBlockInfo{
+			{hash: string(nearParentHash), slot: 100_000, announces: true, ebHash: nearParentEb},
+			{
+				hash: string(nearCombinedHash), prevHash: string(nearParentHash),
+				slot: 100_001, announces: true, ebHash: nearCurrentEb, certifies: true,
+			},
+		},
+		map[string]leiosEbRef{
+			string(nearParentHash): {slot: 100_000, hash: nearParentEb},
+		},
+		100_050, true, 100, true, neverCached,
+	)
+	require.Empty(t, backfill)
+	require.Len(t, tipWait, 2)
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b256{nearParentEb, nearCurrentEb},
+		[]lcommon.Blake2b256{tipWait[0].hash, tipWait[1].hash},
+	)
 
 	// A cached endorser block is not refetched.
 	backfill, _ = classifyEndorserBlockFetches(

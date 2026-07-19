@@ -376,6 +376,28 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 	return data.point.Slot, cloneRawMessages(data.txsRaw), true
 }
 
+// EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of
+// a complete cached endorser block. The forge loop uses this to build the
+// prototype-2026w29 post-certificate mempool view: transactions in the EB being
+// certified are excluded from the new EB announced by the same ranking block.
+func (o *Ouroboros) EndorserBlockTxHashesByHash(
+	ebHash []byte,
+) ([]string, bool) {
+	data, ok := o.lookupLeiosEndorserBlock(ebHash)
+	if !ok || !data.completeTxCache() {
+		return nil, false
+	}
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(data.blockRaw)
+	if err != nil {
+		return nil, false
+	}
+	hashes := make([]string, len(block.TransactionReferences))
+	for i, ref := range block.TransactionReferences {
+		hashes[i] = hex.EncodeToString(ref.TransactionHash.Bytes())
+	}
+	return hashes, true
+}
+
 // leiosAnnouncementFromBlockCbor returns the endorser block announced by the
 // given ranking block's header, if any. It works for both the Conway-tagged
 // (5-component) and Dijkstra (2-component) Musashi block shapes because the
@@ -403,14 +425,14 @@ func leiosAnnouncementFromBlockCbor(
 // certifying ranking block (CertRB) inlines over node-to-client, or ok=false
 // when the block is not a CertRB or its endorser block is not fully available.
 //
-// As of prototype-2026w27 the endorser block a CertRB certifies is not named in
+// As of prototype-2026w29 the endorser block a CertRB certifies is not named in
 // the CertRB itself: the CertRB carries a leios_certificate and empty
 // transaction segments, and the endorser block is the one announced by the
 // immediately-preceding block on the chain (the prototype's prevAnn mechanism;
 // see ouroboros-consensus MiniProtocol/ChainSync/Server.hs). We reproduce that
 // by resolving the parent via the header prev-hash and reading its
-// leios_announcement. Announcing and plain ranking blocks carry their own
-// transactions and are served unchanged (ok=false here).
+// leios_announcement. In w29 the CertRB may independently announce a new EB;
+// that current announcement is not the certified closure resolved here.
 func (o *Ouroboros) resolveCertifiedEndorserTxs(
 	blockCbor []byte,
 ) ([]cbor.RawMessage, bool) {

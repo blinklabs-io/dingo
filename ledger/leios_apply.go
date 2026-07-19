@@ -33,7 +33,7 @@ import (
 )
 
 // leiosEndorserBlockReferencer is implemented by a block header that announces
-// a Leios endorser block via its header extension. As of prototype-2026w27 that
+// a Leios endorser block via its header extension. As of prototype-2026w29 that
 // is the leios_announcement field ([announced_eb, announced_eb_size]).
 type leiosEndorserBlockReferencer interface {
 	LeiosAnnouncement() (lcommon.Blake2b256, uint64, bool)
@@ -46,10 +46,11 @@ type leiosEndorserBlockReferencer interface {
 var _ leiosEndorserBlockReferencer = (*dijkstra.DijkstraBlockHeader)(nil)
 
 // leiosEndorserBlockCertifier is implemented by a block header that can certify
-// a previously announced endorser block. As of prototype-2026w27 a certifying
+// a previously announced endorser block. As of prototype-2026w29 a certifying
 // ranking block (CertRB) carries a leios_certificate and certifies the endorser
-// block announced by its parent (prevHash); the flag rides on the header's
-// leios_certified extension field.
+// block announced by its parent (prevHash), while it may independently announce
+// a new endorser block; the flag rides on the header's leios_certified extension
+// field.
 type leiosEndorserBlockCertifier interface {
 	LeiosCertified() (certified bool, present bool)
 }
@@ -61,12 +62,10 @@ var _ leiosEndorserBlockCertifier = (*dijkstra.DijkstraBlockHeader)(nil)
 // (LeiosApplyEndorserBlockTxs) — applies them to the ledger ahead of the ranking
 // block that references it, so the endorser-resident outputs the ranking block's
 // transactions spend are present in the UTxO set. On the Haskell-conformant path
-// (the Musashi prototype) the blob is still stored (for serving and the
-// node-to-client inline view), and non-UTxO metadata that Dingo uses for ledger
-// queries is recorded, but the transactions are not applied to the UTxO.
-// It returns the number of transactions applied to the UTxO (0 on the
-// Haskell-conformant path, or when the CIP path finds every transaction was
-// already applied).
+// (the Musashi prototype) the certified endorser block is applied with full
+// effects but without validation or consumed-input recovery.
+// It returns the number of transactions applied to the UTxO (or zero when every
+// transaction was already applied).
 //
 // Endorser-block transactions are not part of any chain block, so — mirroring
 // the genesis path (buildGenesisBlockCbor / SetGenesisCbor) — their CBOR is
@@ -149,8 +148,8 @@ func (ls *LedgerState) applyEndorserBlock(
 
 	// Reject repeated endorser transactions before recording ledger data. The
 	// CIP path compacts the block to transactions that still need UTxO apply;
-	// the Musashi metadata-only path keeps the blob intact for serving while
-	// using the indexes to suppress duplicate metadata side effects.
+	// the Musashi path keeps the blob intact for serving while using the indexes
+	// to suppress duplicate ledger effects.
 	keepIndexes, err := ls.deduplicateEndorserBlockTransactionIndexes(txs, txn)
 	if err != nil {
 		return 0, 0, err
@@ -194,7 +193,7 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 
-	// Haskell-conformant path (Musashi prototype-2026w28): apply the certified
+	// Haskell-conformant path (Musashi prototype-2026w29): apply the certified
 	// endorser block's transactions with their full effects — produced outputs,
 	// consumed inputs, certificates, and governance — but WITHOUT validation or
 	// consumed-input recovery. This mirrors the reference ledger's
@@ -438,7 +437,7 @@ func (ls *LedgerState) ensureReferencedEndorserBlocks(
 			if err != nil {
 				continue
 			}
-			if ebHash, ok := leiosAnnouncementHashFromBlockCbor(parent.Cbor); ok {
+			if ebHash, _, ok := leiosAnnouncementFromBlockCbor(parent.Cbor); ok {
 				annByHash[info.prevHash] = leiosEbRef{
 					slot: parent.Slot,
 					hash: ebHash,
@@ -549,9 +548,10 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 // classifyEndorserBlockFetches decides which endorser blocks to fetch for a
 // batch of ranking blocks, by where each block sits relative to the live head:
 //
-//   - Near the head (within waitSlots of wallSlot): announcement-driven on both
-//     paths. The relay is actively diffusing the endorser block a block
-//     announces and it may not be certified yet, so fetch on the announcement.
+//   - Near the head (within waitSlots of wallSlot): current announcements are
+//     fetched on both paths. On the Haskell-conformant path, a certifying block's
+//     parent announcement is fetched as well, because prototype-2026w29 permits
+//     one ranking block to certify its parent's EB and announce a new EB.
 //   - Settled backlog (more than waitSlots below the head): the policy depends
 //     on certDrivenHistorical.
 //
@@ -561,11 +561,11 @@ func leiosBlockInfoFrom(blk ledger.Block) leiosBlockInfo {
 //   - true (Haskell-conformant path, e.g. Musashi): certificate-driven. Fetch a
 //     settled endorser block only once a certifying ranking block certifies it
 //     — the certified endorser block is the one announced by the CertRB's
-//     parent (prevHash), per prototype-2026w27. Uncertified historical
-//     announcements are skipped: on this path endorser transactions are not
-//     applied to the ledger, so only certified endorser blocks matter (for
-//     serving and the node-to-client inline view), and the relay does not
-//     reliably serve uncertified ones.
+//     parent (prevHash), per prototype-2026w29. Uncertified historical
+//     announcements are skipped because their transactions are not applied on
+//     this path; only certified endorser blocks affect the ledger or the merged
+//     node-to-client view, and the relay does not reliably serve uncertified
+//     ones.
 //   - false (CIP-conformant path): announcement-driven, like the near-head
 //     case. Endorser transactions are applied to the UTxO, so every referenced
 //     endorser block is fetched to build a complete set. This preserves the
@@ -586,57 +586,106 @@ func classifyEndorserBlockFetches(
 	certDrivenHistorical bool,
 	cached func(ebHash lcommon.Blake2b256) bool,
 ) (backfill, tipWait []leiosEbRef) {
+	backfillSeen := make(map[string]struct{})
+	tipWaitSeen := make(map[string]struct{})
+	appendRef := func(dst *[]leiosEbRef, seen map[string]struct{}, r leiosEbRef) {
+		key := string(r.hash.Bytes())
+		if _, ok := seen[key]; ok || cached(r.hash) {
+			return
+		}
+		seen[key] = struct{}{}
+		*dst = append(*dst, r)
+	}
 	for _, info := range infos {
 		historical := wallKnown && wallSlot > info.slot &&
 			wallSlot-info.slot > waitSlots
+		if certDrivenHistorical && info.certifies {
+			// The certified EB is always the parent's announcement. Near the
+			// head this is independent of the current block's own announcement:
+			// prototype-2026w29 permits a block to contain both.
+			if r, ok := annByHash[info.prevHash]; ok {
+				if historical {
+					appendRef(&backfill, backfillSeen, r)
+				} else {
+					appendRef(&tipWait, tipWaitSeen, r)
+				}
+			}
+		}
 		if historical && certDrivenHistorical {
-			// Fetch only the endorser block a CertRB certifies (its parent's
-			// announcement); skip uncertified historical announcements.
-			if !info.certifies {
-				continue
-			}
-			r, ok := annByHash[info.prevHash]
-			if !ok || cached(r.hash) {
-				continue
-			}
-			backfill = append(backfill, r)
+			// Historical Musashi replay applies certified EBs only; do not fetch
+			// the current block's uncertified announcement.
 			continue
 		}
-		if !info.announces || cached(info.ebHash) {
+		if !info.announces {
 			continue
 		}
 		r := leiosEbRef{slot: info.slot, hash: info.ebHash}
 		if historical {
 			// CIP-conformant settled backlog: fetch every referenced block.
-			backfill = append(backfill, r)
+			appendRef(&backfill, backfillSeen, r)
 		} else {
-			tipWait = append(tipWait, r)
+			appendRef(&tipWait, tipWaitSeen, r)
 		}
 	}
 	return backfill, tipWait
 }
 
-// leiosAnnouncementHashFromBlockCbor decodes the endorser block hash a Dijkstra
-// ranking block announces from its raw CBOR, or ok=false when it announces
-// none. The block is [header, block_body]; the announcement rides on the header
-// extension. Used to resolve a CertRB's parent announcement when the parent is
-// not in the current block batch.
-func leiosAnnouncementHashFromBlockCbor(
+// leiosAnnouncementFromBlockCbor decodes the endorser block reference a
+// Dijkstra ranking block announces from its raw CBOR, or ok=false when it
+// announces none. The block is [header, block_body]; the announcement rides on
+// the header extension. Used to resolve a CertRB's parent announcement.
+func leiosAnnouncementFromBlockCbor(
 	blockCbor []byte,
-) (lcommon.Blake2b256, bool) {
+) (lcommon.Blake2b256, uint64, bool) {
 	var top []cbor.RawMessage
 	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
-		return lcommon.Blake2b256{}, false
+		return lcommon.Blake2b256{}, 0, false
 	}
 	var header dijkstra.DijkstraBlockHeader
 	if _, err := cbor.Decode(top[0], &header); err != nil {
-		return lcommon.Blake2b256{}, false
+		return lcommon.Blake2b256{}, 0, false
 	}
-	ebHash, _, ok := header.LeiosAnnouncement()
+	ebHash, ebSize, ok := header.LeiosAnnouncement()
 	if !ok {
-		return lcommon.Blake2b256{}, false
+		return lcommon.Blake2b256{}, 0, false
 	}
-	return ebHash, true
+	return ebHash, ebSize, true
+}
+
+// leiosEndorserBlockForApply selects the EB whose transactions affect this
+// ranking block. The forward/CIP path applies the block's own announcement. The
+// Musashi prototype-2026w29 path applies only a certified closure: the EB
+// announced by the certifying block's parent. A w29 CertRB may also announce a
+// new EB, so its current announcement must not be mistaken for the certified
+// one.
+func (ls *LedgerState) leiosEndorserBlockForApply(
+	block ledger.Block,
+) (lcommon.Blake2b256, uint64, bool, error) {
+	if ls.config.LeiosApplyEndorserBlockTxs {
+		ref, ok := block.Header().(leiosEndorserBlockReferencer)
+		if !ok {
+			return lcommon.Blake2b256{}, 0, false, nil
+		}
+		hash, size, announced := ref.LeiosAnnouncement()
+		return hash, size, announced, nil
+	}
+	certifier, ok := block.Header().(leiosEndorserBlockCertifier)
+	if !ok {
+		return lcommon.Blake2b256{}, 0, false, nil
+	}
+	certified, present := certifier.LeiosCertified()
+	if !present || !certified {
+		return lcommon.Blake2b256{}, 0, false, nil
+	}
+	parent, err := ls.BlockByHash(block.PrevHash().Bytes())
+	if err != nil {
+		return lcommon.Blake2b256{}, 0, false, fmt.Errorf(
+			"resolve certifying block parent: %w",
+			err,
+		)
+	}
+	hash, size, announced := leiosAnnouncementFromBlockCbor(parent.Cbor)
+	return hash, size, announced, nil
 }
 
 // leiosBackfillConcurrency bounds how many historical endorser blocks are

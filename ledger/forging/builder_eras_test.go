@@ -15,6 +15,7 @@
 package forging
 
 import (
+	"bytes"
 	"math"
 	"testing"
 
@@ -351,7 +352,7 @@ func TestBuildBlockDijkstraRejectsOversizeLeiosAnnouncement(t *testing.T) {
 	assert.ErrorContains(t, err, "leios announcement size exceeds uint32")
 }
 
-func TestBuildBlockDijkstraCertifiesLeiosEndorserBlock(t *testing.T) {
+func TestBuildBlockDijkstraCertifiesAndAnnouncesLeiosEndorserBlocks(t *testing.T) {
 	creds := setupTestCredentials(t)
 	txCbor := makeMinimalTxCbor(t, 0x01, 0)
 	pparams := &dijkstra.DijkstraProtocolParameters{
@@ -399,7 +400,12 @@ func TestBuildBlockDijkstraCertifiesLeiosEndorserBlock(t *testing.T) {
 	for i := range signature {
 		signature[i] = byte(i)
 	}
+	announcedHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
 	block, _, err := builder.BuildBlockWithLeios(1001, 0, LeiosBlockData{
+		Announcement: &LeiosEndorserBlockAnnouncement{
+			Hash: announcedHash,
+			Size: 1234,
+		},
 		Certificate: &lcommon.LeiosEbCertificate{
 			SlotNo:              900,
 			EndorserBlockHash:   lcommon.NewBlake2b256(make([]byte, lcommon.Blake2b256Size)),
@@ -413,8 +419,10 @@ func TestBuildBlockDijkstraCertifiesLeiosEndorserBlock(t *testing.T) {
 	certified, present := dblock.BlockHeader.LeiosCertified()
 	require.True(t, present)
 	assert.True(t, certified)
-	_, _, announced := dblock.BlockHeader.LeiosAnnouncement()
-	assert.False(t, announced)
+	gotHash, gotSize, announced := dblock.BlockHeader.LeiosAnnouncement()
+	require.True(t, announced)
+	assert.Equal(t, announcedHash, gotHash)
+	assert.Equal(t, uint64(1234), gotSize)
 	require.NotNil(t, dblock.BlockBody.LeiosCertificate)
 	assert.Equal(t, []byte{0x80}, dblock.BlockBody.LeiosCertificate.Signers)
 	assert.Equal(t, signature, dblock.BlockBody.LeiosCertificate.AggregatedSignature)

@@ -408,11 +408,10 @@ type LedgerStateConfig struct {
 	// LeiosApplyEndorserBlockTxs selects the endorser-block ledger path. When
 	// true (the CIP-conformant path, dingo's forward behavior for real Leios),
 	// a referenced endorser block's transactions are applied to the UTxO set.
-	// When false (the Haskell-conformant path, matching the prototype-2026w27
-	// musashi node), endorser-block transactions are fetched and stored but NOT
-	// applied to the UTxO — the ledger stays ranking-block-only and the endorser
-	// transactions surface only in the inlined node-to-client view. Set from the
-	// network in node.go (false on musashi, true otherwise).
+	// When false (the Haskell-conformant path, matching prototype-2026w29), only
+	// the certified parent announcement is applied, with full effects but without
+	// validation or consumed-input recovery. Set from the network in node.go
+	// (false on musashi, true otherwise).
 	LeiosApplyEndorserBlockTxs bool
 	// SkipLeaderStakeThresholdCheck, when true, downgrades a failed Praos
 	// stake-derived leader-eligibility check from a hard header rejection to a
@@ -425,7 +424,7 @@ type LedgerStateConfig struct {
 	// omitted from the stake distribution. On real networks (many diffuse
 	// pools) this omission is proportionally negligible and the check catches
 	// genuine ineligibility, so it stays enforced. On the concentrated
-	// prototype-2026w27 musashi topology the dominant pool's reward accrual
+	// prototype-2026w29 musashi topology the dominant pool's reward accrual
 	// drifts its true relative stake above the UTxO-only figure, so enforcing
 	// the threshold falsely rejects that pool's legitimately-eligible blocks and
 	// wedges the chain — so it is skipped there. All other header checks (KES,
@@ -442,15 +441,11 @@ type LedgerStateConfig struct {
 	// every Dijkstra tx-validation disagreement, because the block was admitted
 	// to the chain by its Leios certificate and the prototype does not itself
 	// validate endorser-block transactions. On the Haskell-conformant path
-	// (Musashi) the ranking-block transactions spend endorser-resident outputs
-	// that are not in dingo's UTxO (endorser txs are stored, not applied), so
-	// per-tx validation disagrees on essentially every transaction and then
-	// trusts it — pure wasted work that pegs a core and holds block-application
-	// throughput below the block-production rate, preventing the node from
-	// reaching tip under transaction/endorser-block load. Skipping is
-	// behavior-equivalent (the disagreement result was already discarded) and
-	// unblocks throughput. Set true on Musashi in node.go. Interim until the
-	// Leios certificate / endorser-availability surface is complete (#2587).
+	// (Musashi) certified closure and ranking-block transactions are trusted in
+	// the same way. Running dingo's rule set only to discard any disagreement is
+	// wasted work that prevents the node from reaching tip under load. Set true
+	// on Musashi in node.go. Interim until the Leios certificate / endorser-
+	// availability surface is complete (#2587).
 	SkipDijkstraTxValidation bool
 	ValidateHistorical       bool
 	EnableDijkstra           bool
@@ -4002,77 +3997,76 @@ func (ls *LedgerState) ledgerProcessBlock(
 		}
 	}
 	var blockDonation uint64
-	// Apply the referenced Leios endorser block's transactions before the
-	// ranking block's own, so the endorser-resident outputs the ranking block
-	// spends are present in the UTxO set. The endorser block is identified by
-	// the Dijkstra Leios header extension; its fetched transactions are
-	// supplied by the EndorserBlockProvider. Decode/build failures remain
-	// best-effort: they leave the interim validation skip in place rather than
-	// aborting the block. Storage-phase failures abort the DB transaction so a
-	// partial endorser-block application cannot be committed.
+	// Apply the relevant Leios endorser block's transactions before the ranking
+	// block's own. On the forward/CIP path this is the current block's announced
+	// EB. On the Musashi prototype-2026w29 path it is the certified EB announced
+	// by the parent; a CertRB may simultaneously announce a different, new EB.
+	// Decode/build failures remain best-effort. Storage-phase failures abort the
+	// DB transaction so a partial endorser-block application cannot be committed.
 	if currentEra.Id == dijkstra.EraIdDijkstra &&
 		ls.config.EndorserBlockProvider != nil {
-		if ref, ok := block.Header().(leiosEndorserBlockReferencer); ok {
-			if ebHash, ebSize, ok := ref.LeiosAnnouncement(); ok {
-				if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+		ebHash, ebSize, referenced, refErr := ls.leiosEndorserBlockForApply(block)
+		switch {
+		case refErr != nil:
+			ls.config.Logger.Warn(
+				"failed to resolve Leios endorser block for ranking block",
+				"component", "ledger",
+				"slot", point.Slot,
+				"error", refErr,
+			)
+		case referenced:
+			if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
+				ebHash.Bytes(),
+			); ok {
+				var donation uint64
+				applied, donation, err := ls.applyEndorserBlock(
+					txn,
+					point,
+					block.BlockNumber(),
+					ebSlot,
 					ebHash.Bytes(),
-				); ok {
-					var donation uint64
-					applied, donation, err := ls.applyEndorserBlock(
-						txn,
-						point,
-						block.BlockNumber(),
-						ebSlot,
-						ebHash.Bytes(),
-						ebTxs,
-					)
-					var storageErr *leiosEndorserBlockStorageError
-					switch {
-					case errors.As(err, &storageErr):
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block after storage mutation",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-						return nil, err
-					case err != nil:
-						ls.config.Logger.Warn(
-							"failed to apply Leios endorser block transactions",
-							"component", "ledger",
-							"slot", point.Slot,
-							"eb_slot", ebSlot,
-							"error", err,
-						)
-					default:
-						ls.logLeiosEndorserBlockApplyResult(
-							point,
-							ebSlot,
-							ebTxs,
-							applied,
-						)
-						blockDonation += donation
-					}
-				} else {
-					ls.config.Logger.Debug(
-						"ranking block references an endorser block not yet cached",
+					ebTxs,
+				)
+				var storageErr *leiosEndorserBlockStorageError
+				switch {
+				case errors.As(err, &storageErr):
+					ls.config.Logger.Warn(
+						"failed to apply Leios endorser block after storage mutation",
 						"component", "ledger",
 						"slot", point.Slot,
-						"eb_hash", ebHash.String(),
-						"eb_size", ebSize,
+						"eb_slot", ebSlot,
+						"error", err,
 					)
+					return nil, err
+				case err != nil:
+					ls.config.Logger.Warn(
+						"failed to apply Leios endorser block transactions",
+						"component", "ledger",
+						"slot", point.Slot,
+						"eb_slot", ebSlot,
+						"error", err,
+					)
+				default:
+					ls.logLeiosEndorserBlockApplyResult(
+						point,
+						ebSlot,
+						ebTxs,
+						applied,
+					)
+					blockDonation += donation
 				}
 			} else {
 				ls.config.Logger.Debug(
-					"dijkstra block has no Leios endorser-block reference",
+					"ranking block references an endorser block not yet cached",
 					"component", "ledger",
 					"slot", point.Slot,
+					"eb_hash", ebHash.String(),
+					"eb_size", ebSize,
 				)
 			}
-		} else {
+		default:
 			ls.config.Logger.Debug(
-				"dijkstra block header is not a Leios endorser-block referencer",
+				"dijkstra block has no Leios endorser block to apply",
 				"component", "ledger",
 				"slot", point.Slot,
 			)
@@ -4345,16 +4339,6 @@ func (ls *LedgerState) logLeiosEndorserBlockApplyResult(
 	case len(ebTxs) == 0:
 		ls.config.Logger.Debug(
 			"Leios endorser block has no transactions",
-			"component", "ledger",
-			"slot", point.Slot,
-			"eb_slot", ebSlot,
-		)
-	case !ls.config.LeiosApplyEndorserBlockTxs:
-		// Haskell-conformant path: the endorser block was stored (for serving
-		// and the NtC inline view) but its transactions were not applied to the
-		// UTxO.
-		ls.config.Logger.Debug(
-			"stored Leios endorser block without applying to UTxO",
 			"component", "ledger",
 			"slot", point.Slot,
 			"eb_slot", ebSlot,

@@ -294,8 +294,9 @@ func (n *Node) initBlockForger(
 	var leiosMempool forging.MempoolProvider
 	if n.leiosPipelineManager != nil && n.ouroboros != nil {
 		adapter := &leiosPipelineAdapter{
-			mgr:   n.leiosPipelineManager,
-			chain: n.chainManager.PrimaryChain(),
+			mgr:                   n.leiosPipelineManager,
+			chain:                 n.chainManager.PrimaryChain(),
+			endorserBlockTxHashes: n.ouroboros.EndorserBlockTxHashesByHash,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
@@ -628,8 +629,9 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
 // the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
-	mgr   *leios.PipelineManager
-	chain leiosParentChain
+	mgr                   *leios.PipelineManager
+	chain                 leiosParentChain
+	endorserBlockTxHashes func([]byte) ([]string, bool)
 }
 
 type leiosParentChain interface {
@@ -659,6 +661,15 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 		})
 	}
 	return out
+}
+
+func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
+	ebHash lcommon.Blake2b256,
+) ([]string, bool) {
+	if a.endorserBlockTxHashes == nil {
+		return nil, false
+	}
+	return a.endorserBlockTxHashes(ebHash.Bytes())
 }
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(

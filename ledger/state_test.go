@@ -4071,6 +4071,57 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	require.Equal(t, uint64(4), sequence)
 }
 
+func TestLedgerProcessBlockContinuesWhenCertRBParentCannotBeResolved(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	certified, err := cbor.Encode(true)
+	require.NoError(t, err)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        10,
+					PrevHash: lcommon.NewBlake2b256(
+						[]byte("missing-cert-rb-parent"),
+					),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{certified},
+		},
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+		},
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: block.SlotNumber()},
+			block,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			nil,
+			eras.DijkstraEraDesc,
+			nil,
+			nil,
+		)
+		return err
+	})
+	require.NoError(t, err)
+}
+
 func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 	t *testing.T,
 ) {
@@ -4099,10 +4150,13 @@ func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
 			notWant:  []string{"Leios endorser block has no transactions"},
 		},
 		{
-			name:    "Haskell stored block",
-			ebTxs:   []cbor.RawMessage{{0x80}},
-			want:    "stored Leios endorser block without applying to UTxO",
-			notWant: []string{"Leios endorser block has no transactions"},
+			name:  "Haskell deduplicated block",
+			ebTxs: []cbor.RawMessage{{0x80}},
+			want:  "skipped already-applied Leios endorser block transactions",
+			notWant: []string{
+				"Leios endorser block has no transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
 		},
 	}
 	for _, tc := range tests {
