@@ -375,78 +375,94 @@ func TestCheckAndForgeProductionAnnouncesForgedLeiosEB(t *testing.T) {
 }
 
 func TestCheckAndForgeProductionCertifiesLeiosEBAfterAdoption(t *testing.T) {
-	creds := setupTestCredentials(t)
-	block := newForgerTestBlock(10, 2)
-	builder := &forgerTestBuilder{block: block, cbor: block.cbor}
-	broadcaster := &forgerTestBroadcaster{}
-	ebHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
-	rbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
-	cert := &lcommon.LeiosEbCertificate{
-		SlotNo:              9,
-		EndorserBlockHash:   ebHash,
-		Signers:             []byte{0x80},
-		AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
-	}
-	leiosCerts := &forgerTestLeiosCerts{
-		txHashes:   []string{strings.Repeat("11", 32)},
-		txHashesOK: true,
-		eligible: []LeiosCertifiedEndorserBlock{
-			{
-				SlotNo:            9,
-				EndorserBlockHash: ebHash,
-				Certificate:       cert,
-				AnnouncingRbHash:  rbHash,
-			},
-		},
-	}
-	parent := &forgerTestLeiosParentAnnouncement{
-		rbHash: rbHash, hash: ebHash, ok: true,
-	}
-	leiosChecker := &forgerTestLeiosChecker{allowed: true}
-	leiosCaster := &forgerTestLeiosCaster{}
-
-	forger, err := NewBlockForger(ForgerConfig{
-		Mode:             ModeProduction,
-		Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		Credentials:      creds,
-		LeaderChecker:    forgerTestLeader{},
-		BlockBuilder:     builder,
-		BlockBroadcaster: broadcaster,
-		SlotClock: forgerTestSlotClock{
-			currentSlot:       10,
-			chainTipSlot:      9,
-			slotsPerKESPeriod: 100,
-		},
-		LeiosCertificateProvider:        leiosCerts,
-		LeiosParentAnnouncementProvider: parent,
-		LeiosProduceChecker:             leiosChecker,
-		LeiosEBBroadcaster:              leiosCaster,
-		LeiosMempool: forgerTestMempoolProvider{
-			txs: []MempoolTransaction{
-				{
-					Hash: strings.Repeat("11", 32),
-					Cbor: []byte{0x83, 0x01, 0x02, 0x03},
+	for _, test := range []struct {
+		name        string
+		txHashesOK  bool
+		canAnnounce bool
+	}{
+		{name: "closure available", txHashesOK: true, canAnnounce: true},
+		{name: "closure unavailable", txHashesOK: false, canAnnounce: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			creds := setupTestCredentials(t)
+			block := newForgerTestBlock(10, 2)
+			builder := &forgerTestBuilder{block: block, cbor: block.cbor}
+			broadcaster := &forgerTestBroadcaster{}
+			ebHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x33}, 32))
+			rbHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x44}, 32))
+			cert := &lcommon.LeiosEbCertificate{
+				SlotNo:              9,
+				EndorserBlockHash:   ebHash,
+				Signers:             []byte{0x80},
+				AggregatedSignature: make([]byte, lcommon.LeiosBlsSignatureSize),
+			}
+			leiosCerts := &forgerTestLeiosCerts{
+				txHashes:   []string{strings.Repeat("11", 32)},
+				txHashesOK: test.txHashesOK,
+				eligible: []LeiosCertifiedEndorserBlock{
+					{
+						SlotNo:            9,
+						EndorserBlockHash: ebHash,
+						Certificate:       cert,
+						AnnouncingRbHash:  rbHash,
+					},
 				},
-				{
-					Hash: strings.Repeat("22", 32),
-					Cbor: []byte{0x83, 0x04, 0x05, 0x06},
+			}
+			parent := &forgerTestLeiosParentAnnouncement{
+				rbHash: rbHash, hash: ebHash, ok: true,
+			}
+			leiosChecker := &forgerTestLeiosChecker{allowed: true}
+			leiosCaster := &forgerTestLeiosCaster{}
+
+			forger, err := NewBlockForger(ForgerConfig{
+				Mode:             ModeProduction,
+				Logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+				Credentials:      creds,
+				LeaderChecker:    forgerTestLeader{},
+				BlockBuilder:     builder,
+				BlockBroadcaster: broadcaster,
+				SlotClock: forgerTestSlotClock{
+					currentSlot:       10,
+					chainTipSlot:      9,
+					slotsPerKESPeriod: 100,
 				},
-			},
-		},
-		PromRegistry: prometheus.NewRegistry(),
-	})
-	require.NoError(t, err)
+				LeiosCertificateProvider:        leiosCerts,
+				LeiosParentAnnouncementProvider: parent,
+				LeiosProduceChecker:             leiosChecker,
+				LeiosEBBroadcaster:              leiosCaster,
+				LeiosMempool: forgerTestMempoolProvider{
+					txs: []MempoolTransaction{
+						{
+							Hash: strings.Repeat("11", 32),
+							Cbor: []byte{0x83, 0x01, 0x02, 0x03},
+						},
+						{
+							Hash: strings.Repeat("22", 32),
+							Cbor: []byte{0x83, 0x04, 0x05, 0x06},
+						},
+					},
+				},
+				PromRegistry: prometheus.NewRegistry(),
+			})
+			require.NoError(t, err)
 
-	require.NoError(t, forger.checkAndForgeProduction(context.Background()))
+			require.NoError(t, forger.checkAndForgeProduction(context.Background()))
 
-	require.Equal(t, 1, builder.leiosCalls)
-	require.NotNil(t, builder.leiosData.Announcement)
-	require.Same(t, cert, builder.leiosData.Certificate)
-	require.Equal(t, 1, leiosChecker.calls)
-	require.NotEmpty(t, leiosCaster.hash)
-	require.Equal(t, [][]byte{{0x83, 0x04, 0x05, 0x06}}, leiosCaster.txBodies)
-	require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
-	require.Equal(t, 1, parent.calls)
+			require.Equal(t, 1, builder.leiosCalls)
+			require.Same(t, cert, builder.leiosData.Certificate)
+			require.Equal(t, test.canAnnounce, leiosChecker.calls == 1)
+			if test.canAnnounce {
+				require.NotNil(t, builder.leiosData.Announcement)
+				require.NotEmpty(t, leiosCaster.hash)
+				require.Equal(t, [][]byte{{0x83, 0x04, 0x05, 0x06}}, leiosCaster.txBodies)
+			} else {
+				require.Nil(t, builder.leiosData.Announcement)
+				require.Empty(t, leiosCaster.hash)
+			}
+			require.Equal(t, []lcommon.Blake2b256{ebHash}, leiosCerts.marked)
+			require.Equal(t, 1, parent.calls)
+		})
+	}
 }
 
 func TestCheckAndForgeProductionCertifiesOnlyParentAnnouncedLeiosEB(

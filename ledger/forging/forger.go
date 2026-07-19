@@ -957,12 +957,15 @@ func (f *BlockForger) checkAndForgeLeiosEB(
 	}
 
 	allTxs := f.leiosMempool.Transactions()
-	txs := make([]MempoolTransaction, 0, len(allTxs))
-	for _, tx := range allTxs {
-		if _, excluded := excludedTxHashes[tx.Hash]; excluded {
-			continue
+	txs := allTxs
+	if len(excludedTxHashes) > 0 {
+		txs = make([]MempoolTransaction, 0, len(allTxs))
+		for _, tx := range allTxs {
+			if _, excluded := excludedTxHashes[tx.Hash]; excluded {
+				continue
+			}
+			txs = append(txs, tx)
 		}
-		txs = append(txs, tx)
 	}
 	if len(txs) == 0 {
 		f.logger.Debug("leios EB skipped: mempool empty", "slot", slot)
