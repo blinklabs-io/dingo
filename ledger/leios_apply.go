@@ -194,21 +194,34 @@ func (ls *LedgerState) applyEndorserBlock(
 		}
 	}
 
-	// Haskell-conformant path (Musashi prototype-2026w27): the endorser block is
-	// stored above for serving and the node-to-client inline view, but its
-	// transactions are NOT applied to the UTxO. Dingo still records transaction
-	// metadata, certificates, and governance because header verification and
-	// other ledger queries are backed by the metadata DB.
+	// Haskell-conformant path (Musashi prototype-2026w28): apply the certified
+	// endorser block's transactions with their full effects — produced outputs,
+	// consumed inputs, certificates, and governance — but WITHOUT validation or
+	// consumed-input recovery. This mirrors the reference ledger's
+	// applyLeiosClosure (ruleApplyTxValidation ValidateNone in
+	// Ouroboros.Consensus.Shelley.Ledger.Leios): the endorser block was admitted
+	// to the chain by its Leios certificate, so its transactions are folded onto
+	// the ledger state without re-validation, and a consumed input that is not
+	// present is left as a no-op instead of driving the consumed-utxo recovery
+	// loop. Applying the produced outputs keeps the UTxO set — and the
+	// stake distribution derived from it — complete, matching the reference;
+	// recording metadata only (the previous behavior) diverged the UTxO and made
+	// downstream transactions and the leader-election stake snapshot treat inputs
+	// the endorser block should have produced as missing (the "utxo not found"
+	// repair loop and "pool has no stake in epoch snapshot" rejection). The delta
+	// is recorded under the ranking block's point, so a rollback of the ranking
+	// block removes these effects.
 	if !ls.config.LeiosApplyEndorserBlockTxs {
-		if err := delta.applyTransactionMetadataOnlyWithoutRecordingDonations(ls, txn); err != nil {
+		delta.skipConsumedInputRecovery = true
+		if err := delta.applyWithoutRecordingDonations(ls, txn); err != nil {
 			return 0, 0, &leiosEndorserBlockStorageError{
 				err: fmt.Errorf(
-					"record endorser block transaction metadata: %w",
+					"apply endorser block transactions: %w",
 					err,
 				),
 			}
 		}
-		return 0, delta.donation, nil
+		return len(delta.Transactions), delta.donation, nil
 	}
 
 	// CIP-conformant path: apply the endorser transactions as a delta recorded
