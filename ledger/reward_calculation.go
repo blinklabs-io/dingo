@@ -487,11 +487,21 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 	) {
 		return nil, false, nil
 	}
+	pparams, params, performanceDecentralization, err := ls.rewardParameters(
+		txn,
+		epochs.performance,
+		epochs.pots,
+		pots,
+	)
+	if err != nil {
+		return nil, false, err
+	}
 	if !precomputedRewardAccountAmountsMatchInputs(
 		poolInputs,
 		poolOutputs,
 		stakeInputs,
 		accountOutputs,
+		params,
 	) {
 		return nil, false, nil
 	}
@@ -501,15 +511,6 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		boundarySlot,
 	) {
 		return nil, false, nil
-	}
-	pparams, params, performanceDecentralization, err := ls.rewardParameters(
-		txn,
-		epochs.performance,
-		epochs.pots,
-		pots,
-	)
-	if err != nil {
-		return nil, false, err
 	}
 	outputsComplete, err := precomputedRewardOutputsComplete(
 		poolOutputs,
@@ -774,6 +775,7 @@ func precomputedRewardAccountAmountsMatchInputs(
 	poolOutputs []*models.RewardPoolOutput,
 	stakeInputs []*models.RewardStakeInput,
 	accountOutputs []*models.RewardAccountOutput,
+	params rewards.Parameters,
 ) bool {
 	poolInputByKey := make(map[string]*models.RewardPoolInput, len(poolInputs))
 	for _, input := range poolInputs {
@@ -845,12 +847,13 @@ func precomputedRewardAccountAmountsMatchInputs(
 			if !ok {
 				return false
 			}
-			expected, err := rewards.MemberReward(
+			expected, err := rewards.MemberRewardWithParameters(
 				uint64(poolOutput.TotalReward),
 				uint64(poolInput.Cost),
 				ratOrZero(poolInput.Margin),
 				stake,
 				uint64(poolInput.DelegatedStake),
+				params,
 			)
 			if err != nil || reward.Amount != expected {
 				return false
@@ -2037,6 +2040,47 @@ func (ls *LedgerState) saveRewardAdaPotsForEpoch(
 	return nil
 }
 
+// minPoolMarginRat converts a CIP-23 minPoolMargin basis-points value to a
+// rational in [0, 1], returning nil when the value is 0 (feature disabled).
+// 150 bp => 150/10000. Uses SetUint64 (not int64(basisPoints)) to avoid a
+// gosec G115 uint->int64 conversion finding.
+func minPoolMarginRat(basisPoints uint) *big.Rat {
+	if basisPoints == 0 {
+		return nil
+	}
+	return new(big.Rat).SetFrac(
+		new(big.Int).SetUint64(uint64(basisPoints)),
+		big.NewInt(10_000),
+	)
+}
+
+// applyMinPoolMarginConfig overlays the CIP-23 minimum pool margin operator
+// setting onto the reward parameters. It sets params.MinPoolMargin only when the
+// configured value is nonzero AND the calculation is for Dijkstra or later
+// (protocol major version >= dijkstra.MinProtocolVersionDijkstra); otherwise it
+// leaves the field nil so pre-Dijkstra reward calculation is byte-for-byte
+// unchanged. This is the reward-path half of the whole-feature Dijkstra+ gate;
+// the certificate half is that checkPoolMarginFloor is wired only into
+// ValidateTxDijkstra.
+func applyMinPoolMarginConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
+	if cfg.MinPoolMargin == 0 {
+		return
+	}
+	if params.ProtocolMajorVersion < dijkstra.MinProtocolVersionDijkstra {
+		return
+	}
+	params.MinPoolMargin = minPoolMarginRat(cfg.MinPoolMargin)
+}
+
+// MinPoolMargin returns the CIP-23 minimum pool margin as a rational in [0, 1],
+// or nil when disabled (config value 0). It satisfies the eras package
+// MinPoolMarginProvider interface used by the Dijkstra pool-margin-floor
+// certificate rule; the Dijkstra-only era gate is inherent because only
+// ValidateTxDijkstra consults it.
+func (ls *LedgerState) MinPoolMargin() *big.Rat {
+	return minPoolMarginRat(ls.config.MinPoolMargin)
+}
+
 func (ls *LedgerState) rewardParameters(
 	txn *database.Txn,
 	performanceEpoch uint64,
@@ -2143,6 +2187,10 @@ func (ls *LedgerState) rewardParameters(
 	if err != nil {
 		return nil, rewards.Parameters{}, nil, err
 	}
+	// CIP-23: overlay the operator-configured minimum pool margin, gated to
+	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
+	// the async precompute, so both agree.
+	applyMinPoolMarginConfig(&params, ls.config)
 	if params.MaxLovelaceSupply < uint64(pots.Reserves) {
 		return nil, rewards.Parameters{}, nil, fmt.Errorf(
 			"invalid reward pots: reserves %d exceed max supply %d",

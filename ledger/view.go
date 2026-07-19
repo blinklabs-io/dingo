@@ -23,6 +23,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -56,6 +57,19 @@ type LedgerView struct {
 func (lv *LedgerView) SkipPhase2Validation() bool {
 	return lv.skipPhase2Validation
 }
+
+// MinPoolMargin forwards the CIP-23 minimum pool margin from the underlying
+// ledger state so that a *LedgerView (the value passed to ValidateTx*) satisfies
+// the eras.MinPoolMarginProvider interface. Without this, the Dijkstra
+// pool-margin-floor certificate rule would never see the configured floor.
+func (lv *LedgerView) MinPoolMargin() *big.Rat {
+	return lv.ls.MinPoolMargin()
+}
+
+// var _ eras.MinPoolMarginProvider = (*LedgerView)(nil) makes any future drift
+// in the MinPoolMarginProvider method signature a compile error instead of a
+// silent runtime no-op for the CIP-23 pool-margin-floor certificate rule.
+var _ eras.MinPoolMarginProvider = (*LedgerView)(nil)
 
 func (lv *LedgerView) NetworkId() uint {
 	genesis := lv.ls.config.CardanoNodeConfig.ShelleyGenesis()

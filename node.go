@@ -359,7 +359,10 @@ func (n *Node) Run(ctx context.Context) error {
 			// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
 			// trusted by the prototype; skip dingo's per-tx validation to match it
 			// and keep block application at the production rate.
-			SkipDijkstraTxValidation:   n.config.isMusashiNetwork(),
+			SkipDijkstraTxValidation: n.config.isMusashiNetwork(),
+			// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
+			// off by default (0), effective only in Dijkstra and later.
+			MinPoolMargin:              n.config.minPoolMargin,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

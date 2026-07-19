@@ -544,3 +544,29 @@ func TestValidateAggregatesAllErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid evictionWatermark")
 	assert.Contains(t, err.Error(), "invalid chainsync.strategy")
 }
+
+func TestValidateMinPoolMargin(t *testing.T) {
+	tests := []struct {
+		name    string
+		v       uint
+		wantErr string
+	}{
+		{name: "zero disabled", v: 0},
+		{name: "within range", v: 150},
+		{name: "at maximum", v: 10_000},
+		{name: "above maximum", v: 10_001, wantErr: "minPoolMargin"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.MinPoolMargin = tt.v
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}

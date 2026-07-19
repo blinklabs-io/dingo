@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
@@ -65,6 +66,21 @@ func TestLedgerViewSkipPhase2Validation(t *testing.T) {
 
 	lv.skipPhase2Validation = true
 	require.True(t, lv.SkipPhase2Validation())
+}
+
+// TestLedgerViewMinPoolMargin guards the CIP-23 bridge: MinPoolMargin() must
+// forward from the LedgerState embedded via the named ls field, since Go does
+// not promote methods across a named (non-embedded) field. Without this
+// forwarding method, ls.(eras.MinPoolMarginProvider) in ledger/eras always fails
+// for the *LedgerView actually passed to ValidateTx*, silently disabling the
+// pool-margin-floor certificate rule.
+func TestLedgerViewMinPoolMargin(t *testing.T) {
+	ls := &LedgerState{}
+	lv := &LedgerView{ls: ls}
+	require.Nil(t, lv.MinPoolMargin())
+
+	ls.config.MinPoolMargin = 150
+	require.Zero(t, big.NewRat(150, 10_000).Cmp(lv.MinPoolMargin()))
 }
 
 func TestExtractCostModelsFromPParams_Nil(t *testing.T) {

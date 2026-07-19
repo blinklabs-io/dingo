@@ -447,6 +447,12 @@ type LedgerStateConfig struct {
 	// on Musashi in node.go. Interim until the Leios certificate / endorser-
 	// availability surface is complete (#2587).
 	SkipDijkstraTxValidation bool
+	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
+	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. It is a consensus-
+	// affecting operator setting (not derived from the network) that takes
+	// effect only in Dijkstra and later. Enable a nonzero value only on a
+	// network where every node also enables the same value.
+	MinPoolMargin            uint
 	ValidateHistorical       bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool

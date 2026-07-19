@@ -1911,3 +1911,133 @@ func testPoolID(fill byte) PoolID {
 	}
 	return hash
 }
+
+// --- CIP-23 minimum pool margin ---
+
+// minMarginCalc runs Calculate for a single pool sized to exercise both the
+// leader and member margin split. Pledge/owner stake are 100 of 1000 total, so
+// the owner fraction (0.1) makes the leader margin term matter; cost 1000 with a
+// ~70000 pool reward leaves a large variable reward to split. margin is the
+// pool's registered margin; minPoolMargin is the CIP-23 floor (nil = off).
+func minMarginCalc(margin, minPoolMargin *big.Rat) (*Result, error) {
+	owner := testCredential(0, 2)
+	member := testCredential(0, 3)
+	params := testParams()
+	params.MinPoolMargin = minPoolMargin
+	return Calculate(
+		Pots{Reserves: 100_000_000},
+		Snapshot{
+			TotalActiveStake: 1_000,
+			Pools: []Pool{
+				{
+					ID:                      testPoolID(1),
+					RewardAccount:           testCredential(0, 4),
+					Margin:                  margin,
+					Pledge:                  100,
+					Cost:                    1_000,
+					DelegatedStake:          1_000,
+					OwnerStake:              100,
+					BlocksProduced:          10,
+					TotalBlocks:             10,
+					RewardAccountRegistered: true,
+					RewardAccountEligible:   true,
+					Owners:                  map[Credential]struct{}{owner: {}},
+					Delegators: []Delegator{
+						{Credential: owner, Stake: 100, Registered: true, Eligible: true},
+						{Credential: member, Stake: 900, Registered: true, Eligible: true},
+					},
+				},
+			},
+		},
+		params,
+	)
+}
+
+func minMarginMemberReward(t *testing.T, result *Result, cred Credential) uint64 {
+	t.Helper()
+	for _, r := range result.AccountRewards {
+		if r.Credential == cred && r.Type == RewardTypeMember {
+			return r.Amount
+		}
+	}
+	return 0
+}
+
+// effectiveMargin: max(margin, floor); margin when floor nil; nil margin == 0.
+func TestEffectiveMargin(t *testing.T) {
+	margin := big.NewRat(1, 50) // 2%
+	floor := big.NewRat(1, 10)  // 10%
+	require.Zero(t, margin.Cmp(Parameters{}.effectiveMargin(margin)))
+	require.Zero(t, margin.Cmp(
+		Parameters{MinPoolMargin: big.NewRat(1, 100)}.effectiveMargin(margin)))
+	require.Zero(t, floor.Cmp(
+		Parameters{MinPoolMargin: floor}.effectiveMargin(margin)))
+	require.Zero(t, floor.Cmp(Parameters{MinPoolMargin: floor}.effectiveMargin(nil)))
+	require.Zero(t, new(big.Rat).Cmp(Parameters{}.effectiveMargin(nil)))
+}
+
+// A below-floor pool with the feature on splits exactly like an at-floor pool
+// with the feature off: the clamp makes it behave as if registered at the floor.
+func TestCalculateMinPoolMarginBelowFloorEqualsAtFloor(t *testing.T) {
+	floor := big.NewRat(1, 10)
+	below := big.NewRat(1, 50)
+	member := testCredential(0, 3)
+
+	on, err := minMarginCalc(below, floor)
+	require.NoError(t, err)
+	atFloor, err := minMarginCalc(floor, nil)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		atFloor.PoolRewards[0].LeaderReward, on.PoolRewards[0].LeaderReward)
+	require.Equal(t,
+		minMarginMemberReward(t, atFloor, member),
+		minMarginMemberReward(t, on, member))
+}
+
+// The clamp shifts the split toward the operator: same total pool reward, higher
+// leader share, lower member share than the unfloored baseline.
+func TestCalculateMinPoolMarginShiftsSplitTowardOperator(t *testing.T) {
+	floor := big.NewRat(1, 10)
+	below := big.NewRat(1, 50)
+	member := testCredential(0, 3)
+
+	base, err := minMarginCalc(below, nil)
+	require.NoError(t, err)
+	on, err := minMarginCalc(below, floor)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		base.PoolRewards[0].PoolReward, on.PoolRewards[0].PoolReward)
+	require.Greater(t,
+		on.PoolRewards[0].LeaderReward, base.PoolRewards[0].LeaderReward)
+	require.Less(t,
+		minMarginMemberReward(t, on, member),
+		minMarginMemberReward(t, base, member))
+}
+
+// A floor at or below the pool's registered margin is a parity no-op.
+func TestCalculateMinPoolMarginBelowMarginIsParity(t *testing.T) {
+	member := testCredential(0, 3)
+	base, err := minMarginCalc(big.NewRat(1, 10), nil)
+	require.NoError(t, err)
+	on, err := minMarginCalc(big.NewRat(1, 10), big.NewRat(1, 50))
+	require.NoError(t, err)
+	require.Equal(t,
+		base.PoolRewards[0].LeaderReward, on.PoolRewards[0].LeaderReward)
+	require.Equal(t,
+		minMarginMemberReward(t, base, member),
+		minMarginMemberReward(t, on, member))
+}
+
+// A MinPoolMargin outside [0,1] is rejected; the inclusive bounds are accepted.
+func TestCalculateMinPoolMarginRange(t *testing.T) {
+	_, err := minMarginCalc(big.NewRat(1, 50), big.NewRat(3, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(-1, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+	_, err = minMarginCalc(big.NewRat(1, 50), new(big.Rat))
+	require.NoError(t, err)
+	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(1, 1))
+	require.NoError(t, err)
+}
