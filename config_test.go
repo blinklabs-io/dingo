@@ -117,6 +117,51 @@ func TestWithMidnightConfig(t *testing.T) {
 	assert.Equal(t, midnightCfg, cfg.midnight)
 }
 
+func TestConfigValidatePledgeLeverage(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		leverage uint
+		wantErr  bool
+	}{
+		{name: "disabled ignores zero", leverage: 0},
+		{
+			name:     "enabled rejects zero",
+			enabled:  true,
+			leverage: 0,
+			wantErr:  true,
+		},
+		{name: "enabled accepts minimum", enabled: true, leverage: 1},
+		{name: "enabled accepts typical value", enabled: true, leverage: 100},
+		{name: "enabled accepts maximum", enabled: true, leverage: 10_000},
+		{
+			name:     "enabled rejects above maximum",
+			enabled:  true,
+			leverage: 10_001,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig(
+				WithNetworkMagic(1),
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithPledgeLeverage(tt.enabled, tt.leverage),
+			)
+			_, err := New(cfg)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "pledge leverage")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestExperimentalDijkstraEnabled(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -186,7 +231,12 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 		expectNetworking  bool
 		expectDijkstraEra bool
 	}{
-		{name: "default", cfg: Config{}, expectNetworking: false, expectDijkstraEra: false},
+		{
+			name:              "default",
+			cfg:               Config{},
+			expectNetworking:  false,
+			expectDijkstraEra: false,
+		},
 		{
 			name:              "leios run mode enables both",
 			cfg:               Config{runMode: runModeLeios},
@@ -194,8 +244,10 @@ func TestExperimentalLeiosNetworkingEnabled(t *testing.T) {
 			expectDijkstraEra: true,
 		},
 		{
-			name:              "dijkstra start era enables both",
-			cfg:               Config{startEra: internalconfig.StartEraDijkstra},
+			name: "dijkstra start era enables both",
+			cfg: Config{
+				startEra: internalconfig.StartEraDijkstra,
+			},
 			expectNetworking:  true,
 			expectDijkstraEra: true,
 		},
@@ -310,7 +362,11 @@ func TestRunRTSMetricsUpdater_Lifecycle(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	n := &Node{config: Config{promRegistry: reg}}
 	n.registerRTSMetrics()
-	require.NotNil(t, n.rtsMetrics, "registerRTSMetrics must populate n.rtsMetrics")
+	require.NotNil(
+		t,
+		n.rtsMetrics,
+		"registerRTSMetrics must populate n.rtsMetrics",
+	)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

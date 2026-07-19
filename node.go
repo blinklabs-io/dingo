@@ -362,7 +362,12 @@ func (n *Node) Run(ctx context.Context) error {
 			SkipDijkstraTxValidation: n.config.isMusashiNetwork(),
 			// CIP-23 minimum pool margin (minimum variable fee). Operator-set,
 			// off by default (0), effective only in Dijkstra and later.
-			MinPoolMargin:              n.config.minPoolMargin,
+			MinPoolMargin: n.config.minPoolMargin,
+			// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
+			// the network) and off by default; enable only where every node
+			// also enables it.
+			PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
+			PledgeLeverage:             n.config.pledgeLeverage,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

@@ -565,6 +565,13 @@ type Config struct {
 	// value only where every node also enables the same value. See
 	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
 	MinPoolMargin uint `yaml:"minPoolMargin" envconfig:"DINGO_MIN_POOL_MARGIN"`
+	// CIP-50 pledge-leverage staking rewards. Consensus-affecting; defaults
+	// off. PledgeLeverageEnabled turns on the L*pledge reward cap and
+	// PledgeLeverage is L in [1, 10000]. Enable only on a network where every
+	// node also enables it. See
+	// docs/plans/2026-07-19-cip50-pledge-leverage-design.md.
+	PledgeLeverageEnabled bool `yaml:"pledgeLeverageEnabled" envconfig:"DINGO_PLEDGE_LEVERAGE_ENABLED"`
+	PledgeLeverage        uint `yaml:"pledgeLeverage"        envconfig:"DINGO_PLEDGE_LEVERAGE"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
@@ -844,6 +851,8 @@ var globalConfig = &Config{
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
 	BackfillBatchSize: 100,
+	// CIP-50 default L (feature disabled by default via PledgeLeverageEnabled)
+	PledgeLeverage: 100,
 	// Cache configuration defaults
 	Cache: DefaultCacheConfig(),
 	// Chainsync configuration defaults

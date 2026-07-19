@@ -452,7 +452,17 @@ type LedgerStateConfig struct {
 	// affecting operator setting (not derived from the network) that takes
 	// effect only in Dijkstra and later. Enable a nonzero value only on a
 	// network where every node also enables the same value.
-	MinPoolMargin            uint
+	MinPoolMargin uint
+	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage reward cap. It
+	// is a consensus-affecting feature gate that defaults false; enable it only
+	// on a network where every node also enables it (mainnet and the public
+	// testnets keep it off). Unlike the Musashi-derived toggles above it is set
+	// from operator config in node.go, not derived from the network.
+	PledgeLeverageEnabled bool
+	// PledgeLeverage is L, the CIP-50 maximum ratio of total stake to pledge,
+	// in the range [1, 10000]. It is used only when PledgeLeverageEnabled is
+	// true.
+	PledgeLeverage           uint
 	ValidateHistorical       bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool

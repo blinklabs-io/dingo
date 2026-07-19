@@ -566,3 +566,19 @@ mithril:
 # CLI: --min-pool-margin
 # Env: DINGO_MIN_POOL_MARGIN
 # minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
+
+# ---
+# CIP-50 pledge-leverage staking rewards (experimental, consensus-affecting)
+#
+# Adds the CIP-50 leverage cap to the staking-reward formula: a pool's
+# reward-eligible stake is capped at L times its pledge, so a zero-pledge pool
+# earns nothing and an over-leveraged pool plateaus. This changes the ledger
+# reward calculation, so it MUST only be enabled on a network where every node
+# also enables it (a devnet or custom network). Enabling it off-consensus, e.g.
+# on mainnet or the public testnets, will fork this node off the network. It is
+# disabled by default.
+#
+# CLI: --pledge-leverage-enabled / --pledge-leverage
+# Env: DINGO_PLEDGE_LEVERAGE_ENABLED / DINGO_PLEDGE_LEVERAGE
+# pledgeLeverageEnabled: false
+# pledgeLeverage: 100        # L; integer in [1, 10000]

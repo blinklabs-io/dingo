@@ -464,6 +464,7 @@ func requireOptimalPoolReward(
 		poolStake,
 		pledge,
 		totalStake,
+		nil,
 	)
 	require.NoError(t, err)
 	return ret

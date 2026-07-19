@@ -430,6 +430,11 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithStorageMode(storageMode),
 			// CIP-23 minimum pool margin (consensus-affecting)
 			dingo.WithMinPoolMargin(cfg.MinPoolMargin),
+			// CIP-50 pledge-leverage staking rewards (consensus-affecting)
+			dingo.WithPledgeLeverage(
+				cfg.PledgeLeverageEnabled,
+				cfg.PledgeLeverage,
+			),
 			// Block production (SPO mode)
 			dingo.WithBlockProducer(cfg.BlockProducer),
 			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),

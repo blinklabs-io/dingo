@@ -84,6 +84,33 @@ func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
 	}
 }
 
+func TestPledgeLeverageEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_PLEDGE_LEVERAGE_ENABLED", "true")
+	t.Setenv("DINGO_PLEDGE_LEVERAGE", "42")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.PledgeLeverageEnabled {
+		t.Fatal("expected env var to enable pledge leverage")
+	}
+	if cfg.PledgeLeverage != 42 {
+		t.Fatalf(
+			"expected env var to set pledgeLeverage=42, got %d",
+			cfg.PledgeLeverage,
+		)
+	}
+}
+
 func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

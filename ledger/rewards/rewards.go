@@ -121,6 +121,23 @@ type Parameters struct {
 	// nil reproduces the pre-CIP-23 split byte-for-byte. Must be in [0, 1] when
 	// set.
 	MinPoolMargin *big.Rat
+	// PledgeLeverageEnabled turns on the CIP-50 pledge-leverage cap. It is a
+	// consensus-affecting feature gate that defaults off; enable it only on a
+	// network where every node also enables it.
+	PledgeLeverageEnabled bool
+	// PledgeLeverage is L, the maximum ratio of total stake to pledge before a
+	// pool's reward-eligible stake plateaus. It is used only when
+	// PledgeLeverageEnabled is true and must be in the range [1, 10000].
+	PledgeLeverage *big.Rat
+}
+
+// pledgeLeverageCap returns L for the CIP-50 pledge-leverage cap when the
+// feature is enabled, or nil when it is disabled (the pre-CIP-50 formula).
+func (p Parameters) pledgeLeverageCap() *big.Rat {
+	if !p.PledgeLeverageEnabled {
+		return nil
+	}
+	return p.PledgeLeverage
 }
 
 // Pots captures the pot values available at the start of reward calculation.
@@ -650,7 +667,37 @@ func validateParameters(params Parameters) error {
 	if params.EpochLength == 0 {
 		return fmt.Errorf("%w: epoch length is zero", ErrInvalidParameters)
 	}
-	return validateMinPoolMargin(params)
+	if err := validateMinPoolMargin(params); err != nil {
+		return err
+	}
+	return validatePledgeLeverage(params)
+}
+
+// validatePledgeLeverage enforces the CIP-50 constraint that, when the
+// pledge-leverage feature is enabled, L is supplied and lies in [1, 10000]. It
+// is a no-op when the feature is disabled. Both Calculate (via
+// validateParameters) and CalculatePoolReward (via validatePoolRewardParameters)
+// run it, since a nil L reaching optimalPoolRewardChecked while enabled would
+// otherwise be silently ignored.
+func validatePledgeLeverage(params Parameters) error {
+	if !params.PledgeLeverageEnabled {
+		return nil
+	}
+	if params.PledgeLeverage == nil {
+		return fmt.Errorf(
+			"%w: pledge leverage enabled without a value",
+			ErrInvalidParameters,
+		)
+	}
+	if params.PledgeLeverage.Cmp(oneRat()) < 0 ||
+		params.PledgeLeverage.Cmp(big.NewRat(10_000, 1)) > 0 {
+		return fmt.Errorf(
+			"%w: pledge leverage %s outside [1, 10000]",
+			ErrInvalidParameters,
+			params.PledgeLeverage.RatString(),
+		)
+	}
+	return nil
 }
 
 // validatePoolRewardParameters checks the subset of parameters that
@@ -665,6 +712,9 @@ func validatePoolRewardParameters(params Parameters) error {
 		true,
 		false,
 	); err != nil {
+		return err
+	}
+	if err := validatePledgeLeverage(params); err != nil {
 		return err
 	}
 	if err := validateRatParameter(
@@ -928,6 +978,7 @@ func calculatePoolRewards(
 		pool.DelegatedStake,
 		pool.Pledge,
 		totalCirculation,
+		params.pledgeLeverageCap(),
 	)
 	if err != nil {
 		return PoolReward{}, err
@@ -1085,6 +1136,7 @@ func optimalPoolRewardChecked(
 	poolStake uint64,
 	pledge uint64,
 	totalStake uint64,
+	pledgeLeverage *big.Rat,
 ) (uint64, error) {
 	if totalStake == 0 || optimalPoolCount == 0 {
 		return 0, nil
@@ -1102,6 +1154,16 @@ func optimalPoolRewardChecked(
 		new(big.Int).SetUint64(totalStake),
 	)
 	s := minRat(sigma, z0)
+	// CIP-50: when pledgeLeverage (L) is set, a pool's reward-eligible stake is
+	// additionally capped at L*p (the pledge fraction times L), so sigma' =
+	// min(sigma, z0, L*p). A zero-pledge pool then has sigma' = 0 and earns no
+	// rewards. Because L >= 1 and poolStake always includes pledge, the capped
+	// sigma' still satisfies sigma' >= p', so the pledge-influence term below
+	// stays non-negative.
+	if pledgeLeverage != nil {
+		leverageCap := new(big.Rat).Mul(pledgeLeverage, pledgeRatio)
+		s = minRat(s, leverageCap)
+	}
 	p := minRat(pledgeRatio, z0)
 
 	left := new(big.Rat).Quo(
