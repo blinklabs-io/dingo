@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Test duration in hours'
+        description: 'Test duration in hours (1-8)'
         type: string
         default: '1'
       no_faults:
@@ -29,6 +29,7 @@ on:
 
 concurrency:
   group: antithesis
+  queue: max
   # Once submitted, an Antithesis test continues running outside GitHub.
   # Keep its polling workflow alive so the result is not lost and the next
   # test waits for the active run to finish.
@@ -246,6 +247,13 @@ jobs:
           HOURS=$((10#$DURATION))
           if ((HOURS < 1)); then
             echo "::error::Duration must be at least one hour"
+            exit 1
+          fi
+          # The wait step allows one extra hour for Antithesis to publish the
+          # result. Leave another hour for this job's setup and cleanup within
+          # its 600-minute timeout.
+          if ((HOURS > 8)); then
+            echo "::error::Duration must be no more than 8 hours"
             exit 1
           fi
           echo "hours=$HOURS" >> "$GITHUB_OUTPUT"
