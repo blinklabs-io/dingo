@@ -1037,6 +1037,13 @@ Key models in `database/models/`:
 
 The `LedgerState` (`ledger/state.go`) manages UTXO tracking and validation:
 
+The first reward update is applied at the boundary into epoch 2 using epoch
+0's block performance with the epoch-1 ADA pots. Cardano-ledger's Go stake
+distribution is still empty at that point, so monetary expansion and treasury
+tax are applied but no pool or account rewards are distributed; the post-tax
+amount returns to reserves. Later updates use the normal delayed E-3 snapshot,
+E-2 performance, and E-1 pots mapping.
+
 During from-genesis startup, the synthetic genesis block transaction creates
 the combined Byron and Shelley genesis UTxOs and atomically writes the slot-0
 `NetworkState`: treasury starts at zero and reserves start at
@@ -2452,7 +2459,10 @@ a fixed order, mirroring `cardano-ledger`'s sequencing:
    reserves, and route unspendable rewards to the treasury before governance
    reads it. It is a no-op until the required reward inputs exist (the mark
    snapshot and the prior epoch's ADA-pot row); see "Reward Calculation And
-   Precomputation".
+   Precomputation". Epoch 2 is the bootstrap exception: it applies expansion
+   and treasury tax synchronously with an empty Go distribution and returns the
+   post-tax amount to reserves. It is not precomputed because zero output rows
+   cannot provide rollback-safe precompute provenance.
 2. Shelley-style protocol-parameter updates (`ComputeAndApplyPParamUpdates`).
 3. Embedded POOLREAP (`applyPoolRetirements`): refund the deposits of pools
    whose retirement epoch is the new epoch. Each deposit is credited to the

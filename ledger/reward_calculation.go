@@ -260,6 +260,9 @@ func (ls *LedgerState) calculateStakeRewardApplication(
 			rewardSnapshotEpoch, err,
 		)
 	}
+	if epochs.bootstrap {
+		suppressBootstrapStakeRewards(result)
+	}
 
 	poolOutputs := rewardPoolOutputs(
 		rewardSnapshotEpoch,
@@ -395,6 +398,12 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		)
 	}
 	if pots == nil || pots.Rewards == 0 {
+		return nil, false, nil
+	}
+	// The bootstrap calculation has no durable output rows with which to
+	// validate the precompute against rollbacks. Always recalculate it at the
+	// epoch-2 boundary rather than treating pots.Rewards alone as provenance.
+	if epochs.bootstrap {
 		return nil, false, nil
 	}
 
@@ -1701,6 +1710,13 @@ func (ls *LedgerState) precomputeStakeRewardsCalculate(
 	capturedSlot uint64,
 	boundarySlot uint64,
 ) (*stakeRewardApplication, bool, error) {
+	if epochs, ok := stakeRewardEpochsForApplication(newEpoch); ok &&
+		epochs.bootstrap {
+		// Epoch 2 is deliberately synchronous: its empty Go distribution leaves
+		// no output rows that can safely prove an async precompute survived a
+		// rollback on the same epoch-1 pots row.
+		return nil, false, nil
+	}
 	if _, ok, err := ls.precomputedStakeRewardApplication(
 		txn,
 		newEpoch,
@@ -1783,6 +1799,9 @@ func (ls *LedgerState) precomputeStakeRewards(
 	)
 	if err != nil || !ok {
 		return err
+	}
+	if app == nil {
+		return errors.New("missing stake reward application")
 	}
 	meta := ls.db.Metadata()
 	metaTxn := txn.Metadata()
@@ -1937,20 +1956,20 @@ type stakeRewardEpochs struct {
 	snapshot    uint64
 	performance uint64
 	pots        uint64
+	bootstrap   bool
 }
 
 func stakeRewardEpochsForApplication(newEpoch uint64) (stakeRewardEpochs, bool) {
-	// The first reward update is the bootstrap exception to the normal
-	// delayed-reward mapping. At the boundary into epoch 2, epoch 0's Mark
-	// snapshot and block performance are both available, while the epoch 1
-	// ADA pots contain the reserves, treasury, and epoch 0 fees that seed the
-	// calculation. Without this application, every later pot remains one
-	// reward update behind cardano-ledger.
+	// The first RUPD calculation is made during epoch 1 from epoch 0's block
+	// performance and the epoch 1 ADA pots. The Go stake distribution is
+	// still empty, so the epoch 2 NEWEPOCH rule applies monetary expansion
+	// and treasury tax but distributes no pool or account rewards.
 	if newEpoch == 2 {
 		return stakeRewardEpochs{
 			snapshot:    0,
 			performance: 0,
 			pots:        1,
+			bootstrap:   true,
 		}, true
 	}
 	return stakeRewardEpochsForNewEpoch(newEpoch)
@@ -1972,6 +1991,17 @@ func stakeRewardEpochsForNewEpoch(newEpoch uint64) (stakeRewardEpochs, bool) {
 		performance: newEpoch - 2,
 		pots:        newEpoch - 1,
 	}, true
+}
+
+func suppressBootstrapStakeRewards(result *rewards.Result) {
+	if result == nil {
+		return
+	}
+	result.PoolRewards = nil
+	result.AccountRewards = nil
+	result.EffectiveRewards = 0
+	result.Unspendable = 0
+	result.Undistributed = result.AvailableRewards
 }
 
 func (ls *LedgerState) saveRewardAdaPotsForEpoch(
