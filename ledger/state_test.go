@@ -4071,7 +4071,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	require.Equal(t, uint64(4), sequence)
 }
 
-func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
+func TestLedgerProcessBlockContinuesWhenCertRBParentCannotBeResolved(
 	t *testing.T,
 ) {
 	db := newTestDB(t)
@@ -4119,7 +4119,7 @@ func TestLedgerProcessBlockRejectsCertRBWhenParentCannotBeResolved(
 		)
 		return err
 	})
-	require.ErrorContains(t, err, "resolve certifying block parent")
+	require.NoError(t, err)
 }
 
 func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(

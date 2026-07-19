@@ -4014,7 +4014,6 @@ func (ls *LedgerState) ledgerProcessBlock(
 				"slot", point.Slot,
 				"error", refErr,
 			)
-			return nil, refErr
 		case referenced:
 			if ebSlot, ebTxs, ok := ls.config.EndorserBlockProvider(
 				ebHash.Bytes(),
