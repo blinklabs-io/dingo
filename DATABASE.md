@@ -507,14 +507,23 @@ removes them (the orphaned endorser-block blob is harmless and re-created on
 reprocess). On the Haskell-conformant path (Musashi,
 `LeiosApplyEndorserBlockTxs` false) the standalone `bp` endorser-block blob
 above is written for historical serving and the node-to-client inline view, and
-non-UTxO transaction metadata/certificates/governance rows are recorded under
-the ranking block for transaction hashes not already present. No `t`/`u` entries
-or UTxO/input rows are created, because the endorser transactions are not
-applied to the UTxO set. Positive donations from valid metadata-only endorser
-transactions are still accumulated in `network_donation` under the ranking
-block's slot/epoch so the treasury update at the epoch boundary matches the
-transaction metadata path. Replayed endorser transactions are skipped for
-metadata so certificate and governance effects are not applied twice.
+the endorser transactions are applied to the ledger with their full effects —
+the same `t`/`u` entries, UTxO/input rows, and certificate/governance rows as
+the CIP-conformant path — but without validation or consumed-input recovery,
+matching the reference ledger's `applyLeiosClosure` (prototype-2026w28,
+`ruleApplyTxValidation` `ValidateNone`): produced outputs and input spends are
+written, and a consumed input absent from the store is left as a no-op instead
+of driving blob recovery (`Database.SetTransactionWithOpts` with
+`SkipConsumedInputRecovery`). Applying the outputs keeps the UTxO set — and the
+stake distribution derived from it — complete, matching the reference; the prior
+metadata-only behavior omitted the produced outputs, which diverged the UTxO and
+made downstream transactions and the leader-election stake snapshot treat inputs
+the endorser block should have produced as missing (the `utxo not found` repair
+loop and the `pool has no stake in epoch snapshot` header rejection). Positive
+donations from valid endorser transactions are accumulated in `network_donation`
+under the ranking block's slot/epoch so the treasury update at the epoch boundary
+matches the CIP path. Replayed endorser transactions (hashes already present) are
+skipped so certificate, governance, and UTxO effects are not applied twice.
 Decode/build failures are ignored before storage is touched; once the blob or
 transaction rows start writing, the caller aborts the enclosing block
 transaction rather than committing a partial endorser-block application.
