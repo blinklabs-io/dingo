@@ -16,9 +16,16 @@ on:
         type: boolean
         default: false
       moog_tag:
+        # The deployed MPFS at mpfs.plutimus.com runs the moog v0.5.x line, so
+        # the requester CLI must match it (same pin as the cardano-foundation
+        # cardano-node-antithesis testnet). moog v2.x (the moog-v2 MPFS cutover)
+        # is incompatible: v2.0.1 preflights GET /status, which the deployed
+        # MPFS answers with 404, then prints an error envelope and exits 0 so
+        # the submission silently never launches. Bump this only once a v2 MPFS
+        # (one that serves /status) is deployed and MOOG_MPFS_HOST points at it.
         description: 'Moog CLI release tag'
         type: string
-        default: 'v2.0.1'
+        default: 'v0.5.1.5'
 
 concurrency:
   group: antithesis
@@ -216,6 +223,15 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 600
+    # Shared Moog env for the submit + wait steps (the wait step polls
+    # MOOG_MPFS_HOST read-only, so it needs the same host/token/requester).
+    env:
+      MOOG_WALLET_FILE: wallet.json
+      MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
+      MOOG_PLATFORM: github
+      MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
+      MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
+      DURATION: ${{ inputs.duration || '3' }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
@@ -223,7 +239,7 @@ jobs:
       - name: Resolve Moog release
         id: moog-release
         run: |
-          TAG="${MOOG_TAG_INPUT:-v2.0.1}"
+          TAG="${MOOG_TAG_INPUT:-v0.5.1.5}"
           VERSION="${TAG#v}"
           TAG="v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -256,28 +272,43 @@ jobs:
           MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
 
       - name: Submit test to Antithesis
+        id: request
         run: |
+          set -euo pipefail
           NO_FAULTS_FLAG=""
           if [ "$NO_FAULTS" = "true" ]; then
             NO_FAULTS_FLAG="--no-faults"
           fi
-          echo "Submitting Antithesis test for commit ${GITHUB_SHA}..."
-          moog requester create-test \
+          # Try index must be unique per commit, so count existing runs for this
+          # commit and increment (matches io-ouroboros-leios antithesis-leios).
+          TRY=$(moog facts test-runs --whose "$MOOG_REQUESTER" \
+            | jq --arg sha "$GITHUB_SHA" 'map(select(.key.commitId == $sha)) | length')
+          TRY=$((TRY + 1))
+          echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION}h)..."
+          # shellcheck disable=SC2086 # NO_FAULTS_FLAG intentionally word-splits
+          RESULT=$(moog requester create-test \
             -d "internal/test/antithesis/testnets/dingo-praos" \
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
+            --try "$TRY" \
             -t "$DURATION" \
-            -y 1 \
-            $NO_FAULTS_FLAG
+            $NO_FAULTS_FLAG)
+          echo "$RESULT"
+          # moog can print an error envelope (e.g. {"exception": ...}) and still
+          # exit 0; a submission only truly launched if it returned a testRunId.
+          # jq -e fails the step (set -e) so a bad submit can't report false green.
+          ID=$(echo "$RESULT" | jq -e .value.testRunId | jq -r .)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Launched Antithesis test run: $ID"
         env:
           MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_WALLET_FILE: wallet.json
-          MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
-          MOOG_PLATFORM: github
-          MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
-          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
-          DURATION: ${{ inputs.duration || '3' }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+
+      - name: Wait for results
+        run: |
+          timeout $(((DURATION + 1) * 3600)) \
+            ./internal/test/antithesis/scripts/wait-for-test.sh \
+            "${{ steps.request.outputs.id }}"
 
       - name: Clean up wallet
         if: always()
