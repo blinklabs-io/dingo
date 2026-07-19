@@ -29,7 +29,10 @@ on:
 
 concurrency:
   group: antithesis
-  cancel-in-progress: true
+  # Once submitted, an Antithesis test continues running outside GitHub.
+  # Keep its polling workflow alive so the result is not lost and the next
+  # test waits for the active run to finish.
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
@@ -233,6 +236,20 @@ jobs:
       MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
       DURATION: ${{ inputs.duration || '3' }}
     steps:
+      - name: Validate duration
+        id: duration
+        run: |
+          if [[ ! "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "::error::Duration must be a positive integer number of hours"
+            exit 1
+          fi
+          HOURS=$((10#$DURATION))
+          if ((HOURS < 1)); then
+            echo "::error::Duration must be at least one hour"
+            exit 1
+          fi
+          echo "hours=$HOURS" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
 
@@ -284,14 +301,14 @@ jobs:
           TRY=$(moog facts test-runs --whose "$MOOG_REQUESTER" \
             | jq --arg sha "$GITHUB_SHA" 'map(select(.key.commitId == $sha)) | length')
           TRY=$((TRY + 1))
-          echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION}h)..."
+          echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION_HOURS}h)..."
           # shellcheck disable=SC2086 # NO_FAULTS_FLAG intentionally word-splits
           RESULT=$(moog requester create-test \
             -d "internal/test/antithesis/testnets/dingo-praos" \
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
             --try "$TRY" \
-            -t "$DURATION" \
+            -t "$DURATION_HOURS" \
             $NO_FAULTS_FLAG)
           echo "$RESULT"
           # moog can print an error envelope (e.g. {"exception": ...}) and still
@@ -303,12 +320,15 @@ jobs:
         env:
           MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
 
       - name: Wait for results
         run: |
-          timeout $(((DURATION + 1) * 3600)) \
+          timeout $(((DURATION_HOURS + 1) * 3600)) \
             ./internal/test/antithesis/scripts/wait-for-test.sh \
             "${{ steps.request.outputs.id }}"
+        env:
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
 
       - name: Clean up wallet
         if: always()
