@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -202,14 +203,11 @@ func (n *Node) validateBlockProducerLedgerWithView(
 // require the genesis snapshot for leader election) and logs a warning for
 // relay nodes (which do not perform leader election).
 func (n *Node) handleGenesisSnapshotError(err error) error {
-	if n.config.blockProducer {
-		return fmt.Errorf("failed to capture genesis snapshot: %w", err)
-	}
-	n.config.logger.Warn(
-		"failed to capture genesis snapshot",
-		"error", err,
+	return snapshot.HandleGenesisSnapshotError(
+		n.config.blockProducer,
+		n.config.logger,
+		err,
 	)
-	return nil
 }
 
 // initBlockForger initializes the block forger for production mode.
