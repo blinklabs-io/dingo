@@ -1,5 +1,107 @@
 # Dingo Releases
 
+## v0.66.1 (July 20, 2026)
+
+**Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
+
+**Date:** July 20, 2026
+
+**Version:** v0.66.1
+
+This release refreshes the published notes, keeps build and database dependencies current, stabilizes Antithesis validation, and corrects live stake indexing so Mithril processing stays consistent.
+
+### 💪 Improvements
+
+* Updated **the release notes for v0.66.0:** The release history now reflects the latest published version, which keeps the changelog current and easier to follow.
+* Improved **release artifact verification:** The publishing flow now uses a newer attestation action, which keeps artifact checks current.
+* Refined **database storage behavior with the latest Badger release:** The storage layer now includes the newer maintenance fixes from Badger, which supports steadier database behavior.
+* Stabilized **Antithesis validation runs:** The CI job now pins Moog and waits for results before continuing, which reduces flaky validation outcomes.
+
+### 🔧 Fixes
+
+* Fixed **live stake indexing for Mithril data:** The database now waits to index live stake until the data is ready, which keeps stake information consistent during processing.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** リリースノートを更新し、依存関係を最新に保ち、ライブ stake indexing を安定化
+
+**日付:** July 20, 2026
+
+**バージョン:** v0.66.1
+
+このリリースでは、公開済みのノートを更新し、build と database の依存関係を最新に保ち、Antithesis の検証を安定化し、Mithril 処理の整合性を保つために live stake indexing を修正します。
+
+### 💪 改善
+
+* 更新しました **v0.66.0 の release notes:** リリース履歴が最新の公開版を反映し、changelog を追いやすくなります。
+* 改善しました **release artifact の検証:** publishing の流れは新しい attestation action を使うようになり、artifact の確認が最新の状態に保たれます。
+* 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は Badger の新しい保守修正を取り込み、database の動作をより安定させます。
+* 安定化しました **Antithesis validation の実行:** CI job は Moog を固定し、結果を待ってから次へ進むため、検証結果のぶれを抑えます。
+
+### 🔧 修正
+
+* 修正しました **Mithril data の live stake indexing:** database は live stake data の準備が整うまで indexing を遅らせるため、処理中の stake 情報が整合したまま保たれます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Actualizar las notas de la versión, mantener dependencias al día y estabilizar la indexación de stake en vivo
+
+**Fecha:** July 20, 2026
+
+**Versión:** v0.66.1
+
+Esta versión actualiza las notas publicadas, mantiene al día las dependencias de compilación y base de datos, estabiliza la validación de Antithesis y corrige la indexación de stake en vivo para mantener coherente el procesamiento de Mithril.
+
+### 💪 Mejoras
+
+* Actualizó **las notas de la versión v0.66.0:** El historial de versiones refleja la publicación más reciente, lo que mantiene el changelog al día y más fácil de seguir.
+* Mejoró **la verificación de los artefactos de publicación:** El flujo de publicación ahora usa una acción de attestation más nueva, lo que mantiene las comprobaciones de los artefactos al día.
+* Refinó **el comportamiento del almacenamiento de la base de datos con la última versión de Badger:** La capa de almacenamiento ahora incluye las correcciones de mantenimiento más nuevas de Badger, lo que ayuda a mantener un comportamiento de base de datos más estable.
+* Estabilizó **las ejecuciones de validación de Antithesis:** El trabajo de CI ahora fija Moog y espera los resultados antes de continuar, lo que reduce los resultados inestables.
+
+### 🔧 Correcciones
+
+* Corrigió **la indexación de live stake para datos de Mithril:** La base de datos ahora aplaza ese trabajo de indexación hasta que los datos de live stake estén listos, lo que mantiene coherente la información de stake durante el procesamiento.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.0 (July 20, 2026)
 
 **Title:** Apply epoch rewards, align import replay, and tighten API and server behavior
