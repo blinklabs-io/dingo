@@ -152,6 +152,7 @@ func TestCostModels_WithCurrentPParams(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	lv := &LedgerView{ls: ls}
 	result := lv.CostModels()
 	require.Len(t, result, 3)
@@ -161,6 +162,7 @@ func TestCostModels_NilPParams(t *testing.T) {
 	ls := &LedgerState{
 		currentPParams: nil,
 	}
+	ls.publishSnapshotsLocked()
 	lv := &LedgerView{ls: ls}
 	result := lv.CostModels()
 	require.NotNil(t, result,

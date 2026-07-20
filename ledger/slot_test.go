@@ -67,6 +67,7 @@ func TestSlotCalc(t *testing.T) {
 			CardanoNodeConfig: &cardano.CardanoNodeConfig{},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 	testShelleyGenesis := `{"systemStart": "2022-10-25T00:00:00Z"}`
 	if err := testLedgerState.config.CardanoNodeConfig.LoadShelleyGenesisFromReader(strings.NewReader(testShelleyGenesis)); err != nil {
 		t.Fatalf("unexpected error loading cardano node config: %s", err)
@@ -173,6 +174,7 @@ func TestSlotToEpochProjection(t *testing.T) {
 			},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	testCases := []struct {
 		name          string
@@ -262,6 +264,7 @@ func TestSlotToEpochEmptyCache(t *testing.T) {
 	testLedgerState := &LedgerState{
 		epochCache: []models.Epoch{},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	_, err := testLedgerState.SlotToEpoch(100)
 	if err == nil {
@@ -292,6 +295,7 @@ func TestSlotToEpochBeforeFirstEpoch(t *testing.T) {
 			},
 		},
 	}
+	testLedgerState.publishSnapshotsLocked()
 
 	// Slot before first known epoch should error
 	_, err := testLedgerState.SlotToEpoch(100)

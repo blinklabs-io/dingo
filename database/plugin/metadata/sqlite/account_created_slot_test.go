@@ -246,12 +246,10 @@ func TestSaveAccountConcurrentCopiesKeepEarliestCreatedSlot(t *testing.T) {
 	for _, slot := range slots {
 		copy := *account
 		copy.AddedSlot = slot
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			errs <- saveAccount(&copy, db)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -212,12 +212,6 @@ func (b *DefaultBlockBuilder) buildBlock(
 			"leios block data requires Dijkstra protocol parameters",
 		)
 	}
-	if limits.era == eraDijkstra && leios.Announcement != nil &&
-		leios.Certificate != nil {
-		return nil, nil, errors.New(
-			"dijkstra block cannot both announce and certify a Leios endorser block",
-		)
-	}
 	leiosCert, err := dijkstraLeiosCertificateForBlock(leios.Certificate)
 	if err != nil {
 		return nil, nil, err
@@ -1077,7 +1071,7 @@ type rawBabbageEraBlock struct {
 	InvalidTransactions    []uint
 }
 
-// rawDijkstraBlockBody encodes the prototype-2026w27 Dijkstra block_body:
+// rawDijkstraBlockBody encodes the prototype-2026w29 Dijkstra block_body:
 // [invalid_transactions / nil, [* transaction], leios_certificate / nil,
 // peras_certificate / nil]. CertRBs populate leios_certificate; peras remains
 // CBOR null.

@@ -31,6 +31,7 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/query/queryconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/submit/submitconnect"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/sync/syncconnect"
@@ -335,9 +336,7 @@ func (u *Utxorpc) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
-		if server.TLSConfig == nil {
-			server.TLSConfig = &tls.Config{}
-		}
+		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
 		server.TLSConfig.Certificates = append(
 			server.TLSConfig.Certificates,
 			cert,

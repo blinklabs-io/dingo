@@ -257,10 +257,12 @@ func TestApplyEndorserBlockDeduplicatesCIPTransactions(t *testing.T) {
 	requireLeiosApplyTestTxCount(t, gdb, 2)
 }
 
-// On the Haskell-conformant path (Musashi prototype) the endorser block is
-// stored and its transaction metadata is recorded, but its transactions are not
-// applied to the UTxO.
-func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
+// On the Haskell-conformant path (Musashi prototype) the endorser block's
+// transactions are applied to the ledger with their full effects, matching the
+// reference ledger's applyLeiosClosure (ValidateNone), and its metadata and blob
+// are stored. Previously this path stored metadata only and did not apply the
+// transactions, which diverged the UTxO set from the reference.
+func TestApplyEndorserBlockHaskellPathAppliesTransactions(t *testing.T) {
 	ls, db, gdb := newLeiosApplyTestLedger(t)
 	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
 	rawTx, bodyCbor, tx := leiosApplyTestTx(t, 0x06)
@@ -282,13 +284,88 @@ func TestApplyEndorserBlockHaskellPathStoresWithoutApplying(t *testing.T) {
 		return err
 	}))
 
-	// Nothing applied to the UTxO, but metadata and the endorser blob are stored.
-	require.Equal(t, 0, applied)
+	// The transaction is applied and recorded under the ranking block's point,
+	// and the endorser blob is stored.
+	require.Equal(t, 1, applied)
 	requireLeiosApplyTestTxCount(t, gdb, 1)
 	var gotTx models.Transaction
 	require.NoError(t, gdb.Where("hash = ?", tx.Hash().Bytes()).First(&gotTx).Error)
 	require.Equal(t, leiosApplyTestRankingPoint(0x77).Slot, gotTx.Slot)
 	requireLeiosApplyTestEndorserBlob(t, db, ebSlot, ebHash, bodyCbor)
+}
+
+// leiosApplyTestTxWithOutput builds a Dijkstra endorser transaction that
+// produces a single output to an enterprise (payment-only) testnet address, so
+// tests can assert the produced UTxO is applied to the store.
+func leiosApplyTestTxWithOutput(
+	t *testing.T,
+	seed byte,
+) (cbor.RawMessage, lcommon.Transaction) {
+	t.Helper()
+	// Enterprise testnet address: header byte 0x60 + 28-byte payment key hash.
+	addr := append([]byte{0x60}, bytes.Repeat([]byte{seed}, 28)...)
+	bodyCbor, err := cbor.Encode(map[uint]any{
+		1: []any{ // outputs
+			map[uint]any{
+				0: addr,
+				1: uint64(1_000_000),
+			},
+		},
+		2: uint64(200_000), // fee
+	})
+	require.NoError(t, err)
+	txCbor, err := cbor.Encode([]any{
+		cbor.RawMessage(bodyCbor),
+		map[uint]any{},
+		true,
+		nil,
+	})
+	require.NoError(t, err)
+	tx, err := gledger.NewTransactionFromCbor(gledger.TxTypeDijkstra, txCbor)
+	require.NoError(t, err)
+	return cbor.RawMessage(txCbor), tx
+}
+
+// The Haskell-conformant path applies endorser-block transactions with their
+// full UTxO effects: an endorser transaction's produced output becomes a live
+// UTxO in the store, stamped at the ranking block's slot so it rolls back with
+// the ranking block. This is the fix that keeps the UTxO set — and the stake
+// distribution derived from it — complete, matching the reference ledger;
+// recording metadata only left the produced outputs missing, which zeroed
+// delegator stake and drove the "pool has no stake in epoch snapshot" rejection.
+func TestApplyEndorserBlockHaskellPathProducesUtxo(t *testing.T) {
+	ls, db, gdb := newLeiosApplyTestLedger(t)
+	// LeiosApplyEndorserBlockTxs defaults to false (Haskell-conformant).
+	rawTx, tx := leiosApplyTestTxWithOutput(t, 0x6a)
+	require.NotEmpty(t, tx.Produced(), "test tx must produce an output")
+
+	rbPoint := leiosApplyTestRankingPoint(0x79)
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		applied, _, err := ls.applyEndorserBlock(
+			txn,
+			rbPoint,
+			1,
+			420,
+			leiosApplyTestEbHash(0x6b),
+			[]cbor.RawMessage{rawTx},
+		)
+		if err != nil {
+			return err
+		}
+		require.Equal(t, 1, applied)
+		return nil
+	}))
+
+	// The endorser transaction's produced output is a live UTxO stamped at the
+	// ranking block's slot (rollback-safe) and not marked spent.
+	var utxos []models.Utxo
+	require.NoError(t, gdb.Model(&models.Utxo{}).
+		Where("tx_id = ?", tx.Hash().Bytes()).
+		Find(&utxos).Error)
+	require.Len(t, utxos, 1)
+	require.Equal(t, rbPoint.Slot, utxos[0].AddedSlot)
+	require.Equal(t, uint64(0), utxos[0].DeletedSlot)
 }
 
 func TestApplyEndorserBlockHaskellPathDeduplicatesMetadata(t *testing.T) {
@@ -345,9 +422,9 @@ func leiosTestHash(b byte) []byte {
 }
 
 // TestClassifyEndorserBlockFetches verifies the fetch policy: near the head,
-// endorser blocks are fetched on announcement; in the settled backlog they are
-// fetched only when a certifying ranking block certifies them (via its parent's
-// announcement), and uncertified historical announcements are skipped.
+// current announcements and certified parent announcements are both fetched;
+// in the settled backlog only certified parent announcements are fetched and
+// uncertified historical announcements are skipped.
 func TestClassifyEndorserBlockFetches(t *testing.T) {
 	var (
 		hashA = leiosTestHash(0xA1) // announces ebA (historical)
@@ -385,6 +462,34 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)
 
+	// prototype-2026w29 permits one near-head block to certify its parent's EB
+	// and announce a new EB. Both references must be available, but only the
+	// parent's EB is applied by the certifying block.
+	nearParentHash := leiosTestHash(0xF1)
+	nearCombinedHash := leiosTestHash(0xF2)
+	nearParentEb := lcommon.NewBlake2b256(leiosTestHash(0x1F))
+	nearCurrentEb := lcommon.NewBlake2b256(leiosTestHash(0x2F))
+	backfill, tipWait = classifyEndorserBlockFetches(
+		[]leiosBlockInfo{
+			{hash: string(nearParentHash), slot: 100_000, announces: true, ebHash: nearParentEb},
+			{
+				hash: string(nearCombinedHash), prevHash: string(nearParentHash),
+				slot: 100_001, announces: true, ebHash: nearCurrentEb, certifies: true,
+			},
+		},
+		map[string]leiosEbRef{
+			string(nearParentHash): {slot: 100_000, hash: nearParentEb},
+		},
+		100_050, true, 100, true, neverCached,
+	)
+	require.Empty(t, backfill)
+	require.Len(t, tipWait, 2)
+	require.ElementsMatch(
+		t,
+		[]lcommon.Blake2b256{nearParentEb, nearCurrentEb},
+		[]lcommon.Blake2b256{tipWait[0].hash, tipWait[1].hash},
+	)
+
 	// A cached endorser block is not refetched.
 	backfill, _ = classifyEndorserBlockFetches(
 		infos, annByHash, 100_050, true, 100, true,
@@ -399,10 +504,14 @@ func TestClassifyEndorserBlockFetches(t *testing.T) {
 	backfill, tipWait = classifyEndorserBlockFetches(
 		infos, annByHash, 100_050, true, 100, false, neverCached,
 	)
+	backfillHashes := make([]lcommon.Blake2b256, 0, len(backfill))
+	for _, ref := range backfill {
+		backfillHashes = append(backfillHashes, ref.hash)
+	}
 	require.ElementsMatch(
 		t,
 		[]lcommon.Blake2b256{ebA, ebE},
-		[]lcommon.Blake2b256{backfill[0].hash, backfill[1].hash},
+		backfillHashes,
 	)
 	require.Len(t, tipWait, 1)
 	require.Equal(t, ebB, tipWait[0].hash)

@@ -28,8 +28,8 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		// MempoolCapacity left as the zero sentinel; LoadConfig fills
-		// it in from RunMode after CLI/env/YAML processing.
+		// MempoolCapacity left as the zero sentinel; ApplyDefaults
+		// fills it in from RunMode after all sources are merged.
 		MempoolCapacity:             0,
 		EvictionWatermark:           0.90,
 		RejectionWatermark:          0.95,
@@ -225,6 +225,9 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
+	// LoadConfig only parses and merges; derived defaults (runMode,
+	// mempool capacity, watermarks) are filled in afterwards
+	cfg.ApplyDefaults()
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
@@ -603,6 +606,11 @@ func TestLoadConfig_EmbeddedDefaults(t *testing.T) {
 		t.Errorf("expected RelayPort to be 3001, got %d", cfg.RelayPort)
 	}
 
+	// Topology is resolved separately from LoadConfig, once the merged
+	// configuration is final (see cmd/dingo)
+	if _, err := LoadTopologyConfig(); err != nil {
+		t.Fatalf("failed to load topology: %v", err)
+	}
 	topologyConfig := GetTopologyConfig()
 	if topologyConfig.PeerSnapshotFile != "peer-snapshot.json" {
 		t.Fatalf(
@@ -688,7 +696,12 @@ func TestLoadConfig_UnsupportedNetworkWithUserConfig(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_WatermarkValidation(t *testing.T) {
+// TestWatermarkDefaultingAndValidation covers the post-merge pipeline
+// for the mempool watermarks: ApplyDefaults fills unset (zero) values
+// and validate rejects out-of-range ones. LoadConfig itself no longer
+// judges watermark values, so a CLI flag can still override a bad YAML
+// value before validation.
+func TestWatermarkDefaultingAndValidation(t *testing.T) {
 	tests := []struct {
 		name       string
 		eviction   float64
@@ -784,7 +797,12 @@ func TestLoadConfig_WatermarkValidation(t *testing.T) {
 			globalConfig.RejectionWatermark = tt.rejection
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			cfg.ApplyDefaults()
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf(
@@ -926,7 +944,7 @@ database:
 	}
 }
 
-func TestLoadConfig_NetworkNameValidation(t *testing.T) {
+func TestNetworkNameValidation(t *testing.T) {
 	validTests := []struct {
 		name    string
 		network string
@@ -950,6 +968,13 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 		{
 			name:    "underscore name",
 			network: "test_net",
+		},
+		{
+			// An empty network must load: Validate() enforces that
+			// network or networkMagic is set, so a networkMagic-only
+			// configuration is legal at the LoadConfig layer.
+			name:    "empty network for magic-only configs",
+			network: "",
 		},
 	}
 
@@ -1015,10 +1040,6 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			network: ".hidden",
 		},
 		{
-			name:    "empty string",
-			network: "",
-		},
-		{
 			name:    "hyphen prefix",
 			network: "-bad",
 		},
@@ -1034,7 +1055,14 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 			globalConfig.Network = tt.network
 			globalConfig.RunMode = RunModeDev
 
-			_, err := LoadConfig("")
+			// LoadConfig only parses and merges; a CLI flag may still
+			// replace the network name, so the traversal guard runs in
+			// validate on the final value.
+			cfg, err := LoadConfig("")
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			err = cfg.validate(cfg.RunMode, minUnprivilegedPort)
 			if err == nil {
 				t.Fatal(
 					"expected error for invalid network name, got nil",
@@ -1049,6 +1077,34 @@ func TestLoadConfig_NetworkNameValidation(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestLoadConfig_NetworkMagicOnly is a regression test for the
+// networkMagic-without-network contract: a YAML config with an empty
+// network and a custom networkMagic must survive both LoadConfig and
+// validation, since Validate() accepts either network or networkMagic.
+func TestLoadConfig_NetworkMagicOnly(t *testing.T) {
+	resetGlobalConfig()
+	tmpDir := t.TempDir()
+	tmpFile := filepath.Join(tmpDir, "test-dingo.yaml")
+	yamlContent := "network: \"\"\nnetworkMagic: 42\n"
+	if err := os.WriteFile(tmpFile, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(tmpFile)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Network != "" {
+		t.Errorf("Network = %q, want empty", cfg.Network)
+	}
+	if cfg.NetworkMagic != 42 {
+		t.Errorf("NetworkMagic = %d, want 42", cfg.NetworkMagic)
+	}
+	if err := cfg.validate(cfg.RunMode, minUnprivilegedPort); err != nil {
+		t.Errorf("validation rejected magic-only config: %v", err)
 	}
 }
 
@@ -1441,6 +1497,7 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("LoadConfig: %v", err)
 			}
+			cfg.ApplyDefaults()
 			if cfg.MempoolCapacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity: got %d, want %d",

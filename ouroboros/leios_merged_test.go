@@ -17,6 +17,7 @@ package ouroboros
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -294,6 +295,26 @@ func TestFetchCachedLeiosEndorserBlockTxsReturnsCompleteCacheWithoutFetch(
 	require.Equal(t, txRaw, cached.txsRaw[0])
 }
 
+func TestEndorserBlockTxHashesByHashReturnsManifestHashes(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRawWithRefs(t, 10, 2)
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(blockRaw)
+	require.NoError(t, err)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(t, o.storeLeiosEndorserBlock(
+		point,
+		blockRaw,
+		[]cbor.RawMessage{mustCbor(t, "tx0"), mustCbor(t, "tx1")},
+	))
+
+	got, ok := o.EndorserBlockTxHashesByHash(point.Hash)
+	require.True(t, ok)
+	require.Equal(t, []string{
+		hex.EncodeToString(block.TransactionReferences[0].TransactionHash.Bytes()),
+		hex.EncodeToString(block.TransactionReferences[1].TransactionHash.Bytes()),
+	}, got)
+}
+
 // Covers the historical-serving path: after the in-memory EB cache is gone,
 // lookup reloads manifest+txs from blob storage and leios-fetch serves them.
 func TestLeiosEndorserBlockLookupReloadsFromDBAndServesFetchRequests(
@@ -522,21 +543,25 @@ func TestSpliceEndorserTxsIntoDijkstraBlockFillsCertRB(t *testing.T) {
 
 	// The header is preserved byte-for-byte so the served block's hash is
 	// unchanged.
-	var origTop, mergedTop []cbor.RawMessage
+	origTop := make([]cbor.RawMessage, 0)
+	mergedTop := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(certRB, &origTop)
 	require.NoError(t, err)
 	_, err = cbor.Decode(merged, &mergedTop)
 	require.NoError(t, err)
+	require.Len(t, origTop, 2)
 	require.Len(t, mergedTop, 2)
 	require.Equal(t, []byte(origTop[0]), []byte(mergedTop[0]))
 
 	// The transaction segment now holds the endorser block's transactions; the
 	// invalid, certificate, and peras segments are preserved.
-	var origBody, mergedBody []cbor.RawMessage
+	origBody := make([]cbor.RawMessage, 0)
+	mergedBody := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(origTop[1], &origBody)
 	require.NoError(t, err)
 	_, err = cbor.Decode(mergedTop[1], &mergedBody)
 	require.NoError(t, err)
+	require.Len(t, origBody, 4)
 	require.Len(t, mergedBody, 4)
 	require.Equal(t, []byte(origBody[0]), []byte(mergedBody[0]))
 	require.Equal(t, []byte(origBody[2]), []byte(mergedBody[2]))
@@ -592,10 +617,24 @@ func TestLeiosAnnouncementFromBlockCbor(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, ebHash, got.Bytes())
 
-	// A CertRB announces nothing.
+	// A certificate-only RB announces nothing.
 	certRB := testDijkstraCertRBRaw(t, 51, make([]byte, lcommon.Blake2b256Size))
 	_, ok = leiosAnnouncementFromBlockCbor(certRB)
 	require.False(t, ok)
+
+	// prototype-2026w29 also permits a CertRB to announce a new EB. The
+	// announcement parser returns that current EB; certified-closure resolution
+	// independently follows the parent block.
+	combined := buildDijkstraLeiosBlockRaw(
+		t,
+		52,
+		make([]byte, lcommon.Blake2b256Size),
+		[]cbor.RawMessage{mustCbor(t, true), announcement},
+		testDijkstraCertRBBodyElems(t),
+	)
+	got, ok = leiosAnnouncementFromBlockCbor(combined)
+	require.True(t, ok)
+	require.Equal(t, ebHash, got.Bytes())
 }
 
 func TestResolveCertifiedEndorserTxsGuards(t *testing.T) {

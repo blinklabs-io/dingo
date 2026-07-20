@@ -70,6 +70,12 @@ type LedgerDelta struct {
 	Offsets      *database.BlockIngestionResult // pre-computed CBOR offsets for this block
 	donation     uint64
 	txSlicePtr   *[]TransactionRecord // store original pointer from pool
+	// skipConsumedInputRecovery applies transaction effects without the
+	// consumed-utxo recovery/repair pass (see Database.SetTransactionWithOpts).
+	// Set only for the Leios Musashi endorser-block apply, which mirrors the
+	// reference ledger's ValidateNone closure apply; false for all ranking-block
+	// deltas so their behavior is unchanged.
+	skipConsumedInputRecovery bool
 }
 
 func NewLedgerDelta(
@@ -83,6 +89,7 @@ func NewLedgerDelta(
 	delta.BlockNumber = blockNumber
 	delta.Offsets = nil // Reset offsets from previous use
 	delta.donation = 0
+	delta.skipConsumedInputRecovery = false
 	slicePtr := transactionRecordSlicePool.Get().(*[]TransactionRecord)
 	delta.Transactions = (*slicePtr)[:0] // Reset slice
 	delta.txSlicePtr = slicePtr          // Store original pointer
@@ -101,6 +108,7 @@ func (d *LedgerDelta) Release() {
 	// Clear offsets to avoid retaining large memory across blocks
 	d.Offsets = nil
 	d.donation = 0
+	d.skipConsumedInputRecovery = false
 	// Return the delta to the pool
 	ledgerDeltaPool.Put(d)
 }
@@ -158,7 +166,7 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			certDeposits[i] = deposit
 		}
 
-		setErr := ls.db.SetTransaction(
+		setErr := ls.db.SetTransactionWithOpts(
 			tr.Tx,
 			d.Point,
 			uint32(tr.Index), //nolint:gosec
@@ -167,6 +175,9 @@ func (d *LedgerDelta) applyWithDonationRecording(
 			certDeposits,
 			d.Offsets,
 			txn,
+			database.BatchedTxIngestOpts{
+				SkipConsumedInputRecovery: d.skipConsumedInputRecovery,
+			},
 		)
 		// Return the map to pool
 		certDepositsMapPool.Put(certDeposits)
@@ -220,67 +231,6 @@ func (d *LedgerDelta) applyWithDonationRecording(
 
 func (d *LedgerDelta) donate(amount uint64) {
 	d.donation += amount
-}
-
-func (d *LedgerDelta) applyTransactionMetadataOnlyWithoutRecordingDonations(
-	ls *LedgerState,
-	txn *database.Txn,
-) error {
-	return d.applyTransactionMetadataOnlyWithDonationRecording(ls, txn, false)
-}
-
-func (d *LedgerDelta) applyTransactionMetadataOnlyWithDonationRecording(
-	ls *LedgerState,
-	txn *database.Txn,
-	recordDonations bool,
-) error {
-	for _, tr := range d.Transactions {
-		if tr.Index < 0 || tr.Index > math.MaxUint32 {
-			return fmt.Errorf("transaction index out of range: %d", tr.Index)
-		}
-
-		certs := tr.Tx.Certificates()
-		certDeposits := certDepositsMapPool.Get().(map[int]uint64)
-		for k := range certDeposits {
-			delete(certDeposits, k)
-		}
-		for i, cert := range certs {
-			deposit, err := ls.calculateCertificateDeposit(cert, d.BlockEraId)
-			if err != nil {
-				certDepositsMapPool.Put(certDeposits)
-				return fmt.Errorf("calculate certificate deposit: %w", err)
-			}
-			certDeposits[i] = deposit
-		}
-
-		setErr := ls.db.SetTransactionMetadataOnly(
-			tr.Tx,
-			d.Point,
-			uint32(tr.Index), //nolint:gosec
-			certDeposits,
-			txn,
-		)
-		certDepositsMapPool.Put(certDeposits)
-		if setErr != nil {
-			return fmt.Errorf("record transaction metadata: %w", setErr)
-		}
-
-		if tr.Tx.IsValid() {
-			if err := d.processGovernance(ls, tr.Tx, txn); err != nil {
-				return fmt.Errorf("process governance: %w", err)
-			}
-		}
-	}
-
-	if recordDonations {
-		if err := d.recordNetworkDonations(ls, txn, nil); err != nil {
-			return err
-		}
-	} else {
-		d.accumulateNetworkDonations(nil)
-	}
-
-	return nil
 }
 
 func (d *LedgerDelta) accumulateNetworkDonations(appliedTxs []bool) {

@@ -571,6 +571,26 @@ func (params Parameters) Validate() error {
 	return validateParameters(params)
 }
 
+// validateRatParameter checks a single rational protocol parameter. unit bounds
+// it to the [0,1] interval and positive rejects a zero value. It returns an
+// ErrInvalidParameters error so callers can convert malformed snapshot/config
+// data into an error instead of dereferencing a nil *big.Rat.
+func validateRatParameter(name string, rat *big.Rat, unit, positive bool) error {
+	if rat == nil {
+		return fmt.Errorf("%w: missing %s", ErrInvalidParameters, name)
+	}
+	if rat.Sign() < 0 {
+		return fmt.Errorf("%w: negative %s", ErrInvalidParameters, name)
+	}
+	if positive && rat.Sign() == 0 {
+		return fmt.Errorf("%w: %s is zero", ErrInvalidParameters, name)
+	}
+	if unit && rat.Cmp(oneRat()) > 0 {
+		return fmt.Errorf("%w: %s greater than one", ErrInvalidParameters, name)
+	}
+	return nil
+}
+
 func validateParameters(params Parameters) error {
 	for _, field := range []struct {
 		name     string
@@ -589,24 +609,13 @@ func validateParameters(params Parameters) error {
 			positive: true,
 		},
 	} {
-		if field.rat == nil {
-			return fmt.Errorf("%w: missing %s", ErrInvalidParameters, field.name)
-		}
-		if field.rat.Sign() < 0 {
-			return fmt.Errorf("%w: negative %s", ErrInvalidParameters, field.name)
-		}
-		if field.positive && field.rat.Sign() == 0 {
-			return fmt.Errorf(
-				"%w: active slot coeff is zero",
-				ErrInvalidParameters,
-			)
-		}
-		if field.unit && field.rat.Cmp(oneRat()) > 0 {
-			return fmt.Errorf(
-				"%w: %s greater than one",
-				ErrInvalidParameters,
-				field.name,
-			)
+		if err := validateRatParameter(
+			field.name,
+			field.rat,
+			field.unit,
+			field.positive,
+		); err != nil {
+			return err
 		}
 	}
 	if params.OptimalPoolCount == 0 {
@@ -616,6 +625,28 @@ func validateParameters(params Parameters) error {
 		return fmt.Errorf("%w: epoch length is zero", ErrInvalidParameters)
 	}
 	return nil
+}
+
+// validatePoolRewardParameters checks the subset of parameters that
+// calculatePoolRewards dereferences: decentralization (bounded to [0,1]) and
+// pledge influence (non-negative). CalculatePoolReward runs it before the
+// arithmetic so malformed pool-reward parameters become an error instead of a
+// nil-pointer panic in apparentPerformance/optimalPoolRewardChecked.
+func validatePoolRewardParameters(params Parameters) error {
+	if err := validateRatParameter(
+		"decentralization",
+		params.Decentralization,
+		true,
+		false,
+	); err != nil {
+		return err
+	}
+	return validateRatParameter(
+		"pledge influence",
+		params.PledgeInfluence,
+		false,
+		false,
+	)
 }
 
 func validateSnapshot(snapshot Snapshot) error {
@@ -895,6 +926,38 @@ func calculatePoolRewards(
 	return ret, nil
 }
 
+// CalculatePoolReward re-derives a single pool's reward fields (OptimalReward,
+// PoolReward, LeaderReward, ApparentPerformance) from frozen snapshot inputs
+// using the same arithmetic Calculate applies per pool. It lets callers
+// validate persisted pool reward outputs against the inputs instead of trusting
+// the stored values. Member distribution (MemberRewardTotal, Undistributed) is
+// not derived here because it depends on per-delegator eligibility, not the
+// pool-level reward that leader and member payouts are computed from.
+//
+// It validates the pool-reward parameters it dereferences (Decentralization and
+// PledgeInfluence) before computing, so malformed snapshot/config data yields an
+// ErrInvalidParameters error rather than a nil-pointer panic.
+func CalculatePoolReward(
+	pool Pool,
+	availableRewards uint64,
+	totalActiveStake uint64,
+	totalCirculation uint64,
+	totalBlocks uint64,
+	params Parameters,
+) (PoolReward, error) {
+	if err := validatePoolRewardParameters(params); err != nil {
+		return PoolReward{}, err
+	}
+	return calculatePoolRewards(
+		pool,
+		availableRewards,
+		totalActiveStake,
+		totalCirculation,
+		totalBlocks,
+		params,
+	)
+}
+
 func expectedBlocks(params Parameters) *big.Rat {
 	nonObftSlots := new(big.Rat).Sub(oneRat(), params.Decentralization)
 	return new(big.Rat).Mul(
@@ -1062,6 +1125,29 @@ func leaderRewardChecked(
 		return 0, fmt.Errorf("%w: leader reward overflow", ErrRewardAmountOverflow)
 	}
 	return ret, nil
+}
+
+// MemberReward computes the reward for a single non-owner pool member from the
+// pool's total reward, cost, margin, the member's stake, and the pool's total
+// delegated stake. It mirrors the member split applied in Calculate (the margin
+// is normalized identically) and is exported so the precompute-reuse validator
+// can re-derive and verify a persisted member reward amount without recomputing
+// the whole epoch. Keeping this the same code path Calculate uses guarantees the
+// validator cannot drift from the authoritative calculation.
+func MemberReward(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	memberStake uint64,
+	poolStake uint64,
+) (uint64, error) {
+	return memberRewardChecked(
+		poolReward,
+		cost,
+		normalizedMargin(margin),
+		memberStake,
+		poolStake,
+	)
 }
 
 func memberRewardChecked(

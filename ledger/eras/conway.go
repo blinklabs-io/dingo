@@ -102,6 +102,7 @@ func HardForkConway(
 		)
 	}
 	ret := conway.UpgradePParams(*babbagePParams)
+	ret.CostModels = cloneCostModels(ret.CostModels)
 	conwayGenesis := nodeConfig.ConwayGenesis()
 	if err := ret.UpdateFromGenesis(conwayGenesis); err != nil {
 		return nil, err

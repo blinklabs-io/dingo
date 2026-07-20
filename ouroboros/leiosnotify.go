@@ -752,10 +752,7 @@ func (g *leiosFetchGuard) markFetchFailed(now time.Time, base time.Duration) {
 	n := g.consecutiveFailures.Add(1)
 	d := base
 	if n > 1 {
-		shift := n - 1
-		if shift > leiosBackfillConnCooldownMaxShift {
-			shift = leiosBackfillConnCooldownMaxShift
-		}
+		shift := min(n-1, leiosBackfillConnCooldownMaxShift)
 		d = base << uint(shift)
 	}
 	// Guard against overflow (d <= 0) and clamp to the cap.

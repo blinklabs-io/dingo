@@ -39,6 +39,15 @@ const (
 	BackendV2 = "v2"
 )
 
+// AcceptedBackends returns the recognized Mithril artifact backends.
+// It is the single source for backend-name validation: cmd/dingo's
+// resolveMithrilBackend derives from it, and internal/config's
+// validation whitelist (which cannot import this package) verifies
+// parity against it.
+func AcceptedBackends() []string {
+	return []string{BackendV1, BackendV2}
+}
+
 // BootstrapConfig holds configuration for the Mithril bootstrap
 // process.
 type BootstrapConfig struct {

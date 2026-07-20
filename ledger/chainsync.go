@@ -3638,8 +3638,31 @@ func (ls *LedgerState) applyEpochDonations(
 	return nil
 }
 
-// Returns EpochRolloverResult with all computed state, or an error.
-// The caller is responsible for:
+// cloneProtocolParametersForEra returns an independently owned protocol-
+// parameter value using the active era's CBOR decoder.
+func cloneProtocolParametersForEra(
+	era eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	if pparams == nil {
+		return nil, nil
+	}
+	if era.DecodePParamsFunc == nil {
+		return nil, fmt.Errorf("era %d has no protocol parameter decoder", era.Id)
+	}
+	data, err := cbor.Encode(pparams)
+	if err != nil {
+		return nil, fmt.Errorf("encode protocol parameters: %w", err)
+	}
+	ret, err := era.DecodePParamsFunc(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode protocol parameters: %w", err)
+	}
+	return ret, nil
+}
+
+// processEpochRollover returns all computed state without applying it. The
+// caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
@@ -3652,10 +3675,20 @@ func (ls *LedgerState) processEpochRollover(
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
 	)
+	// Era update functions mutate their concrete protocol-parameter pointer.
+	// Give the transaction an independently owned value so a failed or
+	// in-flight rollover cannot modify parameters retained by an older snapshot.
+	ownedPParams, err := cloneProtocolParametersForEra(
+		currentEra,
+		currentPParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("clone current protocol parameters: %w", err)
+	}
 	result := &EpochRolloverResult{
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
-		NewCurrentPParams:         currentPParams,
+		NewCurrentPParams:         ownedPParams,
 	}
 
 	// Create initial epoch
@@ -3718,38 +3751,55 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// EPOCH→HARDFORK ordering invariant.
 	//
-	// The remainder of this function mirrors the sequencing of cardano-
-	// ledger's Conway/Rules/Epoch.hs:374-379 (EPOCH STS), which dispatches
-	// HARDFORK only after enactment + pparams write. The relative order
-	// matters because the HARDFORK rule branch is selected from the new
-	// pparams' major version — a HARDFORK rule that ran before enactment
-	// would observe stale pparams and pick the wrong branch.
+	// The reward prefix mirrors cardano-ledger's NEWEPOCH sequence: the delayed
+	// reward update is applied first so reward-driven reserves/treasury movement
+	// is visible to governance withdrawals and to the end-of-boundary ADA-pot
+	// capture. The remainder mirrors cardano-ledger's Conway/Rules/Epoch.hs:
+	// 374-379 (EPOCH STS), which dispatches HARDFORK only after enactment +
+	// pparams write. The relative order matters because the HARDFORK rule branch
+	// is selected from the new pparams' major version — a HARDFORK rule that ran
+	// before enactment would observe stale pparams and pick the wrong branch.
 	//
-	// The order, asserted by TestProcessEpochRollover_OrderingInvariant in
-	// chainsync_ordering_test.go, is:
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant and
+	// TestProcessEpochRollover_RewardOrdering in chainsync_ordering_test.go, is:
 	//
-	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//   1. applyStakeRewards             — apply the delayed reward update
+	//      (rewards from the snapshot three epochs back): credit spendable
+	//      rewards and move undistributed→reserves, unspendable→treasury
+	//      before governance reads the treasury.
+	//   2. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
 	//      voting path; produces newPParams from on-chain pparam-update
 	//      proposals.
-	//   2. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//   3. applyPoolRetirements          — embedded Shelley POOLREAP: refund
 	//      deposits of pools whose retirement epoch is the new epoch. Runs
 	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in step 3.
-	//   3. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   4. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   5. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   5. SetPParams                    — persist the enacted pparams.
-	//   6. IsHardForkTransition check    — detect inter-era boundary from
+	//   6. SetPParams                    — persist the enacted pparams.
+	//   7. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   7. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   8. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
+	//   9. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//      (reserves/treasury/fees) after all boundary pot mutations so the
+	//      next delayed reward calculation has its pot inputs.
 	//
-	// Steps 5 and 6 must observe the post-enactment major version. Step 6
-	// must observe the persisted pparams (not just the in-memory ones)
-	// because its body issues SQL within `txn` that may join against
-	// `pparams` rows.
+	// The authoritative Mark snapshot is captured separately at the end of the
+	// rollover (captureEpochBoundarySnapshot), after the new epoch record and
+	// its nonce exist.
+	//
+	// Steps 6 and 7 must observe the post-enactment major version. Step 8 must
+	// observe the persisted pparams (not just the in-memory ones) because its
+	// body issues SQL within `txn` that may join against `pparams` rows.
+	if err := ls.applyStakeRewards(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply stake rewards: %w", err)
+	}
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -3759,7 +3809,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
 		updateQuorum,
-		currentPParams,
+		ownedPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
 		txn,
@@ -3916,6 +3966,20 @@ func (ls *LedgerState) processEpochRollover(
 				return nil, fmt.Errorf("apply major-version HARDFORK: %w", err)
 			}
 		}
+	}
+
+	// Capture the new epoch's ADA pots (reserves/treasury/fees) after every
+	// boundary treasury/reserves mutation above (stake rewards, POOLREAP,
+	// governance withdrawals, donations, and any AVVM-removal reserves top-up).
+	// This row seeds the delayed reward calculation for a later epoch, so it
+	// must observe the fully settled pots for the ended epoch.
+	if err := ls.saveRewardAdaPotsForEpoch(
+		txn,
+		currentEpoch.EpochId+1,
+		currentEpoch,
+		epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("save reward ADA pots: %w", err)
 	}
 
 	// Create next epoch record

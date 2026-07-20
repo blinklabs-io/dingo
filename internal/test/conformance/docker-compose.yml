@@ -1,0 +1,25 @@
+# PostgreSQL for local conformance test runs.
+#
+# Usage:
+#   docker compose -f internal/test/conformance/docker-compose.yml up -d
+#   POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=postgres \
+#   POSTGRES_PASSWORD=postgres POSTGRES_DATABASE=dingo_test \
+#     go test -tags dingo_extra_plugins -v ./internal/test/conformance/... -run Postgres
+#
+# Image/credentials match .github/workflows/go-test.yml's postgres service
+# so a passing local run and a passing CI run mean the same thing.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dingo_test
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

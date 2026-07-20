@@ -567,6 +567,7 @@ func TestComputeEpochNonceForSlot_PostMithrilBootstrapMatchesRollover(t *testing
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	// Header verification path.
 	hvNonce, hvEvolving, hvCandidate, hvLab, err :=

@@ -32,6 +32,7 @@ import (
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
+	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
 type Bark struct {
@@ -217,6 +218,7 @@ func (b *Bark) startServer(server *http.Server) error {
 				serverType, err,
 			)
 		}
+		server.TLSConfig = tlsutil.ServerConfig(server.TLSConfig)
 	}
 	ln, err := net.Listen("tcp", server.Addr)
 	if err != nil {

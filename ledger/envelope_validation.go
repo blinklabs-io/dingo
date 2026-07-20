@@ -246,16 +246,34 @@ func protocolBlockSizeLimits(
 ) (maxBodySize, maxHeaderSize uint64, ok bool) {
 	switch pp := pparams.(type) {
 	case *shelley.ShelleyProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	case *mary.MaryProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	case *alonzo.AlonzoProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	case *babbage.BabbageProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	case *conway.ConwayProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	case *dijkstra.DijkstraProtocolParameters:
+		if pp == nil {
+			return 0, 0, false
+		}
 		return uint64(pp.MaxBlockBodySize), uint64(pp.MaxBlockHeaderSize), true
 	default:
 		return 0, 0, false

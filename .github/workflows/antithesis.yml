@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Test duration in hours'
+        description: 'Test duration in hours (1-8)'
         type: string
         default: '1'
       no_faults:
@@ -16,13 +16,24 @@ on:
         type: boolean
         default: false
       moog_tag:
+        # The deployed MPFS at mpfs.plutimus.com runs the moog v0.5.x line, so
+        # the requester CLI must match it (same pin as the cardano-foundation
+        # cardano-node-antithesis testnet). moog v2.x (the moog-v2 MPFS cutover)
+        # is incompatible: v2.0.1 preflights GET /status, which the deployed
+        # MPFS answers with 404, then prints an error envelope and exits 0 so
+        # the submission silently never launches. Bump this only once a v2 MPFS
+        # (one that serves /status) is deployed and MOOG_MPFS_HOST points at it.
         description: 'Moog CLI release tag'
         type: string
-        default: 'v2.0.1'
+        default: 'v0.5.1.5'
 
 concurrency:
   group: antithesis
-  cancel-in-progress: true
+  queue: max
+  # Once submitted, an Antithesis test continues running outside GitHub.
+  # Keep its polling workflow alive so the result is not lost and the next
+  # test waits for the active run to finish.
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
@@ -78,7 +89,7 @@ jobs:
           build-args: |
             COMMIT_HASH=${{ github.sha }}
       - name: Attest dingo-antithesis GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
@@ -107,7 +118,7 @@ jobs:
           tags: ${{ steps.configurator-meta.outputs.tags }}
           labels: ${{ steps.configurator-meta.outputs.labels }}
       - name: Attest configurator GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-configurator
           subject-digest: ${{ steps.configurator-push.outputs.digest }}
@@ -136,7 +147,7 @@ jobs:
           tags: ${{ steps.txpump-meta.outputs.tags }}
           labels: ${{ steps.txpump-meta.outputs.labels }}
       - name: Attest txpump GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
           subject-digest: ${{ steps.txpump-push.outputs.digest }}
@@ -165,7 +176,7 @@ jobs:
           tags: ${{ steps.analysis-meta.outputs.tags }}
           labels: ${{ steps.analysis-meta.outputs.labels }}
       - name: Attest analysis GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
           subject-digest: ${{ steps.analysis-push.outputs.digest }}
@@ -216,14 +227,46 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 600
+    # Shared Moog env for the submit + wait steps (the wait step polls
+    # MOOG_MPFS_HOST read-only, so it needs the same host/token/requester).
+    env:
+      MOOG_WALLET_FILE: wallet.json
+      MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
+      MOOG_PLATFORM: github
+      MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
+      MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
+      DURATION: ${{ inputs.duration || '3' }}
     steps:
+      - name: Validate duration
+        id: duration
+        run: |
+          if [[ ! "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "::error::Duration must be a positive integer number of hours"
+            exit 1
+          fi
+          HOURS=$((10#$DURATION))
+          if ((HOURS < 1)); then
+            echo "::error::Duration must be at least one hour"
+            exit 1
+          fi
+          # The wait step allows one extra hour for Antithesis to publish the
+          # result. Leave another hour for this job's setup and cleanup within
+          # its 600-minute timeout.
+          if ((HOURS > 8)); then
+            echo "::error::Duration must be no more than 8 hours"
+            exit 1
+          fi
+          echo "hours=$HOURS" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Resolve Moog release
         id: moog-release
         run: |
-          TAG="${MOOG_TAG_INPUT:-v2.0.1}"
+          TAG="${MOOG_TAG_INPUT:-v0.5.1.5}"
           VERSION="${TAG#v}"
           TAG="v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -256,28 +299,47 @@ jobs:
           MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
 
       - name: Submit test to Antithesis
+        id: request
         run: |
+          set -euo pipefail
           NO_FAULTS_FLAG=""
           if [ "$NO_FAULTS" = "true" ]; then
             NO_FAULTS_FLAG="--no-faults"
           fi
-          echo "Submitting Antithesis test for commit ${GITHUB_SHA}..."
-          moog requester create-test \
+          # Try index must be unique per commit, so count existing runs for this
+          # commit and increment (matches io-ouroboros-leios antithesis-leios).
+          TRY=$(moog facts test-runs --whose "$MOOG_REQUESTER" \
+            | jq --arg sha "$GITHUB_SHA" 'map(select(.key.commitId == $sha)) | length')
+          TRY=$((TRY + 1))
+          echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION_HOURS}h)..."
+          # shellcheck disable=SC2086 # NO_FAULTS_FLAG intentionally word-splits
+          RESULT=$(moog requester create-test \
             -d "internal/test/antithesis/testnets/dingo-praos" \
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
-            -t "$DURATION" \
-            -y 1 \
-            $NO_FAULTS_FLAG
+            --try "$TRY" \
+            -t "$DURATION_HOURS" \
+            $NO_FAULTS_FLAG)
+          echo "$RESULT"
+          # moog can print an error envelope (e.g. {"exception": ...}) and still
+          # exit 0; a submission only truly launched if it returned a testRunId.
+          # jq -e fails the step (set -e) so a bad submit can't report false green.
+          ID=$(echo "$RESULT" | jq -e .value.testRunId | jq -r .)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Launched Antithesis test run: $ID"
         env:
           MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_WALLET_FILE: wallet.json
-          MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
-          MOOG_PLATFORM: github
-          MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
-          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
-          DURATION: ${{ inputs.duration || '3' }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
+
+      - name: Wait for results
+        run: |
+          timeout $(((DURATION_HOURS + 1) * 3600)) \
+            ./internal/test/antithesis/scripts/wait-for-test.sh \
+            "$ANTITHESIS_TEST_RUN_ID"
+        env:
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
+          ANTITHESIS_TEST_RUN_ID: ${{ steps.request.outputs.id }}
 
       - name: Clean up wallet
         if: always()

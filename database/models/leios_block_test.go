@@ -162,9 +162,10 @@ func TestDecodeConwayBlockLeiosExtendedHeader(t *testing.T) {
 	// chain-sync header path (gdijkstra header decode) computes for the same
 	// block. Otherwise prev-hash chain linkage between the header and body
 	// paths would break.
-	var comps []cbor.RawMessage
+	comps := make([]cbor.RawMessage, 0)
 	_, err = cbor.Decode(extendedRaw, &comps)
 	require.NoError(t, err)
+	require.NotEmpty(t, comps)
 	hdr, err := gdijkstra.NewDijkstraBlockHeaderFromCbor(comps[0])
 	require.NoError(t, err)
 	assert.Equal(

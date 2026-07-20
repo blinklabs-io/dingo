@@ -116,6 +116,7 @@ func TestQueryHardForkEraHistory_OpenEraEndBoundedBySafeZone(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -255,6 +256,7 @@ func TestStakePoolsResult_Empty(t *testing.T) {
 func TestQueryShelleyDRepState_EmptyDB(t *testing.T) {
 	db := newTestDB(t)
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.NoError(t, err)
@@ -300,6 +302,7 @@ func TestQueryShelleyDRepState_Populated(t *testing.T) {
 		AddedSlot:     100,
 	}))
 	ls := &LedgerState{db: db}
+	ls.publishSnapshotsLocked()
 
 	result, err := ls.queryShelleyDRepState(nil)
 	require.NoError(t, err)
@@ -790,6 +793,7 @@ func TestQueryHardForkEraHistory_TransitionKnown(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -860,6 +864,7 @@ func TestQueryHardForkEraHistory_TransitionKnown_MissingEpochFallsBackToSafeZone
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -922,6 +927,7 @@ func TestQueryHardForkEraHistory_TransitionUnknown_FallsBackToSafeZone(t *testin
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -988,6 +994,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_ServesEpochEnd(t *testing.
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1039,6 +1046,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_EpochNumberIsNextEpoch(t *
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1079,7 +1087,7 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 			eras.ConwayEraDesc.Id, slotLenMs, epochLen,
 			nil,
 		))
-		return &LedgerState{
+		ls := &LedgerState{
 			db:             db,
 			currentEra:     eras.ConwayEraDesc,
 			currentTip:     ochainsync.Tip{Point: ocommon.NewPoint(tipSlot, []byte("tip"))},
@@ -1089,6 +1097,8 @@ func TestQueryHardForkEraHistory_TransitionImpossible_vs_Unknown_Comparison(t *t
 				Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 			},
 		}
+		ls.publishSnapshotsLocked()
+		return ls
 	}
 
 	eraEndSlot := func(ls *LedgerState) uint64 {
@@ -1333,6 +1343,7 @@ func TestQueryHardForkEraHistory_PastEra_NormalEpochEnd(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1431,6 +1442,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch(t *testing.T) {
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1556,6 +1568,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 		},
 	}
 
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryHardForkEraHistory()
 	require.NoError(t, err)
 
@@ -1624,6 +1637,7 @@ func TestQueryHardForkEraHistory_PastEra_TransitionEpoch_Contiguity(t *testing.T
 // TestQueryChainBlockNoAtGenesis verifies origin is encoded as WithOrigin [0].
 func TestQueryChainBlockNoAtGenesis(t *testing.T) {
 	ls := &LedgerState{}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// WithOrigin at genesis: [0]
@@ -1639,6 +1653,7 @@ func TestQueryChainBlockNoAtBlock(t *testing.T) {
 		},
 		BlockNumber: 12345,
 	}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// WithOrigin at block: [1, blockNo]
@@ -1654,6 +1669,7 @@ func TestQueryChainBlockNoAtFirstBlock(t *testing.T) {
 		},
 		BlockNumber: 0,
 	}
+	ls.publishSnapshotsLocked()
 	result, err := ls.queryChainBlockNo()
 	assert.NoError(t, err)
 	// Cardano block numbers are 0-indexed, so block 0 is not origin.

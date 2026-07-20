@@ -349,6 +349,11 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 
 	// Walk the canonical chain from the anchor to the ledger tip.
 	if ls.chain != nil {
+		if anchorIter == nil {
+			return errors.New(
+				"missing primary-chain iterator for Mithril gap nonce reconstruction",
+			)
+		}
 		iter := anchorIter
 		for {
 			res, err := iter.Next(false)
@@ -421,6 +426,7 @@ func (ls *LedgerState) healMithrilGapBlockNonces(ctx context.Context) error {
 			ls.currentTipBlockNonce = tipNonce
 		}
 		clear(ls.epochNonceHexCache)
+		ls.publishSnapshotsLocked()
 		ls.Unlock()
 	} else {
 		ls.Lock()

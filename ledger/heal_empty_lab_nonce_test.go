@@ -663,7 +663,11 @@ func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
 		},
 	}
 	ls.metrics.init(prometheus.NewRegistry())
-	require.NoError(t, ls.loadEpochs(nil))
+	txn := db.Transaction(true)
+	defer txn.Release()
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.loadEpochs(txn)
+	}))
 
 	require.Equal(t, want.Bytes(), ls.epochCache[1].Nonce)
 	require.Equal(t, want.Bytes(), ls.currentEpoch.Nonce)

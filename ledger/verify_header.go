@@ -683,9 +683,7 @@ func decentralizationParamRat(
 }
 
 func (ls *LedgerState) ledgerTipBehindSlot(slot uint64) bool {
-	ls.RLock()
-	defer ls.RUnlock()
-	return ls.currentTip.Point.Slot < slot
+	return ls.loadTipSnapshot().currentTip.Point.Slot < slot
 }
 
 // verifyBlockLeaderEligibility checks that the block's producer pool was
@@ -1138,22 +1136,20 @@ func (ls *LedgerState) epochNonceHex(epochId uint64, nonce []byte) string {
 	return nonceHex
 }
 
-// epochForSlot searches the epoch cache for the epoch containing the
-// given slot. It takes a snapshot of the epoch cache under RLock to
-// avoid racing with concurrent epoch rollover updates.
+// epochForSlot searches an immutable epoch-cache snapshot for the epoch
+// containing the given slot.
 //
 // Returns the matching epoch or an error if no epoch covers the slot.
 func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
-	ls.RLock()
-	defer ls.RUnlock()
+	cache := ls.loadConsensusSnapshot().epochCache
 
-	if len(ls.epochCache) == 0 {
+	if len(cache) == 0 {
 		return models.Epoch{}, errors.New("epoch cache is empty")
 	}
 
 	// Search newest-to-oldest so that if cache entries overlap
 	// (e.g., after rollback/rebuild), we use the most recent epoch data.
-	for _, ep := range slices.Backward(ls.epochCache) {
+	for _, ep := range slices.Backward(cache) {
 		if ep.LengthInSlots == 0 {
 			continue
 		}
@@ -1167,7 +1163,7 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 	// meaningful error message.
 	var lastValidEnd uint64
 	var hasValidEpoch bool
-	for _, v := range slices.Backward(ls.epochCache) {
+	for _, v := range slices.Backward(cache) {
 		if v.LengthInSlots > 0 {
 			lastValidEnd = v.StartSlot +
 				uint64(v.LengthInSlots)
@@ -1179,13 +1175,13 @@ func (ls *LedgerState) epochForSlot(slot uint64) (models.Epoch, error) {
 		return models.Epoch{}, fmt.Errorf(
 			"slot %d not covered by any known epoch (cache has %d epochs, all with zero length)",
 			slot,
-			len(ls.epochCache),
+			len(cache),
 		)
 	}
 	return models.Epoch{}, fmt.Errorf(
 		"slot %d not covered by any known epoch (cache has %d epochs, last ends at slot %d)",
 		slot,
-		len(ls.epochCache),
+		len(cache),
 		lastValidEnd,
 	)
 }
@@ -1227,14 +1223,12 @@ func (ls *LedgerState) ensureEpochForSlot(
 // The full rollover will run later in ledgerProcessBlocks and replace
 // the cache with the authoritative DB-backed version.
 func (ls *LedgerState) advanceEpochCache() error {
-	// Read last epoch under read lock
-	ls.RLock()
-	if len(ls.epochCache) == 0 {
-		ls.RUnlock()
+	// Read last epoch from the lock-free consensus snapshot
+	cache := ls.loadConsensusSnapshot().epochCache
+	if len(cache) == 0 {
 		return errors.New("epoch cache is empty")
 	}
-	lastEpoch := ls.epochCache[len(ls.epochCache)-1]
-	ls.RUnlock()
+	lastEpoch := cache[len(cache)-1]
 
 	if lastEpoch.LengthInSlots == 0 {
 		return errors.New("last epoch has zero length")
@@ -1287,7 +1281,10 @@ func (ls *LedgerState) advanceEpochCache() error {
 		ls.Unlock()
 		return nil
 	}
-	ls.epochCache = append(ls.epochCache, newEpoch)
+	newCache := make([]models.Epoch, len(ls.epochCache), len(ls.epochCache)+1)
+	copy(newCache, ls.epochCache)
+	ls.epochCache = append(newCache, newEpoch)
+	ls.publishSnapshotsLocked()
 	ls.Unlock()
 
 	ls.config.Logger.Debug(
@@ -1361,13 +1358,9 @@ func (ls *LedgerState) computeEpochNonceForSlot(
 	// When resuming from a snapshot, prevEpoch can carry nonce state
 	// already advanced to the imported tip slot. Continue from the next
 	// slot in that case instead of replaying from epoch start.
-	ls.RLock()
-	currentTipSlot := ls.currentTip.Point.Slot
-	currentTipBlockNonce := append(
-		[]byte(nil),
-		ls.currentTipBlockNonce...,
-	)
-	ls.RUnlock()
+	tipState := ls.loadTipSnapshot()
+	currentTipSlot := tipState.currentTip.Point.Slot
+	currentTipBlockNonce := tipState.currentTipBlockNonce
 	if currentTipSlot >= prevEpoch.StartSlot &&
 		currentTipSlot < prevEpochEndSlot &&
 		len(prevEpoch.CandidateNonce) == 32 &&

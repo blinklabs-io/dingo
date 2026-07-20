@@ -207,35 +207,35 @@ func TestNullableHashValueNonEmpty(t *testing.T) {
 
 // TestNullableHashScan round-trips NULL, []byte, and string sources.
 func TestNullableHashScan(t *testing.T) {
-	var h types.NullableHash
+	h := new(types.NullableHash)
 
 	if err := h.Scan(nil); err != nil {
 		t.Fatalf("Scan(nil) error: %v", err)
 	}
-	if h != nil {
-		t.Fatalf("Scan(nil) = %#v, want nil", h)
+	if *h != nil {
+		t.Fatalf("Scan(nil) = %#v, want nil", *h)
 	}
 
 	if err := h.Scan([]byte{}); err != nil {
 		t.Fatalf("Scan(empty []byte) error: %v", err)
 	}
-	if h != nil {
-		t.Fatalf("Scan(empty []byte) = %#v, want nil", h)
+	if *h != nil {
+		t.Fatalf("Scan(empty []byte) = %#v, want nil", *h)
 	}
 
 	want := bytes.Repeat([]byte{0x01}, 32)
 	if err := h.Scan(want); err != nil {
 		t.Fatalf("Scan([]byte) error: %v", err)
 	}
-	if !bytes.Equal(h, want) {
-		t.Fatalf("Scan([]byte) = %x, want %x", h, want)
+	if !bytes.Equal(*h, want) {
+		t.Fatalf("Scan([]byte) = %x, want %x", *h, want)
 	}
 
 	if err := h.Scan("xyz"); err != nil {
 		t.Fatalf("Scan(string) error: %v", err)
 	}
-	if string(h) != "xyz" {
-		t.Fatalf("Scan(string) = %q, want %q", string(h), "xyz")
+	if string(*h) != "xyz" {
+		t.Fatalf("Scan(string) = %q, want %q", string(*h), "xyz")
 	}
 
 	if err := h.Scan(123); err == nil {

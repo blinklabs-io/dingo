@@ -499,6 +499,7 @@ func TestEpochForSlot_EmptyCache(t *testing.T) {
 	ls := &LedgerState{
 		epochCache: nil,
 	}
+	ls.publishSnapshotsLocked()
 	_, err := ls.epochForSlot(100)
 	assert.Error(t, err, "should fail with empty epoch cache")
 	assert.Contains(t, err.Error(), "epoch cache is empty")
@@ -517,6 +518,7 @@ func TestEpochForSlot_SlotInFirstEpoch(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	ep, err := ls.epochForSlot(1000)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), ep.EpochId)
@@ -543,6 +545,7 @@ func TestEpochForSlot_SlotInSecondEpoch(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	// Slot at the very start of epoch 1
 	ep, err := ls.epochForSlot(432000)
 	require.NoError(t, err)
@@ -570,6 +573,7 @@ func TestEpochForSlot_SlotBeyondKnownEpochs(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	_, err := ls.epochForSlot(432001)
 	assert.Error(t, err, "should fail for slot beyond known epochs")
 	assert.Contains(t, err.Error(), "not covered by any known epoch")
@@ -596,6 +600,7 @@ func TestEpochForSlot_SlotAtEpochBoundary(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	// Last slot of epoch 0
 	ep, err := ls.epochForSlot(999)
 	require.NoError(t, err)
@@ -628,6 +633,7 @@ func TestEpochForSlot_SkipsZeroLengthEpochs(t *testing.T) {
 			},
 		},
 	}
+	ls.publishSnapshotsLocked()
 	ep, err := ls.epochForSlot(500)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1), ep.EpochId)
@@ -699,6 +705,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockOutsideKnownEpochs(
 			),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	// Block at slot 2000, which is beyond epoch 0 (ends at slot 1000)
 	block := &mockBabbageBlock{slot: 2000}
 	err := ls.verifyBlockHeaderCrypto(block)
@@ -730,6 +737,7 @@ func TestVerifyBlockHeaderCrypto_RejectsBlockWithNoNonce(t *testing.T) {
 			),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 500}
 	err := ls.verifyBlockHeaderCrypto(block)
 	assert.Error(t, err, "block with missing nonce must be rejected")
@@ -812,6 +820,7 @@ func TestVerifyBlockHeaderCrypto_EpochBoundaryUsesCorrectNonce(
 			),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	// The test block's slot is in [1, 200]. Ensure epoch 0 covers it.
 	require.Less(
@@ -850,6 +859,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersMissingPoolState(
 	tb := createTestBlock(t, [32]byte{44}, 0, tamperNone)
 	ls, _ := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
 
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
 	require.Error(t, err)
@@ -866,6 +876,7 @@ func TestVerifyBlockHeaderCryptoBeforeApplyDefersEmptyMarkSnapshot(
 	tb := createTestBlock(t, [32]byte{45}, 0, tamperNone)
 	ls, db := newEligibilityTestLedger(t, tb.epochNonce)
 	ls.currentTip.Point.Slot = tb.block.SlotNumber() - 1
+	ls.publishSnapshotsLocked()
 	seedBlockPoolRegistration(t, db, tb.block)
 
 	err := ls.verifyBlockHeaderCryptoBeforeApply(tb.block)
@@ -937,6 +948,7 @@ func TestVerifyBlockHeaderCrypto_RejectsEmptyEpochCache(t *testing.T) {
 			),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	block := &mockBabbageBlock{slot: 100}
 	err := ls.verifyBlockHeaderCrypto(block)
 	assert.Error(t, err, "should reject with empty epoch cache")
@@ -977,6 +989,7 @@ func TestVerifyBlockHeaderCrypto_WrongNonceFails(t *testing.T) {
 			),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err := ls.verifyBlockHeaderCrypto(tb.block)
 	assert.Error(
@@ -1090,6 +1103,7 @@ func newEligibilityTestLedger(
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	return ls, db
 }
 
@@ -1111,6 +1125,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateSkipsPoolChecks(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.NoError(t, err)
@@ -1130,6 +1145,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateVRFMismatchFails(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
+	ls.publishSnapshotsLocked()
 
 	err := ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
@@ -1155,6 +1171,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveAtDZero(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(0, 1)},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
@@ -1180,6 +1197,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateInactiveOverlaySlotFails(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
@@ -1205,6 +1223,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateNonOverlaySlotFallsThrough(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1000)},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockHeaderState(tb.block, 5, false)
 	require.Error(t, err)
@@ -1229,6 +1248,7 @@ func TestVerifyBlockHeaderState_GenesisDelegateUsesActiveDelegation(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
+	ls.publishSnapshotsLocked()
 	seedGenesisDelegation(t, db, models.GenesisDelegation{
 		GenesisHash:         bytes.Repeat([]byte{0x11}, lcommon.Blake2b224Size),
 		GenesisDelegateHash: delegateHash.Bytes(),
@@ -1503,6 +1523,7 @@ func TestVerifyBlockLeaderEligibility_EarlyEpochUsesGenesisSnapshot(t *testing.T
 	ls.epochCache = []models.Epoch{
 		{EpochId: 1, StartSlot: 0, LengthInSlots: 1_000_000, Nonce: tb.epochNonce},
 	}
+	ls.publishSnapshotsLocked()
 
 	// No genesis snapshot seeded — pool has no stake at epoch 0.
 	err := ls.verifyBlockLeaderEligibility(tb.block, 1)
@@ -1550,6 +1571,7 @@ func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
 		Nonce:         tb.epochNonce,
 	}
 	ls.mithrilLedgerSlot = tb.block.slot - 1
+	ls.publishSnapshotsLocked()
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	// Seed the normal rotated mark snapshot with full stake. In the imported
@@ -1588,6 +1610,7 @@ func TestVerifyBlockLeaderEligibility_ActiveDistributionVRFAboveThresholdFails(
 		Nonce:         tb.epochNonce,
 	}
 	ls.mithrilLedgerSlot = tb.block.slot - 1
+	ls.publishSnapshotsLocked()
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshotOfType(
@@ -1662,6 +1685,7 @@ func TestVerifyBlockLeaderEligibility_DecentralizationActiveSkipsThreshold(
 	ls.currentPParams = &shelley.ShelleyProtocolParameters{
 		Decentralization: &cbor.Rat{Rat: big.NewRat(1, 1)},
 	}
+	ls.publishSnapshotsLocked()
 
 	poolKeyHash := tb.block.IssuerVkey().Hash()
 	seedPoolStakeSnapshot(t, db, 4, poolKeyHash[:], 1)
@@ -1765,6 +1789,7 @@ func TestVerifyBlockLeaderEligibility_MithrilImportedHistoricalMarkSkips(
 	)
 	require.NoError(t, err)
 	require.True(t, ls.isMithrilImportedMarkSnapshot(snapshot, 4))
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err)
@@ -1815,6 +1840,7 @@ func TestVerifyBlockLeaderEligibility_LiveComputedHistoricalMarkStillChecks(
 	)
 	require.NoError(t, err)
 	require.False(t, ls.isMithrilImportedMarkSnapshot(snapshot, snapshotEpoch))
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	require.Error(t, err)
@@ -1849,6 +1875,7 @@ func TestVerifyBlockLeaderEligibility_ZeroActiveSlotsCoeffSkips(t *testing.T) {
 			Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "missing active slot coeff should skip, not reject")
@@ -1896,6 +1923,7 @@ func TestVerifyBlockLeaderEligibility_ZeroCoeffSkips(t *testing.T) {
 			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	err = ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "zero active slot coeff should skip, not reject all blocks")

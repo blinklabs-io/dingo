@@ -110,6 +110,7 @@ func TestConwayProtocolParametersDijkstra(t *testing.T) {
 
 	got := conwayProtocolParameters(pparams)
 	require.Same(t, &pparams.ConwayProtocolParameters, got)
+	require.NotNil(t, got)
 	require.Equal(t, uint64(42), got.GovActionValidityPeriod)
 	require.Equal(t, uint64(99), got.DRepInactivityPeriod)
 }
@@ -165,95 +166,7 @@ func TestProcessGovernanceTypedNilPParams(t *testing.T) {
 	}
 }
 
-func TestApplyTransactionMetadataOnlyRecordsNetworkDonations(t *testing.T) {
-	db := newDonationTestDB(t)
-	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 9,
-		},
-	}
-
-	tx1 := mockledger.NewTransactionBuilder()
-	tx1.WithId(bytes.Repeat([]byte{0x31}, lcommon.Blake2b256Size))
-	tx1.WithType(gledger.TxTypeDijkstra)
-	tx1.WithValid(true)
-	tx1.WithDonation(42)
-
-	tx2 := mockledger.NewTransactionBuilder()
-	tx2.WithId(bytes.Repeat([]byte{0x32}, lcommon.Blake2b256Size))
-	tx2.WithType(gledger.TxTypeDijkstra)
-	tx2.WithValid(true)
-	tx2.WithDonation(58)
-
-	delta := NewLedgerDelta(
-		ocommon.NewPoint(123, bytes.Repeat([]byte{0x33}, 32)),
-		uint(dijkstra.EraIdDijkstra),
-		1,
-	)
-	defer delta.Release()
-	delta.addTransaction(tx1, 0)
-	delta.addTransaction(tx2, 1)
-
-	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		return delta.applyTransactionMetadataOnlyWithDonationRecording(ls, txn, true)
-	}))
-
-	sum, err := db.Metadata().SumNetworkDonationsForEpoch(9, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(100), sum)
-}
-
-func TestApplyTransactionMetadataOnlyAggregatesPendingNetworkDonations(
-	t *testing.T,
-) {
-	db := newDonationTestDB(t)
-	ls := &LedgerState{
-		db: db,
-		currentEpoch: models.Epoch{
-			EpochId: 9,
-		},
-	}
-
-	endorserTx := mockledger.NewTransactionBuilder()
-	endorserTx.WithId(bytes.Repeat([]byte{0x41}, lcommon.Blake2b256Size))
-	endorserTx.WithType(gledger.TxTypeDijkstra)
-	endorserTx.WithValid(true)
-	endorserTx.WithDonation(42)
-
-	rankingTx := mockledger.NewTransactionBuilder()
-	rankingTx.WithId(bytes.Repeat([]byte{0x42}, lcommon.Blake2b256Size))
-	rankingTx.WithType(gledger.TxTypeDijkstra)
-	rankingTx.WithValid(true)
-	rankingTx.WithDonation(58)
-
-	point := ocommon.NewPoint(123, bytes.Repeat([]byte{0x43}, 32))
-	endorserDelta := NewLedgerDelta(point, uint(dijkstra.EraIdDijkstra), 1)
-	defer endorserDelta.Release()
-	endorserDelta.addTransaction(endorserTx, 0)
-
-	rankingDelta := NewLedgerDelta(point, uint(dijkstra.EraIdDijkstra), 1)
-	defer rankingDelta.Release()
-	rankingDelta.addTransaction(rankingTx, 0)
-
-	txn := db.Transaction(true)
-	require.NoError(t, txn.Do(func(txn *database.Txn) error {
-		if err := endorserDelta.applyTransactionMetadataOnlyWithoutRecordingDonations(
-			ls,
-			txn,
-		); err != nil {
-			return err
-		}
-		rankingDelta.donate(endorserDelta.donation)
-		return rankingDelta.applyTransactionMetadataOnlyWithDonationRecording(
-			ls,
-			txn,
-			true,
-		)
-	}))
-
-	sum, err := db.Metadata().SumNetworkDonationsForEpoch(9, nil)
-	require.NoError(t, err)
-	require.Equal(t, uint64(100), sum)
-}
+// Network-donation aggregation is covered by network_donation_test.go. The
+// former metadata-only endorser apply path (and its two dedicated tests here)
+// was removed when the Musashi endorser-block apply switched to the full
+// ValidateNone effect apply (see ledger/leios_apply.go).

@@ -137,6 +137,39 @@ func (d *Database) SetTransaction(
 	offsets *BlockIngestionResult,
 	txn *Txn,
 ) error {
+	return d.SetTransactionWithOpts(
+		tx,
+		point,
+		idx,
+		updateEpoch,
+		pparamUpdates,
+		certDeposits,
+		offsets,
+		txn,
+		BatchedTxIngestOpts{},
+	)
+}
+
+// SetTransactionWithOpts is SetTransaction with control over UTxO ingest
+// behavior via opts. Leios endorser-block application on the Musashi/
+// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
+// effects are applied without the consumed-utxo recovery/repair pass: produced
+// outputs and input spends are written, but a consumed input that is absent from
+// the store is left as a no-op instead of triggering blob recovery. This matches
+// the reference ledger's endorser-closure apply (ruleApplyTxValidation
+// ValidateNone), which folds the closure's transactions onto the ledger state
+// without validation or recovery.
+func (d *Database) SetTransactionWithOpts(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	updateEpoch uint64,
+	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+	certDeposits map[int]uint64,
+	offsets *BlockIngestionResult,
+	txn *Txn,
+	opts BatchedTxIngestOpts,
+) error {
 	owned := false
 	if txn == nil {
 		txn = d.Transaction(true)
@@ -221,7 +254,7 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, BatchedTxIngestOpts{}); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
@@ -249,9 +282,11 @@ func (d *Database) SetTransaction(
 // other non-UTxO metadata without writing blob offsets, produced outputs, spent
 // inputs, collateral, reference inputs, reward withdrawals, or pparam updates.
 //
-// This is used for Leios/Musashi endorser-block transactions whose certificate
-// and governance data must be visible to the metadata-backed ledger queries
-// even though their UTxO effects are not applied by Dingo's Musashi path.
+// This is a general primitive for recording a transaction's certificate and
+// governance data without applying its UTxO effects. It is no longer on the
+// Leios endorser-block apply path: the Musashi path now applies endorser
+// transactions with their full effects (see ledger/leios_apply.go and
+// SetTransactionWithOpts), matching the reference ledger.
 func (d *Database) SetTransactionMetadataOnly(
 	tx lcommon.Transaction,
 	point ocommon.Point,

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leader"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/consensus"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -202,14 +203,11 @@ func (n *Node) validateBlockProducerLedgerWithView(
 // require the genesis snapshot for leader election) and logs a warning for
 // relay nodes (which do not perform leader election).
 func (n *Node) handleGenesisSnapshotError(err error) error {
-	if n.config.blockProducer {
-		return fmt.Errorf("failed to capture genesis snapshot: %w", err)
-	}
-	n.config.logger.Warn(
-		"failed to capture genesis snapshot",
-		"error", err,
+	return snapshot.HandleGenesisSnapshotError(
+		n.config.blockProducer,
+		n.config.logger,
+		err,
 	)
-	return nil
 }
 
 // initBlockForger initializes the block forger for production mode.
@@ -296,8 +294,9 @@ func (n *Node) initBlockForger(
 	var leiosMempool forging.MempoolProvider
 	if n.leiosPipelineManager != nil && n.ouroboros != nil {
 		adapter := &leiosPipelineAdapter{
-			mgr:   n.leiosPipelineManager,
-			chain: n.chainManager.PrimaryChain(),
+			mgr:                   n.leiosPipelineManager,
+			chain:                 n.chainManager.PrimaryChain(),
+			endorserBlockTxHashes: n.ouroboros.EndorserBlockTxHashesByHash,
 		}
 		leiosChecker = adapter
 		leiosCerts = adapter
@@ -630,8 +629,9 @@ func (a *slotClockAdapter) UpstreamTipSlot() uint64 {
 // leiosPipelineAdapter adapts leios.PipelineManager and the primary chain to
 // the narrow Leios interfaces the forge loop expects.
 type leiosPipelineAdapter struct {
-	mgr   *leios.PipelineManager
-	chain leiosParentChain
+	mgr                   *leios.PipelineManager
+	chain                 leiosParentChain
+	endorserBlockTxHashes func([]byte) ([]string, bool)
 }
 
 type leiosParentChain interface {
@@ -661,6 +661,15 @@ func (a *leiosPipelineAdapter) EligibleCertifiedEndorserBlocks() []forging.Leios
 		})
 	}
 	return out
+}
+
+func (a *leiosPipelineAdapter) CertifiedEndorserBlockTxHashes(
+	ebHash lcommon.Blake2b256,
+) ([]string, bool) {
+	if a.endorserBlockTxHashes == nil {
+		return nil, false
+	}
+	return a.endorserBlockTxHashes(ebHash.Bytes())
 }
 
 func (a *leiosPipelineAdapter) MarkEndorserBlockEmbedded(
