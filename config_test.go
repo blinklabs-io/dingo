@@ -440,7 +440,8 @@ func TestConfigConvergence(t *testing.T) {
 		}
 
 		// Convert to public config
-		public := NewConfigFromInternal(internal, nil, nil, nil, nil)
+		public, err := NewConfigFromInternal(internal, nil, nil, nil, nil)
+		assert.NoError(t, err)
 
 		// Verify all values are preserved and accessible
 		assert.Equal(t, "preview", public.Network())
@@ -495,6 +496,32 @@ func TestConfigConvergence(t *testing.T) {
 		assert.Equal(t, uint(8090), cfg.BlockfrostPort())
 		assert.Equal(t, uint(50051), cfg.UtxorpcPort())
 		assert.Equal(t, uint(8091), cfg.MeshPort())
+	})
+
+	t.Run("NewConfigFromInternal returns error for invalid chainsync.stallTimeout", func(t *testing.T) {
+		// Test that invalid chainsync.stallTimeout causes fail-fast behavior
+		internal := &internalconfig.Config{
+			Chainsync: internalconfig.ChainsyncConfig{
+				StallTimeout: "invalid-duration",
+			},
+		}
+
+		_, err := NewConfigFromInternal(internal, nil, nil, nil, nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid chainsync stall timeout")
+	})
+
+	t.Run("NewConfigFromInternal preserves tracing settings", func(t *testing.T) {
+		// Test that Tracing and TracingStdout are carried over from internal config
+		internal := &internalconfig.Config{
+			Tracing:       true,
+			TracingStdout: true,
+		}
+
+		cfg, err := NewConfigFromInternal(internal, nil, nil, nil, nil)
+		assert.NoError(t, err)
+		assert.True(t, cfg.Tracing())
+		assert.True(t, cfg.TracingStdout())
 	})
 }
 
@@ -551,7 +578,8 @@ func TestConfigAccessorCompleteness(t *testing.T) {
 		MaxKESEvolutions:              50,
 	}
 
-	cfg := NewConfigFromInternal(internal, nil, nil, nil, nil)
+	cfg, err := NewConfigFromInternal(internal, nil, nil, nil, nil)
+	assert.NoError(t, err)
 
 	// Verify all fields have working accessor methods
 	assert.Equal(t, "testnet", cfg.Network())

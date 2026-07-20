@@ -430,7 +430,7 @@ func NewConfigFromInternal(
 	cardanoCfg *cardano.CardanoNodeConfig,
 	topoCfg *topology.TopologyConfig,
 	promRegistry prometheus.Registerer,
-) Config {
+) (Config, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
 	}
@@ -441,14 +441,14 @@ func NewConfigFromInternal(
 		tmp := NewConfig()
 		cfg = tmp.cfg
 	}
-	// Parse chainsync stall timeout for runtime use. Fall back to 2m on error.
+	// Parse chainsync stall timeout for runtime use. Fail-fast on invalid config.
 	var chainsyncDur time.Duration
 	if cfg.Chainsync.StallTimeout != "" {
-		if d, err := time.ParseDuration(cfg.Chainsync.StallTimeout); err == nil {
-			chainsyncDur = d
-		} else {
-			chainsyncDur = 2 * time.Minute
+		d, err := time.ParseDuration(cfg.Chainsync.StallTimeout)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid chainsync stall timeout: %w", err)
 		}
+		chainsyncDur = d
 	} else {
 		chainsyncDur = 2 * time.Minute
 	}
@@ -459,7 +459,9 @@ func NewConfigFromInternal(
 		topologyConfig:        topoCfg,
 		promRegistry:          promRegistry,
 		chainsyncStallTimeout: chainsyncDur,
-	}
+		tracing:               cfg.Tracing,
+		tracingStdout:         cfg.TracingStdout,
+	}, nil
 }
 
 // WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is mostly used for loading genesis config files

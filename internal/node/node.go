@@ -289,13 +289,16 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 	)
 
 	// Create config using the new unified approach - no more manual mapping!
-	dingoConfig := dingo.NewConfigFromInternal(
+	dingoConfig, err := dingo.NewConfigFromInternal(
 		cfg,
 		logger,
 		nodeCfg,
 		config.GetTopologyConfig(),
 		prometheus.DefaultRegisterer,
 	)
+	if err != nil {
+		return err
+	}
 
 	// Apply runtime-only overrides that aren't in the internal config
 	opts := []dingo.ConfigOptionFunc{
