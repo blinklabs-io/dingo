@@ -36,19 +36,19 @@ Thank you for trying!
 
 ### 🇯🇵 日本語
 
-**タイトル:** リリースノートの更新、依存関係の更新、ライブ stake indexing の修正
+**タイトル:** リリースノートを更新し、依存関係を最新に保ち、ライブ stake indexing を安定化
 
 **日付:** July 20, 2026
 
 **バージョン:** v0.66.1
 
-このリリースでは、公開済みのリリースノートを更新し、build と database の保守依存関係を更新し、Antithesis の検証を安定化し、Mithril 処理の整合性を保つためにライブ stake indexing を修正します。
+このリリースでは、公開済みのノートを更新し、build と database の依存関係を最新に保ち、Antithesis の検証を安定化し、Mithril 処理の整合性を保つために live stake indexing を修正します。
 
 ### 💪 改善
 
-* 更新しました **v0.66.0 の公開済みリリースノート:** リリース履歴が最新の公開版を反映し、changelog を追いやすくなります。
-* 改善しました **release artifact の attestation ツール:** publishing の流れは新しい attestation action を使うようになり、provenance check が現在の upstream support にそろいます。
-* 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は新しい upstream の Badger 保守修正を取り込み、database の動作をより安定させます。
+* 更新しました **v0.66.0 の release notes:** リリース履歴が最新の公開版を反映し、changelog を追いやすくなります。
+* 改善しました **release artifact の検証:** publishing の流れは新しい attestation action を使うようになり、artifact の確認が最新の状態に保たれます。
+* 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は Badger の新しい保守修正を取り込み、database の動作をより安定させます。
 * 安定化しました **Antithesis validation の実行:** CI job は Moog を固定し、結果を待ってから次へ進むため、検証結果のぶれを抑えます。
 
 ### 🔧 修正
