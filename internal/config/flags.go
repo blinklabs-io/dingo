@@ -149,6 +149,7 @@ var flagSpecs = []flagSpec{
 	boolFlag("GenesisBootstrap.Enabled", "genesis-bootstrap-enabled", "enable Genesis bootstrap mode when starting from origin"),
 	uint64Flag("GenesisBootstrap.WindowSlots", "genesis-bootstrap-window-slots", "Genesis density comparison window in slots (0 derives from Shelley genesis 3k/f)"),
 	intFlag("GenesisBootstrap.PromotionMinDiversityGroups", "genesis-bootstrap-promotion-min-diversity-groups", "minimum diversity groups preferred during Genesis bootstrap peer promotion"),
+	intFlag("GenesisBootstrap.CorroborationPeers", "genesis-bootstrap-corroboration-peers", "independent peers that must corroborate a fast source before it drives Genesis selection (0 disables)"),
 
 	// Logging
 	transformStringFlag("Logging.Format", "logging-format", "log output format: text (default) or json", normalizeLoggingValue),

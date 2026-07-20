@@ -436,6 +436,14 @@ genesisBootstrap:
   # Minimum diversity groups to prefer while promoting peers during bootstrap.
   # 0 uses the peer-governor default.
   promotionMinDiversityGroups: 0
+  # Independent peers that must report the same recent blocks before a fast
+  # (shallow) block source may drive Genesis-mode chain selection. This is the
+  # Ouroboros Genesis trust control for biased fast-sync sources such as the
+  # Genesis Sync Accelerator: an uncorroborated or divergent fast source is
+  # denied selection and stalls rather than steering the local chain. Pair it
+  # with a trustable localRoots peer plus a ledger peer snapshot in the topology
+  # file. 0 disables corroboration (density-only Genesis selection).
+  corroborationPeers: 0
 
 # Midnight indexer configuration
 # Indexing is active only in API storage mode. Setting port to 0 disables

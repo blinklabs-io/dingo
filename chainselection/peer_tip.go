@@ -15,6 +15,7 @@
 package chainselection
 
 import (
+	"bytes"
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
@@ -24,13 +25,19 @@ import (
 
 // PeerChainTip tracks the chain tip reported by a specific peer.
 type PeerChainTip struct {
-	ConnectionId  ouroboros.ConnectionId
-	Tip           ochainsync.Tip
-	ObservedTip   ochainsync.Tip
-	VRFOutput     []byte // VRF output from tip block for tie-breaking
-	PraosView     PraosTiebreakerView
-	LastUpdated   time.Time
-	observedSlots []uint64
+	ConnectionId ouroboros.ConnectionId
+	Tip          ochainsync.Tip
+	ObservedTip  ochainsync.Tip
+	VRFOutput    []byte // VRF output from tip block for tie-breaking
+	PraosView    PraosTiebreakerView
+	LastUpdated  time.Time
+	// observedSlots is the recent observed slot frontier used for Genesis
+	// density. observedPoints is the same frontier with block hashes, used
+	// for Genesis corroboration (detecting whether other peers report the
+	// same blocks). The two slices are maintained in lockstep: index i of
+	// observedPoints is the (slot, hash) for observedSlots[i].
+	observedSlots  []uint64
+	observedPoints []ocommon.Point
 }
 
 // NewPeerChainTip creates a new PeerChainTip with the given connection ID,
@@ -113,6 +120,7 @@ func (p *PeerChainTip) ApplyRollback(
 	p.LastUpdated = time.Now()
 	if point.Slot == 0 || len(p.observedSlots) == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 
@@ -123,17 +131,34 @@ func (p *PeerChainTip) ApplyRollback(
 	}
 	if keepUntil == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 	p.observedSlots = p.observedSlots[:keepUntil]
+	p.trimObservedPointsTo(keepUntil)
 }
 
-func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
+// trimObservedPointsTo keeps observedPoints aligned with observedSlots after a
+// slot-frontier trim. observedPoints may be shorter than observedSlots for
+// peers whose frontier predates hash tracking; only trim when it is at least
+// as long.
+func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
+	if keepUntil <= len(p.observedPoints) {
+		p.observedPoints = p.observedPoints[:keepUntil]
+	}
+}
+
+// recordObservedPoint records a (slot, hash) point into the observed frontier
+// used for Genesis density and corroboration, keeping observedSlots and
+// observedPoints in lockstep and bounded to the density window.
+func (p *PeerChainTip) recordObservedPoint(point ocommon.Point, window uint64) {
 	if p == nil {
 		return
 	}
+	slot := point.Slot
 	if slot == 0 {
 		p.observedSlots = nil
+		p.observedPoints = nil
 		return
 	}
 
@@ -143,15 +168,25 @@ func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
 	for len(p.observedSlots) > 0 &&
 		p.observedSlots[len(p.observedSlots)-1] > slot {
 		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
+		p.trimObservedPointsTo(len(p.observedSlots))
 	}
-	if len(p.observedSlots) == 0 ||
-		p.observedSlots[len(p.observedSlots)-1] < slot {
+	switch {
+	case len(p.observedSlots) == 0 ||
+		p.observedSlots[len(p.observedSlots)-1] < slot:
 		p.observedSlots = append(p.observedSlots, slot)
+		p.observedPoints = append(p.observedPoints, clonePoint(point))
+	case len(p.observedPoints) == len(p.observedSlots):
+		// Same slot re-reported: keep the latest hash so corroboration
+		// compares against the current frontier block.
+		p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
 	}
 
 	if window == 0 {
 		if len(p.observedSlots) > 1 {
 			p.observedSlots = p.observedSlots[len(p.observedSlots)-1:]
+		}
+		if len(p.observedPoints) > 1 {
+			p.observedPoints = p.observedPoints[len(p.observedPoints)-1:]
 		}
 		return
 	}
@@ -169,7 +204,64 @@ func (p *PeerChainTip) recordObservedSlot(slot, window uint64) {
 	}
 	if pruneIdx > 0 {
 		p.observedSlots = p.observedSlots[pruneIdx:]
+		if pruneIdx <= len(p.observedPoints) {
+			p.observedPoints = p.observedPoints[pruneIdx:]
+		} else {
+			p.observedPoints = nil
+		}
 	}
+}
+
+// clonePoint returns a copy of point with its own hash backing array so the
+// stored frontier does not alias the caller's chainsync buffers.
+func clonePoint(point ocommon.Point) ocommon.Point {
+	if len(point.Hash) == 0 {
+		return ocommon.Point{Slot: point.Slot}
+	}
+	hash := make([]byte, len(point.Hash))
+	copy(hash, point.Hash)
+	return ocommon.Point{Slot: point.Slot, Hash: hash}
+}
+
+// cloneObservedPoints deep-copies an observed-point frontier, including each
+// point's hash backing array, for use by the selector's deep-copy getters.
+func cloneObservedPoints(points []ocommon.Point) []ocommon.Point {
+	if len(points) == 0 {
+		return nil
+	}
+	out := make([]ocommon.Point, len(points))
+	for i, pt := range points {
+		out[i] = clonePoint(pt)
+	}
+	return out
+}
+
+// sharesObservedPoint reports whether this peer and other have at least one
+// identical observed (slot, hash) point — evidence they are following the same
+// chain within the Genesis window. Points with an empty hash are ignored so an
+// unhashed frontier slot cannot spuriously corroborate. Both frontiers are
+// kept in strictly-ascending slot order, so this is a two-pointer merge.
+func (p *PeerChainTip) sharesObservedPoint(other *PeerChainTip) bool {
+	if p == nil || other == nil {
+		return false
+	}
+	a, b := p.observedPoints, other.observedPoints
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i].Slot < b[j].Slot:
+			i++
+		case a[i].Slot > b[j].Slot:
+			j++
+		default:
+			if len(a[i].Hash) > 0 && bytes.Equal(a[i].Hash, b[j].Hash) {
+				return true
+			}
+			i++
+			j++
+		}
+	}
+	return false
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {

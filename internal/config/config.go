@@ -309,6 +309,13 @@ type GenesisBootstrapConfig struct {
 	// PromotionMinDiversityGroups sets the minimum number of diversity groups
 	// to prefer while promoting peers during bootstrap.
 	PromotionMinDiversityGroups int `yaml:"promotionMinDiversityGroups" envconfig:"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS"`
+	// CorroborationPeers sets the number of independent peers that must report
+	// the same recent blocks before a fast (shallow) block source may drive
+	// Genesis-mode chain selection. This is the Ouroboros Genesis trust control
+	// for biased fast-sync sources: an uncorroborated or divergent fast source
+	// is denied selection and stalls rather than steering the local chain. A
+	// zero value disables corroboration (density-only Genesis selection).
+	CorroborationPeers int `yaml:"corroborationPeers" envconfig:"DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS"`
 }
 
 // HistoryExpiryConfig controls local expiry of immutable block history.

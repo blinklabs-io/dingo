@@ -180,6 +180,7 @@ type Config struct {
 	maxInboundConns                      int
 	genesisBootstrap                     bool
 	genesisWindowSlots                   uint64
+	genesisCorroborationPeers            int
 	// Block production configuration (SPO mode)
 	// Field names match cardano-node environment variable naming convention
 	blockProducer                 bool
@@ -872,6 +873,19 @@ func WithGenesisBootstrap(enabled bool) ConfigOptionFunc {
 func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
 	return func(c *Config) {
 		c.genesisWindowSlots = slots
+	}
+}
+
+// WithGenesisCorroborationPeers sets the number of independent peers that must
+// report the same recent blocks before a fast (shallow) block source may drive
+// Genesis-mode chain selection. This is the Ouroboros Genesis trust control for
+// biased fast-sync sources (e.g. the Genesis Sync Accelerator): an
+// uncorroborated or divergent fast source is denied selection and stalls rather
+// than steering the local chain. A zero value disables corroboration
+// (density-only Genesis selection).
+func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
+	return func(c *Config) {
+		c.genesisCorroborationPeers = peers
 	}
 }
 

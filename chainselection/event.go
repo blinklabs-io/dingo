@@ -28,6 +28,19 @@ const (
 	ChainSwitchEventType    event.EventType = "chainselection.chain_switch"
 	ChainSelectionEventType event.EventType = "chainselection.selection"
 	PeerEvictedEventType    event.EventType = "chainselection.peer_evicted"
+
+	// GenesisCorroborationFailedEventType is published when the densest
+	// Genesis fast source cannot be corroborated by the configured minimum
+	// number of independent peers, so it is denied chain selection (stalls)
+	// rather than steering the local chain. Subscribers (peer governance,
+	// operators) can use this to demote or investigate the source.
+	GenesisCorroborationFailedEventType event.EventType = "chainselection.genesis_corroboration_failed"
+
+	// GenesisModeExitedEventType is published when the selector transitions
+	// from Genesis density-based selection back to Praos selection because the
+	// local tip has caught up to within the Genesis window of the best known
+	// peer tip.
+	GenesisModeExitedEventType event.EventType = "chainselection.genesis_mode_exited"
 )
 
 // PeerTipUpdateEvent is published when a peer's chain tip is updated via
@@ -88,4 +101,33 @@ type ChainSelectionEvent struct {
 // manager) can use this to close the evicted peer's connection.
 type PeerEvictedEvent struct {
 	ConnectionId ouroboros.ConnectionId
+}
+
+// GenesisCorroborationFailedEvent is published when the densest Genesis fast
+// source lacks the configured minimum corroboration from independent peers.
+//
+// Fields:
+//   - ConnectionId: the uncorroborated fast source that was denied selection.
+//   - ObservedDensity: its observed block density within the Genesis window.
+//   - CorroboratingPeers: how many independent peers actually corroborate it.
+//   - RequiredPeers: the configured MinCorroboratingPeers threshold.
+//   - GenesisWindowSlots: the active Genesis density window in slots.
+type GenesisCorroborationFailedEvent struct {
+	ConnectionId       ouroboros.ConnectionId
+	ObservedDensity    uint64
+	CorroboratingPeers int
+	RequiredPeers      int
+	GenesisWindowSlots uint64
+}
+
+// GenesisModeExitedEvent is published when the selector leaves Genesis mode.
+//
+// Fields:
+//   - LocalSlot: the local tip slot at the time of exit.
+//   - BestKnownSlot: the best known selectable peer tip slot.
+//   - GenesisWindowSlots: the active Genesis density window in slots.
+type GenesisModeExitedEvent struct {
+	LocalSlot          uint64
+	BestKnownSlot      uint64
+	GenesisWindowSlots uint64
 }

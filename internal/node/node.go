@@ -387,6 +387,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			),
 			dingo.WithGenesisBootstrap(cfg.GenesisBootstrap.Enabled),
 			dingo.WithGenesisWindowSlots(cfg.GenesisBootstrap.WindowSlots),
+			dingo.WithGenesisCorroborationPeers(
+				cfg.GenesisBootstrap.CorroborationPeers,
+			),
 			dingo.WithBootstrapPromotionMinDiversityGroups(
 				cfg.GenesisBootstrap.PromotionMinDiversityGroups,
 			),

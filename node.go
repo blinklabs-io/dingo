@@ -699,11 +699,12 @@ func (n *Node) Run(ctx context.Context) error {
 		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			SecurityParam:      chainSelectorSecurityParam,
-			GenesisMode:        genesisSelectionMode,
-			GenesisWindowSlots: genesisWindowSlots,
+			Logger:                n.config.logger,
+			EventBus:              n.eventBus,
+			SecurityParam:         chainSelectorSecurityParam,
+			GenesisMode:           genesisSelectionMode,
+			GenesisWindowSlots:    genesisWindowSlots,
+			MinCorroboratingPeers: n.config.genesisCorroborationPeers,
 			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil
@@ -721,6 +722,7 @@ func (n *Node) Run(ctx context.Context) error {
 			"Genesis chain selection enabled",
 			"genesis_window_slots", genesisWindowSlots,
 			"security_param", chainSelectorSecurityParam,
+			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
 	// Subscribe chain selector to peer tip update events
