@@ -232,7 +232,7 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
 		MempoolCapacity:      1048576,
-		EvictionWatermark:    0.0,
+		EvictionWatermark:    0.8,
 		RejectionWatermark:   1.0,
 		BindAddr:             "0.0.0.0",
 		CardanoConfig:        "", // Resolved by consumers using cfg.Network

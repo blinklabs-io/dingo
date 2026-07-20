@@ -80,7 +80,7 @@ func FromContext(ctx context.Context) *Config {
 const (
 	DefaultBlobPlugin                  = "badger"
 	DefaultMetadataPlugin              = "sqlite"
-	DefaultEvictionWatermark           = 0.0
+	DefaultEvictionWatermark           = 0.8
 	DefaultRejectionWatermark          = 1.0
 	DefaultForgeSyncToleranceSlots     = 100
 	DefaultForgeStaleGapThresholdSlots = 1000

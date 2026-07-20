@@ -782,28 +782,28 @@ func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
 			availableBytes: 300,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 150}, {TxId: tx3, Size: 75}},
 			want:           []txsubmission.TxId{tx1, tx2},
-			wantNext:       0,
+			wantNext:       0, // >0 requestable, so nextHeadroom unused
 		},
 		{
-			name:           "skips oversized first tx and still takes later fit tx",
+			name:           "stops at first oversized tx to preserve offer order",
 			availableBytes: 90,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}},
-			want:           []txsubmission.TxId{tx2},
-			wantNext:       0,
+			want:           []txsubmission.TxId{},
+			wantNext:       100, // first tx size when nothing fits
 		},
 		{
-			name:           "skips overflowing middle tx and keeps later smaller tx",
+			name:           "stops at first overflowing tx to preserve dependencies",
 			availableBytes: 160,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 70}, {TxId: tx3, Size: 20}},
-			want:           []txsubmission.TxId{tx1, tx3},
-			wantNext:       0,
+			want:           []txsubmission.TxId{tx1},
+			wantNext:       0, // >0 requestable, so nextHeadroom unused
 		},
 		{
 			name:           "returns next headroom target when no tx fits",
 			availableBytes: 40,
 			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}, {TxId: tx3, Size: 75}},
 			want:           []txsubmission.TxId{},
-			wantNext:       50,
+			wantNext:       100, // first tx size when nothing fits
 		},
 	}
 
