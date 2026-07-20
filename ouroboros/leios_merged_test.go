@@ -659,18 +659,52 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(t *testing.T
 	require.Equal(t, []byte(certRB), got)
 }
 
-func TestCertifiedEndorserBlockHashGuards(t *testing.T) {
+func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
 	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
 
-	// A non-certifying Dijkstra block is not a CertRB.
+	// A non-certifying Dijkstra block is not a CertRB: certified=false.
 	_, blockRaw := testDijkstraBlockRaw(t, 1)
-	_, ok := o.certifiedEndorserBlockHash(blockRaw)
-	require.False(t, ok)
+	_, certified, resolved := o.certifiedEndorserBlockHash(blockRaw)
+	require.False(t, certified)
+	require.False(t, resolved)
 
-	// A CertRB with no ledger state cannot resolve its parent announcement.
+	// A CertRB whose parent announcement cannot be resolved (no ledger state)
+	// must report certified=true, resolved=false so the caller disconnects
+	// instead of downgrading a certified block to the raw serve path.
 	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
-	_, ok = o.certifiedEndorserBlockHash(certRB)
-	require.False(t, ok)
+	_, certified, resolved = o.certifiedEndorserBlockHash(certRB)
+	require.True(t, certified)
+	require.False(t, resolved)
+}
+
+// A certified ranking block whose endorser reference cannot be resolved (parent
+// missing / no announcement) must never be downgraded to the raw serve path; it
+// returns an error so the caller closes the connection.
+func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
+	t *testing.T,
+) {
+	// No ledger state, so a CertRB's parent announcement cannot be resolved.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
+	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
+
+	got, err := o.serveLeiosRankingBlockCbor(block)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
+	// It must not have fallen through to serving the raw certified block.
+	require.NotEqual(t, []byte(certRB), got)
+}
+
+func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
+	// A non-certifying Dijkstra block is served unchanged.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	_, blockRaw := testDijkstraBlockRaw(t, 6)
+	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
+
+	got, err := o.serveLeiosRankingBlockCbor(block)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw), got)
 }
 
 func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
