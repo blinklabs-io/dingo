@@ -40,6 +40,46 @@ This release brings epoch reward processing into the ledger and node, improves r
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** epoch reward の適用、import replay の整合、API と server の強化
+
+**日付:** July 20, 2026
+
+**バージョン:** v0.66.0
+
+このリリースでは、ledger と node に epoch reward の処理を取り込み、import 中の replay 安全性を高め、PostgreSQL ベースの conformance coverage を追加し、選択した API と server の応答と transport policy を厳格化します。あわせて、Leios の動作を最新の Musashi prototype に整合させます。
+
+### ✨ 新機能
+
+* 追加しました **epoch rollover で epoch reward を計算して適用すること:** epoch rollover は stake reward と MIR effect を正しい pre-governance 順で適用し、boundary pot mutation 後の reward total を正しく保ち、rollback 安全な非同期 precompute を行います。
+* 拡張しました **import 中に reward stake state を再構築すること:** Load mode と reconciled import は replay 中に epoch boundary snapshot を取得し、必要な場合は epoch-0 genesis mark snapshot を記録し、import 終了時に cancellation check と進捗表示付きで reward live stake を再構築します。
+* 改善しました **reward lookup 向けの reward metadata helper を整えること:** Metadata API は reward prefiltering と pool issuer slot-range calculation をサポートし、reward arithmetic helper は再利用向けに export され検証されています。
+* 強化しました **PostgreSQL ベースの conformance coverage を追加すること:** Conformance test は dedicated schema と Docker Compose もしくは environment variable による手順、より明確な pass または fail の診断を備えた PostgreSQL で実行されます。
+
+### 🔧 修正
+
+* 修正しました **bootstrap boundary が落ち着くまで最初の reward application を遅らせること:** 最初の reward update は epoch 2 を bootstrap boundary exception として扱い、その initial application では pool と account への reward distribution を抑制し、post-tax amount を reserves に戻し、stale または rollback unsafe な結果を避けるため bootstrap precompute を無効化します。
+* 復旧しました **Blockfrost の未一致 route を 404 JSON 応答にすること:** 未一致の Blockfrost API route は Blockfrost 形式の 404 JSON error を返し、root document は `/` で利用可能なままです。
+* 整合しました **Leios の動作を Musashi prototype に合わせること:** Leios の forging、fetching、classification、ledger application は Musashi prototype-2026w29 semantics に従い、certified parent endorser block handling と関連する robustness fix を含みます。
+
+### 🔐 セキュリティ
+
+* 厳格化しました **UTxORPC と Bark server で TLS 1.2 以降を必須にすること:** 両 server は shared TLS policy を適用し、ECH が構成されている場合は TLS 1.3 が引き続き必要です。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ---
 
 ## v0.65.1 (July 16, 2026)
