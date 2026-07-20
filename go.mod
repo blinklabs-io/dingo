@@ -28,7 +28,7 @@ require (
 	github.com/getsops/sops/v3 v3.13.2
 	github.com/glebarez/sqlite v1.11.0
 	github.com/go-sql-driver/mysql v1.10.0
-	github.com/ipfs/go-cid v0.6.1
+	github.com/ipfs/go-cid v0.6.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/klauspost/compress v1.18.6
 	github.com/orandin/slog-gorm v1.4.0
