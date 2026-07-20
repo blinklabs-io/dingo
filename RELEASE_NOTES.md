@@ -34,6 +34,74 @@ This release refreshes the published release notes, updates build and database m
 
 Thank you for trying!
 
+### 🇯🇵 日本語
+
+**タイトル:** リリースノートの更新、依存関係の更新、ライブ stake indexing の修正
+
+**日付:** July 20, 2026
+
+**バージョン:** v0.66.1
+
+このリリースでは、公開済みのリリースノートを更新し、build と database の保守依存関係を更新し、Antithesis の検証を安定化し、Mithril 処理の整合性を保つためにライブ stake indexing を修正します。
+
+### 💪 改善
+
+* 更新しました **v0.66.0 の公開済みリリースノート:** リリース履歴が最新の公開版を反映し、changelog を追いやすくなります。
+* 改善しました **release artifact の attestation ツール:** publishing の流れは新しい attestation action を使うようになり、provenance check が現在の upstream support にそろいます。
+* 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は新しい upstream の Badger 保守修正を取り込み、database の動作をより安定させます。
+* 安定化しました **Antithesis validation の実行:** CI job は Moog を固定し、結果を待ってから次へ進むため、検証結果のぶれを抑えます。
+
+### 🔧 修正
+
+* 修正しました **Mithril data の live stake indexing:** database は live stake data の準備が整うまで indexing を遅らせるため、処理中の stake 情報が整合したまま保たれます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Actualizar las notas de la versión, renovar dependencias y corregir la indexación de stake en vivo
+
+**Fecha:** July 20, 2026
+
+**Versión:** v0.66.1
+
+Esta versión actualiza las notas publicadas, renueva dependencias de mantenimiento de compilación y base de datos, estabiliza la validación de Antithesis y corrige la indexación de stake en vivo para mantener coherente el procesamiento de Mithril.
+
+### 💪 Mejoras
+
+* Actualizó **las notas publicadas de la versión v0.66.0:** El historial de versiones ahora refleja la publicación más reciente, lo que mantiene el changelog al día y más fácil de seguir.
+* Mejoró **la herramienta de attestation de los artefactos de publicación:** El flujo de publicación ahora usa una acción de attestation más nueva, lo que mantiene las comprobaciones de provenance alineadas con el soporte actual de upstream.
+* Refinó **el comportamiento del almacenamiento de la base de datos con la versión más reciente de Badger:** La capa de almacenamiento ahora incorpora las correcciones de mantenimiento más nuevas de Badger upstream, lo que ayuda a mantener un comportamiento de base de datos más estable.
+* Estabilizó **las ejecuciones de validación de Antithesis:** El trabajo de CI ahora fija Moog y espera los resultados antes de continuar, lo que reduce resultados de validación inestables.
+
+### 🔧 Correcciones
+
+* Corrigió **la indexación de live stake para datos de Mithril:** La base de datos ahora aplaza ese trabajo de indexación hasta que los datos de live stake estén listos, lo que mantiene coherente la información de stake durante el procesamiento.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.0 (July 20, 2026)
 
 **Title:** Apply epoch rewards, align import replay, and tighten API and server behavior
