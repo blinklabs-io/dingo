@@ -48,11 +48,11 @@ Thank you for trying!
 
 **バージョン:** v0.66.0
 
-このリリースでは、ledger と node に epoch reward の処理を取り込み、import 中の replay 安全性を高め、PostgreSQL ベースの conformance coverage を追加し、選択した API と server の応答と transport policy を厳格化します。あわせて、Leios の動作を最新の Musashi prototype に整合させます。
+このリリースでは、ledger と node に epoch reward の処理を導入し、import 中の replay 安全性を高め、一部の API と server の応答と transport policy を厳格化します。あわせて、PostgreSQL ベースの conformance coverage を追加し、Leios の動作を最新の Musashi prototype に整合させます。
 
 ### ✨ 新機能
 
-* 追加しました **epoch rollover で epoch reward を計算して適用すること:** epoch rollover は stake reward と MIR effect を正しい pre-governance 順で適用し、boundary pot mutation 後の reward total を正しく保ち、rollback 安全な非同期 precompute を行います。
+* 追加しました **epoch rollover で epoch reward を計算して適用すること:** epoch rollover は stake reward と MIR effect を正しい pre-governance 順で適用し、boundary pot mutation 後の reward total を正しく維持し、rollback 安全な非同期 precompute を行います。
 * 拡張しました **import 中に reward stake state を再構築すること:** Load mode と reconciled import は replay 中に epoch boundary snapshot を取得し、必要な場合は epoch-0 genesis mark snapshot を記録し、import 終了時に cancellation check と進捗表示付きで reward live stake を再構築します。
 * 改善しました **reward lookup 向けの reward metadata helper を整えること:** Metadata API は reward prefiltering と pool issuer slot-range calculation をサポートし、reward arithmetic helper は再利用向けに export され検証されています。
 * 強化しました **PostgreSQL ベースの conformance coverage を追加すること:** Conformance test は dedicated schema と Docker Compose もしくは environment variable による手順、より明確な pass または fail の診断を備えた PostgreSQL で実行されます。
@@ -88,14 +88,14 @@ Thank you for trying!
 
 **Versión:** v0.66.0
 
-Esta versión incorpora el procesamiento de recompensas de época en el ledger y en el nodo, mejora la seguridad del replay durante las importaciones, añade cobertura de conformance respaldada por PostgreSQL y refuerza las respuestas y la política de transporte de algunas API y servidores. También alinea el comportamiento de Leios con el prototipo más reciente de Musashi.
+Esta versión incorpora el procesamiento de recompensas de época al ledger y al nodo, mejora la seguridad del replay durante las importaciones, añade cobertura de conformance respaldada por PostgreSQL y refuerza las respuestas y la política de transporte de algunas API y servidores. También alinea el comportamiento de Leios con el prototipo más reciente de Musashi.
 
 ### ✨ Novedades
 
 * Agregó **calcular y aplicar recompensas de época durante el epoch rollover:** El epoch rollover ahora aplica las recompensas de stake y los efectos de MIR en el orden pregovernance correcto, mantiene correctos los totales de recompensas después de mutaciones del reward ADA pot y precomputa recompensas de forma asíncrona con seguridad ante rollback.
 * Amplió **reconstruir el estado del stake de recompensas durante las importaciones:** Los modos load y reconciled import ahora capturan instantáneas en el límite de época durante el replay, registran la instantánea genesis mark de epoch 0 cuando hace falta y reconstruyen el reward live stake al final de las importaciones con comprobaciones de cancelación y seguimiento del progreso.
 * Mejoró **las utilidades de metadata de recompensas para las consultas de recompensas:** Las API de metadata ahora admiten prefiltrado de recompensas y cálculos de slot range del pool issuer, y las utilidades de aritmética de recompensas se exportan y validan para reutilización.
-* Reforzó **añadir cobertura de conformance respaldada por PostgreSQL:** Las pruebas de conformance ahora se ejecutan sobre PostgreSQL con un esquema dedicado, una preparación documentada mediante Docker Compose o variables de entorno y diagnósticos de aprobado o fallado más claros.
+* Reforzó **añadir cobertura de conformance respaldada por PostgreSQL:** Las pruebas de conformance ahora se ejecutan sobre PostgreSQL con un esquema dedicado, una preparación documentada mediante Docker Compose o variables de entorno y diagnósticos de éxito o fallo más claros.
 
 ### 🔧 Correcciones
 
