@@ -38,8 +38,8 @@ const (
 	AddTransactionEventType    event.EventType = "mempool.add_tx"
 	RemoveTransactionEventType event.EventType = "mempool.remove_tx"
 
-	DefaultEvictionWatermark  = 0.90
-	DefaultRejectionWatermark = 0.95
+	DefaultEvictionWatermark  = 0.0
+	DefaultRejectionWatermark = 1.0
 	DefaultTransactionTTL     = 5 * time.Minute
 	DefaultCleanupInterval    = 1 * time.Minute
 )
@@ -333,12 +333,31 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 		return nil, ErrNilValidator
 	}
 	evictionWatermark := config.EvictionWatermark
+	if evictionWatermark < 0 {
+		return nil, fmt.Errorf(
+			"invalid eviction watermark: %f (must be in range [0, 1))",
+			evictionWatermark,
+		)
+	}
 	if evictionWatermark == 0 {
 		evictionWatermark = DefaultEvictionWatermark
 	}
 	rejectionWatermark := config.RejectionWatermark
 	if rejectionWatermark == 0 {
 		rejectionWatermark = DefaultRejectionWatermark
+	}
+	if rejectionWatermark <= 0 || rejectionWatermark > 1 {
+		return nil, fmt.Errorf(
+			"invalid rejection watermark: %f (must be in range (0, 1])",
+			rejectionWatermark,
+		)
+	}
+	if evictionWatermark > 0 && evictionWatermark >= rejectionWatermark {
+		return nil, fmt.Errorf(
+			"eviction watermark (%f) must be less than rejection watermark (%f)",
+			evictionWatermark,
+			rejectionWatermark,
+		)
 	}
 	transactionTTL := config.TransactionTTL
 	if transactionTTL == 0 {
@@ -746,9 +765,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		// so we don't waste time validating TXs that will be rejected.
 		txSize := int64(len(txBytes))
 		newSize := m.currentSizeBytes + txSize
-		rejectionThreshold := int64(
-			float64(m.config.MempoolCapacity) * m.rejectionWatermark,
-		)
+		rejectionThreshold := m.maxAdmissionHeadroomBytesLocked()
 		if newSize > rejectionThreshold {
 			err = &MempoolFullError{
 				CurrentSize: int(m.currentSizeBytes),
@@ -767,7 +784,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		evictionThreshold := int64(
 			float64(m.config.MempoolCapacity) * m.evictionWatermark,
 		)
-		if newSize > evictionThreshold {
+		if m.evictionWatermark > 0 && newSize > evictionThreshold {
 			needsEviction = true
 			targetBytes = max(int64(0), evictionThreshold-txSize)
 			// Compute which TXs would be evicted from the front
@@ -864,6 +881,68 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 		ret[i] = *m.transactions[i]
 	}
 	return ret
+}
+
+func (m *Mempool) AdmissionHeadroomBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.admissionHeadroomBytesLocked()
+}
+
+func (m *Mempool) MaxAdmissionHeadroomBytes() int64 {
+	m.RLock()
+	defer m.RUnlock()
+	return m.maxAdmissionHeadroomBytesLocked()
+}
+
+func (m *Mempool) WaitForAdmissionHeadroom(
+	minBytes int64,
+	done <-chan error,
+) bool {
+	if minBytes <= 0 {
+		return true
+	}
+	for {
+		if m.eventBus == nil {
+			return m.AdmissionHeadroomBytes() >= minBytes
+		}
+		subId, subCh := m.eventBus.Subscribe(RemoveTransactionEventType)
+		if subCh == nil {
+			return m.AdmissionHeadroomBytes() >= minBytes
+		}
+		if m.AdmissionHeadroomBytes() >= minBytes {
+			m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+			return true
+		}
+		select {
+		case <-subCh:
+			m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+		case <-m.done:
+			m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+			return false
+		case <-done:
+			m.eventBus.Unsubscribe(RemoveTransactionEventType, subId)
+			return false
+		}
+	}
+}
+
+func (m *Mempool) admissionHeadroomBytesLocked() int64 {
+	headroom := m.maxAdmissionHeadroomBytesLocked() - m.currentSizeBytes
+	if headroom < 0 {
+		return 0
+	}
+	return headroom
+}
+
+func (m *Mempool) maxAdmissionHeadroomBytesLocked() int64 {
+	rejectionThreshold := int64(
+		float64(m.config.MempoolCapacity) * m.rejectionWatermark,
+	)
+	if rejectionThreshold < 0 {
+		return 0
+	}
+	return rejectionThreshold
 }
 
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {

@@ -156,11 +156,20 @@ func (o *Ouroboros) txsubmissionServerInit(
 		}
 		var consecutiveRateLimits int
 		var rateLimitTotal int
+		var consecutiveImpossibleOffers int
 		backoffTimer := time.NewTimer(0)
 		backoffTimer.Stop()
 		defer backoffTimer.Stop()
+		minHeadroomBytes := int64(1)
 
 		for {
+			if !o.Mempool.WaitForAdmissionHeadroom(
+				minHeadroomBytes,
+				conn.ErrorChan(),
+			) {
+				return
+			}
+			minHeadroomBytes = 1
 			done := make(chan struct{})
 			var txIds []txsubmission.TxIdAndSize
 			var err error
@@ -259,76 +268,182 @@ func (o *Ouroboros) txsubmissionServerInit(
 				} else {
 					consecutiveRateLimits = 0
 				}
-				// Unwrap inner TxId from TxIdAndSize
-				var requestTxIds []txsubmission.TxId
-				for _, txId := range txIds {
-					requestTxIds = append(requestTxIds, txId.TxId)
-				}
-				// Request TX content for TxIds from above
-				txs, err := ctx.Server.RequestTxs(requestTxIds)
-				if err != nil {
-					o.config.Logger.Error(
-						fmt.Sprintf(
-							"failed to get Txs: %s",
-							err,
-						),
+
+				// Process this offer: keep trying until we can request
+				// at least some transactions, or determine the offer is
+				// impossible. This loop retries the SAME offer after
+				// waiting for headroom, avoiding the protocol bug where
+				// calling RequestTxIds again would acknowledge/discard
+				// the current offer.
+				for {
+					availableBytes := o.Mempool.AdmissionHeadroomBytes()
+					maxHeadroomBytes := o.Mempool.MaxAdmissionHeadroomBytes()
+					if availableBytes <= 0 {
+						// No headroom at all; wait for any space
+						if !o.Mempool.WaitForAdmissionHeadroom(
+							1,
+							conn.ErrorChan(),
+						) {
+							return
+						}
+						continue
+					}
+					requestTxIds, nextHeadroomBytes := requestableTxIdsWithinHeadroom(
+						txIds,
+						availableBytes,
+					)
+					if len(requestTxIds) > 0 {
+						// We can request at least some txs from this offer
+						consecutiveImpossibleOffers = 0
+						// Request TX content for TxIds from above
+						txs, err := ctx.Server.RequestTxs(requestTxIds)
+						if err != nil {
+							o.config.Logger.Error(
+								fmt.Sprintf(
+									"failed to get Txs: %s",
+									err,
+								),
+								"component", "network",
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+							)
+							return
+						}
+						for _, txBody := range txs {
+							// Decode TX from CBOR
+							tx, err := ledger.NewTransactionFromCbor(
+								uint(txBody.EraId),
+								txBody.TxBody,
+							)
+							if err != nil {
+								o.config.Logger.Error(
+									fmt.Sprintf(
+										"failed to parse transaction CBOR: %s",
+										err,
+									),
+									"component", "network",
+									"protocol", "tx-submission",
+									"role", "server",
+									"connection_id", ctx.ConnectionId.String(),
+								)
+								return
+							}
+							o.config.Logger.Debug(
+								"received tx",
+								"tx_hash", tx.Hash(),
+								"protocol", "tx-submission",
+								"role", "server",
+								"connection_id", ctx.ConnectionId.String(),
+							)
+							// Add transaction to mempool
+							err = o.Mempool.AddTransaction(
+								uint(txBody.EraId),
+								txBody.TxBody,
+							)
+							if err != nil {
+								o.config.Logger.Error(
+									fmt.Sprintf(
+										"failed to add tx %x to mempool: %s",
+										tx.Hash(),
+										err,
+									),
+									"component", "network",
+									"protocol", "tx-submission",
+									"role", "server",
+									"connection_id", ctx.ConnectionId.String(),
+								)
+								return
+							}
+						}
+						// Successfully processed this offer; break inner loop
+						// to request the next offer
+						break
+					}
+					// No txIds fit in available headroom
+					if nextHeadroomBytes > maxHeadroomBytes {
+						// Impossible offer: first tx is larger than max headroom
+						consecutiveImpossibleOffers++
+						o.config.Logger.Debug(
+							"skipping impossible tx offer under mempool admission limits",
+							"component", "network",
+							"protocol", "tx-submission",
+							"role", "server",
+							"connection_id", ctx.ConnectionId.String(),
+							"required_headroom_bytes", nextHeadroomBytes,
+							"max_headroom_bytes", maxHeadroomBytes,
+						)
+						wait := txsubmissionBackoffDuration(
+							consecutiveImpossibleOffers,
+						)
+						backoffTimer.Reset(wait)
+						select {
+						case <-backoffTimer.C:
+						case <-conn.ErrorChan():
+							return
+						}
+						// After backoff, abandon this impossible offer
+						break
+					}
+					// Deferred offer: first tx needs more headroom than available
+					consecutiveImpossibleOffers = 0
+					o.config.Logger.Debug(
+						"deferring tx offer until mempool headroom increases",
 						"component", "network",
 						"protocol", "tx-submission",
 						"role", "server",
 						"connection_id", ctx.ConnectionId.String(),
+						"required_headroom_bytes", nextHeadroomBytes,
+						"available_bytes", availableBytes,
 					)
-					return
-				}
-				for _, txBody := range txs {
-					// Decode TX from CBOR
-					tx, err := ledger.NewTransactionFromCbor(
-						uint(txBody.EraId),
-						txBody.TxBody,
-					)
-					if err != nil {
-						o.config.Logger.Error(
-							fmt.Sprintf(
-								"failed to parse transaction CBOR: %s",
-								err,
-							),
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-						)
+					// Wait for the required headroom, then retry this offer
+					if !o.Mempool.WaitForAdmissionHeadroom(
+						nextHeadroomBytes,
+						conn.ErrorChan(),
+					) {
 						return
 					}
-					o.config.Logger.Debug(
-						"received tx",
-						"tx_hash", tx.Hash(),
-						"protocol", "tx-submission",
-						"role", "server",
-						"connection_id", ctx.ConnectionId.String(),
-					)
-					// Add transaction to mempool
-					err = o.Mempool.AddTransaction(
-						uint(txBody.EraId),
-						txBody.TxBody,
-					)
-					if err != nil {
-						o.config.Logger.Error(
-							fmt.Sprintf(
-								"failed to add tx %x to mempool: %s",
-								tx.Hash(),
-								err,
-							),
-							"component", "network",
-							"protocol", "tx-submission",
-							"role", "server",
-							"connection_id", ctx.ConnectionId.String(),
-						)
-						return
-					}
+					// Loop back to retry the same offer with new headroom
 				}
 			}
 		}
 	}()
 	return nil
+}
+
+func requestableTxIdsWithinHeadroom(
+	txIds []txsubmission.TxIdAndSize,
+	availableBytes int64,
+) ([]txsubmission.TxId, int64) {
+	if availableBytes <= 0 {
+		return nil, 0
+	}
+	// Build the longest contiguous prefix of txIds that fits within
+	// availableBytes. Stop at the first tx that doesn't fit to preserve
+	// order and avoid breaking dependency chains (a later tx may depend
+	// on an earlier one).
+	ret := make([]txsubmission.TxId, 0, len(txIds))
+	var requestedBytes int64
+	var nextHeadroomBytes int64
+	for _, txId := range txIds {
+		txSize := int64(txId.Size)
+		if requestedBytes+txSize > availableBytes {
+			// First tx that doesn't fit; record the headroom needed
+			// for this tx and stop (don't skip to later txs).
+			nextHeadroomBytes = txSize
+			break
+		}
+		ret = append(ret, txId.TxId)
+		requestedBytes += txSize
+	}
+	// If we successfully requested at least one tx, return 0 for
+	// nextHeadroomBytes (we'll get a fresh offer next). Only return
+	// non-zero nextHeadroomBytes when we couldn't request anything
+	// (ret is empty), indicating the caller should wait for more headroom.
+	if len(ret) > 0 {
+		return ret, 0
+	}
+	return ret, nextHeadroomBytes
 }
 
 func (o *Ouroboros) txsubmissionClientRequestTxIds(

@@ -36,6 +36,7 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/protocol/txsubmission"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -762,4 +763,62 @@ func TestTxSubmissionServerInitMempoolRejectionLogsAndStopsCleanly(t *testing.T)
 		h.mA.Transactions(),
 		"rejected transaction must not be admitted to the mempool",
 	)
+}
+
+func TestRequestableTxIdsWithinHeadroom(t *testing.T) {
+	tx1 := txsubmission.TxId{EraId: 6, TxId: [32]byte{1}}
+	tx2 := txsubmission.TxId{EraId: 6, TxId: [32]byte{2}}
+	tx3 := txsubmission.TxId{EraId: 6, TxId: [32]byte{3}}
+
+	tests := []struct {
+		name           string
+		availableBytes int64
+		txIds          []txsubmission.TxIdAndSize
+		want           []txsubmission.TxId
+		wantNext       int64
+	}{
+		{
+			name:           "takes full prefix that fits",
+			availableBytes: 300,
+			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 150}, {TxId: tx3, Size: 75}},
+			want:           []txsubmission.TxId{tx1, tx2},
+			wantNext:       0, // >0 requestable, so nextHeadroom unused
+		},
+		{
+			name:           "stops at first oversized tx to preserve offer order",
+			availableBytes: 90,
+			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}},
+			want:           []txsubmission.TxId{},
+			wantNext:       100, // first tx size when nothing fits
+		},
+		{
+			name:           "stops at first overflowing tx to preserve dependencies",
+			availableBytes: 160,
+			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 70}, {TxId: tx3, Size: 20}},
+			want:           []txsubmission.TxId{tx1},
+			wantNext:       0, // >0 requestable, so nextHeadroom unused
+		},
+		{
+			name:           "returns next headroom target when no tx fits",
+			availableBytes: 40,
+			txIds:          []txsubmission.TxIdAndSize{{TxId: tx1, Size: 100}, {TxId: tx2, Size: 50}, {TxId: tx3, Size: 75}},
+			want:           []txsubmission.TxId{},
+			wantNext:       100, // first tx size when nothing fits
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, gotNext := requestableTxIdsWithinHeadroom(
+				test.txIds,
+				test.availableBytes,
+			)
+			assert.Equal(
+				t,
+				test.want,
+				got,
+			)
+			assert.Equal(t, test.wantNext, gotNext)
+		})
+	}
 }

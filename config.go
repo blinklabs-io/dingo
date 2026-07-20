@@ -664,9 +664,9 @@ func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
 }
 
 // WithEvictionWatermark sets the mempool eviction watermark
-// as a fraction of capacity (0.0-1.0). When a new TX would
+// as a fraction of capacity [0.0-1.0). When a new TX would
 // push the mempool past this fraction, oldest TXs are evicted
-// to make room. Default is 0.90 (90%).
+// to make room. A value of 0 disables eviction. Default is 0.
 func WithEvictionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {
@@ -676,9 +676,8 @@ func WithEvictionWatermark(
 }
 
 // WithRejectionWatermark sets the mempool rejection watermark
-// as a fraction of capacity (0.0-1.0). New TXs are rejected
-// when the mempool would exceed this fraction even after
-// eviction. Default is 0.95 (95%).
+// as a fraction of capacity (0.0-1.0]. New TXs are rejected
+// when the mempool would exceed this fraction. Default is 1.0.
 func WithRejectionWatermark(
 	watermark float64,
 ) ConfigOptionFunc {

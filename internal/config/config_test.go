@@ -31,8 +31,8 @@ func resetGlobalConfig() {
 		// MempoolCapacity left as the zero sentinel; ApplyDefaults
 		// fills it in from RunMode after all sources are merged.
 		MempoolCapacity:             0,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
+		EvictionWatermark:           0.0,
+		RejectionWatermark:          1.0,
 		BindAddr:                    "0.0.0.0",
 		CardanoConfig:               "", // Will be set dynamically based on network
 		DatabasePath:                ".dingo",
@@ -141,8 +141,8 @@ mithril:
 
 	expected := &Config{
 		MempoolCapacity:      2097152,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
+		EvictionWatermark:    0.0,
+		RejectionWatermark:   1.0,
 		BindAddr:             "127.0.0.1",
 		CardanoConfig:        "./cardano/preview/config.json",
 		DatabasePath:         ".dingo",
@@ -232,8 +232,8 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
 		MempoolCapacity:      1048576,
-		EvictionWatermark:    0.90,
-		RejectionWatermark:   0.95,
+		EvictionWatermark:    0.8,
+		RejectionWatermark:   1.0,
 		BindAddr:             "0.0.0.0",
 		CardanoConfig:        "", // Resolved by consumers using cfg.Network
 		DatabasePath:         ".dingo",
@@ -735,7 +735,13 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 		},
 		{
 			name:      "rejection at exactly 1.0",
-			eviction:  0.90,
+			eviction:  0.0,
+			rejection: 1.0,
+			wantErr:   false,
+		},
+		{
+			name:      "eviction disabled",
+			eviction:  0.0,
 			rejection: 1.0,
 			wantErr:   false,
 		},
@@ -748,7 +754,7 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 		},
 		{
 			name:       "rejection negative",
-			eviction:   0.90,
+			eviction:   0.0,
 			rejection:  -0.5,
 			wantErr:    true,
 			errContain: "invalid rejectionWatermark",
