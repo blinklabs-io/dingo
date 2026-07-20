@@ -50,6 +50,7 @@ $("#stake-form").addEventListener("submit", async (event) => {
       <div class="detail-grid">
         ${metric("Stake", shortHex(data.stakingKey))}
         ${metric("Type", credentialTypeName(data.credentialTag))}
+        ${metric("Created slot", number(data.createdSlot))}
         ${metric("Active", data.active ? "yes" : "no")}
         ${metric("Reward", lovelace(data.reward))}
         ${metric("DRep type", data.drepType)}
@@ -243,15 +244,16 @@ async function showDrep(credential, credentialTag) {
       <h3>Recent delegators</h3>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Stake credential</th><th>Reward</th><th>Active</th></tr></thead>
+          <thead><tr><th>Stake credential</th><th>Created slot</th><th>Reward</th><th>Active</th></tr></thead>
           <tbody>
             ${data.delegations.length ? data.delegations.map((account) => `
               <tr>
                 <td><span class="mono">${shortHex(account.stakingKey)}</span><br /><span class="muted">${credentialTypeName(account.credentialTag)}</span></td>
+                <td>${number(account.createdSlot)}</td>
                 <td>${lovelace(account.reward)}</td>
                 <td>${account.active ? "yes" : "no"}</td>
               </tr>
-            `).join("") : emptyRow(3, "No active delegators returned.")}
+            `).join("") : emptyRow(4, "No active delegators returned.")}
           </tbody>
         </table>
       </div>

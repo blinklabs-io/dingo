@@ -77,10 +77,7 @@ func TestImportBoundaries(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for _, rule := range importBoundaryRules {
-		rule := rule
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			ruleViolations, err := importBoundaryViolations(repoRoot, rule)
 			if err != nil {
@@ -90,7 +87,7 @@ func TestImportBoundaries(t *testing.T) {
 			for _, violation := range ruleViolations {
 				violationsCh <- violation
 			}
-		}()
+		})
 	}
 
 	go func() {
@@ -152,9 +149,7 @@ func importBoundaryViolations(
 	jobs := make(chan string)
 
 	for range runtime.GOMAXPROCS(0) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 
 			for file := range jobs {
 				fileViolations, err := importBoundaryViolationsForFile(
@@ -170,7 +165,7 @@ func importBoundaryViolations(
 				}
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	for _, file := range files {
 		jobs <- file

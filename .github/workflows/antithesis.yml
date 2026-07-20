@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       duration:
-        description: 'Test duration in hours'
+        description: 'Test duration in hours (1-8)'
         type: string
         default: '1'
       no_faults:
@@ -16,13 +16,24 @@ on:
         type: boolean
         default: false
       moog_tag:
-        description: 'Pinned Moog CLI tag (defaults to repository variable MOOG_TAG)'
+        # The deployed MPFS at mpfs.plutimus.com runs the moog v0.5.x line, so
+        # the requester CLI must match it (same pin as the cardano-foundation
+        # cardano-node-antithesis testnet). moog v2.x (the moog-v2 MPFS cutover)
+        # is incompatible: v2.0.1 preflights GET /status, which the deployed
+        # MPFS answers with 404, then prints an error envelope and exits 0 so
+        # the submission silently never launches. Bump this only once a v2 MPFS
+        # (one that serves /status) is deployed and MOOG_MPFS_HOST points at it.
+        description: 'Moog CLI release tag'
         type: string
-        default: ''
+        default: 'v0.5.1.5'
 
 concurrency:
   group: antithesis
-  cancel-in-progress: true
+  queue: max
+  # Once submitted, an Antithesis test continues running outside GitHub.
+  # Keep its polling workflow alive so the result is not lost and the next
+  # test waits for the active run to finish.
+  cancel-in-progress: false
 
 env:
   APPLICATION_NAME: 'dingo'
@@ -56,7 +67,7 @@ jobs:
       # dingo-antithesis — instrumented dingo binary
       # -----------------------------------------------------------------------
       - id: antithesis-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository }}
@@ -68,7 +79,7 @@ jobs:
             type=ref,event=branch
       - name: Build and push dingo-antithesis image
         id: antithesis-push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0 https://github.com/docker/build-push-action/releases/tag/v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
           outputs: "type=registry,push=true"
           platforms: linux/amd64
@@ -78,7 +89,7 @@ jobs:
           build-args: |
             COMMIT_HASH=${{ github.sha }}
       - name: Attest dingo-antithesis GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
@@ -87,7 +98,7 @@ jobs:
       # configurator — generates pool keys and genesis files
       # -----------------------------------------------------------------------
       - id: configurator-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-configurator
@@ -98,7 +109,7 @@ jobs:
             type=ref,event=branch
       - name: Build and push configurator image
         id: configurator-push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0 https://github.com/docker/build-push-action/releases/tag/v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
           context: internal/test/antithesis
           file: internal/test/antithesis/Dockerfile.configurator
@@ -107,7 +118,7 @@ jobs:
           tags: ${{ steps.configurator-meta.outputs.tags }}
           labels: ${{ steps.configurator-meta.outputs.labels }}
       - name: Attest configurator GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-configurator
           subject-digest: ${{ steps.configurator-push.outputs.digest }}
@@ -116,7 +127,7 @@ jobs:
       # txpump — submits transactions to the network under test
       # -----------------------------------------------------------------------
       - id: txpump-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-txpump
@@ -127,16 +138,16 @@ jobs:
             type=ref,event=branch
       - name: Build and push txpump image
         id: txpump-push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0 https://github.com/docker/build-push-action/releases/tag/v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
-          context: internal/test/antithesis
+          context: .
           file: internal/test/antithesis/Dockerfile.txpump
           outputs: "type=registry,push=true"
           platforms: linux/amd64
           tags: ${{ steps.txpump-meta.outputs.tags }}
           labels: ${{ steps.txpump-meta.outputs.labels }}
       - name: Attest txpump GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-txpump
           subject-digest: ${{ steps.txpump-push.outputs.digest }}
@@ -145,7 +156,7 @@ jobs:
       # analysis — reads logs and evaluates safety/liveness properties
       # -----------------------------------------------------------------------
       - id: analysis-meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0 https://github.com/docker/metadata-action/releases/tag/v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0 https://github.com/docker/metadata-action/releases/tag/v6.2.0
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/dingo-analysis
@@ -156,16 +167,16 @@ jobs:
             type=ref,event=branch
       - name: Build and push analysis image
         id: analysis-push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0 https://github.com/docker/build-push-action/releases/tag/v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0 https://github.com/docker/build-push-action/releases/tag/v7.3.0
         with:
-          context: internal/test/antithesis
+          context: .
           file: internal/test/antithesis/Dockerfile.analysis
           outputs: "type=registry,push=true"
           platforms: linux/amd64
           tags: ${{ steps.analysis-meta.outputs.tags }}
           labels: ${{ steps.analysis-meta.outputs.labels }}
       - name: Attest analysis GHCR image
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/dingo-analysis
           subject-digest: ${{ steps.analysis-push.outputs.digest }}
@@ -216,34 +227,71 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 600
+    # Shared Moog env for the submit + wait steps (the wait step polls
+    # MOOG_MPFS_HOST read-only, so it needs the same host/token/requester).
+    env:
+      MOOG_WALLET_FILE: wallet.json
+      MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
+      MOOG_PLATFORM: github
+      MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
+      MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
+      DURATION: ${{ inputs.duration || '3' }}
     steps:
+      - name: Validate duration
+        id: duration
+        run: |
+          if [[ ! "$DURATION" =~ ^[0-9]+$ ]]; then
+            echo "::error::Duration must be a positive integer number of hours"
+            exit 1
+          fi
+          HOURS=$((10#$DURATION))
+          if ((HOURS < 1)); then
+            echo "::error::Duration must be at least one hour"
+            exit 1
+          fi
+          # The wait step allows one extra hour for Antithesis to publish the
+          # result. Leave another hour for this job's setup and cleanup within
+          # its 600-minute timeout.
+          if ((HOURS > 8)); then
+            echo "::error::Duration must be no more than 8 hours"
+            exit 1
+          fi
+          echo "hours=$HOURS" >> "$GITHUB_OUTPUT"
+
       - name: Checkout repository
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 https://github.com/actions/checkout/releases/tag/v7.0.0
+        with:
+          persist-credentials: false
 
-      - name: Get latest Moog release tag
+      - name: Resolve Moog release
         id: moog-release
         run: |
-          TAG="${MOOG_TAG_INPUT:-}"
-          if [ -z "$TAG" ]; then
-            TAG=$(gh api repos/cardano-foundation/moog/releases/latest --jq '.tag_name')
-          fi
+          TAG="${MOOG_TAG_INPUT:-v0.5.1.5}"
+          VERSION="${TAG#v}"
+          TAG="v${VERSION}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Moog release: $TAG"
         env:
-          GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_TAG_INPUT: ${{ github.event.inputs.moog_tag || vars.MOOG_TAG }}
+          MOOG_TAG_INPUT: ${{ inputs.moog_tag }}
 
       - name: Download and install Moog
         run: |
+          set -euo pipefail
+          ASSET="moog-${MOOG_VERSION}-x86_64-linux-musl.tar.gz"
+          CHECKSUMS="moog-${MOOG_VERSION}-x86_64-linux.SHA256SUMS"
           gh release download "$MOOG_TAG" \
             -R cardano-foundation/moog \
-            -p "moog-*-linux64.tar.gz" -O moog.tar.gz
-          tar xzf moog.tar.gz
+            -p "$ASSET" \
+            -p "$CHECKSUMS"
+          grep -F "  $ASSET" "$CHECKSUMS" | sha256sum --check --strict -
+          tar xzf "$ASSET"
           sudo install -m 0755 moog /usr/local/bin/moog
-          moog --version
+          moog --version | grep -F "moog $MOOG_VERSION"
         env:
           GH_TOKEN: ${{ secrets.MOOG_GITHUB_PAT }}
           MOOG_TAG: ${{ steps.moog-release.outputs.tag }}
+          MOOG_VERSION: ${{ steps.moog-release.outputs.version }}
 
       - name: Configure wallet
         run: echo "$MOOG_WALLET" | base64 -d > wallet.json
@@ -251,28 +299,47 @@ jobs:
           MOOG_WALLET: ${{ secrets.MOOG_REQUESTER_WALLET }}
 
       - name: Submit test to Antithesis
+        id: request
         run: |
+          set -euo pipefail
           NO_FAULTS_FLAG=""
           if [ "$NO_FAULTS" = "true" ]; then
             NO_FAULTS_FLAG="--no-faults"
           fi
-          echo "Submitting Antithesis test for commit ${GITHUB_SHA}..."
-          moog requester create-test \
+          # Try index must be unique per commit, so count existing runs for this
+          # commit and increment (matches io-ouroboros-leios antithesis-leios).
+          TRY=$(moog facts test-runs --whose "$MOOG_REQUESTER" \
+            | jq --arg sha "$GITHUB_SHA" 'map(select(.key.commitId == $sha)) | length')
+          TRY=$((TRY + 1))
+          echo "Submitting Antithesis test for commit ${GITHUB_SHA} (try $TRY, duration ${DURATION_HOURS}h)..."
+          # shellcheck disable=SC2086 # NO_FAULTS_FLAG intentionally word-splits
+          RESULT=$(moog requester create-test \
             -d "internal/test/antithesis/testnets/dingo-praos" \
             -c "${GITHUB_SHA}" \
             -r "${GITHUB_REPOSITORY}" \
-            -t "$DURATION" \
-            -y 1 \
-            $NO_FAULTS_FLAG
+            --try "$TRY" \
+            -t "$DURATION_HOURS" \
+            $NO_FAULTS_FLAG)
+          echo "$RESULT"
+          # moog can print an error envelope (e.g. {"exception": ...}) and still
+          # exit 0; a submission only truly launched if it returned a testRunId.
+          # jq -e fails the step (set -e) so a bad submit can't report false green.
+          ID=$(echo "$RESULT" | jq -e .value.testRunId | jq -r .)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "Launched Antithesis test run: $ID"
         env:
           MOOG_GITHUB_PAT: ${{ secrets.MOOG_GITHUB_PAT }}
-          MOOG_WALLET_FILE: wallet.json
-          MOOG_MPFS_HOST: ${{ vars.MOOG_MPFS_HOST || 'https://mpfs.plutimus.com' }}
-          MOOG_PLATFORM: github
-          MOOG_REQUESTER: ${{ vars.MOOG_REQUESTER }}
-          MOOG_TOKEN_ID: ${{ vars.MOOG_TOKEN_ID || '21c523c3b4565f1fc1ad7e54e82ca976f60997d8e7e9946826813fabf341069b' }} # not a secret
-          DURATION: ${{ inputs.duration || '3' }}
           NO_FAULTS: ${{ inputs.no_faults || 'false' }}
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
+
+      - name: Wait for results
+        run: |
+          timeout $(((DURATION_HOURS + 1) * 3600)) \
+            ./internal/test/antithesis/scripts/wait-for-test.sh \
+            "$ANTITHESIS_TEST_RUN_ID"
+        env:
+          DURATION_HOURS: ${{ steps.duration.outputs.hours }}
+          ANTITHESIS_TEST_RUN_ID: ${{ steps.request.outputs.id }}
 
       - name: Clean up wallet
         if: always()

@@ -376,66 +376,183 @@ func (o *Ouroboros) EndorserBlockTxsByHash(
 	return data.point.Slot, cloneRawMessages(data.txsRaw), true
 }
 
-// leiosEndorserTxCountForRankingBlock resolves the endorser block referenced
-// by a Dijkstra ranking block and returns its cached transaction count. The
-// ranking block references its endorser block through the Leios header
-// extension ([eb_hash, eb_size]) — NOT the block-level leios_cert, which is an
-// empty placeholder in the current Dijkstra CDDL. ok is true only when the
-// endorser block has been fetched and its full transaction set is cached.
-func (o *Ouroboros) leiosEndorserTxCountForRankingBlock(
+// EndorserBlockTxHashesByHash returns the manifest-order transaction hashes of
+// a complete cached endorser block. The forge loop uses this to build the
+// prototype-2026w29 post-certificate mempool view: transactions in the EB being
+// certified are excluded from the new EB announced by the same ranking block.
+func (o *Ouroboros) EndorserBlockTxHashesByHash(
+	ebHash []byte,
+) ([]string, bool) {
+	data, ok := o.lookupLeiosEndorserBlock(ebHash)
+	if !ok || !data.completeTxCache() {
+		return nil, false
+	}
+	block, err := lcommon.NewLeiosEndorserBlockFromCbor(data.blockRaw)
+	if err != nil {
+		return nil, false
+	}
+	hashes := make([]string, len(block.TransactionReferences))
+	for i, ref := range block.TransactionReferences {
+		hashes[i] = hex.EncodeToString(ref.TransactionHash.Bytes())
+	}
+	return hashes, true
+}
+
+// leiosAnnouncementFromBlockCbor returns the endorser block announced by the
+// given ranking block's header, if any. It works for both the Conway-tagged
+// (5-component) and Dijkstra (2-component) Musashi block shapes because the
+// header is element 0 in both, and the Leios-extended header decodes uniformly
+// via DijkstraBlockHeader.
+func leiosAnnouncementFromBlockCbor(
 	blockCbor []byte,
-) (lcommon.Blake2b256, int, bool) {
+) (lcommon.Blake2b256, bool) {
 	var top []cbor.RawMessage
 	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
-		return lcommon.Blake2b256{}, 0, false
+		return lcommon.Blake2b256{}, false
 	}
 	var header gdijkstra.DijkstraBlockHeader
 	if _, err := cbor.Decode(top[0], &header); err != nil {
-		return lcommon.Blake2b256{}, 0, false
+		return lcommon.Blake2b256{}, false
 	}
-	ebHash, _, ok := header.LeiosEndorserBlockRef()
+	ebHash, _, ok := header.LeiosAnnouncement()
 	if !ok {
-		return lcommon.Blake2b256{}, 0, false
+		return lcommon.Blake2b256{}, false
+	}
+	return ebHash, true
+}
+
+// resolveCertifiedEndorserTxs returns the endorser-block transactions that a
+// certifying ranking block (CertRB) inlines over node-to-client, or ok=false
+// when the block is not a CertRB or its endorser block is not fully available.
+//
+// As of prototype-2026w29 the endorser block a CertRB certifies is not named in
+// the CertRB itself: the CertRB carries a leios_certificate and empty
+// transaction segments, and the endorser block is the one announced by the
+// immediately-preceding block on the chain (the prototype's prevAnn mechanism;
+// see ouroboros-consensus MiniProtocol/ChainSync/Server.hs). We reproduce that
+// by resolving the parent via the header prev-hash and reading its
+// leios_announcement. In w29 the CertRB may independently announce a new EB;
+// that current announcement is not the certified closure resolved here.
+func (o *Ouroboros) resolveCertifiedEndorserTxs(
+	blockCbor []byte,
+) ([]cbor.RawMessage, bool) {
+	var top []cbor.RawMessage
+	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
+		return nil, false
+	}
+	var header gdijkstra.DijkstraBlockHeader
+	if _, err := cbor.Decode(top[0], &header); err != nil {
+		return nil, false
+	}
+	if cert, present := header.LeiosCertified(); !present || !cert {
+		return nil, false
+	}
+	if o.LedgerState == nil {
+		return nil, false
+	}
+	prevHash := header.PrevHash()
+	parent, err := o.LedgerState.BlockByHash(prevHash.Bytes())
+	if err != nil {
+		return nil, false
+	}
+	ebHash, ok := leiosAnnouncementFromBlockCbor(parent.Cbor)
+	if !ok {
+		return nil, false
 	}
 	data, found := o.lookupLeiosEndorserBlock(ebHash.Bytes())
 	if !found || !data.completeTxCache() {
-		return ebHash, 0, false
+		return nil, false
 	}
-	return ebHash, len(data.txsRaw), true
+	return cloneRawMessages(data.txsRaw), true
 }
 
-// The error return is always nil today but is part of this seam's contract for
-// future NtC representation work, and the caller already handles it.
+// spliceEndorserTxsIntoDijkstraBlock returns rankingBlockCbor with the endorser
+// block's transactions inlined into the ranking block's (empty) transaction
+// segment, matching the node-to-client "merged" block the prototype serves for
+// a certifying ranking block. The Dijkstra block is [header, block_body] with
+// block_body = [invalid_transactions, transactions, leios_certificate,
+// peras_certificate]; only the transactions element (index 1) is replaced. The
+// header, certificate, peras, and invalid-transactions elements are preserved
+// verbatim so the served block's hash (a hash of the header) is unchanged; the
+// header's block_body_hash intentionally no longer matches, which is acceptable
+// over node-to-client because local clients do not re-verify the body hash.
 //
-//nolint:unparam // error reserved for future NtC representation work
+// It returns an error (and the caller serves the raw block) when the block is
+// not a fillable CertRB shape: the top level must have two elements, the body
+// four, and the existing transactions segment must be empty. ebTxsRaw must be
+// complete Dijkstra transactions ([transaction_body, transaction_witness_set,
+// auxiliary_data/nil]) in endorser-block order.
+func spliceEndorserTxsIntoDijkstraBlock(
+	rankingBlockCbor []byte,
+	ebTxsRaw []cbor.RawMessage,
+) ([]byte, error) {
+	var top []cbor.RawMessage
+	if _, err := cbor.Decode(rankingBlockCbor, &top); err != nil {
+		return nil, fmt.Errorf("decode dijkstra block: %w", err)
+	}
+	if len(top) != 2 {
+		return nil, fmt.Errorf(
+			"dijkstra block has %d top-level elements, expected 2",
+			len(top),
+		)
+	}
+	var body []cbor.RawMessage
+	if _, err := cbor.Decode(top[1], &body); err != nil {
+		return nil, fmt.Errorf("decode dijkstra block body: %w", err)
+	}
+	if len(body) != 4 {
+		return nil, fmt.Errorf(
+			"dijkstra block body has %d elements, expected 4",
+			len(body),
+		)
+	}
+	var existingTxs []cbor.RawMessage
+	if _, err := cbor.Decode(body[1], &existingTxs); err != nil {
+		return nil, fmt.Errorf("decode dijkstra transactions: %w", err)
+	}
+	if len(existingTxs) != 0 {
+		return nil, fmt.Errorf(
+			"ranking block already has %d transactions; not a fillable CertRB",
+			len(existingTxs),
+		)
+	}
+	newTxs, err := cbor.Encode(ebTxsRaw)
+	if err != nil {
+		return nil, fmt.Errorf("encode endorser transactions: %w", err)
+	}
+	newBody, err := cbor.Encode([]cbor.RawMessage{
+		body[0], cbor.RawMessage(newTxs), body[2], body[3],
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode merged block body: %w", err)
+	}
+	merged, err := cbor.Encode([]cbor.RawMessage{
+		top[0], cbor.RawMessage(newBody),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode merged block: %w", err)
+	}
+	return merged, nil
+}
+
+// mergedLeiosRankingBlockCbor returns the node-to-client representation of a
+// ranking block. For a certifying ranking block it inlines the certified
+// endorser block's transactions (ok=true); every other block is returned
+// unchanged (ok=false). An error is returned only when a CertRB was identified
+// but its bytes could not be spliced, in which case the caller serves the raw
+// block.
 func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	blockCbor []byte,
 ) ([]byte, bool, error) {
-	// A Dijkstra ranking block references its endorser block via the Leios
-	// header extension ([eb_hash, eb_size]); the block-level leios_cert is an
-	// empty placeholder in the current Dijkstra CDDL and carries no reference.
-	// When the referenced endorser block (and its transactions) has been
-	// fetched, its transactions are the endorser-resident transactions whose
-	// outputs the ranking-block transactions spend.
-	//
-	// Applying those transactions to the ledger cannot be done by splicing them
-	// into the ranking-block CBOR: the header's block_body_hash covers only the
-	// ranking block's own body, so a spliced block would fail body-hash
-	// verification. Endorser-block transactions are applied by ledgerProcessBlock
-	// as a ledger-internal side delta when the referencing ranking block is
-	// processed. This NtC path therefore serves the original ranking-block CBOR
-	// and only logs whether a complete cached endorser block is available.
-	if ebHash, txCount, ok := o.leiosEndorserTxCountForRankingBlock(
-		blockCbor,
-	); ok {
-		o.config.Logger.Debug(
-			"ranking block has a fetched endorser block available for application",
-			"component", "network",
-			"endorser_block_hash", ebHash.String(),
-			"endorser_tx_count", txCount,
-		)
+	ebTxsRaw, ok := o.resolveCertifiedEndorserTxs(blockCbor)
+	if !ok {
+		return blockCbor, false, nil
 	}
-	return blockCbor, false, nil
+	merged, err := spliceEndorserTxsIntoDijkstraBlock(blockCbor, ebTxsRaw)
+	if err != nil {
+		return blockCbor, false, err
+	}
+	return merged, true, nil
 }
 
 func (o *Ouroboros) chainsyncServerBlockCbor(

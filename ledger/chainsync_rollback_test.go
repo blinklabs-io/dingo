@@ -289,11 +289,23 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 ) {
 	fixture := newChainsyncRollbackFixture(t)
 
+	// A genuinely un-crossable rollback point: a fork block below our tip
+	// that is not present in our chain. The loop detector must break the loop
+	// only for points the node cannot apply. A crossable point is instead
+	// applied even when it repeats (see
+	// TestHandleEventChainsyncRollbackAppliesRepeatedCrossableRollback and
+	// TestHandleEventChainsyncRollbackAppliesCrossableRollbackAtLoopThreshold),
+	// which is the issue #2790 fix.
+	uncrossablePoint := ocommon.Point{
+		Slot: fixture.currentTip.Point.Slot - 3,
+		Hash: testHashBytes("uncrossable-missing-fork-block"),
+	}
+
 	fixture.ls.rollbackHistory = []rollbackRecord{
 		{
 			point: ocommon.Point{
-				Slot: fixture.ancestorTip.Point.Slot,
-				Hash: append([]byte(nil), fixture.ancestorTip.Point.Hash...),
+				Slot: uncrossablePoint.Slot,
+				Hash: append([]byte(nil), uncrossablePoint.Hash...),
 			},
 			connKey:   connIdKey(fixture.connId),
 			timestamp: time.Now(),
@@ -303,7 +315,7 @@ func TestHandleEventChainsyncRollbackSkipsSamePeerLoop(
 	err := fixture.ls.handleEventChainsyncRollback(
 		ChainsyncEvent{
 			ConnectionId: fixture.connId,
-			Point:        fixture.ancestorTip.Point,
+			Point:        uncrossablePoint,
 		},
 	)
 	require.ErrorIs(t, err, ErrRollbackLoopDetected)
@@ -1663,6 +1675,7 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = append([]byte(nil), currentNonce...)
 	ls.chainsyncState = SyncingChainsyncState
+	ls.publishSnapshotsLocked()
 
 	connId := ouroboros.ConnectionId{
 		LocalAddr:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 6000},

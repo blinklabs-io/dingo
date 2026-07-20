@@ -33,6 +33,12 @@ type Block struct {
 }
 
 func (b Block) Decode() (ledger.Block, error) {
+	// Conway blocks may carry the Musashi/Leios extended header; route them
+	// through the Leios-aware decoder, which falls back to reconstructing the
+	// block only when gouroboros' strict Conway decode fails.
+	if b.Type == ledger.BlockTypeConway {
+		return DecodeConwayBlock(b.Cbor)
+	}
 	return ledger.NewBlockFromCbor(b.Type, b.Cbor)
 }
 

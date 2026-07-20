@@ -95,6 +95,20 @@ func (b *Blockfrost) handleRoot(
 	})
 }
 
+// handleNotFound handles any request that doesn't match a
+// registered route, including unimplemented endpoints.
+func (b *Blockfrost) handleNotFound(
+	w http.ResponseWriter,
+	_ *http.Request,
+) {
+	writeError(
+		w,
+		http.StatusNotFound,
+		"Not Found",
+		"The requested component has not been found.",
+	)
+}
+
 // handleHealth handles GET /health and returns node health
 // status.
 func (b *Blockfrost) handleHealth(
@@ -454,16 +468,82 @@ func (b *Blockfrost) handleAsset(
 	}
 
 	writeJSON(w, http.StatusOK, AssetResponse{
-		Asset:             asset.Asset,
-		PolicyID:          asset.PolicyID,
-		AssetName:         asset.AssetName,
-		AssetNameASCII:    asset.AssetNameASCII,
-		Fingerprint:       asset.Fingerprint,
-		Quantity:          asset.Quantity,
-		InitialMintTxHash: asset.InitialMintTxHash,
-		MintOrBurnCount:   asset.MintOrBurnCount,
-		OnchainMetadata:   asset.OnchainMetadata,
+		Asset:                   asset.Asset,
+		PolicyID:                asset.PolicyID,
+		AssetName:               asset.AssetName,
+		AssetNameASCII:          asset.AssetNameASCII,
+		Fingerprint:             asset.Fingerprint,
+		Quantity:                asset.Quantity,
+		InitialMintTxHash:       asset.InitialMintTxHash,
+		MintOrBurnCount:         asset.MintOrBurnCount,
+		OnchainMetadata:         asset.OnchainMetadata,
+		OnchainMetadataStandard: asset.OnchainMetadataStandard,
+		OnchainMetadataExtra:    asset.OnchainMetadataExtra,
+		Metadata:                asset.Metadata,
 	})
+}
+
+// handleAssetAddresses handles GET /api/v0/assets/{asset}/addresses and
+// returns paginated addresses currently holding the given asset.
+func (b *Blockfrost) handleAssetAddresses(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	params, ok := parsePaginationOrWriteError(w, r)
+	if !ok {
+		return
+	}
+	policyID, assetName, err := parseAssetIdentifier(
+		r.PathValue("asset"),
+	)
+	if err != nil {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"Bad Request",
+			"Invalid asset identifier.",
+		)
+		return
+	}
+	holders, total, err := b.node.AssetAddresses(policyID, assetName, params)
+	if err != nil {
+		if errors.Is(err, ErrAssetNotFound) {
+			writeError(
+				w,
+				http.StatusNotFound,
+				"Not Found",
+				"The requested asset could not be found.",
+			)
+			return
+		}
+		b.logger.Error(
+			"failed to get asset addresses",
+			"asset", r.PathValue("asset"),
+			"error", err,
+		)
+		writeError(
+			w,
+			http.StatusInternalServerError,
+			"Internal Server Error",
+			"failed to retrieve asset addresses",
+		)
+		return
+	}
+	if total == 0 {
+		writeError(
+			w,
+			http.StatusNotFound,
+			"Not Found",
+			"The requested asset could not be found.",
+		)
+		return
+	}
+	SetPaginationHeaders(w, total, params)
+	resp := make([]AssetAddressResponse, 0, len(holders))
+	for _, h := range holders {
+		resp = append(resp, AssetAddressResponse(h))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // handlePoolsExtended handles GET /api/v0/pools/extended
@@ -637,6 +717,7 @@ func (b *Blockfrost) handleAddressUTXOs(
 		resp = append(resp, AddressUTXOResponse{
 			Address:             utxo.Address,
 			TxHash:              utxo.TxHash,
+			TxIndex:             int(utxo.TxIndex),
 			OutputIndex:         int(utxo.OutputIndex),
 			Amount:              convertAddressAmounts(utxo.Amount),
 			Block:               utxo.Block,
@@ -1668,8 +1749,8 @@ func assetNameASCII(
 }
 
 func blockResponse(info BlockInfo) BlockResponse {
-	output := "0"
-	fees := "0"
+	output := info.Output
+	fees := info.Fees
 	return BlockResponse{
 		Hash:          info.Hash,
 		Slot:          info.Slot,
@@ -1684,8 +1765,10 @@ func blockResponse(info BlockInfo) BlockResponse {
 		Confirmations: info.Confirmations,
 		Output:        &output,
 		Fees:          &fees,
-		BlockVRF:      nil,
-		NextBlock:     nil,
+		BlockVRF:      info.BlockVRF,
+		OPCert:        info.OPCert,
+		OPCertCounter: info.OPCertCounter,
+		NextBlock:     info.NextBlock,
 	}
 }
 

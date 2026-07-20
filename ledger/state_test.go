@@ -968,7 +968,7 @@ func newNonceReadyTestLedgerState(
 ) *LedgerState {
 	t.Helper()
 
-	return &LedgerState{
+	ls := &LedgerState{
 		currentEra: eras.ShelleyEraDesc,
 		currentEpoch: models.Epoch{
 			EpochId:             10,
@@ -991,6 +991,8 @@ func newNonceReadyTestLedgerState(
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 func TestLedgerStateIsNearTipUsesStabilityWindow(t *testing.T) {
@@ -1111,6 +1113,7 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.True(t, ok)
@@ -1158,6 +1161,7 @@ func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
 			Logger:            slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	got := ls.computeNextEpochNonce(ls.currentEpoch, ls.currentEra)
 	require.Equal(t, candidateNonce, got)
@@ -1224,6 +1228,7 @@ func TestNextEpochNonceReadyEpochNotReadyBeforeCutoff(t *testing.T) {
 		},
 	}
 	ls.syncUpstreamTipSlot.Store(1100)
+	ls.publishSnapshotsLocked()
 
 	readyEpoch, ok := ls.NextEpochNonceReadyEpoch()
 	require.False(t, ok)
@@ -4049,6 +4054,7 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 			false,
 			false,
 			nil,
+			envelopeParent{},
 			nil,
 			eras.BabbageEraDesc,
 			nil,
@@ -4063,4 +4069,121 @@ func TestLedgerProcessBlockTracksOpCertSequenceByIssuerVkeyHash(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	require.Equal(t, uint64(4), sequence)
+}
+
+func TestLedgerProcessBlockContinuesWhenCertRBParentCannotBeResolved(
+	t *testing.T,
+) {
+	db := newTestDB(t)
+	certified, err := cbor.Encode(true)
+	require.NoError(t, err)
+	block := &dijkstra.DijkstraBlock{
+		BlockHeader: &dijkstra.DijkstraBlockHeader{
+			BabbageBlockHeader: babbage.BabbageBlockHeader{
+				Body: babbage.BabbageBlockHeaderBody{
+					BlockNumber: 2,
+					Slot:        10,
+					PrevHash: lcommon.NewBlake2b256(
+						[]byte("missing-cert-rb-parent"),
+					),
+				},
+			},
+			LeiosHeaderExtension: []cbor.RawMessage{certified},
+		},
+	}
+	ls := &LedgerState{
+		db: db,
+		config: LedgerStateConfig{
+			Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			EndorserBlockProvider: func(
+				[]byte,
+			) (uint64, []cbor.RawMessage, bool) {
+				return 0, nil, false
+			},
+		},
+	}
+
+	err = db.Transaction(true).Do(func(txn *database.Txn) error {
+		_, err := ls.ledgerProcessBlock(
+			txn,
+			ocommon.Point{Slot: block.SlotNumber()},
+			block,
+			false,
+			false,
+			nil,
+			envelopeParent{},
+			nil,
+			eras.DijkstraEraDesc,
+			nil,
+			nil,
+		)
+		return err
+	})
+	require.NoError(t, err)
+}
+
+func TestLogLeiosEndorserBlockApplyResultDistinguishesEmptyBlock(
+	t *testing.T,
+) {
+	tests := []struct {
+		name     string
+		applyTxs bool
+		ebTxs    []cbor.RawMessage
+		applied  int
+		want     string
+		notWant  []string
+	}{
+		{
+			name:     "empty CIP block",
+			applyTxs: true,
+			want:     "Leios endorser block has no transactions",
+			notWant: []string{
+				"skipped already-applied Leios endorser block transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
+		},
+		{
+			name:     "CIP deduplicated block",
+			applyTxs: true,
+			ebTxs:    []cbor.RawMessage{{0x80}},
+			want:     "skipped already-applied Leios endorser block transactions",
+			notWant:  []string{"Leios endorser block has no transactions"},
+		},
+		{
+			name:  "Haskell deduplicated block",
+			ebTxs: []cbor.RawMessage{{0x80}},
+			want:  "skipped already-applied Leios endorser block transactions",
+			notWant: []string{
+				"Leios endorser block has no transactions",
+				"stored Leios endorser block without applying to UTxO",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var logBuf bytes.Buffer
+			ls := &LedgerState{
+				config: LedgerStateConfig{
+					LeiosApplyEndorserBlockTxs: tc.applyTxs,
+					Logger: slog.New(slog.NewTextHandler(
+						&logBuf,
+						&slog.HandlerOptions{Level: slog.LevelDebug},
+					)),
+				},
+			}
+
+			ls.logLeiosEndorserBlockApplyResult(
+				ocommon.Point{Slot: 10},
+				20,
+				tc.ebTxs,
+				tc.applied,
+			)
+
+			logs := logBuf.String()
+			assert.Contains(t, logs, tc.want)
+			for _, notWant := range tc.notWant {
+				assert.NotContains(t, logs, notWant)
+			}
+		})
+	}
 }

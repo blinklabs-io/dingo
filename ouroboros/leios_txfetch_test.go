@@ -53,8 +53,10 @@ func (r *cappingBlockTxsRequester) BlockTxsRequest(
 	}
 	served := map[uint16]uint64{}
 	txs := make([]cbor.RawMessage, 0, n)
-	for k := 0; k < n; k++ {
-		idx := requested[k]
+	for k, idx := range requested {
+		if k >= n {
+			break
+		}
 		served[uint16(idx/64)] |= 1 << uint(63-(idx%64)) // MSB-first, see leiosWindowNeededMask
 		enc, err := cbor.Encode(idx)
 		if err != nil {

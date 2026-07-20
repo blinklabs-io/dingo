@@ -335,6 +335,13 @@ func (d *MetadataStorePostgres) Start() error {
 			"account reward delta slot index migration failed: %w", err,
 		)
 	}
+	if err := models.MigrateRewardLiveStakePoolIndex(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward live stake pool index migration failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children
@@ -347,6 +354,14 @@ func (d *MetadataStorePostgres) Start() error {
 			"purging orphaned cascade rows failed: %w", err,
 		)
 	}
+	// Attempt the one-time account.created_slot backfill whenever the account
+	// table predates this process. BackfillAccountCreatedSlot is gated
+	// internally on a durable backfill_checkpoint marker, so it scans once and
+	// is crash-safe: an interrupted run (column added but backfill unfinished)
+	// is retried on the next startup instead of silently stranding rows at 0.
+	// On a fresh database the account table does not exist yet, so there is
+	// nothing to backfill.
+	backfillAccountCreatedSlot := d.db.Migrator().HasTable(&models.Account{})
 	// Create table schemas
 	d.logger.Debug(
 		"creating table",
@@ -369,6 +384,13 @@ func (d *MetadataStorePostgres) Start() error {
 		)
 		if err := d.db.AutoMigrate(model); err != nil {
 			return err
+		}
+	}
+	if backfillAccountCreatedSlot {
+		if err := models.BackfillAccountCreatedSlot(d.db, d.logger); err != nil {
+			return fmt.Errorf(
+				"account created_slot backfill failed: %w", err,
+			)
 		}
 	}
 	return nil
@@ -435,9 +457,15 @@ func (d *MetadataStorePostgres) Transaction() types.Txn {
 	return newPostgresTxn(db)
 }
 
-// ReadTransaction creates a read-only transaction.
+// ReadTransaction creates a read-only transaction with repeatable-read
+// isolation, so every statement run through it observes one consistent
+// snapshot for its whole lifetime instead of the server default (READ
+// COMMITTED), under which two statements in the same read-only transaction
+// can otherwise observe different commits. Read-only REPEATABLE READ
+// transactions cannot hit serialization failures (there is nothing for them
+// to conflict with), so this raises consistency at no retry cost.
 func (d *MetadataStorePostgres) ReadTransaction() types.Txn {
-	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true})
+	db := d.DB().Begin(&sql.TxOptions{ReadOnly: true, Isolation: sql.LevelRepeatableRead})
 	if db.Error != nil {
 		d.logger.Error(
 			"failed to begin read transaction",

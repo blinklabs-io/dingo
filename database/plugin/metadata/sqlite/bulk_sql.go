@@ -61,7 +61,7 @@ var (
 	}
 	transactionCols = []string{
 		"hash", "block_hash", "metadata", "slot", "type",
-		"fee", "ttl", "block_index", "valid",
+		"fee", "collateral_fee", "ttl", "block_index", "valid",
 	}
 )
 
@@ -96,7 +96,7 @@ func appendAssetRow(dst []any, a *models.Asset) []any {
 func appendTransactionRow(dst []any, t *models.Transaction) []any {
 	return append(dst,
 		t.Hash, t.BlockHash, t.Metadata, t.Slot, t.Type,
-		t.Fee, t.TTL, t.BlockIndex, t.Valid,
+		t.Fee, t.CollateralFee, t.TTL, t.BlockIndex, t.Valid,
 	)
 }
 

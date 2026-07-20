@@ -67,6 +67,7 @@ type mockTransaction struct {
 	outputs      []lcommon.TransactionOutput
 	collReturn   lcommon.TransactionOutput
 	withdrawals  map[*lcommon.Address]*big.Int
+	mint         *lcommon.MultiAsset[lcommon.MultiAssetTypeMint]
 }
 
 func (m *mockTransaction) Hash() lcommon.Blake2b256 {
@@ -134,7 +135,7 @@ func (m *mockTransaction) ProtocolParameterUpdates() (uint64, map[lcommon.Blake2
 }
 
 func (m *mockTransaction) AssetMint() *lcommon.MultiAsset[lcommon.MultiAssetTypeMint] {
-	return nil
+	return m.mint
 }
 
 func (m *mockTransaction) AuxDataHash() *lcommon.Blake2b256 {
@@ -1419,7 +1420,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			}
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x31}, 28)
 		poolHash1 := []byte("pool_hash_1_12345678901234567890123456789012")
 		poolHash2 := []byte("pool_hash_2_12345678901234567890123456789012")
 
@@ -1548,7 +1549,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_active_test_12345678901234567890")
+			stakingKey := bytes.Repeat([]byte{0x32}, 28)
 
 			// Create an account that is currently inactive (deregistered at slot 2000)
 			account := models.Account{
@@ -1648,7 +1649,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 				}
 			}
 
-			stakingKey := []byte("staking_key_inactive_test_123456789012345678")
+			stakingKey := bytes.Repeat([]byte{0x33}, 28)
 
 			// Create an account that was re-registered at slot 2000 (currently active)
 			account := models.Account{
@@ -1767,7 +1768,7 @@ func TestRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte("staking_key_test_1234567890123456789012345678")
+		stakingKey := bytes.Repeat([]byte{0x34}, 28)
 
 		// Create an account registered at slot 2000 (after rollback point)
 		account := models.Account{
@@ -2970,6 +2971,70 @@ func TestGetActivePoolKeyHashesAtSlot(t *testing.T) {
 			}
 			if len(hashes) != 1 {
 				t.Errorf("expected 1 hash (pool active after re-registration in same slot), got %d", len(hashes))
+			}
+		})
+
+		t.Run("synthetic retirement supersedes same slot registration", func(t *testing.T) {
+			sqliteStore := setupTestDB(t)
+
+			epoch := models.Epoch{
+				EpochId:       10,
+				StartSlot:     0,
+				EraId:         1,
+				SlotLength:    1,
+				LengthInSlots: 43200,
+			}
+			if result := sqliteStore.DB().Create(&epoch); result.Error != nil {
+				t.Fatalf("failed to create epoch: %v", result.Error)
+			}
+
+			poolHash := []byte("pool_key_hash_01234567890123")
+			pool := models.Pool{PoolKeyHash: poolHash}
+			if result := sqliteStore.DB().Create(&pool); result.Error != nil {
+				t.Fatalf("failed to create pool: %v", result.Error)
+			}
+
+			tx1 := models.Transaction{ID: 1, Slot: 1000, Hash: []byte("tx1_hash_12345678901234567890")}
+			if result := sqliteStore.DB().Create(&tx1); result.Error != nil {
+				t.Fatalf("failed to create tx1: %v", result.Error)
+			}
+			regCert := models.Certificate{
+				ID:            200,
+				TransactionID: tx1.ID,
+				Slot:          1000,
+				CertIndex:     1,
+			}
+			if result := sqliteStore.DB().Create(&regCert); result.Error != nil {
+				t.Fatalf("failed to create registration cert: %v", result.Error)
+			}
+
+			poolReg := models.PoolRegistration{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				CertificateID: regCert.ID,
+			}
+			if result := sqliteStore.DB().Create(&poolReg); result.Error != nil {
+				t.Fatalf("failed to create pool registration: %v", result.Error)
+			}
+
+			poolRet := models.PoolRetirement{
+				PoolID:        pool.ID,
+				PoolKeyHash:   poolHash,
+				AddedSlot:     1000,
+				Epoch:         10,
+				CertificateID: 0,
+			}
+			if result := sqliteStore.DB().Create(&poolRet); result.Error != nil {
+				t.Fatalf("failed to create pool retirement: %v", result.Error)
+			}
+
+			hashes, err := sqliteStore.GetActivePoolKeyHashesAtSlot(1000, nil)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(hashes) != 0 {
+				t.Errorf("expected 0 hashes (synthetic retirement wins same-slot ordering), got %d", len(hashes))
 			}
 		})
 

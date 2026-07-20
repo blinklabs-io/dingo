@@ -275,6 +275,67 @@ func TestChainBlockBeforeSlotUsesCanonicalChainIndex(t *testing.T) {
 	}
 }
 
+// TestChainBlockBeforeSlotBinarySearchBoundaries exercises the binary-search
+// boundary logic across a multi-block chain (testBlocks have slots 0, 20, 40,
+// 60, 80, 100): below all, at a block slot, between blocks, and above the tip.
+// It guards the #2771 change from the linear backward walk to a binary search.
+func TestChainBlockBeforeSlotBinarySearchBoundaries(t *testing.T) {
+	db, err := database.New(dbConfig)
+	if err != nil {
+		t.Fatalf("unexpected error creating database: %s", err)
+	}
+	defer db.Close()
+
+	cm, err := chain.NewManager(db, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	for i, testBlock := range testBlocks {
+		if err := c.AddBlock(testBlock, nil); err != nil {
+			t.Fatalf("unexpected error adding block %d: %s", i, err)
+		}
+	}
+
+	testCases := []struct {
+		name      string
+		slot      uint64
+		wantFound bool
+		wantSlot  uint64
+	}{
+		{name: "below all blocks", slot: 0, wantFound: false},
+		{name: "just above genesis", slot: 1, wantFound: true, wantSlot: 0},
+		{name: "at a block slot returns the prior block", slot: 20, wantFound: true, wantSlot: 0},
+		{name: "just above a block slot", slot: 21, wantFound: true, wantSlot: 20},
+		{name: "between blocks", slot: 55, wantFound: true, wantSlot: 40},
+		{name: "just above the tip", slot: 101, wantFound: true, wantSlot: 100},
+		{name: "far above the tip", slot: 100_000, wantFound: true, wantSlot: 100},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			block, err := c.BlockBeforeSlot(tc.slot)
+			if !tc.wantFound {
+				if !errors.Is(err, models.ErrBlockNotFound) {
+					t.Fatalf(
+						"slot %d: expected ErrBlockNotFound, got slot=%d err=%v",
+						tc.slot, block.Slot, err,
+					)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("slot %d: unexpected error: %s", tc.slot, err)
+			}
+			if block.Slot != tc.wantSlot {
+				t.Fatalf(
+					"slot %d: got block slot %d, want %d",
+					tc.slot, block.Slot, tc.wantSlot,
+				)
+			}
+		})
+	}
+}
+
 func TestChainIteratorReverseFromTipInclusive(t *testing.T) {
 	cm, err := chain.NewManager(nil, nil)
 	if err != nil {
@@ -833,6 +894,34 @@ func TestChainHeaderRange(t *testing.T) {
 			testEndBlock.SlotNumber(),
 			testEndBlock.Hash().String(),
 		)
+	}
+}
+
+func TestChainFirstVerifiedHeaderMatchesPointRequiresVerifiedHeader(t *testing.T) {
+	cm, err := chain.NewManager(nil, nil)
+	if err != nil {
+		t.Fatalf("unexpected error creating chain manager: %s", err)
+	}
+	c := cm.PrimaryChain()
+	header := testBlocks[0]
+	point := ocommon.NewPoint(header.SlotNumber(), header.Hash().Bytes())
+
+	if err := c.AddBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding header to chain: %s", err)
+	}
+	if !c.FirstHeaderMatchesPoint(point) {
+		t.Fatal("expected first header to match point")
+	}
+	if c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("unverified header must not satisfy verified match")
+	}
+
+	c.ClearHeaders()
+	if err := c.AddVerifiedBlockHeader(header); err != nil {
+		t.Fatalf("unexpected error adding verified header to chain: %s", err)
+	}
+	if !c.FirstVerifiedHeaderMatchesPoint(point) {
+		t.Fatal("verified header should satisfy verified match")
 	}
 }
 

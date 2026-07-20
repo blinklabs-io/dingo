@@ -15,11 +15,13 @@
 package dingo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"math/big"
 
+	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/forging"
 	"github.com/blinklabs-io/dingo/ledger/leios"
@@ -72,22 +74,62 @@ func (a *leiosCommitteeParamsAdapter) LeiosCommitteeParameters() (
 			pparams,
 		)
 	}
+	return leiosCommitteeParamsFromPParams(dijkstraPParams)
+}
+
+// CIP-0164 default Leios committee parameters, used when the Dijkstra
+// genesis / protocol parameters do not configure them. The Dijkstra genesis
+// is immutable network configuration and the current cardano-ledger
+// DijkstraGenesis does not carry these fields at all — the musashi/prototype
+// genesis defines only the refScript parameters — so the reference
+// implementation falls back to the CIP-0164 defaults internally rather than
+// reading them from genesis. dingo mirrors that here so committee formation
+// and certification work without modifying the (hash-pinned) genesis file.
+//   - committee stake coverage (sigma_c) = 0.99 (top-stake coverage)
+//   - quorum stake threshold  (tau)     = 0.75 ("75% certification threshold")
+//
+// A genesis that does configure either field overrides the corresponding
+// default. See issue #2836.
+var (
+	defaultLeiosCommitteeStakeCoverage = big.NewRat(99, 100)
+	defaultLeiosQuorumStakeThreshold   = big.NewRat(3, 4)
+)
+
+// leiosCommitteeParamsFromPParams resolves the Leios committee stake coverage
+// (sigma_c) and quorum stake threshold (tau) from Dijkstra protocol
+// parameters, falling back to the CIP-0164 defaults for any field the genesis
+// leaves unset (see defaultLeiosCommitteeStakeCoverage /
+// defaultLeiosQuorumStakeThreshold). It revalidates the configured values via
+// ValidateLeiosCommitteeParameters and re-checks the tau < sigma_c invariant
+// after applying defaults so a partial genesis configuration cannot yield an
+// invalid combination. Both returned values are always non-nil, which is what
+// lets committee formation and certification proceed on the prototype/musashi
+// deployment whose genesis carries only the refScript fields (issue #2836).
+func leiosCommitteeParamsFromPParams(
+	dijkstraPParams *gdijkstra.DijkstraProtocolParameters,
+) (*big.Rat, *big.Rat, error) {
 	if err := dijkstraPParams.ValidateLeiosCommitteeParameters(); err != nil {
 		return nil, nil, err
 	}
-	sigmaC := dijkstraPParams.CommitteeStakeCoverage
-	tau := dijkstraPParams.QuorumStakeThreshold
-	if sigmaC == nil || sigmaC.Rat == nil {
-		return nil, nil, errors.New(
-			"leios committee stake coverage is not configured",
+	// Return fresh copies so callers cannot mutate the shared defaults.
+	sigmaC := new(big.Rat).Set(defaultLeiosCommitteeStakeCoverage)
+	if cov := dijkstraPParams.CommitteeStakeCoverage; cov != nil && cov.Rat != nil {
+		sigmaC = cov.Rat
+	}
+	tau := new(big.Rat).Set(defaultLeiosQuorumStakeThreshold)
+	if quorum := dijkstraPParams.QuorumStakeThreshold; quorum != nil && quorum.Rat != nil {
+		tau = quorum.Rat
+	}
+	// Defaulting a single unset field against a configured counterpart could
+	// break the tau < sigma_c invariant that ValidateLeiosCommitteeParameters
+	// only enforces across configured values; re-check after defaulting.
+	if tau.Cmp(sigmaC) >= 0 {
+		return nil, nil, fmt.Errorf(
+			"leios quorum stake threshold (%s) must be less than committee stake coverage (%s)",
+			tau.RatString(), sigmaC.RatString(),
 		)
 	}
-	if tau == nil || tau.Rat == nil {
-		return nil, nil, errors.New(
-			"leios quorum stake threshold is not configured",
-		)
-	}
-	return sigmaC.Rat, tau.Rat, nil
+	return sigmaC, tau, nil
 }
 
 // initLeiosVoteManager builds and starts the Leios vote manager and wires
@@ -112,6 +154,7 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 		ParamsProvider: &leiosCommitteeParamsAdapter{
 			ledgerState: n.ledgerState,
 		},
+		PrototypeMode: true,
 		// LedgerState satisfies leios.SlotProvider directly; the slot
 		// window keeps fabricated far-past/future votes away from
 		// committee computation and the stake snapshot queries behind
@@ -132,10 +175,18 @@ func (n *Node) initLeiosVoteManager(ctx context.Context) error {
 	}
 	n.leiosVoteManager = mgr
 	n.ouroboros.LeiosVotes = mgr
+	n.eventBus.SubscribeFunc(leios.VoteEmittedEventType, func(evt event.Event) {
+		data, ok := evt.Data.(leios.VoteEmittedEvent)
+		if !ok {
+			return
+		}
+		n.ouroboros.EnqueueLeiosPrototypeVote(data.Vote)
+	})
 	if n.config.leiosVoteSigningKeyFile != "" && !n.config.blockProducer {
 		n.config.logger.Warn(
 			"leios vote signing key configured without block producer mode; voting disabled",
-			"component", "node",
+			"component",
+			"node",
 		)
 	}
 	return nil
@@ -178,26 +229,37 @@ func (n *Node) initLeiosPipelineManager(ctx context.Context) error {
 	return nil
 }
 
-// enableLeiosVoting loads the configured vote signing key and enables
-// vote emission for the block producer's pool. A configured but
-// unreadable or invalid key is fatal.
+// enableLeiosVoting enables vote emission for the block producer's pool.
+// The current prototype derives the temporary BLS key from the pool ID. A
+// configured key is accepted only when it matches that derivation.
 func (n *Node) enableLeiosVoting(creds *forging.PoolCredentials) error {
-	if n.leiosVoteManager == nil ||
-		n.config.leiosVoteSigningKeyFile == "" {
+	if n.leiosVoteManager == nil {
 		return nil
 	}
 	if creds == nil {
 		return errors.New("nil pool credentials")
 	}
-	key, err := leios.LoadVoteSigningKeyFile(
-		n.config.leiosVoteSigningKeyFile,
-	)
-	if err != nil {
-		return fmt.Errorf("load leios vote signing key: %w", err)
-	}
 	poolID := creds.GetPoolID()
 	var poolKeyHash lcommon.PoolKeyHash
 	copy(poolKeyHash[:], poolID[:])
+	key, err := leios.DerivePrototypeVoteSigningKey(poolKeyHash[:])
+	if err != nil {
+		return fmt.Errorf("derive prototype leios vote signing key: %w", err)
+	}
+	if n.config.leiosVoteSigningKeyFile != "" {
+		configured, loadErr := leios.LoadVoteSigningKeyFile(
+			n.config.leiosVoteSigningKeyFile,
+		)
+		if loadErr != nil {
+			return fmt.Errorf("load leios vote signing key: %w", loadErr)
+		}
+		if !bytes.Equal(configured.PublicKeyBytes(), key.PublicKeyBytes()) {
+			return errors.New(
+				"configured leios vote signing key does not match " +
+					"the current prototype's pool-derived key",
+			)
+		}
+	}
 	n.leiosVoteManager.EnableVoting(poolKeyHash, key)
 	n.config.logger.Info(
 		"leios voting enabled",

@@ -221,8 +221,11 @@ func dedupeRelayCandidates(candidates []string) []string {
 // Returns true if the peer was added, false if it already exists or is denied.
 func (p *PeerGovernor) addLedgerPeer(address string) bool {
 	// Resolve address (with DNS lookup) before acquiring lock to avoid
-	// blocking while holding the mutex
-	normalized := p.resolveAddress(address)
+	// blocking while holding the mutex. Ledger relay hostnames are
+	// attacker-supplied, and resolveLedgerDialTarget's fast path dials
+	// whatever ends up here unchanged for the peer's whole lifetime, so this
+	// (unlike resolveAddress) filters to a locally-dialable address family.
+	normalized := p.resolveLedgerDiscoveryAddress(address)
 
 	// Reject non-routable IPs (private, loopback, link-local, etc.)
 	if !isRoutableAddr(normalized) {

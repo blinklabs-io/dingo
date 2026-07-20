@@ -18,9 +18,12 @@ package postgres
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,12 +31,16 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/blinklabs-io/plutigo/data"
+	"github.com/stretchr/testify/require"
 	"github.com/utxorpc/go-codegen/utxorpc/v1alpha/cardano"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // TestTable is a simple table for testing concurrent transactions
@@ -47,6 +54,10 @@ type mockTransaction struct {
 	isValid      bool
 	produced     []lcommon.Utxo
 	collReturn   lcommon.TransactionOutput
+	inputs       []lcommon.TransactionInput
+	collateral   []lcommon.TransactionInput
+	refInputs    []lcommon.TransactionInput
+	consumed     []lcommon.TransactionInput
 	withdrawals  map[*lcommon.Address]*big.Int
 }
 
@@ -99,11 +110,11 @@ func (m *mockTransaction) Outputs() []lcommon.TransactionOutput {
 }
 
 func (m *mockTransaction) Inputs() []lcommon.TransactionInput {
-	return nil
+	return m.inputs
 }
 
 func (m *mockTransaction) Collateral() []lcommon.TransactionInput {
-	return nil
+	return m.collateral
 }
 
 func (m *mockTransaction) Certificates() []lcommon.Certificate {
@@ -127,7 +138,7 @@ func (m *mockTransaction) Cbor() []byte {
 }
 
 func (m *mockTransaction) Consumed() []lcommon.TransactionInput {
-	return nil
+	return m.consumed
 }
 
 func (m *mockTransaction) Witnesses() lcommon.TransactionWitnessSet {
@@ -139,7 +150,7 @@ func (m *mockTransaction) ValidityIntervalStart() uint64 {
 }
 
 func (m *mockTransaction) ReferenceInputs() []lcommon.TransactionInput {
-	return nil
+	return m.refInputs
 }
 
 func (m *mockTransaction) TotalCollateral() *big.Int {
@@ -180,6 +191,65 @@ func (m *mockTransaction) Utxorpc() (*cardano.Tx, error) {
 
 func (m *mockTransaction) LeiosHash() lcommon.Blake2b256 {
 	return lcommon.Blake2b256{}
+}
+
+type setTransactionSQLRecorder struct {
+	mu         sync.Mutex
+	statements []string
+}
+
+func (r *setTransactionSQLRecorder) LogMode(
+	gormlogger.LogLevel,
+) gormlogger.Interface {
+	return r
+}
+
+func (*setTransactionSQLRecorder) Info(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Warn(context.Context, string, ...any) {}
+
+func (*setTransactionSQLRecorder) Error(context.Context, string, ...any) {}
+
+func (r *setTransactionSQLRecorder) Trace(
+	_ context.Context,
+	_ time.Time,
+	fc func() (string, int64),
+	_ error,
+) {
+	sql, _ := fc()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statements = append(r.statements, sql)
+}
+
+func (r *setTransactionSQLRecorder) countUtxoLookupSelects() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	count := 0
+	for _, stmt := range r.statements {
+		normalized := strings.ToUpper(stmt)
+		if strings.Contains(normalized, "SELECT *") &&
+			strings.Contains(normalized, "FROM \"UTXO\"") {
+			count++
+		}
+	}
+	return count
+}
+
+// testHash32 creates a 32-byte test hash from a seed string.
+// Used for block hashes, transaction hashes, and other Blake2b256 values.
+func testHash32(seed string) []byte {
+	hash := make([]byte, 32)
+	copy(hash, []byte(seed))
+	return hash
+}
+
+// testHash28 creates a 28-byte test hash from a seed string.
+// Used for staking keys, credentials, and other Blake2b224 values.
+func testHash28(seed string) []byte {
+	hash := make([]byte, 28)
+	copy(hash, []byte(seed))
+	return hash
 }
 
 type mockTransactionInput struct {
@@ -477,6 +547,136 @@ func TestPostgresMultipleTransaction(t *testing.T) {
 	}
 }
 
+// TestPostgresSetTransactionBatchesMultiInputUtxoLookups verifies multi-input,
+// collateral, and reference-input processing uses bounded UTxO SELECTs.
+func TestPostgresSetTransactionBatchesMultiInputUtxoLookups(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+	store.storageMode = types.StorageModeAPI
+
+	makeTxID := func(seed byte) []byte {
+		return bytes.Repeat([]byte{seed}, 32)
+	}
+	makeInput := func(seed byte, idx uint32) lcommon.TransactionInput {
+		return dbtestutil.NewMockInput(makeTxID(seed), idx)
+	}
+
+	// Seed UTxOs for regular inputs, collateral, and reference inputs.
+	utxos := make([]models.Utxo, 0, 7)
+	for i := 0; i < 7; i++ {
+		utxos = append(utxos, models.Utxo{
+			TxId:       makeTxID(byte(0x60 + i)),
+			OutputIdx:  uint32(i),
+			AddedSlot:  100,
+			PaymentKey: bytes.Repeat([]byte{byte(0x10 + i)}, 28),
+			StakingKey: bytes.Repeat([]byte{byte(0x20 + i)}, 28),
+			Amount:     types.Uint64(1_000_000 + i),
+		})
+	}
+	if result := store.DB().Create(&utxos); result.Error != nil {
+		t.Fatalf("create utxos: %v", result.Error)
+	}
+
+	// Record SQL executed by SetTransaction so UTxO SELECTs can be counted.
+	recorder := &setTransactionSQLRecorder{}
+	store.db = store.DB().Session(&gorm.Session{Logger: recorder})
+
+	// Build a transaction containing multiple items in every input class.
+	txHash := lcommon.NewBlake2b256(bytes.Repeat([]byte{0x91}, 32))
+	defer func() {
+		cleanupDB := store.DB()
+		for i := 0; i < 7; i++ {
+			seedTxID := makeTxID(byte(0x60 + i))
+			if result := cleanupDB.Model(&models.Utxo{}).
+				Where("tx_id = ?", seedTxID).
+				Updates(map[string]any{
+					"collateral_by_tx_id": nil,
+					"referenced_by_tx_id": nil,
+					"spent_at_tx_id":      nil,
+					"deleted_slot":        0,
+				}); result.Error != nil {
+				t.Errorf("cleanup utxo refs: %v", result.Error)
+			}
+			if result := cleanupDB.
+				Where("tx_id = ?", seedTxID).
+				Delete(&models.Utxo{}); result.Error != nil {
+				t.Errorf("cleanup utxo: %v", result.Error)
+			}
+		}
+		if result := cleanupDB.
+			Where("hash = ?", txHash.Bytes()).
+			Delete(&models.Transaction{}); result.Error != nil {
+			t.Errorf("cleanup transaction: %v", result.Error)
+		}
+	}()
+	tx := &mockTransaction{
+		hash:    txHash,
+		isValid: true,
+		inputs: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+		collateral: []lcommon.TransactionInput{
+			makeInput(0x63, 3),
+			makeInput(0x64, 4),
+		},
+		refInputs: []lcommon.TransactionInput{
+			makeInput(0x65, 5),
+			makeInput(0x66, 6),
+		},
+		consumed: []lcommon.TransactionInput{
+			makeInput(0x60, 0),
+			makeInput(0x61, 1),
+			makeInput(0x62, 2),
+		},
+	}
+	point := ocommon.NewPoint(200, bytes.Repeat([]byte{0x92}, 32))
+
+	// Process the transaction through the regular SetTransaction path.
+	if err := store.SetTransaction(tx, point, 0, nil, nil); err != nil {
+		t.Fatalf("set transaction: %v", err)
+	}
+
+	// Verify exactly one batch SELECT was used per input class.
+	if got := recorder.countUtxoLookupSelects(); got != 3 {
+		t.Fatalf("expected 3 batched UTxO SELECTs, got %d", got)
+	}
+
+	// Verify all regular inputs were marked as spent.
+	var spent int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("spent_at_tx_id = ?", txHash.Bytes()).
+		Count(&spent); result.Error != nil {
+		t.Fatalf("count spent utxos: %v", result.Error)
+	}
+	if spent != 3 {
+		t.Fatalf("expected 3 spent UTxOs, got %d", spent)
+	}
+
+	// Verify all collateral inputs were linked to the transaction.
+	var collateral int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("collateral_by_tx_id = ?", txHash.Bytes()).
+		Count(&collateral); result.Error != nil {
+		t.Fatalf("count collateral utxos: %v", result.Error)
+	}
+	if collateral != 2 {
+		t.Fatalf("expected 2 collateral UTxOs, got %d", collateral)
+	}
+
+	// Verify all reference inputs were linked to the transaction.
+	var referenced int64
+	if result := store.DB().Model(&models.Utxo{}).
+		Where("referenced_by_tx_id = ?", txHash.Bytes()).
+		Count(&referenced); result.Error != nil {
+		t.Fatalf("count reference input utxos: %v", result.Error)
+	}
+	if referenced != 2 {
+		t.Fatalf("expected 2 reference input UTxOs, got %d", referenced)
+	}
+}
+
 func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 	store := newTestPostgresStore(t)
 	defer store.Close() //nolint:errcheck
@@ -572,6 +772,116 @@ func TestPostgresSetTransactionWithdrawalsClearRewardBalance(t *testing.T) {
 	}
 }
 
+// TestPostgresConcurrentWithdrawalReplayAtDifferentSlots verifies the account
+// row lock serializes the slot-independent withdrawal replay check. The
+// account_reward_delta unique index includes added_slot for credit events, so
+// the database constraint alone cannot reject these two replay rows.
+func TestPostgresConcurrentWithdrawalReplayAtDifferentSlots(t *testing.T) {
+	store := newTestPostgresStore(t)
+	defer store.Close() //nolint:errcheck
+
+	stakeKey := bytes.Repeat([]byte{0xE3}, lcommon.AddressHashSize)
+	txHash := bytes.Repeat([]byte{0x73}, 32)
+	if result := store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).Delete(&models.AccountRewardDelta{}); result.Error != nil {
+		t.Fatalf("delete stale reward deltas: %v", result.Error)
+	}
+	if result := store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeKey,
+	).Delete(&models.Account{}); result.Error != nil {
+		t.Fatalf("delete stale account: %v", result.Error)
+	}
+	account := &models.Account{
+		StakingKey:    stakeKey,
+		CredentialTag: 0,
+		Reward:        types.Uint64(100),
+		Active:        true,
+	}
+	if result := store.DB().Create(account); result.Error != nil {
+		t.Fatalf("create account: %v", result.Error)
+	}
+
+	// Hold the account lock while both withdrawals reach their locking read.
+	// This makes the race deterministic: without the lock in the implementation,
+	// both calls pass the replay check and instead block later on the UPDATE.
+	blocker := store.DB().Begin()
+	if blocker.Error != nil {
+		t.Fatalf("begin blocker transaction: %v", blocker.Error)
+	}
+	t.Cleanup(func() { _ = blocker.Rollback().Error })
+	var lockedAccount models.Account
+	if err := blocker.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", account.ID).
+		First(&lockedAccount).Error; err != nil {
+		t.Fatalf("lock account: %v", err)
+	}
+
+	errCh := make(chan error, 2)
+	for _, slot := range []uint64{100, 300} {
+		go func(slot uint64) {
+			errCh <- store.ApplyAccountRewardWithdrawal(
+				0, stakeKey, 100, slot, txHash, nil,
+			)
+		}(slot)
+	}
+
+	dbtestutil.WaitForCondition(t, func() bool {
+		var blocked int64
+		result := store.DB().Raw(`
+			SELECT COUNT(*)
+			FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'`,
+		).Scan(&blocked)
+		return result.Error == nil && blocked >= 2
+	}, 5*time.Second, "both withdrawal transactions to wait on the account lock")
+
+	if err := blocker.Commit().Error; err != nil {
+		t.Fatalf("release account lock: %v", err)
+	}
+	for range 2 {
+		if err := dbtestutil.RequireReceive(
+			t, errCh, 5*time.Second, "concurrent withdrawal result",
+		); err != nil {
+			t.Fatalf("apply concurrent withdrawal: %v", err)
+		}
+	}
+
+	var deltas []models.AccountRewardDelta
+	if result := store.DB().Where(
+		"withdrawal = ? AND tx_hash = ? AND credential_tag = ? AND staking_key = ?",
+		true, txHash, 0, stakeKey,
+	).Find(&deltas); result.Error != nil {
+		t.Fatalf("get withdrawal deltas: %v", result.Error)
+	}
+	if len(deltas) != 1 {
+		t.Fatalf("expected one withdrawal delta, got %d", len(deltas))
+	}
+	if deltas[0].PreviousReward != account.Reward {
+		t.Fatalf(
+			"expected previous reward %d, got %d",
+			uint64(account.Reward),
+			uint64(deltas[0].PreviousReward),
+		)
+	}
+	if err := store.DeleteAccountRewardsAfterSlot(99, nil); err != nil {
+		t.Fatalf("rollback withdrawal: %v", err)
+	}
+	var restored models.Account
+	if result := store.DB().Where("id = ?", account.ID).First(&restored); result.Error != nil {
+		t.Fatalf("get account after rollback: %v", result.Error)
+	}
+	if restored.Reward != account.Reward {
+		t.Fatalf(
+			"expected rollback to restore reward %d once, got %d",
+			uint64(account.Reward),
+			uint64(restored.Reward),
+		)
+	}
+}
+
 // TestPostgresUnifiedCertificateCreation tests that unified certificate records are created
 // correctly and linked to specialized certificate records
 func TestPostgresUnifiedCertificateCreation(t *testing.T) {
@@ -587,7 +897,7 @@ func TestPostgresUnifiedCertificateCreation(t *testing.T) {
 	// Create a mock transaction with certificates
 	mockTx := &mockTransaction{
 		hash: lcommon.NewBlake2b256(
-			[]byte("test_hash_1234567890123456789012345678901234567890"),
+			testHash32("test_hash"),
 		),
 		isValid: true,
 		certificates: []lcommon.Certificate{
@@ -596,27 +906,27 @@ func TestPostgresUnifiedCertificateCreation(t *testing.T) {
 				StakeCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("stake_key_hash_1234567890123456789012345678"),
+						testHash28("stake_key_hash_1"),
 					),
 				},
 			},
 			&lcommon.PoolRegistrationCertificate{
 				CertType: uint(lcommon.CertificateTypePoolRegistration),
 				Operator: lcommon.PoolKeyHash(
-					[]byte("pool_key_hash_1234567890123456789012345678"),
+					testHash28("pool_key_hash_1"),
 				),
 				VrfKeyHash: lcommon.VrfKeyHash(
-					[]byte("vrf_key_hash_12345678901234567890123456789012"),
+					testHash32("vrf_key_hash_1"),
 				),
 				Pledge: 1000000,
 				Cost:   340000000,
 				Margin: cbor.Rat{Rat: big.NewRat(1, 100)},
 				RewardAccount: lcommon.AddrKeyHash(
-					[]byte("reward_account_1234567890123456789012345678"),
+					testHash28("reward_account_1"),
 				),
 				PoolOwners: []lcommon.AddrKeyHash{
 					lcommon.AddrKeyHash(
-						[]byte("owner1_1234567890123456789012345678"),
+						testHash28("owner1"),
 					),
 				},
 			},
@@ -625,13 +935,13 @@ func TestPostgresUnifiedCertificateCreation(t *testing.T) {
 				ColdCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("cold_cred_hash_1234567890123456789012345678"),
+						testHash28("cold_cred_hash_1"),
 					),
 				},
 				HotCredential: lcommon.Credential{
 					CredType: lcommon.CredentialTypeAddrKeyHash,
 					Credential: lcommon.CredentialHash(
-						[]byte("hot_cred_hash_1234567890123456789012345678"),
+						testHash28("hot_cred_hash_1"),
 					),
 				},
 			},
@@ -639,7 +949,7 @@ func TestPostgresUnifiedCertificateCreation(t *testing.T) {
 	}
 
 	point := ocommon.Point{
-		Hash: []byte("block_hash_12345678901234567890123456789012"),
+		Hash: testHash32("block_hash_1"),
 		Slot: 1000000,
 	}
 
@@ -765,7 +1075,7 @@ func TestPostgresSetAccountPreservesCertificateID(t *testing.T) {
 	pgStore := newTestPostgresStore(t)
 	defer pgStore.Close() //nolint:errcheck
 
-	stakeKey := []byte("test_stake_key_123456789012345678901234567890")
+	stakeKey := bytes.Repeat([]byte{0x31}, lcommon.AddressHashSize)
 
 	// First, create an account with a CertificateID via direct DB access
 	account := &models.Account{
@@ -838,13 +1148,13 @@ func TestPostgresFeeConversion(t *testing.T) {
 	// Test with nil Fee
 	mockTxNilFee := &mockTransactionNilFee{
 		hash: lcommon.NewBlake2b256(
-			[]byte("nil_fee_tx_hash_12345678901234567890"),
+			testHash32("nil_fee_tx_hash"),
 		),
 		isValid: true,
 	}
 
 	point := ocommon.Point{
-		Hash: []byte("block_hash_nil_fee_test_1234567890123456"),
+		Hash: testHash32("block_hash_nil_fee"),
 		Slot: 2000000,
 	}
 
@@ -1004,21 +1314,13 @@ func (m *mockTransactionNilFee) LeiosHash() lcommon.Blake2b256 {
 
 // createTestTransactionPg is a helper to create a Transaction record for FK constraints in postgres tests
 func createTestTransactionPg(db *gorm.DB, id uint, slot uint64) error {
+	idText := strconv.FormatUint(uint64(id), 10)
+	slotText := strconv.FormatUint(slot, 10)
 	tx := models.Transaction{
-		Hash: []byte(
-			"tx_hash_" + strconv.FormatUint(
-				uint64(id),
-				10,
-			) + "_123456789012345678901234567890",
-		),
-		BlockHash: []byte(
-			"block_hash_" + strconv.FormatUint(
-				slot,
-				10,
-			) + "_12345678901234567890123456789012",
-		),
-		Slot:  slot,
-		Valid: true,
+		Hash:      testHash32("tx_hash_" + idText),
+		BlockHash: testHash32("block_hash_" + slotText),
+		Slot:      slot,
+		Valid:     true,
 	}
 	tx.ID = id
 	return db.Create(&tx).Error
@@ -1058,8 +1360,8 @@ func TestPostgresDeleteCertificatesAfterSlot(t *testing.T) {
 
 	stakeReg1 := models.StakeDelegation{
 		CertificateID: cert1.ID,
-		StakingKey:    []byte("stake_key_1_1234567890123456789012345678"),
-		PoolKeyHash:   []byte("pool_hash_1_12345678901234567890123456789012"),
+		StakingKey:    testHash28("stake_key_1"),
+		PoolKeyHash:   testHash28("pool_hash_1"),
 		AddedSlot:     1000,
 	}
 	if result := pgStore.DB().Create(&stakeReg1); result.Error != nil {
@@ -1082,8 +1384,8 @@ func TestPostgresDeleteCertificatesAfterSlot(t *testing.T) {
 
 	stakeReg2 := models.StakeDelegation{
 		CertificateID: cert2.ID,
-		StakingKey:    []byte("stake_key_2_1234567890123456789012345678"),
-		PoolKeyHash:   []byte("pool_hash_2_12345678901234567890123456789012"),
+		StakingKey:    testHash28("stake_key_2"),
+		PoolKeyHash:   testHash28("pool_hash_2"),
 		AddedSlot:     2000,
 	}
 	if result := pgStore.DB().Create(&stakeReg2); result.Error != nil {
@@ -1156,18 +1458,14 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 			t.Fatalf("failed to create transaction: %v", err)
 		}
 
-		stakingKey := []byte(
-			"staking_key_test_12345678901234567890123456789012",
-		)
+		stakingKey := bytes.Repeat([]byte{0x32}, lcommon.AddressHashSize)
 		pool1 := []byte("pool1_12345678901234567890123456789012")
 		pool2 := []byte("pool2_12345678901234567890123456789012")
 
 		// Create registration certificate at slot 1000
 		regCert := models.Certificate{
-			Slot: 1000,
-			BlockHash: []byte(
-				"block_hash_1000_12345678901234567890123456789012",
-			),
+			Slot:          1000,
+			BlockHash:     testHash32("block_hash_1000"),
 			CertType:      uint(lcommon.CertificateTypeStakeRegistration),
 			TransactionID: 100,
 			CertIndex:     0,
@@ -1183,10 +1481,8 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 
 		// Create delegation to pool1 at slot 2000
 		delCert1 := models.Certificate{
-			Slot: 2000,
-			BlockHash: []byte(
-				"block_hash_2000_12345678901234567890123456789012",
-			),
+			Slot:          2000,
+			BlockHash:     testHash32("block_hash_2000"),
 			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 			TransactionID: 101,
 			CertIndex:     0,
@@ -1203,10 +1499,8 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 
 		// Create delegation to pool2 at slot 3000
 		delCert2 := models.Certificate{
-			Slot: 3000,
-			BlockHash: []byte(
-				"block_hash_3000_12345678901234567890123456789012",
-			),
+			Slot:          3000,
+			BlockHash:     testHash32("block_hash_3000"),
 			CertType:      uint(lcommon.CertificateTypeStakeDelegation),
 			TransactionID: 102,
 			CertIndex:     0,
@@ -1260,7 +1554,7 @@ func TestPostgresRestoreAccountStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.Account{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
-		stakingKey := []byte("staking_key_new_12345678901234567890123456789012")
+		stakingKey := bytes.Repeat([]byte{0x33}, lcommon.AddressHashSize)
 
 		// Create account registered at slot 2000 (no prior registration)
 		account := models.Account{
@@ -1411,7 +1705,7 @@ func TestPostgresRestorePoolStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.PoolRegistration{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Pool{})
 
-		poolKeyHash := []byte("pool_key_hash_12345678901234567890123456789012")
+		poolKeyHash := testHash28("pool_key_hash")
 
 		// Create pool registered at slot 2000
 		pool := models.Pool{
@@ -1454,7 +1748,7 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 		pgStore.DB().Where("1 = 1").Delete(&models.RegistrationDrep{})
 		pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
 
-		drepCred := []byte("drep_credential_12345678901234567890123456789012")
+		drepCred := testHash28("drep_credential")
 
 		// Create DRep registered at slot 2000
 		drep := models.Drep{
@@ -1494,9 +1788,7 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 			pgStore.DB().Where("1 = 1").Delete(&models.Drep{})
 			pgStore.DB().Where("1 = 1").Delete(&models.Transaction{})
 
-			drepCred := []byte(
-				"drep_credential_12345678901234567890123456789012",
-			)
+			drepCred := testHash28("drep_credential")
 
 			// Create transactions
 			if err := createTestTransactionPg(pgStore.DB(), 200, 1000); err != nil {
@@ -1508,10 +1800,8 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 
 			// Create registration at slot 1000
 			regCert := models.Certificate{
-				Slot: 1000,
-				BlockHash: []byte(
-					"block_hash_1000_12345678901234567890123456789012",
-				),
+				Slot:          1000,
+				BlockHash:     testHash32("block_hash_1000"),
 				CertType:      uint(lcommon.CertificateTypeRegistrationDrep),
 				TransactionID: 200,
 				CertIndex:     0,
@@ -1522,19 +1812,15 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 				CertificateID:  regCert.ID,
 				DrepCredential: drepCred,
 				AnchorURL:      "https://example.com/drep1",
-				AnchorHash: []byte(
-					"anchor_hash_1_12345678901234567890123456789012",
-				),
-				AddedSlot: 1000,
+				AnchorHash:     testHash32("anchor_hash_1"),
+				AddedSlot:      1000,
 			}
 			pgStore.DB().Create(&drepReg)
 
 			// Create update at slot 2000 with different anchor
 			updateCert := models.Certificate{
-				Slot: 2000,
-				BlockHash: []byte(
-					"block_hash_2000_12345678901234567890123456789012",
-				),
+				Slot:          2000,
+				BlockHash:     testHash32("block_hash_2000"),
 				CertType:      uint(lcommon.CertificateTypeUpdateDrep),
 				TransactionID: 201,
 				CertIndex:     0,
@@ -1545,10 +1831,8 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 				CertificateID: updateCert.ID,
 				Credential:    drepCred,
 				AnchorURL:     "https://example.com/drep2",
-				AnchorHash: []byte(
-					"anchor_hash_2_12345678901234567890123456789012",
-				),
-				AddedSlot: 2000,
+				AnchorHash:    testHash32("anchor_hash_2"),
+				AddedSlot:     2000,
 			}
 			pgStore.DB().Create(&drepUpdate)
 
@@ -1556,11 +1840,9 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 			drep := models.Drep{
 				Credential: drepCred,
 				AnchorURL:  "https://example.com/drep2",
-				AnchorHash: []byte(
-					"anchor_hash_2_12345678901234567890123456789012",
-				),
-				AddedSlot: 2000,
-				Active:    true,
+				AnchorHash: testHash32("anchor_hash_2"),
+				AddedSlot:  2000,
+				Active:     true,
 			}
 			pgStore.DB().Create(&drep)
 
@@ -1584,4 +1866,135 @@ func TestPostgresRestoreDrepStateAtSlot(t *testing.T) {
 			}
 		},
 	)
+}
+
+// TestPostgresRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits proves the
+// AddAccountRewardByCredential delta-update path (a single UPDATE of
+// reward_stake/total_stake, added as an efficiency fix for the epoch-boundary
+// reward rollover which credits ~every delegator's account) computes exact
+// totals against real Postgres across two sequential credits, and leaves
+// every other reward_live_stake column untouched. reward_stake/total_stake
+// are stored as text decimal strings, so this also proves the
+// CAST(...AS BIGINT)/CAST(...AS TEXT) delta SQL round-trips correctly.
+func TestPostgresRewardLiveStakeCreditDeltaIsExactAcrossTwoCredits(t *testing.T) {
+	store := newTestPostgresStore(t)
+
+	poolA := bytes.Repeat([]byte{0x8a}, 28)
+	stakeA := bytes.Repeat([]byte{0x8b}, 28)
+	utxoHash := bytes.Repeat([]byte{0x8c}, 32)
+
+	cleanup := func() {
+		db := store.DB()
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.RewardLiveStake{})
+		db.Where("credential_tag = ? AND staking_key = ?", 0, stakeA).
+			Delete(&models.AccountRewardDelta{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Utxo{})
+		db.Where("staking_key = ?", stakeA).
+			Delete(&models.Account{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.PoolRegistration{})
+		db.Where("pool_key_hash = ?", poolA).
+			Delete(&models.Pool{})
+	}
+	cleanup()
+	t.Cleanup(func() {
+		cleanup()
+		_ = store.Close()
+	})
+
+	pool := models.Pool{PoolKeyHash: poolA}
+	require.NoError(t, store.DB().
+		Where("pool_key_hash = ?", poolA).
+		FirstOrCreate(&pool).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolA,
+		AddedSlot:   0,
+	}).Error)
+
+	require.NoError(t, store.CreateAccount(nil, &models.Account{
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Pool:          poolA,
+		Reward:        1_000,
+		Active:        true,
+		AddedSlot:     10,
+	}))
+	require.NoError(t, store.CreateUtxo(nil, &models.Utxo{
+		TxId:          utxoHash,
+		OutputIdx:     0,
+		StakingKey:    stakeA,
+		CredentialTag: 0,
+		Amount:        2_000_000,
+		AddedSlot:     10,
+	}))
+
+	// Sanity: the row already exists before crediting, so both credits below
+	// exercise the delta-update path rather than falling back to a full
+	// refresh (which only happens when no row exists yet).
+	var seeded models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&seeded).Error)
+	require.Equal(t, types.Uint64(1_000), seeded.RewardStake)
+	require.Equal(t, types.Uint64(2_000_000), seeded.UtxoStake)
+	require.Equal(t, types.Uint64(2_001_000), seeded.TotalStake)
+
+	const credit1 = uint64(500_000_000)
+	const credit2 = uint64(123_456_789)
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit1, 11, bytes.Repeat([]byte{0x01}, 32), nil,
+	))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0, stakeA, credit2, 12, bytes.Repeat([]byte{0x02}, 32), nil,
+	))
+
+	wantReward := types.Uint64(1_000 + credit1 + credit2)
+	wantTotal := types.Uint64(2_000_000 + 1_000 + credit1 + credit2)
+
+	var got models.RewardLiveStake
+	require.NoError(t, store.DB().Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&got).Error)
+	require.Equal(
+		t, wantReward, got.RewardStake,
+		"reward_stake must equal the exact sum of both credits",
+	)
+	require.Equal(
+		t, wantTotal, got.TotalStake,
+		"total_stake must equal the exact sum of utxo_stake and both credits",
+	)
+	require.Equal(
+		t, types.Uint64(2_000_000), got.UtxoStake,
+		"utxo_stake must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, poolA, got.PoolKeyHash,
+		"pool delegation must be untouched by the reward-credit delta",
+	)
+	require.True(
+		t, got.Registered,
+		"registered flag must be untouched by the reward-credit delta",
+	)
+	require.Equal(
+		t, uint64(12), got.UpdatedSlot,
+		"updated_slot must reflect the latest credit's slot",
+	)
+
+	// Cross-check against ground truth: a full rebuild from source tables
+	// must land on the exact same totals the delta path produced.
+	txn, err := store.BeginTxn()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = txn.Rollback() })
+	require.NoError(t, store.RebuildRewardLiveStake(12, txn))
+	txnDB, err := store.resolveDB(txn)
+	require.NoError(t, err)
+	var rebuilt models.RewardLiveStake
+	require.NoError(t, txnDB.Where(
+		"credential_tag = ? AND staking_key = ?", 0, stakeA,
+	).First(&rebuilt).Error)
+	require.Equal(t, wantReward, rebuilt.RewardStake)
+	require.Equal(t, wantTotal, rebuilt.TotalStake)
 }

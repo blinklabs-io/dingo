@@ -21,6 +21,29 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+// GetPoolStakeSnapshotsByEpoch returns all pool stake snapshots of
+// snapshotType for the given epoch.
+func (d *Database) GetPoolStakeSnapshotsByEpoch(
+	epoch uint64,
+	snapshotType string,
+	txn *Txn,
+) ([]*models.PoolStakeSnapshot, error) {
+	if !models.ValidPoolStakeSnapshotType(snapshotType) {
+		return nil, fmt.Errorf(
+			"get pool stake snapshots by epoch: invalid snapshot type %q",
+			snapshotType,
+		)
+	}
+	if txn == nil {
+		return d.metadata.GetPoolStakeSnapshotsByEpoch(epoch, snapshotType, nil)
+	}
+	return d.metadata.GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		snapshotType,
+		txn.Metadata(),
+	)
+}
+
 // ResolvePoolRewardAccountAutoVotes classifies each PoolStakeSnapshot
 // with the CIP-1694 reward-account DRep-delegation outcome and writes
 // the result onto snapshot.RewardAccountAutoVote in place. Callers

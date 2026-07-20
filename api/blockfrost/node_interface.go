@@ -140,6 +140,14 @@ type BlockfrostNode interface {
 		assetName []byte,
 	) (AssetInfo, error)
 
+	// AssetAddresses returns paginated addresses currently holding the given
+	// asset, along with the total holder count before pagination.
+	AssetAddresses(
+		policyID string,
+		assetName []byte,
+		params PaginationParams,
+	) ([]AssetHolderInfo, int, error)
+
 	// DRep returns governance DRep information for a parsed
 	// DRep credential.
 	DRep(DRepCredential) (DRepInfo, error)
@@ -197,6 +205,22 @@ type BlockInfo struct {
 	SlotLeader    string
 	PreviousBlock string
 	Confirmations uint64
+	// Output is the total lovelace output of the block's transactions.
+	Output string
+	// Fees is the total lovelace fees of the block's transactions.
+	Fees string
+	// BlockVRF is the bech32-encoded (vrf_vk) VRF verification key from the
+	// Praos/TPraos header, or nil for Byron/unknown headers.
+	BlockVRF *string
+	// OPCert is the hex-encoded operational certificate hot vkey, or nil for
+	// Byron/unknown headers.
+	OPCert *string
+	// OPCertCounter is the operational certificate issue counter as a decimal
+	// string, or nil for Byron/unknown headers.
+	OPCertCounter *string
+	// NextBlock is the hash of the block that builds on this one, or nil when
+	// this block is the chain tip.
+	NextBlock *string
 }
 
 // EpochInfo holds epoch data needed by the API.
@@ -359,8 +383,11 @@ type AddressAmountInfo struct {
 // AddressUTXOInfo holds address UTxO data needed by the
 // API.
 type AddressUTXOInfo struct {
-	Address             string
-	TxHash              string
+	Address string
+	TxHash  string
+	// TxIndex is the deprecated Blockfrost alias for OutputIndex (the UTxO's
+	// index within its producing transaction); it carries the same value.
+	TxIndex             uint32
 	OutputIndex         uint32
 	Amount              []AddressAmountInfo
 	Block               string
@@ -549,15 +576,24 @@ type TransactionRequiredSignerInfo struct {
 
 // AssetInfo holds native asset data needed by the API.
 type AssetInfo struct {
-	Asset             string
-	PolicyID          string
-	AssetName         string
-	AssetNameASCII    string
-	Fingerprint       string
-	Quantity          string
-	InitialMintTxHash string
-	MintOrBurnCount   int
-	OnchainMetadata   *any
+	OnchainMetadata         *any
+	OnchainMetadataStandard *string
+	OnchainMetadataExtra    *string
+	Metadata                *any
+	Asset                   string
+	PolicyID                string
+	AssetName               string
+	AssetNameASCII          string
+	Fingerprint             string
+	Quantity                string
+	InitialMintTxHash       string
+	MintOrBurnCount         int
+}
+
+// AssetHolderInfo holds address and quantity data for a single asset holder.
+type AssetHolderInfo struct {
+	Address  string
+	Quantity string
 }
 
 // DRepCredential holds a parsed governance DRep identifier.

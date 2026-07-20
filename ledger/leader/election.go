@@ -57,8 +57,10 @@ type EpochInfoProvider interface {
 	// for the normal nonce-ready event path instead.
 	NextEpochNonceReadyEpoch() (uint64, bool)
 
-	// SlotsPerEpoch returns the number of slots in an epoch.
-	SlotsPerEpoch() uint64
+	// EpochSlotRange returns the absolute slot range for an epoch, resolved
+	// against the ledger hard-fork summary so Byron prefixes and variable
+	// epoch lengths are respected.
+	EpochSlotRange(epoch uint64) (EpochSlotRange, error)
 
 	// EpochForSlot returns the epoch containing slot, resolved against
 	// the ledger hard-fork summary so era boundaries and variable epoch
@@ -546,6 +548,27 @@ func (e *Election) validatePersistedSchedule(
 		return false, "epoch nonce changed", nil
 	}
 
+	epochRange, err := e.epochProvider.EpochSlotRange(epoch)
+	if err != nil {
+		return false, "", fmt.Errorf("get epoch slot range: %w", err)
+	}
+	if epochRange.SlotCount == 0 {
+		return false, "epoch slot count is zero", nil
+	}
+	if epochRange.StartSlot > ^uint64(0)-epochRange.SlotCount {
+		return false, "", fmt.Errorf(
+			"epoch slot range overflows uint64: start=%d count=%d",
+			epochRange.StartSlot,
+			epochRange.SlotCount,
+		)
+	}
+	epochEndSlot := epochRange.StartSlot + epochRange.SlotCount
+	for _, slot := range schedule.LeaderSlotsSnapshot() {
+		if slot < epochRange.StartSlot || slot >= epochEndSlot {
+			return false, "leader slot outside epoch range", nil
+		}
+	}
+
 	snapshotEpoch := praos.StakeSnapshotEpoch(epoch)
 	poolStake, err := e.stakeProvider.GetPoolStake(snapshotEpoch, e.poolId[:])
 	if err != nil {
@@ -675,16 +698,19 @@ func (e *Election) computeSchedule(
 		return nil, nil
 	}
 
-	calc := NewCalculator(
-		e.epochProvider.ActiveSlotCoeff(),
-		e.epochProvider.SlotsPerEpoch(),
-	)
+	epochRange, err := e.epochProvider.EpochSlotRange(currentEpoch)
+	if err != nil {
+		return nil, fmt.Errorf("get epoch slot range: %w", err)
+	}
+
+	calc := NewCalculator(e.epochProvider.ActiveSlotCoeff())
 
 	mode := e.epochProvider.ConsensusModeForEpoch(currentEpoch)
 
 	vrfEvalStart := time.Now()
 	schedule, err := calc.CalculateSchedule(
 		currentEpoch,
+		epochRange,
 		e.poolId,
 		e.poolVrfSkey,
 		poolStake,
@@ -711,7 +737,7 @@ func (e *Election) computeSchedule(
 		"leader_slot_list", schedule.LeaderSlotsSnapshot(),
 	)
 	if e.metrics != nil {
-		slotsChecked := e.epochProvider.SlotsPerEpoch()
+		slotsChecked := epochRange.SlotCount
 		slotsWon := uint64(len(schedule.LeaderSlotsSnapshot()))
 		slotsNotWon := uint64(0)
 		if slotsWon <= slotsChecked {

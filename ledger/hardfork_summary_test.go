@@ -55,6 +55,7 @@ func TestHardForkSummary_SingleEra(t *testing.T) {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
@@ -89,6 +90,7 @@ func TestHardForkSummary_TwoEras(t *testing.T) {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
 
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
@@ -127,6 +129,7 @@ func TestHardForkSummary_EmptyCache(t *testing.T) {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	_, err := ls.HardForkSummary()
 	assert.Error(t, err)
 }
@@ -143,6 +146,7 @@ func TestHardForkSummary_MissingShelleyGenesis(t *testing.T) {
 		},
 		config: LedgerStateConfig{CardanoNodeConfig: &cardano.CardanoNodeConfig{}},
 	}
+	ls.publishSnapshotsLocked()
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
 	assert.True(t, sum.SystemStart.IsZero(),
@@ -164,6 +168,7 @@ func TestHardForkSummary_CarriesTransitionInfo(t *testing.T) {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
 	sum, err := ls.HardForkSummary()
 	require.NoError(t, err)
 	assert.Equal(t, hardfork.NewTransitionKnown(7), sum.Transition)

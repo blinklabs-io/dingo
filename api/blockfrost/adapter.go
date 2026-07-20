@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/allegra"
 	"github.com/blinklabs-io/gouroboros/ledger/alonzo"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -42,6 +43,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	"github.com/blinklabs-io/gouroboros/ledger/mary"
 	"github.com/blinklabs-io/gouroboros/ledger/shelley"
+	"github.com/btcsuite/btcd/btcutil/bech32"
 )
 
 var (
@@ -304,6 +306,29 @@ func (a *NodeAdapter) blockInfoFromBlock(
 	if tip.BlockNumber >= block.Number {
 		confirmations = tip.BlockNumber - block.Number
 	}
+
+	output, fees, err := a.blockOutputAndFees(block.Hash)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"aggregate output and fees for block %x: %w",
+			block.Hash,
+			err,
+		)
+	}
+
+	blockVRF, opCert, opCertCounter := praosHeaderFields(
+		decodedBlock.Header(),
+	)
+
+	nextBlock, err := a.nextBlockHash(block.Number, tip.BlockNumber)
+	if err != nil {
+		return BlockInfo{}, fmt.Errorf(
+			"resolve next block for block %x: %w",
+			block.Hash,
+			err,
+		)
+	}
+
 	return BlockInfo{
 		Hash:      hex.EncodeToString(block.Hash),
 		Slot:      block.Slot,
@@ -320,7 +345,149 @@ func (a *NodeAdapter) blockInfoFromBlock(
 			block.PrevHash,
 		),
 		Confirmations: confirmations,
+		Output:        output,
+		Fees:          fees,
+		BlockVRF:      blockVRF,
+		OPCert:        opCert,
+		OPCertCounter: opCertCounter,
+		NextBlock:     nextBlock,
 	}, nil
+}
+
+// blockOutputAndFees aggregates the total lovelace output and fees across all
+// transactions in a block. Fees are summed from each transaction's recorded
+// fee. For phase-2 invalid transactions, the collateral return (rather than the
+// discarded outputs) counts toward the block output, matching the
+// per-transaction endpoint.
+func (a *NodeAdapter) blockOutputAndFees(
+	blockHash []byte,
+) (output string, fees string, err error) {
+	txs, err := a.ledgerState.GetTransactionsByBlockHash(blockHash)
+	if err != nil {
+		return "", "", fmt.Errorf(
+			"get transactions for block %x: %w",
+			blockHash,
+			err,
+		)
+	}
+	// Accumulate in big.Int: a block's summed lovelace is bounded by the ADA
+	// supply and stays well under uint64 in practice, but big.Int keeps the
+	// response totals correct even if a chained aggregate ever exceeds uint64
+	// rather than silently wrapping.
+	totalOutput := new(big.Int)
+	totalFees := new(big.Int)
+	for _, tx := range txs {
+		totalFees.Add(totalFees, new(big.Int).SetUint64(uint64(tx.Fee)))
+		outputs := tx.Outputs
+		if !tx.Valid && tx.CollateralReturn != nil {
+			outputs = []models.Utxo{*tx.CollateralReturn}
+		}
+		for _, out := range outputs {
+			totalOutput.Add(
+				totalOutput,
+				new(big.Int).SetUint64(uint64(out.Amount)),
+			)
+		}
+	}
+	return totalOutput.String(), totalFees.String(), nil
+}
+
+// nextBlockHash returns the hash of the block that directly follows the block
+// at the given height, or nil when the block is the chain tip (no successor).
+func (a *NodeAdapter) nextBlockHash(
+	height uint64,
+	tipHeight uint64,
+) (*string, error) {
+	if height >= tipHeight {
+		return nil, nil
+	}
+	// Dingo's blob block index is 1-based (BlockInitialIndex) while Cardano
+	// block heights are 0-based, so the successor's internal index is
+	// height + BlockInitialIndex + 1.
+	if height > math.MaxUint64-database.BlockInitialIndex-1 {
+		return nil, nil
+	}
+	next, err := a.ledgerState.Database().BlockByIndex(
+		height+database.BlockInitialIndex+1,
+		nil,
+	)
+	if err != nil {
+		if errors.Is(err, models.ErrBlockNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	hash := hex.EncodeToString(next.Hash)
+	return &hash, nil
+}
+
+// praosHeaderFields extracts the Blockfrost block_vrf, op_cert, and
+// op_cert_counter values from a Praos/TPraos block header. Byron and unknown
+// headers carry none of these, so all three returns are nil.
+func praosHeaderFields(
+	header gledger.BlockHeader,
+) (blockVRF *string, opCert *string, opCertCounter *string) {
+	var vrfKey, opCertHotVkey []byte
+	var counter uint64
+	switch h := header.(type) {
+	case *shelley.ShelleyBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *allegra.AllegraBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *mary.MaryBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *alonzo.AlonzoBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCertHotVkey
+		counter = uint64(h.Body.OpCertSequenceNumber)
+	case *babbage.BabbageBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	case *conway.ConwayBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	case *dijkstra.DijkstraBlockHeader:
+		vrfKey = h.Body.VrfKey
+		opCertHotVkey = h.Body.OpCert.HotVkey
+		counter = uint64(h.Body.OpCert.SequenceNumber)
+	default:
+		// Byron and unknown headers have no Praos/TPraos header fields.
+		return nil, nil, nil
+	}
+	if len(vrfKey) > 0 {
+		if encoded, err := bech32EncodeData("vrf_vk", vrfKey); err == nil {
+			blockVRF = &encoded
+		}
+	}
+	if len(opCertHotVkey) > 0 {
+		hexCert := hex.EncodeToString(opCertHotVkey)
+		opCert = &hexCert
+	}
+	counterStr := strconv.FormatUint(counter, 10)
+	opCertCounter = &counterStr
+	return blockVRF, opCert, opCertCounter
+}
+
+// bech32EncodeData bech32-encodes raw 8-bit data under the given human-readable
+// prefix, converting to the 5-bit groups bech32 requires.
+func bech32EncodeData(hrp string, data []byte) (string, error) {
+	conv, err := bech32.ConvertBits(data, 8, 5, true)
+	if err != nil {
+		return "", fmt.Errorf("convert bits: %w", err)
+	}
+	encoded, err := bech32.Encode(hrp, conv)
+	if err != nil {
+		return "", fmt.Errorf("bech32 encode: %w", err)
+	}
+	return encoded, nil
 }
 
 // LatestBlockTxHashes returns transaction hashes from the
@@ -773,17 +940,204 @@ func (a *NodeAdapter) Asset(
 		)
 	}
 
-	return AssetInfo{
-		Asset:             policyID + hex.EncodeToString(assetName),
-		PolicyID:          policyID,
-		AssetName:         hex.EncodeToString(assetName),
-		AssetNameASCII:    assetNameASCII(assetName),
-		Fingerprint:       string(asset.Fingerprint),
-		Quantity:          strconv.FormatUint(quantity, 10),
-		InitialMintTxHash: "",
-		MintOrBurnCount:   0,
-		OnchainMetadata:   nil,
-	}, nil
+	initialMintTxHash, mintOrBurnCount, err := a.ledgerState.Database().
+		Metadata().
+		GetAssetMintBurnInfo(policyHash, assetName, nil)
+	if err != nil {
+		return AssetInfo{}, fmt.Errorf(
+			"get asset mint/burn info by policy %s and name %x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+
+	info := AssetInfo{
+		Asset:           policyID + hex.EncodeToString(assetName),
+		PolicyID:        policyID,
+		AssetName:       hex.EncodeToString(assetName),
+		AssetNameASCII:  assetNameASCII(assetName),
+		Fingerprint:     string(asset.Fingerprint),
+		Quantity:        strconv.FormatUint(quantity, 10),
+		MintOrBurnCount: mintOrBurnCount,
+	}
+	if len(initialMintTxHash) > 0 {
+		info.InitialMintTxHash = hex.EncodeToString(initialMintTxHash)
+		if err := a.populateAssetOnchainMetadata(
+			&info,
+			initialMintTxHash,
+			policyID,
+			assetName,
+		); err != nil {
+			return AssetInfo{}, err
+		}
+	}
+	return info, nil
+}
+
+// populateAssetOnchainMetadata resolves the CIP-25 on-chain metadata for an
+// asset from its initial mint transaction and fills the metadata fields on
+// info. A mint transaction without (matching) metadata is not an error; the
+// fields are simply left unset.
+func (a *NodeAdapter) populateAssetOnchainMetadata(
+	info *AssetInfo,
+	initialMintTxHash []byte,
+	policyID string,
+	assetName []byte,
+) error {
+	metadataCbor, err := a.ledgerState.Database().
+		GetTransactionMetadataByHash(initialMintTxHash, nil)
+	if err != nil {
+		return fmt.Errorf(
+			"get initial mint tx %x metadata for asset %s%x: %w",
+			initialMintTxHash,
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if len(metadataCbor) == 0 {
+		return nil
+	}
+	// A mint transaction without a CIP-25 (label 721) entry is normal; treat a
+	// missing label as "no on-chain metadata" rather than an error.
+	jsonValue, _, err := labelcodec.RawValues(metadataCbor, metadataLabelCIP25)
+	if err != nil {
+		return nil //nolint:nilerr // missing metadata label is not an error
+	}
+	metadata, standard, ok := parseCIP25Metadata(
+		string(jsonValue),
+		policyID,
+		assetName,
+	)
+	if !ok {
+		return nil
+	}
+	info.OnchainMetadata = &metadata
+	info.OnchainMetadataStandard = &standard
+	return nil
+}
+
+// AssetAddresses returns paginated addresses currently holding the given asset.
+func (a *NodeAdapter) AssetAddresses(
+	policyID string,
+	assetName []byte,
+	params PaginationParams,
+) ([]AssetHolderInfo, int, error) {
+	policyIDBytes, err := hex.DecodeString(policyID)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"decode asset policy ID %q: %w",
+			policyID,
+			err,
+		)
+	}
+	utxos, err := a.ledgerState.Database().
+		UtxosByAssets(policyIDBytes, assetName, nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"get asset UTxOs for %s%x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	holders, err := assetHoldersFromUtxos(policyIDBytes, assetName, utxos, params)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"build asset holders for %s%x: %w",
+			policyID,
+			assetName,
+			err,
+		)
+	}
+	if len(holders) == 0 {
+		return nil, 0, fmt.Errorf(
+			"asset %s%x: %w",
+			policyID,
+			assetName,
+			ErrAssetNotFound,
+		)
+	}
+	total := len(holders)
+	return paginateAssetHolders(holders, params), total, nil
+}
+
+type assetHolderQuantity struct {
+	address  string
+	quantity uint64
+}
+
+func assetHoldersFromUtxos(
+	policyID []byte,
+	assetName []byte,
+	utxos []models.Utxo,
+	params PaginationParams,
+) ([]AssetHolderInfo, error) {
+	quantities := make(map[string]uint64)
+	for _, utxo := range utxos {
+		var quantity uint64
+		for _, asset := range utxo.Assets {
+			if bytes.Equal(asset.PolicyId, policyID) &&
+				bytes.Equal(asset.Name, assetName) {
+				quantity += uint64(asset.Amount)
+			}
+		}
+		if quantity == 0 {
+			continue
+		}
+		output, err := gledger.NewTransactionOutputFromCbor(utxo.Cbor)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode UTxO %x#%d: %w",
+				utxo.TxId,
+				utxo.OutputIdx,
+				err,
+			)
+		}
+		quantities[output.Address().String()] += quantity
+	}
+
+	rows := make([]assetHolderQuantity, 0, len(quantities))
+	for address, quantity := range quantities {
+		rows = append(rows, assetHolderQuantity{
+			address:  address,
+			quantity: quantity,
+		})
+	}
+	slices.SortFunc(rows, func(a, b assetHolderQuantity) int {
+		if params.Order == "desc" {
+			if n := cmp.Compare(b.quantity, a.quantity); n != 0 {
+				return n
+			}
+			return cmp.Compare(b.address, a.address)
+		}
+		if n := cmp.Compare(a.quantity, b.quantity); n != 0 {
+			return n
+		}
+		return cmp.Compare(a.address, b.address)
+	})
+
+	holders := make([]AssetHolderInfo, 0, len(rows))
+	for _, row := range rows {
+		holders = append(holders, AssetHolderInfo{
+			Address:  row.address,
+			Quantity: strconv.FormatUint(row.quantity, 10),
+		})
+	}
+	return holders, nil
+}
+
+func paginateAssetHolders(
+	holders []AssetHolderInfo,
+	params PaginationParams,
+) []AssetHolderInfo {
+	start := (params.Page - 1) * params.Count
+	if start >= len(holders) {
+		return []AssetHolderInfo{}
+	}
+	end := min(start+params.Count, len(holders))
+	return holders[start:end]
 }
 
 // DRep returns governance DRep information for the requested
@@ -1747,21 +2101,86 @@ func (a *NodeAdapter) AddressUTXOs(
 		)
 	}
 
+	// Inline datum and reference script are not persisted in metadata rows, so
+	// resolve each paged UTxO's CBOR (hot cache -> block LRU -> cold blob) and
+	// recover them from the decoded output. Missing entries degrade to nil
+	// rather than failing the whole listing.
+	utxoCbor, err := a.addressUtxoCbor(paged)
+	if err != nil {
+		return nil, 0, fmt.Errorf(
+			"resolve CBOR for address UTxOs %q: %w",
+			address,
+			err,
+		)
+	}
+
 	ret := make([]AddressUTXOInfo, 0, len(paged))
 	for _, utxo := range paged {
 		txKey := hex.EncodeToString(utxo.TxId)
+		var inlineDatum, referenceScriptHash *string
+		if cborBytes := utxoCbor[utxoRef(utxo.Utxo)]; len(cborBytes) > 0 {
+			if output, decodeErr := gledger.NewTransactionOutputFromCbor(
+				cborBytes,
+			); decodeErr == nil {
+				inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(output)
+			}
+		}
 		ret = append(ret, AddressUTXOInfo{
 			Address:             address,
 			TxHash:              txKey,
+			TxIndex:             utxo.OutputIdx,
 			OutputIndex:         utxo.OutputIdx,
 			Amount:              addressAmountsFromUtxo(utxo.Utxo),
 			Block:               txBlockHashes[txKey],
 			DataHash:            optionalHexString(utxo.DatumHash),
-			InlineDatum:         nil,
-			ReferenceScriptHash: nil,
+			InlineDatum:         inlineDatum,
+			ReferenceScriptHash: referenceScriptHash,
 		})
 	}
 	return ret, total, nil
+}
+
+// addressUtxoCbor resolves the raw output CBOR for the given UTxOs in a single
+// batch, keyed by UtxoRef. It is used to recover the inline datum and reference
+// script, which are not stored in metadata rows.
+func (a *NodeAdapter) addressUtxoCbor(
+	utxos []models.UtxoWithOrdering,
+) (map[database.UtxoRef][]byte, error) {
+	if len(utxos) == 0 {
+		return map[database.UtxoRef][]byte{}, nil
+	}
+	seen := make(map[database.UtxoRef]struct{}, len(utxos))
+	refs := make([]database.UtxoRef, 0, len(utxos))
+	for _, utxo := range utxos {
+		ref := utxoRef(utxo.Utxo)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		refs = append(refs, ref)
+	}
+	return a.ledgerState.Database().CborCache().ResolveUtxoCborBatch(refs)
+}
+
+// utxoDatumAndScriptRef derives the Blockfrost inline_datum and
+// reference_script_hash fields from a decoded transaction output. It returns nil
+// for either field the output does not carry: a datum-hash-only output has no
+// inline datum, and most outputs have no reference script.
+func utxoDatumAndScriptRef(
+	output lcommon.TransactionOutput,
+) (inlineDatum *string, referenceScriptHash *string) {
+	if datum := output.Datum(); datum != nil {
+		if raw := datum.Cbor(); len(raw) > 0 {
+			encoded := hex.EncodeToString(raw)
+			inlineDatum = &encoded
+		}
+	}
+	if scriptRef := output.ScriptRef(); scriptRef != nil {
+		hash := scriptRef.Hash()
+		encoded := hex.EncodeToString(hash.Bytes())
+		referenceScriptHash = &encoded
+	}
+	return inlineDatum, referenceScriptHash
 }
 
 // AddressTransactions returns paginated transaction
@@ -2133,18 +2552,31 @@ func (a *NodeAdapter) TransactionUTXOs(
 	})
 	outputs := make([]TransactionOutputInfo, 0, len(txOutputs))
 	for _, output := range txOutputs {
+		// Resolve the decoded output so inline datum and reference script hash
+		// can be recovered from the transaction CBOR (they are not persisted in
+		// metadata rows). A phase-2 invalid transaction's collateral return is
+		// held separately from the discarded regular outputs.
+		var decodedOutput lcommon.TransactionOutput
+		if isCollateralReturn {
+			decodedOutput = decodedTx.CollateralReturn()
+		} else if outputIndex := int(output.OutputIdx); outputIndex < len(decodedOutputs) {
+			decodedOutput = decodedOutputs[outputIndex]
+		}
 		address := ""
-		outputIndex := int(output.OutputIdx)
-		if outputIndex < len(decodedOutputs) {
-			address = decodedOutputs[outputIndex].Address().String()
+		var inlineDatum, referenceScriptHash *string
+		if decodedOutput != nil {
+			address = decodedOutput.Address().String()
+			inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(
+				decodedOutput,
+			)
 		}
 		outputs = append(outputs, TransactionOutputInfo{
 			Address:             address,
 			Amount:              addressAmountsFromUtxo(output),
 			OutputIndex:         output.OutputIdx,
 			DataHash:            optionalHexString(output.DatumHash),
-			InlineDatum:         optionalHexString(output.Datum),
-			ReferenceScriptHash: nil,
+			InlineDatum:         inlineDatum,
+			ReferenceScriptHash: referenceScriptHash,
 			Collateral:          isCollateralReturn,
 		})
 	}
@@ -2992,6 +3424,16 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 	if err != nil {
 		return TransactionInputInfo{}, err
 	}
+	// Inputs reference outputs produced by earlier transactions; their inline
+	// datum and reference script are recovered from the resolved output CBOR
+	// (populated by transactionInputCbor) since neither is persisted in
+	// metadata rows. Missing CBOR degrades both fields to nil.
+	var inlineDatum, referenceScriptHash *string
+	if len(utxo.Cbor) > 0 {
+		if output, decodeErr := utxo.Decode(); decodeErr == nil {
+			inlineDatum, referenceScriptHash = utxoDatumAndScriptRef(output)
+		}
+	}
 	return TransactionInputInfo{
 		Address:             addr,
 		Amount:              addressAmountsFromUtxo(utxo),
@@ -2999,8 +3441,8 @@ func (a *NodeAdapter) transactionInputInfoFromUtxo(
 		OutputIndex:         utxo.OutputIdx,
 		DataHash:            optionalHexString(utxo.DatumHash),
 		Collateral:          collateral,
-		InlineDatum:         optionalHexString(utxo.Datum),
-		ReferenceScriptHash: nil,
+		InlineDatum:         inlineDatum,
+		ReferenceScriptHash: referenceScriptHash,
 		Reference:           reference,
 	}, nil
 }

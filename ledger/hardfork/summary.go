@@ -185,3 +185,42 @@ func (s *Summary) SlotToEpoch(slot uint64) (EpochInfo, error) {
 		EraID:         era.EraID,
 	}, nil
 }
+
+// EpochInfo converts an absolute epoch number to its boundary information.
+func (s *Summary) EpochInfo(epoch uint64) (EpochInfo, error) {
+	for i := range s.Eras {
+		era := &s.Eras[i]
+		if epoch < era.Start.Epoch {
+			return EpochInfo{}, ErrPastHorizon
+		}
+		if era.End != nil && epoch >= era.End.Epoch {
+			continue
+		}
+		epochsIntoEra := epoch - era.Start.Epoch
+		epochSize := era.Params.EpochSize
+		if epochsIntoEra != 0 && epochSize > ^uint64(0)/epochsIntoEra {
+			return EpochInfo{}, fmt.Errorf(
+				"hardfork: epoch start slot overflows uint64: epoch=%d era_start_epoch=%d epoch_size=%d",
+				epoch,
+				era.Start.Epoch,
+				epochSize,
+			)
+		}
+		slotOffset := epochsIntoEra * epochSize
+		if era.Start.Slot > ^uint64(0)-slotOffset {
+			return EpochInfo{}, fmt.Errorf(
+				"hardfork: epoch start slot overflows uint64: era_start_slot=%d slot_offset=%d",
+				era.Start.Slot,
+				slotOffset,
+			)
+		}
+		return EpochInfo{
+			Epoch:         epoch,
+			StartSlot:     era.Start.Slot + slotOffset,
+			LengthInSlots: epochSize,
+			SlotLength:    era.Params.SlotLength,
+			EraID:         era.EraID,
+		}, nil
+	}
+	return EpochInfo{}, ErrPastHorizon
+}

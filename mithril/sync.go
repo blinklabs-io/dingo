@@ -43,6 +43,166 @@ const (
 	syncStatusBackfill   = "backfill"
 )
 
+// syncMode is the state-detected disposition of a Sync run, decided from the
+// database alone (no artifact comparison). It selects between the existing
+// bootstrap/resume paths and the catch-up path for an already-complete
+// database.
+type syncMode int
+
+const (
+	// syncModeBootstrap is a fresh database with no chain data: run a full
+	// from-scratch bootstrap.
+	syncModeBootstrap syncMode = iota
+	// syncModeResume is an interrupted (in_progress), still-backfilling
+	// (backfill), or otherwise non-empty/unknown sync_status: re-run the
+	// existing bootstrap/backfill path rather than treating the database as
+	// complete.
+	syncModeResume
+	// syncModeCatchUp is a complete database (chain data present, sync_status
+	// clear): a candidate for advancing to a newer artifact. The advance vs.
+	// up-to-date vs. divergent decision is made later by the intersection
+	// check, not here.
+	syncModeCatchUp
+)
+
+// determineSyncMode classifies the database state for Sync dispatch. It only
+// reads sync_status and whether any blocks are present; it does not contact the
+// aggregator or compare artifacts.
+func determineSyncMode(db *database.Database) (syncMode, error) {
+	status, err := db.GetSyncState("sync_status", nil)
+	if err != nil {
+		return syncModeBootstrap, fmt.Errorf("reading sync_status: %w", err)
+	}
+	if status != "" {
+		return syncModeResume, nil
+	}
+	// sync_status is clear: distinguish a fresh database (no blocks) from a
+	// completed one (has blocks).
+	recent, err := database.BlocksRecent(db, 1)
+	if err != nil {
+		return syncModeBootstrap, fmt.Errorf("reading chain tip: %w", err)
+	}
+	if len(recent) == 0 {
+		return syncModeBootstrap, nil
+	}
+	return syncModeCatchUp, nil
+}
+
+// catchUpDecision is the resolved dispatch for a Sync run against a database
+// that may need catch-up semantics (divergence check before mutation +
+// reconcile of stale live rows).
+type catchUpDecision struct {
+	engage   bool   // run the import as a catch-up
+	start    uint64 // first immutable file to download (0 = full range)
+	upToDate bool   // marker already at/beyond the latest artifact: no-op
+}
+
+// decideCatchUp resolves whether this Sync run engages catch-up semantics.
+func decideCatchUp(
+	ctx context.Context,
+	db *database.Database,
+	mode syncMode,
+	backend string,
+	storageMode string,
+	aggregatorURL string,
+	logger *slog.Logger,
+) (catchUpDecision, error) {
+	if backend != BackendV2 {
+		return catchUpDecision{}, nil
+	}
+
+	marker, hasMarker, err := getImmutableImportMarker(db)
+	if err != nil {
+		return catchUpDecision{}, err
+	}
+
+	switch mode {
+	case syncModeBootstrap:
+		return catchUpDecision{}, nil
+	case syncModeResume:
+		if isAPIMode(storageMode) {
+			return catchUpDecision{}, nil
+		}
+		if hasMarker {
+			logger.Info(
+				"resuming interrupted Mithril v2 catch-up",
+				"component", "mithril",
+				"from_immutable_file", marker,
+			)
+			return catchUpDecision{engage: true, start: marker}, nil
+		}
+		// A markerless catch-up writes no marker until completion; the active
+		// flag is the only trace that the interrupted run was mutating a
+		// previously-complete database and must reconcile on re-run.
+		catchUpActive, activeErr := getCatchUpActive(db)
+		if activeErr != nil {
+			return catchUpDecision{}, activeErr
+		}
+		if catchUpActive {
+			logger.Info(
+				"resuming interrupted Mithril v2 catch-up "+
+					"(no import marker; full artifact range)",
+				"component", "mithril",
+			)
+			return catchUpDecision{engage: true}, nil
+		}
+		return catchUpDecision{}, nil
+	case syncModeCatchUp:
+		if isAPIMode(storageMode) {
+			if hasMarker {
+				return catchUpDecision{}, errors.New(
+					"mithril v2 catch-up supports core storage mode only; " +
+						"api-mode metadata replacement is not yet designed — " +
+						"perform a full Mithril resync (remove the database and " +
+						"run `dingo mithril sync` again)",
+				)
+			}
+			logger.Info(
+				"complete api-mode database has no Mithril immutable-import "+
+					"marker; using the full sync path",
+				"component", "mithril",
+			)
+			return catchUpDecision{}, nil
+		}
+		if !hasMarker {
+			logger.Info(
+				"complete database has no Mithril immutable-import marker "+
+					"(bootstrapped before catch-up support); using "+
+					"catch-up reconciliation over the full artifact range",
+				"component", "mithril",
+			)
+			return catchUpDecision{engage: true}, nil
+		}
+		target, targetErr := NewClient(aggregatorURL).
+			GetLatestCardanoDatabaseSnapshot(ctx)
+		if targetErr != nil {
+			return catchUpDecision{}, fmt.Errorf(
+				"fetching latest artifact for catch-up: %w", targetErr,
+			)
+		}
+		if marker >= target.Beacon.ImmutableFileNumber {
+			logger.Info(
+				"database already at or beyond the latest Mithril v2 "+
+					"artifact; nothing to catch up",
+				"component", "mithril",
+				"local_immutable_file", marker,
+				"target_immutable_file", target.Beacon.ImmutableFileNumber,
+			)
+			return catchUpDecision{upToDate: true}, nil
+		}
+		logger.Info(
+			"advancing existing database to a newer Mithril v2 artifact "+
+				"(catch-up)",
+			"component", "mithril",
+			"from_immutable_file", marker,
+			"target_immutable_file", target.Beacon.ImmutableFileNumber,
+		)
+		return catchUpDecision{engage: true, start: marker}, nil
+	default:
+		return catchUpDecision{}, nil
+	}
+}
+
 // SyncPhase identifies a stage of a Mithril bootstrap.
 type SyncPhase string
 
@@ -243,6 +403,31 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	}
 	defer db.Close()
 
+	// Catch-up dispatch. A complete core database (chain data present,
+	// sync_status clear) running against the v2 backend is advanced with
+	// catch-up semantics instead of a blind re-bootstrap: the import first
+	// checks for chain divergence and the ledger import reconciles stale live
+	// rows. If an immutable-import marker exists, only the missing archives are
+	// downloaded; markerless complete core databases use the same reconciliation
+	// path over the full artifact range.
+	catchUp := false
+	var catchUpStart uint64
+	mode, modeErr := determineSyncMode(db)
+	if modeErr != nil {
+		return SyncResult{}, fmt.Errorf("determining sync mode: %w", modeErr)
+	}
+	dec, decErr := decideCatchUp(
+		ctx, db, mode, cfg.Backend, cfg.StorageMode, aggregatorURL, logger,
+	)
+	if decErr != nil {
+		return SyncResult{}, decErr
+	}
+	if dec.upToDate {
+		return SyncResult{}, nil
+	}
+	catchUp = dec.engage
+	catchUpStart = dec.start
+
 	// The sync-in-progress marker and the API backfill checkpoint are NOT set
 	// here: setting them before bootstrap would leave an existing healthy
 	// database permanently marked incomplete (blocking `dingo serve`) if the
@@ -310,11 +495,20 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return nil
 	}
 
+	// Catch-up disables the download<->copy pipeline: it downloads the bounded
+	// [catchUpStart..N] range fully, then runs the divergence check before any
+	// mutation. A fresh bootstrap keeps the pipeline (copy overlaps download).
+	chunkHook := onChunkContiguous
+	if catchUp {
+		chunkHook = nil
+	}
+
 	cfg.emit(SyncProgress{Phase: PhaseBootstrap, Active: true})
 	result, err := Bootstrap(
 		ctx,
 		BootstrapConfig{
-			OnChunkContiguous:      onChunkContiguous,
+			OnChunkContiguous:      chunkHook,
+			StartImmutable:         catchUpStart,
 			Network:                network,
 			Backend:                cfg.Backend,
 			AggregatorURL:          aggregatorURL,
@@ -374,6 +568,44 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, fmt.Errorf("mithril bootstrap failed: %w", err)
 	}
 
+	// Catch-up: confirm the local chain is an ancestor of the target artifact
+	// before mutating anything. A divergent database is left untouched and the
+	// operator is told to perform a full resync. This runs before
+	// markSyncInProgress so an aborted catch-up does not mark a healthy
+	// database incomplete.
+	if catchUp {
+		targetImmutable := uint64(0)
+		if result.Snapshot != nil {
+			targetImmutable = result.Snapshot.Beacon.ImmutableFileNumber
+		}
+		// A resuming run (sync_status still in_progress) never maps
+		// local-ahead to up-to-date: it must fall through to the import so the
+		// interrupted run's remaining work — gap-block transaction processing,
+		// deferred index rebuild, sync-state cleanup — completes. Returning
+		// early here would leave the node wedged (serve refuses to start on
+		// sync_status="in_progress" and every re-run would no-op).
+		upToDate, interErr := verifyCatchupBeforeImport(
+			db, result.ImmutableDir, targetImmutable,
+			mode == syncModeResume, logger,
+		)
+		if interErr != nil {
+			return SyncResult{}, interErr
+		}
+		if upToDate {
+			if cfg.CleanupAfterLoad {
+				result.Cleanup(logger)
+			}
+			return SyncResult{}, nil
+		}
+		// The import is about to mutate the database. Record the catch-up so
+		// an interrupted run resumes with catch-up semantics (reconcile)
+		// instead of a plain bootstrap — a markerless catch-up leaves no
+		// other trace. Wiped by ClearSyncState on completion.
+		if err := setCatchUpActive(db); err != nil {
+			return SyncResult{}, err
+		}
+	}
+
 	// Backstop the in-progress marker for paths that did not pipeline a copy
 	// (for example the v1 backend, which has no per-chunk hook). Idempotent
 	// when the pipelined copy already set it. Set after a successful bootstrap
@@ -420,7 +652,7 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: true})
 		defer cfg.emit(SyncProgress{Phase: PhaseLedgerImport, Active: false})
 		slot, hash, importErr := importLedgerState(
-			gctx, db, logger, nodeCfg, result,
+			gctx, db, logger, nodeCfg, result, catchUp,
 			func(p ledgerstate.ImportProgress) {
 				cfg.emit(SyncProgress{
 					Phase:       PhaseLedgerImport,
@@ -805,6 +1037,22 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 		return SyncResult{}, err
 	}
 	syncComplete = true
+
+	// Record the highest imported immutable file number so a later catch-up can
+	// skip already-present archives and anchor its intersection check. Written
+	// after updateMithrilReadyState clears sync_state, so it survives. Set on
+	// both bootstrap and catch-up. Non-fatal.
+	if result.Snapshot != nil {
+		if markerErr := setImmutableImportMarker(
+			db, result.Snapshot.Beacon.ImmutableFileNumber,
+		); markerErr != nil {
+			logger.Warn(
+				"failed to record Mithril immutable-import marker",
+				"component", "mithril",
+				"error", markerErr,
+			)
+		}
+	}
 	cfg.emit(SyncProgress{Phase: PhaseComplete, Active: true})
 
 	// Clean up temporary files after a successful complete load.

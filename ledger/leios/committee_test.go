@@ -62,6 +62,27 @@ func TestComputeCommitteeOrdersByStakeDescending(t *testing.T) {
 	assert.Equal(t, byte(4), committee.Members[3].PoolKeyHash[0])
 }
 
+func TestComputePrototypeCommitteeIncludesAllPoolsAscending(t *testing.T) {
+	poolStakes := map[string]uint64{
+		testPoolHash(1): 15,
+		testPoolHash(2): 50,
+		testPoolHash(3): 30,
+		testPoolHash(4): 5,
+	}
+	committee, err := ComputePrototypeCommittee(10, 8, poolStakes, 100)
+	require.NoError(t, err)
+	require.Len(t, committee.Members, 4)
+	assert.Equal(t, []uint64{5, 15, 30, 50}, []uint64{
+		committee.Members[0].Stake,
+		committee.Members[1].Stake,
+		committee.Members[2].Stake,
+		committee.Members[3].Stake,
+	})
+	assert.Equal(t, byte(4), committee.Members[0].PoolKeyHash[0])
+	assert.Equal(t, byte(2), committee.Members[3].PoolKeyHash[0])
+	assert.Equal(t, uint64(100), committee.CommitteeStake)
+}
+
 func TestComputeCommitteeBreaksTiesByPoolKeyHashAscending(t *testing.T) {
 	poolStakes := map[string]uint64{
 		testPoolHash(7): 25,
@@ -195,6 +216,16 @@ func TestComputeCommitteeMalformedPoolKeyHash(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCommitteeConstructorsRejectWrongPoolKeyHashLength(t *testing.T) {
+	poolStakes := map[string]uint64{hex.EncodeToString(make([]byte, 27)): 100}
+
+	_, err := ComputeCommittee(1, 0, poolStakes, 100, big.NewRat(1, 1))
+	require.ErrorContains(t, err, "must be 28 bytes")
+
+	_, err = ComputePrototypeCommittee(1, 0, poolStakes, 100)
+	require.ErrorContains(t, err, "must be 28 bytes")
+}
+
 func TestComputeCommitteeLargeStakesNoOverflow(t *testing.T) {
 	// Products of stake and rational components overflow uint64; the
 	// comparison must be exact in big.Int.
@@ -262,8 +293,11 @@ func TestCommitteeMemberLookups(t *testing.T) {
 }
 
 func TestCommitteeSnapshotEpoch(t *testing.T) {
+	// Mirrors praos.StakeSnapshotEpoch = E-1 (leader/committee stake is
+	// end-of-E-2 = mark[E-1]); values shifted +1 when the E-2 off-by-one was
+	// corrected.
 	for _, tc := range []struct{ epoch, want uint64 }{
-		{0, 0}, {1, 0}, {2, 0}, {3, 1}, {10, 8},
+		{0, 0}, {1, 0}, {2, 1}, {3, 2}, {10, 9},
 	} {
 		assert.Equal(
 			t, tc.want, CommitteeSnapshotEpoch(tc.epoch),

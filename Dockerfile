@@ -24,7 +24,7 @@ WORKDIR /antithesis/customer
 RUN make build
 
 FROM ghcr.io/blinklabs-io/cardano-cli:11.0.0.0-1 AS cardano-cli
-FROM ghcr.io/blinklabs-io/cardano-configs:20260623-1 AS cardano-configs
+FROM ghcr.io/blinklabs-io/cardano-configs:20260707-2 AS cardano-configs
 FROM ghcr.io/blinklabs-io/nview:0.15.0 AS nview
 FROM ghcr.io/blinklabs-io/txtop:0.15.0 AS txtop
 

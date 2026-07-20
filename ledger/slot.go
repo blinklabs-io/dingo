@@ -126,6 +126,39 @@ func (ls *LedgerState) SlotToEpoch(slot uint64) (models.Epoch, error) {
 	}, nil
 }
 
+// EpochInfo returns boundary information for the given epoch.
+//
+// Epochs within the known epoch cache resolve to cached-era parameters;
+// epochs past the cache are projected using the current era's parameters.
+// Returns an error for an empty cache or for epochs before the first known
+// era.
+func (ls *LedgerState) EpochInfo(epoch uint64) (models.Epoch, error) {
+	sum, err := ls.HardForkSummary()
+	if err != nil {
+		return models.Epoch{}, errors.New("no epochs in cache")
+	}
+	info, err := sum.EpochInfo(epoch)
+	if err != nil {
+		if errors.Is(err, hardfork.ErrPastHorizon) {
+			return models.Epoch{}, errors.New(
+				"epoch is outside the known epoch range",
+			)
+		}
+		return models.Epoch{}, err
+	}
+	return models.Epoch{
+		EpochId:   info.Epoch,
+		StartSlot: info.StartSlot,
+		EraId:     info.EraID,
+		// info.SlotLength is a positive, protocol-bounded duration.
+		// #nosec G115
+		SlotLength: uint(info.SlotLength / time.Millisecond),
+		// info.LengthInSlots is protocol-bounded and persisted as uint.
+		// #nosec G115
+		LengthInSlots: uint(info.LengthInSlots),
+	}, nil
+}
+
 // shelleySlotLengthMs returns the Shelley genesis slot length in milliseconds,
 // or 0 if the genesis is missing or malformed. Shelley genesis stores slot
 // length as seconds per slot.

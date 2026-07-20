@@ -575,8 +575,7 @@ func TestValidateKESPeriod_HappyPath(t *testing.T) {
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
 	// 250 slots elapsed → KES period 2; opcert period 1 is within
 	// [2, 1+5).
-	now := systemStart.Add(250 * time.Second)
-	if err := pc.ValidateKESPeriod(g, now); err != nil {
+	if err := pc.ValidateKESPeriod(g, 250); err != nil {
 		t.Errorf("ValidateKESPeriod: %v", err)
 	}
 }
@@ -587,8 +586,7 @@ func TestValidateKESPeriod_AtStart(t *testing.T) {
 	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	g := synthGenesis(100, 5, time.Second, systemStart)
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 2}}
-	now := systemStart.Add(250 * time.Second)
-	if err := pc.ValidateKESPeriod(g, now); err != nil {
+	if err := pc.ValidateKESPeriod(g, 250); err != nil {
 		t.Errorf("ValidateKESPeriod: %v", err)
 	}
 }
@@ -599,8 +597,7 @@ func TestValidateKESPeriod_InFuture(t *testing.T) {
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 10}}
 	// 50 slots elapsed → current period 0; opcert period 10 is in the
 	// future.
-	now := systemStart.Add(50 * time.Second)
-	err := pc.ValidateKESPeriod(g, now)
+	err := pc.ValidateKESPeriod(g, 50)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -615,8 +612,7 @@ func TestValidateKESPeriod_Expired(t *testing.T) {
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
 	// Period 1 + max evolutions 3 = expires once current >= 4. At slot
 	// 500 → current period 5, which is past expiry.
-	now := systemStart.Add(500 * time.Second)
-	err := pc.ValidateKESPeriod(g, now)
+	err := pc.ValidateKESPeriod(g, 500)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -632,18 +628,17 @@ func TestValidateKESPeriod_ExpiryBoundaryExclusive(t *testing.T) {
 	g := synthGenesis(100, 3, time.Second, systemStart)
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 1}}
 	// 400 slots → current period 4. start (1) + max (3) = 4 → expired.
-	now := systemStart.Add(400 * time.Second)
-	err := pc.ValidateKESPeriod(g, now)
+	err := pc.ValidateKESPeriod(g, 400)
 	if err == nil {
 		t.Fatal("expected expired error at exact boundary")
 	}
 }
 
-func TestValidateKESPeriod_BeforeSystemStart(t *testing.T) {
+func TestValidateKESPeriod_AtGenesisSlot(t *testing.T) {
 	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	g := synthGenesis(100, 5, time.Second, systemStart)
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
-	if err := pc.ValidateKESPeriod(g, systemStart.Add(-time.Hour)); err != nil {
+	if err := pc.ValidateKESPeriod(g, 0); err != nil {
 		t.Errorf("ValidateKESPeriod: %v", err)
 	}
 }
@@ -652,7 +647,7 @@ func TestValidateKESPeriod_NoOpCert(t *testing.T) {
 	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	g := synthGenesis(100, 5, time.Second, systemStart)
 	pc := &PoolCredentials{}
-	err := pc.ValidateKESPeriod(g, systemStart)
+	err := pc.ValidateKESPeriod(g, 0)
 	if err == nil {
 		t.Fatal("expected error when opcert not loaded")
 	}
@@ -660,7 +655,7 @@ func TestValidateKESPeriod_NoOpCert(t *testing.T) {
 
 func TestValidateKESPeriod_NilGenesis(t *testing.T) {
 	pc := &PoolCredentials{opCert: &OpCert{KESPeriod: 0}}
-	err := pc.ValidateKESPeriod(nil, time.Now())
+	err := pc.ValidateKESPeriod(nil, 0)
 	if err == nil {
 		t.Fatal("expected error for nil genesis")
 	}

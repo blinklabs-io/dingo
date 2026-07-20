@@ -56,7 +56,10 @@ type Txn struct {
 	metadataTxn types.Txn
 	lock        sync.Mutex
 	finished    bool
+	committed   bool
 	readWrite   bool
+	afterCommit []func()
+	dispatching bool
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
@@ -125,6 +128,71 @@ func (t *Txn) Blob() types.Txn {
 // IsReadWrite reports whether the transaction was opened for writing.
 func (t *Txn) IsReadWrite() bool {
 	return t.readWrite
+}
+
+// AfterCommit registers fn to run after this transaction commits durably.
+// Callbacks run in registration order, once, only on a successful Commit; a
+// rollback or a failed commit never fires them. Use it for side effects that
+// must reflect committed state only — e.g. metrics that must not count work a
+// rollback discards. Registration concurrent with, or after, a successful
+// Commit joins the serialized callback drain instead of being lost. Callbacks
+// run without the transaction lock held, so they may register another callback.
+// A callback that panics has its panic recovered and logged: it does not
+// propagate to Commit's caller, abort the other callbacks in the drain, or
+// wedge the dispatch loop for callbacks registered afterward.
+func (t *Txn) AfterCommit(fn func()) {
+	if fn == nil {
+		return
+	}
+	t.lock.Lock()
+	if t.finished && !t.committed {
+		t.lock.Unlock()
+		return
+	}
+	t.afterCommit = append(t.afterCommit, fn)
+	if !t.committed || t.dispatching {
+		t.lock.Unlock()
+		return
+	}
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
+}
+
+func (t *Txn) dispatchAfterCommit() {
+	for {
+		t.lock.Lock()
+		callbacks := t.afterCommit
+		t.afterCommit = nil
+		if len(callbacks) == 0 {
+			t.dispatching = false
+			t.lock.Unlock()
+			return
+		}
+		t.lock.Unlock()
+		for _, fn := range callbacks {
+			t.runAfterCommitCallback(fn)
+		}
+	}
+}
+
+// runAfterCommitCallback runs a single after-commit callback, recovering and
+// logging any panic. Callbacks run detached from the transaction (after the
+// durable commit, without the txn lock), so a panic must not escape the drain
+// loop: an escaping panic would leave dispatching=true, silently stranding
+// every callback registered afterward, and would drop the callbacks already
+// dequeued for this drain. Panics are logged, not propagated.
+func (t *Txn) runAfterCommitCallback(fn func()) {
+	defer func() {
+		if r := recover(); r != nil && t.db != nil {
+			t.db.logger.Error(
+				"panic in after-commit callback",
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	fn()
 }
 
 type savepointTxn interface {
@@ -202,18 +270,21 @@ func (t *Txn) Do(fn func(*Txn) error) error {
 
 func (t *Txn) Commit() error {
 	t.lock.Lock()
-	defer t.lock.Unlock()
 	if t.finished {
+		t.lock.Unlock()
 		return nil
 	}
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finished = true
+		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
 	// No need to commit for read-only, but we do want to free up resources
 	if !t.readWrite {
-		return t.rollback()
+		err := t.rollback()
+		t.lock.Unlock()
+		return err
 	}
 	// Update the commit timestamp in both DBs if using both.
 	// Track timestamp for error reporting if partial commit occurs.
@@ -225,6 +296,7 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
 	}
@@ -237,6 +309,7 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finished = true
+			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
 	}
@@ -256,15 +329,22 @@ func (t *Txn) Commit() error {
 				)
 				// Return PartialCommitError so callers can detect with
 				// errors.Is(err, types.ErrPartialCommit) and trigger recovery
-				return PartialCommitError{
+				ret := PartialCommitError{
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
+				t.lock.Unlock()
+				return ret
 			}
+			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
 	}
 	t.finished = true
+	t.committed = true
+	t.dispatching = true
+	t.lock.Unlock()
+	t.dispatchAfterCommit()
 	return nil
 }
 

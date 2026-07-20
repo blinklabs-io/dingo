@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"strconv"
 
 	"github.com/blinklabs-io/dingo/database/models"
@@ -35,6 +36,42 @@ import (
 // complete pre-boundary UTxO history. Duplicated here (rather than imported)
 // because the database package cannot depend on ledger, which depends on it.
 const mithrilLedgerSlotSyncKey = "mithril_ledger_slot"
+
+type metadataOnlyTransaction struct {
+	lcommon.Transaction
+}
+
+func (tx metadataOnlyTransaction) Inputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Outputs() []lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) ReferenceInputs() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Collateral() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) CollateralReturn() lcommon.TransactionOutput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Withdrawals() map[*lcommon.Address]*big.Int {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Consumed() []lcommon.TransactionInput {
+	return nil
+}
+
+func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
+	return nil
+}
 
 // mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
 // or 0 if none is recorded (genesis sync, or a non-genesis chainsync
@@ -99,6 +136,39 @@ func (d *Database) SetTransaction(
 	certDeposits map[int]uint64,
 	offsets *BlockIngestionResult,
 	txn *Txn,
+) error {
+	return d.SetTransactionWithOpts(
+		tx,
+		point,
+		idx,
+		updateEpoch,
+		pparamUpdates,
+		certDeposits,
+		offsets,
+		txn,
+		BatchedTxIngestOpts{},
+	)
+}
+
+// SetTransactionWithOpts is SetTransaction with control over UTxO ingest
+// behavior via opts. Leios endorser-block application on the Musashi/
+// Haskell-conformant path passes SkipConsumedInputRecovery so a transaction's
+// effects are applied without the consumed-utxo recovery/repair pass: produced
+// outputs and input spends are written, but a consumed input that is absent from
+// the store is left as a no-op instead of triggering blob recovery. This matches
+// the reference ledger's endorser-closure apply (ruleApplyTxValidation
+// ValidateNone), which folds the closure's transactions onto the ledger state
+// without validation or recovery.
+func (d *Database) SetTransactionWithOpts(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	updateEpoch uint64,
+	pparamUpdates map[lcommon.Blake2b224]lcommon.ProtocolParameterUpdate,
+	certDeposits map[int]uint64,
+	offsets *BlockIngestionResult,
+	txn *Txn,
+	opts BatchedTxIngestOpts,
 ) error {
 	owned := false
 	if txn == nil {
@@ -184,7 +254,7 @@ func (d *Database) SetTransaction(
 		}
 	}
 
-	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, BatchedTxIngestOpts{}); err != nil {
+	if err := d.ensureTransactionConsumedUtxos(tx, point, txn, nil, opts); err != nil {
 		return err
 	}
 	if err := d.metadata.SetTransaction(tx, point, idx, certDeposits, txn.Metadata()); err != nil {
@@ -205,6 +275,49 @@ func (d *Database) SetTransaction(
 		}
 	}
 
+	return nil
+}
+
+// SetTransactionMetadataOnly records transaction metadata, certificates, and
+// other non-UTxO metadata without writing blob offsets, produced outputs, spent
+// inputs, collateral, reference inputs, reward withdrawals, or pparam updates.
+//
+// This is a general primitive for recording a transaction's certificate and
+// governance data without applying its UTxO effects. It is no longer on the
+// Leios endorser-block apply path: the Musashi path now applies endorser
+// transactions with their full effects (see ledger/leios_apply.go and
+// SetTransactionWithOpts), matching the reference ledger.
+func (d *Database) SetTransactionMetadataOnly(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	idx uint32,
+	certDeposits map[int]uint64,
+	txn *Txn,
+) error {
+	owned := false
+	if txn == nil {
+		txn = d.Transaction(true)
+		owned = true
+		defer txn.Rollback() //nolint:errcheck
+	}
+	metadataTxn := txn.Metadata()
+	if metadataTxn == nil {
+		return types.ErrNilTxn
+	}
+	if err := d.metadata.SetTransaction(
+		metadataOnlyTransaction{Transaction: tx},
+		point,
+		idx,
+		certDeposits,
+		metadataTxn,
+	); err != nil {
+		return fmt.Errorf("set transaction metadata only: %w", err)
+	}
+	if owned {
+		if err := txn.Commit(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -294,12 +407,28 @@ func (d *Database) SetGapBlockTransaction(
 			"set gap block transaction metadata: %w", err,
 		)
 	}
+	// ensureGapConsumedUtxos must run after SetGapBlockTransaction: it marks
+	// the consumed inputs spent by this tx (utxo.spent_at_tx_id is a FK to
+	// transaction.hash), so the transaction row has to exist first.
 	if err := d.ensureGapConsumedUtxos(
 		tx,
 		point,
 		txn,
 	); err != nil {
 		return err
+	}
+	// For a phase-2-invalid transaction the consumed set is its collateral
+	// inputs. SetGapBlockTransaction above computed the collateral fee before
+	// ensureGapConsumedUtxos recovered those inputs from the blob store, so
+	// when the tx declares no total collateral the fee was computed from an
+	// incomplete UTxO view and undercounts. Recompute it now that the inputs
+	// are materialized so the epoch fee pot is correct.
+	if err := d.metadata.RecomputeGapCollateralFee(
+		tx, point, txn.Metadata(),
+	); err != nil {
+		return fmt.Errorf(
+			"recompute gap block collateral fee: %w", err,
+		)
 	}
 
 	if owned {
@@ -881,35 +1010,21 @@ func (d *Database) GetTransactionByHash(
 	return d.metadata.GetTransactionByHash(hash, txn.Metadata())
 }
 
-// GetExistingTransactionHashes returns the subset of the provided hashes that
-// are already recorded in the ledger. It is lightweight (hash column only) and
-// chunked to keep the IN clause within backend parameter limits. Used to skip
-// re-applying transactions an earlier endorser block already applied
-// (issue #2699).
-func (d *Database) GetExistingTransactionHashes(
-	hashes [][]byte,
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash, without loading any associations. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *Database) GetTransactionMetadataByHash(
+	hash []byte,
 	txn *Txn,
-) ([][]byte, error) {
-	if len(hashes) == 0 {
+) ([]byte, error) {
+	if len(hash) == 0 {
 		return nil, nil
 	}
 	if txn == nil {
 		txn = d.Transaction(false)
 		defer txn.Release()
 	}
-	const chunk = 900
-	var existing [][]byte
-	for i := 0; i < len(hashes); i += chunk {
-		end := min(i+chunk, len(hashes))
-		part, err := d.metadata.ExistingTransactionHashes(
-			hashes[i:end], txn.Metadata(),
-		)
-		if err != nil {
-			return nil, fmt.Errorf("get existing tx hashes: %w", err)
-		}
-		existing = append(existing, part...)
-	}
-	return existing, nil
+	return d.metadata.GetTransactionMetadataByHash(hash, txn.Metadata())
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -1286,7 +1401,7 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			if err := blob.DeleteTx(blobTxn, txHash); err != nil {
 				deleteErrors++
 				batchDeleteErrors++
-				d.logger.Debug(
+				d.logger.Warn(
 					"failed to delete TX blob data",
 					"txHash", hex.EncodeToString(txHash),
 					"error", err,
@@ -1311,13 +1426,19 @@ func deleteTxBlobs(d *Database, txHashes [][]byte, txn *Txn) error {
 			if err := batchTxn.Commit(); err != nil {
 				deleteErrors += len(batch) - batchDeleteErrors
 				_ = batchTxn.Rollback()
-				d.logger.Debug("tx blob delete batch commit failed", "error", err)
+				d.logger.Warn(
+					"TX blob delete batch commit failed",
+					"batch_start", start,
+					"batch_end", end,
+					"batch_size", len(batch),
+					"error", err,
+				)
 			}
 		}
 	}
 	if deleteErrors > 0 {
-		d.logger.Debug(
-			"tx blob deletion completed with errors",
+		d.logger.Warn(
+			"TX blob deletion completed with errors",
 			"failed",
 			deleteErrors,
 			"total",
@@ -1385,18 +1506,6 @@ func (d *Database) TransactionsDeleteRolledback(
 	if err != nil {
 		return fmt.Errorf(
 			"failed to delete transactions after slot %d: %w",
-			slot,
-			err,
-		)
-	}
-
-	// Drop endorser-transaction provenance for the undone spends (empty on
-	// networks that do not apply endorser blocks).
-	if err := d.metadata.DeleteEndorserTransactionsAfterSlot(
-		slot, txn.Metadata(),
-	); err != nil {
-		return fmt.Errorf(
-			"failed to delete endorser transactions after slot %d: %w",
 			slot,
 			err,
 		)

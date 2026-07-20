@@ -62,10 +62,11 @@ type Chain struct {
 }
 
 type queuedHeader struct {
-	header      ledger.BlockHeader
-	point       ocommon.Point
-	prevHash    []byte
-	blockNumber uint64
+	header         ledger.BlockHeader
+	point          ocommon.Point
+	prevHash       []byte
+	blockNumber    uint64
+	cryptoVerified bool
 }
 
 func (c *Chain) Tip() ochainsync.Tip {
@@ -132,6 +133,17 @@ func (c *Chain) MaxQueuedHeaders() int {
 }
 
 func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, false)
+}
+
+func (c *Chain) AddVerifiedBlockHeader(header ledger.BlockHeader) error {
+	return c.addBlockHeader(header, true)
+}
+
+func (c *Chain) addBlockHeader(
+	header ledger.BlockHeader,
+	cryptoVerified bool,
+) error {
 	if c == nil {
 		return errors.New("chain is nil")
 	}
@@ -143,8 +155,9 @@ func (c *Chain) AddBlockHeader(header ledger.BlockHeader) error {
 			Slot: header.SlotNumber(),
 			Hash: headerHash.Bytes(),
 		},
-		prevHash:    headerPrevHash.Bytes(),
-		blockNumber: header.BlockNumber(),
+		prevHash:       headerPrevHash.Bytes(),
+		blockNumber:    header.BlockNumber(),
+		cryptoVerified: cryptoVerified,
 	}
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -1066,6 +1079,17 @@ func (c *Chain) HeaderCount() int {
 }
 
 func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, false)
+}
+
+func (c *Chain) FirstVerifiedHeaderMatchesPoint(point ocommon.Point) bool {
+	return c.firstHeaderMatchesPoint(point, true)
+}
+
+func (c *Chain) firstHeaderMatchesPoint(
+	point ocommon.Point,
+	requireCryptoVerified bool,
+) bool {
 	if c == nil {
 		return false
 	}
@@ -1078,7 +1102,10 @@ func (c *Chain) FirstHeaderMatchesPoint(point ocommon.Point) bool {
 	if header.point.Slot != point.Slot {
 		return false
 	}
-	return bytes.Equal(header.point.Hash, point.Hash)
+	if !bytes.Equal(header.point.Hash, point.Hash) {
+		return false
+	}
+	return !requireCryptoVerified || header.cryptoVerified
 }
 
 func (c *Chain) HeaderRange(count int) (ocommon.Point, ocommon.Point) {
@@ -1208,19 +1235,41 @@ func (c *Chain) BlockBeforeSlot(slotNumber uint64) (models.Block, error) {
 	if c.tipBlockIndex < initialBlockIndex {
 		return models.Block{}, models.ErrBlockNotFound
 	}
-	for blockIndex := c.tipBlockIndex; blockIndex >= initialBlockIndex; blockIndex-- {
-		block, err := c.blockByIndex(blockIndex)
+	// Block slots are strictly increasing with block index on the canonical
+	// chain, so binary-search for the highest index whose slot is below
+	// slotNumber rather than walking backward from the tip. The old linear walk
+	// cost O(tip - boundary) block reads; during catch-up the header chain runs
+	// far ahead of the ledger tip, so a boundary near the ledger tip made every
+	// lookup scan the entire header-ahead gap (the epoch-lab-nonce heal ran this
+	// per recent epoch, wedging large-DB startup for minutes — #2771). The
+	// search still resolves each candidate via blockByIndex (the active chain),
+	// so retained fork or synthetic blobs are never returned.
+	lo, hi := initialBlockIndex, c.tipBlockIndex
+	var (
+		result models.Block
+		found  bool
+	)
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		block, err := c.blockByIndex(mid)
 		if err != nil {
 			return models.Block{}, err
 		}
 		if block.Slot < slotNumber {
-			return block, nil
-		}
-		if blockIndex == initialBlockIndex {
-			break
+			result = block
+			found = true
+			lo = mid + 1
+		} else {
+			if mid == initialBlockIndex {
+				break
+			}
+			hi = mid - 1
 		}
 	}
-	return models.Block{}, models.ErrBlockNotFound
+	if !found {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return result, nil
 }
 
 func (c *Chain) blockByIndex(

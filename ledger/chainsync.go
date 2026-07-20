@@ -37,6 +37,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger/governance"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
@@ -66,6 +67,9 @@ const (
 	// Number of received blockfetch blocks to buffer before committing them.
 	// Keep this small so downstream iterators still see fresh blocks promptly.
 	blockfetchCommitBatchSize = 8
+
+	deferredHeaderValidationSyncStatePrefix = "deferred_header_validation:"
+	deferredHeaderValidationSyncStateValue  = "true"
 
 	// shadowBlockfetchPrimarySlowThreshold is the fixed-cutoff fallback
 	// used to gate shadow blockfetch dispatch when no peer-population
@@ -281,6 +285,116 @@ func (ls *LedgerState) mithrilLedgerSlotSnapshot() uint64 {
 	ls.RLock()
 	defer ls.RUnlock()
 	return ls.mithrilLedgerSlot
+}
+
+func headerValidationPointKey(point ocommon.Point) string {
+	return fmt.Sprintf("%d:%s", point.Slot, hex.EncodeToString(point.Hash))
+}
+
+func deferredHeaderValidationSyncStateKey(point ocommon.Point) string {
+	return deferredHeaderValidationSyncStatePrefix + headerValidationPointKey(point)
+}
+
+func (ls *LedgerState) markDeferredHeaderValidation(point ocommon.Point) {
+	ls.Lock()
+	defer ls.Unlock()
+	if ls.deferredHeaderValidation == nil {
+		ls.deferredHeaderValidation = make(map[string]struct{})
+	}
+	ls.deferredHeaderValidation[headerValidationPointKey(point)] = struct{}{}
+}
+
+func (ls *LedgerState) clearDeferredHeaderValidation(point ocommon.Point) {
+	ls.Lock()
+	defer ls.Unlock()
+	delete(ls.deferredHeaderValidation, headerValidationPointKey(point))
+}
+
+func (ls *LedgerState) consumeDeferredHeaderValidation(point ocommon.Point) bool {
+	ls.Lock()
+	defer ls.Unlock()
+	key := headerValidationPointKey(point)
+	if _, ok := ls.deferredHeaderValidation[key]; !ok {
+		return false
+	}
+	delete(ls.deferredHeaderValidation, key)
+	return true
+}
+
+func (ls *LedgerState) persistDeferredHeaderValidation(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	if err := ls.db.SetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		deferredHeaderValidationSyncStateValue,
+		txn,
+	); err != nil {
+		return fmt.Errorf("set deferred header validation marker: %w", err)
+	}
+	return nil
+}
+
+func (ls *LedgerState) clearPersistentDeferredHeaderValidation(
+	point ocommon.Point,
+	txn *database.Txn,
+) error {
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return nil
+	}
+	if err := ls.db.DeleteSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		txn,
+	); err != nil {
+		return fmt.Errorf("delete deferred header validation marker: %w", err)
+	}
+	return nil
+}
+
+func (ls *LedgerState) deferredHeaderValidationRequired(
+	point ocommon.Point,
+	txn *database.Txn,
+) (bool, error) {
+	required := ls.consumeDeferredHeaderValidation(point)
+	if ls.db == nil || ls.db.Metadata() == nil {
+		return required, nil
+	}
+	value, err := ls.db.GetSyncState(
+		deferredHeaderValidationSyncStateKey(point),
+		txn,
+	)
+	if err != nil {
+		return false, fmt.Errorf("read deferred header validation marker: %w", err)
+	}
+	return required || value == deferredHeaderValidationSyncStateValue, nil
+}
+
+func (ls *LedgerState) verifyDeferredBlockHeaderState(
+	txn *database.Txn,
+	point ocommon.Point,
+	block gledger.Block,
+) error {
+	required, err := ls.deferredHeaderValidationRequired(point, txn)
+	if err != nil {
+		return err
+	}
+	if !required {
+		return nil
+	}
+	if err := ls.verifyBlockHeaderStateWithEpochAdvance(block, true, false); err != nil {
+		return fmt.Errorf(
+			"deferred block header verification failed at slot %d: %w",
+			point.Slot,
+			err,
+		)
+	}
+	if err := ls.clearPersistentDeferredHeaderValidation(point, txn); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
@@ -1245,7 +1359,34 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 				skipRollback = false
 			}
 		}
+		// A rollback the node can actually apply (target block present,
+		// within the security parameter K, at/above the Mithril anchor)
+		// must be crossed even when the same point repeats. Suppressing a
+		// crossable rollback wedges the node behind a legitimately advancing
+		// peer and turns a transient fork into an unrecoverable reconnect
+		// loop (issue #2790). Only a rollback the node genuinely cannot
+		// cross is a true loop to break; those fall through to the skip +
+		// #2728 escalation below.
+		if skipRollback && ls.rollbackIsAppliable(e.Point) {
+			ls.config.Logger.Info(
+				"allowing repeated crossable rollback to converge to peer",
+				"component", "ledger",
+				"slot", e.Point.Slot,
+				"count", slotCount,
+			)
+			skipRollback = false
+		}
 		if skipRollback {
+			// Surface the stuck condition through the point-keyed tracker
+			// that survives the resync reset+reconnect cycle. Without this
+			// the skip silently breaks the loop and the #2728 escalation
+			// (operator error + metric) never fires, hiding a node that
+			// cannot self-recover (issue #2790 bullet 6).
+			ls.reportUnrecoverableRollbackIfStuck(
+				e.Point,
+				event.ChainsyncResyncReasonRollbackLoop,
+				e.ConnectionId,
+			)
 			ls.config.Logger.Warn(
 				"rollback loop detected, skipping rollback to break loop",
 				"component", "ledger",
@@ -1477,7 +1618,60 @@ func (ls *LedgerState) handleEventChainsyncRollback(e ChainsyncEvent) error {
 	// un-crossable-rollback tracking is stale. Clear it so a later,
 	// unrelated divergence starts counting from zero (see issue #2728).
 	ls.clearUnrecoverableRollbacks()
+	// Crossing to the point is forward progress toward the peer's chain, so
+	// drop this point's per-connection loop-detector records too. A rollback
+	// we actually applied must not count toward the repeat-loop threshold on
+	// a later, legitimate rollback to the same fork point; leaving the
+	// records accumulates crossable rollbacks until the loop detector
+	// suppresses one, wedging the node in a reconnect loop behind a
+	// legitimately advancing peer (issue #2790).
+	ls.clearRollbackHistoryForPoint(e.Point)
 	return nil
+}
+
+// rollbackIsAppliable reports whether rollbackChainAndState(point) would
+// succeed right now, without mutating any state. It mirrors the pre-checks
+// rollbackChainAndState relies on for its block-not-found / exceeds-K /
+// exceeds-Mithril failures: the point must sit at or above the Mithril trust
+// anchor, and the chain must be able to roll back to it (target block present
+// and within the security parameter K, verified via chain.ValidateRollback).
+//
+// The loop detector uses this to decide whether a repeated rollback is a
+// crossable point that must be applied (issue #2790) rather than a genuinely
+// un-crossable loop to break.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) rollbackIsAppliable(point ocommon.Point) bool {
+	if ls.chain == nil {
+		return false
+	}
+	mithrilLedgerSlot := ls.mithrilLedgerSlotSnapshot()
+	if mithrilLedgerSlot > 0 && point.Slot < mithrilLedgerSlot {
+		return false
+	}
+	return ls.chain.ValidateRollback(point) == nil
+}
+
+// clearRollbackHistoryForPoint removes per-connection loop-detector records
+// for a rollback point the node has successfully applied. A crossable rollback
+// we actually crossed made forward progress toward the peer's chain, so it
+// must not count toward the repeat-loop threshold that breaks pathological
+// loops. Rollbacks the node genuinely cannot cross never reach this path and
+// are tracked separately by the survives-reset unrecoverableRollbacks map.
+//
+// Callers must hold chainsyncMutex.
+func (ls *LedgerState) clearRollbackHistoryForPoint(point ocommon.Point) {
+	if len(ls.rollbackHistory) == 0 {
+		return
+	}
+	filtered := ls.rollbackHistory[:0]
+	for _, r := range ls.rollbackHistory {
+		if pointMatches(r.point, point) {
+			continue
+		}
+		filtered = append(filtered, r)
+	}
+	ls.rollbackHistory = filtered
 }
 
 // resetChainsyncResyncState clears chainsync-local recovery state before a
@@ -1805,31 +1999,44 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 	// Also skip headers covered by a Mithril snapshot: those slots were
 	// verified by the certificate chain during import, and the restored
 	// database intentionally does not keep every historical epoch nonce.
+	headerCryptoVerified := false
 	if ls.shouldVerifyChainsyncHeaderCrypto(e.Point.Slot) {
 		if err := ls.verifyBlockHeaderOnlyCrypto(e.BlockHeader); err != nil {
-			if ls.config.EventBus != nil {
-				ls.config.Logger.Warn(
-					"recycling connection after header verification failure",
+			if errors.Is(err, errHeaderVerificationDeferred) {
+				ls.config.Logger.Debug(
+					"deferring chainsync header crypto verification until blockfetch",
 					"component", "ledger",
-					"connection_id", e.ConnectionId.String(),
 					"slot", e.Point.Slot,
 					"hash", hex.EncodeToString(e.Point.Hash),
+					"error", err,
 				)
-				ls.config.EventBus.Publish(
-					ConnectionRecycleRequestedEventType,
-					event.NewEvent(
+			} else {
+				if ls.config.EventBus != nil {
+					ls.config.Logger.Warn(
+						"recycling connection after header verification failure",
+						"component", "ledger",
+						"connection_id", e.ConnectionId.String(),
+						"slot", e.Point.Slot,
+						"hash", hex.EncodeToString(e.Point.Hash),
+					)
+					ls.config.EventBus.Publish(
 						ConnectionRecycleRequestedEventType,
-						ConnectionRecycleRequestedEvent{
-							ConnectionId: e.ConnectionId,
-							Reason:       "header_verification_failure",
-						},
-					),
+						event.NewEvent(
+							ConnectionRecycleRequestedEventType,
+							ConnectionRecycleRequestedEvent{
+								ConnectionId: e.ConnectionId,
+								Reason:       "header_verification_failure",
+							},
+						),
+					)
+				}
+				return fmt.Errorf(
+					"block header crypto verification failed: %w",
+					err,
 				)
 			}
-			return fmt.Errorf(
-				"block header crypto verification failed: %w",
-				err,
-			)
+		} else {
+			headerCryptoVerified = true
 		}
 	}
 
@@ -1864,7 +2071,13 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"header_count", headerCount,
 		"connection_id", e.ConnectionId.String(),
 	)
-	if err := ls.chain.AddBlockHeader(e.BlockHeader); err != nil {
+	var err error
+	if headerCryptoVerified {
+		err = ls.chain.AddVerifiedBlockHeader(e.BlockHeader)
+	} else {
+		err = ls.chain.AddBlockHeader(e.BlockHeader)
+	}
+	if err != nil {
 		if notFitErr, ok := errors.AsType[chain.BlockNotFitChainTipError](err); ok {
 			localTip := ls.chain.Tip()
 			// A header behind the local tip is stale only if the
@@ -2019,7 +2232,7 @@ func (ls *LedgerState) handleEventChainsyncBlockHeader(e ChainsyncEvent) error {
 		"connection_id", initialConnId.String(),
 		"header_count", ls.chain.HeaderCount(),
 	)
-	err := ls.startQueuedBlockfetchLocked(initialConnId)
+	err = ls.startQueuedBlockfetchLocked(initialConnId)
 	if err != nil {
 		// The chosen connection's blockfetch protocol may have shut
 		// down. Try the header source connection if it's different;
@@ -2075,7 +2288,15 @@ func (ls *LedgerState) shouldVerifyChainsyncHeaderCrypto(slot uint64) bool {
 	if !validationEnabled {
 		return false
 	}
-	return mithrilLedgerSlot == 0 || slot > mithrilLedgerSlot
+	if mithrilLedgerSlot != 0 && slot <= mithrilLedgerSlot {
+		return false
+	}
+	return ls.hasCachedEpochNonceForSlot(slot)
+}
+
+func (ls *LedgerState) hasCachedEpochNonceForSlot(slot uint64) bool {
+	epoch, err := ls.epochForSlot(slot)
+	return err == nil && len(epoch.Nonce) > 0
 }
 
 // tryResolveFork attempts to resolve a chain fork when an incoming header
@@ -2353,15 +2574,50 @@ func (ls *LedgerState) handleEventBlockfetchBlock(e BlockfetchEvent) error {
 	// historical blocks were already validated by the network.
 	validationEnabled, _ := ls.validationStateSnapshot()
 	if validationEnabled {
-		// Chainsync already verified the queued header before blockfetch started.
-		// When the fetched block matches that first queued header by point, a
-		// second VRF/KES verification is redundant. Chain insertion still checks
-		// that the block matches the queued header hash before accepting it.
-		if !ls.chain.FirstHeaderMatchesPoint(e.Point) {
-			if err := ls.verifyBlockHeaderCrypto(e.Block); err != nil {
+		// Chainsync may already have verified the queued header before
+		// blockfetch started. When the fetched block matches that first
+		// verified queued header by point, a second VRF/KES verification is
+		// redundant. Chain insertion still checks that the block matches the
+		// queued header hash before accepting it.
+		headerAlreadyVerified := ls.chain.FirstVerifiedHeaderMatchesPoint(
+			e.Point,
+		)
+		if !headerAlreadyVerified && !ls.hasCachedEpochNonceForSlot(e.Point.Slot) {
+			if err := ls.flushPendingBlockfetchBlocks(); err != nil {
+				return err
+			}
+			headerAlreadyVerified = ls.chain.FirstVerifiedHeaderMatchesPoint(
+				e.Point,
+			)
+		}
+		var verifyErr error
+		if !headerAlreadyVerified {
+			verifyErr = ls.verifyBlockHeaderCryptoBeforeApply(e.Block)
+		} else {
+			verifyErr = ls.verifyBlockHeaderStateWithEpochAdvance(
+				e.Block,
+				true,
+				true,
+			)
+		}
+		if verifyErr != nil {
+			if errors.Is(verifyErr, errHeaderVerificationDeferred) {
+				ls.markDeferredHeaderValidation(e.Point)
+				if err := ls.persistDeferredHeaderValidation(e.Point, nil); err != nil {
+					ls.clearDeferredHeaderValidation(e.Point)
+					return err
+				}
+				ls.config.Logger.Debug(
+					"deferring stateful block header verification until ledger apply",
+					"component", "ledger",
+					"slot", e.Point.Slot,
+					"hash", hex.EncodeToString(e.Point.Hash),
+					"error", verifyErr,
+				)
+			} else {
 				return fmt.Errorf(
 					"block header crypto verification failed: %w",
-					err,
+					verifyErr,
 				)
 			}
 		}
@@ -2584,6 +2840,13 @@ func (ls *LedgerState) flushPendingBlockfetchBlocks() error {
 			ls.checkSlotBattle(pendingEvent, nil)
 			continue
 		}
+		ls.clearDeferredHeaderValidation(pendingEvent.Point)
+		if err := ls.clearPersistentDeferredHeaderValidation(
+			pendingEvent.Point,
+			nil,
+		); err != nil {
+			return err
+		}
 		var notFitErr chain.BlockNotFitChainTipError
 		var notMatchErr chain.BlockNotMatchHeaderError
 		ignored := errors.As(addBlockErr, &notFitErr) ||
@@ -2644,9 +2907,10 @@ func (ls *LedgerState) createGenesisBlock() error {
 	if ls.currentTip.Point.Slot > 0 {
 		// Validate existing chain data matches the current genesis config.
 		// If genesis CBOR exists in the blob store with the expected hash,
-		// the database was created with a matching genesis — nothing to do.
+		// the database was created with a matching genesis. Older databases
+		// may still be missing the slot-0 network-state baseline.
 		if ls.db.HasGenesisCbor(0, genesisHash[:]) {
-			return nil
+			return ls.ensureGenesisNetworkState()
 		}
 		// Check if genesis CBOR exists but with a different hash.
 		// This indicates the database was created for a different
@@ -2695,6 +2959,13 @@ func (ls *LedgerState) createGenesisBlock() error {
 
 		// Group genesis UTxOs by transaction hash
 		genesisUtxos := slices.Concat(byronGenesisUtxos, shelleyGenesisUtxos)
+		genesisReserves, err := genesisReserveBalance(
+			shelleyGenesis.MaxLovelaceSupply,
+			genesisUtxos,
+		)
+		if err != nil {
+			return fmt.Errorf("calculate genesis reserves: %w", err)
+		}
 		txUtxos := make(map[[32]byte][]lcommon.Utxo)
 		for i := range genesisUtxos {
 			txHash := genesisUtxos[i].Id.Id()
@@ -2787,12 +3058,26 @@ func (ls *LedgerState) createGenesisBlock() error {
 			}
 		}
 
+		// The initial reserves are the maximum supply that was not placed in
+		// circulation by either genesis configuration. All later epoch, MIR,
+		// governance, and donation updates build from this slot-0 baseline.
+		if err := ls.db.Metadata().SetNetworkState(
+			0,
+			genesisReserves,
+			0,
+			txn.Metadata(),
+		); err != nil {
+			return fmt.Errorf("set genesis network state: %w", err)
+		}
+
 		ls.config.Logger.Info(
 			fmt.Sprintf("stored %d genesis transactions with %d total UTxOs",
 				len(txUtxos),
 				len(genesisUtxos),
 			),
 			"component", "ledger",
+			"treasury", 0,
+			"reserves", genesisReserves,
 		)
 
 		// Load genesis staking data (pool registrations + delegations)
@@ -2849,6 +3134,45 @@ func (ls *LedgerState) createGenesisBlock() error {
 		return nil
 	})
 	return err
+}
+
+// ensureGenesisNetworkState initializes the slot-0 treasury/reserves baseline
+// for a matching pre-existing genesis database that has no network-state rows.
+func (ls *LedgerState) ensureGenesisNetworkState() error {
+	state, err := ls.db.Metadata().GetNetworkState(nil)
+	if err != nil {
+		return fmt.Errorf("get existing network state: %w", err)
+	}
+	if state != nil {
+		return nil
+	}
+
+	byronUtxos, err := ls.config.CardanoNodeConfig.ByronGenesis().GenesisUtxos()
+	if err != nil {
+		return fmt.Errorf("generate Byron genesis UTxOs: %w", err)
+	}
+	shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis()
+	shelleyUtxos, err := shelleyGenesis.GenesisUtxos()
+	if err != nil {
+		return fmt.Errorf("generate Shelley genesis UTxOs: %w", err)
+	}
+	reserves, err := genesisReserveBalance(
+		shelleyGenesis.MaxLovelaceSupply,
+		slices.Concat(byronUtxos, shelleyUtxos),
+	)
+	if err != nil {
+		return fmt.Errorf("calculate genesis reserves: %w", err)
+	}
+	if err := ls.db.Metadata().SetNetworkState(0, reserves, 0, nil); err != nil {
+		return fmt.Errorf("set missing genesis network state: %w", err)
+	}
+	ls.config.Logger.Info(
+		"initialized missing genesis network state",
+		"component", "ledger",
+		"treasury", 0,
+		"reserves", reserves,
+	)
+	return nil
 }
 
 // buildGenesisBlockCbor creates a CBOR structure representing a synthetic
@@ -3314,8 +3638,31 @@ func (ls *LedgerState) applyEpochDonations(
 	return nil
 }
 
-// Returns EpochRolloverResult with all computed state, or an error.
-// The caller is responsible for:
+// cloneProtocolParametersForEra returns an independently owned protocol-
+// parameter value using the active era's CBOR decoder.
+func cloneProtocolParametersForEra(
+	era eras.EraDesc,
+	pparams lcommon.ProtocolParameters,
+) (lcommon.ProtocolParameters, error) {
+	if pparams == nil {
+		return nil, nil
+	}
+	if era.DecodePParamsFunc == nil {
+		return nil, fmt.Errorf("era %d has no protocol parameter decoder", era.Id)
+	}
+	data, err := cbor.Encode(pparams)
+	if err != nil {
+		return nil, fmt.Errorf("encode protocol parameters: %w", err)
+	}
+	ret, err := era.DecodePParamsFunc(data)
+	if err != nil {
+		return nil, fmt.Errorf("decode protocol parameters: %w", err)
+	}
+	return ret, nil
+}
+
+// processEpochRollover returns all computed state without applying it. The
+// caller is responsible for:
 //   - Applying the result to in-memory state after successful commit
 //   - Starting background cleanup goroutines
 //   - Calling Scheduler.ChangeInterval if SchedulerIntervalMs > 0
@@ -3328,10 +3675,20 @@ func (ls *LedgerState) processEpochRollover(
 	epochStartSlot := currentEpoch.StartSlot + uint64(
 		currentEpoch.LengthInSlots,
 	)
+	// Era update functions mutate their concrete protocol-parameter pointer.
+	// Give the transaction an independently owned value so a failed or
+	// in-flight rollover cannot modify parameters retained by an older snapshot.
+	ownedPParams, err := cloneProtocolParametersForEra(
+		currentEra,
+		currentPParams,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("clone current protocol parameters: %w", err)
+	}
 	result := &EpochRolloverResult{
 		CheckpointWrittenForEpoch: false,
 		NewCurrentEra:             currentEra,
-		NewCurrentPParams:         currentPParams,
+		NewCurrentPParams:         ownedPParams,
 	}
 
 	// Create initial epoch
@@ -3394,38 +3751,55 @@ func (ls *LedgerState) processEpochRollover(
 	}
 	// EPOCH→HARDFORK ordering invariant.
 	//
-	// The remainder of this function mirrors the sequencing of cardano-
-	// ledger's Conway/Rules/Epoch.hs:374-379 (EPOCH STS), which dispatches
-	// HARDFORK only after enactment + pparams write. The relative order
-	// matters because the HARDFORK rule branch is selected from the new
-	// pparams' major version — a HARDFORK rule that ran before enactment
-	// would observe stale pparams and pick the wrong branch.
+	// The reward prefix mirrors cardano-ledger's NEWEPOCH sequence: the delayed
+	// reward update is applied first so reward-driven reserves/treasury movement
+	// is visible to governance withdrawals and to the end-of-boundary ADA-pot
+	// capture. The remainder mirrors cardano-ledger's Conway/Rules/Epoch.hs:
+	// 374-379 (EPOCH STS), which dispatches HARDFORK only after enactment +
+	// pparams write. The relative order matters because the HARDFORK rule branch
+	// is selected from the new pparams' major version — a HARDFORK rule that ran
+	// before enactment would observe stale pparams and pick the wrong branch.
 	//
-	// The order, asserted by TestProcessEpochRollover_OrderingInvariant in
-	// chainsync_ordering_test.go, is:
+	// The order, asserted by TestProcessEpochRollover_OrderingInvariant and
+	// TestProcessEpochRollover_RewardOrdering in chainsync_ordering_test.go, is:
 	//
-	//   1. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
+	//   1. applyStakeRewards             — apply the delayed reward update
+	//      (rewards from the snapshot three epochs back): credit spendable
+	//      rewards and move undistributed→reserves, unspendable→treasury
+	//      before governance reads the treasury.
+	//   2. ComputeAndApplyPParamUpdates  — Shelley-style ppuProtocolVersion
 	//      voting path; produces newPParams from on-chain pparam-update
 	//      proposals.
-	//   2. applyPoolRetirements          — embedded Shelley POOLREAP: refund
+	//   3. applyPoolRetirements          — embedded Shelley POOLREAP: refund
 	//      deposits of pools whose retirement epoch is the new epoch. Runs
 	//      before enactment so any deposit landing in the treasury is visible
-	//      to the treasury withdrawals checked in step 3.
-	//   3. applyMIRCerts                 — Shelley-era INSTANT rule: apply
+	//      to the treasury withdrawals checked in governance.ProcessEpoch.
+	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   4. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   5. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   5. SetPParams                    — persist the enacted pparams.
-	//   6. IsHardForkTransition check    — detect inter-era boundary from
+	//   6. SetPParams                    — persist the enacted pparams.
+	//   7. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   7. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   8. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
+	//   9. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//      (reserves/treasury/fees) after all boundary pot mutations so the
+	//      next delayed reward calculation has its pot inputs.
 	//
-	// Steps 5 and 6 must observe the post-enactment major version. Step 6
-	// must observe the persisted pparams (not just the in-memory ones)
-	// because its body issues SQL within `txn` that may join against
-	// `pparams` rows.
+	// The authoritative Mark snapshot is captured separately at the end of the
+	// rollover (captureEpochBoundarySnapshot), after the new epoch record and
+	// its nonce exist.
+	//
+	// Steps 6 and 7 must observe the post-enactment major version. Step 8 must
+	// observe the persisted pparams (not just the in-memory ones) because its
+	// body issues SQL within `txn` that may join against `pparams` rows.
+	if err := ls.applyStakeRewards(
+		txn, currentEpoch.EpochId+1, epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("apply stake rewards: %w", err)
+	}
 	updateQuorum := 0
 	if shelleyGenesis := ls.config.CardanoNodeConfig.ShelleyGenesis(); shelleyGenesis != nil {
 		updateQuorum = shelleyGenesis.UpdateQuorum
@@ -3435,7 +3809,7 @@ func (ls *LedgerState) processEpochRollover(
 		currentEpoch.EpochId+1, // Target epoch for updates
 		currentEra.Id,
 		updateQuorum,
-		currentPParams,
+		ownedPParams,
 		currentEra.DecodePParamsUpdateFunc,
 		currentEra.PParamsUpdateFunc,
 		txn,
@@ -3594,6 +3968,20 @@ func (ls *LedgerState) processEpochRollover(
 		}
 	}
 
+	// Capture the new epoch's ADA pots (reserves/treasury/fees) after every
+	// boundary treasury/reserves mutation above (stake rewards, POOLREAP,
+	// governance withdrawals, donations, and any AVVM-removal reserves top-up).
+	// This row seeds the delayed reward calculation for a later epoch, so it
+	// must observe the fully settled pots for the ended epoch.
+	if err := ls.saveRewardAdaPotsForEpoch(
+		txn,
+		currentEpoch.EpochId+1,
+		currentEpoch,
+		epochStartSlot,
+	); err != nil {
+		return nil, fmt.Errorf("save reward ADA pots: %w", err)
+	}
+
 	// Create next epoch record
 	epochSlotLength, epochLength, err := currentEra.EpochLengthFunc(
 		ls.config.CardanoNodeConfig,
@@ -3650,7 +4038,74 @@ func (ls *LedgerState) processEpochRollover(
 		"epoch", fmt.Sprintf("%+v", result.NewCurrentEpoch),
 		"component", "ledger",
 	)
+
+	// SNAP point: capture the authoritative mark snapshot inside this rollover
+	// transaction, now that the new epoch record (and its nonce/boundary slot)
+	// exist. Runs only for the normal N->N+1 rollover; epoch 0 is seeded by
+	// CaptureGenesisSnapshot at startup.
+	if err := ls.captureEpochBoundarySnapshot(txn, currentEpoch, result); err != nil {
+		return nil, err
+	}
+
 	return result, nil
+}
+
+// captureEpochBoundarySnapshot invokes the optional authoritative snapshot hook
+// inside the epoch-rollover write transaction so the mark snapshot commits
+// atomically with the epoch it describes (and the event-driven fallback then
+// skips it). The capture is wrapped in a metadata savepoint: a capture failure
+// rolls back only the snapshot's own writes and lets the rollover proceed,
+// deferring to the fallback rather than wedging the epoch boundary. The capture
+// writes only metadata, so a metadata savepoint fully covers it.
+func (ls *LedgerState) captureEpochBoundarySnapshot(
+	txn *database.Txn,
+	prevEpoch models.Epoch,
+	result *EpochRolloverResult,
+) error {
+	hook := ls.epochBoundarySnapshotHook()
+	if hook == nil {
+		return nil
+	}
+	newEpoch := result.NewCurrentEpoch
+	snapshotSlot := newEpoch.StartSlot
+	if snapshotSlot > 0 {
+		snapshotSlot--
+	}
+	evt := event.EpochTransitionEvent{
+		PreviousEpoch: prevEpoch.EpochId,
+		NewEpoch:      newEpoch.EpochId,
+		BoundarySlot:  newEpoch.StartSlot,
+		EpochNonce:    newEpoch.Nonce,
+		ProtocolVersion: ls.protocolMajorForEvent(
+			result.NewCurrentPParams, result.NewCurrentEra,
+		),
+		SnapshotSlot: snapshotSlot,
+	}
+	const savepoint = "epoch_boundary_snapshot"
+	if err := txn.SavePoint(savepoint); err != nil {
+		ls.config.Logger.Warn(
+			"epoch-boundary snapshot savepoint unavailable; deferring to fallback capture",
+			"error", err,
+			"epoch", newEpoch.EpochId,
+			"component", "ledger",
+		)
+		return nil
+	}
+	if err := hook(txn, evt); err != nil {
+		if rbErr := txn.RollbackTo(savepoint); rbErr != nil {
+			return fmt.Errorf(
+				"roll back epoch-boundary snapshot savepoint (capture error: %w): %w",
+				err, rbErr,
+			)
+		}
+		ls.config.Logger.Warn(
+			"authoritative epoch-boundary snapshot capture failed; deferring to fallback capture",
+			"error", err,
+			"epoch", newEpoch.EpochId,
+			"component", "ledger",
+		)
+	}
+	return nil
 }
 
 func (ls *LedgerState) cleanupBlockNoncesBefore(startSlot uint64) {

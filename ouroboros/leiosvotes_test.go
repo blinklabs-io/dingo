@@ -15,12 +15,16 @@
 package ouroboros
 
 import (
+	"errors"
 	"sync"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/connmanager"
+	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
+	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
 	oleiosvotes "github.com/blinklabs-io/gouroboros/protocol/leiosvotes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,21 +35,27 @@ type handledVote struct {
 	vote    lcommon.LeiosVote
 }
 
+type handledPrototypeVote struct {
+	connKey string
+	vote    lcommon.LeiosPrototypeVote
+}
+
 type handledEb struct {
 	slot   uint64
 	ebHash lcommon.Blake2b256
 }
 
 type fakeLeiosVoteHandler struct {
-	mu           sync.Mutex
-	votes        []handledVote
-	nextVotes    []lcommon.LeiosVote
-	nextErr      error
-	nextRequests []uint64
-	rawVotes     []cbor.RawMessage
-	requestedIds []lcommon.LeiosVoteId
-	ebs          []handledEb
-	removed      []string
+	mu             sync.Mutex
+	votes          []handledVote
+	prototypeVotes []handledPrototypeVote
+	nextVotes      []lcommon.LeiosVote
+	nextErr        error
+	nextRequests   []uint64
+	rawVotes       []cbor.RawMessage
+	requestedIds   []lcommon.LeiosVoteId
+	ebs            []handledEb
+	removed        []string
 }
 
 func (f *fakeLeiosVoteHandler) HandleVote(
@@ -56,6 +66,26 @@ func (f *fakeLeiosVoteHandler) HandleVote(
 	defer f.mu.Unlock()
 	f.votes = append(f.votes, handledVote{connKey: connKey, vote: vote})
 	return nil
+}
+
+func (f *fakeLeiosVoteHandler) HandlePrototypeVote(
+	connKey string,
+	vote lcommon.LeiosPrototypeVote,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.prototypeVotes = append(
+		f.prototypeVotes,
+		handledPrototypeVote{connKey: connKey, vote: vote},
+	)
+	return nil
+}
+
+func (f *fakeLeiosVoteHandler) ObserveAnnouncement(
+	_ uint64,
+	_ lcommon.Blake2b256,
+	_ lcommon.Blake2b256,
+) {
 }
 
 func (f *fakeLeiosVoteHandler) NextVotes(
@@ -148,6 +178,40 @@ func TestLeiosVotesClientVoteDelegates(t *testing.T) {
 	)
 	require.Len(t, handler.votes, 1)
 	assert.Equal(t, uint64(7), handler.votes[0].vote.VoterId)
+}
+
+func TestLeiosNotifyPrototypeVoteDelegates(t *testing.T) {
+	cm := connmanager.NewConnectionManager(
+		connmanager.ConnectionManagerConfig{},
+	)
+	conn, err := gouroboros.New()
+	require.NoError(t, err)
+	require.True(t, cm.AddConnection(conn, false, "127.0.0.1:1234"))
+	defer func() {
+		conn.ErrorChan() <- errors.New("test connection closed")
+	}()
+	handler := &fakeLeiosVoteHandler{}
+	o := NewOuroboros(OuroborosConfig{
+		ConnManager: cm,
+		EnableLeios: true,
+	})
+	o.LeiosVotes = handler
+	vote := lcommon.LeiosPrototypeVote{
+		AnnouncingRbHash: lcommon.NewBlake2b256([]byte("announcing-rb")),
+		VoterId:          7,
+		VoteSignature:    make([]byte, lcommon.LeiosBlsSignatureSize),
+	}
+
+	err = o.leiosnotifyClientNotification(
+		oleiosnotify.CallbackContext{ConnectionId: conn.Id()},
+		oleiosnotify.NewMsgVotesOfferPrototype(
+			[]lcommon.LeiosPrototypeVote{vote},
+		),
+	)
+	require.NoError(t, err)
+	require.Len(t, handler.prototypeVotes, 1)
+	assert.Equal(t, leiosConnectionIdString(conn.Id()), handler.prototypeVotes[0].connKey)
+	assert.Equal(t, vote, handler.prototypeVotes[0].vote)
 }
 
 func TestLeiosVotesClientVoteWithoutHandlerLogsOnly(t *testing.T) {

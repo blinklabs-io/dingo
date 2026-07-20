@@ -101,6 +101,21 @@ const (
 	RunModeLoad  RunMode = "load"  // Batch import from ImmutableDB
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
+
+	// RunModeSync and RunModeMithril are effective run modes used only for
+	// validation, not configurable runMode values (RunMode.Valid rejects
+	// them); cmd/dingo passes the one matching the invoked command to
+	// Config.Validate. Neither starts the relay/private serving listeners
+	// or the API listeners. They differ in their auxiliary-listener
+	// surface: RunModeSync is the Mithril snapshot sync operation (via
+	// `dingo sync --mithril` or `dingo mithril sync`), which starts a
+	// Prometheus metrics listener and an optional pprof debug listener;
+	// RunModeMithril is the read-only Mithril query subcommands (`list`,
+	// `show`, and bare `mithril`), which start no listeners at all.
+	// Keeping them distinct lets Validate check exactly the ports each
+	// invocation binds.
+	RunModeSync    RunMode = "sync"
+	RunModeMithril RunMode = "mithril"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -116,6 +131,9 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
+	case RunModeSync, RunModeMithril:
+		// Effective-only modes used for validation; never configurable runModes.
+		return false
 	default:
 		return false
 	}
@@ -125,6 +143,24 @@ func (m RunMode) Valid() bool {
 // (forge blocks, disable outbound, skip topology)
 func (m RunMode) IsDevMode() bool {
 	return m == RunModeDev
+}
+
+// RequiresListeners reports whether an (effective) run mode runs as a
+// serving node, starting the relay and private (NtN/NtC) listeners. The
+// serving modes (serve, dev, leios, and the empty default) do; the load
+// and one-shot sync/mithril utilities do not. (The metrics and debug
+// listeners are gated separately by Validate: serving modes and the
+// Mithril sync operation start them, the read-only Mithril subcommands do
+// not.)
+func (m RunMode) RequiresListeners() bool {
+	switch m {
+	case RunModeServe, RunModeDev, RunModeLeios, "":
+		return true
+	case RunModeLoad, RunModeSync, RunModeMithril:
+		return false
+	default:
+		return false
+	}
 }
 
 func (e StartEra) Valid() bool {
@@ -956,107 +992,72 @@ func LoadConfig(configFile string) (*Config, error) {
 		)
 	}
 
-	// Validate and default RunMode
-	if !globalConfig.RunMode.Valid() {
-		return nil, fmt.Errorf(
-			"invalid runMode: %q (must be 'serve', 'load', 'dev', or 'leios')",
-			globalConfig.RunMode,
-		)
-	}
-	if globalConfig.RunMode == "" {
-		globalConfig.RunMode = RunModeServe
-	}
-	if !globalConfig.StartEra.Valid() {
-		return nil, fmt.Errorf(
-			"invalid startEra: %q (must be empty or 'dijkstra')",
-			globalConfig.StartEra,
-		)
-	}
-
-	// Default unset MempoolCapacity based on RunMode. CLI/env/YAML have
-	// already been merged at this point; an explicit non-zero setting
-	// from any of those layers wins per existing config priority.
-	if globalConfig.MempoolCapacity == 0 {
-		if globalConfig.RunMode == RunModeLeios {
-			globalConfig.MempoolCapacity = DefaultMempoolCapacityLeios
-		} else {
-			globalConfig.MempoolCapacity = DefaultMempoolCapacityPraos
-		}
-	}
-
-	// Validate block producer configuration
-	if globalConfig.BlockProducer {
-		var missing []string
-		if globalConfig.ShelleyVRFKey == "" {
-			missing = append(missing, "shelleyVrfKey")
-		}
-		if globalConfig.ShelleyKESKey == "" {
-			missing = append(missing, "shelleyKesKey")
-		}
-		if globalConfig.ShelleyOperationalCertificate == "" {
-			missing = append(missing, "shelleyOperationalCertificate")
-		}
-		if len(missing) > 0 {
-			return nil, fmt.Errorf(
-				"blockProducer enabled but missing required key paths: %v",
-				missing,
-			)
-		}
-	}
-
-	// Default unset rejection watermark. Eviction watermark 0 is valid
-	// and disables eviction, so we preserve it as-is.
-	if globalConfig.RejectionWatermark == 0 {
-		globalConfig.RejectionWatermark = DefaultRejectionWatermark
-	}
-	if globalConfig.EvictionWatermark < 0 ||
-		globalConfig.EvictionWatermark >= 1.0 {
-		return nil, fmt.Errorf(
-			"invalid evictionWatermark: %f (must be in range [0, 1))",
-			globalConfig.EvictionWatermark,
-		)
-	}
-	if globalConfig.RejectionWatermark <= 0 ||
-		globalConfig.RejectionWatermark > 1.0 {
-		return nil, fmt.Errorf(
-			"invalid rejectionWatermark: %f (must be in range (0, 1])",
-			globalConfig.RejectionWatermark,
-		)
-	}
-	if globalConfig.EvictionWatermark > 0 &&
-		globalConfig.EvictionWatermark >= globalConfig.RejectionWatermark {
-		return nil, fmt.Errorf(
-			"evictionWatermark (%f) must be less than rejectionWatermark (%f)",
-			globalConfig.EvictionWatermark,
-			globalConfig.RejectionWatermark,
-		)
-	}
-	if globalConfig.ForgeSyncToleranceSlots == 0 {
-		globalConfig.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
-	}
-	if globalConfig.ForgeStaleGapThresholdSlots == 0 {
-		globalConfig.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
-	}
-	if globalConfig.HistoryExpiry.Frequency <= 0 {
-		globalConfig.HistoryExpiry.Frequency = time.Hour
-	}
-
-	// Validate network name to prevent path traversal (INT-03).
-	if err := ValidateNetworkName(globalConfig.Network); err != nil {
-		return nil, err
-	}
+	// LoadConfig only parses and merges configuration sources; it makes
+	// no semantic judgments about the merged values. CLI flags are a
+	// higher-precedence source merged afterwards by ApplyFlags, so any
+	// defaulting or validation here would act on values a flag may
+	// still override — defaults derived from the final configuration
+	// are applied by ApplyDefaults, and semantic checks run in
+	// Validate, both called after ApplyFlags.
+	//
+	// The Midnight network defaults applied here are the exception:
+	// they let a config loaded without CLI flags resolve its per-network
+	// values, and ApplyFlags compensates for a network change by
+	// clearing the previous network's defaults and reapplying.
 	applyMidnightNetworkDefaults(globalConfig)
 
 	// NOTE: Do not set a default CardanoConfig here. The network flag
 	// can be overridden after LoadConfig returns (see main.go
 	// PersistentPreRunE). Each consumer resolves the cardano config
-	// path using cfg.Network at call time instead.
+	// path using cfg.Network at call time instead. Topology is likewise
+	// not resolved here: it derives from Network and Topology, both of
+	// which a CLI flag may still change, so cmd/dingo loads it once
+	// after the merged configuration has been defaulted and validated.
 
-	_, err = LoadTopologyConfig()
-	if err != nil {
-		return nil, fmt.Errorf("error loading topology: %+w", err)
-	}
 	return globalConfig, nil
+}
+
+// ApplyDefaults fills in unset values whose defaults depend on other
+// settings in the fully merged configuration — most notably
+// MempoolCapacity, whose default is chosen by RunMode. It must run
+// after every configuration source has been merged (defaults, YAML,
+// environment, and CLI flags via ApplyFlags): defaulting earlier would
+// derive values from settings a higher-precedence source is still
+// allowed to change. Call it before Validate; Validate rejects any
+// value that is still invalid after defaulting.
+func (c *Config) ApplyDefaults() {
+	// An empty runMode selects the standard serving mode
+	if c.RunMode == "" {
+		c.RunMode = RunModeServe
+	}
+	// Unset MempoolCapacity defaults based on RunMode
+	if c.MempoolCapacity == 0 {
+		if c.RunMode == RunModeLeios {
+			c.MempoolCapacity = DefaultMempoolCapacityLeios
+		} else {
+			c.MempoolCapacity = DefaultMempoolCapacityPraos
+		}
+	}
+	// Unset float64 fields are 0, which is indistinguishable from an
+	// explicit 0; both select the standard watermark
+	if c.EvictionWatermark == 0 {
+		c.EvictionWatermark = DefaultEvictionWatermark
+	}
+	if c.RejectionWatermark == 0 {
+		c.RejectionWatermark = DefaultRejectionWatermark
+	}
+	if c.ForgeSyncToleranceSlots == 0 {
+		c.ForgeSyncToleranceSlots = DefaultForgeSyncToleranceSlots
+	}
+	if c.ForgeStaleGapThresholdSlots == 0 {
+		c.ForgeStaleGapThresholdSlots = DefaultForgeStaleGapThresholdSlots
+	}
+	// Only an unset (zero) frequency takes the default; an explicitly
+	// negative value is preserved so Validate can reject it instead of
+	// the node silently starting the expiry worker on the default cadence
+	if c.HistoryExpiry.Frequency == 0 {
+		c.HistoryExpiry.Frequency = time.Hour
+	}
 }
 
 func GetConfig() *Config {
@@ -1082,6 +1083,14 @@ func LoadTopologyConfigFor(cfg *Config) (*topology.TopologyConfig, error) {
 		return &topology.TopologyConfig{}, nil
 	}
 	if cfg.Topology == "" {
+		if cfg.Network == "" {
+			// A networkMagic-only configuration has no network name to
+			// resolve an embedded topology or bootstrap peers from;
+			// peers must come from an explicit topology file. Return an
+			// empty topology (as dev mode does) rather than failing
+			// config load.
+			return &topology.TopologyConfig{}, nil
+		}
 		embeddedTopologyPath := path.Join(cfg.Network, "topology.json")
 		tc, err := topology.NewTopologyConfigFromFS(
 			cardano.EmbeddedConfigFS,

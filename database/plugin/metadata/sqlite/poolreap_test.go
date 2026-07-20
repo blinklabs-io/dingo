@@ -95,3 +95,116 @@ func TestGetPoolsRetiringAtEpoch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, none, "retirement cert added at slot 200 is excluded before slot 150")
 }
+
+func TestGetPoolsRetiringAtEpochTieBreaksSameAddedSlot(t *testing.T) {
+	t.Parallel()
+	store := setupTestDB(t)
+
+	const (
+		retireEpoch = uint64(5)
+		certSlot    = uint64(300)
+		querySlot   = uint64(301)
+	)
+
+	tx := &models.Transaction{
+		Hash:       []byte("poolreap_same_slot_tx_hash_0001"),
+		Slot:       certSlot,
+		BlockIndex: 0,
+		Valid:      true,
+	}
+	require.NoError(t, store.DB().Create(tx).Error)
+	cert0 := &models.Certificate{
+		TransactionID: tx.ID,
+		Slot:          certSlot,
+		CertIndex:     0,
+	}
+	cert1 := &models.Certificate{
+		TransactionID: tx.ID,
+		Slot:          certSlot,
+		CertIndex:     1,
+	}
+	require.NoError(t, store.DB().Create(cert0).Error)
+	require.NoError(t, store.DB().Create(cert1).Error)
+
+	laterTx := &models.Transaction{
+		Hash:       []byte("poolreap_same_slot_tx_hash_0002"),
+		Slot:       certSlot,
+		BlockIndex: 1,
+		Valid:      true,
+	}
+	require.NoError(t, store.DB().Create(laterTx).Error)
+	cert2 := &models.Certificate{
+		TransactionID: laterTx.ID,
+		Slot:          certSlot,
+		CertIndex:     0,
+	}
+	require.NoError(t, store.DB().Create(cert2).Error)
+
+	// Pool A: the retirement appears first and a same-slot registration
+	// appears later in the transaction. The registration cancels the
+	// retirement, so no POOLREAP refund should be emitted.
+	poolA := seedRetiringPool(t, store, poolreapBytes(0xAA), poolreapBytes(0x11), 500, 100)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID:        poolA.ID,
+		PoolKeyHash:   poolA.PoolKeyHash,
+		Epoch:         retireEpoch,
+		AddedSlot:     certSlot,
+		CertificateID: cert0.ID,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:        poolA.ID,
+		PoolKeyHash:   poolA.PoolKeyHash,
+		RewardAccount: poolreapBytes(0x22),
+		DepositAmount: types.Uint64(700),
+		AddedSlot:     certSlot,
+		CertificateID: cert1.ID,
+	}).Error)
+
+	// Pool B: the same-slot retirement appears after the registration and is
+	// therefore effective. The refund uses that latest registration.
+	poolB := &models.Pool{PoolKeyHash: poolreapBytes(0xBB)}
+	require.NoError(t, store.DB().Create(poolB).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:        poolB.ID,
+		PoolKeyHash:   poolB.PoolKeyHash,
+		RewardAccount: poolreapBytes(0x33),
+		DepositAmount: types.Uint64(900),
+		AddedSlot:     certSlot,
+		CertificateID: cert0.ID,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID:        poolB.ID,
+		PoolKeyHash:   poolB.PoolKeyHash,
+		Epoch:         retireEpoch,
+		AddedSlot:     certSlot,
+		CertificateID: cert1.ID,
+	}).Error)
+
+	// Pool C: the earlier transaction's retirement has a higher CertIndex,
+	// but the later transaction's registration wins because BlockIndex is
+	// compared before CertIndex.
+	poolC := &models.Pool{PoolKeyHash: poolreapBytes(0xCC)}
+	require.NoError(t, store.DB().Create(poolC).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRetirement{
+		PoolID:        poolC.ID,
+		PoolKeyHash:   poolC.PoolKeyHash,
+		Epoch:         retireEpoch,
+		AddedSlot:     certSlot,
+		CertificateID: cert1.ID,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolID:        poolC.ID,
+		PoolKeyHash:   poolC.PoolKeyHash,
+		RewardAccount: poolreapBytes(0x44),
+		DepositAmount: types.Uint64(1100),
+		AddedSlot:     certSlot,
+		CertificateID: cert2.ID,
+	}).Error)
+
+	refunds, err := store.GetPoolsRetiringAtEpoch(retireEpoch, querySlot, nil)
+	require.NoError(t, err)
+	require.Len(t, refunds, 1, "later BlockIndex must precede CertIndex")
+	assert.Equal(t, poolB.PoolKeyHash, refunds[0].PoolKeyHash)
+	assert.Equal(t, poolreapBytes(0x33), refunds[0].RewardAccount)
+	assert.Equal(t, uint64(900), uint64(refunds[0].DepositAmount))
+}

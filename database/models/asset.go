@@ -35,6 +35,67 @@ func (Asset) TableName() string {
 	return "asset"
 }
 
+// AssetMintBurn records a single asset mint or burn event: one row per
+// (transaction, asset) pair for every transaction that mints or burns the
+// asset. Quantity is a signed decimal string (positive for a mint, negative
+// for a burn). Only populated in API storage mode.
+//
+// Unlike Asset (which tracks live UTxO holdings), this table preserves the
+// full mint/burn history so the Blockfrost API can derive an asset's
+// initial_mint_tx_hash (earliest event) and mint_or_burn_count (row count).
+type AssetMintBurn struct {
+	ID          uint   `gorm:"primaryKey"`
+	TxHash      []byte `gorm:"size:32;uniqueIndex:idx_asset_mint_burn_unique,priority:1"`
+	PolicyId    []byte `gorm:"size:28;uniqueIndex:idx_asset_mint_burn_unique,priority:2;index:idx_asset_mint_burn_lookup,priority:1"`
+	Name        []byte `gorm:"size:32;uniqueIndex:idx_asset_mint_burn_unique,priority:3;index:idx_asset_mint_burn_lookup,priority:2"`
+	Fingerprint []byte `gorm:"index;size:48"`
+	Slot        uint64 `gorm:"index;index:idx_asset_mint_burn_lookup,priority:3"`
+	Quantity    string `gorm:"size:40"`
+	TxIndex     uint32
+}
+
+func (AssetMintBurn) TableName() string {
+	return "asset_mint_burn"
+}
+
+// ConvertMintToAssetMintBurnModels converts a transaction's mint field into a
+// slice of AssetMintBurn models, one per (policy, asset name) pair with a
+// non-zero net quantity. Returns nil when there is nothing minted or burned.
+func ConvertMintToAssetMintBurnModels(
+	mint *lcommon.MultiAsset[lcommon.MultiAssetTypeMint],
+	txHash []byte,
+	slot uint64,
+	txIndex uint32,
+) []AssetMintBurn {
+	if mint == nil {
+		return nil
+	}
+	var rows []AssetMintBurn
+	for _, policyId := range mint.Policies() {
+		policyIdBytes := policyId.Bytes()
+		for _, assetNameBytes := range mint.Assets(policyId) {
+			amount := mint.Asset(policyId, assetNameBytes)
+			if amount == nil || amount.Sign() == 0 {
+				continue
+			}
+			fingerprint := lcommon.NewAssetFingerprint(
+				policyIdBytes,
+				assetNameBytes,
+			)
+			rows = append(rows, AssetMintBurn{
+				TxHash:      append([]byte(nil), txHash...),
+				PolicyId:    policyIdBytes,
+				Name:        append([]byte(nil), assetNameBytes...),
+				Fingerprint: []byte(fingerprint.String()),
+				Slot:        slot,
+				Quantity:    amount.String(),
+				TxIndex:     txIndex,
+			})
+		}
+	}
+	return rows
+}
+
 // ConvertMultiAssetToModels converts a MultiAsset structure into a slice of Asset models.
 // Each asset is populated with its name, hex-encoded name, policy ID, fingerprint, and amount.
 // Returns an empty slice if multiAsset is nil or contains no assets.

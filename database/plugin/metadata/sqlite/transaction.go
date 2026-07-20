@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -104,28 +105,6 @@ func (d *MetadataStoreSqlite) resolveReadDB(
 	return db, nil
 }
 
-// ExistingTransactionHashes returns transaction hashes already recorded.
-func (d *MetadataStoreSqlite) ExistingTransactionHashes(
-	hashes [][]byte,
-	txn types.Txn,
-) ([][]byte, error) {
-	if len(hashes) == 0 {
-		return nil, nil
-	}
-	db, err := d.resolveReadDB(txn)
-	if err != nil {
-		return nil, err
-	}
-	var existing [][]byte
-	result := db.Model(&models.Transaction{}).
-		Where("hash IN ?", hashes).
-		Pluck("hash", &existing)
-	if result.Error != nil {
-		return nil, result.Error
-	}
-	return existing, nil
-}
-
 // GetTransactionByHash returns a transaction by its hash
 func (d *MetadataStoreSqlite) GetTransactionByHash(
 	hash []byte,
@@ -177,6 +156,29 @@ func (d *MetadataStoreSqlite) GetTransactionSlotByHash(
 	return row.Slot, true, nil
 }
 
+// SumTransactionFeesInSlotRange sums the fee-pot contributions in an
+// inclusive slot range: declared fees of valid transactions plus consumed
+// collateral of phase-2-invalid transactions, per the Alonzo/Babbage UTXOS
+// rule.
+func (d *MetadataStoreSqlite) SumTransactionFeesInSlotRange(
+	startSlot uint64,
+	endSlot uint64,
+	txn types.Txn,
+) (uint64, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return 0, err
+	}
+	var total uint64
+	if err := db.Model(&models.Transaction{}).
+		Select("COALESCE(SUM(CASE WHEN valid THEN CAST(fee AS INTEGER) ELSE CAST(collateral_fee AS INTEGER) END), 0)").
+		Where("slot >= ? AND slot <= ?", startSlot, endSlot).
+		Scan(&total).Error; err != nil {
+		return 0, fmt.Errorf("sum transaction fees in slot range: %w", err)
+	}
+	return total, nil
+}
+
 // GetTransactionIDByHash returns the primary-key ID of the transaction
 // with the given hash without preloading any related rows. Returns
 // (0, false, nil) when no such transaction exists.
@@ -200,6 +202,31 @@ func (d *MetadataStoreSqlite) GetTransactionIDByHash(
 		return 0, false, result.Error
 	}
 	return row.ID, true, nil
+}
+
+// GetTransactionMetadataByHash returns only the stored metadata blob for the
+// transaction with the given hash without preloading any related rows. Returns
+// (nil, nil) when no such transaction exists or it carries no metadata.
+func (d *MetadataStoreSqlite) GetTransactionMetadataByHash(
+	hash []byte,
+	txn types.Txn,
+) ([]byte, error) {
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	var row struct{ Metadata []byte }
+	result := db.Model(&models.Transaction{}).
+		Select("metadata").
+		Where("hash = ?", hash).
+		Take(&row)
+	if result.Error != nil {
+		if errors.Is(result.Error, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, result.Error
+	}
+	return row.Metadata, nil
 }
 
 // GetTransactionsByHashes returns transactions for the provided hashes.
@@ -811,6 +838,9 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 		// Account exists - mark for reactivation if inactive
 		if !existing.Active {
 			existing.Active = true
+			existing.Pool = nil
+			existing.Drep = nil
+			existing.DrepType = 0
 		}
 		return &existing, nil
 	}
@@ -822,6 +852,7 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 		StakingKey:    stakeKey,
 		CredentialTag: credentialTag,
 		Active:        true,
+		CreatedSlot:   models.AccountCreatedSlotUnset,
 	}
 	result = db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{
@@ -847,6 +878,9 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 		// Mark for reactivation if inactive
 		if !tmpAccount.Active {
 			tmpAccount.Active = true
+			tmpAccount.Pool = nil
+			tmpAccount.Drep = nil
+			tmpAccount.DrepType = 0
 		}
 	}
 
@@ -856,40 +890,140 @@ func (d *MetadataStoreSqlite) getOrCreateAccount(
 // saveAccount persists the account to the database. It creates a new
 // record when `account.ID == 0` (with an upsert on credential tag + staking
 // key) or saves the existing record otherwise.
-func saveAccount(account *models.Account, db *gorm.DB) error {
+func saveAccount(
+	account *models.Account,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
+	// Resolve the create-helper sentinel to the account's creation slot. For a
+	// freshly built account CreatedSlot==AddedSlot; an existing row loaded from
+	// the DB carries its real (never-sentinel) CreatedSlot and is left as-is,
+	// and no upsert DoUpdates list includes created_slot, so it stays immutable.
+	if account.CreatedSlot == models.AccountCreatedSlotUnset {
+		account.CreatedSlot = account.AddedSlot
+	}
 	if account.ID == 0 {
+		updates := clause.AssignmentColumns(
+			[]string{
+				"added_slot",
+				"pool",
+				"drep",
+				"drep_type",
+				"active",
+				"certificate_id",
+			},
+		)
+		updates = append(updates, clause.Assignment{
+			Column: clause.Column{Name: "created_slot"},
+			Value: gorm.Expr(
+				"MIN(account.created_slot, excluded.created_slot)",
+			),
+		})
 		result := db.Clauses(clause.OnConflict{
 			Columns: []clause.Column{
 				{Name: "credential_tag"},
 				{Name: "staking_key"},
 			},
-			DoUpdates: clause.AssignmentColumns(
-				[]string{
-					"added_slot",
-					"pool",
-					"drep",
-					"drep_type",
-					"active",
-					"certificate_id",
-				},
-			),
+			DoUpdates: updates,
 		}).Create(account)
 		if result.Error != nil {
 			return result.Error
 		}
 	} else {
-		result := db.Save(account)
+		// Multiple callers can load the sentinel row inserted by
+		// getOrCreateAccount before any of them stamps CreatedSlot. Update
+		// the first-seen slot atomically so a later-slot caller cannot win
+		// the race merely by saving last. MIN also keeps genesis slot 0
+		// immutable.
+		result := db.Model(&models.Account{}).
+			Where("id = ?", account.ID).
+			Updates(map[string]any{
+				"staking_key":    account.StakingKey,
+				"credential_tag": account.CredentialTag,
+				"pool":           account.Pool,
+				"drep":           account.Drep,
+				"added_slot":     account.AddedSlot,
+				"created_slot": gorm.Expr(
+					"MIN(created_slot, ?)", account.CreatedSlot,
+				),
+				"certificate_id": account.CertificateID,
+				"reward":         account.Reward,
+				"drep_type":      account.DrepType,
+				"active":         account.Active,
+			})
 		if result.Error != nil {
 			return result.Error
 		}
 	}
-	return nil
+	ref := models.NewStakeCredentialRef(
+		account.CredentialTag,
+		account.StakingKey,
+	)
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, account.AddedSlot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, account.AddedSlot)
 }
 
 // saveCertRecord saves a certificate record and returns any error
-func saveCertRecord(record any, db *gorm.DB) error {
+func saveCertRecord(
+	record any,
+	db *gorm.DB,
+	rewardRefs ...map[string]rewardCredentialSlotRef,
+) error {
 	result := db.Create(record)
-	return result.Error
+	if result.Error != nil {
+		return result.Error
+	}
+	ref, slot, ok := rewardLiveStakeRefFromCertRecord(record)
+	if !ok {
+		return nil
+	}
+	if len(rewardRefs) > 0 && rewardRefs[0] != nil {
+		addRewardStakeRef(rewardRefs[0], ref, slot)
+		return nil
+	}
+	return refreshRewardLiveStakeAggregate(db, ref, slot)
+}
+
+func rewardLiveStakeRefFromCertRecord(
+	record any,
+) (models.StakeCredentialRef, uint64, bool) {
+	switch r := record.(type) {
+	case *models.StakeRegistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDeregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Registration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.Deregistration:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.StakeVoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteRegistrationDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	case *models.VoteDelegation:
+		return models.NewStakeCredentialRef(r.CredentialTag, r.StakingKey),
+			r.AddedSlot, true
+	default:
+		return models.StakeCredentialRef{}, 0, false
+	}
 }
 
 // SetGapBlockTransaction stores a transaction record and its produced
@@ -907,15 +1041,31 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 	if err != nil {
 		return err
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(tx.Fee().Uint64()),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	// Store produced outputs only (no input lookup or consumption)
 	collateralReturn := tx.CollateralReturn()
@@ -971,6 +1121,7 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 			)
 		}
 	}
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
 	if tmpTx.CollateralReturn != nil {
 		tmpTx.CollateralReturn.CollateralReturnForTxID = &tmpTx.ID
 		if err := d.ImportUtxos(
@@ -982,6 +1133,62 @@ func (d *MetadataStoreSqlite) SetGapBlockTransaction(
 				txHash, err,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
+	}
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf("refresh reward live stake for gap tx %x: %w", txHash, err)
+	}
+	return nil
+}
+
+// RecomputeGapCollateralFee recomputes and persists the collateral fee for a
+// phase-2-invalid gap-block transaction after ensureGapConsumedUtxos has
+// materialized its consumed collateral inputs in the utxo table. See the
+// interface docs on metadata.MetadataStore.
+func (d *MetadataStoreSqlite) RecomputeGapCollateralFee(
+	tx lcommon.Transaction,
+	point ocommon.Point,
+	txn types.Txn,
+) error {
+	if tx.IsValid() {
+		return nil
+	}
+	txHash := tx.Hash().Bytes()
+	db, err := d.resolveDB(txn)
+	if err != nil {
+		return err
+	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
+	if err := db.Model(&models.Transaction{}).
+		Where("hash = ?", txHash).
+		Update("collateral_fee", types.Uint64(collateralFee)).Error; err != nil {
+		return fmt.Errorf(
+			"update collateral fee for gap tx %x: %w", txHash, err,
+		)
 	}
 	return nil
 }
@@ -999,15 +1206,31 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	if err != nil {
 		return err
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, nil,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(tx.Fee().Uint64()),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(tx.Fee().Uint64()),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -1049,7 +1272,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 	result := db.Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "hash"}}, // unique txn hash
 		DoUpdates: clause.AssignmentColumns(
-			[]string{"block_hash", "block_index", "slot"},
+			[]string{"block_hash", "block_index", "slot", "collateral_fee"},
 		),
 	}).Create(tmpTx)
 	needsIdFetch := tmpTx.ID == 0
@@ -1130,6 +1353,10 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		}
 	}
 
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
+	}
+
 	// Create UTxO records for outputs in a single statement per transaction.
 	for i := range tmpTx.Outputs {
 		tmpTx.Outputs[i].ID = 0 // Reset ID to let GORM auto-increment
@@ -1140,6 +1367,12 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			return fmt.Errorf("create utxo outputs for tx %x: %w", txHash, err)
 		}
 	}
+	// rewardRefs accumulates every stake-credential ref touched by this
+	// transaction (outputs, collateral return, spent UTxOs, and account/cert
+	// saves below) so the full reward_live_stake recompute for a credential
+	// runs exactly once at the end of SetTransaction, instead of once per
+	// trigger. See addRewardStakeRef / refreshRewardLiveStakeAggregates.
+	rewardRefs := rewardStakeRefsFromUtxos(tmpTx.Outputs)
 	// Create CollateralReturn UTxO if present
 	// Uses CollateralReturnForTxID (not TransactionID) to distinguish from regular outputs
 	if tmpTx.CollateralReturn != nil {
@@ -1151,6 +1384,14 @@ func (d *MetadataStoreSqlite) SetTransaction(
 		); err != nil {
 			return fmt.Errorf("create collateral return utxo: %w", err)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(
+				tmpTx.CollateralReturn.CredentialTag,
+				tmpTx.CollateralReturn.StakingKey,
+			),
+			tmpTx.CollateralReturn.AddedSlot,
+		)
 	}
 
 	if d.storageMode == types.StorageModeAPI {
@@ -1405,6 +1646,24 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					)
 				}
 			}
+			consumedUtxoIDs := make([]models.UtxoId, 0, len(consumedRefs))
+			for _, ref := range consumedRefs {
+				consumedUtxoIDs = append(consumedUtxoIDs, models.UtxoId{
+					Hash: ref.txID,
+					Idx:  ref.idx,
+				})
+			}
+			spendRefs, err := rewardStakeRefsFromUtxoIDs(
+				db,
+				consumedUtxoIDs,
+				point.Slot,
+			)
+			if err != nil {
+				return fmt.Errorf("query reward live stake spend refs: %w", err)
+			}
+			for _, item := range spendRefs {
+				addRewardStakeRef(rewardRefs, item.ref, item.slot)
+			}
 		}
 	}
 	// Address indexing, witnesses, scripts, redeemers, and plutus data only stored in API mode
@@ -1625,6 +1884,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					"deregistration", "stake_delegation", "stake_registration_delegation", "stake_vote_delegation",
 					"stake_vote_registration_delegation", "registration", "registration_drep", "deregistration_drep",
 					"update_drep", "vote_delegation", "vote_registration_delegation", "move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).Where("certificate_id IN ?", unifiedIDs).Delete(nil); result.Error != nil {
@@ -1639,6 +1899,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 			// Create unified certificate records first (idempotent with ON CONFLICT DO NOTHING)
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint) // unifiedID -> specializedID
+			// certRewardRefs aliases the same underlying map as rewardRefs
+			// (maps are reference types) so account/cert saves below merge
+			// into the single end-of-transaction refresh instead of
+			// triggering their own.
+			certRewardRefs := rewardRefs
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -1678,6 +1943,8 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn("unknown certificate type", "type", fmt.Sprintf("%T", cert))
 					continue
@@ -1925,16 +2192,32 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.AddedSlot = point.Slot
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
 					// Collect update for batch processing
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate: %w", err)
+					}
+
+					// Collect update for batch processing
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					// Include inactive pools when retiring.
 					tmpPool, err := d.GetPool(lcommon.PoolKeyHash(c.PoolKeyHash[:]), true, txn)
@@ -1961,7 +2244,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -1973,26 +2256,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
-					}
-					if tmpAccount == nil {
-						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
-						}
 					}
 
 					tmpAccount.Active = false
@@ -2005,11 +2271,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2021,26 +2287,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate: %w", err)
-					}
-					if tmpAccount == nil {
-						d.logger.Warn("deregistering non-existent account", "hash", stakeKey)
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-						}
-						result := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if result.Error != nil {
-							return fmt.Errorf("process certificate: %w", result.Error)
-						}
 					}
 
 					tmpAccount.Active = false
@@ -2054,11 +2303,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						Amount:        types.Uint64(deposit),
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2086,11 +2335,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2119,11 +2368,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2164,11 +2413,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2194,11 +2443,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 					}
 
 					tmpAccount.AddedSlot = point.Slot
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2295,7 +2544,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2334,7 +2583,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2376,11 +2625,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2420,11 +2669,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2463,11 +2712,11 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						CertificateID: certIDMap[i],
 					}
 
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2484,7 +2733,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						AddedSlot:      point.Slot,
 					}
 
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2503,7 +2752,7 @@ func (d *MetadataStoreSqlite) SetTransaction(
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
 
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate: %w", err)
 					}
 
@@ -2548,6 +2797,9 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				}
 			}
 
+			// certRewardRefs merges into rewardRefs above; the combined set
+			// is refreshed exactly once at the end of SetTransaction.
+
 			// Batch update unified certificates with specialized record IDs
 			if len(certIDUpdates) > 0 {
 				// Build CASE statement for batch update
@@ -2582,6 +2834,17 @@ func (d *MetadataStoreSqlite) SetTransaction(
 				return fmt.Errorf("store datums failed: %w", err)
 			}
 		}
+	}
+
+	// Single end-of-transaction refresh for every credential touched above
+	// (outputs, collateral return, spent UTxOs, account/cert saves), instead
+	// of once per trigger.
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for tx %x: %w",
+			txHash,
+			err,
+		)
 	}
 
 	return nil
@@ -2679,15 +2942,31 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			feeUint = txFee.Uint64()
 		}
 	}
+	collateralFee, collateralResolved, err := collateralfee.ForTransaction(
+		db, tx, batch.InFlightProducerAmount,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"compute collateral fee for tx %x: %w", txHash, err,
+		)
+	}
+	if !collateralResolved {
+		d.logger.Warn(
+			"collateral fee computed from incomplete UTxO history",
+			"txHash", hex.EncodeToString(txHash),
+			"slot", point.Slot,
+		)
+	}
 	tmpTx := &models.Transaction{
-		Hash:       txHash,
-		Type:       tx.Type(),
-		BlockHash:  point.Hash,
-		BlockIndex: idx,
-		Slot:       point.Slot,
-		Fee:        types.Uint64(feeUint),
-		TTL:        types.Uint64(tx.TTL()),
-		Valid:      tx.IsValid(),
+		Hash:          txHash,
+		Type:          tx.Type(),
+		BlockHash:     point.Hash,
+		BlockIndex:    idx,
+		Slot:          point.Slot,
+		Fee:           types.Uint64(feeUint),
+		CollateralFee: types.Uint64(collateralFee),
+		TTL:           types.Uint64(tx.TTL()),
+		Valid:         tx.IsValid(),
 	}
 	var metadataLabels []labelcodec.Entry
 	if tx.Metadata() != nil && d.storageMode == types.StorageModeAPI {
@@ -2753,8 +3032,14 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 		if _, err := execRawOnConn(
 			db,
 			`UPDATE "transaction" SET "block_hash" = ?, "block_index" = ?, `+
-				`"slot" = ? WHERE "hash" = ?`,
-			[]any{tmpTx.BlockHash, tmpTx.BlockIndex, tmpTx.Slot, txHash},
+				`"slot" = ?, "collateral_fee" = ? WHERE "hash" = ?`,
+			[]any{
+				tmpTx.BlockHash,
+				tmpTx.BlockIndex,
+				tmpTx.Slot,
+				tmpTx.CollateralFee,
+				txHash,
+			},
 		); err != nil {
 			return fmt.Errorf(
 				"update existing transaction (batched) at slot %d, txHash %x: %w",
@@ -2826,6 +3111,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 				result.Error,
 			)
 		}
+	}
+
+	if err := d.recordAssetMintBurn(tx, txHash, point.Slot, idx, txn); err != nil {
+		return err
 	}
 
 	// ------------------------------------------------------------------ //
@@ -3247,6 +3536,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					"registration_drep", "deregistration_drep", "update_drep",
 					"vote_delegation", "vote_registration_delegation",
 					"move_instantaneous_rewards",
+					"genesis_delegation",
 				}
 				for _, table := range tables {
 					if result := db.Table(table).
@@ -3262,6 +3552,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 			}
 			certIDMap := make(map[int]uint)
 			certIDUpdates := make(map[uint]uint)
+			certRewardRefs := make(map[string]rewardCredentialSlotRef)
 			for i, cert := range certs {
 				var certType uint
 				switch cert.(type) {
@@ -3301,6 +3592,8 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					certType = uint(lcommon.CertificateTypeResignCommitteeCold)
 				case *lcommon.MoveInstantaneousRewardsCertificate:
 					certType = uint(lcommon.CertificateTypeMoveInstantaneousRewards)
+				case *lcommon.GenesisKeyDelegationCertificate:
+					certType = uint(lcommon.CertificateTypeGenesisKeyDelegation)
 				default:
 					d.logger.Warn(
 						"unknown certificate type (batched)",
@@ -3533,13 +3826,27 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						CertificateID: certIDMap[i],
 					}
 					tmpAccount.AddedSlot = point.Slot
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
+				case *lcommon.GenesisKeyDelegationCertificate:
+					tmpItem := models.GenesisDelegation{
+						GenesisHash:         c.GenesisHash,
+						GenesisDelegateHash: c.GenesisDelegateHash,
+						VrfKeyHash:          c.VrfKeyHash[:],
+						AddedSlot:           point.Slot,
+						BlockIndex:          idx,
+						CertIndex:           uint(i), //nolint:gosec
+						CertificateID:       certIDMap[i],
+					}
+					if err := saveCertRecord(&tmpItem, db); err != nil {
+						return fmt.Errorf("process certificate (batched): %w", err)
+					}
+					certIDUpdates[certIDMap[i]] = tmpItem.ID
 				case *lcommon.PoolRetirementCertificate:
 					tmpPool, err := d.GetPool(
 						lcommon.PoolKeyHash(c.PoolKeyHash[:]),
@@ -3566,7 +3873,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						PoolID:        tmpPool.ID,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3576,25 +3883,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
-					}
-					if tmpAccount == nil {
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
-						}
 					}
 					tmpAccount.Active = false
 					tmpAccount.AddedSlot = point.Slot
@@ -3604,10 +3895,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3617,25 +3908,9 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					if err != nil {
 						return err
 					}
-					tmpAccount, err := d.GetAccountByCredential(credentialTag, stakeKey, false, txn)
+					tmpAccount, err := d.getOrCreateAccount(credentialTag, stakeKey, txn)
 					if err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
-					}
-					if tmpAccount == nil {
-						tmpAccount = &models.Account{
-							StakingKey:    stakeKey,
-							CredentialTag: credentialTag,
-						}
-						r := db.Clauses(clause.OnConflict{
-							Columns: []clause.Column{
-								{Name: "credential_tag"},
-								{Name: "staking_key"},
-							},
-							UpdateAll: true,
-						}).Create(tmpAccount)
-						if r.Error != nil {
-							return fmt.Errorf("process certificate (batched): %w", r.Error)
-						}
 					}
 					tmpAccount.Active = false
 					tmpAccount.AddedSlot = point.Slot
@@ -3646,10 +3921,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						CertificateID: certIDMap[i],
 						Amount:        types.Uint64(deposit),
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3672,10 +3947,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3699,10 +3974,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3738,10 +4013,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -3763,10 +4038,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						CertificateID: certIDMap[i],
 					}
 					tmpAccount.AddedSlot = point.Slot
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3848,7 +4123,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpDereg, db); err != nil {
+					if err := saveCertRecord(&tmpDereg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpDereg.ID
@@ -3884,7 +4159,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 					); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpUpdate, db); err != nil {
+					if err := saveCertRecord(&tmpUpdate, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpUpdate.ID
@@ -3921,10 +4196,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3959,10 +4234,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						DepositAmount: types.Uint64(deposit),
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpReg, db); err != nil {
+					if err := saveCertRecord(&tmpReg, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpReg.ID
@@ -3996,10 +4271,10 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						AddedSlot:     point.Slot,
 						CertificateID: certIDMap[i],
 					}
-					if err := saveAccount(tmpAccount, db); err != nil {
+					if err := saveAccount(tmpAccount, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
-					if err := saveCertRecord(&tmpItem, db); err != nil {
+					if err := saveCertRecord(&tmpItem, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpItem.ID
@@ -4012,7 +4287,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						CertificateID:  certIDMap[i],
 						AddedSlot:      point.Slot,
 					}
-					if err := saveCertRecord(&tmpAuth, db); err != nil {
+					if err := saveCertRecord(&tmpAuth, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpAuth.ID
@@ -4027,7 +4302,7 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						tmpResign.AnchorURL = c.Anchor.Url
 						tmpResign.AnchorHash = c.Anchor.DataHash[:]
 					}
-					if err := saveCertRecord(&tmpResign, db); err != nil {
+					if err := saveCertRecord(&tmpResign, db, certRewardRefs); err != nil {
 						return fmt.Errorf("process certificate (batched): %w", err)
 					}
 					certIDUpdates[certIDMap[i]] = tmpResign.ID
@@ -4063,6 +4338,16 @@ func (d *MetadataStoreSqlite) SetTransactionBatched(
 						cert,
 					)
 				}
+			}
+
+			if err := refreshRewardLiveStakeAggregates(
+				db,
+				certRewardRefs,
+			); err != nil {
+				return fmt.Errorf(
+					"refresh reward live stake for certificates (batched): %w",
+					err,
+				)
 			}
 
 			if len(certIDUpdates) > 0 {
@@ -4161,6 +4446,15 @@ func (d *MetadataStoreSqlite) SetGenesisTransaction(
 		if result.Error != nil {
 			return fmt.Errorf("create genesis utxos: %w", result.Error)
 		}
+		if err := refreshRewardLiveStakeAggregates(
+			db,
+			rewardStakeRefsFromUtxos(outputs),
+		); err != nil {
+			return fmt.Errorf(
+				"refresh reward live stake for genesis utxos: %w",
+				err,
+			)
+		}
 	}
 
 	return nil
@@ -4195,6 +4489,11 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(
+		map[string]rewardCredentialSlotRef,
+		len(stakeDelegations),
+	)
 
 	// Batch fetch all existing pools to avoid N+1 queries
 	poolKeyHashes := make([][]byte, 0, len(pools))
@@ -4355,6 +4654,18 @@ func (d *MetadataStoreSqlite) SetGenesisStaking(
 				result.Error,
 			)
 		}
+		addRewardStakeRef(
+			rewardRefs,
+			models.NewStakeCredentialRef(0, stakerBytes),
+			0,
+		)
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis staking: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -4374,6 +4685,8 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 	if err != nil {
 		return err
 	}
+
+	rewardRefs := make(map[string]rewardCredentialSlotRef, len(delegs))
 
 	for cred, state := range initialDReps {
 		if cred == nil {
@@ -4500,7 +4813,7 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 		switch delegatee.Type {
 		case conway.ConwayGenesisDelegateeTypeStake:
 			account.Pool = delegatee.PoolId[:]
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake delegatee account: %w", err,
 				)
@@ -4523,7 +4836,7 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 		case conway.ConwayGenesisDelegateeTypeVote:
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis vote delegatee account: %w", err,
 				)
@@ -4548,7 +4861,7 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 			account.Pool = delegatee.PoolId[:]
 			account.Drep = drepCredential
 			account.DrepType = drepType
-			if err := saveAccount(account, db); err != nil {
+			if err := saveAccount(account, db, rewardRefs); err != nil {
 				return fmt.Errorf(
 					"save genesis stake/vote delegatee account: %w", err,
 				)
@@ -4576,6 +4889,13 @@ func (d *MetadataStoreSqlite) SetGenesisGovernance(
 				delegatee.Type,
 			)
 		}
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for genesis governance: %w",
+			err,
+		)
 	}
 
 	return nil
@@ -4662,6 +4982,11 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 	slot uint64,
 	txn types.Txn,
 ) error {
+	if txn == nil {
+		return d.DB().Transaction(func(tx *gorm.DB) error {
+			return d.DeleteTransactionsAfterSlot(slot, newSqliteTxn(tx))
+		})
+	}
 	db, err := d.resolveDB(txn)
 	if err != nil {
 		return err
@@ -4680,11 +5005,52 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 	// handle them. The hash list is chunked because a deep (e.g. over-K)
 	// rollback can produce far more hashes than SQLite's bind-variable limit
 	// (SQLITE_MAX_VARIABLE_NUMBER) allows in a single IN (...) clause.
+	rewardRefs := make(map[string]rewardCredentialSlotRef)
+	if len(txHashes) > 0 {
+		// Transaction deletion cascades outputs and collateral returns, so
+		// collect their stake refs before the rows disappear.
+		txIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		collateralReturnTxIDQuery := db.Model(&models.Transaction{}).
+			Select("id").
+			Where("slot > ?", slot)
+		var outputRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where(
+				"transaction_id IN (?) OR collateral_return_for_tx_id IN (?)",
+				txIDQuery,
+				collateralReturnTxIDQuery,
+			).
+			Select("credential_tag", "staking_key").
+			Find(&outputRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for deleted transaction outputs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(outputRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
+	}
 	for i := 0; i < len(txHashes); i += batchChunkSize {
 		end := min(i+batchChunkSize, len(txHashes))
 		chunk := txHashes[i:end]
 
 		// Clear spent_at_tx_id and reset deleted_slot to restore UTXO active state
+		var spentRows []models.Utxo
+		if result := db.Model(&models.Utxo{}).
+			Where("spent_at_tx_id IN ?", chunk).
+			Select("credential_tag", "staking_key").
+			Find(&spentRows); result.Error != nil {
+			return fmt.Errorf(
+				"query reward stake refs for restored UTxOs: %w",
+				result.Error,
+			)
+		}
+		for _, item := range rewardStakeRefsFromUtxos(spentRows) {
+			addRewardStakeRef(rewardRefs, item.ref, slot)
+		}
 		if result := db.Model(&models.Utxo{}).
 			Where("spent_at_tx_id IN ?", chunk).
 			Updates(map[string]any{
@@ -4725,8 +5091,24 @@ func (d *MetadataStoreSqlite) DeleteTransactionsAfterSlot(
 		)
 	}
 
+	if result := db.Where("slot > ?", slot).
+		Delete(&models.AssetMintBurn{}); result.Error != nil {
+		return fmt.Errorf(
+			"delete asset mint/burn events after slot %d: %w",
+			slot,
+			result.Error,
+		)
+	}
+
 	if result := db.Where("slot > ?", slot).Delete(&models.Transaction{}); result.Error != nil {
 		return result.Error
+	}
+
+	if err := refreshRewardLiveStakeAggregates(db, rewardRefs); err != nil {
+		return fmt.Errorf(
+			"refresh reward live stake for rolled back transactions: %w",
+			err,
+		)
 	}
 
 	return nil

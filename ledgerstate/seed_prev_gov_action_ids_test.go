@@ -136,25 +136,25 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 	))
 
 	cases := []struct {
-		name        string
-		txHash      []byte
-		actionIdx   uint32
-		actionType  uint8
-		queryGroup  []uint8
+		name       string
+		txHash     []byte
+		actionIdx  uint32
+		actionType uint8
+		queryGroup []uint8
 	}{
 		{
-			name:        "param-update",
-			txHash:      pp.TxHash,
-			actionIdx:   pp.ActionIndex,
-			actionType:  govActionTypeParameterChange,
-			queryGroup:  []uint8{govActionTypeParameterChange},
+			name:       "param-update",
+			txHash:     pp.TxHash,
+			actionIdx:  pp.ActionIndex,
+			actionType: govActionTypeParameterChange,
+			queryGroup: []uint8{govActionTypeParameterChange},
 		},
 		{
-			name:        "hard-fork",
-			txHash:      hf.TxHash,
-			actionIdx:   hf.ActionIndex,
-			actionType:  govActionTypeHardForkInitiation,
-			queryGroup:  []uint8{govActionTypeHardForkInitiation},
+			name:       "hard-fork",
+			txHash:     hf.TxHash,
+			actionIdx:  hf.ActionIndex,
+			actionType: govActionTypeHardForkInitiation,
+			queryGroup: []uint8{govActionTypeHardForkInitiation},
 		},
 		{
 			name:       "committee-no-confidence",
@@ -167,11 +167,11 @@ func TestImportGovStateSeedsPrevGovActionIds(t *testing.T) {
 			},
 		},
 		{
-			name:        "constitution",
-			txHash:      cn.TxHash,
-			actionIdx:   cn.ActionIndex,
-			actionType:  govActionTypeNewConstitution,
-			queryGroup:  []uint8{govActionTypeNewConstitution},
+			name:       "constitution",
+			txHash:     cn.TxHash,
+			actionIdx:  cn.ActionIndex,
+			actionType: govActionTypeNewConstitution,
+			queryGroup: []uint8{govActionTypeNewConstitution},
 		},
 	}
 

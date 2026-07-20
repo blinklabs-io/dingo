@@ -30,7 +30,7 @@ import (
 // Total Byron time = 2 × 100 × 20s = 4000s.
 func crossEraLedger(t *testing.T) *LedgerState {
 	t.Helper()
-	return &LedgerState{
+	ls := &LedgerState{
 		epochCache: []models.Epoch{
 			{EpochId: 0, StartSlot: 0, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
 			{EpochId: 1, StartSlot: 100, SlotLength: 20_000, LengthInSlots: 100, EraId: 0},
@@ -41,6 +41,8 @@ func crossEraLedger(t *testing.T) *LedgerState {
 			CardanoNodeConfig: minimalShelleyGenesisCfg(t),
 		},
 	}
+	ls.publishSnapshotsLocked()
+	return ls
 }
 
 // TestSlotToTime_CrossEra covers multi-era chains where per-era slot length

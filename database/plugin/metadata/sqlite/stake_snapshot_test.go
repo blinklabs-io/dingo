@@ -15,6 +15,7 @@
 package sqlite
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -705,6 +706,206 @@ func TestGetStakeByPoolsAggregatesUtxos(t *testing.T) {
 		"pool A should have 2 delegators")
 	require.Equal(t, uint64(1), delegators[string(poolB)],
 		"pool B should have 1 delegator")
+}
+
+func TestGetStakeByPoolsAtSlotAggregatesFallbackAccounts(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	poolA := bytes.Repeat([]byte{0xA1}, 28)
+	poolB := bytes.Repeat([]byte{0xB1}, 28)
+	poolEmpty := bytes.Repeat([]byte{0xE1}, 28)
+	stakeA1 := bytes.Repeat([]byte{0x01}, 28)
+	stakeA2 := bytes.Repeat([]byte{0x02}, 28)
+	stakeB1 := bytes.Repeat([]byte{0x03}, 28)
+
+	accounts := []models.Account{
+		{StakingKey: stakeA1, Pool: poolA, AddedSlot: 10, Active: true},
+		{StakingKey: stakeA2, Pool: poolA, AddedSlot: 10, Active: true},
+		{StakingKey: stakeB1, Pool: poolB, AddedSlot: 10, Active: true},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x11}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 5, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x12}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 7, AddedSlot: 30,
+			DeletedSlot: 90,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x13}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 11, AddedSlot: 90,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x14}, 32), OutputIdx: 0,
+			StakingKey: stakeA1, Amount: 13, AddedSlot: 5,
+			DeletedSlot: 70,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x15}, 32), OutputIdx: 0,
+			StakingKey: stakeB1, Amount: 17, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{poolA, poolB, poolEmpty},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t, uint64(12), stakes[string(poolA)])
+	require.Equal(t, uint64(2), delegators[string(poolA)])
+	require.Equal(t, uint64(17), stakes[string(poolB)])
+	require.Equal(t, uint64(1), delegators[string(poolB)])
+	require.Equal(t, uint64(0), stakes[string(poolEmpty)])
+	require.Equal(t, uint64(0), delegators[string(poolEmpty)])
+}
+
+// TestGetStakeByPoolsAtSlotIncludesRewardBalance covers issue #2813: a mark
+// snapshot must add each delegator's reward-account balance to their live UTxO
+// lovelace. A credential with both a live UTxO and a reward balance sums both,
+// and a credential whose entire stake sits in its reward balance (no live UTxO)
+// yields non-zero stake instead of collapsing to zero.
+func TestGetStakeByPoolsAtSlotIncludesRewardBalance(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	poolA := bytes.Repeat([]byte{0xA2}, 28)
+	poolB := bytes.Repeat([]byte{0xB2}, 28)
+	stakeUtxoReward := bytes.Repeat([]byte{0x04}, 28) // live UTxO + reward
+	stakeRewardOnly := bytes.Repeat([]byte{0x05}, 28) // reward only, no UTxO
+	stakeUtxoNoReward := bytes.Repeat([]byte{0x06}, 28)
+
+	accounts := []models.Account{
+		{
+			StakingKey: stakeUtxoReward, Pool: poolA, AddedSlot: 10,
+			Active: true, Reward: types.Uint64(50),
+		},
+		{
+			StakingKey: stakeRewardOnly, Pool: poolA, AddedSlot: 10,
+			Active: true, Reward: types.Uint64(30),
+		},
+		{
+			StakingKey: stakeUtxoNoReward, Pool: poolB, AddedSlot: 10,
+			Active: true,
+		},
+	}
+	for i := range accounts {
+		require.NoError(t, db.Create(&accounts[i]).Error)
+	}
+
+	utxos := []models.Utxo{
+		{
+			TxId: bytes.Repeat([]byte{0x31}, 32), OutputIdx: 0,
+			StakingKey: stakeUtxoReward, Amount: 100, AddedSlot: 20,
+		},
+		{
+			TxId: bytes.Repeat([]byte{0x32}, 32), OutputIdx: 0,
+			StakingKey: stakeUtxoNoReward, Amount: 40, AddedSlot: 20,
+		},
+	}
+	for i := range utxos {
+		require.NoError(t, db.Create(&utxos[i]).Error)
+	}
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{poolA, poolB},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+
+	// Pool A: (100 UTxO + 50 reward) + (0 UTxO + 30 reward) = 180
+	require.Equal(t, uint64(180), stakes[string(poolA)],
+		"pool A stake should add reward balances to live UTxO lovelace")
+	require.Equal(t, uint64(2), delegators[string(poolA)])
+	// Reward-only credential still counts and contributes its reward.
+	// Pool B: 40 UTxO + 0 reward = 40 (baseline, reward absent)
+	require.Equal(t, uint64(40), stakes[string(poolB)],
+		"pool B stake unchanged when reward balance is zero")
+	require.Equal(t, uint64(1), delegators[string(poolB)])
+}
+
+// TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance proves that credits and
+// withdrawals after a snapshot boundary cannot change that snapshot's stake.
+func TestGetStakeByPoolsAtSlotUsesHistoricalRewardBalance(t *testing.T) {
+	t.Parallel()
+	store := setupStakeSnapshotTestStore(t)
+	defer store.Close() //nolint:errcheck
+
+	db := store.DB()
+	pool := bytes.Repeat([]byte{0xA3}, 28)
+	stakeKey := bytes.Repeat([]byte{0x07}, 28)
+	account := models.Account{
+		StakingKey: stakeKey,
+		Pool:       pool,
+		AddedSlot:  10,
+		Active:     true,
+		Reward:     types.Uint64(50),
+	}
+	require.NoError(t, db.Create(&account).Error)
+
+	// The boundary balance is 50. A later credit raises it to 70, a
+	// withdrawal clears it, and another later credit leaves the live balance
+	// at 25. Neither the live 25 nor the intermediate 70 belongs at slot 80.
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0,
+		stakeKey,
+		20,
+		90,
+		bytes.Repeat([]byte{0x41}, 32),
+		nil,
+	))
+	require.NoError(t, store.ApplyAccountRewardWithdrawal(
+		0,
+		stakeKey,
+		70,
+		100,
+		bytes.Repeat([]byte{0x42}, 32),
+		nil,
+	))
+	require.NoError(t, store.AddAccountRewardByCredential(
+		0,
+		stakeKey,
+		25,
+		110,
+		bytes.Repeat([]byte{0x43}, 32),
+		nil,
+	))
+
+	stakes, delegators, err := store.GetStakeByPoolsAtSlot(
+		[][]byte{pool},
+		80,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(50), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
+
+	// After the withdrawal, reversing the sole later credit must recover the
+	// cleared balance rather than use the current 25.
+	stakes, delegators, err = store.GetStakeByPoolsAtSlot(
+		[][]byte{pool},
+		105,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), stakes[string(pool)])
+	require.Equal(t, uint64(1), delegators[string(pool)])
 }
 
 func TestGetStakeByPoolsUsesStakeCredentialUtxoIndex(t *testing.T) {

@@ -1,5 +1,925 @@
 # Dingo Releases
 
+## v0.66.1 (July 20, 2026)
+
+**Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
+
+**Date:** July 20, 2026
+
+**Version:** v0.66.1
+
+This release refreshes the published notes, keeps build and database dependencies current, stabilizes Antithesis validation, and corrects live stake indexing so Mithril processing stays consistent.
+
+### 💪 Improvements
+
+* Updated **the release notes for v0.66.0:** The release history now reflects the latest published version, which keeps the changelog current and easier to follow.
+* Improved **release artifact verification:** The publishing flow now uses a newer attestation action, which keeps artifact checks current.
+* Refined **database storage behavior with the latest Badger release:** The storage layer now includes the newer maintenance fixes from Badger, which supports steadier database behavior.
+* Stabilized **Antithesis validation runs:** The CI job now pins Moog and waits for results before continuing, which reduces flaky validation outcomes.
+
+### 🔧 Fixes
+
+* Fixed **live stake indexing for Mithril data:** The database now waits to index live stake until the data is ready, which keeps stake information consistent during processing.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** リリースノートを更新し、依存関係を最新に保ち、ライブ stake indexing を安定化
+
+**日付:** July 20, 2026
+
+**バージョン:** v0.66.1
+
+このリリースでは、公開済みのノートを更新し、build と database の依存関係を最新に保ち、Antithesis の検証を安定化し、Mithril 処理の整合性を保つために live stake indexing を修正します。
+
+### 💪 改善
+
+* 更新しました **v0.66.0 の release notes:** リリース履歴が最新の公開版を反映し、changelog を追いやすくなります。
+* 改善しました **release artifact の検証:** publishing の流れは新しい attestation action を使うようになり、artifact の確認が最新の状態に保たれます。
+* 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は Badger の新しい保守修正を取り込み、database の動作をより安定させます。
+* 安定化しました **Antithesis validation の実行:** CI job は Moog を固定し、結果を待ってから次へ進むため、検証結果のぶれを抑えます。
+
+### 🔧 修正
+
+* 修正しました **Mithril data の live stake indexing:** database は live stake data の準備が整うまで indexing を遅らせるため、処理中の stake 情報が整合したまま保たれます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Actualizar las notas de la versión, mantener dependencias al día y estabilizar la indexación de stake en vivo
+
+**Fecha:** July 20, 2026
+
+**Versión:** v0.66.1
+
+Esta versión actualiza las notas publicadas, mantiene al día las dependencias de compilación y base de datos, estabiliza la validación de Antithesis y corrige la indexación de stake en vivo para mantener coherente el procesamiento de Mithril.
+
+### 💪 Mejoras
+
+* Actualizó **las notas de la versión v0.66.0:** El historial de versiones refleja la publicación más reciente, lo que mantiene el changelog al día y más fácil de seguir.
+* Mejoró **la verificación de los artefactos de publicación:** El flujo de publicación ahora usa una acción de attestation más nueva, lo que mantiene las comprobaciones de los artefactos al día.
+* Refinó **el comportamiento del almacenamiento de la base de datos con la última versión de Badger:** La capa de almacenamiento ahora incluye las correcciones de mantenimiento más nuevas de Badger, lo que ayuda a mantener un comportamiento de base de datos más estable.
+* Estabilizó **las ejecuciones de validación de Antithesis:** El trabajo de CI ahora fija Moog y espera los resultados antes de continuar, lo que reduce los resultados inestables.
+
+### 🔧 Correcciones
+
+* Corrigió **la indexación de live stake para datos de Mithril:** La base de datos ahora aplaza ese trabajo de indexación hasta que los datos de live stake estén listos, lo que mantiene coherente la información de stake durante el procesamiento.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+## v0.66.0 (July 20, 2026)
+
+**Title:** Apply epoch rewards, align import replay, and tighten API and server behavior
+
+**Date:** July 20, 2026
+
+**Version:** v0.66.0
+
+This release introduces epoch reward processing in the ledger and node, improves replay safety during imports, adds PostgreSQL-backed conformance coverage, and tightens responses and transport policy for selected APIs and servers. It also aligns Leios handling with the latest Musashi prototype behavior.
+
+### ✨ What's New
+
+* Added **calculate and apply epoch rewards during epoch rollover:** Epoch rollover now applies stake rewards and MIR effects in the correct pre-governance order, keeps reward totals correct after boundary pot mutations, and precomputes rewards asynchronously with rollback safety.
+* Expanded **rebuild reward stake state during imports:** Load mode and reconciled imports now capture epoch-boundary snapshots during replay, record the epoch-0 genesis mark snapshot when needed, and rebuild reward live stake at the end of imports with cancellation checks and progress reporting.
+* Improved **reward metadata helpers for reward lookups:** Metadata APIs now support reward prefiltering and pool issuer slot-range calculations, and reward arithmetic helpers are exported and validated for reuse.
+* Updated **PostgreSQL-backed conformance coverage:** Conformance tests now run against PostgreSQL with a dedicated schema, documented setup through Docker Compose or environment variables, and clearer pass or fail diagnostics.
+
+### 🔧 Fixes
+
+* Corrected **delay the first reward application until the bootstrap boundary settles:** The first reward update now treats epoch 2 as a bootstrap boundary exception, skips pool and account reward distribution for that initial application, returns the post-tax amount to reserves, and disables bootstrap precomputation to avoid stale or rollback-unsafe results.
+* Restored **return unmatched Blockfrost routes as 404 JSON responses:** Unmatched Blockfrost API routes now return a Blockfrost-format 404 JSON error while the root document remains available at `/`.
+* Aligned **match Leios behavior with the Musashi prototype:** Leios forging, fetching, classification, and ledger application now follow Musashi prototype-2026w29 semantics, including certified parent endorser block handling and related robustness fixes.
+
+### 🔐 Security
+
+* Strengthened **require TLS 1.2 or later for UTxORPC and Bark servers:** Both servers now enforce the shared TLS policy, and TLS 1.3 remains required when ECH is configured.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** epoch reward の適用、import replay の整合、API と server の強化
+
+**日付:** July 20, 2026
+
+**バージョン:** v0.66.0
+
+このリリースでは、ledger と node に epoch reward の処理を導入し、import 中の replay 安全性を高め、一部の API と server の応答と transport policy を厳格化します。あわせて、PostgreSQL ベースの conformance coverage を追加し、Leios の動作を最新の Musashi prototype に整合させます。
+
+### ✨ 新機能
+
+* 追加しました **epoch rollover で epoch reward を計算して適用すること:** epoch rollover は stake reward と MIR effect を正しい pre-governance 順で適用し、boundary pot mutation 後の reward total を正しく維持し、rollback 安全な非同期 precompute を行います。
+* 拡張しました **import 中に reward stake state を再構築すること:** Load mode と reconciled import は replay 中に epoch boundary snapshot を取得し、必要な場合は epoch-0 genesis mark snapshot を記録し、import 終了時に cancellation check と進捗表示付きで reward live stake を再構築します。
+* 改善しました **reward lookup 向けの reward metadata helper を整えること:** Metadata API は reward prefiltering と pool issuer slot-range calculation をサポートし、reward arithmetic helper は再利用向けに export され検証されています。
+* 強化しました **PostgreSQL ベースの conformance coverage を追加すること:** Conformance test は dedicated schema と Docker Compose もしくは environment variable による手順、より明確な pass または fail の診断を備えた PostgreSQL で実行されます。
+
+### 🔧 修正
+
+* 修正しました **bootstrap boundary が落ち着くまで最初の reward application を遅らせること:** 最初の reward update は epoch 2 を bootstrap boundary exception として扱い、その initial application では pool と account への reward distribution を抑制し、post-tax amount を reserves に戻し、stale または rollback unsafe な結果を避けるため bootstrap precompute を無効化します。
+* 復旧しました **Blockfrost の未一致 route を 404 JSON 応答にすること:** 未一致の Blockfrost API route は Blockfrost 形式の 404 JSON error を返し、root document は `/` で利用可能なままです。
+* 整合しました **Leios の動作を Musashi prototype に合わせること:** Leios の forging、fetching、classification、ledger application は Musashi prototype-2026w29 semantics に従い、certified parent endorser block handling と関連する robustness fix を含みます。
+
+### 🔐 セキュリティ
+
+* 厳格化しました **UTxORPC と Bark server で TLS 1.2 以降を必須にすること:** 両 server は shared TLS policy を適用し、ECH が構成されている場合は TLS 1.3 が引き続き必要です。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Aplicar recompensas de época, alinear el replay de importación y reforzar el comportamiento de la API y de los servidores
+
+**Fecha:** July 20, 2026
+
+**Versión:** v0.66.0
+
+Esta versión incorpora el procesamiento de recompensas de época al ledger y al nodo, mejora la seguridad del replay durante las importaciones, añade cobertura de conformance respaldada por PostgreSQL y refuerza las respuestas y la política de transporte de algunas API y servidores. También alinea el comportamiento de Leios con el prototipo más reciente de Musashi.
+
+### ✨ Novedades
+
+* Agregó **calcular y aplicar recompensas de época durante el epoch rollover:** El epoch rollover ahora aplica las recompensas de stake y los efectos de MIR en el orden pregovernance correcto, mantiene correctos los totales de recompensas después de mutaciones del reward ADA pot y precomputa recompensas de forma asíncrona con seguridad ante rollback.
+* Amplió **reconstruir el estado del stake de recompensas durante las importaciones:** Los modos load y reconciled import ahora capturan instantáneas en el límite de época durante el replay, registran la instantánea genesis mark de epoch 0 cuando hace falta y reconstruyen el reward live stake al final de las importaciones con comprobaciones de cancelación y seguimiento del progreso.
+* Mejoró **las utilidades de metadata de recompensas para las consultas de recompensas:** Las API de metadata ahora admiten prefiltrado de recompensas y cálculos de slot range del pool issuer, y las utilidades de aritmética de recompensas se exportan y validan para reutilización.
+* Reforzó **añadir cobertura de conformance respaldada por PostgreSQL:** Las pruebas de conformance ahora se ejecutan sobre PostgreSQL con un esquema dedicado, una preparación documentada mediante Docker Compose o variables de entorno y diagnósticos de éxito o fallo más claros.
+
+### 🔧 Correcciones
+
+* Corrigió **retrasar la primera aplicación de recompensas hasta que se estabilice el bootstrap boundary:** La primera actualización de recompensas ahora trata el epoch 2 como una excepción de bootstrap boundary, omite la distribución de recompensas a pools y cuentas en esa aplicación inicial, devuelve a reserves el importe después de impuestos y desactiva la precomputación de bootstrap para evitar resultados obsoletos o inseguros ante rollback.
+* Restauró **devolver los routes de Blockfrost sin coincidencia como respuestas 404 JSON:** Los routes de Blockfrost que no coinciden ahora devuelven un error JSON 404 con formato Blockfrost mientras el documento raíz sigue disponible en `/`.
+* Alineó **el comportamiento de Leios con el prototipo de Musashi:** El forge, el fetch, la clasificación y la aplicación del ledger de Leios ahora siguen la semántica de Musashi prototype-2026w29, incluido el manejo de bloques endorser con parent certificado y las correcciones de robustez relacionadas.
+
+### 🔐 Seguridad
+
+* Endureció **exigir TLS 1.2 o superior para los servidores UTxORPC y Bark:** Ambos servidores ahora aplican la política TLS compartida, y TLS 1.3 sigue siendo obligatorio cuando ECH está configurado.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.65.1 (July 16, 2026)
+
+**Title:** Restore Leios committee formation when Musashi omits committee parameters
+
+**Date:** July 16, 2026
+
+**Version:** v0.65.1
+
+This release restores Leios committee formation on Musashi and other Dijkstra-based deployments when the network configuration leaves committee parameters unset, so voting and endorser block certification can continue without editing a pinned network configuration. Dingo now fills in the standard committee defaults when those values are missing and still stops with a clear error if the resulting thresholds are invalid.
+
+### 🔧 Fixes
+
+* Restored **keep Leios committee formation working when committee parameters are unset:** Musashi and other Dijkstra-based deployments now use the standard committee thresholds when the network configuration leaves those values unset, which lets committee formation, voting, and endorser block certification continue without editing a pinned network configuration. Dingo still stops with a clear error if the resulting thresholds are invalid.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** Musashi で committee parameter が未設定でも Leios committee formation を復旧
+
+**日付:** July 16, 2026
+
+**バージョン:** v0.65.1
+
+このリリースでは、network configuration で committee parameter が未設定の Musashi やその他の Dijkstra ベースの環境でも Leios committee formation を復旧し、pinned な network configuration を編集せずに voting と endorser block certification を継続できるようにします。Dingo は値が欠けている場合に標準の committee default を補い、結果のしきい値が不正な場合は引き続き明確な error で停止します。
+
+### 🔧 修正
+
+* 復旧しました **committee parameter が未設定でも Leios committee formation を動かし続けること:** Musashi やその他の Dijkstra ベースの環境では、network configuration で値が未設定のときに標準の committee threshold を使うようになり、pinned な network configuration を編集しなくても committee formation、voting、endorser block certification を継続できます。結果のしきい値が不正な場合は、Dingo は引き続き明確な error で停止します。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Restaurar la formación del comité de Leios cuando Musashi omite parámetros del comité
+
+**Fecha:** July 16, 2026
+
+**Versión:** v0.65.1
+
+Esta versión restablece la formación del comité de Leios en Musashi y en otros entornos basados en Dijkstra cuando la configuración de red deja sin definir los parámetros del comité, de modo que la votación y la certificación de bloques endosadores pueden continuar sin editar una configuración de red fijada por hash. Dingo ahora completa los valores estándar del comité cuando faltan esos datos y sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+
+### 🔧 Correcciones
+
+* Restableció **mantener activa la formación del comité de Leios cuando los parámetros del comité quedan sin definir:** Musashi y otros entornos basados en Dijkstra ahora usan los umbrales estándar del comité cuando la configuración de red deja sin definir esos valores, lo que permite que la formación del comité, la votación y la certificación de bloques endosadores continúen sin editar una configuración de red fijada por hash. Dingo sigue deteniéndose con un error claro si los umbrales resultantes no son válidos.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.65.0 (July 15, 2026)
+
+**Title:** Reward metadata groundwork, steadier Mark stake snapshots, and faster Leios failover
+
+**Date:** July 15, 2026
+
+**Version:** v0.65.0
+
+This release gives upgraded databases a startup rebuild path for fuller reward metadata, corrects historical Mark stake totals, improves Leios catch up failover on slow or busy relays, and refreshes TypeScript toolchains in the example projects.
+
+### ✨ What's New
+
+* Added **rebuild fuller reward metadata state at startup:** Reward snapshots now keep more reward state, including pool reward and owner stake details, and operators upgrading existing databases can rebuild missing live reward stake metadata before ledger processing resumes. This groundwork keeps rollback recovery and reward withdrawal replay more consistent without changing reward formulas in this release.
+
+### 💪 Improvements
+
+* Updated **use TypeScript 7.0.2 in the Blockfrost explorer example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+* Refreshed **use TypeScript 7.0.2 in the Sundae preview example:** Developers working on the example now build and type check with TypeScript 7.0.2, and the local toolchain requires Node 16.20.0 or newer.
+
+### 🔧 Fixes
+
+* Fixed **include reward account balances in Mark stake snapshots:** Historical pool stake totals now count each delegator's reward balance together with live UTxO stake, which prevents false leader eligibility failures and preserves stake for delegators who hold only rewards at the snapshot slot.
+* Improved **fail over Leios historical fetches faster on slow or busy relays:** Historical catch up now abandons slow fetch attempts sooner, prefers recently healthy peers, and skips busy connections so backfill keeps moving instead of stalling on one relay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** reward metadata 基盤、安定した Mark stake snapshot、Leios フェイルオーバー高速化
+
+**日付:** July 15, 2026
+
+**バージョン:** v0.65.0
+
+このリリースでは、既存 database の更新時により完全な reward metadata を起動時に再構築できるようにし、履歴 Mark stake 合計を是正し、遅い relay や busy connection での Leios catch up フェイルオーバーを改善し、example project の TypeScript toolchain を更新します。
+
+### ✨ 新機能
+
+* 追加しました **起動時により完全な reward metadata state を再構築できること:** Reward snapshot は pool reward と owner stake を含む、より多くの reward state を保持するようになり、既存 database を更新する operator は ledger 処理を再開する前に不足している live reward stake metadata を再構築できます。この基盤により、今回のリリースで reward formula 自体を変えずに、rollback recovery と reward withdrawal replay の整合性を高めます。
+
+### 💪 改善
+
+* 更新しました **Blockfrost explorer example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+* 刷新しました **Sundae preview example で TypeScript 7.0.2 を使うこと:** この example を扱う開発者は TypeScript 7.0.2 で build と type check を行えるようになり、local toolchain には Node 16.20.0 以降が必要です。
+
+### 🔧 修正
+
+* 修正しました **Mark stake snapshot に reward account balance を含めること:** 履歴 pool stake 合計は live UTxO stake とあわせて delegator ごとの reward balance も数えるようになり、leader eligibility の誤判定を防ぎ、snapshot slot で reward のみを持つ delegator の stake も維持します。
+* 改善しました **遅い relay や busy connection から Leios の履歴 fetch をより早く切り替えること:** 履歴 catch up は遅い fetch をより早く打ち切り、最近健全だった peer を優先し、busy connection を待たずにスキップするため、backfill が一つの relay で止まりにくくなります。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Base de metadatos de recompensas, instantáneas de Mark stake más estables y failover más rápido de Leios
+
+**Fecha:** July 15, 2026
+
+**Versión:** v0.65.0
+
+Esta versión ofrece a las bases de datos actualizadas una ruta de reconstrucción al iniciar para un estado de metadatos de recompensas más completo, corrige los totales históricos de Mark stake, mejora el failover de catch up de Leios en relays lentos u ocupados y renueva las cadenas de herramientas TypeScript en los proyectos de ejemplo.
+
+### ✨ Novedades
+
+* Agregó **reconstruir un estado de metadatos de recompensas más completo al iniciar:** Las instantáneas de recompensas ahora conservan más estado de recompensas, incluidos los detalles de la cuenta de recompensas del pool y del stake del propietario, y los operadores que actualizan bases de datos existentes pueden reconstruir el metadato faltante de live reward stake antes de que se reanude el procesamiento del ledger. Esta base mantiene más consistente la recuperación tras rollback y el replay de retiros sin cambiar las fórmulas de recompensas en esta versión.
+
+### 💪 Mejoras
+
+* Actualizó **usar TypeScript 7.0.2 en el ejemplo de Blockfrost explorer:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+* Renovó **usar TypeScript 7.0.2 en el ejemplo de Sundae preview:** Los desarrolladores que trabajan con el ejemplo ahora compilan y ejecutan la comprobación de tipos con TypeScript 7.0.2, y la cadena de herramientas local requiere Node 16.20.0 o una versión posterior.
+
+### 🔧 Correcciones
+
+* Corrigió **incluir saldos de cuentas de recompensas en las instantáneas de Mark stake:** Los totales históricos de stake por pool ahora cuentan el saldo de recompensas de cada delegador junto con el stake UTxO en vivo, lo que evita falsos fallos de elegibilidad del líder y preserva el stake de delegadores que solo mantienen recompensas en el slot de la instantánea.
+* Mejoró **cambiar antes las consultas históricas de Leios cuando un relay va lento o está ocupado:** El catch up histórico ahora abandona antes los intentos lentos, prioriza pares que respondieron bien hace poco y omite conexiones ocupadas para que el backfill siga avanzando en lugar de quedarse detenido en un relay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.64.0 (July 14, 2026)
+
+**Title:** Governance replay recovery and simpler pool imports
+
+**Date:** July 14, 2026
+
+**Version:** v0.64.0
+
+This release restores governance side effects after restarts at an epoch boundary and makes it easier to import pools through the database interface in a single call.
+
+### ✨ What's New
+
+* Added **import pool state through the database interface:** Database integrations can now import a pool and its registration details through a single database call, which removes manual write setup and prevents invalid transaction use from writing outside the intended operation.
+
+### 🔧 Fixes
+
+* Fixed **preserve governance side effects across epoch boundary replay:** Nodes now restore governance treasury withdrawals and expired proposal deposit refunds after a restart at an epoch boundary, which keeps treasury, reserves, and reward account balances consistent during replay.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** Governance replay の回復と pool import の簡素化
+
+**日付:** July 14, 2026
+
+**バージョン:** v0.64.0
+
+このリリースでは、epoch boundary での再起動後も governance の副作用を復元し、database interface を通じた pool の取り込みを一回の呼び出しで行いやすくします。
+
+### ✨ 新機能
+
+* 追加しました **database interface から pool state を取り込めること:** Database 統合は、pool とその登録情報を一回の呼び出しで取り込めるようになり、手動の write 準備を減らし、無効な transaction 利用が意図しない範囲へ書き込むことを防ぎます。
+
+### 🔧 修正
+
+* 修正しました **epoch boundary の replay で governance の副作用を保つこと:** Node は epoch boundary での再起動後も governance の treasury withdrawal と期限切れ proposal の deposit refund を復元し、replay 中の treasury、reserves、reward account の balance 整合性を保ちます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Recuperación del replay de gobernanza e importaciones de pools más simples
+
+**Fecha:** July 14, 2026
+
+**Versión:** v0.64.0
+
+Esta versión restaura los efectos de gobernanza después de reinicios en un límite de época y facilita la importación de pools mediante la interfaz de base de datos con una sola llamada.
+
+### ✨ Novedades
+
+* Agregó **importar el estado de pools mediante la interfaz de base de datos:** Las integraciones con la base de datos ahora pueden importar un pool y sus datos de registro con una sola llamada, lo que evita la preparación manual de escritura y evita que el uso de transacciones no válidas escriba fuera de la operación prevista.
+
+### 🔧 Correcciones
+
+* Corrigió **conservar los efectos de gobernanza durante el replay del límite de época:** Los nodos ahora restauran los retiros del tesoro de gobernanza y los reembolsos de depósitos de propuestas vencidas después de un reinicio en un límite de época, lo que mantiene coherentes los saldos del tesoro, las reservas y las cuentas de recompensa durante el replay.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.63.1 (July 14, 2026)
+
+**Title:** Blockfrost asset completeness, calmer logs, and steadier maintenance
+
+**Date:** July 14, 2026
+
+**Version:** v0.63.1
+
+This release completes more Blockfrost asset data, quiets routine Mithril and peer logging, and refreshes bundled support updates and examples while widening automated coverage around transaction submission and synchronization.
+
+### 💪 Improvements
+
+* Improved **ship newer Cardano network settings:** Container builds now use a newer Cardano configuration set, which refreshes tracer data and updates Musashi network settings.
+* Strengthened **carry safer bundled concurrency safeguards:** Bundled concurrency support now fails fast on invalid negative values instead of risking damaged internal state.
+* Updated **keep health checking support current:** Dingo now uses the newer health checking library while keeping the same health endpoints and configuration.
+* Modernized **inherit newer system support fixes:** Dingo now picks up current system support fixes without requiring configuration changes.
+* Refreshed **bundle newer security, terminal, and text support libraries:** Dingo now includes newer maintenance updates across these support libraries without changing configuration or external behavior.
+* Polished **keep the Blockfrost explorer example on the latest frontend tooling patch:** Local frontend work for the example now uses the patched build and development tool release.
+* Streamlined **keep the Sundae preview example on the latest frontend tooling patch:** Local development for the example now uses the newer frontend maintenance release.
+* Aligned **run the Sundae preview example on a newer Sundae library release:** The example now installs and runs against the newer library version without changing its own external behavior.
+* Verified **cover transaction submission flows more thoroughly:** Broader automated checks now help keep transaction submission behavior steady across future updates.
+* Expanded **cover server synchronization paths more directly:** Additional automated checks now help catch regressions earlier in server synchronization behavior.
+
+### 🔧 Fixes
+
+* Completed **return asset mint history and metadata more fully in Blockfrost responses:** Blockfrost asset queries now populate mint history and metadata fields more reliably, which makes downstream asset inspection more complete.
+* Clarified **make Mithril warning logs easier to read:** Mithril related warning output now uses clearer wording, which makes routine operator review less confusing.
+* Softened **lower harmless duplicate connection shutdowns to info logs:** Routine peer connection races no longer report harmless shutdowns as errors, while genuine connection failures still appear as errors.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** Blockfrost の資産情報補完、静かなログ、安定した保守更新
+
+**日付:** July 14, 2026
+
+**バージョン:** v0.63.1
+
+このリリースでは、Blockfrost の資産データをより完全に返し、Mithril と peer の日常ログを静かにし、付属のサポート更新と example を新しくしながら、transaction submission と同期処理の自動検証を広げます。
+
+### 💪 改善
+
+* 更新しました **より新しい Cardano network 設定を取り込むこと:** コンテナビルドは新しい Cardano 設定セットを使うようになり、tracer data を更新し、Musashi network 設定を新しくします。
+* 強化しました **同梱の並行処理保護をより安全にすること:** 同梱の並行処理サポートは、不正な負の値を受け取ると内部状態を壊す前に即座に停止します。
+* 刷新しました **health check サポートを最新に保つこと:** Dingo は新しい health check サポートを使い、health endpoint と設定はそのまま維持します。
+* 改良しました **新しい system support fix を取り込むこと:** Dingo は設定変更なしで現在の system support fix を取り込みます。
+* 補強しました **security、terminal、text のサポート更新を取り込むこと:** Dingo はこれらのサポート更新を取り込み、設定や外部動作の変更は不要です。
+* 調整しました **Blockfrost explorer example を最新の frontend tooling patch に保つこと:** example の local frontend 作業は、修正版の build と development tool を使うようになります。
+* 最適化しました **Sundae preview example を最新の frontend tooling patch に保つこと:** example の local development は、新しい frontend の保守更新を使うようになります。
+* 整合しました **Sundae preview example を新しい Sundae library で動かすこと:** example は外部向けの動作を変えずに、新しい library version を install して実行します。
+* 拡充しました **transaction submission のカバー範囲を広げること:** より広い自動確認によって、今後の更新でも transaction submission の挙動を安定して保ちやすくなります。
+* 拡張しました **server の同期経路をより直接カバーすること:** 追加の自動確認によって、server の同期挙動に対する回帰を早く見つけやすくなります。
+
+### 🔧 修正
+
+* 補完しました **Blockfrost 応答で asset の mint history と metadata をより完全に返すこと:** Blockfrost の asset query は mint history と metadata field をより確実に埋めるようになり、下流での asset 確認をより完全にします。
+* 明確化しました **Mithril の warning log を読みやすくすること:** Mithril 関連の warning 出力は、日常の運用確認で混乱しにくい表現になります。
+* 抑制しました **無害な重複接続の shutdown を info log に下げること:** 通常の peer 接続競合で起きる無害な切断は error ではなく info として扱い、実際の接続失敗は引き続き error のままです。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Mayor detalle de activos en Blockfrost, registros más tranquilos y mantenimiento más estable
+
+**Fecha:** July 14, 2026
+
+**Versión:** v0.63.1
+
+Esta versión completa más datos de activos en Blockfrost, reduce el ruido habitual en los registros de Mithril y de pares, y renueva componentes de soporte y ejemplos mientras amplía la cobertura automatizada para los flujos de envío de transacciones y sincronización.
+
+### 💪 Mejoras
+
+* Actualizó **incorporar ajustes más recientes de red de Cardano:** Las compilaciones en contenedor ahora usan un conjunto más reciente de configuración de Cardano, lo que renueva los datos de trazado y actualiza la configuración de Musashi.
+* Reforzó **usar protecciones incluidas más seguras para la concurrencia:** El soporte de concurrencia incluido ahora falla de inmediato ante valores negativos no válidos en lugar de arriesgar un estado interno dañado.
+* Renovó **mantener al día el soporte de comprobación de salud:** Dingo ahora usa soporte más reciente para la comprobación de salud y mantiene sin cambios los endpoints y la configuración.
+* Modernizó **incorporar correcciones más recientes de soporte del sistema:** Dingo ahora recibe correcciones actuales de soporte del sistema sin requerir cambios de configuración.
+* Refrescó **incluir soporte más reciente de seguridad, terminal y texto:** Dingo ahora incorpora estas actualizaciones de mantenimiento sin cambiar la configuración ni el comportamiento externo.
+* Pulió **mantener el ejemplo de Blockfrost explorer en el último parche de herramientas de frontend:** El trabajo local de frontend para el ejemplo ahora usa la versión corregida de las herramientas de compilación y desarrollo.
+* Optimizó **mantener el ejemplo de Sundae preview en el último parche de herramientas de frontend:** El desarrollo local del ejemplo ahora usa la versión de mantenimiento más reciente para el frontend.
+* Alineó **ejecutar el ejemplo de Sundae preview con una biblioteca más nueva de Sundae:** El ejemplo ahora se instala y se ejecuta con la versión más reciente de la biblioteca sin cambiar su comportamiento externo.
+* Amplió **cubrir con más profundidad los flujos de envío de transacciones:** Una cobertura automatizada más amplia ayuda a mantener estable ese comportamiento en futuras actualizaciones.
+* Extendió **cubrir de forma más directa las rutas de sincronización del servidor:** Comprobaciones automatizadas adicionales ayudan a detectar antes regresiones en ese comportamiento.
+
+### 🔧 Correcciones
+
+* Completó **devolver con más detalle el historial de acuñación y los metadatos en las respuestas de Blockfrost:** Las consultas de activos de Blockfrost ahora rellenan esos campos con más fiabilidad, lo que vuelve más completa la inspección posterior de activos.
+* Aclaró **hacer más legibles los registros de advertencia de Mithril:** La salida de advertencia relacionada con Mithril ahora usa una redacción más clara, lo que reduce la confusión durante la revisión operativa habitual.
+* Atenuó **bajar a registros informativos los cierres inofensivos de conexiones duplicadas:** Las carreras normales entre conexiones de pares ya no muestran cierres inofensivos como errores, mientras los fallos reales de conexión siguen apareciendo como errores.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.63.0 (July 10, 2026)
+
+**Title:** MidnightState expansion, API correctness, and stricter inbound ledger validation
+
+**Date:** July 10, 2026
+
+**Version:** v0.63.0
+
+This release broadens MidnightState client access, completes more API responses, and strengthens inbound block validation and historical chain handling.
+
+### ✨ What's New
+
+* Added **page through MidnightState UTxO queries:** MidnightState clients can now request UTxO results in pages, which makes large result sets easier to consume.
+* Expanded **query more MidnightState governance and chain data:** MidnightState now exposes governance, protocol parameter, block, epoch, and related state queries, which gives clients broader read access to node data.
+
+### 💪 Improvements
+
+* Strengthened **keep Midnight rollback handling safer when no events were recorded:** Midnight indexer rollback paths now keep their no-event case covered, which reduces regression risk during recovery.
+
+### 🔧 Fixes
+
+* Fixed **surface blob deletion failures during rollback cleanup:** Rollback cleanup now logs blob deletion failures instead of failing quietly, which makes recovery problems easier to diagnose.
+* Corrected **return Blockfrost block aggregates and header details more completely:** Blockfrost block responses now fill in more aggregate and header fields, which makes those API results more reliable for clients.
+* Refined **calculate pool stake totals without conversion errors:** Pool stake totals now avoid summation errors when live UTxO amounts are added together, which improves stake reporting accuracy.
+* Enhanced **populate richer Blockfrost UTxO details for addresses and transactions:** Address and transaction UTxO responses now include more embedded data and reference details, which makes downstream inspection more complete.
+* Repaired **count slots correctly across Byron history:** Slot calculations now account for Byron data, which keeps historical chain calculations aligned across older eras.
+* Balanced **keep Leios pool and governance results aligned with endorsement effects:** Leios processing now applies endorsement effects to pool and governance state, which keeps those results more accurate.
+* Stabilized **forge Dijkstra blocks correctly:** Dijkstra block production now follows the expected behavior more closely, which reduces invalid block creation during affected runs.
+* Hardened **reject malformed inbound blocks earlier during ledger validation:** Validated inbound processing now stops blocks with malformed envelopes, bad ordering, invalid Byron epoch boundary placement, or oversized headers and bodies before deeper ledger work continues.
+
+### 📋 What You Need to Know
+
+* Clarified **use MidnightState as a broader read surface for client workflows:** Client integrations can rely on one service for paged UTxO reads together with wider governance and chain lookups.
+* Highlighted **review rollback cleanup logs after storage recovery work:** Blob deletion failures now appear in logs, which gives operators faster evidence when cleanup leaves storage work unfinished.
+* Emphasized **expect downstream data consumers to see fewer missing response details:** Blockfrost clients and stake reporting workflows now receive more complete block, address, transaction, and pool stake data.
+* Summarized **trust stronger safeguards around historical and inbound chain processing:** Byron slot accounting, Leios endorsement handling, Dijkstra forging, and validated inbound block checks now reduce the chance that incorrect chain data advances unnoticed.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** MidnightState の拡張、API 応答の正確性向上、インバウンド ledger 検証の厳格化
+
+**日付:** July 10, 2026
+
+**バージョン:** v0.63.0
+
+このリリースでは、MidnightState を通じたクライアントの参照範囲を広げ、API 応答の詳細を補い、インバウンド block 検証と履歴チェーン処理を強化します。
+
+### ✨ 新機能
+
+* 追加しました **MidnightState の UTxO クエリをページ単位で取得できること:** MidnightState クライアントは UTxO 結果をページングして取得できるようになり、大きな結果セットを扱いやすくなります。
+* 拡張しました **MidnightState でより多くの governance と chain data を照会できること:** MidnightState は governance、protocol parameter、block、epoch、および関連する state クエリを提供し、クライアントが参照できるノード情報を広げます。
+
+### 💪 改善
+
+* 強化しました **イベント未記録時の Midnight rollback 処理をより安全に保つこと:** Midnight indexer の rollback 経路はイベントがない場合も継続してカバーされ、回復時の回帰リスクを下げます。
+
+### 🔧 修正
+
+* 修正しました **rollback cleanup 中の blob 削除失敗を可視化すること:** rollback cleanup は blob 削除失敗を黙って見過ごさず記録するようになり、回復時の問題を診断しやすくなります。
+* 是正しました **Blockfrost の block aggregate と header 情報をより完全に返すこと:** Blockfrost の block 応答は、aggregate と header の項目をより多く埋めるようになり、API 利用側で結果を信頼しやすくなります。
+* 改善しました **変換ずれを避けて pool stake 合計を計算すること:** pool stake 合計は live UTxO amount を合算する際の集計ずれを避けるようになり、stake 報告の正確性が向上します。
+* 補完しました **address と transaction 向けの Blockfrost UTxO 詳細をより充実させること:** address と transaction の UTxO 応答は、埋め込みデータと参照情報をより多く含むようになり、下流での確認を行いやすくなります。
+* 修復しました **Byron の履歴を含めて slot を正しく数えること:** slot 計算は Byron データも考慮するようになり、古い era をまたぐ履歴計算の整合性を保ちます。
+* 調整しました **Leios の pool と governance 結果を endorsement の影響に合わせること:** Leios の処理は endorsement の影響を pool と governance の状態へ反映し、結果の正確性を保ちます。
+* 安定化しました **Dijkstra block を正しく forge すること:** Dijkstra の block 生成は期待される動作により近づき、影響を受ける実行で無効な block が作られる可能性を減らします。
+* 厳格化しました **ledger 検証で不正なインバウンド block をより早く拒否すること:** 検証対象のインバウンド処理は、壊れた envelope、不正な順序、不正な Byron epoch boundary 配置、過大な header や body を、より深い ledger 処理へ進む前に停止します。
+
+### 📋 知っておくこと
+
+* 明確化しました **MidnightState をクライアント処理のより広い参照面として使えること:** クライアント統合は、UTxO のページングと、より広い governance および chain の参照を一つのサービスにまとめられます。
+* 強調しました **storage recovery 作業後に rollback cleanup のログを確認できること:** blob 削除失敗はログへ出力されるようになり、cleanup で未処理の保存作業が残った場合に早く把握できます。
+* 記載しました **下流の data consumer で欠けた応答詳細が減ること:** Blockfrost client と stake reporting workflow は、block、address、transaction、pool stake のより完全なデータを受け取れます。
+* 要約しました **履歴処理とインバウンド処理の安全策が強まること:** Byron の slot 計算、Leios の endorsement 処理、Dijkstra の forging、インバウンド block 検証は、不正な chain data が進む可能性をさらに下げます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Expansión de MidnightState, mayor precisión de la API y validación entrante del ledger más estricta
+
+**Fecha:** July 10, 2026
+
+**Versión:** v0.63.0
+
+Esta versión amplía el acceso de los clientes a MidnightState, completa más respuestas de la API y refuerza la validación de bloques entrantes y el tratamiento histórico de la cadena.
+
+### ✨ Novedades
+
+* Agregó **paginar las consultas UTxO de MidnightState:** Los clientes de MidnightState ahora pueden solicitar resultados UTxO por páginas, lo que facilita manejar conjuntos de resultados grandes.
+* Amplió **consultar más datos de gobernanza y de cadena en MidnightState:** MidnightState ahora expone consultas de gobernanza, parámetros del protocolo, bloques, épocas y estado relacionado, lo que ofrece a los clientes un acceso de lectura más amplio a los datos del nodo.
+
+### 💪 Mejoras
+
+* Reforzó **mantener más seguro el manejo de rollback de Midnight cuando no se registraron eventos:** Las rutas de rollback del indexador de Midnight ahora siguen cubriendo el caso sin eventos, lo que reduce el riesgo de regresiones durante la recuperación.
+
+### 🔧 Correcciones
+
+* Corrigió **mostrar los fallos de eliminación de blobs durante la limpieza de rollback:** La limpieza de rollback ahora registra los fallos de eliminación de blobs en lugar de ignorarlos en silencio, lo que facilita diagnosticar problemas de recuperación.
+* Completó **devolver con más detalle los agregados y encabezados de bloques de Blockfrost:** Las respuestas de bloques de Blockfrost ahora rellenan más campos de agregados y encabezados, lo que hace que esos resultados sean más fiables para los clientes.
+* Refinó **calcular los totales de stake por pool sin errores de conversión:** Los totales de stake por pool ahora evitan errores de suma cuando se agregan importes UTxO en vivo, lo que mejora la precisión de los informes de stake.
+* Mejoró **rellenar detalles UTxO más completos de Blockfrost para direcciones y transacciones:** Las respuestas UTxO de direcciones y transacciones ahora incluyen más detalles de datos incrustados y de referencias, lo que hace más completa la inspección posterior.
+* Reparó **contar los slots correctamente en el historial de Byron:** El cálculo de slots ahora tiene en cuenta los datos de Byron, lo que mantiene alineados los cálculos históricos de la cadena a través de eras anteriores.
+* Equilibró **mantener alineados los resultados de pools y gobernanza de Leios con los efectos de las endorsments:** El procesamiento de Leios ahora aplica los efectos de las endorsments al estado de pools y gobernanza, lo que mantiene esos resultados más precisos.
+* Estabilizó **forjar correctamente bloques de Dijkstra:** La producción de bloques de Dijkstra ahora sigue más de cerca el comportamiento esperado, lo que reduce la creación de bloques no válidos en las ejecuciones afectadas.
+* Endureció **rechazar antes los bloques entrantes mal formados durante la validación del ledger:** El procesamiento entrante validado ahora detiene bloques con envolturas mal formadas, orden incorrecto, colocación no válida del límite de época de Byron o encabezados y cuerpos sobredimensionados antes de que continúe un trabajo más profundo del ledger.
+
+### 📋 Lo que se debe saber
+
+* Aclaró **usar MidnightState como una superficie de lectura más amplia para los flujos cliente:** Las integraciones cliente pueden apoyarse en un solo servicio para lecturas UTxO paginadas junto con consultas más amplias de gobernanza y de cadena.
+* Destacó **revisar los registros de limpieza de rollback tras trabajos de recuperación de almacenamiento:** Los fallos de eliminación de blobs ahora aparecen en los registros, lo que ofrece señales más rápidas cuando la limpieza deja trabajo de almacenamiento sin terminar.
+* Subrayó **esperar menos detalles ausentes en los consumidores de datos posteriores:** Los clientes de Blockfrost y los flujos de informes de stake ahora reciben datos más completos de bloques, direcciones, transacciones y stake por pool.
+* Resumió **confiar en protecciones más sólidas para el procesamiento histórico y entrante de la cadena:** El cálculo de slots de Byron, el manejo de endorsments de Leios, el forjado de Dijkstra y las comprobaciones de bloques entrantes ahora reducen mejor la posibilidad de que avance información de cadena incorrecta.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
+## v0.62.0 (July 9, 2026)
+
+**Title:** Mithril core catch-up, ledger validation, and faster database indexing
+
+**Date:** July 9, 2026
+
+**Version:** v0.62.0
+
+This release strengthens Mithril core catch-up, tightens ledger validation, and reduces database work during transaction indexing.
+
+### ✨ What's New
+
+* Added **Mithril v2 core-mode catch-up for existing databases:** Operators can advance an already-synced core database to newer artifacts without a full bootstrap, and divergence now fails closed before any mutation.
+* Introduced **the Blockfrost asset holder addresses endpoint:** API clients can list holder addresses and quantities for native assets through `GET /api/v0/assets/{asset}/addresses`, with pagination and Blockfrost-style 404 behavior when the asset has no live holders.
+
+### 💪 Improvements
+
+* Improved **transaction indexing with batched UTxO reads:** MySQL and Postgres now read inputs, collateral inputs, and reference inputs in batches, which reduces round trips and keeps reference-input address indexing complete in API mode.
+* Strengthened **regression coverage for `LedgerDelta.apply`:** Direct tests now cover transaction persistence, governance and protocol parameter handling, donation accumulation, invalid transaction handling, rollback behavior, and pooled object reuse safety.
+* Updated **Dijkstra forging and validation to match revised protocol shapes:** The node now encodes candidate Dijkstra block bodies as `[header, block_body]`, computes the body hash and size from the encoded body, excludes invalid transactions, and resolves Leios endorser references more strictly.
+
+### 🔧 Fixes
+
+* Fixed **inbound operational certificate validation:** The ledger now rejects forged, expired, stale, or otherwise invalid operational certificates earlier through stateless header checks and stateful counter checks.
+* Hardened **MySQL database name validation before `CREATE DATABASE`:** Misconfigured names now fail fast when they violate the allowed length or character rules or contain backticks, which prevents malformed SQL and late startup failures.
+
+### 📋 What You Need to Know
+
+* Clarified **Mithril core catch-up keeps existing databases usable:** Operators can sync an existing Mithril v2 core database to newer artifacts without deleting it, while divergent chains still stop and require a full resync.
+* Highlighted **ledger validation now rejects bad operational certificates sooner:** Forged, expired, stale, or invalid certificates fail earlier and more strictly during block validation.
+* Emphasized **transaction indexing now performs fewer database round trips:** UTxO reads batch across inputs, collateral inputs, and reference inputs, and API mode address indexing now includes reference inputs.
+* Summarized **misconfigured database names now fail fast:** Invalid MySQL database names no longer reach malformed SQL or late startup failure paths.
+* Noted **Blockfrost clients can list asset holder addresses and quantities:** The new endpoint follows Blockfrost pagination and 404 behavior for unknown assets or assets without live holders.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** Mithril のコアモード追従、ledger 検証の強化、データベース索引の高速化
+
+**日付:** July 9, 2026
+
+**バージョン:** v0.62.0
+
+このリリースでは、Mithril のコアモード追従を強化し、インバウンド ledger 検証を厳格化し、トランザクション索引でのデータベース処理を削減します。
+
+### ✨ 新機能
+
+* 追加しました **既存データベース向けの Mithril v2 コアモード追従:** すでに同期済みのコアデータベースを、完全な再初期化なしで新しい成果物へ進められ、分岐した場合は変更前に安全に停止します。
+* 追加しました **Blockfrost の asset holder addresses エンドポイント:** API クライアントは `GET /api/v0/assets/{asset}/addresses` でネイティブ資産の保有者アドレスと数量をページング付きで取得でき、資産が存在しないかライブ保有者がいない場合は Blockfrost 互換の 404 応答になります。
+
+### 💪 改善
+
+* 改善しました **バッチ化した UTxO 読み取りによるトランザクション索引:** MySQL と Postgres は inputs、collateral inputs、reference inputs をまとめて読み取り、往復回数を減らしつつ API mode の reference-input address indexing を維持します。
+* 強化しました **`LedgerDelta.apply` の回帰テスト:** 直接テストで、transaction persistence、governance と protocol parameter の処理、donation accumulation、invalid transaction の扱い、rollback 動作、pooled object の再利用安全性を確認します。
+* 更新しました **改訂された protocol shapes に合わせた Dijkstra の forging と validation:** ノードは candidate Dijkstra block body を `[header, block_body]` としてエンコードし、body hash と size をエンコード済み body から計算し、無効な transaction を除外し、Leios endorser reference をより厳密に解決します。
+
+### 🔧 修正
+
+* 修正しました **インバウンド operational certificate validation:** ledger は stateless な header チェックと stateful な counter チェックを通じて、偽造、期限切れ、古い、または不正な operational certificate をより早く拒否します。
+* 強化しました **`CREATE DATABASE` 前の MySQL database name validation:** 許可された長さや文字規則に違反する名前、またはバッククォートを含む名前は、設定ミスの段階で早期に失敗し、壊れた SQL や起動遅延を防ぎます。
+
+### 📋 知っておくこと
+
+* 明確化しました **Mithril core catch-up は既存データベースをそのまま利用できること:** 既存の Mithril v2 core database は削除せずに新しい成果物へ追従でき、分岐した chain は引き続き停止して full resync が必要になります。
+* 強調しました **ledger validation が不正な operational certificate をより早く拒否すること:** 偽造、期限切れ、古い、または無効な certificate は、block validation の早い段階でより厳格に失敗します。
+* 強調しました **トランザクション索引がデータベース往復を減らすこと:** UTxO 読み取りは inputs、collateral inputs、reference inputs にわたってまとめて実行され、API mode の address indexing には reference inputs が含まれます。
+* 要約しました **設定ミスの database name が早期失敗すること:** 不正な MySQL database name は、壊れた SQL や起動時の後段エラーに到達しません。
+* 記載しました **Blockfrost クライアントが asset holder の address と quantity を取得できること:** 新しい endpoint は、Blockfrost の pagination と、未知の資産または live holder のいない資産に対する 404 動作に従います。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Catch-up en modo núcleo de Mithril, validación del ledger y indexación de base de datos más rápida
+
+**Fecha:** July 9, 2026
+
+**Versión:** v0.62.0
+
+Esta versión refuerza el catch-up en modo núcleo de Mithril, endurece la validación entrante del ledger y reduce el trabajo de base de datos durante la indexación de transacciones.
+
+### ✨ Novedades
+
+* Agregó **catch-up de Mithril v2 en modo núcleo para bases de datos existentes:** Los operadores pueden llevar una base de datos núcleo ya sincronizada a artefactos más nuevos sin un bootstrap completo, y cualquier divergencia ahora falla de forma segura antes de modificar datos.
+* Introdujo **el endpoint de direcciones de holders de activos de Blockfrost:** Los clientes de la API pueden listar direcciones y cantidades de holders para activos nativos mediante `GET /api/v0/assets/{asset}/addresses`, con paginación y comportamiento 404 estilo Blockfrost cuando el activo no tiene holders vivos.
+
+### 💪 Mejoras
+
+* Mejoró **la indexación de transacciones con lecturas UTxO por lotes:** MySQL y Postgres ahora leen inputs, collateral inputs y reference inputs en lotes, lo que reduce los viajes de ida y vuelta y mantiene completa la indexación de direcciones de reference inputs en API mode.
+* Reforzó **la cobertura de regresión de `LedgerDelta.apply`:** Las pruebas directas ahora cubren persistencia de transacciones, manejo de parámetros de gobernanza y protocolo, acumulación de donaciones, comportamiento ante transacciones inválidas, rollback y seguridad al reutilizar objetos agrupados.
+* Actualizó **el forge y la validación de Dijkstra para ajustarlos a las nuevas formas del protocolo:** El nodo ahora codifica los candidatos a block body de Dijkstra como `[header, block_body]`, calcula el hash y el tamaño del body a partir del body codificado, excluye transacciones inválidas y resuelve las referencias de endorser de Leios de forma más estricta.
+
+### 🔧 Correcciones
+
+* Corrigió **la validación de certificados operativos entrantes:** El ledger ahora rechaza antes los certificados operativos falsificados, caducados, obsoletos o inválidos mediante comprobaciones de encabezado sin estado y comprobaciones de contador con estado.
+* Endureció **la validación de nombres de base de datos de MySQL antes de `CREATE DATABASE`:** Los nombres mal configurados ahora fallan rápido cuando violan la longitud o las reglas de caracteres permitidas o incluyen acentos graves, lo que evita SQL inválido y fallos tardíos al arrancar.
+
+### 📋 Lo que se debe saber
+
+* Aclaró **que el catch-up del núcleo de Mithril mantiene utilizables las bases de datos existentes:** Los operadores pueden sincronizar una base de datos núcleo de Mithril v2 existente con artefactos más nuevos sin borrarla, aunque las cadenas divergentes siguen deteniéndose y requieren una resincronización completa.
+* Destacó **que la validación del ledger rechaza antes los certificados operativos incorrectos:** Los certificados falsificados, caducados, obsoletos o inválidos fallan antes y con más rigor durante la validación de bloques.
+* Subrayó **que la indexación de transacciones ahora realiza menos viajes a la base de datos:** Las lecturas UTxO se agrupan entre inputs, collateral inputs y reference inputs, y la indexación de direcciones en API mode ahora incluye reference inputs.
+* Resumió **que los nombres de base de datos mal configurados ahora fallan rápido:** Los nombres inválidos de MySQL ya no llegan a SQL mal formado ni a rutas tardías de fallo al iniciar.
+* Indicó **que los clientes de Blockfrost pueden listar direcciones y cantidades de holders de activos:** El nuevo endpoint sigue la paginación de Blockfrost y el comportamiento 404 para activos desconocidos o sin holders vivos.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
+---
+
 ## v0.61.2 (July 6, 2026)
 
 **Title:** Safer recovery, steadier peer governance, and tighter validation
@@ -48,6 +968,94 @@ This release focuses on ledger recovery, sync stability, peer governance, and ma
 * Emphasized **plan for more active peer discovery when upstreams fall below target:** The peer governor can now trigger emergency discovery on a faster cadence and may add an extra batch to recover more quickly from collapsed relay pools.
 * Summarized **expect stricter consensus and ledger validation around producer identity and block order:** Non-Byron headers with mismatched VRF keys or broken block-number continuity now fail validation, and ledger recovery will not rewind below the Mithril boundary.
 * Acknowledged **expect ChainSync to resync more directly after cursor drift, backlog draining, or unrecoverable rollbacks:** Switched peers, ledger-application backlog, and repeated rollback failures now push the node back toward a healthy sync path instead of recycling endlessly.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.61.4 (July 7, 2026)
+
+**Title:** Strengthen peer recovery, historical stake validation, and heal performance
+
+**Date:** July 7, 2026
+
+**Version:** v0.61.4
+
+This release improves recovery speed, peer stability, historical stake correctness, and startup heal performance while keeping operator guidance current.
+
+### 💪 Improvements
+
+* Updated the internal SSH crypto test dependency set to newer upstream releases, which keeps automated coverage aligned with fixes for unexpected response deadlocks, large channel write loops, key verification limits, and nil callback panics.
+* Improved peer replenishment when the hot peer pool drops to a critical level, which helps the node recover faster after short-lived disconnects and reduces the risk of running with too few healthy upstream peers.
+* Reviewed the release history to keep the previous release entry current.
+
+### 🔧 Fixes
+
+* Fixed Mark snapshots to use historical stake at the snapshot slot, which keeps epoch-2 Praos leader election and VRF-based header validation aligned with the delegation, registration, and UTxO state at the snapshot boundary.
+* Corrected chain heal to use a binary search over the canonical chain index, which shortens startup recovery when the header chain tip runs far ahead of the ledger tip while preserving canonical chain behavior.
+
+### ⚠️ Breaking Changes
+
+* Added a required `GetStakeByPoolsAtSlot` method to metadata plugins, and third-party implementations must add it before upgrading to this release.
+
+### 📋 What You Need to Know
+
+* Clarified that operators can expect faster peer replenishment after short-lived disconnects when the hot peer pool becomes critically low.
+* Highlighted that Mark snapshots now follow historical stake at the snapshot boundary instead of live chain state.
+* Emphasized that startup heal now reaches the canonical chain tip faster when the header chain runs far ahead of the ledger tip.
+* Noted that third-party metadata plugins must implement `GetStakeByPoolsAtSlot` before this release.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ⛔         |
+| preview-testnet     | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
+## v0.61.3 (July 7, 2026)
+
+**Title:** Mithril leader eligibility fix and dependency refreshes
+
+**Date:** July 7, 2026
+
+**Version:** v0.61.3
+
+This release focuses on a narrowly scoped Mithril bootstrap recovery fix together with dependency and workflow updates across the node, examples, and CI pipelines.
+
+### 💪 Improvements
+
+* Improved **skip the stake-threshold check for imported historical Mithril Mark snapshots:** Fresh Mithril bootstraps and catch-up runs now avoid rejecting canonical blocks when an imported historical Mark snapshot would otherwise misstate the VRF leader threshold.
+* Updated **the dingo-sundae-preview example to Vite 8.1.3:** The example now picks up patch fixes for nested dynamic import CSS preload handling, inline CSS injection after a shebang, and SSR stacktrace column positions.
+* Refreshed **the AWS SDK for Go to v1.42.1:** Builds and runtime paths that depend on the AWS SDK now use the newer upstream module version and regenerated endpoint and API models.
+* Strengthened **the `docker/setup-buildx-action` workflow to v4.2.0:** Antithesis, CI Docker, and publish workflows now run on the newer Buildx action release.
+* Polished **`@types/node` in the dingo-sundae-preview example to v26.1.0:** TypeScript checks in the example now use the newer Node type definitions.
+* Enhanced **the `docker/build-push-action` workflow to v7.3.0:** Antithesis, CI Docker, and publish workflows now use the newer Docker build and push action implementation.
+* Modernized **the AWS SDK for Go S3 service module to v1.105.0:** S3 related builds now use the updated service implementation and related transitive modules.
+* Refined **the `docker/metadata-action` workflow to v6.2.0:** Docker image tag and label metadata generation now uses the newer action release.
+* Sharpened **the AWS SDK for Go config module to v1.32.28:** Builds and runtime paths that depend on AWS configuration now use the newer upstream module version.
+* Balanced **gRPC to v1.82.0:** Services built from this repository now inherit the newer gRPC behavior, including the removal of `GRPC_GO_EXPERIMENTAL_DISABLE_STRICT_PATH_CHECKING` support and case-sensitive lookup in the load balancing registry.
+* Expanded **Google API dependencies to v0.287.0:** Rebuilds now pick up the newer upstream dependency versions.
+
+### 🔧 Fixes
+
+* Fixed **skip the Mithril imported historical Mark stake threshold check when the snapshot is out of epoch bounds:** `verifyBlockLeaderEligibility` now skips only the stake-threshold eligibility check for imported historical Mark snapshots captured after the target epoch start, while normal checks continue to run for boundary-captured snapshots and non-Mithril nodes.
 
 ### Recommended Network Compatibility ⚠️
 

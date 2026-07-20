@@ -40,9 +40,8 @@ type VerifiedVote struct {
 // aggregated -- including an unverified signature would silently produce a
 // certificate that fails verification.
 //
-// NOTE: the Dijkstra block's leios_cert slot is an empty placeholder in
-// gouroboros v0.180.0, so certificates built here are not yet embedded in
-// blocks; this is the aggregation path for when the CDDL lands.
+// NOTE: certificates built here are not yet embedded in forged blocks; this is
+// the aggregation path consumed by future forge-loop certificate integration.
 func BuildEbCertificate(
 	slotNo uint64,
 	ebHash lcommon.Blake2b256,
@@ -169,4 +168,63 @@ func ValidateEbCertificate(
 		return false, err
 	}
 	return true, nil
+}
+
+// ValidatePrototypeEbCertificate validates a Musashi prototype certificate.
+// Prototype vote signatures cover the announcing ranking-block hash rather
+// than the legacy slot-plus-EB-hash message, and their public keys are
+// deterministically derived from committee pool ids.
+func ValidatePrototypeEbCertificate(
+	cert *lcommon.LeiosEbCertificate,
+	announcingRbHash lcommon.Blake2b256,
+	committee *Committee,
+	quorumStakeThreshold *big.Rat,
+) error {
+	if cert == nil {
+		return errors.New("nil certificate")
+	}
+	if committee == nil {
+		return errors.New("nil committee")
+	}
+	if err := cert.Validate(committee.Size()); err != nil {
+		return err
+	}
+	var signerStake uint64
+	signerPubs := make([]*bls12381.G2Affine, 0, len(committee.Members))
+	for _, member := range committee.Members {
+		if !cert.Signer(member.VoterId) {
+			continue
+		}
+		signerStake += member.Stake
+		key, err := DerivePrototypeVoteSigningKey(member.PoolKeyHash)
+		if err != nil {
+			return fmt.Errorf("derive prototype voter %d key: %w", member.VoterId, err)
+		}
+		signerPubs = append(signerPubs, key.PublicKey())
+	}
+	quorumMet, err := MeetsStakeQuorum(
+		signerStake,
+		committee.TotalActiveStake,
+		quorumStakeThreshold,
+	)
+	if err != nil {
+		return err
+	}
+	if !quorumMet {
+		return fmt.Errorf(
+			"%w: signer stake %d of total active stake %d below threshold %s",
+			ErrQuorumNotMet,
+			signerStake,
+			committee.TotalActiveStake,
+			quorumStakeThreshold.String(),
+		)
+	}
+	if err := VerifyAggregateSignature(
+		signerPubs,
+		PrototypeVoteMessageBytes(announcingRbHash),
+		cert.AggregatedSignature,
+	); err != nil {
+		return err
+	}
+	return nil
 }

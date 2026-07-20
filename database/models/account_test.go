@@ -17,6 +17,7 @@ package models
 import (
 	"bytes"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 
@@ -24,6 +25,55 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
+
+func TestBackfillAccountCreatedSlotSkipsNullStakingKey(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := db.AutoMigrate(&Account{}); err != nil {
+		t.Fatalf("migrate account: %v", err)
+	}
+	if err := db.Exec(`
+		CREATE TABLE stake_registration (
+			credential_tag integer,
+			staking_key blob,
+			added_slot integer
+		)`).Error; err != nil {
+		t.Fatalf("create legacy registration table: %v", err)
+	}
+	if err := db.Exec(`
+		INSERT INTO stake_registration
+			(credential_tag, staking_key, added_slot)
+		VALUES (0, NULL, 10)`).Error; err != nil {
+		t.Fatalf("insert null staking key: %v", err)
+	}
+
+	queryCount := 0
+	const callbackName = "test:bound_account_created_slot_scan"
+	if err := db.Callback().Row().Before("gorm:row").Register(
+		callbackName,
+		func(tx *gorm.DB) {
+			queryCount++
+			if queryCount > 1 {
+				tx.AddError(errors.New("registration page repeated"))
+			}
+		},
+	); err != nil {
+		t.Fatalf("register query callback: %v", err)
+	}
+
+	if _, err := backfillAccountCreatedSlotFromTable(
+		db,
+		"stake_registration",
+		nil,
+	); err != nil {
+		t.Fatalf("backfill null staking key: %v", err)
+	}
+	if queryCount != 1 {
+		t.Fatalf("registration queries = %d, want 1", queryCount)
+	}
+}
 
 func TestAccount_String(t *testing.T) {
 	tests := []struct {

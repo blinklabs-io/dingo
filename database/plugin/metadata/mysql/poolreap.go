@@ -28,8 +28,12 @@ import (
 // account and deposit from their active registration. A retirement is
 // "effective" when it is the latest pool certificate (registration or
 // retirement) before the boundary — i.e. it was not cancelled by a later
-// re-registration. Same-slot ordering uses block_index then cert_index, the
-// same disambiguation GetActivePoolKeyHashesAtSlot uses.
+// re-registration. Same-slot ordering uses block_index then cert_index.
+// Synthetic reconcile retirements (certificate_id = 0) are deliberately not
+// ranked first here (unlike GetActivePoolKeyHashesAtSlot): they carry the
+// catch-up tip as epoch/added_slot, so the boundary-slot and epoch filters
+// exclude them from POOLREAP refund processing — the imported snapshot's
+// ledger state already settled any refund.
 func (d *MetadataStoreMysql) GetPoolsRetiringAtEpoch(
 	epoch uint64,
 	boundarySlot uint64,

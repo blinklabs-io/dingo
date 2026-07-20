@@ -87,6 +87,7 @@ type Node struct {
 	cancel                           context.CancelFunc
 	shutdownOnce                     sync.Once
 	shutdownErr                      error
+	chainsyncStallRecyclerWG         sync.WaitGroup
 	chainsyncIngressEligibilityMu    sync.RWMutex
 	chainsyncIngressEligibilityCache map[ouroboros.ConnectionId]bool
 }
@@ -319,12 +320,6 @@ func (n *Node) Run(ctx context.Context) error {
 			ValidateHistorical: n.config.validateHistorical,
 			EnableDijkstra:     enableDijkstra,
 			StartInDijkstra:    n.config.startEra.IsDijkstra(),
-			// The Musashi prototype network's successive endorser blocks carry
-			// mutually-conflicting, never-confirmed mempool transactions, so
-			// tolerate and resolve those conflicts (skip conflicting endorser
-			// spends, let authoritative ranking-block spends revoke them)
-			// instead of wedging on "UTxO already spent" (issue #2699).
-			LeiosTolerateEndorserConflicts: n.config.isMusashiNetwork(),
 			// Supplies fetched Leios endorser-block transactions so the ledger
 			// can apply them when their referencing Dijkstra ranking block is
 			// processed (completing the UTxO set for endorser-resident outputs).
@@ -345,7 +340,26 @@ func (n *Node) Run(ctx context.Context) error {
 			// the still-diffusing tail) exceeds the diffusion window — so the
 			// certify deadline is the bound that matches when the EB is actually
 			// available to fetch.
-			EndorserBlockWaitSlots:     n.leiosPipelineTiming().CertifyByDeadlineSlots,
+			EndorserBlockWaitSlots: n.leiosPipelineTiming().CertifyByDeadlineSlots,
+			// Two-path Leios ledger selection: the Musashi prototype
+			// (prototype-2026w29) applies only the certified parent EB, without
+			// validation or consumed-input recovery (Haskell-conformant), whereas
+			// dingo's forward path applies the current announcement normally
+			// (CIP-conformant).
+			LeiosApplyEndorserBlockTxs: !n.config.isMusashiNetwork(),
+			// dingo's leadership stake omits reward-account balances (staking
+			// rewards are not yet computed), which spuriously rejects the
+			// dominant pool's eligible blocks on Musashi's concentrated
+			// topology and wedges the chain. Trust rather than reject there
+			// until reward calculation lands; enforce on real networks where
+			// the omission is negligible. TPraos bootstrap pool-threshold
+			// checks are waived separately inside header validation after
+			// genesis overlay slots are handled.
+			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
+			// On Musashi, certified endorser txs and Dijkstra ranking-block txs are
+			// trusted by the prototype; skip dingo's per-tx validation to match it
+			// and keep block application at the production rate.
+			SkipDijkstraTxValidation:   n.config.isMusashiNetwork(),
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
@@ -491,6 +505,9 @@ func (n *Node) Run(ctx context.Context) error {
 			return fmt.Errorf("failed to recover database: %w", err)
 		}
 	}
+	if err := n.backfillRewardLiveStake(); err != nil {
+		return err
+	}
 
 	// Create and start the Midnight indexer before LedgerState.Start so that
 	// (a) the synchronous backfill runs while no new blocks can arrive, and
@@ -564,6 +581,15 @@ func (n *Node) Run(ctx context.Context) error {
 		n.config.logger,
 	)
 	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
+	// Wire the authoritative epoch-boundary capture before block sync begins so
+	// each epoch rollover stages its mark snapshot atomically at the SNAP point.
+	// Set before CaptureGenesisSnapshot/sync; a nil hook (never set) would leave
+	// only the event-driven fallback capture.
+	n.ledgerState.SetEpochBoundarySnapshotHook(
+		func(txn *database.Txn, evt event.EpochTransitionEvent) error {
+			return n.snapshotMgr.CaptureEpochBoundarySnapshot(n.ctx, txn, evt)
+		},
+	)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		if err := n.handleGenesisSnapshotError(err); err != nil {
@@ -980,63 +1006,19 @@ func (n *Node) Run(ctx context.Context) error {
 	stallRecoveryGrace := max(chainsyncCfg.StallTimeout, 30*time.Second)
 	stallRecycleCooldown := max(2*chainsyncCfg.StallTimeout, 2*time.Minute)
 	//nolint:gosec // G118: cancel func stored in started slice.
-	recyclerCtx, recyclerCancel := context.WithCancel(n.ctx)
-	started = append(started, recyclerCancel)
-	go func(interval, grace, cooldown time.Duration) {
-		for {
-			if recyclerCtx.Err() != nil {
-				return
-			}
-			if !n.runStallCheckerLoop(func() {
-				ticker := time.NewTicker(interval)
-				defer ticker.Stop()
-				recycleAt := make(map[string]time.Time)
-				lastRecycled := make(map[string]time.Time)
-				lastProgressSlot := n.ledgerState.Tip().Point.Slot
-				lastProgressAt := time.Now()
-				plateauRecoveryThreshold := plateauThreshold(
-					chainsyncCfg.StallTimeout,
-				)
-				for {
-					select {
-					case <-recyclerCtx.Done():
-						return
-					case <-ticker.C:
-						n.runStallCheckerTick(func() {
-							now := time.Now()
-							localTip := n.ledgerState.Tip()
-							localTipSlot := localTip.Point.Slot
-							if n.chainSelector != nil {
-								n.chainSelector.SetLocalTip(localTip)
-								if k := n.ledgerState.SecurityParam(); k > 0 {
-									n.chainSelector.SetSecurityParam(uint64(k)) //nolint:gosec
-								}
-							}
-							n.processChainsyncRecyclerTick(
-								now,
-								localTipSlot,
-								chainsyncCfg,
-								recycleAt,
-								lastRecycled,
-								&lastProgressSlot,
-								&lastProgressAt,
-								plateauRecoveryThreshold,
-								grace,
-								cooldown,
-							)
-						})
-					}
-				}
-			}) {
-				return
-			}
-			select {
-			case <-recyclerCtx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-		}
-	}(stallCheckInterval, stallRecoveryGrace, stallRecycleCooldown)
+	recyclerCancel := n.startChainsyncStallRecycler(
+		n.ctx,
+		chainsyncCfg,
+		stallCheckInterval,
+		stallRecoveryGrace,
+		stallRecycleCooldown,
+	)
+	// On startup failure or panic, cancel the recycler and wait for it before
+	// unwinding later components that the recycler can still touch.
+	started = append(started, func() {
+		recyclerCancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
 	// Configure UTxO RPC (only in API mode with a non-zero port)
 	if n.config.storageMode.IsAPI() && n.config.utxorpcPort > 0 {
 		n.utxorpc = utxorpc.NewUtxorpc(
@@ -1098,12 +1080,25 @@ func (n *Node) Run(ctx context.Context) error {
 		var err error
 		n.midnightServer, err = midnightserver.New(
 			midnightserver.Config{
-				Logger:          n.config.logger,
+				Logger:   n.config.logger,
+				Metadata: n.db.Metadata(),
+				BlockNumberByHash: func(hash []byte) (uint64, bool, error) {
+					block, err := database.BlockByHash(n.db, hash)
+					if err != nil {
+						if errors.Is(err, models.ErrBlockNotFound) {
+							return 0, false, nil
+						}
+						return 0, false, err
+					}
+					return block.Number, true, nil
+				},
 				Host:            n.config.midnight.Host,
 				Port:            n.config.midnight.Port,
 				TLSCertFilePath: n.config.tlsCertFilePath,
 				TLSKeyFilePath:  n.config.tlsKeyFilePath,
 				ShutdownTimeout: n.config.shutdownTimeout,
+				Database:        midnightserver.NewDatabase(n.db),
+				SlotTimer:       n.ledgerState,
 			},
 		)
 		if err != nil {
@@ -1301,6 +1296,36 @@ func (n *Node) Run(ctx context.Context) error {
 	// Wait for shutdown signal
 	<-n.ctx.Done()
 	return nil
+}
+
+// backfillRewardLiveStake repairs databases created before the live reward
+// stake aggregate existed. It runs after commit-timestamp recovery and before
+// ledger processing can advance the chain, so the next epoch-boundary snapshot
+// cannot observe a partially populated aggregate.
+func (n *Node) backfillRewardLiveStake() error {
+	return n.db.MetadataTxn(true).Do(func(txn *database.Txn) error {
+		needed, err := n.db.Metadata().RewardLiveStakeNeedsBackfill(
+			txn.Metadata(),
+		)
+		if err != nil {
+			return fmt.Errorf("check reward live stake backfill: %w", err)
+		}
+		if !needed {
+			return nil
+		}
+		tip, err := n.db.GetTip(txn)
+		if err != nil {
+			return fmt.Errorf("get tip for reward live stake backfill: %w", err)
+		}
+		n.config.logger.Info(
+			"rebuilding reward live stake aggregate",
+			"slot", tip.Point.Slot,
+		)
+		if err := n.db.RebuildRewardLiveStake(tip.Point.Slot, txn); err != nil {
+			return fmt.Errorf("backfill reward live stake: %w", err)
+		}
+		return nil
+	})
 }
 
 // startDeferredIndexMaintenance finishes lazy deferred-index rebuilds

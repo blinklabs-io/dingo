@@ -244,10 +244,10 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	db, _ := newTallyTestDB(t)
 
 	const (
-		earlyMajor    uint = 11
+		earlyMajor    uint   = 11
 		earlySlot     uint64 = 1
 		earlyHashSeed byte   = 0xA1
-		lateMajor     uint = 12
+		lateMajor     uint   = 12
 		lateSlot      uint64 = 10
 		lateHashSeed  byte   = 0xA2
 	)

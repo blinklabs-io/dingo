@@ -51,12 +51,35 @@ const (
 	// PoolStakeSnapshotTypeMark is the epoch-boundary mark snapshot used by
 	// governance and by the normal Praos epoch-offset rotation.
 	PoolStakeSnapshotTypeMark = "mark"
+	// PoolStakeSnapshotTypeSet is the mark snapshot rotated forward one
+	// epoch, per the Shelley set/go/mark rotation.
+	PoolStakeSnapshotTypeSet = "set"
+	// PoolStakeSnapshotTypeGo is the set snapshot rotated forward one more
+	// epoch; this is the row consulted for live leader-election stake.
+	PoolStakeSnapshotTypeGo = "go"
 	// PoolStakeSnapshotTypeActive is the active consensus pool distribution
 	// imported from a Mithril NewEpochState.pool-distr field. TotalStake
 	// stores the fraction numerator and StakeDenominator stores the
 	// denominator for the same row.
 	PoolStakeSnapshotTypeActive = "actv"
 )
+
+// ValidPoolStakeSnapshotType reports whether snapshotType is one of the
+// known pool_stake_snapshot.snapshot_type values. Callers that accept a
+// snapshotType from outside the package should validate with this before
+// querying, so a typo or stale value fails fast instead of silently
+// returning zero rows.
+func ValidPoolStakeSnapshotType(snapshotType string) bool {
+	switch snapshotType {
+	case PoolStakeSnapshotTypeMark,
+		PoolStakeSnapshotTypeSet,
+		PoolStakeSnapshotTypeGo,
+		PoolStakeSnapshotTypeActive:
+		return true
+	default:
+		return false
+	}
+}
 
 // PoolStakeSnapshot captures pool stake for an epoch snapshot. Mark rows store
 // lovelace totals at an epoch boundary. Active rows imported from Mithril store

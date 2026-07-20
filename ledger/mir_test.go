@@ -92,6 +92,17 @@ func runApplyMIRCerts(
 	}))
 }
 
+func applyMIRCertsErr(
+	ls *LedgerState,
+	db *database.Database,
+	epochStartSlot, boundarySlot uint64,
+) error {
+	txn := db.Transaction(true)
+	return txn.Do(func(txn *database.Txn) error {
+		return ls.applyMIRCerts(txn, epochStartSlot, boundarySlot)
+	})
+}
+
 // TestApplyMIRCerts_DistributionFromReserves_RegisteredAccount verifies that a
 // MIR cert distributing from reserves credits the registered reward account and
 // debits reserves.
@@ -178,6 +189,41 @@ func TestApplyMIRCerts_MultipleDistributionsSameAccount(t *testing.T) {
 	).Order("id ASC").Find(&deltas).Error)
 	require.Len(t, deltas, 2)
 	assert.NotEqual(t, string(deltas[0].TxHash), string(deltas[1].TxHash))
+}
+
+func TestApplyMIRCerts_DistributionTotalOverflowRollsBack(t *testing.T) {
+	ls, db, gdb := newMIRTestLedger(t)
+
+	maxUint := ^uint64(0)
+	credA := mirCred28(0x13)
+	credB := mirCred28(0x14)
+	seedMIRDistribution(t, gdb, mirPotReserves, 200, []models.MoveInstantaneousRewardsReward{
+		{Credential: credA, Amount: types.Uint64(maxUint)},
+		{Credential: credB, Amount: types.Uint64(1)},
+	})
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: credA,
+		Active:     true,
+	}))
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: credB,
+		Active:     true,
+	}))
+	require.NoError(t, db.Metadata().SetNetworkState(1_000, maxUint, 50, nil))
+
+	err := applyMIRCertsErr(ls, db, 0, 1_000)
+	require.ErrorContains(t, err, "MIR distribution total overflow")
+
+	accountA, err := db.GetAccountByCredential(0, credA, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), uint64(accountA.Reward))
+	accountB, err := db.GetAccountByCredential(0, credB, false, nil)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), uint64(accountB.Reward))
+	state, err := db.Metadata().GetNetworkState(nil)
+	require.NoError(t, err)
+	require.Equal(t, maxUint, uint64(state.Reserves))
+	require.Equal(t, uint64(50), state.Slot)
 }
 
 // TestApplyMIRCerts_DistributionFromTreasury_RegisteredAccount verifies a MIR
@@ -280,6 +326,38 @@ func TestApplyMIRCerts_PotTransferTreasuryToReserves(t *testing.T) {
 		"treasury decreased by pot transfer")
 	assert.Equal(t, uint64(7_500), uint64(state.Reserves),
 		"reserves increased by pot transfer")
+}
+
+func TestApplyMIRCerts_PotTransferOverflow(t *testing.T) {
+	maxUint := ^uint64(0)
+
+	t.Run("reserves to treasury", func(t *testing.T) {
+		ls, db, gdb := newMIRTestLedger(t)
+		seedMIRPotTransfer(t, gdb, mirPotReserves, 1, 500)
+		require.NoError(t, db.Metadata().SetNetworkState(maxUint, 1, 50, nil))
+
+		err := applyMIRCertsErr(ls, db, 0, 1_000)
+		require.ErrorContains(t, err, "overflow treasury")
+		state, stateErr := db.Metadata().GetNetworkState(nil)
+		require.NoError(t, stateErr)
+		require.Equal(t, maxUint, uint64(state.Treasury))
+		require.Equal(t, uint64(1), uint64(state.Reserves))
+		require.Equal(t, uint64(50), state.Slot)
+	})
+
+	t.Run("treasury to reserves", func(t *testing.T) {
+		ls, db, gdb := newMIRTestLedger(t)
+		seedMIRPotTransfer(t, gdb, mirPotTreasury, 1, 500)
+		require.NoError(t, db.Metadata().SetNetworkState(1, maxUint, 50, nil))
+
+		err := applyMIRCertsErr(ls, db, 0, 1_000)
+		require.ErrorContains(t, err, "overflow reserves")
+		state, stateErr := db.Metadata().GetNetworkState(nil)
+		require.NoError(t, stateErr)
+		require.Equal(t, uint64(1), uint64(state.Treasury))
+		require.Equal(t, maxUint, uint64(state.Reserves))
+		require.Equal(t, uint64(50), state.Slot)
+	})
 }
 
 // TestApplyMIRCerts_OutsideEpochRange verifies that a MIR cert submitted

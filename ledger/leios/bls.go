@@ -23,11 +23,9 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 )
 
-// LeiosVoteDST is the domain separation tag for hashing vote messages to
-// the BLS12-381 G1 group. CIP-0164 has not yet pinned a DST for the voting
-// scheme; this is a dingo-local provisional value to be aligned with the
-// reference implementation once the CIP finalizes it.
-const LeiosVoteDST = "CIP-0164-LEIOS-VOTE-BLS12381G1_XMD:SHA-256_SSWU_RO_"
+// LeiosVoteDST is the proof-of-possession ciphersuite used by
+// cardano-crypto-leios' minSigPoPDST.
+const LeiosVoteDST = "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"
 
 // Vote signatures follow the BLS MinSig variant on BLS12-381: signatures
 // are compressed G1 points (48 bytes, matching gouroboros
@@ -48,10 +46,13 @@ var negG2Gen = func() bls12381.G2Affine {
 	return neg
 }()
 
-// VoteMessageBytes returns the message signed by a Leios vote:
-// concat(slot_no, endorser_block_hash) with slot_no encoded as 8 bytes
-// big-endian. The exact encoding is an assumption pending CIP-0164
-// finalization.
+// PrototypeVoteMessageBytes returns the current prototype's signed message:
+// the hash of the ranking block that announced the endorser block.
+func PrototypeVoteMessageBytes(announcingRbHash lcommon.Blake2b256) []byte {
+	return announcingRbHash.Bytes()
+}
+
+// VoteMessageBytes retains the legacy standalone leios-votes message shape.
 func VoteMessageBytes(slotNo uint64, ebHash lcommon.Blake2b256) []byte {
 	msg := make([]byte, 8, 8+len(ebHash))
 	binary.BigEndian.PutUint64(msg, slotNo)

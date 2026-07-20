@@ -38,9 +38,14 @@ type Transaction struct {
 	Type             int
 	ID               uint `gorm:"primaryKey"`
 	Fee              types.Uint64
-	TTL              types.Uint64
-	BlockIndex       uint32
-	Valid            bool
+	// CollateralFee is the lovelace consumed into the fee pot by a
+	// phase-2-invalid transaction (collateral inputs minus collateral
+	// return, per the Alonzo/Babbage UTXOS rule). Zero for valid
+	// transactions; Fee keeps the declared body fee in both cases.
+	CollateralFee types.Uint64
+	TTL           types.Uint64
+	BlockIndex    uint32
+	Valid         bool
 }
 
 func (Transaction) TableName() string {

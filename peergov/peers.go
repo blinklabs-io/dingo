@@ -276,6 +276,52 @@ func (p *PeerGovernor) resolveAddress(address string) string {
 	return net.JoinHostPort(ips[0].String(), port)
 }
 
+// resolveLedgerDiscoveryAddress resolves a ledger relay hostname at initial
+// discovery time, filtering the resolved records to the locally-supported
+// address families before picking one. This function performs blocking DNS
+// lookups and must NOT be called while holding locks.
+//
+// It is ledger-specific rather than a change to resolveAddress (shared by
+// every peer source — topology, gossip, inbound, TestPeer/DenyPeer lookups)
+// because the record chosen here matters far more than it does for those
+// other sources: resolveLedgerDialTarget's fast path reuses whatever ends up
+// in NormalizedAddress unchanged and dials it for the rest of the peer's
+// lifetime, whereas every other source re-resolves (and re-filters via
+// resolveDialAddress) on every dial attempt. Without this, a v4-only host
+// could pin a ledger peer to an unreachable AAAA record forever, since
+// there is no later attempt to self-correct the family.
+//
+// Behavior otherwise matches resolveAddress: an IP literal is normalized
+// unchanged, and a resolution failure or empty result falls back to the
+// lowercased hostname so the peer is still added (with routability decided
+// downstream) rather than dropped.
+func (p *PeerGovernor) resolveLedgerDiscoveryAddress(address string) string {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return strings.ToLower(address)
+	}
+
+	ip := net.ParseIP(host)
+	if ip != nil {
+		return net.JoinHostPort(ip.String(), port)
+	}
+
+	ips, err := lookupIP(host)
+	if err != nil || len(ips) == 0 {
+		p.config.Logger.Warn(
+			"failed to resolve ledger relay hostname",
+			"address", address,
+			"host", host,
+			"error", err,
+		)
+		return net.JoinHostPort(strings.ToLower(host), port)
+	}
+
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	return net.JoinHostPort(ips[0].String(), port)
+}
+
 // resolveDialAddress returns the concrete transport target to dial for an
 // outbound connection attempt against the given peer address.
 //
@@ -339,6 +385,90 @@ func (p *PeerGovernor) resolveDialAddress(
 	// half-dead backend is escaped on the next attempt.
 	ip := ips[rand.IntN(len(ips))] //nolint:gosec // load-balancing spread, not security-sensitive
 	return net.JoinHostPort(ip.String(), port)
+}
+
+// resolveLedgerDialTarget returns the concrete IP:port to dial for a
+// ledger-discovered pool relay peer, locking that choice onto the peer so
+// every subsequent dial attempt reuses the same resolved IP instead of
+// asking DNS again.
+//
+// Ledger relay hostnames are supplied by pool operators via on-chain stake
+// pool registration — input outside the node's control. If the routability
+// check performed when the relay was discovered (isRoutableAddr, via
+// resolveAddress in addLedgerPeer) and the actual dial each triggered their
+// own DNS lookup, a malicious or compromised authoritative DNS server could
+// answer the discovery-time lookup with a public IP (passing the check) and
+// a later lookup with an internal address (the one actually dialed) — a DNS
+// rebind that would cause the node to TCP-probe internal addresses.
+// Resolving exactly once and always dialing that resolved IP closes the
+// gap.
+//
+// peer.NormalizedAddress already holds the IP resolved at discovery time in
+// the common case, so this returns it unchanged. If that earlier resolution
+// failed and NormalizedAddress is still a hostname, a single fresh
+// resolution is performed here, filtered to the locally-supported address
+// families (so the record locked in for the rest of this peer's lifetime is
+// actually dialable, not an arbitrary first record), checked for
+// routability, and — on success — written back to peer.NormalizedAddress
+// under p.mu so it is locked in for this and every future reconnect
+// attempt. It must NOT be called while holding p.mu.
+func (p *PeerGovernor) resolveLedgerDialTarget(
+	ctx context.Context,
+	peer *Peer,
+) (string, error) {
+	host, port, err := net.SplitHostPort(peer.NormalizedAddress)
+	if err != nil {
+		return "", err
+	}
+	if net.ParseIP(host) != nil {
+		// Resolved and locked in at discovery time.
+		return peer.NormalizedAddress, nil
+	}
+
+	// Discovery-time resolution didn't produce an IP (e.g. it failed and
+	// fell back to the lowercased hostname). Resolve once now, bounded so a
+	// hung or slow resolver cannot wedge the dial loop.
+	lookupCtx, cancel := context.WithTimeout(ctx, dialDNSResolveTimeout)
+	defer cancel()
+	ips, err := lookupIPAddr(lookupCtx, host)
+	if err != nil {
+		return "", err
+	}
+	if len(ips) == 0 {
+		return "", errors.New("no addresses returned for ledger relay hostname")
+	}
+	// Filter to the address families this host can actually dial before
+	// picking the one record that gets locked in forever; an unfiltered
+	// pick could permanently pin the peer to an unreachable family (e.g. an
+	// AAAA record on a v4-only host), which resolveDialAddress's per-attempt
+	// re-resolution would otherwise self-correct on the next try.
+	hasV4, hasV6 := p.supportedDialFamilies()
+	ips = filterDialFamilies(ips, hasV4, hasV6)
+	resolved := net.JoinHostPort(ips[0].String(), port)
+	if !isRoutableAddr(resolved) {
+		return "", ErrUnroutableAddress
+	}
+
+	p.mu.Lock()
+	idx := p.peerIndexByAddress(peer.NormalizedAddress)
+	if idx != -1 && p.peers[idx] != nil {
+		// Guard against colliding with a distinct peer entry that already
+		// owns this resolved address (e.g. a gossip/topology peer for the
+		// same relay, or another ledger hostname that happens to resolve
+		// here). Two peers sharing NormalizedAddress breaks
+		// peerIndexByAddress's assumption that it uniquely identifies a
+		// peer, which can misdirect this peer's connection bookkeeping onto
+		// the other entry. Skip the lock-in in that case; this peer simply
+		// re-resolves (still routability-checked before every dial) on its
+		// next attempt instead of corrupting peer identity.
+		if collidingIdx := p.peerIndexByAddress(resolved); collidingIdx == -1 ||
+			collidingIdx == idx {
+			p.peers[idx].NormalizedAddress = resolved
+		}
+	}
+	p.mu.Unlock()
+
+	return resolved, nil
 }
 
 // localAddrFamilies detects which IP families the local host can route to.

@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/ledger"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
+	gdijkstra "github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 )
@@ -57,6 +58,8 @@ const (
 	// from immediately re-entering the same rollback loop.
 	chainsyncDivergentPeerCooldown = 2 * time.Minute
 )
+
+var chainsyncRestartAfter = time.After
 
 func effectiveChainsyncBlockTimeout(timeout time.Duration) time.Duration {
 	if timeout < ochainsync.MustReplyTimeoutMax {
@@ -88,8 +91,10 @@ func (o *Ouroboros) chainsyncServerConnOpts() []ochainsync.ChainSyncOptionFunc {
 
 func (o *Ouroboros) chainsyncClientConnOpts() []ochainsync.ChainSyncOptionFunc {
 	return []ochainsync.ChainSyncOptionFunc{
-		ochainsync.WithRollForwardFunc(
-			o.instrumentChainsyncRollForward(o.chainsyncClientRollForward),
+		ochainsync.WithRollForwardRawFunc(
+			o.instrumentChainsyncRollForwardRaw(
+				o.chainsyncClientRollForwardRaw,
+			),
 		),
 		ochainsync.WithRollBackwardFunc(
 			o.instrumentChainsyncRollBackward(o.chainsyncClientRollBackward),
@@ -191,7 +196,10 @@ func (o *Ouroboros) buildDefaultChainsyncIntersectPoints(
 	}
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
-		return nil, fmt.Errorf("failed to lookup connection ID: %s", connId.String())
+		return nil, fmt.Errorf(
+			"failed to lookup connection ID: %s",
+			connId.String(),
+		)
 	}
 	if conn.ChainSync() == nil || conn.ChainSync().Client == nil {
 		return nil, fmt.Errorf(
@@ -274,7 +282,9 @@ func (o *Ouroboros) syncChainsyncClient(
 // (FindIntersect + RequestNext). The server will send RollBackward if
 // the intersection point is behind the client's current position, which
 // triggers the normal rollback handler.
-func (o *Ouroboros) RestartChainsyncClient(connId ouroboros.ConnectionId) error {
+func (o *Ouroboros) RestartChainsyncClient(
+	connId ouroboros.ConnectionId,
+) error {
 	intersectPoints, err := o.buildDefaultChainsyncIntersectPoints(connId)
 	if err != nil {
 		return fmt.Errorf(
@@ -588,8 +598,10 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 	if !sendChainsyncConnError(conn.ErrorChan(), err) {
 		o.config.Logger.Debug(
 			"chainsync server: failed to forward async send error to connection error channel",
-			"connection_id", connectionID,
-			"operation", operation,
+			"connection_id",
+			connectionID,
+			"operation",
+			operation,
 		)
 	}
 }
@@ -1063,7 +1075,7 @@ func (o *Ouroboros) restartChainsyncClientAsync(
 			)
 			closeConn()
 			<-done
-		case <-time.After(chainsyncRestartTimeout):
+		case <-chainsyncRestartAfter(chainsyncRestartTimeout):
 			o.config.Logger.Warn(
 				"chainsync restart timed out, closing connection",
 				"connection_id", connId.String(),
@@ -1129,9 +1141,12 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				if recovery.SkipConnectionClose {
 					o.config.Logger.Info(
 						"skipping connection closure: chain already past rollback point",
-						"component", "ouroboros",
-						"rollback_slot", e.Point.Slot,
-						"chain_tip_slot", recovery.PrimaryChainTipSlot,
+						"component",
+						"ouroboros",
+						"rollback_slot",
+						e.Point.Slot,
+						"chain_tip_slot",
+						recovery.PrimaryChainTipSlot,
 					)
 					return
 				}
@@ -1148,9 +1163,12 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 				// state, so there are no in-flight lookups to break.
 				o.config.Logger.Info(
 					"local rollback had no recoverable peer history, closing connections for fresh chainsync",
-					"component", "ouroboros",
-					"rollback_slot", e.Point.Slot,
-					"connection_count", len(connIds),
+					"component",
+					"ouroboros",
+					"rollback_slot",
+					e.Point.Slot,
+					"connection_count",
+					len(connIds),
 				)
 				for _, connId := range connIds {
 					if o.ChainsyncState != nil {
@@ -1165,8 +1183,10 @@ func (o *Ouroboros) SubscribeChainsyncResync(ctx context.Context) {
 					}
 					o.config.Logger.Info(
 						"closing connection for fresh chainsync after local rollback",
-						"component", "ouroboros",
-						"connection_id", connId.String(),
+						"component",
+						"ouroboros",
+						"connection_id",
+						connId.String(),
 					)
 					conn.Close()
 				}
@@ -1281,13 +1301,54 @@ func (o *Ouroboros) instrumentChainsyncRollBackward(
 	}
 }
 
-func (o *Ouroboros) instrumentChainsyncRollForward(
-	fn func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error,
-) func(ochainsync.CallbackContext, uint, any, ochainsync.Tip) error {
+// decodeChainsyncHeader decodes a chain-sync block header, choosing the decoder
+// by block type. On the Musashi prototype network, blocks tagged Conway (block
+// type 7) carry the Leios header extension (leios_certified/leios_announcement)
+// in place — a structurally extended Babbage header that gouroboros' strict
+// Conway header decoder rejects. Decode those via the Dijkstra header path,
+// which handles the trailing extension, so the strict Conway decoder that every
+// real Conway network relies on is left untouched. All other networks and block
+// types decode exactly as before.
+func (o *Ouroboros) decodeChainsyncHeader(
+	blockType uint,
+	raw []byte,
+) (gledger.BlockHeader, error) {
+	if o.config.NetworkMagic == ouroboros.NetworkCardanoMusashi.NetworkMagic &&
+		blockType == gledger.BlockTypeConway {
+		return gdijkstra.NewDijkstraBlockHeaderFromCbor(raw)
+	}
+	return gledger.NewBlockHeaderFromCbor(blockType, raw)
+}
+
+// chainsyncClientRollForwardRaw decodes the raw header itself (via
+// decodeChainsyncHeader) and forwards the decoded header to the shared
+// RollForward handler. dingo takes the raw callback so it can apply the
+// Musashi-scoped Conway-with-Leios-header decode; using the decoded callback
+// would let gouroboros' strict decode fail before dingo can intervene.
+func (o *Ouroboros) chainsyncClientRollForwardRaw(
+	ctx ochainsync.CallbackContext,
+	blockType uint,
+	blockData []byte,
+	tip ochainsync.Tip,
+) error {
+	header, err := o.decodeChainsyncHeader(blockType, blockData)
+	if err != nil {
+		return fmt.Errorf(
+			"decode chain-sync header (block type %d): %w",
+			blockType,
+			err,
+		)
+	}
+	return o.chainsyncClientRollForward(ctx, blockType, header, tip)
+}
+
+func (o *Ouroboros) instrumentChainsyncRollForwardRaw(
+	fn func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error,
+) func(ochainsync.CallbackContext, uint, []byte, ochainsync.Tip) error {
 	return func(
 		ctx ochainsync.CallbackContext,
 		blockType uint,
-		blockData any,
+		blockData []byte,
 		tip ochainsync.Tip,
 	) error {
 		start := time.Now()

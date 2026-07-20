@@ -156,6 +156,58 @@ type MetadataStore interface {
 	// the in-memory tracked-UTxO set. Used during chain rollback.
 	DeleteMidnightDeregistrationsByBlock(types.Txn, uint64) ([]models.MidnightDeregistration, error)
 
+	// FindMidnightAssetCreatesFrom returns cNIGHT create rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// The result may hold more than limit rows: (block_number, tx_index) is
+	// not a unique key (one tx can write several rows to the same table),
+	// so implementations extend a page that would otherwise end mid-key to
+	// include the rest of that key's rows, keeping the cursor gap-free.
+	// Used to serve the MidnightState GetAssetCreates RPC.
+	FindMidnightAssetCreatesFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetCreate, error)
+
+	// FindMidnightAssetSpendsFrom returns cNIGHT spend rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetAssetSpends RPC.
+	FindMidnightAssetSpendsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightAssetSpend, error)
+
+	// FindMidnightRegistrationsFrom returns registration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetRegistrations RPC.
+	FindMidnightRegistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightRegistration, error)
+
+	// FindMidnightDeregistrationsFrom returns deregistration rows ordered by
+	// (block_number, tx_index) ascending, starting strictly after
+	// (startBlock, startTxIndex). limit <= 0 means no SQL LIMIT is applied.
+	// See FindMidnightAssetCreatesFrom for why the result may hold more
+	// than limit rows. Used to serve the MidnightState GetDeregistrations
+	// RPC.
+	FindMidnightDeregistrationsFrom(
+		startBlock uint64,
+		startTxIndex uint32,
+		limit int,
+		txn types.Txn,
+	) ([]models.MidnightDeregistration, error)
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.
@@ -230,6 +282,14 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, bool, error)
 
+	// GetPoolBlockIssuersInSlotRange returns observed pool/op-cert issuer
+	// rows in the inclusive slot range, ordered by slot and pool key hash.
+	GetPoolBlockIssuersInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) ([]models.PoolOpCertSequence, error)
+
 	// CountPoolBlocksInSlotRange counts observed pool-issued blocks in the
 	// inclusive slot range, grouped by pool key hash. The total return value
 	// counts all observed pool blocks in the range, not only the requested
@@ -240,6 +300,15 @@ type MetadataStore interface {
 		uint64, // endSlot
 		types.Txn,
 	) (map[string]uint64, uint64, error)
+
+	// SumTransactionFeesInSlotRange sums the fee-pot contributions in the
+	// inclusive slot range: declared fees of valid transactions plus
+	// consumed collateral of phase-2-invalid transactions.
+	SumTransactionFeesInSlotRange(
+		uint64, // startSlot
+		uint64, // endSlot
+		types.Txn,
+	) (uint64, error)
 
 	// GetPools retrieves pools by key hash in batch.
 	GetPools(
@@ -254,6 +323,20 @@ type MetadataStore interface {
 	GetPoolRegistrationsAtSlot(
 		[]lcommon.PoolKeyHash,
 		uint64, // slot
+		types.Txn,
+	) ([]models.PoolRegistration, error)
+
+	// GetPoolRegistrationsEffectiveForEpoch retrieves, per requested pool,
+	// the registration whose parameters the ledger's pool-params map held
+	// during the ended epoch [epochStartSlot, snapshotSlot]. Re-registrations
+	// submitted during that epoch are future params (promoted after SNAP)
+	// and excluded; pools that freshly entered the params map during the
+	// epoch use their earliest in-epoch certificate.
+	GetPoolRegistrationsEffectiveForEpoch(
+		[]lcommon.PoolKeyHash,
+		uint64, // epochStartSlot
+		uint64, // endedEpoch
+		uint64, // snapshotSlot
 		types.Txn,
 	) ([]models.PoolRegistration, error)
 
@@ -328,6 +411,46 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]uint64, map[string]uint64, error)
 
+	// GetStakeByPoolsAtSlot returns delegated stake for multiple pools at a
+	// historical slot. It uses certificate history plus slot-aware UTxO
+	// liveness so epoch-boundary stake snapshots do not read current live
+	// stake for an older boundary.
+	GetStakeByPoolsAtSlot(
+		[][]byte, // poolKeyHashes
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, map[string]uint64, error)
+
+	// GetPoolOwnerStakeAtSlot returns historical stake for the requested pool
+	// owner key hashes, keyed by pool plus credential. An owner is included only
+	// when that credential was delegated to the pool at the requested slot.
+	GetPoolOwnerStakeAtSlot(
+		[][]byte, // ownerKeyHashes
+		uint64, // slot
+		types.Txn,
+	) (map[string]uint64, error)
+
+	// GetRewardStakeInputsForPools returns positive per-account delegated stake
+	// for pools from the live reward stake aggregate. The aggregate always
+	// reflects the caller's transaction view, so there is no slot argument:
+	// callers scope the result by opening the transaction at the desired point.
+	GetRewardStakeInputsForPools(
+		[][]byte, // poolKeyHashes
+		types.Txn,
+	) ([]*models.RewardStakeInput, error)
+
+	// RebuildRewardLiveStake rebuilds the live reward stake aggregate from
+	// canonical account and live UTxO metadata. Node startup uses it as an
+	// upgrade/repair backstop when RewardLiveStakeNeedsBackfill reports gaps.
+	RebuildRewardLiveStake(uint64, types.Txn) error
+
+	// RewardLiveStakeNeedsBackfill reports whether the reward_live_stake
+	// aggregate needs a one-time RebuildRewardLiveStake pass: true when any
+	// canonical account or live-UTxO credential is missing from the aggregate.
+	// This detects both empty and partially populated upgraded databases without
+	// misfiring on a legitimately fresh, empty database.
+	RewardLiveStakeNeedsBackfill(types.Txn) (bool, error)
+
 	// GetStakeRegistrationsByCredential retrieves stake registration certificates
 	// using the full credential identity: credential tag plus 28-byte hash.
 	GetStakeRegistrationsByCredential(
@@ -356,8 +479,19 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsActiveAtSlot returns the subset of stake credentials that
+	// were registered and not subsequently deregistered at or before the given
+	// slot. The returned map is keyed by StakeCredentialRef.MapKey().
+	GetAccountsActiveAtSlot(
+		[]models.StakeCredentialRef, // stakeCredentials
+		uint64, // slot
+		types.Txn,
+	) (map[string]struct{}, error)
+
 	// ApplyAccountRewardWithdrawal clears a registered reward account after a
-	// validated transaction withdrawal and records rollback state.
+	// validated transaction withdrawal and records rollback state. txHash must
+	// identify the withdrawing transaction; callers that pass nil cannot safely
+	// apply more than one hashless withdrawal for the same credential.
 	ApplyAccountRewardWithdrawal(
 		uint8, // credentialTag
 		[]byte, // stakeKey
@@ -440,6 +574,35 @@ type MetadataStore interface {
 	// GetActiveDreps retrieves all active DReps.
 	GetActiveDreps(types.Txn) ([]*models.Drep, error)
 
+	// GetActiveAccountCredentials returns the stake credentials (tag + key) of
+	// every currently active account. Used by Mithril v2 catch-up
+	// reconciliation to find accounts absent from a newer snapshot's live set.
+	GetActiveAccountCredentials(
+		types.Txn,
+	) ([]models.StakeCredentialRef, error)
+
+	// DeactivateAccounts marks the given accounts inactive (Active=false). Used
+	// by Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateAccounts(types.Txn, []models.StakeCredentialRef) error
+
+	// DeactivateDreps marks the given DReps inactive (Active=false). Used by
+	// Mithril v2 catch-up reconciliation; rows are never deleted, only
+	// tombstoned via the active flag. Credentials that match no row are ignored.
+	DeactivateDreps(types.Txn, []models.StakeCredentialRef) error
+
+	// RetirePools records a retirement at the given epoch (and added slot) for
+	// each supplied pool key hash, mirroring a retirement certificate. Used by
+	// Mithril v2 catch-up reconciliation to retire pools absent from a newer
+	// snapshot's active set; registrations are preserved. Key hashes that match
+	// no pool are ignored.
+	RetirePools(
+		txn types.Txn,
+		poolKeyHashes [][]byte,
+		epoch uint64,
+		addedSlot uint64,
+	) error
+
 	// GetPParams retrieves the latest protocol-parameters row at
 	// epoch <= the supplied epoch whose stored era_id matches the
 	// supplied era. The era filter is required: at era boundaries the
@@ -460,6 +623,14 @@ type MetadataStore interface {
 		uint64, // epoch
 		types.Txn,
 	) ([]models.PParamUpdate, error)
+
+	// GetGenesisDelegationForSlot returns the latest genesis-key delegation
+	// certificate for genesisHash before the supplied block slot.
+	GetGenesisDelegationForSlot(
+		[]byte, // genesisHash
+		uint64, // blockSlot
+		types.Txn,
+	) (*models.GenesisDelegation, error)
 
 	// GetUtxo retrieves an unspent transaction output by transaction ID and index.
 	GetUtxo(
@@ -501,65 +672,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint, bool, error)
 
-	// ExistingTransactionHashes returns the subset of the given hashes that
-	// are already recorded. Lightweight (selects the hash column only, no
-	// associations); used to skip re-applying transactions that an earlier
-	// endorser block already applied, since the Leios prototype re-includes
-	// unconfirmed mempool transactions in successive endorser blocks
-	// (issue #2699).
-	ExistingTransactionHashes(
-		[][]byte, // hashes
+	// GetTransactionMetadataByHash returns only the stored (API-mode)
+	// CBOR metadata blob for the transaction with the given hash,
+	// without loading any associations. Returns (nil, nil) when no such
+	// transaction exists or when it has no metadata. Used by the asset
+	// endpoint to resolve CIP-25 on-chain metadata without paying for
+	// full transaction preloads.
+	GetTransactionMetadataByHash(
+		[]byte, // hash
 		types.Txn,
-	) ([][]byte, error)
-
-	// AddEndorserTransactions records the given transaction hashes as
-	// endorser-block (speculative) transactions applied under the referencing
-	// ranking block at rbSlot. Used only when endorser-block conflict
-	// resolution is enabled (Musashi); it marks these spends as revocable so a
-	// later authoritative ranking-block transaction can override them
-	// (issue #2699). Idempotent: re-recording an existing hash is a no-op.
-	AddEndorserTransactions(
-		[][]byte, // hashes
-		uint64, // rbSlot
-		types.Txn,
-	) error
-
-	// FilterEndorserTransactions returns the subset of the given hashes that
-	// are recorded endorser-block transactions. Used to tell a revocable
-	// endorser-block spend from a final ranking-block spend when resolving a
-	// conflict, and to walk the endorser-on-endorser revoke cascade.
-	FilterEndorserTransactions(
-		[][]byte, // hashes
-		types.Txn,
-	) ([][]byte, error)
-
-	// UtxoSpenders returns the distinct hashes of transactions that spent any
-	// output produced by the given producer transaction hashes (i.e. the
-	// spent_at_tx_id of every utxo whose tx_id is in the set). Used to expand
-	// the endorser-on-endorser revoke cascade: revoking an endorser
-	// transaction must also revoke any endorser transaction that spent one of
-	// its outputs.
-	UtxoSpenders(
-		[][]byte, // producer hashes
-		types.Txn,
-	) ([][]byte, error)
-
-	// RevokeEndorserTransactions undoes the ledger effect of the given
-	// endorser-block transactions: it un-spends the inputs they consumed
-	// (clearing deleted_slot and spent_at_tx_id), deletes the outputs they
-	// produced, and removes their transaction, endorser-transaction, and
-	// address-mapping rows. The caller is responsible for passing a complete
-	// revoke set (the transitive endorser-on-endorser closure); this method
-	// does not expand the cascade itself.
-	RevokeEndorserTransactions(
-		[][]byte, // hashes
-		types.Txn,
-	) error
-
-	// DeleteEndorserTransactionsAfterSlot removes endorser-transaction records
-	// whose referencing ranking block is after the given slot, so a chain
-	// rollback drops the provenance for the spends it is undoing.
-	DeleteEndorserTransactionsAfterSlot(uint64, types.Txn) error
+	) ([]byte, error)
 
 	// GetTransactionsByHashes retrieves transactions by their hashes.
 	GetTransactionsByHashes(
@@ -692,6 +814,16 @@ type MetadataStore interface {
 		types.Txn,
 	) (uint64, error)
 
+	// GetAssetMintBurnInfo returns the hash of the earliest transaction that
+	// minted the asset (its initial mint) and the total number of recorded
+	// mint/burn events for the asset. Returns (nil, 0, nil) when the asset has
+	// no recorded mint/burn history (e.g. running in core storage mode).
+	GetAssetMintBurnInfo(
+		lcommon.Blake2b224,
+		[]byte, // assetName
+		types.Txn,
+	) (initialMintTxHash []byte, mintOrBurnCount int, err error)
+
 	// GetScript retrieves a script by its hash.
 	GetScript(
 		lcommon.ScriptHash,
@@ -791,6 +923,19 @@ type MetadataStore interface {
 		lcommon.Transaction,
 		ocommon.Point,
 		uint32, // idx
+		types.Txn,
+	) error
+
+	// RecomputeGapCollateralFee recomputes and persists the collateral fee
+	// for a phase-2-invalid gap-block transaction after its consumed
+	// collateral inputs have been recovered into the metadata UTxO table.
+	// SetGapBlockTransaction computes the collateral fee before those inputs
+	// exist, so for a transaction that declares no total collateral the fee
+	// is undercounted until this recompute runs. It is a no-op for valid
+	// transactions (which have no collateral fee).
+	RecomputeGapCollateralFee(
+		lcommon.Transaction,
+		ocommon.Point,
 		types.Txn,
 	) error
 
@@ -982,9 +1127,41 @@ type MetadataStore interface {
 		types.Txn,
 	) (*models.RewardAdaPots, error)
 
-	// SaveRewardSnapshot saves reward snapshot metadata for an epoch.
+	// SaveRewardSnapshot saves reward snapshot metadata for an epoch,
+	// overwriting any existing row for the (epoch, snapshot_type) pair
+	// (including its authoritative flag). Used by the authoritative
+	// epoch-rollover capture, which must always win over a fallback row.
 	SaveRewardSnapshot(
 		*models.RewardSnapshot,
+		types.Txn,
+	) error
+
+	// ClaimFallbackRewardSnapshot atomically reserves the (epoch, snapshot_type)
+	// reward snapshot marker for a fallback (non-authoritative) capture,
+	// returning false when an authoritative snapshot already occupies it so the
+	// caller abandons the fallback rather than overwriting the authoritative
+	// row. See rewardstate.ClaimFallbackSnapshot.
+	ClaimFallbackRewardSnapshot(
+		*models.RewardSnapshot,
+		types.Txn,
+	) (bool, error)
+
+	// ClaimFallbackRewardSnapshotGuard serializes a fallback capture that cannot
+	// persist reward inputs against the authoritative epoch-rollover capture.
+	// It returns proceed=false when an authoritative row already exists. A
+	// non-zero guard ID identifies a temporary row that the caller must delete
+	// in the same transaction before commit.
+	ClaimFallbackRewardSnapshotGuard(
+		uint64, // epoch
+		string, // snapshotType
+		types.Txn,
+	) (bool, uint, error)
+
+	// ReleaseFallbackRewardSnapshotGuard removes a temporary guard row returned
+	// by ClaimFallbackRewardSnapshotGuard. It must run in the same transaction
+	// that claimed the guard.
+	ReleaseFallbackRewardSnapshotGuard(
+		uint, // guardID
 		types.Txn,
 	) error
 
@@ -1006,6 +1183,30 @@ type MetadataStore interface {
 		uint64, // epoch
 		types.Txn,
 	) ([]*models.RewardPoolInput, error)
+
+	// SaveRewardStakeInputs saves per-credential reward snapshot inputs.
+	SaveRewardStakeInputs([]*models.RewardStakeInput, types.Txn) error
+
+	// GetRewardStakeInputs retrieves all per-credential reward inputs for an epoch.
+	GetRewardStakeInputs(uint64, types.Txn) ([]*models.RewardStakeInput, error)
+
+	// DeleteRewardInputsForEpoch deletes reward-calculation input rows for an epoch.
+	DeleteRewardInputsForEpoch(uint64, types.Txn) error
+
+	// DeleteRewardOutputsForEpoch deletes reward-calculation output rows for an epoch.
+	DeleteRewardOutputsForEpoch(uint64, types.Txn) error
+
+	// SaveRewardPoolOutputs saves per-pool reward calculation outputs.
+	SaveRewardPoolOutputs([]*models.RewardPoolOutput, types.Txn) error
+
+	// GetRewardPoolOutputs retrieves per-pool reward calculation outputs.
+	GetRewardPoolOutputs(uint64, types.Txn) ([]*models.RewardPoolOutput, error)
+
+	// SaveRewardAccountOutputs saves per-account reward calculation outputs.
+	SaveRewardAccountOutputs([]*models.RewardAccountOutput, types.Txn) error
+
+	// GetRewardAccountOutputs retrieves per-account reward calculation outputs.
+	GetRewardAccountOutputs(uint64, types.Txn) ([]*models.RewardAccountOutput, error)
 
 	// DeleteRewardStateAfterSlot deletes reward-state rows captured from
 	// rolled-back blocks.
@@ -1124,12 +1325,30 @@ type MetadataStore interface {
 		types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
+	// GetEnactedGovernanceProposalsAt returns proposals that were enacted at
+	// the given epoch-boundary slot. Used to replay enactment side effects when
+	// stake reward pot reset is reapplied after a boundary commit crash.
+	GetEnactedGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
 	// GetExpiringGovernanceProposals returns proposals whose
 	// `expires_epoch` is strictly less than the given epoch and that
 	// have not yet been enacted, expired, or soft-deleted. Used at
 	// epoch boundaries to mark expired proposals and return deposits.
 	GetExpiringGovernanceProposals(
 		epoch uint64,
+		txn types.Txn,
+	) ([]*models.GovernanceProposal, error)
+
+	// GetExpiredGovernanceProposalsAt returns proposals that were expired at
+	// the given epoch-boundary slot. Used to replay deposit-return side effects
+	// when stake reward pot reset is reapplied after a boundary commit crash.
+	GetExpiredGovernanceProposalsAt(
+		epoch uint64,
+		slot uint64,
 		txn types.Txn,
 	) ([]*models.GovernanceProposal, error)
 
@@ -1484,6 +1703,7 @@ type MetadataStore interface {
 	GetLatestMidnightGovernanceDatum(string, uint64, types.Txn) (*models.MidnightGovernanceDatum, error)
 	GetLatestMidnightAriadneParams(types.Txn) (*models.MidnightAriadneParams, error)
 	GetMidnightAriadneParamsByEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
+	GetMidnightAriadneParamsAtOrBeforeEpoch(uint64, types.Txn) (*models.MidnightAriadneParams, error)
 	UpsertMidnightAriadneParams(types.Txn, *models.MidnightAriadneParams) error
 	DeleteMidnightAriadneParamsByEpoch(types.Txn, uint64) error
 	CreateMidnightAriadneRollback(types.Txn, *models.MidnightAriadneRollback) error
@@ -1492,6 +1712,13 @@ type MetadataStore interface {
 	DeleteMidnightAriadneRollbacksBeforeBlock(types.Txn, uint64) error
 	UpsertMidnightEpochCandidates(types.Txn, *models.MidnightEpochCandidates) error
 	DeleteMidnightEpochCandidatesByBlock(types.Txn, uint64) error
+	GetMidnightEpochCandidatesByEpoch(uint64, types.Txn) (*models.MidnightEpochCandidates, error)
+	InsertMidnightCommitteeCandidateRegistration(types.Txn, *models.MidnightCommitteeCandidateRegistration) error
+	DeleteMidnightCommitteeCandidateRegistrationsByBlock(types.Txn, uint64) error
+	GetMidnightCommitteeCandidateRegistrationsByTxHashes(
+		[][]byte,
+		types.Txn,
+	) ([]models.MidnightCommitteeCandidateRegistration, error)
 }
 
 // BulkLoadOptimizer is an optional interface that metadata stores can

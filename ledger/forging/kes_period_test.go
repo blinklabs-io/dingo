@@ -34,23 +34,9 @@ func synthGenesis(slotsPerKES, maxKES int, slotLen time.Duration, systemStart ti
 	}
 }
 
-func TestCurrentKESPeriod_BeforeSystemStart(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
-	got, err := CurrentKESPeriod(g, systemStart.Add(-time.Hour))
-	if err != nil {
-		t.Fatalf("CurrentKESPeriod: %v", err)
-	}
-	if got != 0 {
-		t.Errorf("got %d, want 0 (before SystemStart)", got)
-	}
-}
-
 func TestCurrentKESPeriod_HappyPath(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
 	// 250 slots elapsed at 1s/slot, 100 slots per period → period 2.
-	got, err := CurrentKESPeriod(g, systemStart.Add(250*time.Second))
+	got, err := CurrentKESPeriod(250, 100)
 	if err != nil {
 		t.Fatalf("CurrentKESPeriod: %v", err)
 	}
@@ -68,9 +54,9 @@ func TestCurrentKESPeriod_FractionalSlotLength(t *testing.T) {
 		SlotsPerKESPeriod: 200,
 		SlotLength:        common.GenesisRat{Rat: big.NewRat(1, 20)},
 	}
-	got, err := CurrentKESPeriod(g, systemStart.Add(50*time.Second))
+	got, err := WallClockKESPeriod(g, systemStart.Add(50*time.Second))
 	if err != nil {
-		t.Fatalf("CurrentKESPeriod: %v", err)
+		t.Fatalf("WallClockKESPeriod: %v", err)
 	}
 	if got != 5 {
 		t.Errorf("got %d, want 5", got)
@@ -80,9 +66,7 @@ func TestCurrentKESPeriod_FractionalSlotLength(t *testing.T) {
 func TestCurrentKESPeriod_PeriodBoundaryExclusive(t *testing.T) {
 	// At exactly 100 slots elapsed (the start of period 1) we should be in
 	// period 1, not 0 or 2.
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(100, 5, time.Second, systemStart)
-	got, err := CurrentKESPeriod(g, systemStart.Add(100*time.Second))
+	got, err := CurrentKESPeriod(100, 100)
 	if err != nil {
 		t.Fatalf("CurrentKESPeriod: %v", err)
 	}
@@ -91,17 +75,8 @@ func TestCurrentKESPeriod_PeriodBoundaryExclusive(t *testing.T) {
 	}
 }
 
-func TestCurrentKESPeriod_NilGenesis(t *testing.T) {
-	_, err := CurrentKESPeriod(nil, time.Now())
-	if err == nil {
-		t.Fatal("expected error for nil genesis")
-	}
-}
-
 func TestCurrentKESPeriod_ZeroSlotsPerKES(t *testing.T) {
-	systemStart := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
-	g := synthGenesis(0, 5, time.Second, systemStart)
-	_, err := CurrentKESPeriod(g, systemStart)
+	_, err := CurrentKESPeriod(0, 0)
 	if err == nil {
 		t.Fatal("expected error for zero SlotsPerKESPeriod")
 	}
@@ -117,7 +92,7 @@ func TestCurrentKESPeriod_ZeroSlotLength(t *testing.T) {
 		SlotsPerKESPeriod: 100,
 		SlotLength:        common.GenesisRat{Rat: big.NewRat(0, 1)},
 	}
-	_, err := CurrentKESPeriod(g, systemStart.Add(time.Hour))
+	_, err := WallClockKESPeriod(g, systemStart.Add(time.Hour))
 	if err == nil {
 		t.Fatal("expected error for zero SlotLength")
 	}
@@ -133,9 +108,34 @@ func TestCurrentKESPeriod_NilSlotLengthRat(t *testing.T) {
 		SlotsPerKESPeriod: 100,
 		SlotLength:        common.GenesisRat{Rat: nil},
 	}
-	_, err := CurrentKESPeriod(g, systemStart.Add(time.Hour))
+	_, err := WallClockKESPeriod(g, systemStart.Add(time.Hour))
 	if err == nil {
 		t.Fatal("expected error for nil SlotLength.Rat")
 	}
 }
 
+func TestCurrentKESPeriod_UsesAbsoluteSlot(t *testing.T) {
+	const (
+		preprodEpoch299Start = uint64(127_526_400)
+		epochSlot            = uint64(385_815)
+		slotsPerKESPeriod    = uint64(129_600)
+	)
+
+	got, err := CurrentKESPeriod(
+		preprodEpoch299Start+epochSlot,
+		slotsPerKESPeriod,
+	)
+	if err != nil {
+		t.Fatalf("CurrentKESPeriod: %v", err)
+	}
+	if got != 986 {
+		t.Errorf("got %d, want 986", got)
+	}
+}
+
+func TestCurrentKESPeriodFromGenesis_NilGenesis(t *testing.T) {
+	_, err := CurrentKESPeriodFromGenesis(nil, 0)
+	if err == nil {
+		t.Fatal("expected error for nil genesis")
+	}
+}

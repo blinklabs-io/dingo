@@ -161,6 +161,7 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
+	ls.publishSnapshotsLocked()
 
 	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	require.True(t, ok)
@@ -322,6 +323,7 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	ls.currentTip = boundaryTip
 	ls.currentTipBlockNonce = []byte("nonce-boundary")
 	ls.mithrilLedgerSlot = boundaryTip.Point.Slot
+	ls.publishSnapshotsLocked()
 	timer := time.NewTimer(time.Hour)
 	t.Cleanup(func() { timer.Stop() })
 	ls.activeBlockfetchConnId = activeConnId
@@ -465,7 +467,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	ls.currentTip = ledgerTip
 	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
 	ls.validationEnabled = true
-	ls.reachedTip = true
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
 
 	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
 	require.True(t, ok)
@@ -639,7 +642,8 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	ls.currentTip = ledgerTip
 	ls.currentTipBlockNonce = []byte("nonce-ledger-tip")
 	ls.mithrilLedgerSlot = ledgerTip.Point.Slot
-	ls.reachedTip = true
+	ls.reachedTip.Store(true)
+	ls.publishSnapshotsLocked()
 
 	validationErr := &txValidationError{
 		BlockPoint: ocommon.NewPoint(
@@ -781,6 +785,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
+	ls.publishSnapshotsLocked()
 
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
@@ -914,6 +919,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
+	ls.publishSnapshotsLocked()
 
 	producerTxs := producerBlock.block.Transactions()
 	require.NotEmpty(t, producerTxs)
@@ -1064,6 +1070,7 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	ls.metrics.init(prometheus.NewRegistry())
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
+	ls.publishSnapshotsLocked()
 
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
@@ -1138,6 +1145,7 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	require.NoError(t, db.SetTip(currentTip, nil))
 	ls.currentTip = currentTip
 	ls.currentTipBlockNonce = []byte("nonce-current")
+	ls.publishSnapshotsLocked()
 
 	recovered, err := ls.tryRecoverFromTxValidationError(
 		&txValidationError{
