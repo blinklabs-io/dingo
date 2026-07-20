@@ -2,24 +2,24 @@
 
 ## v0.66.1 (July 20, 2026)
 
-**Title:** Refresh release notes, update dependencies, and correct live stake indexing
+**Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
 
 **Date:** July 20, 2026
 
 **Version:** v0.66.1
 
-This release refreshes the published release notes, updates build and database maintenance dependencies, stabilizes Antithesis validation, and corrects live stake indexing so Mithril processing stays consistent.
+This release refreshes the published notes, keeps build and database dependencies current, stabilizes Antithesis validation, and corrects live stake indexing so Mithril processing stays consistent.
 
 ### 💪 Improvements
 
-* Updated **the published release notes for v0.66.0:** The release history now reflects the latest published version, which keeps the changelog current and easier to follow.
-* Improved **release artifact attestation tooling:** The publishing flow now uses a newer attestation action, which keeps provenance checks aligned with current upstream support.
-* Refined **database storage behavior with the latest Badger release:** The storage layer now tracks the newer upstream Badger maintenance fixes, which supports steadier database behavior.
+* Updated **the release notes for v0.66.0:** The release history now reflects the latest published version, which keeps the changelog current and easier to follow.
+* Improved **release artifact verification:** The publishing flow now uses a newer attestation action, which keeps artifact checks current.
+* Refined **database storage behavior with the latest Badger release:** The storage layer now includes the newer maintenance fixes from Badger, which supports steadier database behavior.
 * Stabilized **Antithesis validation runs:** The CI job now pins Moog and waits for results before continuing, which reduces flaky validation outcomes.
 
 ### 🔧 Fixes
 
-* Fixed **live stake indexing for Mithril data:** The database now defers that indexing work until live stake data is ready, which keeps stake information consistent during processing.
+* Fixed **live stake indexing for Mithril data:** The database now waits to index live stake until the data is ready, which keeps stake information consistent during processing.
 
 ### Recommended Network Compatibility ⚠️
 
