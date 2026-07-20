@@ -2313,8 +2313,13 @@ UTxO-only credentials as unregistered and undelegated so a later registration
 can activate their existing stake without losing it. `RewardLiveStakeNeedsBackfill`
 distinguishes an upgraded database with accounts but no aggregate rows from a
 legitimately fresh empty database. Node startup performs the check and rebuild
-after database recovery and before ledger processing. Mithril import does not
-currently invoke this rebuild directly; the next normal node startup does.
+after database recovery and before ledger processing. Mithril ledger-state
+import also invokes the rebuild directly, at the end of import once accounts and
+UTxOs are populated. That import runs with the deferred-index manifest dropped
+for bulk load, so the SQLite backend applies its `INDEXED BY
+idx_utxo_staking_deleted_amount` query-planner hint only when the index is
+present; while the index is deferred the rebuild falls back to a planner-chosen
+plan rather than aborting with `no such index`.
 
 Pool registration lookup reconstructs the parameters effective during the
 ended epoch for per-pool input capture. Reward calculation and application

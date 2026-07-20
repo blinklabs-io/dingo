@@ -286,12 +286,38 @@ func (d *MetadataStoreSqlite) RebuildRewardLiveStake(
 	if err != nil {
 		return fmt.Errorf("rebuild reward live stake: resolve db: %w", err)
 	}
-	rebuild := func(tx *gorm.DB) error {
-		return rewardstate.RebuildLiveStake(
-			tx,
-			slot,
-			"INDEXED BY "+utxoStakingLiveAmountIndex,
+	// The INDEXED BY hint forces the covering index for the per-credential
+	// UTxO SUM, but idx_utxo_staking_deleted_amount is a deferred-manifest
+	// entry (see database/plugin/metadata/deferred) that Mithril bulk load
+	// drops for the duration of ledger-state import. SQLite treats INDEXED BY
+	// as a hard directive and aborts with "no such index" when the hinted
+	// index is absent, and this full rebuild runs at the end of that import
+	// before the index is rebuilt. Only apply the hint when the index is
+	// present (live operation, startup rebuild); otherwise fall back to a
+	// planner-chosen plan, which for a full-table aggregate is a scan and hash
+	// group anyway.
+	//
+	// The presence check MUST run on the resolved db (the caller's transaction
+	// connection when txn != nil), not d.DB(): Mithril import calls this inside
+	// a write transaction (database.RebuildRewardLiveStake -> Txn.Do), and the
+	// write pool is capped at a single connection, so probing d.DB() here would
+	// request a second handle and deadlock against the very transaction waiting
+	// on this call. Query sqlite_master directly, mirroring LiveStakeNeedsBackfill.
+	var indexPresent bool
+	if err := db.Raw(
+		"SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?)",
+		utxoStakingLiveAmountIndex,
+	).Scan(&indexPresent).Error; err != nil {
+		return fmt.Errorf(
+			"rebuild reward live stake: check staking index: %w", err,
 		)
+	}
+	utxoJoinHint := ""
+	if indexPresent {
+		utxoJoinHint = "INDEXED BY " + utxoStakingLiveAmountIndex
+	}
+	rebuild := func(tx *gorm.DB) error {
+		return rewardstate.RebuildLiveStake(tx, slot, utxoJoinHint)
 	}
 	if txn != nil {
 		return rebuild(db)
