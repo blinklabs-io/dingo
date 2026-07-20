@@ -197,7 +197,9 @@ var Manifest = []Index{
 	},
 	{
 		Model: &models.Utxo{}, Name: "idx_utxo_staking_deleted_amount", Table: "utxo",
-		Notes:    "DRep voting-power live UTxO SUM; live query path",
+		Notes: "DRep voting-power live UTxO SUM; live query path. RebuildRewardLiveStake " +
+			"runs during ledger-state import and hints this index, but the sqlite backend " +
+			"applies the INDEXED BY hint only when the index exists, so it stays deferrable.",
 		Critical: true,
 	},
 	{
