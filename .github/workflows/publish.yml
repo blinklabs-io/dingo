@@ -118,7 +118,7 @@ jobs:
         shell: bash
       - name: Attest binary
         if: startsWith(github.ref, 'refs/tags/')
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-path: "${{ matrix.os == 'windows' && format('{0}.exe', env.APPLICATION_NAME) || env.APPLICATION_NAME }}"
 
@@ -189,14 +189,14 @@ jobs:
             COMMIT_HASH=${{ github.sha }}
       - name: Attest Docker Hub image
         continue-on-error: ${{ github.ref_type != 'tag' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
       - name: Attest GHCR image
         continue-on-error: ${{ github.ref_type != 'tag' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -235,7 +235,7 @@ jobs:
       - name: Attest antithesis Docker Hub image
         if: matrix.arch == 'amd64'
         continue-on-error: ${{ github.ref_type != 'tag' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: docker.io/blinklabs/dingo
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
@@ -243,7 +243,7 @@ jobs:
       - name: Attest antithesis GHCR image
         if: matrix.arch == 'amd64'
         continue-on-error: ${{ github.ref_type != 'tag' }}
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1 https://github.com/actions/attest/releases/tag/v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0 https://github.com/actions/attest/releases/tag/v4.2.0
         with:
           subject-name: ghcr.io/${{ github.repository }}
           subject-digest: ${{ steps.antithesis-push.outputs.digest }}
