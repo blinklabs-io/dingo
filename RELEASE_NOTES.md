@@ -70,20 +70,20 @@ Thank you for trying!
 
 ### 🇪🇸 Español
 
-**Título:** Actualizar las notas de la versión, renovar dependencias y corregir la indexación de stake en vivo
+**Título:** Actualizar las notas de la versión, mantener dependencias al día y estabilizar la indexación de stake en vivo
 
 **Fecha:** July 20, 2026
 
 **Versión:** v0.66.1
 
-Esta versión actualiza las notas publicadas, renueva dependencias de mantenimiento de compilación y base de datos, estabiliza la validación de Antithesis y corrige la indexación de stake en vivo para mantener coherente el procesamiento de Mithril.
+Esta versión actualiza las notas publicadas, mantiene al día las dependencias de compilación y base de datos, estabiliza la validación de Antithesis y corrige la indexación de stake en vivo para mantener coherente el procesamiento de Mithril.
 
 ### 💪 Mejoras
 
-* Actualizó **las notas publicadas de la versión v0.66.0:** El historial de versiones ahora refleja la publicación más reciente, lo que mantiene el changelog al día y más fácil de seguir.
-* Mejoró **la herramienta de attestation de los artefactos de publicación:** El flujo de publicación ahora usa una acción de attestation más nueva, lo que mantiene las comprobaciones de provenance alineadas con el soporte actual de upstream.
-* Refinó **el comportamiento del almacenamiento de la base de datos con la versión más reciente de Badger:** La capa de almacenamiento ahora incorpora las correcciones de mantenimiento más nuevas de Badger upstream, lo que ayuda a mantener un comportamiento de base de datos más estable.
-* Estabilizó **las ejecuciones de validación de Antithesis:** El trabajo de CI ahora fija Moog y espera los resultados antes de continuar, lo que reduce resultados de validación inestables.
+* Actualizó **las notas de la versión v0.66.0:** El historial de versiones refleja la publicación más reciente, lo que mantiene el changelog al día y más fácil de seguir.
+* Mejoró **la verificación de los artefactos de publicación:** El flujo de publicación ahora usa una acción de attestation más nueva, lo que mantiene las comprobaciones de los artefactos al día.
+* Refinó **el comportamiento del almacenamiento de la base de datos con la última versión de Badger:** La capa de almacenamiento ahora incluye las correcciones de mantenimiento más nuevas de Badger, lo que ayuda a mantener un comportamiento de base de datos más estable.
+* Estabilizó **las ejecuciones de validación de Antithesis:** El trabajo de CI ahora fija Moog y espera los resultados antes de continuar, lo que reduce los resultados inestables.
 
 ### 🔧 Correcciones
 
