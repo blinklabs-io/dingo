@@ -1,5 +1,47 @@
 # Dingo Releases
 
+## v0.66.0 (July 20, 2026)
+
+**Title:** Apply epoch rewards, align import replay, and tighten API and server behavior
+
+**Date:** July 20, 2026
+
+**Version:** v0.66.0
+
+This release brings epoch reward processing into the ledger and node, improves replay safety during imports, adds PostgreSQL backed conformance coverage, and tightens responses and transport policy for selected APIs and servers. It also aligns Leios handling with the latest Musashi prototype behavior.
+
+### ✨ What's New
+
+* Added **calculate and apply epoch rewards during epoch rollover:** Epoch rollover now applies stake rewards and MIR effects in the correct pre-governance order, keeps reward totals correct after boundary pot mutations, and precomputes rewards asynchronously with rollback safety.
+* Expanded **rebuild reward stake state during imports:** Load mode and reconciled imports now capture epoch-boundary snapshots during replay, record the epoch-0 genesis mark snapshot when needed, and rebuild reward live stake at the end of imports with cancellation checks and progress reporting.
+* Improved **reward metadata helpers for reward lookups:** Metadata APIs now support reward prefiltering and pool issuer slot-range calculations, and reward arithmetic helpers are exported and validated for reuse.
+* Strengthened **add PostgreSQL-backed conformance coverage:** Conformance tests now run against PostgreSQL with a dedicated schema, documented setup through Docker Compose or environment variables, and clearer pass or fail diagnostics.
+
+### 🔧 Fixes
+
+* Corrected **delay the first reward application until the bootstrap boundary settles:** The first reward update now treats epoch 2 as a bootstrap boundary exception, skips pool and account reward distribution for that initial application, returns the post-tax amount to reserves, and disables bootstrap precomputation to avoid stale or rollback-unsafe results.
+* Restored **return unmatched Blockfrost routes as 404 JSON responses:** Unmatched Blockfrost API routes now return a Blockfrost-format 404 JSON error while the root document remains available at `/`.
+* Aligned **match Leios behavior with the Musashi prototype:** Leios forging, fetching, classification, and ledger application now follow Musashi prototype-2026w29 semantics, including certified parent endorser block handling and related robustness fixes.
+
+### 🔐 Security
+
+* Strengthened **require TLS 1.2 or later for UTxORPC and Bark servers:** Both servers now enforce the shared TLS policy, and TLS 1.3 remains required when ECH is configured.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.65.1 (July 16, 2026)
 
 **Title:** Restore Leios committee formation when Musashi omits committee parameters
