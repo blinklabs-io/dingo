@@ -1,13 +1,20 @@
-# PostgreSQL for local conformance test runs.
+# PostgreSQL and MySQL for local conformance test runs.
 #
 # Usage:
 #   docker compose -f internal/test/conformance/docker-compose.yml up -d
+#
 #   POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=postgres \
 #   POSTGRES_PASSWORD=postgres POSTGRES_DATABASE=dingo_test \
 #     go test -tags dingo_extra_plugins -v ./internal/test/conformance/... -run Postgres
 #
-# Image/credentials match .github/workflows/go-test.yml's postgres service
-# so a passing local run and a passing CI run mean the same thing.
+#   MYSQL_HOST=localhost MYSQL_PORT=3306 MYSQL_ROOT_PASSWORD=mysql \
+#     go test -tags dingo_extra_plugins -v ./internal/test/conformance/... -run Mysql
+#
+# Images/credentials match .github/workflows/go-test.yml's services so a
+# passing local run and a passing CI run mean the same thing. The mysql
+# conformance tests authenticate as root (not the mysql/mysql user) because
+# they need CREATE DATABASE privileges to isolate themselves from
+# database/plugin/metadata/mysql's own tests -- see state_manager_mysql.go.
 services:
   postgres:
     image: postgres:16
@@ -20,6 +27,22 @@ services:
       - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_USER: mysql
+      MYSQL_PASSWORD: mysql
+      MYSQL_DATABASE: dingo_test
+    ports:
+      - "127.0.0.1:3306:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -pmysql"]
       interval: 5s
       timeout: 5s
       retries: 20

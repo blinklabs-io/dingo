@@ -68,6 +68,7 @@ jobs:
       MYSQL_USER: mysql
       MYSQL_PASSWORD: mysql
       MYSQL_DATABASE: dingo_test
+      MYSQL_ROOT_PASSWORD: mysql
       AWS_ACCESS_KEY_ID: minioadmin
       AWS_SECRET_ACCESS_KEY: minioadmin
       AWS_ENDPOINT: "http://127.0.0.1:9000/"
