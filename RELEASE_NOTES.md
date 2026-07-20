@@ -80,6 +80,46 @@ Thank you for trying!
 
 ご利用ありがとうございます。
 
+### 🇪🇸 Español
+
+**Título:** Aplicar recompensas de época, alinear el replay de importación y reforzar el comportamiento de la API y de los servidores
+
+**Fecha:** July 20, 2026
+
+**Versión:** v0.66.0
+
+Esta versión incorpora el procesamiento de recompensas de época en el ledger y en el nodo, mejora la seguridad del replay durante las importaciones, añade cobertura de conformance respaldada por PostgreSQL y refuerza las respuestas y la política de transporte de algunas API y servidores. También alinea el comportamiento de Leios con el prototipo más reciente de Musashi.
+
+### ✨ Novedades
+
+* Agregó **calcular y aplicar recompensas de época durante el epoch rollover:** El epoch rollover ahora aplica las recompensas de stake y los efectos de MIR en el orden pregovernance correcto, mantiene correctos los totales de recompensas después de mutaciones del reward ADA pot y precomputa recompensas de forma asíncrona con seguridad ante rollback.
+* Amplió **reconstruir el estado del stake de recompensas durante las importaciones:** Los modos load y reconciled import ahora capturan instantáneas en el límite de época durante el replay, registran la instantánea genesis mark de epoch 0 cuando hace falta y reconstruyen el reward live stake al final de las importaciones con comprobaciones de cancelación y seguimiento del progreso.
+* Mejoró **las utilidades de metadata de recompensas para las consultas de recompensas:** Las API de metadata ahora admiten prefiltrado de recompensas y cálculos de slot range del pool issuer, y las utilidades de aritmética de recompensas se exportan y validan para reutilización.
+* Reforzó **añadir cobertura de conformance respaldada por PostgreSQL:** Las pruebas de conformance ahora se ejecutan sobre PostgreSQL con un esquema dedicado, una preparación documentada mediante Docker Compose o variables de entorno y diagnósticos de aprobado o fallado más claros.
+
+### 🔧 Correcciones
+
+* Corrigió **retrasar la primera aplicación de recompensas hasta que se estabilice el bootstrap boundary:** La primera actualización de recompensas ahora trata el epoch 2 como una excepción de bootstrap boundary, omite la distribución de recompensas a pools y cuentas en esa aplicación inicial, devuelve a reserves el importe después de impuestos y desactiva la precomputación de bootstrap para evitar resultados obsoletos o inseguros ante rollback.
+* Restauró **devolver los routes de Blockfrost sin coincidencia como respuestas 404 JSON:** Los routes de Blockfrost que no coinciden ahora devuelven un error JSON 404 con formato Blockfrost mientras el documento raíz sigue disponible en `/`.
+* Alineó **el comportamiento de Leios con el prototipo de Musashi:** El forge, el fetch, la clasificación y la aplicación del ledger de Leios ahora siguen la semántica de Musashi prototype-2026w29, incluido el manejo de bloques endorser con parent certificado y las correcciones de robustez relacionadas.
+
+### 🔐 Seguridad
+
+* Endureció **exigir TLS 1.2 o superior para los servidores UTxORPC y Bark:** Ambos servidores ahora aplican la política TLS compartida, y TLS 1.3 sigue siendo obligatorio cuando ECH está configurado.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ---
 
 ## v0.65.1 (July 16, 2026)
