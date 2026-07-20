@@ -129,6 +129,14 @@ type Parameters struct {
 	// pool's reward-eligible stake plateaus. It is used only when
 	// PledgeLeverageEnabled is true and must be in the range [1, 10000].
 	PledgeLeverage *big.Rat
+	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
+	// entire available reward pot is apportioned across pools that earned a base
+	// reward (largest-remainder scaling of each pool's base reward), instead of
+	// returning the saturation/pledge/performance residual to reserves. It is a
+	// consensus-affecting feature gate that defaults off; enable it only on a
+	// network where every node also enables it. When off, Calculate is
+	// byte-for-byte identical to the pre-CIP-0163 calculation.
+	FullPotRewardsEnabled bool
 }
 
 // pledgeLeverageCap returns L for the CIP-50 pledge-leverage cap when the
@@ -309,7 +317,12 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 		return pools[i].ID.String() < pools[j].ID.String()
 	})
 
-	for _, pool := range pools {
+	// Pass 1: compute each pool's base reward B_i (the pre-CIP-0163 pool
+	// reward) in canonical pool-ID order, accumulating the base totals used by
+	// the CIP-0163 full-pot apportionment below.
+	poolRewards := make([]PoolReward, len(pools))
+	baseTotals := make([]uint64, len(pools))
+	for i, pool := range pools {
 		poolReward, err := calculatePoolRewards(
 			pool,
 			availableRewards,
@@ -325,6 +338,47 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 				err,
 			)
 		}
+		poolRewards[i] = poolReward
+		baseTotals[i] = poolReward.PoolReward
+	}
+
+	// CIP-0163: when full-pot distribution is enabled, scale the base rewards
+	// up with the largest-remainder method so the per-pool totals sum to the
+	// entire available pot R, then re-derive each pool's leader reward from its
+	// scaled total. When no pool earned a base reward (W == 0) ApportionFullPot
+	// returns the base totals unchanged, so the whole pot falls through to
+	// reserves via the reconciliation below, matching the disabled path. The
+	// leader/member split reuses the same checked helpers as the disabled path,
+	// so the two paths cannot drift.
+	if params.FullPotRewardsEnabled {
+		scaled := ApportionFullPot(baseTotals, availableRewards)
+		for i := range poolRewards {
+			if scaled[i] == poolRewards[i].PoolReward {
+				continue
+			}
+			poolRewards[i].PoolReward = scaled[i]
+			leader, err := leaderRewardChecked(
+				scaled[i],
+				pools[i].Cost,
+				params.effectiveMargin(pools[i].Margin),
+				pools[i].OwnerStake,
+				pools[i].DelegatedStake,
+			)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"calculate leader reward for pool %s: %w",
+					pools[i].ID.String(),
+					err,
+				)
+			}
+			poolRewards[i].LeaderReward = leader
+		}
+	}
+
+	// Pass 2: credit each pool's leader and member rewards from its (possibly
+	// scaled) pool total, in the same order as the disabled path.
+	for i, pool := range pools {
+		poolReward := poolRewards[i]
 		result.PoolRewards = append(result.PoolRewards, poolReward)
 		result.poolAccounted = append(result.poolAccounted, 0)
 
@@ -1006,13 +1060,24 @@ func calculatePoolRewards(
 	return ret, nil
 }
 
-// CalculatePoolReward re-derives a single pool's reward fields (OptimalReward,
-// PoolReward, LeaderReward, ApparentPerformance) from frozen snapshot inputs
-// using the same arithmetic Calculate applies per pool. It lets callers
-// validate persisted pool reward outputs against the inputs instead of trusting
-// the stored values. Member distribution (MemberRewardTotal, Undistributed) is
-// not derived here because it depends on per-delegator eligibility, not the
-// pool-level reward that leader and member payouts are computed from.
+// CalculatePoolReward re-derives a single pool's BASE reward fields
+// (OptimalReward, PoolReward, LeaderReward, ApparentPerformance) from frozen
+// snapshot inputs using the same arithmetic Calculate applies per pool. It lets
+// callers validate persisted pool reward outputs against the inputs instead of
+// trusting the stored values. Member distribution (MemberRewardTotal,
+// Undistributed) is not derived here because it depends on per-delegator
+// eligibility, not the pool-level reward that leader and member payouts are
+// computed from.
+//
+// The returned PoolReward is always the base (pre-CIP-0163) reward: it is a
+// single-pool computation and has no visibility into the pool set, so it cannot
+// know the full-pot apportionment. When Parameters.FullPotRewardsEnabled is set,
+// Calculate scales these base rewards across the whole pot, so its persisted
+// PoolReward/LeaderReward differ from this function's output. A caller
+// validating full-pot outputs must first collect every pool's base PoolReward
+// from this function, apply ApportionFullPot to obtain each pool's scaled total,
+// and then re-derive the leader split from that scaled total with LeaderReward
+// (this is exactly what precomputedRewardPoolRewardsMatchInputs does).
 //
 // It validates the pool-reward parameters it dereferences (Decentralization and
 // PledgeInfluence) before computing, so malformed snapshot/config data yields an
@@ -1036,6 +1101,72 @@ func CalculatePoolReward(
 		totalBlocks,
 		params,
 	)
+}
+
+// ApportionFullPot implements the CIP-0163 full-pot distribution: it scales each
+// pool's base reward B_i up so the per-pool totals sum to the entire available
+// reward pot R exactly, using the largest-remainder (Hamilton) method on
+// integer lovelace. baseRewards holds each pool's B_i in the caller's canonical
+// pool ordering (Calculate sorts pools by ID ascending; the precompute verifier
+// sorts by key hash ascending, which is the same order). availableRewards is R.
+//
+// f_pool_exact(i) = B_i * R / W, where W = sum(B_i). Each pool receives
+// floor(B_i * R / W); the D = R - sum(floor) leftover lovelace go to the D pools
+// with the largest remainders (B_i * R) mod W, ties broken by ascending index
+// (i.e. ascending pool ID, matching the caller's sort). All arithmetic is
+// big.Int, so there is no floating point and no intermediate overflow; the
+// result sums to exactly R.
+//
+// If W == 0 (no pool earned a base reward) it returns a copy of baseRewards
+// unchanged and leaves the residual for the caller to return to reserves; the
+// caller is expected to guard this case explicitly.
+func ApportionFullPot(baseRewards []uint64, availableRewards uint64) []uint64 {
+	scaled := make([]uint64, len(baseRewards))
+	w := new(big.Int)
+	for _, b := range baseRewards {
+		w.Add(w, new(big.Int).SetUint64(b))
+	}
+	if w.Sign() == 0 {
+		copy(scaled, baseRewards)
+		return scaled
+	}
+	r := new(big.Int).SetUint64(availableRewards)
+	remainders := make([]*big.Int, len(baseRewards))
+	allocated := new(big.Int)
+	for i, b := range baseRewards {
+		// prod = B_i * R; q = floor(prod / W); rem = prod mod W.
+		prod := new(big.Int).Mul(new(big.Int).SetUint64(b), r)
+		q := new(big.Int)
+		rem := new(big.Int)
+		q.QuoRem(prod, w, rem)
+		// q <= B_i*R/W <= R (B_i <= W), so it fits uint64.
+		scaled[i] = q.Uint64()
+		remainders[i] = rem
+		allocated.Add(allocated, q)
+	}
+	// D = R - sum(floor); 0 <= D <= number of pools with B_i > 0.
+	d := new(big.Int).Sub(r, allocated)
+	if d.Sign() <= 0 {
+		return scaled
+	}
+	order := make([]int, len(baseRewards))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(a, b int) bool {
+		ia, ib := order[a], order[b]
+		if cmp := remainders[ia].Cmp(remainders[ib]); cmp != 0 {
+			// Larger remainder first.
+			return cmp > 0
+		}
+		// Tie-break by ascending index (ascending pool ID).
+		return ia < ib
+	})
+	extra := int(d.Int64())
+	for k := 0; k < extra && k < len(order); k++ {
+		scaled[order[k]]++
+	}
+	return scaled
 }
 
 func expectedBlocks(params Parameters) *big.Rat {
@@ -1259,6 +1390,53 @@ func MemberRewardWithParameters(
 		cost,
 		params.effectiveMargin(margin),
 		memberStake,
+		poolStake,
+	)
+}
+
+// LeaderReward computes a pool operator's leader reward from the pool's total
+// reward, fixed cost, margin, the owner (pledge) stake, and the pool's total
+// delegated stake, using the plainly normalized margin (no CIP-23 floor). It is
+// the leader-side sibling of MemberReward. Callers that must match Calculate's
+// authoritative split when the CIP-23 minimum pool margin may be active should
+// use LeaderRewardWithParameters instead.
+func LeaderReward(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	ownerStake uint64,
+	poolStake uint64,
+) (uint64, error) {
+	return leaderRewardChecked(
+		poolReward,
+		cost,
+		normalizedMargin(margin),
+		ownerStake,
+		poolStake,
+	)
+}
+
+// LeaderRewardWithParameters computes a leader reward using the same effective
+// pool margin as Calculate, applying the CIP-23 minimum pool margin from params
+// when one is enabled. It is the leader-side sibling of MemberRewardWithParameters.
+// Under CIP-0163 full-pot distribution the pool total is the apportioned reward
+// rather than the base reward, so the precompute-reuse validator computes the
+// leader split from the scaled total via this form; using it (rather than the
+// unfloored LeaderReward) keeps the validator consistent with Calculate when both
+// CIP-23 and full-pot are active.
+func LeaderRewardWithParameters(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	ownerStake uint64,
+	poolStake uint64,
+	params Parameters,
+) (uint64, error) {
+	return leaderRewardChecked(
+		poolReward,
+		cost,
+		params.effectiveMargin(margin),
+		ownerStake,
 		poolStake,
 	)
 }

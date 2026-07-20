@@ -435,6 +435,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.PledgeLeverageEnabled,
 				cfg.PledgeLeverage,
 			),
+			// CIP-0163 full-pot reward distribution (consensus-affecting)
+			dingo.WithFullPotRewards(cfg.FullPotRewardsEnabled),
 			// Block production (SPO mode)
 			dingo.WithBlockProducer(cfg.BlockProducer),
 			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),

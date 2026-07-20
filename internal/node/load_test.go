@@ -483,6 +483,45 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.True(t, captured.ManualBlockProcessing)
 }
 
+// TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
+// feature gate flows from the loaded config into the load-mode ledger config,
+// so `dingo load` computes the same reward state as an enabled serve node
+// instead of the legacy residual-to-reserves behavior.
+func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stopAfterCapture := errors.New("stop after ledger config capture")
+
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		oldNewLedgerStateForLoad := newLedgerStateForLoad
+		newLedgerStateForLoad = func(
+			cfg ledger.LedgerStateConfig,
+		) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stopAfterCapture
+		}
+		t.Cleanup(func() {
+			newLedgerStateForLoad = oldNewLedgerStateForLoad
+		})
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:               "preview",
+				FullPotRewardsEnabled: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stopAfterCapture)
+		return captured
+	}
+
+	require.True(t, run(true).FullPotRewardsEnabled)
+	require.False(t, run(false).FullPotRewardsEnabled)
+}
+
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
 // recorded failures reports success, so a clean load is never turned into an
 // error.

@@ -2175,3 +2175,233 @@ func TestCalculateAllowsPledgeLeverageAtBounds(t *testing.T) {
 	_, err = leverageCalc(100, 100, true, big.NewRat(10_000, 1))
 	require.NoError(t, err)
 }
+
+// --- CIP-0163 full-pot reward distribution -------------------------------
+
+// TestApportionFullPotSumsToTotal exercises the largest-remainder core: three
+// equal base rewards over a pot that does not divide evenly. floor(10*1/3)=3
+// for each (sum 9), leaving D=1 lovelace; the remainders are all equal, so the
+// tie breaks to the lowest index.
+func TestApportionFullPotSumsToTotal(t *testing.T) {
+	require.Equal(t, []uint64{4, 3, 3}, ApportionFullPot([]uint64{1, 1, 1}, 10))
+}
+
+// TestApportionFullPotLargestRemainderWins: base [2,1,1] over R=10, W=4 gives
+// floors [5,2,2] (sum 9, D=1). Remainders are [0,2,2]; the +1 lovelace lands on
+// the largest remainder, and the tie between indices 1 and 2 breaks to 1.
+func TestApportionFullPotLargestRemainderWins(t *testing.T) {
+	require.Equal(t, []uint64{5, 3, 2}, ApportionFullPot([]uint64{2, 1, 1}, 10))
+}
+
+// TestApportionFullPotNoRemainder: when R divides exactly by W there is no
+// leftover lovelace to allocate.
+func TestApportionFullPotNoRemainder(t *testing.T) {
+	require.Equal(t, []uint64{10}, ApportionFullPot([]uint64{3}, 10))
+	require.Equal(t, []uint64{4, 6}, ApportionFullPot([]uint64{2, 3}, 10))
+}
+
+// TestApportionFullPotZeroWeightUnchanged: W==0 returns the base rewards
+// unchanged (all zero); the caller returns the pot to reserves.
+func TestApportionFullPotZeroWeightUnchanged(t *testing.T) {
+	require.Equal(t, []uint64{0, 0}, ApportionFullPot([]uint64{0, 0}, 10))
+}
+
+// TestApportionFullPotBigProductNoOverflow: B_i*R overflows uint64 (~1.8e19);
+// the big.Int arithmetic keeps it exact.
+func TestApportionFullPotBigProductNoOverflow(t *testing.T) {
+	const b = uint64(10_000_000_000_000_000) // 1e16
+	require.Equal(
+		t,
+		[]uint64{b, b},
+		ApportionFullPot([]uint64{b, b}, 20_000_000_000_000_000),
+	)
+}
+
+func fullPotTwoPoolSnapshot() Snapshot {
+	ownerA := testCredential(0, 0x11)
+	memberA := testCredential(0, 0x12)
+	ownerB := testCredential(0, 0x21)
+	memberB := testCredential(0, 0x22)
+	return Snapshot{
+		TotalActiveStake: 1_000,
+		Pools: []Pool{
+			{
+				ID:                      testPoolID(0x01),
+				RewardAccount:           testCredential(0, 0x13),
+				Margin:                  big.NewRat(1, 10),
+				Pledge:                  100,
+				Cost:                    1_000,
+				DelegatedStake:          600,
+				OwnerStake:              100,
+				BlocksProduced:          6,
+				TotalBlocks:             10,
+				RewardAccountRegistered: true,
+				RewardAccountEligible:   true,
+				Owners:                  map[Credential]struct{}{ownerA: {}},
+				Delegators: []Delegator{
+					{Credential: ownerA, Stake: 100, Registered: true, Eligible: true},
+					{Credential: memberA, Stake: 500, Registered: true, Eligible: true},
+				},
+			},
+			{
+				ID:                      testPoolID(0x02),
+				RewardAccount:           testCredential(0, 0x23),
+				Margin:                  big.NewRat(1, 10),
+				Pledge:                  50,
+				Cost:                    1_000,
+				DelegatedStake:          400,
+				OwnerStake:              50,
+				BlocksProduced:          4,
+				TotalBlocks:             10,
+				RewardAccountRegistered: true,
+				RewardAccountEligible:   true,
+				Owners:                  map[Credential]struct{}{ownerB: {}},
+				Delegators: []Delegator{
+					{Credential: ownerB, Stake: 50, Registered: true, Eligible: true},
+					{Credential: memberB, Stake: 350, Registered: true, Eligible: true},
+				},
+			},
+		},
+	}
+}
+
+func fullPotCalc(t *testing.T, enabled bool) *Result {
+	t.Helper()
+	params := testParams()
+	params.FullPotRewardsEnabled = enabled
+	result, err := Calculate(
+		Pots{Reserves: 100_000_000},
+		fullPotTwoPoolSnapshot(),
+		params,
+	)
+	require.NoError(t, err)
+	return result
+}
+
+// TestCalculateFullPotDisabledMatchesBaseTotals anchors the shared two-pool
+// scenario: with the gate off each pool earns its pre-CIP-0163 base reward.
+func TestCalculateFullPotDisabledMatchesBaseTotals(t *testing.T) {
+	off := fullPotCalc(t, false)
+	require.Equal(t, uint64(41_866), off.PoolRewards[0].PoolReward)
+	require.Equal(t, uint64(27_283), off.PoolRewards[1].PoolReward)
+}
+
+// TestCalculateFullPotDistributesEntirePot checks that the gate-on pool totals
+// are exactly the Hamilton apportionment of the whole pot by base reward, never
+// reduce a pool below its base, and sum to the entire available pot, whereas the
+// disabled path leaves a large pot-scaling residual.
+func TestCalculateFullPotDistributesEntirePot(t *testing.T) {
+	off := fullPotCalc(t, false)
+	on := fullPotCalc(t, true)
+	require.Equal(t, off.AvailableRewards, on.AvailableRewards)
+
+	baseTotals := make([]uint64, len(off.PoolRewards))
+	for i, pr := range off.PoolRewards {
+		baseTotals[i] = pr.PoolReward
+	}
+	expected := ApportionFullPot(baseTotals, off.AvailableRewards)
+
+	var onTotal, offTotal uint64
+	for i := range on.PoolRewards {
+		require.Equal(t, expected[i], on.PoolRewards[i].PoolReward,
+			"pool %d scaled total", i)
+		require.GreaterOrEqual(t, on.PoolRewards[i].PoolReward, baseTotals[i],
+			"full pot must never reduce a pool reward")
+		onTotal += on.PoolRewards[i].PoolReward
+		offTotal += off.PoolRewards[i].PoolReward
+	}
+	require.Equal(t, on.AvailableRewards, onTotal,
+		"gate on: pool totals sum to the entire pot")
+	require.Less(t, offTotal, off.AvailableRewards,
+		"gate off: a pot-scaling residual remains")
+}
+
+// TestCalculateFullPotResidualIsOnlySplitRounding checks that the only reserves
+// inflow left under full pot is the per-pool leader/member split rounding, far
+// below the disabled path's pot-scaling residual.
+func TestCalculateFullPotResidualIsOnlySplitRounding(t *testing.T) {
+	off := fullPotCalc(t, false)
+	on := fullPotCalc(t, true)
+	accounted := on.EffectiveRewards + on.Unspendable
+	require.Equal(t, on.AvailableRewards-accounted, on.Undistributed)
+	require.Less(t, on.Undistributed, off.Undistributed)
+	require.Less(t, on.UpdatedPots.Reserves, off.UpdatedPots.Reserves)
+}
+
+// TestCalculateFullPotNoBaseRewardFallsBackToReserves: with no pool earning a
+// base reward (pledge exceeds owner stake => disqualified, W==0), the gate-on
+// result is identical to the disabled path — the whole pot returns to reserves.
+func TestCalculateFullPotNoBaseRewardFallsBackToReserves(t *testing.T) {
+	owner := testCredential(0, 0x11)
+	snap := Snapshot{
+		TotalActiveStake: 600,
+		Pools: []Pool{
+			{
+				ID:             testPoolID(0x01),
+				RewardAccount:  testCredential(0, 0x13),
+				Margin:         big.NewRat(1, 10),
+				Pledge:         200, // exceeds OwnerStake => disqualified
+				Cost:           1_000,
+				DelegatedStake: 600,
+				OwnerStake:     100,
+				BlocksProduced: 10,
+				TotalBlocks:    10,
+				Owners:         map[Credential]struct{}{owner: {}},
+				Delegators: []Delegator{
+					{Credential: owner, Stake: 100, Registered: true, Eligible: true},
+				},
+			},
+		},
+	}
+	run := func(enabled bool) *Result {
+		params := testParams()
+		params.FullPotRewardsEnabled = enabled
+		r, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+		require.NoError(t, err)
+		return r
+	}
+	on := run(true)
+	off := run(false)
+	require.Empty(t, on.AccountRewards)
+	require.Equal(t, on.AvailableRewards, on.Undistributed)
+	require.Equal(t, off.Undistributed, on.Undistributed)
+	require.Equal(t, off.UpdatedPots, on.UpdatedPots)
+}
+
+// TestCalculateFullPotComposesWithMinPoolMargin verifies that when BOTH CIP-0163
+// full-pot distribution and the CIP-23 minimum pool margin are enabled, each
+// pool's full-pot-scaled leader reward is computed with the CIP-23 effective
+// (floored) margin, not the pool's unfloored registered margin. This guards the
+// composition of the two independent reward features (a below-floor pool must
+// have its scaled leader split shifted toward the operator by the floor).
+func TestCalculateFullPotComposesWithMinPoolMargin(t *testing.T) {
+	snap := fullPotTwoPoolSnapshot() // pools register margin 1/10, IDs 0x01 < 0x02
+	params := testParams()
+	params.FullPotRewardsEnabled = true
+	params.MinPoolMargin = big.NewRat(1, 5) // 20% floor, above the pools' 10% margin
+
+	result, err := Calculate(Pots{Reserves: 100_000_000}, snap, params)
+	require.NoError(t, err)
+	require.Len(t, result.PoolRewards, len(snap.Pools))
+
+	for i := range result.PoolRewards {
+		pr := result.PoolRewards[i]
+		pool := snap.Pools[i] // Calculate sorts by pool ID; snapshot is already in that order
+		floored, err := LeaderRewardWithParameters(
+			pr.PoolReward, pool.Cost, pool.Margin,
+			pool.OwnerStake, pool.DelegatedStake, params,
+		)
+		require.NoError(t, err)
+		unfloored, err := LeaderReward(
+			pr.PoolReward, pool.Cost, pool.Margin,
+			pool.OwnerStake, pool.DelegatedStake,
+		)
+		require.NoError(t, err)
+		// The credited leader reward uses the floored (effective) margin.
+		require.Equal(t, floored, pr.LeaderReward,
+			"pool %d scaled leader must use the CIP-23 effective margin", i)
+		// And the floor actually shifts the split (leader gets more than at 1/10).
+		require.Greater(t, floored, unfloored,
+			"pool %d floor must raise the leader share above the registered margin", i)
+	}
+}

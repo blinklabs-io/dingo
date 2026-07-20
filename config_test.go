@@ -162,6 +162,14 @@ func TestConfigValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
+func TestWithFullPotRewards(t *testing.T) {
+	cfg := &Config{}
+	WithFullPotRewards(true)(cfg)
+	assert.True(t, cfg.fullPotRewardsEnabled)
+	WithFullPotRewards(false)(cfg)
+	assert.False(t, cfg.fullPotRewardsEnabled)
+}
+
 func TestExperimentalDijkstraEnabled(t *testing.T) {
 	tests := []struct {
 		name     string

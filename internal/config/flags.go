@@ -172,6 +172,8 @@ var flagSpecs = []flagSpec{
 
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag("MinPoolMargin", "min-pool-margin", "CIP-23 minimum pool margin in basis points [0,10000] (150 = 1.5%); 0 disables (enable only where every node also enables it)"),
+	// CIP-0163 full-pot reward distribution (consensus-affecting; default off)
+	boolFlag("FullPotRewardsEnabled", "full-pot-rewards-enabled", "enable CIP-0163 full-pot reward distribution (only where every node also enables it)"),
 
 	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
 	boolFlag("PledgeLeverageEnabled", "pledge-leverage-enabled", "enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)"),

@@ -462,7 +462,15 @@ type LedgerStateConfig struct {
 	// PledgeLeverage is L, the CIP-50 maximum ratio of total stake to pledge,
 	// in the range [1, 10000]. It is used only when PledgeLeverageEnabled is
 	// true.
-	PledgeLeverage           uint
+	PledgeLeverage uint
+	// FullPotRewardsEnabled turns on CIP-0163 full-pot reward distribution: the
+	// entire epoch reward pot is apportioned across pools that earned a base
+	// reward instead of returning the saturation/pledge/performance residual to
+	// reserves. It is a consensus-affecting feature gate that defaults false;
+	// enable it only on a network where every node also enables it (mainnet and
+	// the public testnets keep it off). Like the CIP-50 pledge-leverage gate it
+	// is set from operator config in node.go, not derived from the network.
+	FullPotRewardsEnabled    bool
 	ValidateHistorical       bool
 	EnableDijkstra           bool
 	StartInDijkstra          bool

@@ -1044,6 +1044,30 @@ tax are applied but no pool or account rewards are distributed; the post-tax
 amount returns to reserves. Later updates use the normal delayed E-3 snapshot,
 E-2 performance, and E-1 pots mapping.
 
+CIP-0163 full-pot reward distribution is an operator-set, consensus-affecting
+feature gate (`FullPotRewardsEnabled`, default off; see `WithFullPotRewards` and
+`LedgerStateConfig`). When off, `rewards.Calculate` is byte-for-byte identical to
+the pre-CIP-0163 calculation and the saturation, pledge-influence, and
+performance residual returns to reserves as above. When on, `Calculate` runs two
+passes: pass one computes each pool's base reward `B_i` in pool-ID order, and
+`rewards.ApportionFullPot` scales the base rewards up with the largest-remainder
+(Hamilton) method — all `big.Int`, tie-broken by pool ID — so the per-pool totals
+sum to the entire available pot exactly; pass two re-derives each pool's leader
+and member split from the scaled total using the same checked helpers as the
+disabled path. Only the irreducible per-pool leader/member split rounding (a few
+lovelace network-wide) still returns to reserves. The one exception is when no
+pool earned a base reward (`W == 0`, e.g. every pool disqualified): apportionment
+is skipped and the whole available pot returns to reserves, identical to the
+disabled path. The gate is overlaid onto the
+on-chain-derived reward parameters at a single chokepoint,
+`rewardParameters` (`applyFullPotConfig`), which feeds both the epoch-boundary
+apply and the async precompute path, so both compute identical rewards; the
+precompute reuse verifier (`precomputedRewardPoolRewardsMatchInputs`) reproduces
+the same apportionment before validating persisted pool totals. Because it
+changes consensus, enable it only on a network where every node also enables it
+(mainnet and the public testnets keep it off); enabling it off-consensus forks
+the node off the network.
+
 During from-genesis startup, the synthetic genesis block transaction creates
 the combined Byron and Shelley genesis UTxOs and atomically writes the slot-0
 `NetworkState`: treasury starts at zero and reserves start at

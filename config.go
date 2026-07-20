@@ -200,6 +200,10 @@ type Config struct {
 	// off). pledgeLeverage is L in [1, 10000], used only when enabled.
 	pledgeLeverageEnabled bool
 	pledgeLeverage        uint
+	// CIP-0163 full-pot reward distribution (consensus-affecting; default
+	// off). Distributes the entire epoch reward pot to eligible pools instead
+	// of returning the residual to reserves.
+	fullPotRewardsEnabled bool
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
@@ -924,6 +928,17 @@ func WithPledgeLeverage(enabled bool, leverage uint) ConfigOptionFunc {
 	return func(c *Config) {
 		c.pledgeLeverageEnabled = enabled
 		c.pledgeLeverage = leverage
+	}
+}
+
+// WithFullPotRewards configures CIP-0163 full-pot reward distribution. It is
+// consensus-affecting and disabled by default; enable it only on a network
+// where every node also enables it. When enabled, the entire epoch reward pot
+// is distributed to eligible pools and delegators instead of returning the
+// residual to reserves.
+func WithFullPotRewards(enabled bool) ConfigOptionFunc {
+	return func(c *Config) {
+		c.fullPotRewardsEnabled = enabled
 	}
 }
 

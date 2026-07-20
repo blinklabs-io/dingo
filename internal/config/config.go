@@ -572,6 +572,12 @@ type Config struct {
 	// docs/plans/2026-07-19-cip50-pledge-leverage-design.md.
 	PledgeLeverageEnabled bool `yaml:"pledgeLeverageEnabled" envconfig:"DINGO_PLEDGE_LEVERAGE_ENABLED"`
 	PledgeLeverage        uint `yaml:"pledgeLeverage"        envconfig:"DINGO_PLEDGE_LEVERAGE"`
+	// CIP-0163 full-pot reward distribution. Consensus-affecting; defaults
+	// off. When enabled the entire epoch reward pot is distributed to eligible
+	// pools and delegators instead of returning the residual to reserves.
+	// Enable only on a network where every node also enables it. See
+	// docs/plans/2026-07-19-cip163-full-pot-distribution-design.md.
+	FullPotRewardsEnabled bool `yaml:"fullPotRewardsEnabled" envconfig:"DINGO_FULL_POT_REWARDS_ENABLED"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381

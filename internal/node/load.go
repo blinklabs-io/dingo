@@ -386,11 +386,18 @@ func LoadWithDB(
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
-			Database:              db,
-			ChainManager:          cm,
-			Logger:                logger,
-			CardanoNodeConfig:     nodeCfg,
-			ValidateHistorical:    cfg.ValidateHistorical,
+			Database:           db,
+			ChainManager:       cm,
+			Logger:             logger,
+			CardanoNodeConfig:  nodeCfg,
+			ValidateHistorical: cfg.ValidateHistorical,
+			// CIP-0163 full-pot reward distribution is consensus-affecting and
+			// deterministically changes the reward state written during replay,
+			// so load must honor the same operator flag as serve mode; otherwise
+			// an import with the feature enabled would persist legacy
+			// residual-to-reserves reward state that disagrees with an enabled
+			// serve node.
+			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
 			ManualBlockProcessing: true,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
