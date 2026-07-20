@@ -8,14 +8,14 @@
 
 **Version:** v0.66.0
 
-This release brings epoch reward processing into the ledger and node, improves replay safety during imports, adds PostgreSQL backed conformance coverage, and tightens responses and transport policy for selected APIs and servers. It also aligns Leios handling with the latest Musashi prototype behavior.
+This release introduces epoch reward processing in the ledger and node, improves replay safety during imports, adds PostgreSQL-backed conformance coverage, and tightens responses and transport policy for selected APIs and servers. It also aligns Leios handling with the latest Musashi prototype behavior.
 
 ### ✨ What's New
 
 * Added **calculate and apply epoch rewards during epoch rollover:** Epoch rollover now applies stake rewards and MIR effects in the correct pre-governance order, keeps reward totals correct after boundary pot mutations, and precomputes rewards asynchronously with rollback safety.
 * Expanded **rebuild reward stake state during imports:** Load mode and reconciled imports now capture epoch-boundary snapshots during replay, record the epoch-0 genesis mark snapshot when needed, and rebuild reward live stake at the end of imports with cancellation checks and progress reporting.
 * Improved **reward metadata helpers for reward lookups:** Metadata APIs now support reward prefiltering and pool issuer slot-range calculations, and reward arithmetic helpers are exported and validated for reuse.
-* Strengthened **add PostgreSQL-backed conformance coverage:** Conformance tests now run against PostgreSQL with a dedicated schema, documented setup through Docker Compose or environment variables, and clearer pass or fail diagnostics.
+* Updated **PostgreSQL-backed conformance coverage:** Conformance tests now run against PostgreSQL with a dedicated schema, documented setup through Docker Compose or environment variables, and clearer pass or fail diagnostics.
 
 ### 🔧 Fixes
 
