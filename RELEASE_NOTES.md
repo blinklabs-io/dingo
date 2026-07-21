@@ -91,6 +91,10 @@ Esta versión actualiza dependencias principales y herramientas de CI, añade co
 * Renovó `github.com/aws/smithy-go` a `1.27.4`, manteniendo actualizada la gestión de solicitudes de AWS.
 * Mejoró `github.com/aws/aws-sdk-go-v2/credentials` a `1.19.29`, junto con las dependencias transversales relacionadas de AWS SDK v2, manteniendo actualizada la gestión de credenciales.
 
+* Modernizó los flujos de CI para usar `actions/setup-go` `7.0.0`, manteniendo `go test`, `golangci-lint` y las tareas de publicación sobre la acción más reciente.
+* Amplió la cobertura de conformance respaldada por MySQL mediante el arnés `ouroboros-mock`, con soporte de Docker Compose y conexión de CI para facilitar su ejecución.
+* Revisó `github.com/ipfs/go-cid` a `0.6.2`, manteniendo actualizada la gestión de CIDs.
+
 ### 🔧 Correcciones
 
 * Corrigió la publicación de CertRB en NtC para esperar el cierre del endorser certificado antes de servir, cerrar las conexiones sin resolver y registrar métricas de duración de la espera.
