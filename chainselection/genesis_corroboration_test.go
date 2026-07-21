@@ -371,6 +371,10 @@ func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
 	require.Equal(t, fast, *cs.GetBestPeer())
 
 	// The witness disconnects; the fast source loses its only corroboration.
+	// RemovePeer itself must re-evaluate here (the removed peer is a witness,
+	// not the best), so GetBestPeer reflects the drop with no extra
+	// EvaluateAndSwitch call — that internal re-evaluation is exactly the
+	// behavior under test.
 	cs.RemovePeer(witness)
 	assert.Nil(
 		t,
