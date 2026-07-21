@@ -92,6 +92,23 @@ Esta versión actualiza dependencias principales y herramientas de CI, añade co
 
 ### 🔧 Correcciones
 
+* Corrigió la publicación de CertRB en NtC para esperar el cierre del endorser certificado antes de servir, cerrar las conexiones sin resolver y registrar métricas de duración de la espera.
+* Eliminó `ORDER BY id DESC` de las consultas de limpieza de UTXO en MySQL, Postgres y SQLite, evitando ordenaciones innecesarias.
+* Estabilizó la búsqueda del índice de live stake de recompensas al filtrar en Go las filas gastadas y conservar el comportamiento del plan de consultas de SQLite.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.1 (July 20, 2026)
 
 **Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
