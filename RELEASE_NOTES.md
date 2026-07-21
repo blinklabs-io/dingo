@@ -1,5 +1,120 @@
 # Dingo Releases
 
+## v0.66.2 (July 21, 2026)
+
+**Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
+
+**Date:** July 21, 2026
+
+**Version:** v0.66.2
+
+This release updates core dependencies and CI workflows, expands MySQL-backed conformance coverage, and corrects NtC CertRB serving and database query behavior so cleanup and reward lookups stay stable.
+
+### 💪 Improvements
+
+* Updated the network helper library to `0.57.0`, keeping network behavior current.
+* Refreshed the AWS Smithy library to `1.27.4`, keeping AWS request handling current.
+* Improved `github.com/aws/aws-sdk-go-v2/credentials` to `1.19.29`, along with related AWS SDK v2 dependencies, keeping credential handling current.
+* Modernized CI workflows to use `actions/setup-go` `7.0.0`, keeping `go test`, `golangci-lint`, and publish jobs on the newer action.
+* Expanded MySQL-backed conformance coverage through the ouroboros-mock harness, with Docker Compose support and CI wiring for execution.
+* Revised `github.com/ipfs/go-cid` to `0.6.2`, keeping CID handling current.
+
+### 🔧 Fixes
+
+* Fixed NtC CertRB serving to wait for certified endorser closure before serving, close unresolved connections, and record wait duration metrics.
+* Corrected UTXO cleanup queries to remove `ORDER BY id DESC` across MySQL, Postgres, and SQLite.
+* Stabilized the reward live stake index lookup by filtering spent rows in Go and preserving SQLite query-plan behavior.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+### 🇯🇵 日本語
+
+**タイトル:** 依存関係を更新し、MySQL-backed conformance coverage と database の安定性を強化
+
+**日付:** July 21, 2026
+
+**バージョン:** v0.66.2
+
+このリリースでは、主要な依存関係と CI ワークフローを更新し、MySQL-backed の conformance coverage を拡張し、NtC の CertRB 配信と database の query 挙動を整えて、cleanup と reward lookup の間も処理を安定させます。
+
+### 💪 改善
+
+* 更新しました `golang.org/x/net` を `0.57.0` にし、network helper の依存関係を最新に保ちます。
+* 改訂しました `github.com/aws/smithy-go` を `1.27.4` にし、AWS request handling を最新に保ちます。
+* 改善しました `github.com/aws/aws-sdk-go-v2/credentials` を `1.19.29` にし、関連する AWS SDK v2 依存関係も更新して credential handling を最新に保ちます。
+* 近代化しました CI workflow で `actions/setup-go` を `7.0.0` にし、`go test`、`golangci-lint`、publish job を新しい action で実行します。
+* 拡張しました ouroboros-mock harness を使った MySQL-backed conformance coverage を広げ、Docker Compose support と CI wiring で実行しやすくします。
+* 刷新しました `github.com/ipfs/go-cid` を `0.6.2` にし、CID handling を最新に保ちます。
+
+### 🔧 修正
+
+* 修正しました NtC で CertRB を配信する前に certified endorser closure を待ち、未解決の connection を閉じ、wait duration metrics を記録します。
+* 是正しました UTXO cleanup query から `ORDER BY id DESC` を外し、MySQL、Postgres、SQLite 全体で不要な並び替えをなくします。
+* 安定化しました reward live stake index lookup で spent row を Go 側で絞り込み、SQLite query-plan の挙動を保ちます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
+### 🇪🇸 Español
+
+**Título:** Actualizar las dependencias principales, añadir cobertura de conformance para MySQL y mejorar la estabilidad de la base de datos
+
+**Fecha:** July 21, 2026
+
+**Versión:** v0.66.2
+
+Esta versión actualiza dependencias principales y herramientas de CI, añade cobertura de conformance respaldada por MySQL y corrige la publicación de CertRB en NtC y el comportamiento de consultas de base de datos para mantener estables el cleanup y las búsquedas de reward.
+
+### 💪 Mejoras
+
+* Actualizó `golang.org/x/net` a `0.57.0`, manteniendo actualizada la dependencia de utilidades de red.
+* Renovó `github.com/aws/smithy-go` a `1.27.4`, manteniendo actualizada la gestión de solicitudes de AWS.
+* Mejoró `github.com/aws/aws-sdk-go-v2/credentials` a `1.19.29`, junto con las dependencias transversales relacionadas de AWS SDK v2, manteniendo actualizada la gestión de credenciales.
+
+* Modernizó los flujos de CI para usar `actions/setup-go` `7.0.0`, manteniendo `go test`, `golangci-lint` y las tareas de publicación sobre la acción más reciente.
+* Amplió la cobertura de conformance respaldada por MySQL mediante el arnés `ouroboros-mock`, con soporte de Docker Compose y conexión de CI para facilitar su ejecución.
+* Revisó `github.com/ipfs/go-cid` a `0.6.2`, manteniendo actualizada la gestión de CIDs.
+
+### 🔧 Correcciones
+
+* Corrigió la publicación de CertRB en NtC para esperar el cierre del endorser certificado antes de servir, cerrar las conexiones sin resolver y registrar métricas de duración de la espera.
+* Eliminó `ORDER BY id DESC` de las consultas de limpieza de UTXO en MySQL, Postgres y SQLite, evitando ordenaciones innecesarias.
+* Estabilizó la búsqueda del índice de live stake de recompensas al filtrar en Go las filas gastadas y conservar el comportamiento del plan de consultas de SQLite.
+
+### Compatibilidad de red recomendada ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Gracias
+
+Gracias por probarlo.
+
 ## v0.66.1 (July 20, 2026)
 
 **Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
