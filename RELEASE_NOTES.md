@@ -16,7 +16,28 @@ This release updates core dependencies and CI tooling, adds MySQL-backed conform
 * Refreshed `github.com/aws/smithy-go` to `1.27.4`, keeping AWS request handling current.
 * Improved `github.com/aws/aws-sdk-go-v2/credentials` to `1.19.29`, along with related AWS SDK v2 dependencies, keeping credential handling current.
 
+* Modernized CI workflows to use `actions/setup-go` `7.0.0`, keeping `go test`, `golangci-lint`, and publish jobs on the newer action.
+* Added MySQL-backed conformance tests through the ouroboros-mock harness, with Docker Compose support and CI wiring for execution.
+* Bumped `github.com/ipfs/go-cid` to `0.6.2`, keeping CID handling current.
+
 ### 🔧 Fixes
+
+* Fixed NtC CertRB serving to wait for certified endorser closure before serving, close unresolved connections, and record wait duration metrics.
+* Corrected UTXO cleanup queries to remove `ORDER BY id DESC` across MySQL, Postgres, and SQLite.
+* Stabilized the reward live stake index lookup by filtering spent rows in Go and preserving SQLite query-plan behavior.
+
+### Recommended Network Compatibility ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 Thank You
+
+Thank you for trying!
 
 ## v0.66.1 (July 20, 2026)
 
