@@ -29,14 +29,29 @@ does not enter Genesis mode — it syncs with normal Praos chain selection.
 
 The security goal for from-origin sync is that a fast source which serves blocks
 quickly but is not itself trustworthy (a shallow local peer, GSA) **cannot steer
-the node onto an untrue chain**. Dingo enforces this with a **corroboration
-gate**: the densest fast source is only followed while independent peers confirm
-its recent blocks. A divergent or uncorroborated source is **denied selection**
-and the node **stalls** rather than following it.
+the node onto a chain no independent peer shares**. Dingo enforces this with a
+**corroboration gate**: the densest fast source is only followed while other
+peers confirm its recent chain — every block a witness has seen within the
+candidate's window must match the candidate's, so agreeing on one old ancestor
+and then forking is not enough. A divergent or uncorroborated source is **denied
+selection** and the node **stalls** rather than following it.
 
-Assumption: at least `corroborationPeers` **honest** peers are reachable (e.g.
-seeded from a ledger peer snapshot). Under that assumption a bad or divergent
-fast source can at worst stall the node.
+Assumptions (the security property holds only under these):
+
+- At least `corroborationPeers` **honest, independent** peers are reachable and
+  within the Genesis window of the fast source (e.g. seeded from a ledger peer
+  snapshot). If the fast source races far beyond every corroborator's window,
+  corroboration fails closed and the node stalls until the corroborators catch
+  up — this is safe but means corroborators must not be left far behind.
+- Those peers really are independent. The node can only enforce **distinct remote
+  hosts** (several connections from one IP cannot self-corroborate); it cannot
+  tell whether two hosts are the same operator, ASN, or chain view. Establishing
+  genuine independence is the operator's responsibility (see below).
+
+Under these assumptions a bad or divergent fast source can at worst stall the
+node. A fork that diverges only in blocks no honest peer has yet observed is not
+detected until a corroborator advances past it — full Ouroboros Genesis
+density-at-intersection would resolve such cases sooner (see Limitations).
 
 ## Configuration
 
@@ -65,8 +80,17 @@ Equivalent CLI flags / environment variables:
 Put the fast source in `localRoots` (mark it `trustable` so peer governance
 keeps it as a preferred ingress source) and point `peerSnapshotFile` at a
 cardano-node ledger peer snapshot. When Genesis selection is active and the
-snapshot has relays, Dingo seeds the snapshot relays as independent ledger peers
-before outbound startup — these are the corroborators.
+snapshot has relays, Dingo seeds the snapshot relays as ledger peers before
+outbound startup — these are the corroborators.
+
+**Validate corroborator independence.** The gate only enforces that
+corroborators are on *distinct remote hosts* from each other and from the fast
+source; it cannot tell whether two hosts belong to the same operator, ASN, or
+share a chain view. The security property assumes the corroborators are
+genuinely independent, so populate the snapshot with large ledger peers run by
+distinct operators on distinct infrastructure, and avoid pointing several
+snapshot entries at relays that ultimately share an upstream. A snapshot full of
+related relays satisfies the count but not the trust assumption.
 
 `topology.json`:
 
@@ -119,10 +143,12 @@ fast source, and per-peer density/corroboration for metrics or debugging.
   behavior). Use only when every configured peer is already trusted.
 - **1** — a single independent peer must confirm the fast source. Minimal
   protection; a lone honest snapshot peer is enough to keep going.
-- **2+** — require a quorum of independent peers. More robust against a small
+- **2+** — require a quorum of distinct-host peers. More robust against a small
   set of colluding/divergent sources, but the node stalls until that many
   reachable peers agree, so size it to how many independent snapshot peers you
-  actually connect.
+  actually connect. Raising this raises the required *count*, not the
+  independence of the peers you supply — that is fixed by your snapshot contents
+  (see "Validate corroborator independence").
 
 ## Limitations (deferred)
 
@@ -132,11 +158,18 @@ Genesis. Specifically **not** implemented:
 - **ChainSync Jumping** and devoted BlockFetch dynamics (a
   performance/robustness optimization for downloading across many peers).
 - **Density-at-intersection** resolution of a fork whose intersection is *inside*
-  the window (the gate compares recent shared frontier points, not block counts
-  after an exact intersection).
+  the window. The gate confirms a witness's chain is a prefix of the candidate's
+  within their overlap; it does not count blocks after an exact intersection, and
+  it cannot testify about blocks the fast source produced *beyond* every
+  witness's frontier. A fast source that stays consistent with honest peers up to
+  their frontiers but forks in the not-yet-witnessed suffix is followed until a
+  corroborator advances past the fork. This is a **security** limitation for that
+  window (not merely performance), mitigated but not closed by the fail-closed
+  overlap requirement and the per-header density comparison.
 - **Peer-governance demotion** wired to the corroboration-failure event; today
   the source is denied selection (stall) but kept connected so it can serve
   blocks once corroboration arrives.
 
-These do not affect the from-origin **security** property above; they are
-performance and refinement work.
+The first and third are performance/refinement work; the second is a residual
+security limitation of the density-based approach, documented here so operators
+do not over-rely on the gate to resolve every in-window fork.

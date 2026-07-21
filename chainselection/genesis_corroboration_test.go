@@ -15,6 +15,8 @@
 package chainselection
 
 import (
+	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -26,6 +28,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// corrConn builds a connection id with a distinct remote HOST per n, so peers
+// count as independent corroboration witnesses (which dedup by remote host).
+func corrConn(n int) ouroboros.ConnectionId {
+	return corrConnAddr(fmt.Sprintf("10.0.0.%d", n), 3001)
+}
+
+// corrConnAddr builds a connection id for an explicit remote host and port,
+// used to model several connections sharing one host (a Sybil source).
+func corrConnAddr(host string, port int) ouroboros.ConnectionId {
+	localAddr, _ := net.ResolveTCPAddr("tcp", "127.0.0.1:3001")
+	remoteAddr, _ := net.ResolveTCPAddr(
+		"tcp",
+		fmt.Sprintf("%s:%d", host, port),
+	)
+	return ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+}
 
 // genesisTip builds a chainsync tip at the given slot with a named hash.
 func genesisTip(slot uint64, hash string, block uint64) ochainsync.Tip {
@@ -47,18 +69,24 @@ func feedFrontier(
 	}
 }
 
+// feedPoints records a sequence of points into a bare PeerChainTip with hash
+// tracking enabled.
+func feedPoints(pt *PeerChainTip, window uint64, points ...ocommon.Point) {
+	for _, p := range points {
+		pt.recordObservedPoint(p, window, true)
+	}
+}
+
 // recordObservedPoint keeps the slot frontier and the point (slot+hash)
 // frontier in lockstep, storing the current hash at each slot.
 func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
-	for _, p := range []ocommon.Point{
-		{Slot: 10, Hash: []byte("h10")},
-		{Slot: 20, Hash: []byte("h20")},
-		{Slot: 30, Hash: []byte("h30")},
-	} {
-		pt.recordObservedPoint(p, window)
-	}
+	feedPoints(pt, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+	)
 
 	require.Equal(t, []uint64{10, 20, 30}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
@@ -72,10 +100,36 @@ func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 	}
 
 	// Re-reporting the same slot with a new hash updates the frontier in place.
-	pt.recordObservedPoint(ocommon.Point{Slot: 30, Hash: []byte("h30b")}, window)
+	pt.recordObservedPoint(
+		ocommon.Point{Slot: 30, Hash: []byte("h30b")},
+		window,
+		true,
+	)
 	require.Equal(t, []uint64{10, 20, 30}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h30b"), pt.observedPoints[2].Hash)
+}
+
+// With hash tracking disabled (corroboration inactive) only the slot frontier
+// is kept; the hash frontier is not retained.
+func TestRecordObservedPointSkipsHashesWhenInactive(t *testing.T) {
+	pt := &PeerChainTip{}
+	window := uint64(100)
+	for _, p := range []ocommon.Point{
+		{Slot: 10, Hash: []byte("h10")},
+		{Slot: 20, Hash: []byte("h20")},
+	} {
+		pt.recordObservedPoint(p, window, false)
+	}
+	assert.Equal(t, []uint64{10, 20}, pt.observedSlots)
+	assert.Empty(t, pt.observedPoints)
+
+	// Enabling tracking starts populating the hash frontier again; disabling
+	// clears it.
+	pt.recordObservedPoint(ocommon.Point{Slot: 30, Hash: []byte("h30")}, window, true)
+	assert.Len(t, pt.observedPoints, 1)
+	pt.recordObservedPoint(ocommon.Point{Slot: 40, Hash: []byte("h40")}, window, false)
+	assert.Empty(t, pt.observedPoints)
 }
 
 // ApplyRollback trims the slot and point frontiers together so they stay
@@ -83,13 +137,11 @@ func TestRecordObservedPointTracksHashFrontier(t *testing.T) {
 func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	pt := &PeerChainTip{}
 	window := uint64(100)
-	for _, p := range []ocommon.Point{
-		{Slot: 10, Hash: []byte("h10")},
-		{Slot: 20, Hash: []byte("h20")},
-		{Slot: 30, Hash: []byte("h30")},
-	} {
-		pt.recordObservedPoint(p, window)
-	}
+	feedPoints(pt, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+		ocommon.Point{Slot: 30, Hash: []byte("h30")},
+	)
 
 	pt.ApplyRollback(
 		ocommon.Point{Slot: 20, Hash: []byte("h20")},
@@ -105,36 +157,78 @@ func TestApplyRollbackTrimsPointFrontier(t *testing.T) {
 	assert.Equal(t, []byte("h20"), pt.observedPoints[1].Hash)
 
 	// A subsequent point extends both frontiers consistently.
-	pt.recordObservedPoint(ocommon.Point{Slot: 40, Hash: []byte("h40")}, window)
+	pt.recordObservedPoint(ocommon.Point{Slot: 40, Hash: []byte("h40")}, window, true)
 	require.Equal(t, []uint64{10, 20, 40}, pt.observedSlots)
 	require.Len(t, pt.observedPoints, 3)
 	assert.Equal(t, []byte("h40"), pt.observedPoints[2].Hash)
 }
 
-// sharesObservedPoint requires an identical slot AND hash; a peer on a divergent
-// fork (same slots, different hashes) does not corroborate.
-func TestSharesObservedPointHashSensitive(t *testing.T) {
+// confirmsRecentChain requires the witness's chain, as far as it reaches into
+// the candidate's window, to match the candidate: same-chain peers confirm each
+// other; a peer on a divergent fork does not.
+func TestConfirmsRecentChainHashSensitive(t *testing.T) {
 	window := uint64(100)
 	honestA := &PeerChainTip{}
 	honestB := &PeerChainTip{}
 	divergent := &PeerChainTip{}
-	for _, p := range []ocommon.Point{
-		{Slot: 10, Hash: []byte("h10")},
-		{Slot: 20, Hash: []byte("h20")},
-	} {
-		honestA.recordObservedPoint(p, window)
-		honestB.recordObservedPoint(p, window)
-	}
-	for _, p := range []ocommon.Point{
-		{Slot: 10, Hash: []byte("x10")},
-		{Slot: 20, Hash: []byte("x20")},
-	} {
-		divergent.recordObservedPoint(p, window)
-	}
+	feedPoints(honestA, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+	)
+	feedPoints(honestB, window,
+		ocommon.Point{Slot: 10, Hash: []byte("h10")},
+		ocommon.Point{Slot: 20, Hash: []byte("h20")},
+	)
+	feedPoints(divergent, window,
+		ocommon.Point{Slot: 10, Hash: []byte("x10")},
+		ocommon.Point{Slot: 20, Hash: []byte("x20")},
+	)
 
-	assert.True(t, honestA.sharesObservedPoint(honestB))
-	assert.False(t, honestA.sharesObservedPoint(divergent))
-	assert.False(t, divergent.sharesObservedPoint(honestB))
+	assert.True(t, honestA.confirmsRecentChain(honestB))
+	assert.False(t, honestA.confirmsRecentChain(divergent))
+	assert.False(t, divergent.confirmsRecentChain(honestB))
+}
+
+// Regression for the "shared ancestor then diverge" bypass: a fast source that
+// agrees on one old block but then produces different blocks for the rest of the
+// window is NOT confirmed by an honest witness, because the witness observed
+// recent blocks the candidate does not have.
+func TestConfirmsRecentChainRejectsSharedAncestorThenDiverge(t *testing.T) {
+	window := uint64(100)
+	fast := &PeerChainTip{}
+	honest := &PeerChainTip{}
+	// Both agree on slot 100, then the fast source forks (x...) while the
+	// honest witness continues on the real chain (h...).
+	feedPoints(fast, window,
+		ocommon.Point{Slot: 100, Hash: []byte("shared-100")},
+		ocommon.Point{Slot: 105, Hash: []byte("x105")},
+		ocommon.Point{Slot: 110, Hash: []byte("x110")},
+	)
+	feedPoints(honest, window,
+		ocommon.Point{Slot: 100, Hash: []byte("shared-100")},
+		ocommon.Point{Slot: 106, Hash: []byte("h106")},
+		ocommon.Point{Slot: 111, Hash: []byte("h111")},
+	)
+
+	assert.False(t, fast.confirmsRecentChain(honest),
+		"a witness that diverges after the shared ancestor must not confirm")
+}
+
+// A witness whose frontier does not overlap the candidate's window cannot
+// confirm it (fail-closed).
+func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
+	window := uint64(20)
+	ahead := &PeerChainTip{}
+	behind := &PeerChainTip{}
+	feedPoints(ahead, window,
+		ocommon.Point{Slot: 200, Hash: []byte("h200")},
+		ocommon.Point{Slot: 210, Hash: []byte("h210")},
+	)
+	feedPoints(behind, window,
+		ocommon.Point{Slot: 100, Hash: []byte("h100")},
+		ocommon.Point{Slot: 105, Hash: []byte("h105")},
+	)
+	assert.False(t, ahead.confirmsRecentChain(behind))
 }
 
 // A dense fast source whose recent blocks are also reported by other eligible
@@ -147,9 +241,9 @@ func TestGenesisHonestFastSourceIsCorroborated(t *testing.T) {
 		MinCorroboratingPeers: 1,
 	})
 
-	fast := newTestConnectionId(1)
-	corroboratorA := newTestConnectionId(2)
-	corroboratorB := newTestConnectionId(3)
+	fast := corrConn(1)
+	corroboratorA := corrConn(2)
+	corroboratorB := corrConn(3)
 
 	// Fast source: three blocks in the window (densest).
 	feedFrontier(cs, fast,
@@ -204,9 +298,9 @@ func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
 		EventBus:              bus,
 	})
 
-	divergent := newTestConnectionId(1)
-	honestA := newTestConnectionId(2)
-	honestB := newTestConnectionId(3)
+	divergent := corrConn(1)
+	honestA := corrConn(2)
+	honestB := corrConn(3)
 
 	// Divergent source: densest/longest, but on a private fork — its block
 	// hashes ("x...") are seen by nobody else.
@@ -251,6 +345,40 @@ func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
 		"expected corroboration-failure event for divergent source")
 }
 
+// Removing the only witness revokes the incumbent fast source's corroboration
+// and forces a re-evaluation that drops it, even though the removed peer was not
+// itself the selected best.
+func TestGenesisCorroborationRevokedOnWitnessRemoval(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	fast := corrConn(1)
+	witness := corrConn(2)
+	feedFrontier(cs, fast,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, fast, *cs.GetBestPeer())
+
+	// The witness disconnects; the fast source loses its only corroboration.
+	cs.RemovePeer(witness)
+	assert.Nil(
+		t,
+		cs.GetBestPeer(),
+		"incumbent must be dropped once it loses corroboration",
+	)
+}
+
 // With no corroborating peers available, a fast source stalls: the selector
 // refuses to select it, returning no best peer, rather than following an
 // uncorroborated chain.
@@ -261,7 +389,7 @@ func TestGenesisInsufficientCorroborationStalls(t *testing.T) {
 		MinCorroboratingPeers: 1,
 	})
 
-	fast := newTestConnectionId(1)
+	fast := corrConn(1)
 	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),
@@ -285,8 +413,8 @@ func TestGenesisCorroborationQuorumNotMet(t *testing.T) {
 		MinCorroboratingPeers: 2,
 	})
 
-	fast := newTestConnectionId(1)
-	corroborator := newTestConnectionId(2)
+	fast := corrConn(1)
+	corroborator := corrConn(2)
 
 	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
@@ -304,6 +432,48 @@ func TestGenesisCorroborationQuorumNotMet(t *testing.T) {
 		cs.GetBestPeer(),
 		"quorum of 2 not met with a single corroborator; must stall",
 	)
+}
+
+// Several connections from the SAME remote host cannot corroborate each other:
+// witnesses are de-duplicated by host, so a Sybil fast source opening multiple
+// connections still lacks independent corroboration and stalls.
+func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	// Fast source and two "corroborators" that are really the same operator
+	// host (10.9.9.9), just different ports.
+	fast := corrConnAddr("10.9.9.9", 3001)
+	sybilA := corrConnAddr("10.9.9.9", 3002)
+	sybilB := corrConnAddr("10.9.9.9", 3003)
+	for _, conn := range []ouroboros.ConnectionId{fast, sybilA, sybilB} {
+		feedFrontier(cs, conn,
+			genesisTip(100, "h100", 100),
+			genesisTip(105, "h105", 105),
+			genesisTip(110, "h110", 110),
+		)
+	}
+
+	cs.EvaluateAndSwitch()
+	assert.Nil(
+		t,
+		cs.GetBestPeer(),
+		"same-host connections must not self-corroborate a Sybil fast source",
+	)
+
+	// Add a genuinely independent host on the same chain; now corroboration
+	// succeeds.
+	independent := corrConnAddr("10.0.0.42", 3001)
+	feedFrontier(cs, independent,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer(),
+		"an independent-host corroborator should satisfy the gate")
 }
 
 // Corroboration is opt-in. With MinCorroboratingPeers == 0 (the default), a
@@ -337,8 +507,8 @@ func TestGenesisStatusObservability(t *testing.T) {
 		MinCorroboratingPeers: 1,
 	})
 
-	fast := newTestConnectionId(1)
-	corroborator := newTestConnectionId(2)
+	fast := corrConn(1)
+	corroborator := corrConn(2)
 	feedFrontier(cs, fast,
 		genesisTip(100, "h100", 100),
 		genesisTip(105, "h105", 105),

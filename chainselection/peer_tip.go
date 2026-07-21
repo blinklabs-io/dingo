@@ -149,11 +149,23 @@ func (p *PeerChainTip) trimObservedPointsTo(keepUntil int) {
 }
 
 // recordObservedPoint records a (slot, hash) point into the observed frontier
-// used for Genesis density and corroboration, keeping observedSlots and
-// observedPoints in lockstep and bounded to the density window.
-func (p *PeerChainTip) recordObservedPoint(point ocommon.Point, window uint64) {
+// used for Genesis density (observedSlots, always maintained in Genesis) and
+// corroboration (observedPoints, the block hashes), keeping the two in lockstep
+// and bounded to the density window.
+//
+// trackHashes gates the hash frontier: it is stored only while Genesis
+// corroboration is active. When false the hash frontier is dropped, so normal
+// Praos operation does not retain per-peer window-length hash history.
+func (p *PeerChainTip) recordObservedPoint(
+	point ocommon.Point,
+	window uint64,
+	trackHashes bool,
+) {
 	if p == nil {
 		return
+	}
+	if !trackHashes {
+		p.observedPoints = nil
 	}
 	slot := point.Slot
 	if slot == 0 {
@@ -168,14 +180,18 @@ func (p *PeerChainTip) recordObservedPoint(point ocommon.Point, window uint64) {
 	for len(p.observedSlots) > 0 &&
 		p.observedSlots[len(p.observedSlots)-1] > slot {
 		p.observedSlots = p.observedSlots[:len(p.observedSlots)-1]
-		p.trimObservedPointsTo(len(p.observedSlots))
+		if trackHashes {
+			p.trimObservedPointsTo(len(p.observedSlots))
+		}
 	}
 	switch {
 	case len(p.observedSlots) == 0 ||
 		p.observedSlots[len(p.observedSlots)-1] < slot:
 		p.observedSlots = append(p.observedSlots, slot)
-		p.observedPoints = append(p.observedPoints, clonePoint(point))
-	case len(p.observedPoints) == len(p.observedSlots):
+		if trackHashes {
+			p.observedPoints = append(p.observedPoints, clonePoint(point))
+		}
+	case trackHashes && len(p.observedPoints) == len(p.observedSlots):
 		// Same slot re-reported: keep the latest hash so corroboration
 		// compares against the current frontier block.
 		p.observedPoints[len(p.observedPoints)-1] = clonePoint(point)
@@ -236,32 +252,56 @@ func cloneObservedPoints(points []ocommon.Point) []ocommon.Point {
 	return out
 }
 
-// sharesObservedPoint reports whether this peer and other have at least one
-// identical observed (slot, hash) point — evidence they are following the same
-// chain within the Genesis window. Points with an empty hash are ignored so an
-// unhashed frontier slot cannot spuriously corroborate. Both frontiers are
-// kept in strictly-ascending slot order, so this is a two-pointer merge.
-func (p *PeerChainTip) sharesObservedPoint(other *PeerChainTip) bool {
-	if p == nil || other == nil {
+// confirmsRecentChain reports whether witness confirms this peer's (candidate's)
+// chain across the window range they overlap. It is true when, for every block
+// the witness observed within the candidate's frontier slot range, the candidate
+// observed the identical (slot, hash) block, AND they share at least one such
+// block. In other words the witness's chain, as far as it reaches into the
+// candidate's window, is a prefix/subset of the candidate's chain.
+//
+// This is deliberately stronger than "share any common point": a fast source
+// that shares only an old ancestor and then diverges for every later block is
+// NOT confirmed, because the witness observed recent blocks the candidate did
+// not (or a conflicting hash at the same slot). A witness whose frontier does
+// not overlap the candidate's window at all cannot confirm it (returns false),
+// so corroboration fails closed — the candidate then stalls rather than being
+// followed uncorroborated.
+//
+// Both frontiers are kept in strictly-ascending slot order; this is a
+// two-pointer scan. It relies on the observed frontier being populated per
+// header (dense) during chainsync, so two peers on the same chain share every
+// block in their overlap.
+func (p *PeerChainTip) confirmsRecentChain(witness *PeerChainTip) bool {
+	if p == nil || witness == nil ||
+		len(p.observedPoints) == 0 || len(witness.observedPoints) == 0 {
 		return false
 	}
-	a, b := p.observedPoints, other.observedPoints
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		switch {
-		case a[i].Slot < b[j].Slot:
-			i++
-		case a[i].Slot > b[j].Slot:
-			j++
-		default:
-			if len(a[i].Hash) > 0 && bytes.Equal(a[i].Hash, b[j].Hash) {
-				return true
-			}
-			i++
-			j++
+	candidate := p.observedPoints
+	lo := candidate[0].Slot
+	hi := candidate[len(candidate)-1].Slot
+	i := 0
+	hadMatch := false
+	for _, w := range witness.observedPoints {
+		if w.Slot < lo {
+			continue
 		}
+		if w.Slot > hi {
+			break
+		}
+		for i < len(candidate) && candidate[i].Slot < w.Slot {
+			i++
+		}
+		if i < len(candidate) && candidate[i].Slot == w.Slot &&
+			len(w.Hash) > 0 && bytes.Equal(candidate[i].Hash, w.Hash) {
+			hadMatch = true
+			continue
+		}
+		// The witness observed a block within the candidate's range that the
+		// candidate does not have (or a conflicting hash at the same slot):
+		// they are on different chains, so this witness does not confirm.
+		return false
 	}
-	return false
+	return hadMatch
 }
 
 func (p *PeerChainTip) observedDensity(window uint64) uint64 {

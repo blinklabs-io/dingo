@@ -15,6 +15,8 @@
 package chainselection
 
 import (
+	"net"
+
 	"github.com/blinklabs-io/dingo/event"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 )
@@ -33,12 +35,20 @@ import (
 // trust model") for the supported trust model and the explicitly deferred
 // pieces.
 
-// peerCanCorroborateLocked reports whether a peer is a valid corroboration
-// witness: live, eligible, and non-stale. It deliberately omits the
-// corroboration check itself (which would be circular) and the behind-best
-// selection filters, so honest peers that are slightly behind the fast source
-// still count as witnesses.
-func (cs *ChainSelector) peerCanCorroborateLocked(
+// genesisCorroborationActiveLocked reports whether the Genesis corroboration
+// gate is in effect (Genesis mode with a positive threshold). When false the
+// selector behaves as before (density-only / Praos) and does not track the
+// per-peer hash frontier used for corroboration.
+func (cs *ChainSelector) genesisCorroborationActiveLocked() bool {
+	return cs.mode == SelectionModeGenesis &&
+		cs.config.MinCorroboratingPeers > 0
+}
+
+// peerLiveEligibleNonStaleLocked reports whether a peer passes the shared
+// live/eligible/non-stale prerequisite used by both Genesis corroboration
+// witness eligibility and normal selection eligibility. It is the single
+// source of truth for those three checks.
+func (cs *ChainSelector) peerLiveEligibleNonStaleLocked(
 	connId ouroboros.ConnectionId,
 	peerTip *PeerChainTip,
 ) bool {
@@ -51,15 +61,43 @@ func (cs *ChainSelector) peerCanCorroborateLocked(
 	if !cs.isConnectionEligible(connId) {
 		return false
 	}
-	if cs.isPeerTipStale(peerTip) {
-		return false
-	}
-	return true
+	return !cs.isPeerTipStale(peerTip)
 }
 
-// corroboratingPeersLocked counts the distinct other eligible, live, non-stale
-// peers whose observed frontier shares at least one identical (slot, hash)
-// point with the candidate.
+// peerCanCorroborateLocked reports whether a peer is a valid corroboration
+// witness: live, eligible, and non-stale. It deliberately omits the
+// corroboration check itself (which would be circular) and the behind-best
+// selection filters, so honest peers that are slightly behind the fast source
+// still count as witnesses.
+func (cs *ChainSelector) peerCanCorroborateLocked(
+	connId ouroboros.ConnectionId,
+	peerTip *PeerChainTip,
+) bool {
+	return cs.peerLiveEligibleNonStaleLocked(connId, peerTip)
+}
+
+// corroboratorIdentity returns a coarse peer identity (remote host, without
+// port) used to de-duplicate corroboration witnesses. Counting raw connection
+// IDs would let several connections from one operator corroborate each other, so
+// witnesses are grouped by remote host. This is a lower bound on independence,
+// not a guarantee: true independence (distinct operators, ASNs, chain views)
+// depends on the operator's topology and diversity groups in peer governance.
+func corroboratorIdentity(connId ouroboros.ConnectionId) string {
+	if connId.RemoteAddr == nil {
+		return connId.String()
+	}
+	addr := connId.RemoteAddr.String()
+	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" {
+		return host
+	}
+	return addr
+}
+
+// corroboratingPeersLocked counts the distinct witness identities whose chain
+// confirms the candidate's recent chain within the Genesis window. Witnesses are
+// de-duplicated by remote host, and any witness sharing the candidate's own host
+// is excluded, so a Sybil fast source opening several connections cannot
+// self-corroborate.
 func (cs *ChainSelector) corroboratingPeersLocked(
 	candidate ouroboros.ConnectionId,
 	candidateTip *PeerChainTip,
@@ -67,7 +105,7 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 	if candidateTip == nil {
 		return 0
 	}
-	count := 0
+	witnesses := make(map[string]struct{})
 	for connId, peerTip := range cs.peerTips {
 		if connId == candidate {
 			continue
@@ -75,11 +113,14 @@ func (cs *ChainSelector) corroboratingPeersLocked(
 		if !cs.peerCanCorroborateLocked(connId, peerTip) {
 			continue
 		}
-		if candidateTip.sharesObservedPoint(peerTip) {
-			count++
+		if candidateTip.confirmsRecentChain(peerTip) {
+			witnesses[corroboratorIdentity(connId)] = struct{}{}
 		}
 	}
-	return count
+	// A witness on the candidate's own host is the same operator; it cannot
+	// count as independent corroboration.
+	delete(witnesses, corroboratorIdentity(candidate))
+	return len(witnesses)
 }
 
 // isPeerCorroboratedLocked reports whether a peer may drive Genesis chain
@@ -90,8 +131,7 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 	connId ouroboros.ConnectionId,
 	peerTip *PeerChainTip,
 ) bool {
-	if cs.mode != SelectionModeGenesis ||
-		cs.config.MinCorroboratingPeers <= 0 {
+	if !cs.genesisCorroborationActiveLocked() {
 		return true
 	}
 	return cs.corroboratingPeersLocked(connId, peerTip) >=
@@ -129,15 +169,15 @@ func (cs *ChainSelector) rawDensityLeaderLocked() (
 	return leader, bestDensity, found
 }
 
-// genesisCorroborationFailureLocked returns a GenesisCorroborationFailedEvent
-// when the densest Genesis fast source cannot be corroborated, deduped so a
-// persistently uncorroborated leader emits once (not on every evaluation).
-// Returns nil outside Genesis corroboration, when the leader is corroborated,
-// or when the same failure was already reported.
+// genesisCorroborationFailureLocked warns (deduped) and returns a
+// GenesisCorroborationFailedEvent when the densest Genesis fast source cannot be
+// corroborated. The warning log and dedup run whether or not an EventBus is
+// configured, so an enabled gate that is stalling bootstrap is always visible;
+// only event publishing needs the bus. Returns nil outside Genesis
+// corroboration, when the leader is corroborated, when the same failure was
+// already reported, or when no EventBus is configured to publish to.
 func (cs *ChainSelector) genesisCorroborationFailureLocked() *event.Event {
-	if cs.config.EventBus == nil ||
-		cs.mode != SelectionModeGenesis ||
-		cs.config.MinCorroboratingPeers <= 0 {
+	if !cs.genesisCorroborationActiveLocked() {
 		cs.lastCorroborationFailedConn = nil
 		return nil
 	}
@@ -165,6 +205,9 @@ func (cs *ChainSelector) genesisCorroborationFailureLocked() *event.Event {
 		"required_peers", cs.config.MinCorroboratingPeers,
 		"genesis_window_slots", cs.genesisWindowSlotsLocked(),
 	)
+	if cs.config.EventBus == nil {
+		return nil
+	}
 	evt := event.NewEvent(
 		GenesisCorroborationFailedEventType,
 		GenesisCorroborationFailedEvent{

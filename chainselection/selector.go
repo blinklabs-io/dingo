@@ -272,6 +272,12 @@ func (cs *ChainSelector) advanceSelectionModeLocked() bool {
 	bestSlot := cs.bestKnownGenesisSlotLocked()
 	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
+	// Corroboration no longer applies in Praos; drop the per-peer hash
+	// frontier so it does not linger for the full window on every tracked peer.
+	for _, peerTip := range cs.peerTips {
+		peerTip.observedPoints = nil
+	}
+	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
 		"exiting Genesis selection mode",
 		"local_slot", localSlot,
@@ -413,6 +419,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			}
 		}
 
+		trackHashes := cs.genesisCorroborationActiveLocked()
 		if peerTip, exists := cs.peerTips[connId]; exists {
 			peerTip.UpdateTipWithObservedPraosView(
 				tip,
@@ -423,6 +430,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			peerTip.recordObservedPoint(
 				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
+				trackHashes,
 			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
@@ -450,6 +458,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			peerTip.recordObservedPoint(
 				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
+				trackHashes,
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -464,9 +473,15 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		)
 
 		// Check if this peer's tip is better than the current best peer's tip
-		if modeChanged {
+		switch {
+		case modeChanged:
 			shouldEvaluate = true
-		} else if cs.bestPeerConn != nil {
+		case trackHashes:
+			// Under Genesis corroboration any peer's frontier change can grant
+			// or revoke corroboration of the incumbent/leader, so always
+			// re-evaluate rather than only when this peer beats the best.
+			shouldEvaluate = true
+		case cs.bestPeerConn != nil:
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
 				shouldEvaluate = cs.comparePeerTips(
 					connId,
@@ -475,7 +490,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 					bestPeerTip,
 				) == ChainABetter
 			}
-		} else {
+		default:
 			// No best peer yet, trigger evaluation
 			shouldEvaluate = true
 		}
@@ -605,12 +620,19 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 // RemovePeer removes a peer from tracking.
 func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	var switchEvent *event.Event
+	var reevaluate bool
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
 		cs.deletePeerLocked(connId)
+
+		// Removing a witness can revoke the incumbent's corroboration even
+		// when the removed peer was not itself the best; force a re-evaluation
+		// so an incumbent that just lost corroboration is dropped.
+		reevaluate = cs.genesisCorroborationActiveLocked() &&
+			(cs.bestPeerConn == nil || *cs.bestPeerConn != connId)
 
 		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 			previousBest := *cs.bestPeerConn
@@ -653,6 +675,10 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	// call back into ChainSelector
 	if switchEvent != nil {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+	}
+	cs.publishPendingGenesisExitEvent()
+	if reevaluate {
+		cs.EvaluateAndSwitch()
 	}
 }
 
@@ -788,8 +814,12 @@ func (cs *ChainSelector) PeerCount() int {
 // the peer with the best chain.
 func (cs *ChainSelector) SelectBestChain() *ouroboros.ConnectionId {
 	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
-	return cs.selectBestChainLocked()
+	best := cs.selectBestChainLocked()
+	cs.mutex.Unlock()
+	// selectBestChainLocked may have exited Genesis mode; publish the staged
+	// exit event outside the lock.
+	cs.publishPendingGenesisExitEvent()
+	return best
 }
 
 func (cs *ChainSelector) isPeerSelectableLocked(
@@ -797,23 +827,12 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	peerTip *PeerChainTip,
 	logSkip bool,
 ) bool {
-	if peerTip == nil {
-		return false
-	}
-	if cs.config.ConnectionLive != nil &&
-		!cs.config.ConnectionLive(connId) {
+	// Shared live/eligible/non-stale prerequisite (single source of truth,
+	// also used by the Genesis corroboration witness check).
+	if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
-				"skipping closed peer",
-				"connection_id", connId.String(),
-			)
-		}
-		return false
-	}
-	if !cs.isConnectionEligible(connId) {
-		if logSkip {
-			cs.config.Logger.Debug(
-				"skipping ineligible peer",
+				"skipping closed, ineligible, or stale peer",
 				"connection_id", connId.String(),
 			)
 		}
@@ -854,16 +873,6 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 			}
 			return false
 		}
-	}
-	if cs.isPeerTipStale(peerTip) {
-		if logSkip {
-			cs.config.Logger.Debug(
-				"skipping stale peer",
-				"connection_id", connId.String(),
-				"last_updated", peerTip.LastUpdated,
-			)
-		}
-		return false
 	}
 	// Genesis corroboration gate: a fast source must be corroborated by the
 	// configured minimum number of independent peers before it can steer
@@ -1582,4 +1591,5 @@ func (cs *ChainSelector) cleanupStalePeers() {
 	if switchEvent != nil {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
 	}
+	cs.publishPendingGenesisExitEvent()
 }
