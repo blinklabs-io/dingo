@@ -127,9 +127,6 @@ func (o *Ouroboros) instrumentTxsubmissionRequestTxs(
 func (o *Ouroboros) txsubmissionClientStart(
 	connId ouroboros.ConnectionId,
 ) error {
-	// Register mempool consumer
-	o.Mempool.AddConsumer(connId)
-	// Start TxSubmission loop
 	conn := o.ConnManager.GetConnectionById(connId)
 	if conn == nil {
 		return fmt.Errorf("failed to lookup connection ID: %s", connId.String())
@@ -141,6 +138,9 @@ func (o *Ouroboros) txsubmissionClientStart(
 			connId.String(),
 		)
 	}
+	// Register only after all required connection state has been verified. This
+	// avoids leaving a stale consumer behind when startup cannot proceed.
+	o.Mempool.AddConsumer(connId)
 	tx.Client.Init()
 	return nil
 }

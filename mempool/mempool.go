@@ -418,9 +418,11 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 }
 
 func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
-	// Create consumer
 	m.consumersMutex.Lock()
 	defer m.consumersMutex.Unlock()
+	if consumer := m.consumers[connId]; consumer != nil {
+		return consumer
+	}
 	consumer := newConsumer(m)
 	m.consumers[connId] = consumer
 	return consumer

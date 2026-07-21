@@ -286,6 +286,29 @@ func TestTxSubmissionServerInitMissingConnectionReturnsCleanly(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(t *testing.T) {
+	o, connId := newTxSubmissionTestOuroboros(t)
+
+	err := o.txsubmissionClientStart(connId)
+
+	require.Error(t, err)
+	require.ErrorContains(t, err, "failed to lookup connection ID")
+	require.Nil(t, o.Mempool.Consumer(connId))
+}
+
+func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
+	h := newTxSubmissionRelayHarness(t)
+	defer h.close(t)
+	connId := h.connB.Id()
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(connId))
+	first := h.mB.Consumer(connId)
+	require.NotNil(t, first)
+
+	require.NoError(t, h.nodeB.txsubmissionClientStart(connId))
+	require.Same(t, first, h.mB.Consumer(connId))
+}
+
 // TestTxSubmissionConnectionClosedCleanup verifies connection close handling
 // removes txsubmission consumer and rate-limiter state for that peer.
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {

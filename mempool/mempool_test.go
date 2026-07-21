@@ -330,6 +330,18 @@ func TestMempool_AddRemoveConsumer(t *testing.T) {
 	m.consumersMutex.Unlock()
 }
 
+func TestMempool_AddConsumerIsIdempotent(t *testing.T) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+	connId := newTestConnectionId(0)
+
+	first := m.AddConsumer(connId)
+	second := m.AddConsumer(connId)
+
+	require.Same(t, first, second)
+	assert.Len(t, m.consumers, 1)
+}
+
 func TestMempoolConsumer_NextTx_NonBlocking(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
