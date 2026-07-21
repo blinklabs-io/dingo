@@ -57,6 +57,23 @@ Thank you for trying!
 
 ### 🔧 修正
 
+* 修正しました NtC で CertRB を配信する前に certified endorser closure を待ち、未解決の connection を閉じ、wait duration metrics を記録します。
+* 是正しました UTXO cleanup query から `ORDER BY id DESC` を外し、MySQL、Postgres、SQLite 全体で不要な並び替えをなくします。
+* 安定化しました reward live stake index lookup で spent row を Go 側で絞り込み、SQLite query-plan の挙動を保ちます。
+
+### 推奨ネットワーク互換性 ⚠️
+
+| Network             | Compatible |
+|---------------------|------------|
+| mainnet             | ⛔         |
+| preprod-testnet     | ✅         |
+| preview-testnet     | ✅         |
+| musashi             | ✅         |
+
+### 🙏 感謝
+
+ご利用ありがとうございます。
+
 ### 🇪🇸 Español
 
 **Título:** Actualizar las dependencias principales, añadir cobertura de conformance para MySQL y mejorar la estabilidad de la base de datos
