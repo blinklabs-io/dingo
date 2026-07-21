@@ -1264,6 +1264,7 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 	// Modify returned transaction
 	originalHash := txs[0].Hash
 	txs[0].Hash = "modified-hash"
+	txs[0].Cbor[0] = 'X'
 
 	// Verify mempool transaction is unchanged
 	mempoolTxs := m.Transactions()
@@ -1273,6 +1274,7 @@ func TestMempool_Transactions_ReturnsCopies(t *testing.T) {
 		mempoolTxs[0].Hash,
 		"mempool should return copies",
 	)
+	assert.NotEqual(t, byte('X'), mempoolTxs[0].Cbor[0], "CBOR should be copied")
 }
 
 func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
@@ -1288,11 +1290,39 @@ func TestMempool_GetTransaction_ReturnsCopy(t *testing.T) {
 
 	// Modify returned transaction
 	tx.Hash = "modified"
+	tx.Cbor[0] = 'X'
 
 	// Verify mempool transaction is unchanged
 	tx2, exists := m.GetTransaction("tx-hash-0")
 	require.True(t, exists)
 	assert.Equal(t, "tx-hash-0", tx2.Hash, "mempool should return copy")
+	assert.NotEqual(t, byte('X'), tx2.Cbor[0], "CBOR should be copied")
+}
+
+func TestMempoolConsumer_ReturnsImmutableCopies(t *testing.T) {
+	m := newTestMempool(t)
+	defer m.Stop(context.Background())
+
+	txs := addMockTransactions(t, m, 1)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+
+	nextTx := consumer.NextTx(false)
+	require.NotNil(t, nextTx)
+	nextTx.Cbor[0] = 'X'
+
+	cachedTx := consumer.GetTxFromCache(txs[0].Hash)
+	require.NotNil(t, cachedTx)
+	assert.NotEqual(t, byte('X'), cachedTx.Cbor[0], "cache should not alias NextTx")
+	cachedTx.Cbor[0] = 'Y'
+
+	cachedTxAgain := consumer.GetTxFromCache(txs[0].Hash)
+	require.NotNil(t, cachedTxAgain)
+	assert.NotEqual(t, byte('Y'), cachedTxAgain.Cbor[0], "cache reads should be copied")
+
+	poolTx, ok := m.GetTransaction(txs[0].Hash)
+	require.True(t, ok)
+	assert.NotEqual(t, byte('X'), poolTx.Cbor[0], "pool should not alias NextTx")
+	assert.NotEqual(t, byte('Y'), poolTx.Cbor[0], "pool should not alias cache")
 }
 
 func TestMempool_AddTransaction_DuplicateUpdatesLastSeen(t *testing.T) {

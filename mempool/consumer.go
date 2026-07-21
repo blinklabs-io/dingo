@@ -44,8 +44,12 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 
 		// Check if we have a transaction available
 		if m.nextTxIdx < len(m.mempool.transactions) {
-			nextTx := m.mempool.transactions[m.nextTxIdx]
-			if nextTx != nil {
+			poolTx := m.mempool.transactions[m.nextTxIdx]
+			if poolTx != nil {
+				// Clone while holding the pool read lock so neither the caller
+				// nor the consumer cache shares mutable CBOR with pool storage.
+				nextTx := cloneMempoolTransaction(poolTx)
+				cachedTx := cloneMempoolTransaction(poolTx)
 				// Increment next TX index atomically with reading it
 				m.nextTxIdx++
 				m.nextTxIdxMu.Unlock()
@@ -53,7 +57,7 @@ func (m *MempoolConsumer) NextTx(blocking bool) *MempoolTransaction {
 
 				// Add transaction to cache (outside of locks)
 				m.cacheMutex.Lock()
-				m.cache[nextTx.Hash] = nextTx
+				m.cache[cachedTx.Hash] = cachedTx
 				m.cacheMutex.Unlock()
 
 				return nextTx
@@ -103,7 +107,7 @@ func (m *MempoolConsumer) GetTxFromCache(hash string) *MempoolTransaction {
 	if m != nil {
 		m.cacheMutex.Lock()
 		defer m.cacheMutex.Unlock()
-		return m.cache[hash]
+		return cloneMempoolTransaction(m.cache[hash])
 	}
 	var ret *MempoolTransaction
 	return ret
