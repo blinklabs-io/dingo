@@ -8,17 +8,16 @@
 
 **Version:** v0.66.2
 
-This release updates core dependencies and CI tooling, adds MySQL-backed conformance coverage, and corrects NtC CertRB serving and database query behavior so processing stays stable during cleanup and reward lookups.
+This release updates core dependencies and CI workflows, expands MySQL-backed conformance coverage, and corrects NtC CertRB serving and database query behavior so cleanup and reward lookups stay stable.
 
 ### 💪 Improvements
 
-* Updated `golang.org/x/net` to `0.57.0`, keeping the network helper dependency current.
-* Refreshed `github.com/aws/smithy-go` to `1.27.4`, keeping AWS request handling current.
+* Updated the network helper library to `0.57.0`, keeping network behavior current.
+* Refreshed the AWS Smithy library to `1.27.4`, keeping AWS request handling current.
 * Improved `github.com/aws/aws-sdk-go-v2/credentials` to `1.19.29`, along with related AWS SDK v2 dependencies, keeping credential handling current.
-
 * Modernized CI workflows to use `actions/setup-go` `7.0.0`, keeping `go test`, `golangci-lint`, and publish jobs on the newer action.
-* Added MySQL-backed conformance tests through the ouroboros-mock harness, with Docker Compose support and CI wiring for execution.
-* Bumped `github.com/ipfs/go-cid` to `0.6.2`, keeping CID handling current.
+* Expanded MySQL-backed conformance coverage through the ouroboros-mock harness, with Docker Compose support and CI wiring for execution.
+* Revised `github.com/ipfs/go-cid` to `0.6.2`, keeping CID handling current.
 
 ### 🔧 Fixes
 
