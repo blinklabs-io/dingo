@@ -879,6 +879,11 @@ func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
 	return &ret
 }
 
+// CapacityBytes returns the configured maximum mempool size in bytes.
+func (m *Mempool) CapacityBytes() int64 {
+	return m.config.MempoolCapacity
+}
+
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
 	return m.txByHash[txHash]
 }
