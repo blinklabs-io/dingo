@@ -75,6 +75,7 @@ Thank you for trying!
 ### 🙏 感謝
 
 ご利用ありがとうございます。
+
 ### 🇪🇸 Español
 
 **Título:** Actualizar las dependencias principales, añadir cobertura de conformance para MySQL y mejorar la estabilidad de la base de datos
