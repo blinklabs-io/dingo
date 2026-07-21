@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/ledger/eras"
 	ledgersnapshot "github.com/blinklabs-io/dingo/ledger/snapshot"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/consensus"
@@ -1551,6 +1552,110 @@ func TestVerifyBlockLeaderEligibility_EligiblePoolPasses(t *testing.T) {
 
 	err := ls.verifyBlockLeaderEligibility(tb.block, 5)
 	assert.NoError(t, err, "eligible pool with full stake should pass")
+}
+
+// TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake is a golden
+// regression for Preview block 5ac88b23fb3060edbc1e478976b75033b82b64941d6b9830559f938b31e915a8
+// at slot 117744396. The block is a deliberately narrow CPraos winner: the
+// reward-stale distribution reported by dingo v0.65.1 rejects it, while the
+// reward-inclusive active distribution accepts it. This pins the fact that a
+// seemingly small stake discrepancy cannot be tolerated in consensus.
+func TestVerifyBlockLeaderEligibility_Issue2876RewardInclusiveStake(
+	t *testing.T,
+) {
+	const (
+		epoch               = uint64(1362)
+		snapshotEpoch       = uint64(1361)
+		slot                = uint64(117744396)
+		stalePoolStake      = uint64(21_256_151_898_192)
+		staleTotalStake     = uint64(3_267_403_053_048_802)
+		referencePoolStake  = uint64(21_281_013_692_685)
+		referenceTotalStake = uint64(3_268_194_725_993_512)
+	)
+
+	issuerVkey, err := hex.DecodeString(
+		"959dc65b2759195a259bce816606dfc6b4772c0544a2668595cb2629be0e48f7",
+	)
+	require.NoError(t, err)
+	vrfOutput, err := hex.DecodeString(
+		"ee98d65a916622d87cc9661dd9440884cf7fbca9bf6e183b99dfcf2bd915b7b" +
+			"e66ad2e184fdfa0bf7e4c5e5c47733b83b98fbe1e336e00c7ceca3a7832f04b64",
+	)
+	require.NoError(t, err)
+
+	var issuer lcommon.IssuerVkey
+	copy(issuer[:], issuerVkey)
+	headerBody := babbage.BabbageBlockHeaderBody{
+		Slot:       slot,
+		IssuerVkey: issuer,
+		VrfResult: lcommon.VrfResult{
+			Output: vrfOutput,
+		},
+	}
+	headerBodyCbor, err := cbor.Encode(headerBody)
+	require.NoError(t, err)
+	headerBody.SetCbor(headerBodyCbor)
+	block := &realBabbageBlock{
+		header: &babbage.BabbageBlockHeader{Body: headerBody},
+		era:    babbage.EraBabbage,
+		slot:   slot,
+	}
+
+	for _, test := range []struct {
+		name       string
+		poolStake  uint64
+		totalStake uint64
+		wantErr    bool
+	}{
+		{
+			name:       "v0.65.1 reward-stale snapshot rejects",
+			poolStake:  stalePoolStake,
+			totalStake: staleTotalStake,
+			wantErr:    true,
+		},
+		{
+			name:       "reward-inclusive snapshot accepts",
+			poolStake:  referencePoolStake,
+			totalStake: referenceTotalStake,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ls, db := newEligibilityTestLedger(t, nil)
+			ls.config.CardanoNodeConfig = newTestShelleyGenesisCfg(t)
+			ls.epochCache = []models.Epoch{{
+				EpochId:       epoch,
+				StartSlot:     slot - 1,
+				LengthInSlots: 2,
+				EraId:         eras.ConwayEraDesc.Id,
+			}}
+			ls.publishSnapshotsLocked()
+
+			poolKeyHash := block.IssuerVkey().Hash()
+			seedPoolStakeSnapshot(
+				t, db, snapshotEpoch, poolKeyHash[:], test.poolStake,
+			)
+			dummyPool := bytes.Repeat([]byte{0xff}, lcommon.Blake2b224Size)
+			seedPoolStakeSnapshot(
+				t,
+				db,
+				snapshotEpoch,
+				dummyPool,
+				test.totalStake-test.poolStake,
+			)
+
+			err := ls.verifyBlockLeaderEligibility(block, epoch)
+			if test.wantErr {
+				require.Error(t, err)
+				assert.Contains(
+					t,
+					err.Error(),
+					"VRF leader value exceeds stake-derived threshold",
+				)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestVerifyBlockLeaderEligibility_MithrilEpochRequiresActiveDistribution(
