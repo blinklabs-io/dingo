@@ -57,6 +57,24 @@ Thank you for trying!
 
 ### 🔧 修正
 
+### 🇪🇸 Español
+
+**Título:** Actualizar las dependencias principales, añadir cobertura de conformance para MySQL y mejorar la estabilidad de la base de datos
+
+**Fecha:** July 21, 2026
+
+**Versión:** v0.66.2
+
+Esta versión actualiza dependencias principales y herramientas de CI, añade cobertura de conformance respaldada por MySQL y corrige la publicación de CertRB en NtC y el comportamiento de consultas de base de datos para mantener estables el cleanup y las búsquedas de reward.
+
+### 💪 Mejoras
+
+* Actualizó `golang.org/x/net` a `0.57.0`, manteniendo actualizada la dependencia de utilidades de red.
+* Renovó `github.com/aws/smithy-go` a `1.27.4`, manteniendo actualizada la gestión de solicitudes de AWS.
+* Mejoró `github.com/aws/aws-sdk-go-v2/credentials` a `1.19.29`, junto con las dependencias transversales relacionadas de AWS SDK v2, manteniendo actualizada la gestión de credenciales.
+
+### 🔧 Correcciones
+
 ## v0.66.1 (July 20, 2026)
 
 **Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
