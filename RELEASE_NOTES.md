@@ -1,5 +1,23 @@
 # Dingo Releases
 
+## v0.66.2 (July 21, 2026)
+
+**Title:** Update core dependencies, add MySQL conformance coverage, and improve database stability
+
+**Date:** July 21, 2026
+
+**Version:** v0.66.2
+
+This release updates core dependencies and CI tooling, adds MySQL-backed conformance coverage, and corrects NtC CertRB serving and database query behavior so processing stays stable during cleanup and reward lookups.
+
+### 💪 Improvements
+
+* Updated `golang.org/x/net` to `0.57.0`, keeping the network helper dependency current.
+* Refreshed `github.com/aws/smithy-go` to `1.27.4`, keeping AWS request handling current.
+* Improved `github.com/aws/aws-sdk-go-v2/credentials` to `1.19.29`, along with related AWS SDK v2 dependencies, keeping credential handling current.
+
+### 🔧 Fixes
+
 ## v0.66.1 (July 20, 2026)
 
 **Title:** Refresh release notes, keep dependencies current, and stabilize live stake indexing
