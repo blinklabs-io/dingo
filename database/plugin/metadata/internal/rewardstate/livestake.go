@@ -134,16 +134,26 @@ func stakeRefsFromUtxoIDs(
 			AddedSlot     uint64
 			DeletedSlot   uint64
 		}
+		// Do NOT add a SQL `deleted_slot = 0` filter for liveOnly here.
+		// The OR-chain over (tx_id, output_idx) resolves through the unique
+		// index tx_id_output_idx (SQLite MULTI-INDEX OR: one index lookup per
+		// pair). Adding `AND deleted_slot = 0` makes SQLite switch to the
+		// deleted_slot index (idx_utxo_deleted_payment_script) and scan every
+		// live UTxO evaluating the whole OR-chain per row (O(live_utxos x
+		// terms)), which wedges the node at every epoch boundary during
+		// from-genesis sync. Because (tx_id, output_idx) is UNIQUE the OR-chain
+		// returns at most one row per pair, so filtering spent rows in Go below
+		// is trivially cheap and yields an identical result set.
 		query := db.Model(&models.Utxo{}).
 			Select("credential_tag", "staking_key", "added_slot", "deleted_slot").
 			Where(strings.Join(conditions, " OR "), args...)
-		if liveOnly {
-			query = query.Where("deleted_slot = 0")
-		}
 		if err := query.Find(&rows).Error; err != nil {
 			return nil, err
 		}
 		for _, row := range rows {
+			if liveOnly && row.DeletedSlot != 0 {
+				continue
+			}
 			refSlot := slot
 			if refSlot == 0 {
 				refSlot = row.AddedSlot
