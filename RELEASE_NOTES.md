@@ -40,19 +40,22 @@ Thank you for trying!
 
 ### 🇯🇵 日本語
 
-**タイトル:** 依存関係を更新し、MySQL conformance coverage と database の安定性を強化
+**タイトル:** 依存関係を更新し、MySQL-backed conformance coverage と database の安定性を強化
 
 **日付:** July 21, 2026
 
 **バージョン:** v0.66.2
 
-このリリースでは、主要な依存関係と CI ツールを更新し、MySQL-backed の conformance coverage を追加し、NtC の CertRB 配信と database の query 挙動を整えて、cleanup と reward lookup の最中も処理を安定させます。
+このリリースでは、主要な依存関係と CI ワークフローを更新し、MySQL-backed の conformance coverage を拡張し、NtC の CertRB 配信と database の query 挙動を整えて、cleanup と reward lookup の間も処理を安定させます。
 
 ### 💪 改善
 
 * 更新しました `golang.org/x/net` を `0.57.0` にし、network helper の依存関係を最新に保ちます。
 * 改訂しました `github.com/aws/smithy-go` を `1.27.4` にし、AWS request handling を最新に保ちます。
 * 改善しました `github.com/aws/aws-sdk-go-v2/credentials` を `1.19.29` にし、関連する AWS SDK v2 依存関係も更新して credential handling を最新に保ちます。
+* 近代化しました CI workflow で `actions/setup-go` を `7.0.0` にし、`go test`、`golangci-lint`、publish job を新しい action で実行します。
+* 拡張しました ouroboros-mock harness を使った MySQL-backed conformance coverage を広げ、Docker Compose support と CI wiring で実行しやすくします。
+* 刷新しました `github.com/ipfs/go-cid` を `0.6.2` にし、CID handling を最新に保ちます。
 
 ### 🔧 修正
 
@@ -72,7 +75,6 @@ Thank you for trying!
 ### 🙏 感謝
 
 ご利用ありがとうございます。
-
 ### 🇪🇸 Español
 
 **Título:** Actualizar las dependencias principales, añadir cobertura de conformance para MySQL y mejorar la estabilidad de la base de datos
