@@ -2041,3 +2041,137 @@ func TestCalculateMinPoolMarginRange(t *testing.T) {
 	_, err = minMarginCalc(big.NewRat(1, 50), big.NewRat(1, 1))
 	require.NoError(t, err)
 }
+
+// --- CIP-50 pledge leverage ---
+
+// leveragePoolResult runs Calculate for a single pool sized to exercise the
+// CIP-50 pledge-leverage cap. It reuses the shared testParams() economics
+// (rho=1/100, a0=1/2, k=10) with Reserves=100_000_000 and
+// MaxLovelaceSupply=100_010_000, giving totalCirculation=10_000 and
+// AvailableRewards=1_000_000. BlocksProduced==TotalBlocks and
+// DelegatedStake==TotalActiveStake make apparentPerformance==1, so
+// PoolReward==OptimalReward. enabled toggles the leverage cap; l is L and is
+// ignored when disabled.
+func leveragePoolResult(
+	t *testing.T,
+	pledge, ownerStake uint64,
+	enabled bool,
+	l *big.Rat,
+) *Result {
+	t.Helper()
+	result, err := leverageCalc(pledge, ownerStake, enabled, l)
+	require.NoError(t, err)
+	return result
+}
+
+func leverageCalc(
+	pledge, ownerStake uint64,
+	enabled bool,
+	l *big.Rat,
+) (*Result, error) {
+	owner := testCredential(0, 2)
+	member := testCredential(0, 3)
+
+	params := testParams()
+	params.PledgeLeverageEnabled = enabled
+	params.PledgeLeverage = l
+
+	return Calculate(
+		Pots{Reserves: 100_000_000},
+		Snapshot{
+			TotalActiveStake: 1_000,
+			Pools: []Pool{
+				{
+					ID:                      testPoolID(1),
+					RewardAccount:           testCredential(0, 4),
+					Margin:                  big.NewRat(1, 10),
+					Pledge:                  pledge,
+					Cost:                    1_000,
+					DelegatedStake:          1_000,
+					OwnerStake:              ownerStake,
+					BlocksProduced:          10,
+					TotalBlocks:             10,
+					RewardAccountRegistered: true,
+					RewardAccountEligible:   true,
+					Owners:                  map[Credential]struct{}{owner: {}},
+					Delegators: []Delegator{
+						{
+							Credential: owner,
+							Stake:      ownerStake,
+							Registered: true,
+							Eligible:   true,
+						},
+						{
+							Credential: member,
+							Stake:      1_000 - ownerStake,
+							Registered: true,
+							Eligible:   true,
+						},
+					},
+				},
+			},
+		},
+		params,
+	)
+}
+
+// With pledge fraction p = 100/10_000 = 1/100 and L=5, the leverage cap
+// L*p = 1/20 is below min(sigma, z0) = 1/10, so eligible stake sigma' is
+// capped at 1/20 (halved), reducing the optimal reward from 70_000 to 34_833.
+func TestCalculatePledgeLeverageCapsEligibleStake(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, true, big.NewRat(5, 1))
+	require.Equal(t, uint64(34_833), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(34_833), result.PoolRewards[0].PoolReward)
+}
+
+// Disabled is the regression guard: the eligible stake and reward match the
+// current (pre-CIP-50) formula exactly.
+func TestCalculatePledgeLeverageDisabledMatchesBaseline(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, false, nil)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
+}
+
+// A well-pledged pool (here L=100 => L*p = 1, far above z0=1/10) is unaffected
+// by the cap and earns the same reward as with the feature disabled.
+func TestCalculatePledgeLeverageWellPledgedUnaffected(t *testing.T) {
+	result := leveragePoolResult(t, 100, 100, true, big.NewRat(100, 1))
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(70_000), result.PoolRewards[0].PoolReward)
+}
+
+// A zero-pledge pool earns zero rewards under CIP-50 (L*p = 0 => sigma' = 0),
+// a break from the current formula where it would earn 66_666.
+func TestCalculatePledgeLeverageZeroPledgeZerosPoolReward(t *testing.T) {
+	result := leveragePoolResult(t, 0, 0, true, big.NewRat(5, 1))
+	require.Equal(t, uint64(0), result.PoolRewards[0].OptimalReward)
+	require.Equal(t, uint64(0), result.PoolRewards[0].PoolReward)
+	require.Empty(t, result.AccountRewards)
+}
+
+// L below the minimum of 1 is rejected when the feature is enabled.
+func TestCalculateRejectsPledgeLeverageBelowMinimum(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(1, 2))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// L above the maximum of 10000 is rejected when the feature is enabled.
+func TestCalculateRejectsPledgeLeverageAboveMaximum(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(10_001, 1))
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// Enabling the feature without supplying L is rejected rather than silently
+// treated as disabled.
+func TestCalculateRejectsPledgeLeverageEnabledWithoutValue(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, nil)
+	require.ErrorIs(t, err, ErrInvalidParameters)
+}
+
+// The inclusive bounds L=1 and L=10000 are accepted.
+func TestCalculateAllowsPledgeLeverageAtBounds(t *testing.T) {
+	_, err := leverageCalc(100, 100, true, big.NewRat(1, 1))
+	require.NoError(t, err)
+	_, err = leverageCalc(100, 100, true, big.NewRat(10_000, 1))
+	require.NoError(t, err)
+}

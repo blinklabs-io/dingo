@@ -319,6 +319,15 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// CIP-50 pledge leverage L must be within [1, 10000] when enabled.
+	if c.PledgeLeverageEnabled &&
+		(c.PledgeLeverage < 1 || c.PledgeLeverage > 10000) {
+		errs = append(errs, fmt.Errorf(
+			"pledgeLeverage (%d) must be in [1, 10000] when pledgeLeverageEnabled",
+			c.PledgeLeverage,
+		))
+	}
+
 	// Network identity
 	if c.Network == "" {
 		if c.NetworkMagic == 0 {

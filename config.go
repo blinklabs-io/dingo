@@ -196,6 +196,10 @@ type Config struct {
 	// CIP-23 minimum pool margin (minimum variable fee) in basis points,
 	// [0, 10000]; consensus-affecting, 0 = off; effective only in Dijkstra+.
 	minPoolMargin uint
+	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default
+	// off). pledgeLeverage is L in [1, 10000], used only when enabled.
+	pledgeLeverageEnabled bool
+	pledgeLeverage        uint
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
@@ -444,6 +448,13 @@ func (n *Node) configValidate() error {
 		return fmt.Errorf(
 			"min pool margin (%d) must be in [0, 10000] basis points",
 			n.config.minPoolMargin,
+		)
+	}
+	if n.config.pledgeLeverageEnabled &&
+		(n.config.pledgeLeverage < 1 || n.config.pledgeLeverage > 10_000) {
+		return fmt.Errorf(
+			"pledge leverage (%d) must be in [1, 10000] when enabled",
+			n.config.pledgeLeverage,
 		)
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
@@ -905,6 +916,17 @@ func WithMinPoolMargin(basisPoints uint) ConfigOptionFunc {
 	}
 }
 
+// WithPledgeLeverage configures the CIP-50 pledge-leverage staking reward cap.
+// It is consensus-affecting and disabled by default; enable it only on a
+// network where every node also enables it. leverage is L, the maximum ratio
+// of total stake to pledge, and is used only when enabled.
+func WithPledgeLeverage(enabled bool, leverage uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.pledgeLeverageEnabled = enabled
+		c.pledgeLeverage = leverage
+	}
+}
+
 // WithShelleyVRFKey specifies the path to the VRF signing key file (CARDANO_SHELLEY_VRF_KEY).
 // Required for block production.
 func WithShelleyVRFKey(path string) ConfigOptionFunc {
@@ -1103,7 +1125,10 @@ func WithStorageMode(mode StorageMode) ConfigOptionFunc {
 
 // WithCacheConfig sets the CBOR cache sizes for block LRU,
 // hot UTxO, and hot TX caches.
-func WithCacheConfig(blockLRU, hotUtxo, hotTx int, hotTxMaxBytes int64) ConfigOptionFunc {
+func WithCacheConfig(
+	blockLRU, hotUtxo, hotTx int,
+	hotTxMaxBytes int64,
+) ConfigOptionFunc {
 	return func(c *Config) {
 		c.cacheBlockLRUEntries = blockLRU
 		c.cacheHotUtxoEntries = hotUtxo

@@ -411,6 +411,46 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestValidatePledgeLeverage(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		l       uint
+		wantErr string
+	}{
+		{name: "disabled ignores out-of-range value", enabled: false, l: 0},
+		{name: "enabled at minimum", enabled: true, l: 1},
+		{name: "enabled within range", enabled: true, l: 100},
+		{name: "enabled at maximum", enabled: true, l: 10_000},
+		{
+			name:    "enabled below minimum",
+			enabled: true,
+			l:       0,
+			wantErr: "pledgeLeverage",
+		},
+		{
+			name:    "enabled above maximum",
+			enabled: true,
+			l:       10_001,
+			wantErr: "pledgeLeverage",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.PledgeLeverageEnabled = tt.enabled
+			cfg.PledgeLeverage = tt.l
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 // TestValidatePrivilegedPortAllowedWhenBindable covers a process that
 // may bind any port (root, Windows, or CAP_NET_BIND_SERVICE):
 // minBindable is 0, so a sub-1024 port passes.

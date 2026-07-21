@@ -2191,6 +2191,10 @@ func (ls *LedgerState) rewardParameters(
 	// Dijkstra and later. Single chokepoint feeding both the boundary apply and
 	// the async precompute, so both agree.
 	applyMinPoolMarginConfig(&params, ls.config)
+	// CIP-50: overlay the operator-configured pledge-leverage feature gate onto
+	// the on-chain-derived parameters. This is the single chokepoint feeding
+	// both the boundary apply and the async precompute path, so both agree.
+	applyPledgeLeverageConfig(&params, ls.config)
 	if params.MaxLovelaceSupply < uint64(pots.Reserves) {
 		return nil, rewards.Parameters{}, nil, fmt.Errorf(
 			"invalid reward pots: reserves %d exceed max supply %d",
@@ -2958,6 +2962,20 @@ func rewardFromAccountOutput(
 		Type:       rewards.RewardType(output.RewardType),
 		Spendable:  output.Spendable,
 	}, nil
+}
+
+// applyPledgeLeverageConfig copies the CIP-50 pledge-leverage feature gate from
+// the ledger config onto the reward parameters, converting the integer L to the
+// rational the rewards package expects. When the feature is disabled the
+// pledge-leverage value is cleared (PledgeLeverage stays nil), preserving the
+// pre-CIP-50 formula.
+func applyPledgeLeverageConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
+	params.PledgeLeverageEnabled = cfg.PledgeLeverageEnabled
+	if cfg.PledgeLeverageEnabled {
+		params.PledgeLeverage = new(big.Rat).SetUint64(uint64(cfg.PledgeLeverage))
+	} else {
+		params.PledgeLeverage = nil
+	}
 }
 
 func rewardParametersFromPParams(

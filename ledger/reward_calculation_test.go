@@ -3879,6 +3879,29 @@ func TestRewardParametersRejectIncompletePParams(t *testing.T) {
 	require.ErrorContains(t, err, "missing treasury expansion")
 }
 
+func TestApplyPledgeLeverageConfigEnabledSetsRationalL(t *testing.T) {
+	params := rewards.Parameters{}
+	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+		PledgeLeverageEnabled: true,
+		PledgeLeverage:        100,
+	})
+	require.True(t, params.PledgeLeverageEnabled)
+	require.Equal(t, big.NewRat(100, 1), params.PledgeLeverage)
+}
+
+func TestApplyPledgeLeverageConfigDisabledClearsL(t *testing.T) {
+	params := rewards.Parameters{
+		PledgeLeverageEnabled: true,
+		PledgeLeverage:        big.NewRat(50, 1),
+	}
+	applyPledgeLeverageConfig(&params, LedgerStateConfig{
+		PledgeLeverageEnabled: false,
+		PledgeLeverage:        100,
+	})
+	require.False(t, params.PledgeLeverageEnabled)
+	require.Nil(t, params.PledgeLeverage)
+}
+
 func TestRewardBlockCountsTotalIncludesPoolsOutsideSnapshot(t *testing.T) {
 	ls, db := newRewardCalculationTestLedger(t)
 	meta := db.Metadata()

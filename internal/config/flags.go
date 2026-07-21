@@ -173,6 +173,10 @@ var flagSpecs = []flagSpec{
 	// CIP-23 minimum pool margin / minimum variable fee (consensus-affecting; default 0 = off)
 	uintFlag("MinPoolMargin", "min-pool-margin", "CIP-23 minimum pool margin in basis points [0,10000] (150 = 1.5%); 0 disables (enable only where every node also enables it)"),
 
+	// CIP-50 pledge-leverage staking rewards (consensus-affecting; default off)
+	boolFlag("PledgeLeverageEnabled", "pledge-leverage-enabled", "enable the CIP-50 pledge-leverage reward cap (only where every node also enables it)"),
+	uintFlag("PledgeLeverage", "pledge-leverage", "CIP-50 max pledge leverage L in [1,10000] (used when pledge-leverage-enabled)"),
+
 	// Leios voting (experimental)
 	stringFlag("LeiosVoteSigningKeyFile", "leios-vote-signing-key-file", "", "path to hex-encoded BLS12-381 Leios vote signing key"),
 	stringToStringFlag("LeiosVoterPublicKeys", "leios-voter-public-keys", "Leios voter public key registry: pool key hash hex=public key hex"),
