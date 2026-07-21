@@ -1602,6 +1602,13 @@ clearing transaction and consumer state; later transaction admission returns
 prevents in-flight protocol callbacks from repopulating a pool whose background
 expiry and chain-update workers have already been stopped.
 
+Mempool mutations are serialized by a dedicated mutation gate so admission and
+chain-update revalidation use a stable UTxO-overlay view. CBOR decoding and
+ledger validation run without the primary pool RW lock or consumer lock;
+transaction snapshots, lookups, and relay reads therefore remain available
+during slow script validation. Revalidation commits its rebuilt overlay and any
+invalid removals atomically before releasing the mutation gate.
+
 ## Block Production
 
 When running as a stake pool operator, Dingo can produce blocks. This involves three subsystems under `ledger/`:
