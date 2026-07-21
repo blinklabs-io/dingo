@@ -1054,11 +1054,18 @@ passes: pass one computes each pool's base reward `B_i` in pool-ID order, and
 (Hamilton) method — all `big.Int`, tie-broken by pool ID — so the per-pool totals
 sum to the entire available pot exactly; pass two re-derives each pool's leader
 and member split from the scaled total using the same checked helpers as the
-disabled path. Only the irreducible per-pool leader/member split rounding (a few
-lovelace network-wide) still returns to reserves. The one exception is when no
-pool earned a base reward (`W == 0`, e.g. every pool disqualified): apportionment
-is skipped and the whole available pot returns to reserves, identical to the
-disabled path. The gate is overlaid onto the
+disabled path. This removes the pre-CIP-0163 saturation, pledge, and performance
+residual, but it does not make the full pot spendable by reward accounts. Rewards
+omitted by the pre-Babbage registration prefilter still return to reserves;
+calculated rewards for accounts that fail the application-time registration or
+eligibility check still route to treasury as unspendable; and per-delegator
+member-reward flooring returns to reserves and can accumulate across many
+delegators. The "few lovelace" bound applies only to the irreducible per-pool
+leader/member split rounding that returns to reserves when all relevant rewards
+pass those eligibility checks. The one
+exception is when no pool earned a base reward (`W == 0`, e.g. every pool
+disqualified): apportionment is skipped and the whole available pot returns to
+reserves, identical to the disabled path. The gate is overlaid onto the
 on-chain-derived reward parameters at a single chokepoint,
 `rewardParameters` (`applyFullPotConfig`), which feeds both the epoch-boundary
 apply and the async precompute path, so both compute identical rewards; the
