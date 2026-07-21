@@ -491,9 +491,16 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				tip,
 			)
 		} else {
+			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+			if blockErr != nil {
+				// Do not RollForward an incomplete CertRB; return the error so
+				// the connection is torn down and the client retries from its
+				// last point once the endorser closure is available.
+				return blockErr
+			}
 			err = ctx.Server.RollForward(
 				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
+				blockCbor,
 				tip,
 			)
 		}
@@ -563,9 +570,23 @@ func (o *Ouroboros) chainsyncServerRequestNext(
 				)
 			}
 		} else {
+			blockCbor, blockErr := o.chainsyncServerBlockCbor(ctx, next.Block)
+			if blockErr != nil {
+				// Do not RollForward an incomplete CertRB. This runs after the
+				// callback returned AwaitReply, so actively close the transport
+				// (an error-channel send alone does not) to unpark the client
+				// from AwaitReply so it reconnects and retries the point once
+				// the endorser closure is available.
+				o.closeChainsyncServerConn(
+					conn,
+					ctx.ConnectionId.String(),
+					blockErr,
+				)
+				return
+			}
 			if err := ctx.Server.RollForward(
 				next.Block.Type,
-				o.chainsyncServerBlockCbor(ctx, next.Block),
+				blockCbor,
 				tip,
 			); err != nil {
 				o.reportChainsyncServerAsyncError(
@@ -617,6 +638,37 @@ func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
 		return true
 	default:
 		return false
+	}
+}
+
+// closeChainsyncServerConn tears down the connection after the async serving
+// goroutine declines to serve a block (e.g. a certifying ranking block whose
+// endorser closure did not resolve). This runs after the RequestNext callback
+// has already returned AwaitReply, so gouroboros cannot propagate the error
+// through the callback-owned teardown path the synchronous path relies on. A
+// best-effort send to the connection error channel only drives the connmanager
+// bookkeeping (RemoveConnection + conn_closed); it does not close the transport,
+// which would leave the NtC client parked in AwaitReply. Calling conn.Close()
+// actually tears down the bearer so the client reconnects and retries the point.
+// Both are done: the error send unblocks the connmanager watcher with a reason,
+// and Close() (idempotent) closes the transport.
+func (o *Ouroboros) closeChainsyncServerConn(
+	conn *ouroboros.Connection,
+	connectionID string,
+	err error,
+) {
+	o.config.Logger.Warn(
+		"chainsync server: closing connection to force client retry",
+		"connection_id", connectionID,
+		"error", err,
+	)
+	sendChainsyncConnError(conn.ErrorChan(), err)
+	if closeErr := conn.Close(); closeErr != nil {
+		o.config.Logger.Debug(
+			"chainsync server: connection close failed",
+			"connection_id", connectionID,
+			"error", closeErr,
+		)
 	}
 }
 

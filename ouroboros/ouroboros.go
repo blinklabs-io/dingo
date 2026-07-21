@@ -89,6 +89,12 @@ type Ouroboros struct {
 	// package to Leios prototype protocols.
 	leiosEndorserBlocks map[string]*leiosEndorserBlockData
 	leiosMu             sync.RWMutex
+	// Waiters blocked in the NtC serving path until an endorser block's
+	// transaction closure is cached. Keyed by leiosBlockKey(ebHash); each
+	// channel is closed once a complete closure is stored for that key.
+	leiosClosureWaiters map[string][]chan struct{}
+	// NtC CertRB closure-resolution metrics.
+	leiosMetrics *leiosMetrics
 
 	// Per-connection serialization and bound for asynchronous leios-fetch
 	// client operations (manifest and EB-tx fetches). The leios-fetch client
@@ -155,6 +161,12 @@ type OuroborosConfig struct {
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
+	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync
+	// server waits for a certifying ranking block's endorser block transaction
+	// closure to become available before closing the connection. When 0 (the
+	// default) the wait is derived from the ledger's Leios pipeline timing
+	// (EndorserBlockWaitSlots × slot length), matching ledger application.
+	LeiosClosureWaitTimeout time.Duration
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol
 	// (protocol 20) toward peers. This is a dingo extension that is ahead
 	// of the IOG Leios prototype: the prototype Haskell node does not run a
@@ -221,6 +233,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 		blockfetchNoBlocksCounts: make(map[ouroboros.ConnectionId]blockfetchNoBlocksState),
 		chainsyncStats:           make(map[ouroboros.ConnectionId]*chainsyncPeerStats),
 		leiosEndorserBlocks:      make(map[string]*leiosEndorserBlockData),
+		leiosClosureWaiters:      make(map[string][]chan struct{}),
 		leiosEBLog:               newLeiosForgedEBLog(),
 	}
 	// Initialize per-peer TxSubmission rate limiter
@@ -236,6 +249,7 @@ func NewOuroboros(cfg OuroborosConfig) *Ouroboros {
 	if cfg.PromRegistry != nil {
 		o.initBlockfetchMetrics()
 		o.initProtocolMetrics()
+		o.initLeiosMetrics()
 	}
 	return o
 }

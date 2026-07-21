@@ -189,6 +189,27 @@ func (ls *LedgerState) shelleySlotLength() time.Duration {
 	return time.Duration(slotLenMs) * time.Millisecond
 }
 
+// EndorserBlockWaitDuration returns the wall-clock window to wait for a
+// referenced/certified endorser block's transaction closure to become
+// available, derived from the Leios pipeline timing (EndorserBlockWaitSlots,
+// the certify-by deadline) and the Shelley slot length. It returns 0 when the
+// wait is disabled or the slot length is unknown. This is the same window
+// ledger application uses to gate a ranking block on its endorser block (see
+// ensureReferencedEndorserBlocks), so NtC serving and ledger application wait
+// for the same healthy closure-delivery window.
+func (ls *LedgerState) EndorserBlockWaitDuration() time.Duration {
+	if ls.config.EndorserBlockWaitSlots == 0 {
+		return 0
+	}
+	slotLen := ls.shelleySlotLength()
+	if slotLen <= 0 {
+		return 0
+	}
+	// EndorserBlockWaitSlots is a small protocol window.
+	// #nosec G115
+	return time.Duration(ls.config.EndorserBlockWaitSlots) * slotLen
+}
+
 // nearNowSlot estimates the current slot from the Shelley genesis slot length,
 // used as a fallback when the epoch cache is empty and the caller asks about
 // a time within 5s of now.

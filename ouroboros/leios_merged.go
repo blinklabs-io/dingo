@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -36,7 +37,43 @@ import (
 const (
 	leiosEndorserBlockCacheMaxEntries = 1024
 	leiosEndorserBlockCacheTTL        = 10 * time.Minute
+	// defaultLeiosClosureWaitTimeout is the fallback window the NtC chainsync
+	// server waits for a certifying ranking block's endorser block
+	// transaction closure to become available. It is used only when the
+	// ledger's Leios pipeline timing is unavailable (e.g. no ledger state or
+	// unknown slot length); production derives the window from that timing
+	// via leiosClosureWaitTimeout. The value mirrors the pipeline's default
+	// 20-slot certify-by deadline at the 1s Musashi slot length, so it is not
+	// shorter than the documented healthy closure-delivery path.
+	defaultLeiosClosureWaitTimeout = 20 * time.Second
 )
+
+// errLeiosClosureUnresolved is returned by the NtC serving path when a
+// certifying ranking block's endorser closure does not arrive within the wait
+// window. The caller closes the connection rather than serving an incomplete
+// (empty-transaction) CertRB, so the client retries from its last point.
+var errLeiosClosureUnresolved = errors.New(
+	"leios endorser closure unresolved before timeout",
+)
+
+// leiosClosureWaitTimeout returns how long the NtC serving path waits for a
+// certifying ranking block's endorser closure. An explicit config override
+// wins (tests/tuning); otherwise it uses the same pipeline timing
+// (EndorserBlockWaitSlots × slot length) the ledger uses to gate applying a
+// referenced endorser block, so NtC serving and ledger application wait for the
+// same healthy window. It falls back to a conservative default only when that
+// timing is unavailable.
+func (o *Ouroboros) leiosClosureWaitTimeout() time.Duration {
+	if o.config.LeiosClosureWaitTimeout > 0 {
+		return o.config.LeiosClosureWaitTimeout
+	}
+	if o.LedgerState != nil {
+		if d := o.LedgerState.EndorserBlockWaitDuration(); d > 0 {
+			return d
+		}
+	}
+	return defaultLeiosClosureWaitTimeout
+}
 
 type leiosEndorserBlockData struct {
 	point      ocommon.Point
@@ -115,6 +152,15 @@ func (o *Ouroboros) storeLeiosEndorserBlock(
 	}
 	for _, key := range cacheKeys {
 		o.leiosEndorserBlocks[key] = data
+	}
+	// Wake any NtC serving path waiting on this closure once its transaction
+	// set is complete. Completeness (txsRaw count == reference count) is the
+	// same readiness predicate the resolver uses, so a waiter is only woken
+	// when a subsequent merge would succeed.
+	if data.completeTxCache() {
+		for _, key := range cacheKeys {
+			o.signalLeiosClosureWaitersLocked(key)
+		}
 	}
 	o.pruneLeiosEndorserBlockCacheLocked(time.Now())
 	o.leiosMu.Unlock()
@@ -421,9 +467,15 @@ func leiosAnnouncementFromBlockCbor(
 	return ebHash, true
 }
 
-// resolveCertifiedEndorserTxs returns the endorser-block transactions that a
-// certifying ranking block (CertRB) inlines over node-to-client, or ok=false
-// when the block is not a CertRB or its endorser block is not fully available.
+// certifiedEndorserBlockHash resolves the endorser block a certifying ranking
+// block (CertRB) inlines over node-to-client. It returns two independent flags:
+//   - certified: the header is a CertRB (leios_certified is set). Once true, the
+//     block must never be served raw — the caller either serves the merged block
+//     or closes the connection.
+//   - resolved: the certified endorser block hash (ebHash) was resolved.
+//     resolved implies certified. When certified is true but resolved is false
+//     (parent lookup or announcement resolution failed) the caller must
+//     disconnect rather than fall back to the raw, empty-transaction block.
 //
 // As of prototype-2026w29 the endorser block a CertRB certifies is not named in
 // the CertRB itself: the CertRB carries a leios_certificate and empty
@@ -433,30 +485,45 @@ func leiosAnnouncementFromBlockCbor(
 // by resolving the parent via the header prev-hash and reading its
 // leios_announcement. In w29 the CertRB may independently announce a new EB;
 // that current announcement is not the certified closure resolved here.
-func (o *Ouroboros) resolveCertifiedEndorserTxs(
+func (o *Ouroboros) certifiedEndorserBlockHash(
 	blockCbor []byte,
-) ([]cbor.RawMessage, bool) {
+) (ebHash lcommon.Blake2b256, certified bool, resolved bool) {
 	var top []cbor.RawMessage
 	if _, err := cbor.Decode(blockCbor, &top); err != nil || len(top) == 0 {
-		return nil, false
+		return lcommon.Blake2b256{}, false, false
 	}
 	var header gdijkstra.DijkstraBlockHeader
 	if _, err := cbor.Decode(top[0], &header); err != nil {
-		return nil, false
+		return lcommon.Blake2b256{}, false, false
 	}
 	if cert, present := header.LeiosCertified(); !present || !cert {
-		return nil, false
+		return lcommon.Blake2b256{}, false, false
 	}
+	// The header is certified from here on; a resolution failure below keeps
+	// certified=true so the caller disconnects instead of serving raw.
 	if o.LedgerState == nil {
-		return nil, false
+		return lcommon.Blake2b256{}, true, false
 	}
 	prevHash := header.PrevHash()
 	parent, err := o.LedgerState.BlockByHash(prevHash.Bytes())
 	if err != nil {
-		return nil, false
+		return lcommon.Blake2b256{}, true, false
 	}
-	ebHash, ok := leiosAnnouncementFromBlockCbor(parent.Cbor)
+	hash, ok := leiosAnnouncementFromBlockCbor(parent.Cbor)
 	if !ok {
+		return lcommon.Blake2b256{}, true, false
+	}
+	return hash, true, true
+}
+
+// resolveCertifiedEndorserTxs returns the endorser-block transactions that a
+// certifying ranking block (CertRB) inlines over node-to-client, or ok=false
+// when the block is not a CertRB or its endorser block is not fully available.
+func (o *Ouroboros) resolveCertifiedEndorserTxs(
+	blockCbor []byte,
+) ([]cbor.RawMessage, bool) {
+	ebHash, _, resolved := o.certifiedEndorserBlockHash(blockCbor)
+	if !resolved {
 		return nil, false
 	}
 	data, found := o.lookupLeiosEndorserBlock(ebHash.Bytes())
@@ -464,6 +531,91 @@ func (o *Ouroboros) resolveCertifiedEndorserTxs(
 		return nil, false
 	}
 	return cloneRawMessages(data.txsRaw), true
+}
+
+// leiosClosureCompleteLocked reports whether a complete transaction closure is
+// cached in memory for the given cache key, using the same readiness predicate
+// (completeTxCache) as the resolver. The caller must hold leiosMu.
+func (o *Ouroboros) leiosClosureCompleteLocked(key string) bool {
+	data, ok := o.leiosEndorserBlocks[key]
+	return ok && data.completeTxCache()
+}
+
+// signalLeiosClosureWaitersLocked wakes and clears every waiter registered for
+// the given cache key. The caller must hold leiosMu.
+func (o *Ouroboros) signalLeiosClosureWaitersLocked(key string) {
+	waiters := o.leiosClosureWaiters[key]
+	if len(waiters) == 0 {
+		return
+	}
+	for _, ch := range waiters {
+		close(ch)
+	}
+	delete(o.leiosClosureWaiters, key)
+}
+
+// removeLeiosClosureWaiter deregisters a waiter channel, e.g. after its context
+// is cancelled. It does not close the channel.
+func (o *Ouroboros) removeLeiosClosureWaiter(key string, ch chan struct{}) {
+	o.leiosMu.Lock()
+	defer o.leiosMu.Unlock()
+	waiters := o.leiosClosureWaiters[key]
+	for i, w := range waiters {
+		if w == ch {
+			o.leiosClosureWaiters[key] = slices.Delete(waiters, i, i+1)
+			break
+		}
+	}
+	if len(o.leiosClosureWaiters[key]) == 0 {
+		delete(o.leiosClosureWaiters, key)
+	}
+}
+
+// waitForLeiosEndorserClosure blocks until a complete transaction closure for
+// ebHash is cached in memory or ctx is done. It returns true once the closure
+// is available.
+func (o *Ouroboros) waitForLeiosEndorserClosure(
+	ctx context.Context,
+	ebHash []byte,
+) bool {
+	key := leiosBlockKey(ebHash)
+	o.leiosMu.Lock()
+	if o.leiosClosureCompleteLocked(key) {
+		o.leiosMu.Unlock()
+		return true
+	}
+	ch := make(chan struct{})
+	o.leiosClosureWaiters[key] = append(o.leiosClosureWaiters[key], ch)
+	o.leiosMu.Unlock()
+	select {
+	case <-ch:
+		return true
+	case <-ctx.Done():
+		o.removeLeiosClosureWaiter(key, ch)
+		// The store path may have completed the closure between ctx
+		// cancellation and deregistration; re-check to avoid a lost wakeup.
+		o.leiosMu.RLock()
+		defer o.leiosMu.RUnlock()
+		return o.leiosClosureCompleteLocked(key)
+	}
+}
+
+// awaitMergedLeiosRankingBlock waits (bounded by ctx) for a certifying ranking
+// block's endorser closure and returns the merged CBOR once available. It
+// returns ok=false if the closure does not arrive before ctx is done.
+func (o *Ouroboros) awaitMergedLeiosRankingBlock(
+	ctx context.Context,
+	blockCbor []byte,
+	ebHash lcommon.Blake2b256,
+) ([]byte, bool) {
+	if !o.waitForLeiosEndorserClosure(ctx, ebHash.Bytes()) {
+		return nil, false
+	}
+	merged, ok, err := o.mergedLeiosRankingBlockCbor(blockCbor)
+	if err != nil || !ok {
+		return nil, false
+	}
+	return merged, true
 }
 
 // spliceEndorserTxsIntoDijkstraBlock returns rankingBlockCbor with the endorser
@@ -555,35 +707,132 @@ func (o *Ouroboros) mergedLeiosRankingBlockCbor(
 	return merged, true, nil
 }
 
+// chainsyncServerBlockCbor returns the CBOR to serve for a block over NtC
+// chainsync. For a certifying ranking block it inlines the certified endorser
+// block's transactions. It returns errLeiosClosureUnresolved when a CertRB
+// cannot be served with its transactions (closure did not arrive within the
+// wait window, or the certified endorser reference could not be resolved); the
+// caller must then close the connection (rather than RollForward an incomplete
+// block) so the client retries the same point once the closure is available.
 func (o *Ouroboros) chainsyncServerBlockCbor(
 	ctx ochainsync.CallbackContext,
 	block models.Block,
-) []byte {
+) ([]byte, error) {
 	if !o.config.EnableLeios ||
 		block.Type != uint(gdijkstra.BlockTypeDijkstra) ||
 		ctx.Server == nil {
-		return block.Cbor
+		return block.Cbor, nil
 	}
 	p := ctx.Server.ProtocolInstance()
 	if p == nil || p.Mode() != protocol.ProtocolModeNodeToClient {
-		return block.Cbor
+		return block.Cbor, nil
 	}
+	return o.serveLeiosRankingBlockCbor(block)
+}
+
+// serveLeiosRankingBlockCbor resolves the NtC representation of a Dijkstra
+// ranking block, once the caller has confirmed Leios NtC serving applies. It is
+// separated from chainsyncServerBlockCbor's protocol guards so the serving
+// decision (merge / serve-raw / disconnect) is unit-testable without a live
+// chainsync server. A block whose header is certified is never downgraded to
+// the raw serve path: it is either merged or an error is returned so the
+// connection is closed.
+func (o *Ouroboros) serveLeiosRankingBlockCbor(
+	block models.Block,
+) ([]byte, error) {
 	merged, ok, err := o.mergedLeiosRankingBlockCbor(block.Cbor)
 	if err != nil {
+		// A CertRB was identified but its bytes could not be spliced (malformed
+		// shape). This is a structural fault, not a missing closure; serve the
+		// raw block as a CBOR-safety fallback rather than wedging the client.
 		o.config.Logger.Warn(
 			"failed to build merged Leios block for NtC chainsync",
 			"error", err,
 			"slot", block.Slot,
 		)
-		return block.Cbor
+		return block.Cbor, nil
 	}
-	if !ok {
-		return block.Cbor
+	if ok {
+		o.recordLeiosCertRbOutcome("merged")
+		o.config.Logger.Debug(
+			"serving merged Leios block over NtC chainsync",
+			"slot", block.Slot,
+			"hash", hex.EncodeToString(block.Hash),
+		)
+		return merged, nil
 	}
-	o.config.Logger.Debug(
-		"serving merged Leios block over NtC chainsync",
+	ebHash, certified, resolved := o.certifiedEndorserBlockHash(block.Cbor)
+	if !certified {
+		// Not a certifying ranking block (announcing or plain); serve as-is.
+		return block.Cbor, nil
+	}
+	if !resolved {
+		// The header is certified but the endorser reference could not be
+		// resolved (parent block missing or no announcement). Never serve a
+		// certified block raw; close the connection so the client retries once
+		// the parent/closure is available.
+		o.recordLeiosCertRbOutcome("unresolved")
+		o.config.Logger.Warn(
+			"certified ranking block with unresolvable endorser reference over NtC chainsync; closing connection so the client retries rather than recording a block with no transactions",
+			"slot", block.Slot,
+			"hash", hex.EncodeToString(block.Hash),
+		)
+		return nil, fmt.Errorf(
+			"%w: certified block slot %d hash %s has no resolvable endorser reference",
+			errLeiosClosureUnresolved,
+			block.Slot,
+			hex.EncodeToString(block.Hash),
+		)
+	}
+	// Certified and resolved: wait a bounded window for the endorser closure.
+	return o.serveLeiosCertRbWithWait(block, ebHash)
+}
+
+// serveLeiosCertRbWithWait waits a bounded window (the ledger's endorser-block
+// wait window, see leiosClosureWaitTimeout) for a certifying ranking block's
+// endorser closure to be cached, returning the merged block if it arrives. On
+// timeout it returns errLeiosClosureUnresolved so the caller closes the
+// connection instead of serving an incomplete (empty-transaction) CertRB — the
+// client then retries the same point, avoiding a permanently-incomplete record.
+func (o *Ouroboros) serveLeiosCertRbWithWait(
+	block models.Block,
+	ebHash lcommon.Blake2b256,
+) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(
+		context.Background(),
+		o.leiosClosureWaitTimeout(),
+	)
+	defer cancel()
+	start := time.Now()
+	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, block.Cbor, ebHash)
+	waited := time.Since(start)
+	if ok {
+		o.recordLeiosCertRbOutcome("merged_after_wait")
+		o.recordLeiosCertRbWait("resolved", waited)
+		o.config.Logger.Debug(
+			"serving merged Leios block over NtC chainsync after closure wait",
+			"slot", block.Slot,
+			"hash", hex.EncodeToString(block.Hash),
+			"eb_hash", ebHash.String(),
+			"waited", waited,
+		)
+		return merged, nil
+	}
+	o.recordLeiosCertRbOutcome("unresolved")
+	o.recordLeiosCertRbWait("timeout", waited)
+	o.config.Logger.Warn(
+		"endorser closure unresolved for CertRB within wait window; closing NtC chainsync connection so the client retries rather than recording a block with no transactions",
 		"slot", block.Slot,
 		"hash", hex.EncodeToString(block.Hash),
+		"eb_hash", ebHash.String(),
+		"waited", waited,
 	)
-	return merged
+	return nil, fmt.Errorf(
+		"%w: slot %d hash %s eb %s (waited %s)",
+		errLeiosClosureUnresolved,
+		block.Slot,
+		hex.EncodeToString(block.Hash),
+		ebHash.String(),
+		waited,
+	)
 }

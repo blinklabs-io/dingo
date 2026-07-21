@@ -498,6 +498,74 @@ func TestChainsyncServerRequestNext_AsyncRollBackwardErrorClosesConnection(
 	)
 }
 
+// TestCloseChainsyncServerConnTearsDownTransport verifies that the async
+// serving path's connection close actually tears down the bearer, not only the
+// connmanager conn_closed event. The earlier error-channel-only path published
+// conn_closed but left the transport open, so the NtC client stayed parked in
+// AwaitReply; this asserts the transport itself closes (the client end's
+// connection observes the bearer going away).
+func TestCloseChainsyncServerConnTearsDownTransport(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	serverPipe, clientPipe := net.Pipe()
+	t.Cleanup(func() {
+		_ = serverPipe.Close()
+		_ = clientPipe.Close()
+	})
+
+	serverConnCh := make(chan *ouroboros.Connection, 1)
+	serverErrCh := make(chan error, 1)
+	go func() {
+		c, err := ouroboros.New(
+			ouroboros.WithConnection(serverPipe),
+			ouroboros.WithServer(true),
+			ouroboros.WithNetworkMagic(42),
+			ouroboros.WithDelayProtocolStart(true),
+			ouroboros.WithLogger(logger),
+		)
+		if err != nil {
+			serverErrCh <- err
+			return
+		}
+		serverConnCh <- c
+	}()
+	clientConn, err := ouroboros.New(
+		ouroboros.WithConnection(clientPipe),
+		ouroboros.WithNetworkMagic(42),
+		ouroboros.WithDelayProtocolStart(true),
+		ouroboros.WithLogger(logger),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clientConn.Close() })
+
+	var serverConn *ouroboros.Connection
+	select {
+	case err := <-serverErrCh:
+		t.Fatalf("server connection setup failed: %v", err)
+	case serverConn = <-serverConnCh:
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for server connection setup")
+	}
+	t.Cleanup(func() { _ = serverConn.Close() })
+
+	o := NewOuroboros(OuroborosConfig{Logger: logger})
+	o.closeChainsyncServerConn(
+		serverConn,
+		serverConn.Id().String(),
+		errLeiosClosureUnresolved,
+	)
+
+	// The client end observes the transport tearing down (its connection
+	// ErrorChan fires) rather than staying connected. The earlier
+	// error-channel-only server path left the bearer open, parking the client
+	// in AwaitReply.
+	testutil.RequireReceive(
+		t,
+		clientConn.ErrorChan(),
+		2*time.Second,
+		"client should observe the server transport closing",
+	)
+}
+
 // TestChainsyncServerFindIntersect_MatchingPointRegistersClient verifies a
 // common point returns the server tip and registers downstream client state.
 func TestChainsyncServerFindIntersect_MatchingPointRegistersClient(

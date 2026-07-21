@@ -15,6 +15,7 @@
 package ouroboros
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -27,6 +28,8 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	gouroboros "github.com/blinklabs-io/gouroboros"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -36,6 +39,8 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	oleiosfetch "github.com/blinklabs-io/gouroboros/protocol/leiosfetch"
 	oleiosnotify "github.com/blinklabs-io/gouroboros/protocol/leiosnotify"
+	"github.com/prometheus/client_golang/prometheus"
+	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -652,4 +657,217 @@ func TestMergedLeiosRankingBlockCborServesRawForCertRBWithoutLedger(t *testing.T
 	require.NoError(t, err)
 	require.False(t, ok)
 	require.Equal(t, []byte(certRB), got)
+}
+
+func TestCertifiedEndorserBlockHashTriState(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+
+	// A non-certifying Dijkstra block is not a CertRB: certified=false.
+	_, blockRaw := testDijkstraBlockRaw(t, 1)
+	_, certified, resolved := o.certifiedEndorserBlockHash(blockRaw)
+	require.False(t, certified)
+	require.False(t, resolved)
+
+	// A CertRB whose parent announcement cannot be resolved (no ledger state)
+	// must report certified=true, resolved=false so the caller disconnects
+	// instead of downgrading a certified block to the raw serve path.
+	certRB := testDijkstraCertRBRaw(t, 2, make([]byte, lcommon.Blake2b256Size))
+	_, certified, resolved = o.certifiedEndorserBlockHash(certRB)
+	require.True(t, certified)
+	require.False(t, resolved)
+}
+
+// A certified ranking block whose endorser reference cannot be resolved (parent
+// missing / no announcement) must never be downgraded to the raw serve path; it
+// returns an error so the caller closes the connection.
+func TestServeLeiosRankingBlockCborDisconnectsOnUnresolvedCertifiedBlock(
+	t *testing.T,
+) {
+	// No ledger state, so a CertRB's parent announcement cannot be resolved.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	certRB := testDijkstraCertRBRaw(t, 5, make([]byte, lcommon.Blake2b256Size))
+	block := models.Block{Cbor: certRB, Slot: 5, Hash: []byte{0x05}}
+
+	got, err := o.serveLeiosRankingBlockCbor(block)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
+	// It must not have fallen through to serving the raw certified block.
+	require.NotEqual(t, []byte(certRB), got)
+}
+
+func TestServeLeiosRankingBlockCborServesRawForNonCertifiedBlock(t *testing.T) {
+	// A non-certifying Dijkstra block is served unchanged.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	_, blockRaw := testDijkstraBlockRaw(t, 6)
+	block := models.Block{Cbor: blockRaw, Slot: 6, Hash: []byte{0x06}}
+
+	got, err := o.serveLeiosRankingBlockCbor(block)
+	require.NoError(t, err)
+	require.Equal(t, []byte(blockRaw), got)
+}
+
+func TestWaitForLeiosEndorserClosureReturnsWhenAlreadyCached(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 10)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{mustCbor(t, "tx0")},
+		),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.True(t, o.waitForLeiosEndorserClosure(ctx, point.Hash))
+}
+
+func TestWaitForLeiosEndorserClosureWakesOnStore(t *testing.T) {
+	point, blockRaw := testLeiosEndorserBlockRaw(t, 11)
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	result := make(chan bool, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			2*time.Second,
+		)
+		defer cancel()
+		result <- o.waitForLeiosEndorserClosure(ctx, point.Hash)
+	}()
+
+	// Register the waiter before storing so the store exercises the
+	// wake-on-signal path rather than the already-cached fast path.
+	testutil.WaitForCondition(
+		t,
+		func() bool {
+			o.leiosMu.RLock()
+			defer o.leiosMu.RUnlock()
+			return len(o.leiosClosureWaiters[leiosBlockKey(point.Hash)]) > 0
+		},
+		2*time.Second,
+		"closure waiter to register",
+	)
+
+	require.NoError(
+		t,
+		o.storeLeiosEndorserBlock(
+			point,
+			blockRaw,
+			[]cbor.RawMessage{mustCbor(t, "tx0")},
+		),
+	)
+
+	require.True(
+		t,
+		testutil.RequireReceive(
+			t,
+			result,
+			3*time.Second,
+			"closure wait to resolve after store",
+		),
+	)
+}
+
+func TestWaitForLeiosEndorserClosureTimesOutAndCleansUp(t *testing.T) {
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	ebHash := make([]byte, lcommon.Blake2b256Size)
+	ebHash[0] = 0xbb
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, o.waitForLeiosEndorserClosure(ctx, ebHash))
+
+	o.leiosMu.RLock()
+	waiters := len(o.leiosClosureWaiters)
+	o.leiosMu.RUnlock()
+	require.Zero(t, waiters)
+}
+
+func TestAwaitMergedLeiosRankingBlockTimesOut(t *testing.T) {
+	certRB := testDijkstraCertRBRaw(t, 42, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xcc
+
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	merged, ok := o.awaitMergedLeiosRankingBlock(ctx, certRB, ebHash)
+	require.False(t, ok)
+	require.Nil(t, merged)
+}
+
+func TestLeiosCertRbMetricsRecordOutcomes(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true, PromRegistry: reg})
+	require.NotNil(t, o.leiosMetrics)
+
+	o.recordLeiosCertRbOutcome("merged")
+	o.recordLeiosCertRbOutcome("merged_after_wait")
+	o.recordLeiosCertRbOutcome("unresolved")
+	o.recordLeiosCertRbOutcome("unresolved")
+	o.recordLeiosCertRbWait("resolved", 100*time.Millisecond)
+	o.recordLeiosCertRbWait("timeout", 3*time.Second)
+
+	require.Equal(t, float64(1), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged"),
+	))
+	require.Equal(t, float64(1), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("merged_after_wait"),
+	))
+	require.Equal(t, float64(2), promtestutil.ToFloat64(
+		o.leiosMetrics.certRbOutcomes.WithLabelValues("unresolved"),
+	))
+	// One histogram series per wait outcome (resolved, timeout).
+	require.Equal(t, 2, promtestutil.CollectAndCount(
+		o.leiosMetrics.certRbWaitSeconds,
+	))
+}
+
+func TestLeiosCertRbMetricsNilSafe(t *testing.T) {
+	// Without a PromRegistry, metrics are not initialized; recording must be
+	// a no-op rather than panicking.
+	o := NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.Nil(t, o.leiosMetrics)
+	require.NotPanics(t, func() {
+		o.recordLeiosCertRbOutcome("merged")
+		o.recordLeiosCertRbWait("timeout", time.Second)
+	})
+}
+
+func TestLeiosClosureWaitTimeoutPrecedence(t *testing.T) {
+	// Explicit config override wins.
+	o := NewOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosClosureWaitTimeout: 5 * time.Second,
+	})
+	require.Equal(t, 5*time.Second, o.leiosClosureWaitTimeout())
+
+	// With no override and no ledger timing, the conservative default applies
+	// (not a short constant).
+	o = NewOuroboros(OuroborosConfig{EnableLeios: true})
+	require.Equal(t, defaultLeiosClosureWaitTimeout, o.leiosClosureWaitTimeout())
+	require.GreaterOrEqual(t, defaultLeiosClosureWaitTimeout, 6*time.Second)
+}
+
+func TestServeLeiosCertRbWithWaitErrorsOnTimeout(t *testing.T) {
+	// A certifying ranking block whose endorser closure never arrives must
+	// surface an error (so the caller closes the connection) rather than
+	// serving the raw, empty-transaction block.
+	certRB := testDijkstraCertRBRaw(t, 77, make([]byte, lcommon.Blake2b256Size))
+	var ebHash lcommon.Blake2b256
+	ebHash[0] = 0xdd
+
+	o := NewOuroboros(OuroborosConfig{
+		EnableLeios:             true,
+		LeiosClosureWaitTimeout: 20 * time.Millisecond,
+	})
+	block := models.Block{Cbor: certRB, Slot: 77, Hash: []byte{0x77}}
+	got, err := o.serveLeiosCertRbWithWait(block, ebHash)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errLeiosClosureUnresolved)
+	require.Nil(t, got)
 }
