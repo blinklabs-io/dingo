@@ -300,6 +300,15 @@ func (d *MetadataStoreSqlite) GetUtxosBySlot(
 }
 
 // GetUtxosDeletedBeforeSlot returns a list of Utxos marked as deleted before a given slot
+//
+// No ORDER BY is applied. Cleanup (UtxosDeleteConsumed) physically deletes every
+// row this returns and loops until none remain, so the order the batch is
+// returned in has no effect on correctness. Omitting the ordering lets SQLite
+// satisfy the deleted_slot range and LIMIT directly from the deleted_slot-leading
+// composite index (idx_utxo_deleted_staking_amount) instead of materializing and
+// sorting the entire matching set (millions of consumed UTxOs on a from-genesis
+// sync) on every batch. An "ORDER BY id DESC" here forced exactly that temp-btree
+// sort because the primary-key id is not aligned with the deleted_slot index.
 func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	slot uint64,
 	limit int,
@@ -310,8 +319,7 @@ func (d *MetadataStoreSqlite) GetUtxosDeletedBeforeSlot(
 	if err != nil {
 		return nil, err
 	}
-	db = db.Where("deleted_slot > 0 AND deleted_slot <= ?", slot).
-		Order("id DESC")
+	db = db.Where("deleted_slot > 0 AND deleted_slot <= ?", slot)
 	if limit > 0 {
 		db = db.Limit(limit)
 	}
