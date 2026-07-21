@@ -1040,7 +1040,7 @@ func TestGetDRepVotingPower(t *testing.T) {
 	require.NoError(t, err)
 
 	// No delegators = zero voting power
-	power, err := store.GetDRepVotingPower(0, drepCred, nil)
+	power, err := store.GetDRepVotingPower(0, drepCred, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(0), power)
 
@@ -1104,7 +1104,7 @@ func TestGetDRepVotingPower(t *testing.T) {
 	require.NoError(t, result.Error)
 
 	// Voting power should be 5M + 3M + 2M = 10M
-	power, err = store.GetDRepVotingPower(0, drepCred, nil)
+	power, err = store.GetDRepVotingPower(0, drepCred, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(10000000), power)
 }
@@ -1115,6 +1115,7 @@ func TestGetDRepVotingPowerByTypeRejectsCredentialTypes(t *testing.T) {
 
 	_, err := store.GetDRepVotingPowerByType(
 		[]uint64{models.DrepTypeAddrKeyHash},
+		0,
 		nil,
 	)
 	require.Error(t, err)
@@ -1122,12 +1123,13 @@ func TestGetDRepVotingPowerByTypeRejectsCredentialTypes(t *testing.T) {
 
 	_, err = store.GetDRepVotingPowerByType(
 		[]uint64{models.DrepTypeScriptHash},
+		0,
 		nil,
 	)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential-backed")
 
-	_, err = store.GetDRepVotingPowerByType([]uint64{99}, nil)
+	_, err = store.GetDRepVotingPowerByType([]uint64{99}, 0, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown predefined drep type")
 }

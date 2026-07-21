@@ -511,6 +511,49 @@ func TestValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
+// TestValidateDelegatorInactivity pins the CIP-0163 range check: the
+// inactivity window is only validated when the gate is enabled, and must
+// fall in [1, 10000] when it is.
+func TestValidateDelegatorInactivity(t *testing.T) {
+	tests := []struct {
+		name       string
+		enabled    bool
+		inactivity uint64
+		wantErr    string
+	}{
+		{name: "disabled ignores out-of-range value", enabled: false, inactivity: 10_001},
+		{name: "enabled at minimum", enabled: true, inactivity: 1},
+		{name: "enabled within range", enabled: true, inactivity: 90},
+		{name: "enabled at maximum", enabled: true, inactivity: 10_000},
+		{
+			name:       "enabled below minimum",
+			enabled:    true,
+			inactivity: 0,
+			wantErr:    "delegatorInactivity",
+		},
+		{
+			name:       "enabled above maximum",
+			enabled:    true,
+			inactivity: 10_001,
+			wantErr:    "delegatorInactivity",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validTestConfig()
+			cfg.DelegatorInactivityEnabled = tt.enabled
+			cfg.DelegatorInactivity = tt.inactivity
+			err := cfg.validate(cfg.RunMode, minUnprivilegedPort)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
 // TestValidatePrivilegedPortAllowedWhenBindable covers a process that
 // may bind any port (root, Windows, or CAP_NET_BIND_SERVICE):
 // minBindable is 0, so a sub-1024 port passes.

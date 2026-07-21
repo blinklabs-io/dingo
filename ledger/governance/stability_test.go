@@ -146,7 +146,7 @@ func seedDRepYesVote(
 func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
 	// pre-Conway: no governance state machine yet
-	in := NewStabilityCheckInputs(db, nil, stabilityTestEpoch, nil, nil, nil)
+	in := NewStabilityCheckInputs(db, nil, stabilityTestEpoch, false, nil, nil, nil)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
 	assert.Nil(t, got, "pre-Conway pparams must short-circuit to nil")
@@ -155,7 +155,7 @@ func TestEvaluateRatifiableHardForkInitiation_PreConway_ReturnsNil(t *testing.T)
 func TestEvaluateRatifiableHardForkInitiation_NoActiveProposals_ReturnsNil(t *testing.T) {
 	db, _ := newTallyTestDB(t)
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -184,7 +184,7 @@ func TestEvaluateRatifiableHardForkInitiation_OnlyOtherActionType_ReturnsNil(t *
 	}, nil))
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -208,7 +208,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 	seedDRepYesVote(t, db, proposal.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -217,6 +217,39 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapWithDRepYesVote(t *testin
 		"target major must come from the proposal's encoded action")
 	assert.Equal(t, proposal.ID, got.Proposal.ID,
 		"the helper must return the proposal that ratifies")
+}
+
+func TestEvaluateRatifiableHardForkInitiation_DelegatorInactivityParity(t *testing.T) {
+	db, _ := newTallyTestDB(t)
+
+	proposal := seedHardForkInitiationProposal(
+		t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx,
+	)
+	drepCred := seedDRepWithStake(t, db, 1_000)
+	seedDRepYesVote(t, db, proposal.ID, drepCred)
+	rewardCred := models.NewStakeCredentialRef(
+		0,
+		testBytes(28, stabilityStakeCred),
+	)
+	require.NoError(t, db.RenewAccountExpirations(
+		[]models.StakeCredentialRef{rewardCred},
+		stabilityTestEpoch-1,
+		nil,
+	))
+
+	gateOff := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
+	)
+	got, err := EvaluateRatifiableHardForkInitiation(gateOff)
+	require.NoError(t, err)
+	require.NotNil(t, got, "gate off must preserve the expired account's vote")
+
+	gateOn := NewStabilityCheckInputs(
+		db, nil, stabilityTestEpoch, true, stabilityConwayPParams(9), nil, nil,
+	)
+	got, err = EvaluateRatifiableHardForkInitiation(gateOn)
+	require.NoError(t, err)
+	assert.Nil(t, got, "gate on must match boundary tally and exclude expired stake")
 }
 
 // TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable
@@ -228,7 +261,7 @@ func TestEvaluateRatifiableHardForkInitiation_BootstrapNoVotes_NotRatifiable(t *
 	seedHardForkInitiationProposal(t, db, stabilityTestEpoch, 11, 1, stabilityProposalTx)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)
@@ -264,7 +297,7 @@ func TestEvaluateRatifiableHardForkInitiation_MultipleRatifiable_PicksLowestAdde
 	seedDRepYesVote(t, db, late.ID, drepCred)
 
 	in := NewStabilityCheckInputs(
-		db, nil, stabilityTestEpoch, stabilityConwayPParams(9), nil, nil,
+		db, nil, stabilityTestEpoch, false, stabilityConwayPParams(9), nil, nil,
 	)
 	got, err := EvaluateRatifiableHardForkInitiation(in)
 	require.NoError(t, err)

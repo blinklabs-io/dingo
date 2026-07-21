@@ -787,7 +787,9 @@ func (lv *LedgerView) GetDRepVotingPower(
 	credentialTag uint8,
 	drepCredential []byte,
 ) (uint64, error) {
-	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, lv.txn)
+	// expiryEpoch 0: this point-in-time API query is not gated by the
+	// CIP-0163 epoch-boundary tally (see ledger/governance for that path).
+	power, err := lv.ls.db.GetDRepVotingPower(credentialTag, drepCredential, 0, lv.txn)
 	if err != nil {
 		return 0, fmt.Errorf("get drep voting power: %w", err)
 	}

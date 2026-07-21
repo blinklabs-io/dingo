@@ -417,6 +417,14 @@ func LoadWithDB(
 		return errors.New("primary chain not available")
 	}
 	snapshotMgr := snapshot.NewManager(db, nil, logger)
+	// Mirror the CIP-0163 reward-account inactivity gate into snapshot capture
+	// so replay matches serve mode (node.go) on the same DB.
+	if err := snapshotMgr.SetDelegatorInactivity(
+		cfg.DelegatorInactivityEnabled,
+		cfg.DelegatorInactivity,
+	); err != nil {
+		return fmt.Errorf("configuring snapshot manager: %w", err)
+	}
 	// Load state
 	ls, err := newLedgerStateForLoad(
 		ledger.LedgerStateConfig{
@@ -434,6 +442,10 @@ func LoadWithDB(
 			FullPotRewardsEnabled: cfg.FullPotRewardsEnabled,
 			TrustedReplay:         true,
 			ManualBlockProcessing: true,
+			// CIP-0163 reward-account inactivity expiry: consensus-affecting,
+			// must match serve mode (node.go) on replay of the same DB.
+			DelegatorInactivityEnabled: cfg.DelegatorInactivityEnabled,
+			DelegatorInactivity:        cfg.DelegatorInactivity,
 			DatabaseWorkerPoolConfig: ledger.DatabaseWorkerPoolConfig{
 				WorkerPoolSize: cfg.DatabaseWorkers,
 				TaskQueueSize:  cfg.DatabaseQueueSize,

@@ -1212,6 +1212,8 @@ func (d *MetadataStorePostgres) GetStakeByPools(
 func (d *MetadataStorePostgres) GetStakeByPoolsAtSlot(
 	poolKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, map[string]uint64, error) {
 	db, err := d.resolveReadDB(txn)
@@ -1225,6 +1227,8 @@ func (d *MetadataStorePostgres) GetStakeByPoolsAtSlot(
 		db,
 		poolKeyHashes,
 		slot,
+		expiryEpoch,
+		inactivityPeriod,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("GetStakeByPoolsAtSlot: %w", err)
@@ -1235,6 +1239,8 @@ func (d *MetadataStorePostgres) GetStakeByPoolsAtSlot(
 func (d *MetadataStorePostgres) GetPoolOwnerStakeAtSlot(
 	ownerKeyHashes [][]byte,
 	slot uint64,
+	expiryEpoch uint64,
+	inactivityPeriod uint64,
 	txn types.Txn,
 ) (map[string]uint64, error) {
 	db, err := d.resolveReadDB(txn)
@@ -1242,6 +1248,6 @@ func (d *MetadataStorePostgres) GetPoolOwnerStakeAtSlot(
 		return nil, err
 	}
 	return stakequery.GetPoolOwnerStakeAtSlot(
-		db, ownerKeyHashes, slot,
+		db, ownerKeyHashes, slot, expiryEpoch, inactivityPeriod,
 	)
 }

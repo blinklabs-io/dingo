@@ -320,6 +320,28 @@ func TestMempoolImplementationSourcePrecedence(t *testing.T) {
 	)
 }
 
+func TestDelegatorInactivityEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY_ENABLED", "true")
+	t.Setenv("DINGO_DELEGATOR_INACTIVITY", "90")
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("write temp config: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if !cfg.DelegatorInactivityEnabled {
+		t.Fatal("expected env var to enable delegator inactivity")
+	}
+	if cfg.DelegatorInactivity != 90 {
+		t.Fatalf("expected delegatorInactivity=90, got %d", cfg.DelegatorInactivity)
+	}
+}
+
 func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
 	resetGlobalConfig()
 

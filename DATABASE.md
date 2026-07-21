@@ -173,7 +173,7 @@ erDiagram
 | `network_donation` | `id`, `slot`, `epoch`, `amount` | PK `id`; unique `slot`; index `epoch` | Per-block Conway treasury donation, tagged with its epoch. `amount` is a plain integer column (not `types.Uint64`) so `SUM` aggregates directly across backends. All donation sources applied under the same block slot, including Leios endorser-block effects recorded under a ranking block, are accumulated before this per-slot row is written. Donations accumulate during an epoch and are moved into `network_state.treasury` at the next epoch boundary; rows are kept (not deleted on apply) so a rollback drops them by slot and re-application re-derives the same total. |
 | `pparams` | `id`, `cbor`, `added_slot`, `epoch`, `era_id` | PK `id`; index `added_slot` | CBOR protocol parameters. Query by `epoch <= ?` and matching `era_id`. |
 | `pparam_update` | `id`, `genesis_hash`, `cbor`, `added_slot`, `epoch` | PK `id`; index `added_slot` | Proposed protocol-parameter updates by epoch. |
-| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. |
+| `sync_state` | `sync_key`, `value` | PK `sync_key` | Key/value state for sync/load work. `sync_status` (`in_progress`/`backfill`/cleared; unknown non-empty values are treated as incomplete) is ephemeral and cleared on completion. Mithril stores `mithril_ledger_slot` plus `mithril_ledger_hash` as the trusted replay/intersect boundary point. `mithril_immutable_max` persists the highest immutable file number a Mithril sync imported (written *after* the completion clear, since clearing wipes all `sync_state`) so a later `dingo mithril sync` catch-up can skip already-present immutable archives when the marker exists. `mithril_catchup_active` is ephemeral (set when a catch-up import starts mutating, wiped on completion): it routes an interrupted catch-up back through catch-up semantics (reconcile) on the next run, which a markerless catch-up otherwise leaves no trace of. `deferred_header_validation:<slot>:<hash>` is written when blockfetch defers stateful header checks to ledger apply; the value is `true` and the row is deleted after the strict apply-time check passes. `delegator_inactivity_activated` guards the CIP-0163 one-time activation stamp (`ledger.LedgerState.activateDelegatorInactivityIfNeeded`): its value is the activation epoch `A` (the entered epoch, stored as a decimal string), and any non-empty value means activation has run, so later rollovers skip it even after a restart. It is durable but not permanent: a chain rollback to before epoch `A` clears it (`recomputeAccountExpirationsAfterRollback` calls `DeleteSyncState` alongside `ResetAccountExpirationActivation`), so a subsequent re-sync re-runs activation. The stored epoch is read back (`ledger.LedgerState.delegatorInactivityActivationEpoch`) as the activation floor the rollback recompute clamps expirations up to, since the activation stamp writes `A + DelegatorInactivity` without leaving a witness. |
 | `backfill_checkpoint` | `id`, `phase`, `last_slot`, `total_slots`, `started_at`, `updated_at`, `completed` | PK `id`; unique `phase` | Durable, resumable one-time backfill progress keyed by `phase`. `metadata` tracks API-mode historical metadata backfill. `account_created_slot` records completion of the one-time `account.created_slot` stamp (`models.BackfillAccountCreatedSlot`); gating on this marker instead of on "the column was just added" makes that backfill crash-safe (an interrupted run leaves the marker absent, so the next startup retries the `created_slot = 0` guarded scan). |
 | `import_checkpoint` | `id`, `import_key`, `phase` | PK `id`; unique `import_key` | Mithril snapshot import resume state. `import_key` is usually `{digest}:{slot}`. Catch-up imports leave `import_key` empty to force a full pass. |
 
@@ -330,8 +330,10 @@ rather than relied on).
 
 | Table | Columns | Keys / indexes | Relationships and notes |
 |---|---|---|---|
-| `account` | `id`, `staking_key`, `credential_tag`, `pool`, `drep`, `added_slot`, `created_slot`, `certificate_id`, `reward`, `drep_type`, `active` | PK `id`; unique (`credential_tag`, `staking_key`); indexes pool/DRep/active lookup combinations, including leftmost `active` coverage for reconcile scans | Current stake account state. `credential_tag`: 0 key hash, 1 script hash. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. `created_slot` is the immutable slot the row was first created (0 for Shelley-genesis delegated accounts); unlike `added_slot`, later registration and delegation changes do not bump it. New rows resolve the `AccountCreatedSlotUnset` sentinel when saved, including phantom rows created by deregistration certificates. Older certificate-created rows (`certificate_id != 0`) are backfilled once from the earliest registration certificate in bounded keyset pages; genesis rows remain at 0 even if later registration history exists. `GetAccountsActiveAtSlot` combines registration/deregistration certificate order with this immutable creation slot so pre-Babbage reward filtering can reconstruct whether each requested credential was active immediately before the RUPD cutoff. |
+| `account` | `id`, `staking_key`, `credential_tag`, `pool`, `drep`, `added_slot`, `created_slot`, `certificate_id`, `reward`, `drep_type`, `active`, `expiration_epoch` | PK `id`; unique (`credential_tag`, `staking_key`); indexes pool/DRep/active lookup combinations, including leftmost `active` coverage for reconcile scans; index on `expiration_epoch` | Current stake account state. `credential_tag`: 0 key hash, 1 script hash. Historical changes are in certificate-specific tables. `drep_type`: 0 key hash, 1 script hash, 2 AlwaysAbstain, 3 AlwaysNoConfidence. `created_slot` is the immutable slot the row was first created (0 for Shelley-genesis delegated accounts); unlike `added_slot`, later registration and delegation changes do not bump it. New rows resolve the `AccountCreatedSlotUnset` sentinel when saved, including phantom rows created by deregistration certificates. Older certificate-created rows (`certificate_id != 0`) are backfilled once from the earliest registration certificate in bounded keyset pages; genesis rows remain at 0 even if later registration history exists. `GetAccountsActiveAtSlot` combines registration/deregistration certificate order with this immutable creation slot so pre-Babbage reward filtering can reconstruct whether each requested credential was active immediately before the RUPD cutoff. `expiration_epoch` (default 0, plain AutoMigrate column mirroring `drep.expiry_epoch`) is the CIP-0163 reward-account inactivity expiry: 0 means unset/active; otherwise the account is treated as expired once the current epoch strictly exceeds it (`ledger.accountExpiredAtEpoch`). Mithril bootstrap does not import this column (it is absent from the cardano-ledger snapshot and cannot be reconstructed after import), so a node with the CIP-0163 gate enabled refuses Mithril bootstrap and must sync from genesis (see ARCHITECTURE.md). `MetadataStore.RenewAccountExpirations(refs, expirationEpoch, txn)` sets it for a batch of stake credentials with set-based `UPDATE`s — one statement per chunk of credentials over an OR-chain of `(credential_tag, staking_key)` equality predicates (the same portable pattern as `MarkUtxosDeletedAtSlot`, avoiding GORM's byte-by-byte tuple-IN unpacking), rather than one `UPDATE` per credential — so a large rollback recompute does not hold the ledger write transaction open across thousands of single-row round-trips; refs with no matching account row are silently ignored (an account must already be registered to have an expiration). The ledger calls this write primitive during block application through the CIP-0163 renewal hook (`ledger.LedgerState.renewWitnessedAccountExpirations`, invoked from `LedgerDelta.applyWithDonationRecording` — the shared body of `apply` and `applyWithoutRecordingDonations` — after the block's account writes and in the same transaction): when the delegator-inactivity gate is on, every reward-account credential witnessed by a block's phase-2-valid transactions (reward withdrawals plus stake/vote registration, deregistration, and delegation certificates) has its `expiration_epoch` set to `currentEpoch + DelegatorInactivity`; with the gate off the hook computes and writes nothing. `MetadataStore.StampAllActiveAccountExpirations(expirationEpoch, txn)` is the one-time CIP-0163 activation counterpart: it records the exact active credential set in `account_inactivity_activation`, then gives every active account the same full window from the activation epoch, overwriting any shorter expiration set by a pre-activation witness, and returns the row count. `ledger.LedgerState.activateDelegatorInactivityIfNeeded` (`ledger/account_expiry_activate.go`) calls it exactly once before inactivity-gated governance and snapshot calculations, guarded by the `delegator_inactivity_activated` `sync_state` marker (see the `sync_state` row above). On a chain rollback the ledger recomputes `expiration_epoch` for the affected reward accounts, because it is an epoch value the slot-oriented account restore (`RestoreAccountStateAtSlot`) cannot derive: `MetadataStore.AccountsWitnessedAfterSlot(slot, txn)` returns the distinct credentials with a stake-witnessing certificate or a reward withdrawal from `account_withdrawal_witness` (including zero-amount withdrawals) or legacy `account_reward_delta` withdrawal rows at `added_slot > slot` — the rolled-away witnesses, collected before the rollback deletes those rows — and `MetadataStore.AccountLastWitnessSlots(refs, maxSlot, txn)` returns, per credential, the greatest witnessing `added_slot <= maxSlot` across that same CIP-0163 witness set (the ten stake-witnessing certificate tables plus both withdrawal histories), keyed by `StakeCredentialRef.MapKey()` and absent when there is no surviving witness. `ledger.LedgerState.recomputeAccountExpirationsAfterRollback` (`ledger/account_expiry_rollback.go`, invoked from the rollback transaction in `ledger/state.go` after `RestoreAccountStateAtSlot`) stamps each affected credential's `expiration_epoch` to the surviving witness slot's epoch + `DelegatorInactivity`, or resets it to 0 when no surviving witness remains. It also honors the one-time activation floor: when activation ran at or before the rollback point (the `delegator_inactivity_activated` marker epoch `A` is `<= SlotToEpoch(rollbackSlot)`), exactly the credentials recorded in `account_inactivity_activation` are clamped up to at least `A + DelegatorInactivity`, because the activation stamp left no witness for a witness-only recompute to recover. This explicit membership avoids flooring account rows that existed but were deregistered at activation. When rollback crosses before `A`, `ResetAccountExpirationActivation` clears expiration for that exact membership, returns those credentials, and deletes the membership rows; the ledger unions the returned credentials into the affected set so a pre-activation witness expiration overwritten by activation is reconstructed rather than lost. With the gate off it does nothing. The stake-aggregation chokepoint enforces the gate for consensus: `GetStakeByPoolsAtSlot`, `GetPoolOwnerStakeAtSlot`, and `GetRewardStakeInputsForPools` all accept `slot`, `expiryEpoch`, and `inactivityPeriod` arguments (`expiryEpoch == 0` = gate off, byte-identical to pre-CIP). With the gate on they reconstruct each credential's expiration at `slot` from witness history (not the mutable live column) and exclude credentials expired before `expiryEpoch` from leader-election mark stake, the per-pool reward basis, and SPO vote power. `GetRewardStakeInputsForPools` sources the gated per-pool reward basis from the same historical `active_delegator_stake` CTE as `GetStakeByPoolsAtSlot`, so the reward-basis inputs agree with the leader-election pool totals by construction; only its gate-off path still reads the live reward aggregate. See `GetStakeByPoolsAtSlot` below. `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, and `GetDRepVotingPowerByType` accept the identical `expiryEpoch` gate for the separate DRep governance voting-power denominator, applied at the epoch-boundary tally by `ledger/governance.LoadDRepVotingState`; see `GetDRepVotingPower` below. |
+| `account_inactivity_activation` | `credential_tag`, `staking_key` | composite PK (`credential_tag`, `staking_key`); index `staking_key` | Exact active-account membership captured by the one-time CIP-0163 activation stamp. Historical expiry reconstruction and rollback use this table instead of inferring membership from account creation time, because an account row may exist while deregistered. The rows are deleted together with the activation marker when rollback crosses before activation. |
 | `account_reward_delta` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `amount`, `previous_reward`, `added_slot`, `withdrawal` | PK `id`; indexes `(credential_tag, staking_key)`, `tx_hash`, `added_slot`, `withdrawal`; unique `(withdrawal, tx_hash, credential_tag, staking_key, added_slot)` | Rollback-aware reward-account change journal. `tx_hash` is non-null; credit writers use an empty blob only when no event discriminator exists. Credit rows add `amount`; withdrawal rows clear `account.reward`, store `previous_reward`, and use `tx_hash` plus the full stake credential identity as their slot-independent logical replay key. The physical unique key also includes `added_slot` so distinct per-epoch credits remain separate while same-boundary credit re-ingest is idempotent. Governance proposal credits store a 32-byte proposal-event discriminator derived from proposal `tx_hash` plus `action_index`, not the raw proposal transaction hash alone. Logical join to `account.(credential_tag, staking_key)`. |
+| `account_withdrawal_witness` | `id`, `staking_key`, `credential_tag`, `tx_hash`, `added_slot` | PK `id`; indexes `added_slot` and (`staking_key`, `credential_tag`, `added_slot`); unique (`tx_hash`, `credential_tag`, `staking_key`) | Rollback-aware CIP-0163 history for every valid withdrawal-map entry, including zero-amount withdrawals that create no reward delta. Rollback witness queries read this table (and legacy withdrawal delta rows), and rollback deletes rows after its target slot. |
 | `registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake registration certificate. Join `certificate_id -> certs.id`. |
 | `deregistration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Conway-era stake deregistration certificate. |
 | `stake_registration` | `id`, `staking_key`, `credential_tag`, `certificate_id`, `added_slot`, `deposit_amount` | PK `id`; indexes `(credential_tag, staking_key)`, `certificate_id`, `added_slot` | Shelley-era stake registration certificate. |
@@ -395,11 +397,11 @@ process the same pointer unless the claim expires before a result is recorded.
 |---|---|---|---|
 | `pool_stake_snapshot` | `id`, `epoch`, `snapshot_type`, `pool_key_hash`, `total_stake`, `stake_denominator`, `delegator_count`, `captured_slot`, `reward_account_auto_vote`, `reward_account_auto_vote_resolved` | PK `id`; unique `(epoch, snapshot_type, pool_key_hash)` | Per-pool stake snapshots. `"mark"` rows store lovelace stake totals captured from slot-aware delegation and UTxO state at `captured_slot`, plus each delegator's live `account.reward` balance (issue #2813; interim source, not boundary-exact), and are used by the normal Praos epoch-2 rotation. Mithril-imported `"actv"` rows store `NewEpochState.pool-distr` stake fractions as `total_stake / stake_denominator` for the imported epoch. Mark snapshot refreshes atomically replace all rows for the same `(epoch, snapshot_type)` before inserting the freshly captured set, so disappeared pools cannot remain in the snapshot. Logical joins to `epoch.epoch_id` and `pool.pool_key_hash`. |
 | `epoch_summary` | `id`, `epoch`, `total_active_stake`, `total_pool_count`, `total_delegators`, `epoch_nonce`, `boundary_slot`, `snapshot_ready` | PK `id`; unique `epoch` | Aggregate epoch snapshot state. |
-| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot` | PK `id`; unique `(credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. Epoch-boundary reward capture copies positive, registered, delegated rows into `reward_stake_input`; leader-election Mark snapshots remain slot-aware and independent. Node startup checks for missing aggregate credentials and rebuilds from canonical state when necessary. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. Capture defensively applies the same credential-only identity before deriving `reward_pool_input` totals. Before AutoMigrate creates the unique index, startup repairs duplicates left by upgraded or partially-written databases by preserving the lowest-`id` row, which is the row the pre-index incremental refresh path updates. |
+| `reward_live_stake` | `id`, `credential_tag`, `staking_key`, `pool_key_hash`, `utxo_stake`, `reward_stake`, `total_stake`, `registered`, `pool_delegation_slot`, `pool_delegation_block_index`, `pool_delegation_cert_index`, `updated_slot` | PK `id`; unique `(credential_tag, staking_key)` | Live per-stake-credential aggregate maintained transactionally with UTxO, account, delegation, and reward-balance writes. Epoch-boundary reward capture copies positive, registered, delegated rows into `reward_stake_input` when the CIP-0163 gate is off; with the gate on, the reward basis is instead reconstructed at the snapshot slot from the historical `active_delegator_stake` CTE (see `GetRewardStakeInputsForPools`) so it agrees with leader-election stake by construction. Leader-election Mark snapshots remain slot-aware and independent. Node startup checks for missing aggregate credentials and rebuilds from canonical state when necessary. The `(credential_tag, staking_key)` uniqueness protects the invariant that each stake credential contributes to exactly one reward aggregate and pool input. Capture defensively applies the same credential-only identity before deriving `reward_pool_input` totals. Before AutoMigrate creates the unique index, startup repairs duplicates left by upgraded or partially-written databases by preserving the lowest-`id` row, which is the row the pre-index incremental refresh path updates. |
 | `reward_ada_pots` | `id`, `epoch`, `treasury`, `reserves`, `fees`, `rewards`, `captured_slot` | PK `id`; unique `epoch`; index `captured_slot` | Reward ADA pots captured at an epoch boundary. |
 | `reward_snapshot` | `id`, `epoch`, `snapshot_type`, `total_active_stake`, `total_pool_count`, `total_delegators`, `captured_slot`, `boundary_slot`, `epoch_nonce`, `protocol_version`, `authoritative` | PK `id`; unique `(epoch, snapshot_type)`; indexes `captured_slot`, `boundary_slot` | Reward snapshot metadata recorded by the epoch rotation path. `authoritative` is `true` for a snapshot captured inside the ledger epoch-rollover write transaction at the SNAP point (`CaptureEpochBoundarySnapshot`) and `false` for the event-driven fallback (`captureMarkSnapshot`). The fallback claims the `(epoch, mark)` row atomically (INSERT ... ON CONFLICT DO NOTHING, then a `FOR UPDATE` recheck) and skips when an `authoritative` row already exists, so it can never overwrite the authoritative capture; the authoritative writer always overwrites a fallback row. When ended-epoch metadata is unavailable and no reward inputs can be persisted, the fallback uses `ClaimFallbackRewardSnapshotGuard` to insert-or-lock the same key, writes the leader-election Mark rows, then deletes only the temporary row it inserted before commit. The transaction retains the row/unique-key lock through commit, so serialization still closes the MySQL/Postgres capture race (SQLite is already serial) while no durable `reward_snapshot` row remains without reward inputs. Guard claim/release require the same non-nil metadata transaction. |
 | `reward_pool_input` | `id`, `epoch`, `pool_key_hash`, `reward_account`, `reward_account_credential_tag`, `pledge`, `delegated_stake`, `owner_stake`, `cost`, `margin`, `delegator_count`, `blocks_produced`, `total_blocks_in_epoch`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Per-pool metadata captured by epoch rotation. Stake totals are aggregated from the captured `reward_stake_input` credentials, independently of leader-election Mark totals; pool parameters are selected as effective during the ended epoch. Owner stake counts captured key credentials named by the effective pool registration. Block counts are stored on the row at capture time. Pools with missing or invalid registration data are excluded from reward inputs without changing `pool_stake_snapshot` or `epoch_summary`. Logical join to `pool.pool_key_hash`. |
-| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential stake frozen from `reward_live_stake` by either authoritative or fallback reward snapshot capture. Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
+| `reward_stake_input` | `id`, `epoch`, `pool_key_hash`, `credential_tag`, `staking_key`, `stake`, `owner`, `registered`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash, credential_tag, staking_key)`; indexes `captured_slot`, `boundary_slot` | Per-credential stake frozen by either authoritative or fallback reward snapshot capture: from the live `reward_live_stake` aggregate when the CIP-0163 gate is off, or reconstructed at the snapshot slot from the historical `active_delegator_stake` CTE when the gate is on (matching the leader-election basis). Check the matching `reward_snapshot.authoritative` value to distinguish the source snapshot. `owner` records whether the effective pool registration names the key credential as an owner. Capture defensively deduplicates by `(credential_tag, staking_key)` before deriving `reward_pool_input.delegated_stake` and `delegator_count`, so a corrupted credential cannot contribute to multiple pools and the persisted pool totals remain equal to the sum of their stake-input rows. |
 | `reward_pool_output` | `id`, `epoch`, `pool_key_hash`, `apparent_performance`, `optimal_reward`, `total_reward`, `leader_reward`, `member_reward_total`, `owner_stake`, `undistributed`, `unspendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, pool_key_hash)`; indexes `captured_slot`, `boundary_slot` | Persisted per-pool reward-calculation results. Replacing a provisional reward snapshot invalidates rows for the same epoch. |
 | `reward_account_output` | `id`, `epoch`, `credential_tag`, `staking_key`, `pool_key_hash`, `reward_type`, `amount`, `spendable`, `captured_slot`, `boundary_slot` | PK `id`; unique `(epoch, credential_tag, staking_key, pool_key_hash, reward_type)`; indexes `captured_slot`, `boundary_slot` | Persisted per-account reward-calculation results, invalidated together with pool outputs when snapshot inputs are replaced. |
 
@@ -914,6 +916,38 @@ across the UTxO join fan-out.
 integer type before arithmetic (`INTEGER` on sqlite, `BIGINT` on postgres,
 `UNSIGNED` on mysql), matching the DRep voting-power queries:
 
+`GetStakeByPoolsAtSlot` and `GetPoolOwnerStakeAtSlot` take both an
+`expiryEpoch uint64` and the configured inactivity period. `expiryEpoch == 0`
+disables the CIP-0163 gate and leaves the pre-CIP query path unchanged. With the
+gate enabled, a shared CTE reconstructs expiration at the requested slot from
+the latest qualifying certificate/withdrawal witness at or before that slot,
+maps the witness slot through the `epoch` table, and adds the inactivity period.
+If the one-time activation marker applies, credentials recorded in
+`account_inactivity_activation` are floored to
+`activationEpoch + inactivityPeriod`. A mutable
+`account.expiration_epoch` is used only as the import/bootstrap fallback when
+neither witness history nor the activation floor can reconstruct the value; if
+only later local witnesses exist, `account.created_slot` supplies the historical
+floor instead, so a later renewal cannot revive stake in an older snapshot.
+Credentials without an account row remain active. The final predicate keeps
+only `expiration_epoch = 0 OR expiration_epoch >= expiryEpoch`.
+
+`GetRewardStakeInputsForPools` takes the same `slot`, `expiryEpoch`, and
+`inactivityPeriod` arguments. With the gate off (`expiryEpoch == 0`) it reads the
+live reward aggregate (`reward_live_stake`), byte-identical to the pre-CIP query
+(`slot`/`inactivityPeriod` ignored). With the gate on it selects the
+per-credential rows of the same `active_delegator_stake` CTE that
+`GetStakeByPoolsAtSlot` aggregates for pool totals — identical credential
+membership, slot-accurate stake values, and the identical historical expiry
+reconstruction — so the reward-basis inputs agree with the leader-election stake
+by construction rather than reading the mutable `account.expiration_epoch`
+column (which can reflect a post-`slot` renewal when a fallback capture runs
+after the boundary). Together, these historical filters remove expired-account
+stake from the leader-election Mark snapshot, reward basis, and SPO governance
+vote power. The snapshot manager supplies the snapshot slot, epoch, and period;
+the public `Calculator.CalculateStakeDistribution` path passes zero values (gate
+off).
+
 ```sql
 -- Predicate used by sqlite/postgres/mysql implementations after resolving
 -- active_delegation(pool_key_hash, credential_tag, staking_key)
@@ -932,7 +966,15 @@ WITH active_delegator_stake AS (
   LEFT JOIN historical_reward
     ON historical_reward.credential_tag = active_delegation.credential_tag
    AND historical_reward.staking_key = active_delegation.staking_key
-  WHERE active_delegation.pool_key_hash IN (...)
+  -- CIP-0163 gate (emitted only when expiryEpoch > 0). The preceding
+  -- historical_expiration CTE derives expiration at the requested slot.
+  LEFT JOIN historical_expiration expiry_acct
+    ON expiry_acct.credential_tag = active_delegation.credential_tag
+   AND expiry_acct.staking_key = active_delegation.staking_key
+  WHERE (expiry_acct.expiration_epoch = 0
+         OR expiry_acct.expiration_epoch >= $expiryEpoch
+         OR expiry_acct.expiration_epoch IS NULL) AND
+        active_delegation.pool_key_hash IN (...)
   GROUP BY active_delegation.pool_key_hash,
            active_delegation.credential_tag,
            active_delegation.staking_key
@@ -943,6 +985,73 @@ SELECT pool_key_hash,
 FROM active_delegator_stake
 GROUP BY pool_key_hash;
 ```
+
+### `GetDRepVotingPower`, `GetDRepVotingPowerBatch`, `GetDRepVotingPowerByType`
+
+All three DRep voting-power queries take an `expiryEpoch uint64` argument that
+drives the same CIP-0163 reward-account inactivity exclusion as
+`GetStakeByPoolsAtSlot` (see above), applied to the DRep governance
+denominator instead of the leader-election/reward/SPO one. `expiryEpoch == 0`
+disables the gate and the generated SQL and bind args are byte-identical to
+the pre-CIP query. A nonzero value adds
+`AND (<alias>.expiration_epoch = 0 OR <alias>.expiration_epoch >= expiryEpoch)`
+to both the inner subquery's `WHERE ... active = 1/true` (aliased `ax`, or an
+`EXISTS` correlation for the single-DRep and by-type variants) and the outer
+query's `WHERE ... active = 1/true` (aliased `a`), keeping an account iff it
+has never been witnessed-expired or its expiration is not yet due.
+`ledger/governance.LoadDRepVotingState` computes `expiryEpoch` as
+`currentEpoch` when `LedgerStateConfig.DelegatorInactivityEnabled` is true and
+`0` otherwise, and passes it to `GetDRepVotingPowerBatch` (regular DReps) and
+`GetDRepVotingPowerByType` (the `AlwaysAbstain`/`AlwaysNoConfidence`
+predefined options); `ledger.LedgerState.processEpochRollover` threads the
+gate flag in from config through `governance.ProcessEpoch`'s `EpochInput`.
+`GetDRepVotingPower` (the single-DRep, non-batch form used by point-in-time
+API/ledger-view queries, not the epoch-boundary tally) accepts the same
+parameter but its callers always pass `0`.
+
+The expiry clause's bind position is always textually ahead of the
+pre-existing predicate it shares a `WHERE` with (the `IN (...)` chunk for the
+batch/by-type variants, or the `drep = ?`/`drep_type = ?` equality for the
+single-DRep variant), so callers append args in
+"inner expiry, inner predicate, outer expiry, outer predicate" order,
+omitting both expiry args when the gate is off:
+
+```sql
+-- GetDRepVotingPowerBatch, sqlite dialect (postgres/mysql equivalent, CAST
+-- target and true/false spelling aside)
+SELECT a.drep AS drep, a.drep_type AS credential_tag,
+       COALESCE(SUM(
+         COALESCE(u.utxo_sum, 0) + COALESCE(CAST(a.reward AS INTEGER), 0)
+       ), 0) AS stake
+FROM account a
+LEFT JOIN (
+  SELECT ax.drep_type, ax.credential_tag, ax.staking_key,
+         COALESCE(SUM(CAST(utxo.amount AS INTEGER)), 0) AS utxo_sum
+  FROM account ax
+  JOIN utxo ON utxo.credential_tag = ax.credential_tag
+           AND utxo.staking_key = ax.staking_key
+           AND utxo.deleted_slot = 0
+  -- CIP-0163 gate (emitted only when expiryEpoch > 0), ahead of the IN chunk:
+  WHERE ax.active = 1 AND (ax.expiration_epoch = 0 OR ax.expiration_epoch >= ?)
+    AND ax.drep IN (...)
+  GROUP BY ax.drep_type, ax.credential_tag, ax.staking_key
+) u ON u.credential_tag = a.credential_tag
+   AND u.staking_key = a.staking_key
+   AND u.drep_type = a.drep_type
+WHERE a.active = 1 AND (a.expiration_epoch = 0 OR a.expiration_epoch >= ?)
+  AND a.drep IN (...)
+GROUP BY a.drep, a.drep_type;
+```
+
+One dialect-specific wrinkle: the postgres `GetDRepVotingPower` (single-DRep)
+query is hand-written with literal `$1`/`$2` placeholders reused across the
+inner and outer clause rather than GORM's `?` auto-numbering (used by every
+other DRep voting-power/stake query in this file). GORM's raw-SQL builder
+only rewrites literal `?` bytes into dialect placeholders as it walks the SQL
+text, in textual order; it does not parse or reserve numbers already spelled
+out as `$1`/`$2` text. The expiry clause therefore reuses a third literal
+placeholder (`$3`) instead of a new `?`, to avoid the new `?` being
+substituted using the wrong (already-textually-earlier) argument.
 
 ### `GetDRepDelegators`
 

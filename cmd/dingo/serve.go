@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/node"
+	"github.com/blinklabs-io/dingo/mithril"
 	"github.com/spf13/cobra"
 )
 
@@ -39,6 +40,16 @@ func serveRun(
 	// did not complete. The user must finish (or re-run) the sync
 	// before starting the node.
 	if err := checkSyncState(cfg, logger); err != nil {
+		slog.Error(err.Error())
+		os.Exit(1)
+	}
+
+	// CIP-0163: refuse to serve a Mithril-bootstrapped database with the
+	// delegator-inactivity gate enabled. This closes the "run 'mithril sync'
+	// with the gate off, then restart with it on" path that Guard 1 in the
+	// sync command cannot see; a bootstrapped node cannot reproduce a
+	// genesis-synced node's expiration state.
+	if err := checkMithrilInactivityCompat(cfg, logger); err != nil {
 		slog.Error(err.Error())
 		os.Exit(1)
 	}
@@ -129,6 +140,49 @@ func checkSyncState(
 			"Mithril bootstrap) to resume before starting the node",
 		val,
 	)
+}
+
+// checkMithrilInactivityCompat refuses to start a node that has the CIP-0163
+// delegator-inactivity gate enabled on a database populated by a Mithril
+// bootstrap. Reward-account expiration state is dingo-only and absent from the
+// cardano-ledger Mithril snapshot, and cannot be reconstructed after import, so
+// serving such a database would diverge from a genesis-synced node. A no-op
+// when the gate is off or the database was not Mithril-bootstrapped.
+func checkMithrilInactivityCompat(
+	cfg *config.Config,
+	logger *slog.Logger,
+) error {
+	if !cfg.DelegatorInactivityEnabled {
+		return nil
+	}
+	db, err := database.New(&database.Config{
+		DataDir:        cfg.DatabasePath,
+		Logger:         logger,
+		BlobPlugin:     cfg.BlobPlugin,
+		RunMode:        string(cfg.RunMode),
+		MetadataPlugin: cfg.MetadataPlugin,
+		MaxConnections: 1,
+		StorageMode:    cfg.StorageMode,
+		Network:        cfg.Network,
+	})
+	if err != nil {
+		// A commit-timestamp mismatch is recovered downstream in node.Run;
+		// the marker read works on the partially-initialised handle.
+		var cte database.CommitTimestampError
+		if !errors.As(err, &cte) || db == nil {
+			return fmt.Errorf("opening database: %w", err)
+		}
+	}
+	defer db.Close()
+
+	bootstrapped, err := mithril.WasBootstrapped(db)
+	if err != nil {
+		return fmt.Errorf("checking mithril bootstrap marker: %w", err)
+	}
+	if bootstrapped {
+		return errMithrilInactivityIncompatible()
+	}
+	return nil
 }
 
 // repairDeferredIndexes rebuilds any deferred metadata indexes left

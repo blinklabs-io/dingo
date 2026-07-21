@@ -192,6 +192,9 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 
 	liveInputs, err := meta.GetRewardStakeInputsForPools(
 		[][]byte{poolKey},
+		boundarySlot,
+		0, // gate off: live aggregate, slot/inactivity ignored
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -243,6 +246,9 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 	require.Equal(t, uint64(37_049), uint64(rewardMember.Reward))
 	liveInputs, err = meta.GetRewardStakeInputsForPools(
 		[][]byte{poolKey},
+		boundarySlot,
+		0, // gate off: live aggregate, slot/inactivity ignored
+		0,
 		nil,
 	)
 	require.NoError(t, err)
@@ -258,6 +264,293 @@ func TestApplyStakeRewardsUsesDelayedRewardState(t *testing.T) {
 		Where("added_slot = ?", boundarySlot).
 		Count(&deltas).Error)
 	require.Equal(t, int64(2), deltas)
+}
+
+// guardExpiredLeaderResult captures the post-application state a Task 10
+// scenario run produces, so gate-on and gate-off runs can be compared.
+type guardExpiredLeaderResult struct {
+	reserves           uint64
+	treasury           uint64
+	leaderReward       uint64 // credited to the reward (leader) account
+	memberReward       uint64 // credited to the member delegator
+	leaderOutputAmount uint64 // persisted leader account output amount
+	memberOutputAmount uint64 // persisted member account output amount
+}
+
+// applyGuardExpiredLeaderScenario seeds a single-pool reward application in
+// which the pool's reward (leader) account is expired as of the reward's
+// snapshot epoch, runs the application with the delegator-inactivity gate set
+// to gateEnabled, and returns the resulting network state and reward balances.
+//
+// It is the shared harness for the Task 10 reward-crediting guard. newEpoch is
+// 5, so stakeRewardEpochsForApplication maps it to snapshot epoch 2: an
+// ExpirationEpoch of 1 is nonzero and strictly before 2 (expired), while an
+// unset (0) expiration is active. This is the same snapshot epoch Task 8 uses
+// to build the reward basis, so the guard and the basis agree on which snapshot
+// an account is judged against.
+func applyGuardExpiredLeaderScenario(
+	t *testing.T,
+	gateEnabled bool,
+) guardExpiredLeaderResult {
+	t.Helper()
+	ls, db := newRewardCalculationTestLedger(t)
+	ls.config.DelegatorInactivityEnabled = gateEnabled
+	meta := db.Metadata()
+
+	const (
+		newEpoch            = uint64(5)
+		rewardSnapshotEpoch = uint64(2)
+		performanceEpoch    = uint64(3)
+		potsEpoch           = uint64(4)
+		boundarySlot        = uint64(500)
+	)
+	poolKey := rewardCalcHash(0x11)
+	rewardAccount := rewardCalcHash(0x22)
+	member := rewardCalcHash(0x33)
+	var poolID lcommon.PoolKeyHash
+	copy(poolID[:], poolKey)
+
+	pparams := &shelley.ShelleyProtocolParameters{
+		NOpt:             10,
+		A0:               rewardCalcRat(1, 2),
+		Rho:              rewardCalcRat(1, 100),
+		Tau:              rewardCalcRat(0, 1),
+		Decentralization: rewardCalcRat(0, 1),
+		ProtocolMajor:    7,
+		ProtocolMinor:    0,
+	}
+	pparamsCbor, err := cbor.Encode(pparams)
+	require.NoError(t, err)
+
+	require.NoError(t, meta.SetEpoch(100, performanceEpoch, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil))
+	require.NoError(t, meta.SetEpoch(200, potsEpoch, nil, nil, nil, nil, eras.ShelleyEraDesc.Id, 1, 100, nil))
+	for i := range uint64(10) {
+		require.NoError(t, db.UpdatePoolOpCertSequence(
+			poolID,
+			i+1,
+			140+i,
+			nil,
+		))
+	}
+	require.NoError(t, db.SetPParams(
+		pparamsCbor,
+		100,
+		performanceEpoch,
+		eras.ShelleyEraDesc.Id,
+		nil,
+	))
+	require.NoError(t, meta.SaveRewardAdaPots(&models.RewardAdaPots{
+		Epoch:        potsEpoch,
+		Reserves:     100_000_000,
+		CapturedSlot: 300,
+	}, nil))
+	require.NoError(t, meta.SaveRewardSnapshot(&models.RewardSnapshot{
+		Epoch:            rewardSnapshotEpoch,
+		SnapshotType:     "mark",
+		TotalActiveStake: 1_000,
+		TotalPoolCount:   1,
+		TotalDelegators:  2,
+		CapturedSlot:     100,
+		BoundarySlot:     100,
+		ProtocolVersion:  7,
+	}, nil))
+	require.NoError(t, meta.SaveRewardPoolInputs([]*models.RewardPoolInput{
+		{
+			Epoch:                      rewardSnapshotEpoch,
+			PoolKeyHash:                poolKey,
+			RewardAccount:              rewardAccount,
+			RewardAccountCredentialTag: 0,
+			Margin:                     &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:                     500,
+			Cost:                       1_000,
+			DelegatedStake:             1_000,
+			OwnerStake:                 500,
+			DelegatorCount:             2,
+			CapturedSlot:               100,
+			BoundarySlot:               100,
+		},
+	}, nil))
+	require.NoError(t, meta.SaveRewardStakeInputs([]*models.RewardStakeInput{
+		{
+			Epoch:         rewardSnapshotEpoch,
+			PoolKeyHash:   poolKey,
+			CredentialTag: 0,
+			StakingKey:    rewardAccount,
+			Stake:         500,
+			Owner:         true,
+			Registered:    true,
+			CapturedSlot:  100,
+			BoundarySlot:  100,
+		},
+		{
+			Epoch:         rewardSnapshotEpoch,
+			PoolKeyHash:   poolKey,
+			CredentialTag: 0,
+			StakingKey:    member,
+			Stake:         500,
+			Registered:    true,
+			CapturedSlot:  100,
+			BoundarySlot:  100,
+		},
+	}, nil))
+	gormDB := rewardCalcGormDB(t, db)
+	pool := models.Pool{PoolKeyHash: poolKey}
+	require.NoError(t, gormDB.Create(&pool).Error)
+	require.NoError(t, gormDB.Create(&models.PoolRegistration{
+		PoolID:      pool.ID,
+		PoolKeyHash: poolKey,
+		AddedSlot:   0,
+	}).Error)
+	// The reward (leader) account is expired as of the snapshot epoch (2):
+	// ExpirationEpoch 1 is nonzero and strictly before 2.
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:      rewardAccount,
+		Pool:            poolKey,
+		Active:          true,
+		ExpirationEpoch: 1,
+	}))
+	// The member delegator is active (unset expiration).
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:      member,
+		Pool:            poolKey,
+		Active:          true,
+		ExpirationEpoch: 0,
+	}))
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		1,
+		rewardAccount,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+	rewardCalcSeedStakeCert(
+		t,
+		db,
+		2,
+		member,
+		0,
+		250,
+		uint(lcommon.CertificateTypeStakeRegistration),
+	)
+
+	txn := db.Transaction(true)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		return ls.applyStakeRewards(txn, newEpoch, boundarySlot)
+	}))
+
+	rewardOwner, err := db.GetAccountByCredential(0, rewardAccount, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardOwner)
+	rewardMember, err := db.GetAccountByCredential(0, member, true, nil)
+	require.NoError(t, err)
+	require.NotNil(t, rewardMember)
+
+	state, err := meta.GetNetworkState(nil)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	accountOutputs, err := meta.GetRewardAccountOutputs(rewardSnapshotEpoch, nil)
+	require.NoError(t, err)
+
+	res := guardExpiredLeaderResult{
+		reserves:     uint64(state.Reserves),
+		treasury:     uint64(state.Treasury),
+		leaderReward: uint64(rewardOwner.Reward),
+		memberReward: uint64(rewardMember.Reward),
+	}
+	for _, output := range accountOutputs {
+		switch string(output.StakingKey) {
+		case string(rewardAccount):
+			require.Equal(t, string(rewards.RewardTypeLeader), output.RewardType)
+			res.leaderOutputAmount = uint64(output.Amount)
+		case string(member):
+			require.Equal(t, string(rewards.RewardTypeMember), output.RewardType)
+			res.memberOutputAmount = uint64(output.Amount)
+		}
+	}
+	return res
+}
+
+// TestApplyStakeRewardsGuardsExpiredRewardAccount is the Task 10 reward-crediting
+// guard test: a pool reward (leader) account expired as of the reward snapshot
+// epoch must not be credited, and its reward must be routed to undistributed ->
+// reserves so the ADA pots reconcile exactly. Gate off is byte-identical to the
+// pre-CIP behavior (both accounts credited).
+func TestApplyStakeRewardsGuardsExpiredRewardAccount(t *testing.T) {
+	const initialReserves = uint64(100_000_000)
+
+	// Gate off: the expired reward account is still credited (pre-CIP
+	// behavior). Both leader and member receive their rewards, and the ADA is
+	// fully conserved (fees=0, tau=0).
+	off := applyGuardExpiredLeaderScenario(t, false)
+	require.Greater(t, off.leaderReward, uint64(0), "gate off must credit the leader")
+	require.Greater(t, off.memberReward, uint64(0), "gate off must credit the member")
+	require.Equal(t, off.leaderOutputAmount, off.leaderReward)
+	require.Equal(t, off.memberOutputAmount, off.memberReward)
+	require.Equal(t,
+		initialReserves,
+		off.reserves+off.treasury+off.leaderReward+off.memberReward,
+		"gate off ADA must be conserved",
+	)
+
+	// Gate on: the expired reward (leader) account is NOT credited; the active
+	// member is still credited its full, unchanged amount.
+	on := applyGuardExpiredLeaderScenario(t, true)
+	require.Equal(t, uint64(0), on.leaderReward,
+		"gate on must not credit the expired reward account")
+	require.Equal(t, off.memberReward, on.memberReward,
+		"gate on must still credit the active member unchanged")
+	// The guard skips crediting only; it does not rewrite the computed reward
+	// outputs, so the persisted leader output amount is unchanged.
+	require.Equal(t, off.leaderOutputAmount, on.leaderOutputAmount)
+
+	// Reconciliation: reserves gains exactly the skipped leader reward, and the
+	// treasury is unchanged (the skipped amount is routed to undistributed ->
+	// reserves, not unspendable -> treasury).
+	require.Equal(t, off.reserves+off.leaderReward, on.reserves,
+		"reserves must gain exactly the skipped leader reward")
+	require.Equal(t, off.treasury, on.treasury,
+		"treasury must be unchanged by the guard")
+	// ADA conservation with the guard on: the only credited reward is the
+	// member; the skipped leader amount stayed in reserves.
+	require.Equal(t,
+		initialReserves,
+		on.reserves+on.treasury+on.memberReward,
+		"gate on ADA must be conserved",
+	)
+}
+
+func TestGuardedExpiredRewardCredentialsUsesSnapshotWitnessHistory(t *testing.T) {
+	const inactivity = uint64(90)
+	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
+	cred := renewTestCred(0x71)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey: cred, Active: true, ExpirationEpoch: 2 + inactivity,
+	}))
+	seedRollbackCertificate(
+		t, db, 150, rollbackStakeRegistrationCertificate(cred),
+	)
+	seedRollbackCertificate(
+		t, db, 250, rollbackStakeRegistrationCertificate(cred),
+	)
+	app := &stakeRewardApplication{
+		epochs:               stakeRewardEpochs{snapshot: 92},
+		snapshotCapturedSlot: 199,
+		accountOutputs: []*models.RewardAccountOutput{{
+			StakingKey: cred, CredentialTag: 0,
+		}},
+	}
+	txn := db.Transaction(false)
+	require.NoError(t, txn.Do(func(txn *database.Txn) error {
+		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		if err != nil {
+			return err
+		}
+		require.Contains(t, guarded, models.NewStakeCredentialRef(0, cred).MapKey())
+		return nil
+	}))
 }
 
 func TestApplyStakeRewardsAggregatesSharedRewardAccountBalance(t *testing.T) {

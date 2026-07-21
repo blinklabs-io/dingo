@@ -3777,14 +3777,16 @@ func (ls *LedgerState) processEpochRollover(
 	//   4. applyMIRCerts                 — Shelley-era INSTANT rule: apply
 	//      Move Instantaneous Rewards certificates accumulated during the
 	//      ended epoch. No-op for Conway+ epochs (no MIR certs exist).
-	//   5. governance.ProcessEpoch       — Conway-style HardForkInitiation /
+	//   5. activateDelegatorInactivityIfNeeded — one-time CIP-0163 activation
+	//      before any inactivity-gated boundary calculation.
+	//   6. governance.ProcessEpoch       — Conway-style HardForkInitiation /
 	//      ParameterChange enactment; may further mutate pparams.
-	//   6. SetPParams                    — persist the enacted pparams.
-	//   7. IsHardForkTransition check    — detect inter-era boundary from
+	//   7. SetPParams                    — persist the enacted pparams.
+	//   8. IsHardForkTransition check    — detect inter-era boundary from
 	//      the now-final pparams.
-	//   8. applyIntraEraHardForkRule     — dispatch the per-major-version
+	//   9. applyIntraEraHardForkRule     — dispatch the per-major-version
 	//      HARDFORK STS rule (e.g. pv3 AVVM removal, pv10 DRep clear).
-	//   9. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
+	//  10. saveRewardAdaPotsForEpoch     — capture the new epoch's ADA pots
 	//      (reserves/treasury/fees) after all boundary pot mutations so the
 	//      next delayed reward calculation has its pot inputs.
 	//
@@ -3840,6 +3842,17 @@ func (ls *LedgerState) processEpochRollover(
 		return nil, fmt.Errorf("apply MIR certs: %w", err)
 	}
 
+	// CIP-0163: one-time activation stamp. It must precede governance's
+	// inactivity-gated DRep voting-power calculation so every active account
+	// receives the same full window starting at the activation boundary. The
+	// new epoch row is persisted later in this transaction; the stamp and
+	// durable marker still commit or roll back atomically with it.
+	if err := ls.activateDelegatorInactivityIfNeeded(
+		txn, currentEpoch.EpochId+1,
+	); err != nil {
+		return nil, err
+	}
+
 	// Run the CIP-1694 governance tick: enact proposals ratified in the
 	// previous epoch (possibly mutating pparams), expire stale proposals,
 	// and ratify active proposals whose tallies meet threshold. Any
@@ -3850,15 +3863,16 @@ func (ls *LedgerState) processEpochRollover(
 		conwayGenesis = ls.config.CardanoNodeConfig.ConwayGenesis()
 	}
 	govOut, err := governance.ProcessEpoch(&governance.EpochInput{
-		DB:            ls.db,
-		Txn:           txn,
-		Logger:        ls.config.Logger,
-		PrevEpoch:     currentEpoch.EpochId,
-		NewEpoch:      currentEpoch.EpochId + 1,
-		BoundarySlot:  epochStartSlot,
-		PParams:       newPParams,
-		UpdateFn:      currentEra.PParamsUpdateFunc,
-		ConwayGenesis: conwayGenesis,
+		DB:                    ls.db,
+		Txn:                   txn,
+		Logger:                ls.config.Logger,
+		PrevEpoch:             currentEpoch.EpochId,
+		NewEpoch:              currentEpoch.EpochId + 1,
+		BoundarySlot:          epochStartSlot,
+		PParams:               newPParams,
+		UpdateFn:              currentEra.PParamsUpdateFunc,
+		ConwayGenesis:         conwayGenesis,
+		DelegatorInactivityOn: ls.config.DelegatorInactivityEnabled,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("process governance epoch: %w", err)

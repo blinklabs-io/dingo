@@ -463,6 +463,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.DelegatorInactivityEnabled &&
+		(c.DelegatorInactivity < 1 || c.DelegatorInactivity > 10000) {
+		errs = append(errs, fmt.Errorf(
+			"delegatorInactivity (%d) must be in [1, 10000] when delegatorInactivityEnabled",
+			c.DelegatorInactivity,
+		))
+	}
+
 	return errors.Join(errs...)
 }
 

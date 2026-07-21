@@ -372,34 +372,53 @@ func DedupePoolKeyHashes(poolKeyHashes [][]byte) [][]byte {
 // live reward aggregate for the requested pools. The live aggregate is
 // maintained transactionally, so the result reflects the caller's db/txn view
 // rather than any historical slot.
+// When expiryEpoch > 0 the CIP-0163 reward-account inactivity gate is active:
+// the live aggregate is joined to account and credentials whose account expired
+// before expiryEpoch (nonzero expiration_epoch < expiryEpoch) are excluded,
+// while credentials with no account row or expiration_epoch 0 stay included.
+// When expiryEpoch == 0 the gate is off and the query and args are
+// byte-identical to the pre-CIP query.
 func StakeInputsForPools(
 	db *gorm.DB,
 	poolKeyHashes [][]byte,
 	chunkSize int,
+	expiryEpoch uint64,
 ) ([]*models.RewardStakeInput, error) {
 	if len(poolKeyHashes) == 0 {
 		return nil, nil
 	}
 	poolKeyHashes = DedupePoolKeyHashes(poolKeyHashes)
+	// The expiry gate's "?" is the last placeholder, so its bind arg is
+	// appended after the fixed IN/registered/total_stake args.
+	var expiryJoin, expiryPredicate string
+	if expiryEpoch > 0 {
+		expiryJoin = `
+			LEFT JOIN account acct
+				ON acct.credential_tag = rls.credential_tag
+				AND acct.staking_key = rls.staking_key`
+		expiryPredicate = `
+			AND (acct.expiration_epoch = 0
+				OR acct.expiration_epoch >= ?
+				OR acct.expiration_epoch IS NULL)`
+	}
 	query := fmt.Sprintf(`
 		SELECT rls.*
-		FROM reward_live_stake rls
+		FROM reward_live_stake rls%s
 		WHERE rls.pool_key_hash IN ?
 			AND rls.registered = ?
-			AND CAST(rls.total_stake AS %s) > ?
+			AND CAST(rls.total_stake AS %s) > ?%s
 		ORDER BY rls.pool_key_hash ASC, rls.credential_tag ASC, rls.staking_key ASC
-	`, integerCastType(db))
+	`, expiryJoin, integerCastType(db), expiryPredicate)
 
 	rows := make([]models.RewardLiveStake, 0)
 	for start := 0; start < len(poolKeyHashes); start += chunkSize {
 		end := min(start+chunkSize, len(poolKeyHashes))
+		args := []any{poolKeyHashes[start:end], true, 0}
+		if expiryEpoch > 0 {
+			args = append(args, expiryEpoch)
+		}
 		var chunkRows []models.RewardLiveStake
-		if err := db.Raw(
-			query,
-			poolKeyHashes[start:end],
-			true,
-			0,
-		).Scan(&chunkRows).Error; err != nil {
+		if err := db.Raw(query, args...).Scan(&chunkRows).Error; err != nil {
 			return nil, fmt.Errorf("query stake inputs: %w", err)
 		}
 		rows = append(rows, chunkRows...)

@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/rewardstate"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/stakequery"
 	"github.com/blinklabs-io/dingo/database/types"
 )
 
@@ -156,12 +157,25 @@ func (d *MetadataStorePostgres) GetRewardPoolInputs(
 	return rewardstate.GetPoolInputs(db, epoch)
 }
 
-func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]byte, txn types.Txn) ([]*models.RewardStakeInput, error) {
+func (d *MetadataStorePostgres) GetRewardStakeInputsForPools(poolKeyHashes [][]byte, slot uint64, expiryEpoch uint64, inactivityPeriod uint64, txn types.Txn) ([]*models.RewardStakeInput, error) {
 	db, err := d.resolveReadDB(txn)
 	if err != nil {
 		return nil, fmt.Errorf("GetRewardStakeInputsForPools: resolve db: %w", err)
 	}
-	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, 1000)
+	// CIP-0163 gate on: reconstruct reward inputs at slot from the same
+	// historical CTE the leader-election path uses so both halves of the
+	// snapshot agree by construction. Gate off: read the live aggregate,
+	// byte-identical to the pre-CIP query.
+	if expiryEpoch > 0 {
+		inputs, err := stakequery.GetRewardStakeInputsByPoolsAtSlot(
+			db, poolKeyHashes, slot, expiryEpoch, inactivityPeriod,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
+		}
+		return inputs, nil
+	}
+	inputs, err := rewardstate.StakeInputsForPools(db, poolKeyHashes, 1000, expiryEpoch)
 	if err != nil {
 		return nil, fmt.Errorf("GetRewardStakeInputsForPools: %w", err)
 	}

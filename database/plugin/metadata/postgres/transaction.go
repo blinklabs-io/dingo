@@ -28,6 +28,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accounthistory"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountsums"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountwitness"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
@@ -2808,7 +2809,7 @@ func (d *MetadataStorePostgres) applyTransactionRewardWithdrawals(
 	txn types.Txn,
 ) error {
 	for addr, amount := range withdrawals {
-		if addr == nil || amount == nil || amount.Sign() == 0 {
+		if addr == nil || amount == nil {
 			continue
 		}
 		if amount.Sign() < 0 || !amount.IsUint64() {
@@ -2825,6 +2826,16 @@ func (d *MetadataStorePostgres) applyTransactionRewardWithdrawals(
 		credentialTag, ok := models.StakeCredentialTagFromAddress(*addr)
 		if !ok {
 			return errors.New("derive reward withdrawal credential tag")
+		}
+		db, err := d.resolveDB(txn)
+		if err != nil {
+			return err
+		}
+		if err := accountwitness.RecordWithdrawal(db, models.NewStakeCredentialRef(credentialTag, stakeKeyHash.Bytes()), txHash, slot); err != nil {
+			return err
+		}
+		if amount.Sign() == 0 {
+			continue
 		}
 		if err := d.ApplyAccountRewardWithdrawal(
 			credentialTag,

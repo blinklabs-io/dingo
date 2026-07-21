@@ -89,6 +89,16 @@ type stakeRewardApplication struct {
 	unspendable      uint64
 	precomputed      bool
 	outputsUpdated   bool
+	// guardedRewardCredentials is the CIP-0163 reward-crediting guard set,
+	// populated only at application time when the delegator-inactivity gate is
+	// on (nil otherwise, so the gate-off path is byte-identical). Its keys are
+	// StakeCredentialRef.MapKey() values for reward-account credentials that are
+	// expired as of epochs.snapshot -- the same snapshot epoch Task 8 used to
+	// build the reward basis. An output whose credential is in this set is
+	// neither credited (applyStakeRewardApplication) nor counted toward
+	// effective/unspendable (deriveStakeRewardApplicationTotals), so its amount
+	// falls through to undistributed and is refunded to reserves.
+	guardedRewardCredentials map[string]struct{}
 	// snapshotCapturedSlot and snapshotBoundarySlot record the reward_snapshot
 	// row's own captured/boundary slots as observed by
 	// calculateStakeRewardApplication. Callers that compute this application
@@ -318,12 +328,33 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		}
 	}
 
+	// CIP-0163 reward-crediting guard (Mechanism B, Task 10). A pool's reward
+	// (leader) account is credited its leader reward independent of its own
+	// stake, so -- unlike an expired delegator, whose stake Task 8 already
+	// removed from the reward basis -- an expired reward account could still be
+	// credited here. Build the set of credited credentials that are expired as
+	// of the reward's snapshot epoch (the same epoch Task 8 judged the basis
+	// against) so the crediting loop and deriveStakeRewardApplicationTotals
+	// agree: a guarded amount is not credited and lands in undistributed ->
+	// reserves rather than being counted effective. Gate off leaves the set nil
+	// (no load, byte-identical to pre-CIP behavior).
+	if ls.config.DelegatorInactivityEnabled {
+		guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+		if err != nil {
+			return err
+		}
+		app.guardedRewardCredentials = guarded
+	}
+
 	for _, output := range app.accountOutputs {
 		reward, err := rewardFromAccountOutput(output)
 		if err != nil {
 			return err
 		}
 		if !reward.Spendable {
+			continue
+		}
+		if rewardOutputGuarded(app, output) {
 			continue
 		}
 		if err := ls.db.AddAccountRewardByCredential(
@@ -375,6 +406,113 @@ func (ls *LedgerState) applyStakeRewardApplication(
 		"unspendable_rewards", app.unspendable,
 	)
 	return nil
+}
+
+// guardedExpiredRewardCredentials returns the set of credited reward-account
+// credentials that are expired as of the reward snapshot, keyed by
+// StakeCredentialRef.MapKey(). Expiry is reconstructed from witness history at
+// the snapshot's captured slot, rather than read from the mutable account row:
+// a later witness may already have renewed that row by application time.
+func (ls *LedgerState) guardedExpiredRewardCredentials(
+	txn *database.Txn,
+	app *stakeRewardApplication,
+) (map[string]struct{}, error) {
+	if app == nil || len(app.accountOutputs) == 0 {
+		return nil, nil
+	}
+	refsByKey := make(map[string]models.StakeCredentialRef, len(app.accountOutputs))
+	for _, output := range app.accountOutputs {
+		if output == nil || len(output.StakingKey) != rewards.CredentialHashSize {
+			continue
+		}
+		ref := models.NewStakeCredentialRef(output.CredentialTag, output.StakingKey)
+		refsByKey[ref.MapKey()] = ref
+	}
+	if len(refsByKey) == 0 {
+		return nil, nil
+	}
+	refs := make([]models.StakeCredentialRef, 0, len(refsByKey))
+	for _, ref := range refsByKey {
+		refs = append(refs, ref)
+	}
+	accounts, err := ls.db.GetAccountsByCredential(refs, true, txn)
+	if err != nil {
+		return nil, fmt.Errorf("load reward account expirations: %w", err)
+	}
+	lastWitness, err := ls.db.AccountLastWitnessSlots(
+		refs, app.snapshotCapturedSlot, txn,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("load reward account witness history: %w", err)
+	}
+	activationEpoch, activated, err := ls.delegatorInactivityActivationEpoch(txn)
+	if err != nil {
+		return nil, fmt.Errorf("load delegator-inactivity activation: %w", err)
+	}
+	activationApplies := activated && activationEpoch <= app.epochs.snapshot
+	var activationMembership map[string]struct{}
+	if activationApplies {
+		activationMembership, err = ls.db.AccountInactivityActivationMembership(
+			refs,
+			txn,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("load activation membership: %w", err)
+		}
+	}
+	var guarded map[string]struct{}
+	for key, account := range accounts {
+		if account == nil {
+			continue
+		}
+		// Imported/bootstrap rows may carry an expiry without locally retained
+		// witness history, so retain the projection as a fallback. When history
+		// exists it is authoritative at the snapshot cutoff.
+		expiration := account.ExpirationEpoch
+		if slot, ok := lastWitness[key]; ok {
+			epoch, epochErr := ls.SlotToEpoch(slot)
+			if epochErr != nil {
+				return nil, fmt.Errorf("map reward witness slot %d to epoch: %w", slot, epochErr)
+			}
+			expiration = epoch.EpochId + ls.config.DelegatorInactivity
+		}
+		if activationApplies {
+			floor, applies := rollbackActivationFloor(
+				models.NewStakeCredentialRef(account.CredentialTag, account.StakingKey),
+				true, activationEpoch, activationMembership,
+			)
+			if applies {
+				expiration = max(expiration, floor+ls.config.DelegatorInactivity)
+			}
+		}
+		if accountExpiredAtEpoch(expiration, app.epochs.snapshot) {
+			if guarded == nil {
+				guarded = make(map[string]struct{})
+			}
+			guarded[key] = struct{}{}
+		}
+	}
+	return guarded, nil
+}
+
+// rewardOutputGuarded reports whether an account output's reward-account
+// credential is in the CIP-0163 guard set. It returns false whenever the set is
+// empty (always the case when the gate is off), so both the crediting loop and
+// deriveStakeRewardApplicationTotals skip exactly the same outputs and remain
+// byte-identical to pre-CIP behavior when the gate is off.
+func rewardOutputGuarded(
+	app *stakeRewardApplication,
+	output *models.RewardAccountOutput,
+) bool {
+	if app == nil || len(app.guardedRewardCredentials) == 0 || output == nil {
+		return false
+	}
+	key := models.NewStakeCredentialRef(
+		output.CredentialTag,
+		output.StakingKey,
+	).MapKey()
+	_, ok := app.guardedRewardCredentials[key]
+	return ok
 }
 
 func (ls *LedgerState) precomputedStakeRewardApplication(
@@ -1918,6 +2056,15 @@ func deriveStakeRewardApplicationTotals(app *stakeRewardApplication) error {
 	app.unspendable = 0
 	for _, output := range app.accountOutputs {
 		if output == nil {
+			continue
+		}
+		// CIP-0163 guard: an output whose reward account is expired as of the
+		// snapshot epoch is neither credited nor counted here, so its amount
+		// falls through to undistributed (see undistributed below) and is
+		// refunded to reserves. This must match the crediting loop's skip in
+		// applyStakeRewardApplication exactly. The set is nil unless the gate
+		// was on at application time, keeping the gate-off path byte-identical.
+		if rewardOutputGuarded(app, output) {
 			continue
 		}
 		amount := uint64(output.Amount)

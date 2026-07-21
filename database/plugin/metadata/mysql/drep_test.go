@@ -47,18 +47,20 @@ func TestMysqlGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 	require.NoError(t, store.SetDrep(0, rewardOnlyCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.SetDrep(0, multiUtxoCred, 1000, "", nil, true, nil))
 	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: rewardOnlyStake,
-		Drep:       rewardOnlyCred,
-		Reward:     700,
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      rewardOnlyStake,
+		Drep:            rewardOnlyCred,
+		Reward:          700,
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 4,
 	}).Error)
 	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: multiUtxoStake,
-		Drep:       multiUtxoCred,
-		Reward:     500,
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      multiUtxoStake,
+		Drep:            multiUtxoCred,
+		Reward:          500,
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 6,
 	}).Error)
 	require.NoError(t, store.DB().Create(&models.Utxo{
 		TxId:       testHash32("tx_reward_1"),
@@ -80,17 +82,37 @@ func TestMysqlGetDRepVotingPowerBatchIncludesReward(t *testing.T) {
 			{Tag: 0, Key: rewardOnlyCred},
 			{Tag: 0, Key: multiUtxoCred},
 		},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), powers[models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey()])
 	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
 
-	singlePower, err := store.GetDRepVotingPower(0, rewardOnlyCred, nil)
+	singlePower, err := store.GetDRepVotingPower(0, rewardOnlyCred, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), singlePower)
 
-	singlePower, err = store.GetDRepVotingPower(0, multiUtxoCred, nil)
+	singlePower, err = store.GetDRepVotingPower(0, multiUtxoCred, 0, nil)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1000), singlePower)
+
+	powers, err = store.GetDRepVotingPowerBatch(
+		[]models.StakeCredentialRef{
+			{Tag: 0, Key: rewardOnlyCred},
+			{Tag: 0, Key: multiUtxoCred},
+		},
+		5,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.NotContains(t, powers, models.StakeCredentialRef{Tag: 0, Key: rewardOnlyCred}.MapKey())
+	assert.Equal(t, uint64(1000), powers[models.StakeCredentialRef{Tag: 0, Key: multiUtxoCred}.MapKey()])
+
+	singlePower, err = store.GetDRepVotingPower(0, rewardOnlyCred, 5, nil)
+	require.NoError(t, err)
+	assert.Zero(t, singlePower)
+	singlePower, err = store.GetDRepVotingPower(0, multiUtxoCred, 5, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(1000), singlePower)
 }
@@ -104,18 +126,20 @@ func TestMysqlGetDRepVotingPowerByTypeIncludesReward(t *testing.T) {
 	noConfidenceStake := testHash28("stake_no_conf_reward")
 
 	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: abstainStake,
-		DrepType:   models.DrepTypeAlwaysAbstain,
-		Reward:     700,
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      abstainStake,
+		DrepType:        models.DrepTypeAlwaysAbstain,
+		Reward:          700,
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 4,
 	}).Error)
 	require.NoError(t, store.DB().Create(&models.Account{
-		StakingKey: noConfidenceStake,
-		DrepType:   models.DrepTypeAlwaysNoConfidence,
-		Reward:     500,
-		Active:     true,
-		AddedSlot:  1000,
+		StakingKey:      noConfidenceStake,
+		DrepType:        models.DrepTypeAlwaysNoConfidence,
+		Reward:          500,
+		Active:          true,
+		AddedSlot:       1000,
+		ExpirationEpoch: 6,
 	}).Error)
 	require.NoError(t, store.DB().Create(&models.Utxo{
 		TxId:       testHash32("tx_type_1"),
@@ -137,10 +161,23 @@ func TestMysqlGetDRepVotingPowerByTypeIncludesReward(t *testing.T) {
 			models.DrepTypeAlwaysAbstain,
 			models.DrepTypeAlwaysNoConfidence,
 		},
+		0,
 		nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(700), powers[models.DrepTypeAlwaysAbstain])
+	assert.Equal(t, uint64(1000), powers[models.DrepTypeAlwaysNoConfidence])
+
+	powers, err = store.GetDRepVotingPowerByType(
+		[]uint64{
+			models.DrepTypeAlwaysAbstain,
+			models.DrepTypeAlwaysNoConfidence,
+		},
+		5,
+		nil,
+	)
+	require.NoError(t, err)
+	assert.NotContains(t, powers, models.DrepTypeAlwaysAbstain)
 	assert.Equal(t, uint64(1000), powers[models.DrepTypeAlwaysNoConfidence])
 }
 
@@ -180,11 +217,11 @@ func TestMysqlGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
 		AddedSlot:     1000,
 	}).Error)
 
-	keyPower, err := store.GetDRepVotingPower(0, sharedHash, nil)
+	keyPower, err := store.GetDRepVotingPower(0, sharedHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(100), keyPower, "key-hash DRep power should be 100")
 
-	scriptPower, err := store.GetDRepVotingPower(1, sharedHash, nil)
+	scriptPower, err := store.GetDRepVotingPower(1, sharedHash, 0, nil)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(200), scriptPower, "script-hash DRep power should be 200")
 
@@ -193,6 +230,7 @@ func TestMysqlGetDRepVotingPowerCrossTagIsolation(t *testing.T) {
 			{Tag: 0, Key: sharedHash},
 			{Tag: 1, Key: sharedHash},
 		},
+		0,
 		nil,
 	)
 	require.NoError(t, err)

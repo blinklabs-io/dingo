@@ -578,6 +578,34 @@ func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
 	}
 }
 
+// TestLoadWithDBPropagatesDelegatorInactivity verifies that load mode
+// (`dingo load`) sets LedgerStateConfig.DelegatorInactivityEnabled /
+// DelegatorInactivity from the operator config, matching serve mode, since a
+// mismatch between load and serve would diverge consensus on replay.
+func TestLoadWithDBPropagatesDelegatorInactivity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stop := errors.New("stop after ledger config capture")
+	run := func(enabled bool, epochs uint64) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		old := newLedgerStateForLoad
+		newLedgerStateForLoad = func(cfg ledger.LedgerStateConfig) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stop
+		}
+		t.Cleanup(func() { newLedgerStateForLoad = old })
+		err := LoadWithDB(context.Background(),
+			&config.Config{Network: "preview", DelegatorInactivityEnabled: enabled, DelegatorInactivity: epochs},
+			logger, "unused", db)
+		require.ErrorIs(t, err, stop)
+		return captured
+	}
+	on := run(true, 90)
+	require.True(t, on.DelegatorInactivityEnabled)
+	require.Equal(t, uint64(90), on.DelegatorInactivity)
+	require.False(t, run(false, 0).DelegatorInactivityEnabled)
+}
+
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
 // recorded failures reports success, so a clean load is never turned into an
 // error.

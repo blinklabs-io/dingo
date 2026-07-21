@@ -33,6 +33,60 @@ import (
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
+func TestSetDelegatorInactivityRejectsInvalidPeriod(t *testing.T) {
+	mgr := NewManager(nil, nil, nil)
+
+	require.ErrorContains(t, mgr.SetDelegatorInactivity(true, 0), "[1, 10000]")
+	require.ErrorContains(t, mgr.SetDelegatorInactivity(true, 10_001), "[1, 10000]")
+	require.NoError(t, mgr.SetDelegatorInactivity(false, 90))
+	require.Zero(t, mgr.expiryEpoch(123))
+	require.Zero(t, mgr.inactivityPeriod())
+}
+
+func TestSetDelegatorInactivityLockedAfterStart(t *testing.T) {
+	db := setupTestDB(t)
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+	require.NoError(t, mgr.Start(context.Background()))
+	t.Cleanup(func() { require.NoError(t, mgr.Stop()) })
+
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(false, 0),
+		"configuration is locked",
+	)
+	require.Equal(t, uint64(123), mgr.expiryEpoch(123))
+	require.Equal(t, uint64(90), mgr.inactivityPeriod())
+
+	require.NoError(t, mgr.Stop())
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(true, 91),
+		"configuration is locked",
+	)
+}
+
+func TestSetDelegatorInactivityLockedAfterGenesisCapture(t *testing.T) {
+	db := setupTestDB(t)
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+	})
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	require.ErrorContains(
+		t,
+		mgr.SetDelegatorInactivity(true, 90),
+		"configuration is locked",
+	)
+}
+
+func TestSetDelegatorInactivityRemainsMutableAfterFailedStart(t *testing.T) {
+	mgr := NewManager(nil, event.NewEventBus(nil, nil), nil)
+	require.ErrorContains(t, mgr.Start(context.Background()), "nil database")
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+}
+
 // TestCaptureGenesisSnapshot_PostMithril verifies that after a Mithril
 // bootstrap (where slot 0 has no pools but later epochs exist), the
 // snapshot manager seeds the recent historical window for the current epoch.
@@ -113,6 +167,52 @@ func TestCaptureGenesisSnapshot_PostMithril(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, stakeInputs,
 		"current post-Mithril seed row keeps stake reward inputs")
+}
+
+func TestCaptureGenesisSnapshot_PostMithrilSkipsUnsafeExpiryHistory(t *testing.T) {
+	db := setupTestDB(t)
+
+	seedEpochs(t, db, []models.Epoch{
+		{EpochId: 0, StartSlot: 0, LengthInSlots: 432000},
+		{EpochId: 148, StartSlot: 63936000, LengthInSlots: 432000},
+		{EpochId: 149, StartSlot: 64368000, LengthInSlots: 432000},
+		{EpochId: 150, StartSlot: 64800000, LengthInSlots: 432000},
+	})
+
+	poolHash := []byte("poolM_expiry_history_1234567")
+	activeCred := bytes.Repeat([]byte{0xa1}, 28)
+	expiredCred := bytes.Repeat([]byte{0xe1}, 28)
+	seedPoolAndDelegations(t, db, poolHash, []struct {
+		stakingKey  []byte
+		utxoAmounts []types.Uint64
+	}{
+		{stakingKey: activeCred, utxoAmounts: []types.Uint64{10_000_000}},
+		{stakingKey: expiredCred, utxoAmounts: []types.Uint64{50_000_000}},
+	}, 64800000)
+	require.NoError(t, db.RenewAccountExpirations(
+		[]models.StakeCredentialRef{
+			models.NewStakeCredentialRef(0, expiredCred),
+		},
+		149,
+		nil,
+	))
+
+	mgr := NewManager(db, event.NewEventBus(nil, nil), nil)
+	require.NoError(t, mgr.SetDelegatorInactivity(true, 90))
+	require.NoError(t, mgr.CaptureGenesisSnapshot(context.Background()))
+
+	for _, epoch := range []uint64{148, 149} {
+		snapshot, err := db.Metadata().GetPoolStakeSnapshot(
+			epoch, "mark", poolHash, nil,
+		)
+		require.NoError(t, err)
+		require.Nil(t, snapshot,
+			"epoch %d must not be synthesized from current expiry state", epoch)
+	}
+	current, err := db.Metadata().GetPoolStakeSnapshot(150, "mark", poolHash, nil)
+	require.NoError(t, err)
+	require.NotNil(t, current)
+	require.Equal(t, uint64(10_000_000), uint64(current.TotalStake))
 }
 
 func TestCaptureGenesisSnapshot_PostMithrilSkipsExistingWindow(t *testing.T) {
@@ -526,6 +626,7 @@ func TestFallbackWithoutRewardMarkerStillWritesMarkSnapshot(t *testing.T) {
 	distribution, err := mgr.calculateSnapshotDistribution(
 		context.Background(),
 		evt.SnapshotSlot,
+		0,
 	)
 	require.NoError(t, err)
 	saved, err := mgr.saveSnapshot(
@@ -1854,6 +1955,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
+			0,
 		)
 		require.NoError(t, err)
 		for poolKey := range fallbackDistribution.PoolStakes {
@@ -1961,6 +2063,7 @@ func TestConcurrentFallbackAndAuthoritativeCaptureSerialization(t *testing.T) {
 		fallbackDistribution, err := mgr.calculateSnapshotDistribution(
 			context.Background(),
 			fallbackEvt.SnapshotSlot,
+			0,
 		)
 		require.NoError(t, err)
 		fallbackTxn := db.Transaction(true)
