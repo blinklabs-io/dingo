@@ -2549,6 +2549,23 @@ Rewards omitted by the filter return to reserves. Calculated rewards that fail
 the application-time account-registration check are unspendable and go to
 treasury. Spendable rewards are credited through `account_reward_delta`.
 
+CIP-23 minimum pool margin is an optional, consensus-affecting operator setting
+that defaults off (0) and takes effect only in Dijkstra and later. When
+`LedgerStateConfig.MinPoolMargin` (basis points) is nonzero, `rewardParameters`
+sets `rewards.Parameters.MinPoolMargin` via `applyMinPoolMarginConfig` only for
+protocol major version >= 12, and the reward split uses
+`params.effectiveMargin(pool.Margin) = max(pool.Margin, MinPoolMargin)` for both
+the operator (leader) and delegator (member) shares. In the same era,
+`ValidateTxDijkstra` rejects pool registration certificates whose margin is below
+the floor via `checkPoolMarginFloor`. Disabled or pre-Dijkstra, the field is nil,
+the split is byte-for-byte the pre-CIP-23 calculation, and no certificate is
+rejected. Because it changes reward amounts (and therefore ADA pots and reward
+accounts) and certificate acceptance, enable a nonzero value only on a network
+where every node also enables the same value; the precompute-reuse member
+validator is left unclamped, so when the feature is active and any pool in the
+epoch's snapshot is below the floor, reuse is conservatively bypassed for that
+whole epoch's snapshot and the fresh authoritative calculation is used.
+
 After an epoch-transition event, ledger can precompute the next delayed reward
 update into `reward_pool_output` and `reward_account_output`. Calculation runs
 in a read-only transaction; a separate short write transaction re-reads the

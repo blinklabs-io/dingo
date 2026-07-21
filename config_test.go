@@ -64,6 +64,37 @@ func TestWithStorageMode(t *testing.T) {
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
 }
 
+func TestNewValidatesMinPoolMargin(t *testing.T) {
+	tests := []struct {
+		name    string
+		margin  uint
+		wantErr bool
+	}{
+		{name: "disabled", margin: 0},
+		{name: "maximum", margin: 10_000},
+		{name: "above maximum", margin: 10_001, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig(
+				WithMinPoolMargin(tt.margin),
+				WithNetworkMagic(1),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+			)
+			_, err := New(cfg)
+			if tt.wantErr {
+				require.ErrorContains(t, err, "min pool margin")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestWithMidnightConfig(t *testing.T) {
 	cfg := &Config{}
 	midnightCfg := MidnightConfig{

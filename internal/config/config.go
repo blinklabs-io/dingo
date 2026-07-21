@@ -559,6 +559,13 @@ type Config struct {
 	ForgeStaleGapThresholdSlots   uint64 `yaml:"forgeStaleGapThresholdSlots"   envconfig:"DINGO_FORGE_STALE_GAP_THRESHOLD_SLOTS"`
 	ValidateForgedBlock           bool   `yaml:"validateForgedBlock"           envconfig:"DINGO_VALIDATE_FORGED_BLOCK"`
 
+	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee) in
+	// basis points, [0, 10000] (150 = 1.5%); 0 disables it. Consensus-affecting
+	// and off by default; effective only in Dijkstra and later. Enable a nonzero
+	// value only where every node also enables the same value. See
+	// ARCHITECTURE.md ("Reward Calculation And Precomputation").
+	MinPoolMargin uint `yaml:"minPoolMargin" envconfig:"DINGO_MIN_POOL_MARGIN"`
+
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381
 	// vote signing key. When set on a block producer whose pool is a

@@ -193,6 +193,9 @@ type Config struct {
 	// (VRF/KES header crypto, body-hash, per-tx ledger rules) before the
 	// block is adopted onto the chain and diffused to peers.
 	validateForgedBlock bool
+	// CIP-23 minimum pool margin (minimum variable fee) in basis points,
+	// [0, 10000]; consensus-affecting, 0 = off; effective only in Dijkstra+.
+	minPoolMargin uint
 	// Leios voting configuration (experimental)
 	leiosVoteSigningKeyFile string
 	leiosVoterPublicKeys    map[string]string
@@ -432,6 +435,15 @@ func (n *Node) configValidate() error {
 			"invalid start era %q: must be empty or %q",
 			n.config.startEra,
 			internalconfig.StartEraDijkstra,
+		)
+	}
+	// CIP-23 minimum pool margin is expressed in basis points. Validate the
+	// exported WithMinPoolMargin option at the root node boundary so an invalid
+	// value cannot reach ledger reward or certificate validation.
+	if n.config.minPoolMargin > 10_000 {
+		return fmt.Errorf(
+			"min pool margin (%d) must be in [0, 10000] basis points",
+			n.config.minPoolMargin,
 		)
 	}
 	// In core mode, ignore API ports — they are only used in API mode.
@@ -880,6 +892,16 @@ func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
 func WithBlockProducer(enabled bool) ConfigOptionFunc {
 	return func(c *Config) {
 		c.blockProducer = enabled
+	}
+}
+
+// WithMinPoolMargin configures the CIP-23 minimum pool margin (minimum variable
+// fee) in basis points, [0, 10000] (150 = 1.5%). It is consensus-affecting and
+// off by default (0), taking effect only in Dijkstra and later. Enable a nonzero
+// value only on a network where every node also enables the same value.
+func WithMinPoolMargin(basisPoints uint) ConfigOptionFunc {
+	return func(c *Config) {
+		c.minPoolMargin = basisPoints
 	}
 }
 

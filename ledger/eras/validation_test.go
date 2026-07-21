@@ -2609,3 +2609,58 @@ func TestCalculateMinFee_OverflowSaturates(t *testing.T) {
 		"overflow should saturate at MaxUint64",
 	)
 }
+
+// --- CIP-23 pool-margin-floor certificate rule ---
+
+func cip23PoolCert(num, den int64) *lcommon.PoolRegistrationCertificate {
+	return &lcommon.PoolRegistrationCertificate{
+		Margin: lcommon.GenesisRat{Rat: big.NewRat(num, den)},
+	}
+}
+
+func TestCheckPoolMarginFloor(t *testing.T) {
+	floor := big.NewRat(150, 10_000) // 1.5%
+
+	// nil floor: no-op even for a zero-margin cert.
+	require.NoError(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{cip23PoolCert(0, 1)}, nil))
+
+	// below floor: rejected.
+	require.Error(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{cip23PoolCert(1, 1000)}, floor)) // 0.1%
+
+	// at floor: accepted.
+	require.NoError(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{cip23PoolCert(150, 10_000)}, floor))
+
+	// above floor: accepted.
+	require.NoError(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{cip23PoolCert(5, 100)}, floor)) // 5%
+
+	// nil cert margin treated as 0: rejected under a nonzero floor.
+	require.Error(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{&lcommon.PoolRegistrationCertificate{}}, floor))
+
+	// non-pool-registration cert ignored.
+	require.NoError(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{&lcommon.StakeRegistrationCertificate{}}, floor))
+
+	// multiple certs: one below floor rejects the whole set.
+	require.Error(t, checkPoolMarginFloor(
+		[]lcommon.Certificate{cip23PoolCert(5, 100), cip23PoolCert(1, 1000)}, floor))
+
+	// empty cert set: accepted.
+	require.NoError(t, checkPoolMarginFloor(nil, floor))
+
+	// typed-nil *PoolRegistrationCertificate element: must not panic, treated
+	// as ignorable (no error) under any floor, including nil.
+	var nilReg *lcommon.PoolRegistrationCertificate
+	require.NotPanics(t, func() {
+		require.NoError(t, checkPoolMarginFloor(
+			[]lcommon.Certificate{nilReg}, floor))
+	})
+	require.NotPanics(t, func() {
+		require.NoError(t, checkPoolMarginFloor(
+			[]lcommon.Certificate{nilReg}, nil))
+	})
+}

@@ -428,6 +428,8 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithBlockfrostPort(cfg.BlockfrostPort),
 			dingo.WithMeshPort(cfg.MeshPort),
 			dingo.WithStorageMode(storageMode),
+			// CIP-23 minimum pool margin (consensus-affecting)
+			dingo.WithMinPoolMargin(cfg.MinPoolMargin),
 			// Block production (SPO mode)
 			dingo.WithBlockProducer(cfg.BlockProducer),
 			dingo.WithShelleyVRFKey(cfg.ShelleyVRFKey),

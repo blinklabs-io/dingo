@@ -37,6 +37,57 @@ type phase2ValidationSkipper interface {
 	SkipPhase2Validation() bool
 }
 
+// MinPoolMarginProvider is satisfied by the dingo ledger state to expose the
+// CIP-23 minimum pool margin to era validation, mirroring phase2ValidationSkipper.
+// Exported so implementers (e.g. *ledger.LedgerView) can assert conformance at
+// compile time; a signature drift here would otherwise silently disable the
+// CIP-23 pool-margin-floor certificate rule at runtime.
+type MinPoolMarginProvider interface {
+	MinPoolMargin() *big.Rat
+}
+
+// minPoolMarginFromLedgerState returns the CIP-23 minimum pool margin the ledger
+// state enforces, or nil when the state does not provide one (feature disabled).
+func minPoolMarginFromLedgerState(ls lcommon.LedgerState) *big.Rat {
+	provider, ok := ls.(MinPoolMarginProvider)
+	if !ok {
+		return nil
+	}
+	return provider.MinPoolMargin()
+}
+
+// checkPoolMarginFloor enforces the CIP-23 rule that each pool registration
+// certificate's margin (variable fee) is at least minMargin. It is a no-op when
+// minMargin is nil (feature disabled). A nil certificate margin is treated as 0.
+// Non-pool-registration certificates are ignored.
+func checkPoolMarginFloor(certs []lcommon.Certificate, minMargin *big.Rat) error {
+	if minMargin == nil {
+		return nil
+	}
+	for _, cert := range certs {
+		reg, ok := cert.(*lcommon.PoolRegistrationCertificate)
+		if !ok {
+			continue
+		}
+		if reg == nil {
+			continue
+		}
+		margin := reg.Margin.Rat
+		if margin == nil {
+			margin = new(big.Rat)
+		}
+		if margin.Cmp(minMargin) < 0 {
+			return fmt.Errorf(
+				"pool %x margin %s below minimum pool margin %s",
+				reg.Operator,
+				margin.RatString(),
+				minMargin.RatString(),
+			)
+		}
+	}
+	return nil
+}
+
 type indexedUtxoValidationRule struct {
 	index          int
 	validationFunc lcommon.UtxoValidationRuleFunc

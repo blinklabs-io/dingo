@@ -2252,7 +2252,7 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 
 	check := func(outs []*models.RewardAccountOutput) bool {
 		return precomputedRewardAccountAmountsMatchInputs(
-			poolInputs, poolOutputs, stakeInputs, outs,
+			poolInputs, poolOutputs, stakeInputs, outs, rewards.Parameters{},
 		)
 	}
 
@@ -2282,6 +2282,39 @@ func TestPrecomputedRewardAccountAmountsMatchInputs(t *testing.T) {
 	require.False(t, check([]*models.RewardAccountOutput{
 		memberOut(memberA, wantA), memberOut(rewardCalcHash(0x44), 1),
 	}))
+
+	// Dijkstra precompute uses the effective CIP-23 margin. A pool registered
+	// below the floor must therefore validate against the floor-derived member
+	// amounts, not amounts derived from its raw registration margin.
+	poolInputs[0].Margin = &types.Rat{Rat: big.NewRat(1, 100)}
+	minPoolMargin := big.NewRat(1, 20)
+	wantFloorA, err := rewards.MemberReward(
+		poolReward, cost, minPoolMargin, stakeA, delegated,
+	)
+	require.NoError(t, err)
+	wantFloorB, err := rewards.MemberReward(
+		poolReward, cost, minPoolMargin, stakeB, delegated,
+	)
+	require.NoError(t, err)
+	floorOutputs := []*models.RewardAccountOutput{
+		leaderOut(leaderReward),
+		memberOut(memberA, wantFloorA),
+		memberOut(memberB, wantFloorB),
+	}
+	require.True(t, precomputedRewardAccountAmountsMatchInputs(
+		poolInputs,
+		poolOutputs,
+		stakeInputs,
+		floorOutputs,
+		rewards.Parameters{MinPoolMargin: minPoolMargin},
+	))
+	require.False(t, precomputedRewardAccountAmountsMatchInputs(
+		poolInputs,
+		poolOutputs,
+		stakeInputs,
+		floorOutputs,
+		rewards.Parameters{},
+	))
 
 	// Guard the invariant this fix relies on: the pre-existing membership check
 	// accepts the redistributed set, so the amount check is the only gate that
@@ -2481,7 +2514,7 @@ func TestPrecomputedStakeRewardsRejectPoolRewardMismatch(t *testing.T) {
 	stakeInputs, err := meta.GetRewardStakeInputs(rewardSnapshotEpoch, nil)
 	require.NoError(t, err)
 	require.True(t, precomputedRewardAccountAmountsMatchInputs(
-		poolInputs, poolOutputs, stakeInputs, accountOutputs,
+		poolInputs, poolOutputs, stakeInputs, accountOutputs, rewards.Parameters{},
 	))
 	complete, err := precomputedRewardOutputsComplete(poolOutputs, accountOutputs, false)
 	require.NoError(t, err)
@@ -4675,4 +4708,47 @@ func rewardCalcSeedStakeCert(
 	default:
 		t.Fatalf("unsupported cert type %d", certType)
 	}
+}
+
+// --- CIP-23 minimum pool margin wiring ---
+
+func TestMinPoolMarginRat(t *testing.T) {
+	require.Nil(t, minPoolMarginRat(0))
+	require.Zero(t, big.NewRat(150, 10_000).Cmp(minPoolMarginRat(150)))
+	require.Zero(t, big.NewRat(1, 1).Cmp(minPoolMarginRat(10_000)))
+}
+
+// applyMinPoolMarginConfig sets the floor only when the value is nonzero AND the
+// calculation is for Dijkstra (major >= 12); otherwise it leaves the field nil.
+func TestApplyMinPoolMarginConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		bp      uint
+		major   uint64
+		wantRat *big.Rat // nil => expect nil
+	}{
+		{name: "disabled zero at dijkstra", bp: 0, major: 12},
+		{name: "pre-dijkstra ignored", bp: 150, major: 11},
+		{name: "dijkstra sets rat", bp: 150, major: 12, wantRat: big.NewRat(150, 10_000)},
+		{name: "post-dijkstra sets rat", bp: 500, major: 13, wantRat: big.NewRat(500, 10_000)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := rewards.Parameters{ProtocolMajorVersion: tt.major}
+			applyMinPoolMarginConfig(&params, LedgerStateConfig{MinPoolMargin: tt.bp})
+			if tt.wantRat == nil {
+				require.Nil(t, params.MinPoolMargin)
+				return
+			}
+			require.NotNil(t, params.MinPoolMargin)
+			require.Zero(t, tt.wantRat.Cmp(params.MinPoolMargin))
+		})
+	}
+}
+
+func TestLedgerStateMinPoolMargin(t *testing.T) {
+	ls, _ := newRewardCalculationTestLedger(t)
+	require.Nil(t, ls.MinPoolMargin())
+	ls.config.MinPoolMargin = 150
+	require.Zero(t, big.NewRat(150, 10_000).Cmp(ls.MinPoolMargin()))
 }

@@ -113,6 +113,14 @@ type Parameters struct {
 	// reward prefilter; final unregistered rewards are still routed away from
 	// spendable accounts at application time.
 	ProtocolMajorVersion uint64
+	// MinPoolMargin is the CIP-23 minimum pool margin (minimum variable fee).
+	// When non-nil, a pool's effective margin in the reward split is
+	// max(pool.Margin, MinPoolMargin), so a pool registered below the floor is
+	// paid out as if it registered at the floor. It is nil unless the operator
+	// sets a nonzero minPoolMargin AND the calculation is for Dijkstra or later;
+	// nil reproduces the pre-CIP-23 split byte-for-byte. Must be in [0, 1] when
+	// set.
+	MinPoolMargin *big.Rat
 }
 
 // Pots captures the pot values available at the start of reward calculation.
@@ -329,7 +337,7 @@ func Calculate(pots Pots, snapshot Snapshot, params Parameters) (*Result, error)
 			amount, err := memberRewardChecked(
 				poolReward.PoolReward,
 				pool.Cost,
-				normalizedMargin(pool.Margin),
+				params.effectiveMargin(pool.Margin),
 				delegator.Stake,
 				pool.DelegatedStake,
 			)
@@ -591,6 +599,24 @@ func validateRatParameter(name string, rat *big.Rat, unit, positive bool) error 
 	return nil
 }
 
+// validateMinPoolMargin enforces that a set CIP-23 MinPoolMargin lies in [0, 1].
+// It is a no-op when MinPoolMargin is nil, so parameters built with the zero
+// value are unaffected.
+func validateMinPoolMargin(params Parameters) error {
+	if params.MinPoolMargin == nil {
+		return nil
+	}
+	if params.MinPoolMargin.Sign() < 0 ||
+		params.MinPoolMargin.Cmp(oneRat()) > 0 {
+		return fmt.Errorf(
+			"%w: min pool margin %s outside [0,1]",
+			ErrInvalidParameters,
+			params.MinPoolMargin.RatString(),
+		)
+	}
+	return nil
+}
+
 func validateParameters(params Parameters) error {
 	for _, field := range []struct {
 		name     string
@@ -624,7 +650,7 @@ func validateParameters(params Parameters) error {
 	if params.EpochLength == 0 {
 		return fmt.Errorf("%w: epoch length is zero", ErrInvalidParameters)
 	}
-	return nil
+	return validateMinPoolMargin(params)
 }
 
 // validatePoolRewardParameters checks the subset of parameters that
@@ -641,12 +667,15 @@ func validatePoolRewardParameters(params Parameters) error {
 	); err != nil {
 		return err
 	}
-	return validateRatParameter(
+	if err := validateRatParameter(
 		"pledge influence",
 		params.PledgeInfluence,
 		false,
 		false,
-	)
+	); err != nil {
+		return err
+	}
+	return validateMinPoolMargin(params)
 }
 
 func validateSnapshot(snapshot Snapshot) error {
@@ -915,7 +944,7 @@ func calculatePoolRewards(
 	leader, err := leaderRewardChecked(
 		ret.PoolReward,
 		pool.Cost,
-		normalizedMargin(pool.Margin),
+		params.effectiveMargin(pool.Margin),
 		pool.OwnerStake,
 		pool.DelegatedStake,
 	)
@@ -1150,6 +1179,28 @@ func MemberReward(
 	)
 }
 
+// MemberRewardWithParameters computes a member reward using the same effective
+// pool margin as Calculate. In particular, it applies the CIP-23 minimum pool
+// margin from params when one is enabled. Callers that validate rewards produced
+// by Calculate must use this form so their arithmetic cannot drift from the
+// authoritative reward split.
+func MemberRewardWithParameters(
+	poolReward uint64,
+	cost uint64,
+	margin *big.Rat,
+	memberStake uint64,
+	poolStake uint64,
+	params Parameters,
+) (uint64, error) {
+	return memberRewardChecked(
+		poolReward,
+		cost,
+		params.effectiveMargin(margin),
+		memberStake,
+		poolStake,
+	)
+}
+
 func memberRewardChecked(
 	poolReward uint64,
 	cost uint64,
@@ -1207,6 +1258,26 @@ func minRat(a, b *big.Rat) *big.Rat {
 		return new(big.Rat).Set(a)
 	}
 	return new(big.Rat).Set(b)
+}
+
+func maxRat(a, b *big.Rat) *big.Rat {
+	if a.Cmp(b) >= 0 {
+		return new(big.Rat).Set(a)
+	}
+	return new(big.Rat).Set(b)
+}
+
+// effectiveMargin returns the pool margin used in the reward split, applying the
+// CIP-23 minimum pool margin floor when set: max(normalizedMargin(margin),
+// MinPoolMargin). When MinPoolMargin is nil (feature off or pre-Dijkstra) it
+// returns normalizedMargin(margin) unchanged, so the split is byte-for-byte the
+// pre-CIP-23 calculation. A nil pool margin is treated as 0.
+func (p Parameters) effectiveMargin(margin *big.Rat) *big.Rat {
+	m := normalizedMargin(margin)
+	if p.MinPoolMargin == nil {
+		return m
+	}
+	return maxRat(m, p.MinPoolMargin)
 }
 
 func uintRat(v uint64) *big.Rat {

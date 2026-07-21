@@ -311,6 +311,14 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		}
 	}
 
+	// CIP-23 minimum pool margin is basis points; must be within [0, 10000].
+	if c.MinPoolMargin > 10_000 {
+		errs = append(errs, fmt.Errorf(
+			"minPoolMargin (%d) must be in [0, 10000] basis points",
+			c.MinPoolMargin,
+		))
+	}
+
 	// Network identity
 	if c.Network == "" {
 		if c.NetworkMagic == 0 {

@@ -675,3 +675,22 @@ func collectExportedLeafFields(
 		out[path] = struct{}{}
 	}
 }
+
+func TestMinPoolMarginEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_MIN_POOL_MARGIN", "150")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.MinPoolMargin != 150 {
+		t.Fatalf("expected env var to set minPoolMargin=150, got %d", cfg.MinPoolMargin)
+	}
+}

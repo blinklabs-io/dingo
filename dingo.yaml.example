@@ -546,3 +546,23 @@ mithril:
   # Verify the Mithril certificate chain from snapshot back to genesis
   # Default: true
   verifyCertificates: true
+
+# ---
+# CIP-23 minimum pool margin / minimum variable fee (experimental, consensus-affecting)
+#
+# Sets a floor on the pool margin (variable fee): a pool's effective margin in
+# the staking-reward split becomes max(pool.margin, minPoolMargin), and pool
+# registration certificates below the floor are rejected. Reward-account
+# registration and eligibility still apply: some or all of a pool allocation
+# can return to reserves when omitted by the reward prefilter, or go to treasury
+# when calculated for an account that cannot receive it. Expressed in basis
+# points (150 = 1.5%), range 0..10000. This changes the ledger reward calculation
+# and certificate validation, so it MUST only be enabled (nonzero) on a network
+# where every node also enables the same value (a devnet or custom network).
+# Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
+# this node. It takes effect only in the Dijkstra era and later. Disabled by
+# default.
+#
+# CLI: --min-pool-margin
+# Env: DINGO_MIN_POOL_MARGIN
+# minPoolMargin: 0        # basis points, 0..10000 (150 = 1.5%); 0 disables
