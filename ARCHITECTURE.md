@@ -1071,8 +1071,11 @@ on-chain-derived reward parameters at a single chokepoint,
 apply and the async precompute path, so both compute identical rewards; the
 precompute reuse verifier (`precomputedRewardPoolRewardsMatchInputs`) reproduces
 the same apportionment before validating persisted pool totals. Because it
-changes consensus, enable it only on a network where every node also enables it
-(mainnet and the public testnets keep it off); enabling it off-consensus forks
+changes consensus, startup validation permits it only on devnet/custom networks
+by default. Predefined standard networks reject it unless the operator also sets
+the explicit unsafe override
+(`UnsafeFullPotRewardsOnStandardNetworks` /
+`WithUnsafeFullPotRewardsOnStandardNetworks`); enabling it off-consensus forks
 the node off the network.
 
 During from-genesis startup, the synthetic genesis block transaction creates

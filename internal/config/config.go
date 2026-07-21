@@ -578,6 +578,10 @@ type Config struct {
 	// Enable only on a network where every node also enables it. See
 	// docs/plans/2026-07-19-cip163-full-pot-distribution-design.md.
 	FullPotRewardsEnabled bool `yaml:"fullPotRewardsEnabled" envconfig:"DINGO_FULL_POT_REWARDS_ENABLED"`
+	// UnsafeFullPotRewardsOnStandardNetworks is an explicit unsafe override
+	// for running CIP-0163 full-pot rewards on predefined public networks.
+	// Leave false except for controlled off-consensus experiments.
+	UnsafeFullPotRewardsOnStandardNetworks bool `yaml:"unsafeFullPotRewardsOnStandardNetworks" envconfig:"DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS"`
 
 	// Leios voting configuration (experimental, leios runMode only).
 	// LeiosVoteSigningKeyFile is the path to a hex-encoded BLS12-381

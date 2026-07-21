@@ -593,11 +593,13 @@ mithril:
 # the treasury tax is still taken first, and account eligibility plus per-pool
 # leader/member handling can still route some or all of a pool's allocation to
 # treasury or reserves, so not every lovelace necessarily reaches a delegator.
-# This changes the ledger reward calculation, so it MUST only be enabled on a
-# network where every node also enables it (a devnet or custom network).
+# This changes the ledger reward calculation, so it can only be enabled by
+# default on a devnet or custom network where every node also enables it.
 # Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
-# this node off the network. It is disabled by default.
+# this node off the network. Standard networks require the explicit unsafe
+# override below. It is disabled by default.
 #
-# CLI: --full-pot-rewards-enabled
-# Env: DINGO_FULL_POT_REWARDS_ENABLED
+# CLI: --full-pot-rewards-enabled / --unsafe-full-pot-rewards-on-standard-networks
+# Env: DINGO_FULL_POT_REWARDS_ENABLED / DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS
 # fullPotRewardsEnabled: false
+# unsafeFullPotRewardsOnStandardNetworks: false

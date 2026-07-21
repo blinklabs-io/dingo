@@ -115,6 +115,7 @@ func TestFullPotRewardsEnvBinding(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("DINGO_FULL_POT_REWARDS_ENABLED", "true")
+	t.Setenv("DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS", "true")
 
 	tmpDir := t.TempDir()
 	configFile := filepath.Join(tmpDir, "dingo.yaml")
@@ -128,6 +129,9 @@ func TestFullPotRewardsEnvBinding(t *testing.T) {
 	}
 	if !cfg.FullPotRewardsEnabled {
 		t.Fatal("expected env var to enable full-pot rewards")
+	}
+	if !cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		t.Fatal("expected env var to enable unsafe full-pot rewards override")
 	}
 }
 

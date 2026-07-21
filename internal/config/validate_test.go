@@ -335,6 +335,45 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name: "full pot rewards reject standard network by name",
+			modify: func(c *Config) {
+				c.FullPotRewardsEnabled = true
+			},
+			wantErr: "fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+		},
+		{
+			name: "full pot rewards reject standard network by magic",
+			modify: func(c *Config) {
+				c.Network = "private-preview-mirror"
+				c.NetworkMagic = 2
+				c.FullPotRewardsEnabled = true
+			},
+			wantErr: "fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+		},
+		{
+			name: "full pot rewards allow standard network with unsafe opt-in",
+			modify: func(c *Config) {
+				c.FullPotRewardsEnabled = true
+				c.UnsafeFullPotRewardsOnStandardNetworks = true
+			},
+		},
+		{
+			name: "full pot rewards allow custom network",
+			modify: func(c *Config) {
+				c.Network = "private-net"
+				c.NetworkMagic = 9_999
+				c.FullPotRewardsEnabled = true
+			},
+		},
+		{
+			name: "full pot rewards allow devnet",
+			modify: func(c *Config) {
+				c.Network = "devnet"
+				c.NetworkMagic = 42
+				c.FullPotRewardsEnabled = true
+			},
+		},
+		{
 			name:    "network name with traversal characters",
 			modify:  func(c *Config) { c.Network = "../mainnet" },
 			wantErr: "invalid network name",

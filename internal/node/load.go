@@ -345,6 +345,19 @@ func LoadWithDB(
 		}
 		cardanoConfigPath = network + "/config.json"
 	}
+	if cfg.FullPotRewardsEnabled &&
+		!cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			network,
+			cfg.NetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
+	}
 
 	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 		cardanoConfigPath,

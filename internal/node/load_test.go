@@ -507,8 +507,9 @@ func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
 		err := LoadWithDB(
 			context.Background(),
 			&config.Config{
-				Network:               "preview",
-				FullPotRewardsEnabled: enabled,
+				Network:                                "preview",
+				FullPotRewardsEnabled:                  enabled,
+				UnsafeFullPotRewardsOnStandardNetworks: enabled,
 			},
 			logger,
 			"unused",
@@ -520,6 +521,25 @@ func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
 
 	require.True(t, run(true).FullPotRewardsEnabled)
 	require.False(t, run(false).FullPotRewardsEnabled)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{
+			Network:               "preview",
+			FullPotRewardsEnabled: true,
+		},
+		logger,
+		"unused",
+		nil,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+	)
 }
 
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
