@@ -24,7 +24,7 @@ import (
 )
 
 func TestHarnessGetChainTip(t *testing.T) {
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(DefaultNetworkMagic),
 	)
@@ -46,7 +46,7 @@ func TestHarnessWaitForSlot(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)
@@ -67,7 +67,7 @@ func TestHarnessVerifyConsensus(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)

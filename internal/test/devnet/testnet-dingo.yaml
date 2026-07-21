@@ -1,0 +1,57 @@
+# DevNet configurator spec: all-dingo default network (3 pools).
+#
+# Mirrors testnet.yaml but with three pools so the default devnet runs
+# three Dingo producers. poolPledge stays 0; the CIP-50 pledge-leverage
+# scenario relies on zero pledge collapsing reward-eligible stake to zero
+# when the leverage cap is enabled.
+#
+# Format: 6 YAML documents (see testnet.yaml for the document map).
+
+--- # Required Testnet Parameters
+poolCount: 3
+poolCost: 0
+poolMargin: 0.0
+poolPledge: 0
+# delegatedSupply must be divisible by poolCount (generator constraint).
+# 2.1T / 3 = 700G per pool. The generator makes a staked and an unstaked
+# genesis address per pool, so ~4.2T circulates and ~1.8T stays in reserves
+# (maxLovelaceSupply 6T) to feed the epoch reward pot.
+delegatedSupply: 2100000000000
+systemStart: 'now'
+systemStartDelay: 5
+networkMagic: 42
+testnetDomain: devnet
+
+--- # Byron Genesis Override
+protocolConsts:
+  k: 40
+
+--- # Shelley Genesis Override
+epochLength: 500
+slotLength: 1
+activeSlotsCoeff: 0.4
+securityParam: 40
+maxLovelaceSupply: 6000000000000
+protocolParams:
+  decentralisationParam: 0
+  protocolVersion:
+    major: 10
+    minor: 0
+
+--- # Alonzo Genesis Override
+
+--- # Conway Genesis Override
+
+--- # Node Config Override
+TestShelleyHardForkAtEpoch: 0
+TestAllegraHardForkAtEpoch: 0
+TestMaryHardForkAtEpoch: 0
+TestAlonzoHardForkAtEpoch: 0
+TestBabbageHardForkAtEpoch: 0
+TestConwayHardForkAtEpoch: 0
+ExperimentalHardForksEnabled: true
+ExperimentalProtocolsEnabled: true
+TraceForge: true
+TraceChainDb: true
+TraceMempool: true
+TurnOnLogging: true

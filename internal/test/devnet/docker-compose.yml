@@ -14,23 +14,33 @@
 
 # DevNet Docker Compose configuration
 #
-# Runs a private Cardano DevNet with:
-#   - configurator:     Generates unique pool keys and genesis files
+# Two profiles are defined; select one via COMPOSE_PROFILES (.env defaults to
+# COMPOSE_PROFILES=dingo).
+#
+# Default profile: dingo (all-dingo network)
+#   - configurator-dingo: Generates unique pool keys and genesis files (3 pools)
+#   - dingo-1/2/3:        Dingo nodes forging with pool 1/2/3 keys
+#   - dingo-relay:        Relay connecting all three producers (no block production)
+#   NtN host ports: 3010/3013/3014 (dingo-1/2/3), 3015 (dingo-relay).
+#   NtC host ports: 3020-3023.
+#
+# Opt-in profile: conformance (dingo + cardano-node, pass --conformance)
+#   - configurator:     Generates unique pool keys and genesis files (2 pools)
 #   - dingo-producer:   Dingo node forging with pool 1 keys
 #   - cardano-producer: Official cardano-node forging with pool 2 keys
 #   - cardano-relay:    Relay connecting both producers (no block production)
 #
 # Usage:
-#   docker compose up -d       # Start all services
+#   docker compose up -d       # Start all services in the selected profile
 #   docker compose down -v     # Stop and remove volumes
 #
-# Host port overrides (set in environment or .env file):
+# Host port overrides (set in environment or .env file, conformance profile):
 #   DEVNET_DINGO_PORT     - Dingo producer host port    (default: 3010)
 #   DEVNET_CARDANO_PORT   - Cardano producer host port  (default: 3011)
 #   DEVNET_RELAY_PORT     - Cardano relay host port     (default: 3012)
 #
-# The configurator service runs first (via depends_on) to generate unique
-# key sets and genesis files for each pool from testnet.yaml.
+# Each profile's configurator service runs first (via depends_on) to generate
+# unique key sets and genesis files for each pool from its testnet*.yaml.
 
 services:
   configurator:
@@ -38,16 +48,204 @@ services:
       context: .
       dockerfile: Dockerfile.configurator
     container_name: devnet-configurator
+    profiles: ["conformance"]
     volumes:
       - ./testnet.yaml:/testnet.yaml
       - p1-configs:/configs/1
       - p2-configs:/configs/2
       - utxo-keys:/configs/utxo-keys
 
+  configurator-dingo:
+    build:
+      context: .
+      dockerfile: Dockerfile.configurator
+    container_name: devnet-configurator-dingo
+    profiles: ["dingo"]
+    environment:
+      DINGO_POOL_IDS: "1 2 3"
+    volumes:
+      - ./testnet-dingo.yaml:/testnet.yaml
+      - p1-configs:/configs/1
+      - p2-configs:/configs/2
+      - p3-configs:/configs/3
+      - utxo-keys:/configs/utxo-keys
+
+  dingo-1:
+    build:
+      context: ../../..
+    container_name: dingo-1
+    profiles: ["dingo"]
+    depends_on:
+      configurator-dingo:
+        condition: service_completed_successfully
+    environment: &dingo-node-env
+      CARDANO_NETWORK: devnet
+      CARDANO_CONFIG: /configs/configs/config.json
+      CARDANO_TOPOLOGY: /topology/topology.json
+      CARDANO_DATABASE_PATH: /data/db
+      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_DEBUG: "1"
+      CARDANO_BLOCK_PRODUCER: "true"
+      CARDANO_SHELLEY_VRF_KEY: /configs/keys/vrf.skey
+      CARDANO_SHELLEY_KES_KEY: /configs/keys/kes.skey
+      CARDANO_SHELLEY_OPERATIONAL_CERTIFICATE: /configs/keys/opcert.cert
+      DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
+      DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
+      DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
+      # Expose node-to-client over TCP (private port 3002) so the host test
+      # harness can run LocalStateQuery. Avoids a cross-uid host socket mount:
+      # the dingo image runs as uid 100 and cannot bind a socket in a
+      # host-owned bind mount. The in-container unix socket lives on a named
+      # volume (like conformance mode) for txpump and the healthcheck.
+      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+    volumes:
+      - p1-configs:/configs:ro
+      - ./topology/dingo-1.json:/topology/topology.json:ro
+      - dingo-1-data:/data/db
+      - dingo-1-ipc:/ipc
+    ports:
+      - "${DEVNET_DINGO1_PORT:-3010}:3001"
+      - "${DEVNET_DINGO1_NTC_PORT:-3020}:3002"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.13
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  dingo-2:
+    build:
+      context: ../../..
+    container_name: dingo-2
+    profiles: ["dingo"]
+    depends_on:
+      configurator-dingo:
+        condition: service_completed_successfully
+    environment:
+      <<: *dingo-node-env
+    volumes:
+      - p2-configs:/configs:ro
+      - ./topology/dingo-2.json:/topology/topology.json:ro
+      - dingo-2-data:/data/db
+      - dingo-2-ipc:/ipc
+    ports:
+      - "${DEVNET_DINGO2_PORT:-3013}:3001"
+      - "${DEVNET_DINGO2_NTC_PORT:-3021}:3002"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.14
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  dingo-3:
+    build:
+      context: ../../..
+    container_name: dingo-3
+    profiles: ["dingo"]
+    depends_on:
+      configurator-dingo:
+        condition: service_completed_successfully
+    environment:
+      <<: *dingo-node-env
+    volumes:
+      - p3-configs:/configs:ro
+      - ./topology/dingo-3.json:/topology/topology.json:ro
+      - dingo-3-data:/data/db
+      - dingo-3-ipc:/ipc
+    ports:
+      - "${DEVNET_DINGO3_PORT:-3014}:3001"
+      - "${DEVNET_DINGO3_NTC_PORT:-3022}:3002"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.15
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  dingo-relay:
+    build:
+      context: ../../..
+    container_name: dingo-relay
+    profiles: ["dingo"]
+    depends_on:
+      configurator-dingo:
+        condition: service_completed_successfully
+    environment:
+      CARDANO_NETWORK: devnet
+      CARDANO_CONFIG: /configs/configs/config.json
+      CARDANO_TOPOLOGY: /topology/topology.json
+      CARDANO_DATABASE_PATH: /data/db
+      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
+      DINGO_DEBUG: "1"
+      CARDANO_BLOCK_PRODUCER: "false"
+      DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
+      DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
+      DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
+      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
+      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
+    volumes:
+      - p1-configs:/configs:ro
+      - ./topology/dingo-relay.json:/topology/topology.json:ro
+      - dingo-relay-data:/data/db
+      - dingo-relay-ipc:/ipc
+    ports:
+      - "${DEVNET_DINGO_RELAY_PORT:-3015}:3001"
+      - "${DEVNET_DINGO_RELAY_NTC_PORT:-3023}:3002"
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.16
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /ipc/dingo.socket || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  txpump-dingo:
+    build:
+      context: ../../..
+      dockerfile: internal/test/antithesis/Dockerfile.txpump
+    container_name: devnet-txpump-dingo
+    profiles: ["dingo"]
+    init: true
+    user: "0:0"
+    depends_on:
+      dingo-1:
+        condition: service_healthy
+    environment:
+      TXPUMP_NODE_ADDR: "/ipc/dingo.socket"
+      TXPUMP_NETWORK_MAGIC: "42"
+      TXPUMP_TX_COUNT_MIN: "10"
+      TXPUMP_TX_COUNT_MAX: "50"
+      TXPUMP_COOLDOWN_MIN: "5"
+      TXPUMP_COOLDOWN_MAX: "15"
+      TXPUMP_TYPES: "payment"
+      TXPUMP_LOG_DIR: "/logs"
+      TXPUMP_GENESIS_UTXO_FILE: "/utxo-keys"
+    volumes:
+      - dingo-1-ipc:/ipc:ro
+      - logs:/logs
+      - utxo-keys:/utxo-keys:ro
+    networks:
+      devnet:
+        ipv4_address: 172.20.0.21
+
   dingo-producer:
     build:
       context: ../../..
     container_name: dingo-producer
+    profiles: ["conformance"]
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -83,6 +281,7 @@ services:
   cardano-producer:
     image: ghcr.io/blinklabs-io/cardano-node:11.0.1
     container_name: cardano-producer
+    profiles: ["conformance"]
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -129,6 +328,7 @@ services:
       context: ../../..
       dockerfile: internal/test/antithesis/Dockerfile.txpump
     container_name: devnet-txpump
+    profiles: ["conformance"]
     init: true
     # Named Docker volumes are root-owned on first mount; txpump writes
     # /logs/txpump.log so the runtime user must be root.
@@ -157,6 +357,7 @@ services:
   cardano-relay:
     image: ghcr.io/blinklabs-io/cardano-node:11.0.1
     container_name: cardano-relay
+    profiles: ["conformance"]
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -201,6 +402,7 @@ networks:
 volumes:
   p1-configs:
   p2-configs:
+  p3-configs:
   utxo-keys:
   logs:
   dingo-producer-data:
@@ -209,3 +411,11 @@ volumes:
   cardano-producer-ipc:
   cardano-relay-data:
   cardano-relay-ipc:
+  dingo-1-data:
+  dingo-2-data:
+  dingo-3-data:
+  dingo-relay-data:
+  dingo-1-ipc:
+  dingo-2-ipc:
+  dingo-3-ipc:
+  dingo-relay-ipc:

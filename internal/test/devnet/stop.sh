@@ -16,13 +16,29 @@
 
 # Stop the DevNet and remove all volumes.
 #
-# Usage: ./stop.sh
+# Usage:
+#   ./stop.sh               # all-dingo network (default)
+#   ./stop.sh --conformance # dingo + cardano-node reference network
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "Stopping DevNet containers and removing volumes..."
+# Mode selection: default dingo (all-dingo network), --conformance for the
+# dingo + cardano-node reference network.
+MODE="dingo"
+for arg in "$@"; do
+  case "${arg}" in
+    --conformance) MODE="conformance" ;;
+  esac
+done
+if [[ "${MODE}" == "conformance" ]]; then
+  export COMPOSE_PROFILES="conformance"
+else
+  export COMPOSE_PROFILES="dingo"
+fi
+
+echo "Stopping DevNet containers and removing volumes (mode: ${MODE})..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" down -v
 
 echo "DevNet stopped."

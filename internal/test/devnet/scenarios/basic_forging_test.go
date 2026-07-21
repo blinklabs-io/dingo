@@ -28,7 +28,10 @@ import (
 // and that all nodes in the DevNet reach consensus.
 //
 // This test:
-//  1. Connects to all 3 nodes (dingo-producer, cardano-producer, cardano-relay)
+//  1. Connects to all nodes in the active network (all producers plus the
+//     relay - three Dingo producers plus a Dingo relay in dingo mode, or a
+//     Dingo producer, cardano-node producer, and cardano-node relay in
+//     conformance mode)
 //  2. Waits for Dingo to advance past genesis (bootstrap grace period)
 //  3. Waits for the chain to advance 10 slots beyond the current tip
 //  4. Verifies that Dingo's selected chain advances
@@ -45,7 +48,7 @@ func TestBasicBlockForging(t *testing.T) {
 		cfg.ExpectedBlockTime(),
 	)
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
@@ -59,7 +62,7 @@ func TestBasicBlockForging(t *testing.T) {
 	// Step 2: Wait for Dingo to advance past genesis. On a cold start
 	// dingo needs time to connect peers, sync, and compute the leader
 	// schedule before it can forge or relay blocks.
-	dingoEndpoint := endpoints[0]
+	dingoEndpoint := h.DingoNode()
 	t.Log("waiting for Dingo to advance past genesis...")
 	bootstrapTimeout := cfg.SlotDuration()*120 + cfg.ExpectedBlockTime()*10
 	h.WaitForNodeSlot(dingoEndpoint, 1, bootstrapTimeout)
@@ -117,13 +120,13 @@ func TestDingoChainAdvances(t *testing.T) {
 	cfg, err := devnet.LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config from testnet.yaml")
 
-	endpoints := devnet.DefaultEndpoints()
+	endpoints := devnet.LoadEndpoints()
 	h := devnet.NewTestHarness(
 		t, endpoints,
 		devnet.WithNetworkMagic(cfg.NetworkMagic),
 	)
 
-	dingoEndpoint := endpoints[0]
+	dingoEndpoint := h.DingoNode()
 
 	// Wait for Dingo to be reachable
 	h.WaitForNodeSlot(dingoEndpoint, 0, 60*time.Second)
