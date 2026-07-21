@@ -542,6 +542,42 @@ func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
 	)
 }
 
+func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name         string
+		network      string
+		networkMagic uint32
+	}{
+		{name: "configured identity unset"},
+		{
+			name:         "configured identity claims custom network",
+			network:      "devnet",
+			networkMagic: 42,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{
+					Network:               test.network,
+					NetworkMagic:          test.networkMagic,
+					CardanoConfig:         "preview/config.json",
+					FullPotRewardsEnabled: true,
+				},
+				logger,
+				"unused",
+				nil,
+			)
+			require.ErrorContains(
+				t,
+				err,
+				"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+			)
+		})
+	}
+}
+
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
 // recorded failures reports success, so a clean load is never turned into an
 // error.

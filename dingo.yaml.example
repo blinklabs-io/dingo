@@ -593,8 +593,8 @@ mithril:
 # the treasury tax is still taken first, and account eligibility plus per-pool
 # leader/member handling can still route some or all of a pool's allocation to
 # treasury or reserves, so not every lovelace necessarily reaches a delegator.
-# This changes the ledger reward calculation, so it can only be enabled by
-# default on a devnet or custom network where every node also enables it.
+# This changes the ledger reward calculation, so it can only be enabled without
+# the unsafe override on a devnet or custom network where every node enables it.
 # Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
 # this node off the network. Standard networks require the explicit unsafe
 # override below. It is disabled by default.

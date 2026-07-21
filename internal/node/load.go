@@ -345,8 +345,27 @@ func LoadWithDB(
 		}
 		cardanoConfigPath = network + "/config.json"
 	}
+	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
+		cardanoConfigPath,
+		network,
+		cardano.EmbeddedConfigFS,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"loading cardano node config: %w", err,
+		)
+	}
 	if cfg.FullPotRewardsEnabled &&
 		!cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		var genesisNetworkMagic uint32
+		if shelleyGenesis := nodeCfg.ShelleyGenesis(); shelleyGenesis != nil {
+			genesisNetworkMagic = shelleyGenesis.NetworkMagic
+		}
+		if network == "" && cfg.NetworkMagic == 0 && genesisNetworkMagic == 0 {
+			return errors.New(
+				"fullPotRewardsEnabled requires a resolvable network identity",
+			)
+		}
 		if networkName, ok := config.FullPotRewardsStandardNetwork(
 			network,
 			cfg.NetworkMagic,
@@ -357,17 +376,19 @@ func LoadWithDB(
 				networkName,
 			)
 		}
-	}
-
-	nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
-		cardanoConfigPath,
-		network,
-		cardano.EmbeddedConfigFS,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"loading cardano node config: %w", err,
-		)
+		// The Shelley genesis drives ledger state during load, so validate its
+		// identity independently. Otherwise a custom configured name or magic
+		// could disguise a standard-network Cardano config and bypass the gate.
+		if networkName, ok := config.FullPotRewardsStandardNetwork(
+			"",
+			genesisNetworkMagic,
+		); ok {
+			return fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				networkName,
+			)
+		}
 	}
 	logger.Debug(
 		"cardano network config",
