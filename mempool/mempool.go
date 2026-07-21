@@ -853,7 +853,7 @@ func (m *Mempool) GetTransaction(txHash string) (MempoolTransaction, bool) {
 	if ret == nil {
 		return MempoolTransaction{}, false
 	}
-	return *ret, true
+	return *cloneMempoolTransaction(ret), true
 }
 
 func (m *Mempool) Transactions() []MempoolTransaction {
@@ -861,9 +861,20 @@ func (m *Mempool) Transactions() []MempoolTransaction {
 	defer m.RUnlock()
 	ret := make([]MempoolTransaction, len(m.transactions))
 	for i := range m.transactions {
-		ret[i] = *m.transactions[i]
+		ret[i] = *cloneMempoolTransaction(m.transactions[i])
 	}
 	return ret
+}
+
+// cloneMempoolTransaction returns a deep copy that does not share mutable CBOR
+// storage with the source transaction.
+func cloneMempoolTransaction(tx *MempoolTransaction) *MempoolTransaction {
+	if tx == nil {
+		return nil
+	}
+	ret := *tx
+	ret.Cbor = slices.Clone(tx.Cbor)
+	return &ret
 }
 
 func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
