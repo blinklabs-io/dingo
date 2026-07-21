@@ -125,6 +125,9 @@ Thank you for trying!
 * 改善しました **release artifact の検証:** publishing の流れは新しい attestation action を使うようになり、artifact の確認が最新の状態に保たれます。
 * 整えました **最新の Badger release に合わせた database storage 動作:** storage layer は Badger の新しい保守修正を取り込み、database の動作をより安定させます。
 * 安定化しました **Antithesis validation の実行:** CI job は Moog を固定し、結果を待ってから次へ進むため、検証結果のぶれを抑えます。
+* 近代化しました CI workflow で `actions/setup-go` を `7.0.0` にし、`go test`、`golangci-lint`、publish job を新しい action で実行します。
+* 追加しました ouroboros-mock harness を使った MySQL-backed conformance test を追加し、Docker Compose support と CI wiring で実行しやすくします。
+* 刷新しました `github.com/ipfs/go-cid` を `0.6.2` にし、CID handling を最新に保ちます。
 
 ### 🔧 修正
 
