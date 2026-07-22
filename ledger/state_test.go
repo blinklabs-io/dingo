@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,6 +44,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
@@ -1121,10 +1122,8 @@ func TestNextEpochNonceReadyEpoch(t *testing.T) {
 }
 
 func TestComputeNextEpochNonceUsesImportedTipAnchor(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
-
 	tipNonce := bytes.Repeat([]byte{0x22}, 32)
 	candidateNonce := bytes.Repeat([]byte{0x33}, 32)
 
@@ -1722,14 +1721,10 @@ func TestTransitionToEra_ReturnsResultWithoutMutating(t *testing.T) {
 	)
 
 	// Create in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:             db,
 		currentEra:     eras.ByronEraDesc,
@@ -1828,14 +1823,10 @@ func TestTransitionToEra_ChainedTransitions(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ByronEraDesc,
@@ -2037,14 +2028,10 @@ func TestEpochRolloverResult_FieldsPopulated(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2139,14 +2126,10 @@ func TestEpochRollover_NoDeadlockDuringTransaction(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2271,14 +2254,10 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db:         db,
 		currentEra: eras.ShelleyEraDesc,
@@ -2398,13 +2377,10 @@ func TestEpochRollover_ConcurrentReaders(t *testing.T) {
 // TestTransitionToEra_ErrorHandling tests error conditions in transitionToEra
 func TestTransitionToEra_ErrorHandling(t *testing.T) {
 	t.Run("invalid era ID returns error", func(t *testing.T) {
-		db, err := database.New(&database.Config{
-			BlobPlugin:     "badger",
-			MetadataPlugin: "sqlite",
-			DataDir:        "",
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir: "",
 		})
 		require.NoError(t, err)
-		defer db.Close()
 
 		ls := &LedgerState{
 			db:         db,
@@ -2446,8 +2422,12 @@ func makeTestPoint(block models.Block) pcommon.Point {
 	return pcommon.NewPoint(block.Slot, block.Hash)
 }
 
-// TestCleanupOrphanedBlobs_NoBlobStore tests that cleanup gracefully handles nil blob store
-func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
+// TestCleanupOrphanedBlobs_EmptyBlobStore verifies cleanup returns without
+// error against a real (badger) blob store that has no stored blocks, so there
+// are no orphaned blobs to remove. dbtest.NewDatabase always composes a badger
+// blob store, and database.New now requires a non-nil blob store, so a
+// no-blob-store database is no longer constructible.
+func TestCleanupOrphanedBlobs_EmptyBlobStore(t *testing.T) {
 	ls := &LedgerState{
 		db: nil, // No database
 		config: LedgerStateConfig{
@@ -2455,18 +2435,15 @@ func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
 		},
 	}
 
-	// Create a mock database that returns nil blob store
-	mockDB, err := database.New(&database.Config{
-		BlobPlugin:     "",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	// Create a database backed by a real (badger) blob store with no blocks.
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer mockDB.Close()
 
-	ls.db = mockDB
+	ls.db = db
 
-	// Cleanup should return nil when there's no blob store
+	// Cleanup should return nil when there are no orphaned blobs.
 	err = ls.cleanupOrphanedBlobs(100)
 	assert.NoError(t, err)
 }
@@ -2474,14 +2451,10 @@ func TestCleanupOrphanedBlobs_NoBlobStore(t *testing.T) {
 // TestCleanupOrphanedBlobs_NoOrphans tests cleanup when there are no orphaned blocks
 func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2511,14 +2484,10 @@ func TestCleanupOrphanedBlobs_NoOrphans(t *testing.T) {
 // TestCleanupOrphanedBlobs_WithOrphans tests cleanup when orphaned blocks exist
 func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2555,14 +2524,10 @@ func TestCleanupOrphanedBlobs_WithOrphans(t *testing.T) {
 // TestCleanupOrphanedBlobs_SlotZero tests cleanup behavior when tip is at slot 0
 func TestCleanupOrphanedBlobs_SlotZero(t *testing.T) {
 	// Create an in-memory database
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	ls := &LedgerState{
 		db: db,
 		config: LedgerStateConfig{
@@ -2655,14 +2620,10 @@ func TestIntersectPointsIncludesPersistedMithrilBoundaryWhenRecentPointsEmpty(
 }
 
 func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 5)
 	for slot := uint64(1); slot <= 5; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -2701,14 +2662,10 @@ func TestIntersectPointsUsesPrimaryChainWhenPrimaryChainIsAhead(t *testing.T) {
 }
 
 func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 256)
 	for slot := uint64(1); slot <= 256; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -2746,14 +2703,10 @@ func TestIntersectPointsUsesSparseLedgerTipSamples(t *testing.T) {
 }
 
 func TestIntersectPointsIncludesMithrilTrustBoundary(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 256)
 	for slot := uint64(1); slot <= 256; slot++ {
 		block := makeTestBlock(slot, slot)
@@ -3124,14 +3077,10 @@ func TestChainDensityUsesCardanoNodeFragment(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := []models.Block{
 		makeTestBlock(10, 1),
 		makeTestBlock(20, 2),
@@ -3184,14 +3133,10 @@ func TestLoadTipSeedsChainDensityFromPersistedFragment(t *testing.T) {
 		cfg.LoadShelleyGenesisFromReader(strings.NewReader(shelleyGenesisJSON)),
 	)
 
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := []models.Block{
 		makeTestBlock(10, 1),
 		makeTestBlock(20, 2),
@@ -3236,14 +3181,10 @@ func TestFragmentDensityIgnoresByronEbbBlockNumber(t *testing.T) {
 func TestReconcilePrimaryChainTipWithLedgerTipPreservesSelectedChain(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	defer db.Close()
-
 	blocks := make([]models.Block, 0, 5)
 	for slot := uint64(1); slot <= 5; slot++ {
 		block := makeTestBlock(slot, slot)

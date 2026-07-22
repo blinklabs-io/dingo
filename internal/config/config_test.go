@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -28,12 +28,7 @@ import (
 func resetGlobalConfig() {
 	midnightYAMLFields = nil
 	globalConfig = &Config{
-		// MempoolCapacity left as the zero sentinel; ApplyDefaults
-		// fills it in from RunMode after all sources are merged.
-		MempoolCapacity:             0,
-		MempoolImplementation:       DefaultMempoolImplementation,
-		EvictionWatermark:           0.90,
-		RejectionWatermark:          0.95,
+		Plugins:                     defaultPluginsConfig(),
 		BindAddr:                    "0.0.0.0",
 		CardanoConfig:               "", // Will be set dynamically based on network
 		DatabasePath:                ".dingo",
@@ -45,15 +40,10 @@ func resetGlobalConfig() {
 		PrivateBindAddr:             "127.0.0.1",
 		PrivatePort:                 3002,
 		RelayPort:                   3001,
-		UtxorpcPort:                 9090,
 		CORSAllowedOrigins:          []string{"*"},
-		BlockfrostPort:              3000,
-		MeshPort:                    8080,
 		Topology:                    "",
 		TlsCertFilePath:             "",
 		TlsKeyFilePath:              "",
-		BlobPlugin:                  DefaultBlobPlugin,
-		MetadataPlugin:              DefaultMetadataPlugin,
 		RunMode:                     RunModeServe,
 		StartEra:                    StartEraDefault,
 		ImmutableDbPath:             "",
@@ -79,8 +69,18 @@ func resetGlobalConfig() {
 func TestLoad_CompareFullStruct(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-badgerCacheSize: 8388608
-mempoolCapacity: 2097152
+plugins:
+  mempool:
+    provider: default
+    config:
+      capacity: 2097152
+      evictionWatermark: 0.90
+      rejectionWatermark: 0.95
+  api:
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9940
 bindAddr: "127.0.0.1"
 cardanoConfig: "./cardano/preview/config.json"
 databasePath: ".dingo"
@@ -91,7 +91,6 @@ metricsPort: 8088
 privateBindAddr: "127.0.0.1"
 privatePort: 8000
 relayPort: 4000
-utxorpcPort: 9940
 databaseWorkers: 11
 databaseQueueSize: 77
 backfillBatchSize: 200
@@ -140,39 +139,34 @@ mithril:
 	}
 	defer os.Remove(tmpFile)
 
+	expectedPlugins := defaultPluginsConfig()
+	expectedPlugins.Mempool.Config["capacity"] = 2097152
+	expectedPlugins.API.Utxorpc.Config["port"] = 9940
 	expected := &Config{
-		MempoolCapacity:       2097152,
-		MempoolImplementation: DefaultMempoolImplementation,
-		EvictionWatermark:     0.90,
-		RejectionWatermark:    0.95,
-		BindAddr:              "127.0.0.1",
-		CardanoConfig:         "./cardano/preview/config.json",
-		DatabasePath:          ".dingo",
-		SocketPath:            "env.socket",
-		IntersectTip:          true,
-		ValidateHistorical:    false,
-		Network:               "preview",
-		MetricsPort:           8088,
-		PrivateBindAddr:       "127.0.0.1",
-		PrivatePort:           8000,
-		RelayPort:             4000,
-		UtxorpcPort:           9940, // explicit override from YAML
-		CORSAllowedOrigins:    []string{"*"},
-		BlockfrostPort:        3000, // default
-		MeshPort:              8080, // default
-		Topology:              "",
-		TlsCertFilePath:       "cert1.pem",
-		TlsKeyFilePath:        "key1.pem",
-		BlobPlugin:            DefaultBlobPlugin,
-		MetadataPlugin:        DefaultMetadataPlugin,
-		RunMode:               RunModeServe,
-		StartEra:              StartEraDefault,
-		ImmutableDbPath:       "/tmp/immutable",
-		ShutdownTimeout:       "45s",
-		LedgerCatchupTimeout:  "90m",
-		DatabaseWorkers:       11,
-		DatabaseQueueSize:     77,
-		BackfillBatchSize:     200,
+		Plugins:              expectedPlugins,
+		BindAddr:             "127.0.0.1",
+		CardanoConfig:        "./cardano/preview/config.json",
+		DatabasePath:         ".dingo",
+		SocketPath:           "env.socket",
+		IntersectTip:         true,
+		ValidateHistorical:   false,
+		Network:              "preview",
+		MetricsPort:          8088,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          8000,
+		RelayPort:            4000,
+		CORSAllowedOrigins:   []string{"*"},
+		Topology:             "",
+		TlsCertFilePath:      "cert1.pem",
+		TlsKeyFilePath:       "key1.pem",
+		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
+		ImmutableDbPath:      "/tmp/immutable",
+		ShutdownTimeout:      "45s",
+		LedgerCatchupTimeout: "90m",
+		DatabaseWorkers:      11,
+		DatabaseQueueSize:    77,
+		BackfillBatchSize:    200,
 		GenesisBootstrap: GenesisBootstrapConfig{
 			Enabled:                     false,
 			WindowSlots:                 4321,
@@ -233,40 +227,36 @@ func TestLoad_WithoutConfigFile_UsesDefaults(t *testing.T) {
 
 	// Expected is the updated default values from globalConfig
 	expected := &Config{
-		MempoolCapacity:       1048576,
-		MempoolImplementation: DefaultMempoolImplementation,
-		EvictionWatermark:     0.90,
-		RejectionWatermark:    0.95,
-		BindAddr:              "0.0.0.0",
-		CardanoConfig:         "", // Resolved by consumers using cfg.Network
-		DatabasePath:          ".dingo",
-		SocketPath:            "dingo.socket",
-		IntersectTip:          false,
-		ValidateHistorical:    false,
-		Network:               "preview",
-		MetricsPort:           12798,
-		PrivateBindAddr:       "127.0.0.1",
-		PrivatePort:           3002,
-		RelayPort:             3001,
-		UtxorpcPort:           9090,
-		CORSAllowedOrigins:    []string{"*"},
-		BlockfrostPort:        3000,
-		MeshPort:              8080,
-		Topology:              "",
-		TlsCertFilePath:       "",
-		TlsKeyFilePath:        "",
-		BlobPlugin:            DefaultBlobPlugin,
-		MetadataPlugin:        DefaultMetadataPlugin,
-		RunMode:               RunModeServe,
-		StartEra:              StartEraDefault,
-		ImmutableDbPath:       "",
-		ShutdownTimeout:       DefaultShutdownTimeout,
-		LedgerCatchupTimeout:  DefaultLedgerCatchupTimeout,
-		DatabaseWorkers:       5,
-		DatabaseQueueSize:     50,
-		BackfillBatchSize:     100,
-		GenesisBootstrap:      DefaultGenesisBootstrapConfig(),
-		HistoryExpiry:         DefaultHistoryExpiryConfig(),
+		Plugins: func() PluginsConfig {
+			plugins := defaultPluginsConfig()
+			plugins.Mempool.Config["capacity"] = int64(1048576)
+			return plugins
+		}(),
+		BindAddr:             "0.0.0.0",
+		CardanoConfig:        "", // Resolved by consumers using cfg.Network
+		DatabasePath:         ".dingo",
+		SocketPath:           "dingo.socket",
+		IntersectTip:         false,
+		ValidateHistorical:   false,
+		Network:              "preview",
+		MetricsPort:          12798,
+		PrivateBindAddr:      "127.0.0.1",
+		PrivatePort:          3002,
+		RelayPort:            3001,
+		CORSAllowedOrigins:   []string{"*"},
+		Topology:             "",
+		TlsCertFilePath:      "",
+		TlsKeyFilePath:       "",
+		RunMode:              RunModeServe,
+		StartEra:             StartEraDefault,
+		ImmutableDbPath:      "",
+		ShutdownTimeout:      DefaultShutdownTimeout,
+		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+		DatabaseWorkers:      5,
+		DatabaseQueueSize:    50,
+		BackfillBatchSize:    100,
+		GenesisBootstrap:     DefaultGenesisBootstrapConfig(),
+		HistoryExpiry:        DefaultHistoryExpiryConfig(),
 		Midnight: func() MidnightConfig {
 			m := midnightNetworkDefaults["preview"]
 			m.Port = DefaultMidnightConfig().Port
@@ -754,28 +744,28 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 			eviction:   -0.1,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection negative",
 			eviction:   0.90,
 			rejection:  -0.5,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction above 1",
 			eviction:   1.5,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 		{
 			name:       "rejection above 1",
 			eviction:   0.90,
 			rejection:  1.1,
 			wantErr:    true,
-			errContain: "invalid rejectionWatermark",
+			errContain: "invalid plugins.mempool.config.rejectionWatermark",
 		},
 		{
 			name:       "eviction equals rejection",
@@ -796,15 +786,15 @@ func TestWatermarkDefaultingAndValidation(t *testing.T) {
 			eviction:   1.0,
 			rejection:  0.95,
 			wantErr:    true,
-			errContain: "invalid evictionWatermark",
+			errContain: "invalid plugins.mempool.config.evictionWatermark",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resetGlobalConfig()
-			globalConfig.EvictionWatermark = tt.eviction
-			globalConfig.RejectionWatermark = tt.rejection
+			globalConfig.Plugins.Mempool.Config["evictionWatermark"] = tt.eviction
+			globalConfig.Plugins.Mempool.Config["rejectionWatermark"] = tt.rejection
 			globalConfig.RunMode = RunModeDev
 
 			cfg, err := LoadConfig("")
@@ -866,20 +856,9 @@ database:
 	}
 	defer os.Remove(tmpFile)
 
-	cfg, err := LoadConfig(tmpFile)
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-
-	if cfg.BlobPlugin != "badger" {
-		t.Errorf("expected BlobPlugin to be 'badger', got %q", cfg.BlobPlugin)
-	}
-
-	if cfg.MetadataPlugin != "sqlite" {
-		t.Errorf(
-			"expected MetadataPlugin to be 'sqlite', got %q",
-			cfg.MetadataPlugin,
-		)
+	_, err = LoadConfig(tmpFile)
+	if err == nil || !strings.Contains(err.Error(), "field database not found") {
+		t.Fatalf("expected legacy database section rejection, got %v", err)
 	}
 }
 
@@ -898,7 +877,7 @@ database:
   blob:
     plugin: 123
 `,
-			errContain: "blob plugin name must be a string",
+			errContain: "field database not found",
 		},
 		{
 			name: "metadata plugin selector is not string",
@@ -907,7 +886,7 @@ database:
   metadata:
     plugin: true
 `,
-			errContain: "metadata plugin name must be a string",
+			errContain: "field database not found",
 		},
 		{
 			name: "blob plugin config is not map",
@@ -917,7 +896,7 @@ database:
     plugin: "badger"
     badger: "/tmp/badger"
 `,
-			errContain: `blob plugin config "badger" must be a map`,
+			errContain: "field database not found",
 		},
 		{
 			name: "metadata plugin config is not map",
@@ -927,7 +906,7 @@ database:
     plugin: "sqlite"
     sqlite: "/tmp/test.db"
 `,
-			errContain: `metadata plugin config "sqlite" must be a map`,
+			errContain: "field database not found",
 		},
 	}
 	for _, tt := range tests {
@@ -1121,9 +1100,20 @@ func TestLoadConfig_NetworkMagicOnly(t *testing.T) {
 func TestLoad_APIPorts(t *testing.T) {
 	resetGlobalConfig()
 	yamlContent := `
-blockfrostPort: 8080
-utxorpcPort: 9090
-meshPort: 8081
+plugins:
+  api:
+    blockfrost:
+      provider: builtin
+      config:
+        port: 8080
+    utxorpc:
+      provider: builtin
+      config:
+        port: 9090
+    mesh:
+      provider: builtin
+      config:
+        port: 8081
 network: "preview"
 `
 
@@ -1140,23 +1130,85 @@ network: "preview"
 		t.Fatalf("failed to load config: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 8080 {
 		t.Errorf(
-			"expected BlockfrostPort to be 8080, got %d",
-			cfg.BlockfrostPort,
+			"expected Blockfrost port to be 8080, got %d",
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
-			"expected UtxorpcPort to be 9090, got %d",
-			cfg.UtxorpcPort,
+			"expected Utxorpc port to be 9090, got %d",
+			port,
 		)
 	}
-	if cfg.MeshPort != 8081 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8081 {
 		t.Errorf(
-			"expected MeshPort to be 8081, got %d",
-			cfg.MeshPort,
+			"expected Mesh port to be 8081, got %d",
+			port,
 		)
+	}
+}
+
+func TestLoad_APIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_BLOCKFROST_PORT", "3100")
+	t.Setenv("DINGO_MESH_PORT", "8181")
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3100 {
+		t.Fatalf("Blockfrost port = %d, want 3100", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8181 {
+		t.Fatalf("Mesh port = %d, want 8181", port)
+	}
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9191 {
+		t.Fatalf("Utxorpc port = %d, want 9191", port)
+	}
+}
+
+func TestLoad_CanonicalAPIPortEnvironmentOverridesCompatibility(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "9191")
+	t.Setenv("DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT", "9292")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9292 {
+		t.Fatalf("Utxorpc port = %d, want canonical value 9292", port)
+	}
+}
+
+func TestLoad_InvalidAPIPortCompatibilityEnvironment(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_UTXORPC_PORT", "not-a-port")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	if err := os.WriteFile(configFile, nil, 0o600); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+	_, err := LoadConfig(configFile)
+	if err == nil || !strings.Contains(err.Error(), "DINGO_UTXORPC_PORT") {
+		t.Fatalf("expected invalid compatibility port error, got %v", err)
 	}
 }
 
@@ -1168,22 +1220,22 @@ func TestLoad_APIPortsDefault(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if cfg.BlockfrostPort != 3000 {
+	if port := APIPluginPort(cfg.Plugins.API.Blockfrost); port != 3000 {
 		t.Errorf(
 			"expected BlockfrostPort default to be 3000, got %d",
-			cfg.BlockfrostPort,
+			port,
 		)
 	}
-	if cfg.UtxorpcPort != 9090 {
+	if port := APIPluginPort(cfg.Plugins.API.Utxorpc); port != 9090 {
 		t.Errorf(
 			"expected UtxorpcPort default to be 9090, got %d",
-			cfg.UtxorpcPort,
+			port,
 		)
 	}
-	if cfg.MeshPort != 8080 {
+	if port := APIPluginPort(cfg.Plugins.API.Mesh); port != 8080 {
 		t.Errorf(
 			"expected MeshPort default to be 8080, got %d",
-			cfg.MeshPort,
+			port,
 		)
 	}
 }
@@ -1486,12 +1538,12 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 		},
 		{
 			name:     "explicit value wins under leios",
-			yaml:     "runMode: \"leios\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"leios\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 		{
 			name:     "explicit value wins under serve",
-			yaml:     "runMode: \"serve\"\nmempoolCapacity: 5242880\n",
+			yaml:     "runMode: \"serve\"\nplugins:\n  mempool:\n    provider: default\n    config:\n      capacity: 5242880\n      evictionWatermark: 0.90\n      rejectionWatermark: 0.95\n",
 			expected: 5242880,
 		},
 	}
@@ -1508,10 +1560,11 @@ func TestLoad_MempoolCapacityMode(t *testing.T) {
 				t.Fatalf("LoadConfig: %v", err)
 			}
 			cfg.ApplyDefaults()
-			if cfg.MempoolCapacity != tc.expected {
+			capacity, _, _ := cfg.MempoolSettings()
+			if capacity != tc.expected {
 				t.Errorf(
 					"MempoolCapacity: got %d, want %d",
-					cfg.MempoolCapacity, tc.expected,
+					capacity, tc.expected,
 				)
 			}
 		})

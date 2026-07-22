@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata"
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/snapshot"
 	gcbor "github.com/blinklabs-io/gouroboros/cbor"
@@ -128,15 +129,34 @@ func ensureDB(
 		return db, func() {}, nil
 	}
 	dbConfig := &database.Config{
-		DataDir:        cfg.DatabasePath,
-		Logger:         logger,
-		PromRegistry:   nil,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        string(cfg.RunMode),
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
+		DataDir: cfg.DatabasePath, Logger: logger,
+		StorageMode: cfg.StorageMode, Network: cfg.Network,
 	}
-	newDB, err := database.New(dbConfig)
+	runtime, err := internalplugins.OpenDatabase(
+		context.Background(),
+		dbConfig,
+		internalplugins.StorageSelections{
+			Blob:     cfg.Plugins.Storage.Blob,
+			Metadata: cfg.Plugins.Storage.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DatabasePath, RunMode: string(cfg.RunMode),
+			StorageMode: cfg.StorageMode, MaxConnections: cfg.DatabaseWorkers,
+			Logger: logger,
+		},
+	)
+	if runtime == nil || runtime.Database == nil {
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating database: %w", err)
+		}
+		return nil, nil, errors.New(
+			"creating database: runtime did not provide a database",
+		)
+	}
+	newDB := runtime.Database
+	cleanup := func() {
+		_ = runtime.Close(context.Background())
+	}
 	if err != nil {
 		// Bootstrap paths (load / mithril sync) tolerate a recoverable
 		// commit-timestamp mismatch: the import work that follows
@@ -144,19 +164,18 @@ func ensureDB(
 		// Returning the error here would leave the user unable to
 		// re-run a load / re-bootstrap from a previous interrupted
 		// import.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && newDB != nil {
+		if cte, ok := errors.AsType[database.CommitTimestampError](err); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing — import will heal it",
 				"metadata_timestamp", cte.MetadataTimestamp,
 				"blob_timestamp", cte.BlobTimestamp,
 			)
-			return newDB, func() { newDB.Close() }, nil
+			return newDB, cleanup, nil
 		}
 		return nil, nil, fmt.Errorf("creating database: %w", err)
 	}
-	return newDB, func() { newDB.Close() }, nil
+	return newDB, cleanup, nil
 }
 
 // captureLoadGenesisSnapshot captures the genesis (epoch 0) mark stake
@@ -396,7 +415,7 @@ func LoadWithDB(
 		"config", nodeCfg,
 	)
 	// Load database (open new one if not provided)
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return err
 	}
@@ -588,7 +607,7 @@ func LoadBlobsWithDB(
 	}
 	// Load database (open new one if not provided)
 	callerProvidedDB := db != nil
-	db, closeDB, err := ensureDB(cfg, logger, db)
+	db, closeDB, err := ensureDB(cfg, logger, db) //nolint:contextcheck
 	if err != nil {
 		return nil, err
 	}

@@ -28,9 +28,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
-	"github.com/blinklabs-io/dingo/database/plugin/blob"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
+	"github.com/blinklabs-io/dingo/database/plugin/blob/badger"
 )
 
 func main() {
@@ -52,27 +50,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob, "badger", "data-dir", *dir,
-	); err != nil {
-		fmt.Fprintf(os.Stderr, "set data-dir: %v\n", err)
-		os.Exit(2)
-	}
-	// Run badger in API storage mode so we don't trip over core-mode
-	// mmap defaults that assume the dingo node owns the process.
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob, "badger", "storage-mode", "api",
-	); err != nil {
-		fmt.Fprintf(os.Stderr, "set storage-mode: %v\n", err)
-		os.Exit(2)
-	}
-
-	store, err := blob.New("badger")
+	store, err := badger.New(
+		badger.WithDataDir(*dir),
+		badger.WithBlockCacheSize(badger.DefaultAPIBlockCacheSize),
+		badger.WithIndexCacheSize(badger.DefaultAPIIndexCacheSize),
+		badger.WithCompressionEnabled(badger.DefaultAPICompressionEnabled),
+		badger.WithDeferOpen(),
+	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open badger: %v\n", err)
 		os.Exit(2)
 	}
-	defer func() { _ = store.Close() }()
+	if err := store.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "start badger: %v\n", err)
+		os.Exit(2)
+	}
+	defer func() { _ = store.Stop() }()
 
 	txn := store.NewTransaction(false)
 	defer func() { _ = txn.Rollback() }()

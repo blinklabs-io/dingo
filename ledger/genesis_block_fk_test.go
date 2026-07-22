@@ -25,6 +25,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
 // TestCreateGenesisBlockFileBackedNoFKError drives the real genesis sync path
@@ -52,13 +53,10 @@ func TestCreateGenesisBlockFileBackedNoFKError(t *testing.T) {
 		t.Run(nw.name, func(t *testing.T) {
 			// File-backed store: enables foreign_keys(1) + WAL, the
 			// production configuration that matches the reported failure.
-			db, err := database.New(&database.Config{
-				BlobPlugin:     "badger",
-				MetadataPlugin: "sqlite",
-				DataDir:        t.TempDir(),
+			db, err := dbtest.NewDatabase(t, &database.Config{
+				DataDir: t.TempDir(),
 			})
 			require.NoError(t, err)
-			t.Cleanup(func() { db.Close() }) //nolint:errcheck
 
 			nodeCfg, err := cardano.LoadCardanoNodeConfigWithFallback(
 				nw.configPath,

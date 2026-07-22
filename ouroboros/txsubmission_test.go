@@ -119,7 +119,7 @@ func TestTxSubmissionClientRequestTxIds(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Arrange a peer consumer with the test's available tx set.
 			o, connId := newTxSubmissionTestOuroboros(t)
-			o.Mempool.AddConsumer(connId)
+			o.Mempool.NewConsumer(connId)
 			addTxSubmissionTestFixtures(t, o.Mempool, fixtures[:tt.txCount]...)
 
 			// Ask the handler for at most the peer-requested number of TxIds.
@@ -152,7 +152,7 @@ func TestTxSubmissionClientRequestTxIdsClearsConsumerCacheOnAck(t *testing.T) {
 	// Arrange one cached transaction for a peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
@@ -180,7 +180,7 @@ func TestTxSubmissionClientRequestTxs(t *testing.T) {
 	// Arrange one known tx and one unknown tx id for the peer request.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	unknownHash := txsubmissionTestHash(99)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
@@ -236,7 +236,7 @@ func TestTxSubmissionClientRequestCallbacksMissingConsumer(t *testing.T) {
 func TestTxSubmissionClientRequestTxsUnknownZeroTxId(t *testing.T) {
 	// Arrange a valid consumer without advertising any txs to its cache.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 
 	// Verify an all-zero TxId request is treated as a cache miss, not a panic.
 	require.NotPanics(t, func() {
@@ -255,7 +255,7 @@ func TestTxSubmissionClientRequestTxIdsZeroRequestDoesNotAdvance(t *testing.T) {
 	// Arrange one available tx for the peer consumer.
 	fixture := txsubmissionTestFixtures(t)[0]
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	addTxSubmissionTestFixtures(t, o.Mempool, fixture)
 	ctx := txsubmission.CallbackContext{ConnectionId: connId}
 
@@ -293,7 +293,7 @@ func TestTxSubmissionClientStartMissingConnectionDoesNotAddConsumer(t *testing.T
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "failed to lookup connection ID")
-	require.Nil(t, o.Mempool.Consumer(connId))
+	require.Nil(t, o.Mempool.FindConsumer(connId))
 }
 
 func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
@@ -314,7 +314,7 @@ func TestTxSubmissionClientStartIsIdempotent(t *testing.T) {
 func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	// Arrange per-peer mempool and rate-limiter state.
 	o, connId := newTxSubmissionTestOuroboros(t)
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 	o.txSubmissionRateLimiter = newTxSubmissionRateLimiter(1, 1)
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 	require.False(t, o.txSubmissionRateLimiter.Allow(connId, 1))
@@ -328,7 +328,7 @@ func TestTxSubmissionConnectionClosedCleanup(t *testing.T) {
 	})
 
 	// Verify both txsubmission state holders have forgotten the peer.
-	require.Nil(t, o.Mempool.Consumer(connId))
+	require.Nil(t, o.Mempool.FindConsumer(connId))
 	require.True(t, o.txSubmissionRateLimiter.Allow(connId, 1))
 }
 
@@ -353,6 +353,7 @@ func newTxSubmissionTestOuroboros(
 	}
 	m, err := mempool.NewMempool(cfg)
 	require.NoError(t, err)
+	require.NoError(t, m.Start(t.Context()))
 	t.Cleanup(func() {
 		require.NoError(t, m.Stop(t.Context()))
 	})
@@ -415,9 +416,7 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 
 func addTxSubmissionTestFixtures(
 	t *testing.T,
-	m interface {
-		AddTransaction(txType uint, txBytes []byte) error
-	},
+	m mempool.Service,
 	fixtures ...txsubmissionTestFixture,
 ) {
 	t.Helper()
@@ -714,7 +713,7 @@ func TestTxSubmissionClientRequestTxsExpiredTransactionNotServed(t *testing.T) {
 		cfg.TransactionTTL = 10 * time.Millisecond
 		cfg.CleanupInterval = 10 * time.Millisecond
 	})
-	o.Mempool.AddConsumer(connId)
+	o.Mempool.NewConsumer(connId)
 
 	txBytes, err := hex.DecodeString(txsubmissionRelayTestTxHex)
 	require.NoError(t, err)

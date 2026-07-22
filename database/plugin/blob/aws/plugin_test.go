@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,21 +18,16 @@ package aws
 
 import (
 	"testing"
+
+	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/stretchr/testify/require"
 )
 
-func TestNewFromCmdlineOptions(t *testing.T) {
-	// Save original cmdlineOptions
-	originalOptions := cmdlineOptions
-	cmdlineOptions.bucket = "test-bucket"
-	cmdlineOptions.region = "us-east-1"
-	cmdlineOptions.prefix = "test-prefix"
-
-	// This should succeed
-	plugin := NewFromCmdlineOptions()
-	if plugin == nil {
-		t.Error("Expected plugin to be created, got nil")
-	}
-
-	// Restore original options
-	cmdlineOptions = originalOptions
+func TestRegisterProvider(t *testing.T) {
+	host := plugin.NewHost()
+	require.NoError(t, RegisterProvider(host))
+	require.Contains(t, host.Providers(), plugin.Descriptor{
+		Capability: plugin.CapabilityStorageBlob,
+		Name:       "s3", Description: "AWS S3 blob store",
+	})
 }

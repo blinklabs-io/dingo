@@ -79,7 +79,7 @@ type Ouroboros struct {
 	PeerGov                  *peergov.PeerGovernor
 	ChainsyncState           *chainsync.State
 	EventBus                 *event.EventBus
-	Mempool                  Mempool
+	Mempool                  mempool.Service
 	LedgerState              *ledger.LedgerState
 	LeiosVotes               LeiosVoteHandler
 	LeiosPipeline            LeiosPipelineHandler

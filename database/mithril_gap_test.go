@@ -68,17 +68,11 @@ type batchedCrossBlockSpendCandidate struct {
 func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 	t *testing.T,
 ) {
-	// Intentionally not t.Parallel(): database.New() writes to
-	// plugin option destination pointers via SetPluginOption, which
-	// the race detector flags when two tests build a Database
-	// concurrently.
-
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -153,18 +147,11 @@ func TestSetGapBlockTransactionRestoresConsumedInputsOnRollback(
 func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 	t *testing.T,
 ) {
-	// Intentionally not t.Parallel(): database.New() writes to
-	// plugin option destination pointers via SetPluginOption, which
-	// the race detector flags when two tests build a Database
-	// concurrently. Running serially matches other Database tests
-	// in this package.
-
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -213,16 +200,11 @@ func TestSetTransactionRecoversMissingConsumedInputsFromBlob(
 func TestSetTransactionBatchedSpendsPreviousBlockOutputInSameBatch(
 	t *testing.T,
 ) {
-	// Intentionally not t.Parallel(): database.New() writes to
-	// plugin option destination pointers via SetPluginOption, which
-	// the race detector flags when two tests build a Database
-	// concurrently.
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close()
 
@@ -789,18 +771,11 @@ func findBatchedCrossBlockSpendCandidate(
 // skipped existing UTxO rows, leaving outputs produced by earlier gap
 // blocks live forever even after a later gap block consumed them.
 func TestSetGapBlockTransactionSpendsLiveProducedInputs(t *testing.T) {
-	// Intentionally not t.Parallel(): database.New() writes to
-	// plugin option destination pointers via SetPluginOption, which
-	// the race detector flags when two tests build a Database
-	// concurrently. Running serially matches other Database tests
-	// in this package.
-
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	defer db.Close()
 

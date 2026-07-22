@@ -96,12 +96,11 @@ func stageTxSentinel(t *testing.T, db *Database, txHash []byte) []byte {
 
 func openTestDB(t *testing.T) *Database {
 	t.Helper()
-	db, err := New(&Config{
-		DataDir:        t.TempDir(),
-		Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+	db, err := newTestDatabase(t, &Config{
+		DataDir: t.TempDir(),
+		Logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
+
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		db.Close() //nolint:errcheck

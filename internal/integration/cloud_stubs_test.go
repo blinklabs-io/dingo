@@ -16,7 +16,9 @@
 
 package integration
 
-func additionalBlobPlugins() []string { return nil }
+func cloudStorageBenchmarkBackends(_, _ string) []storageBenchBackend {
+	return nil
+}
 
 func hasGCSCredentials() bool { return false }
 

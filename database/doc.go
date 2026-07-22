@@ -21,9 +21,9 @@
 //     stake snapshots, and governance state — plugins in
 //     database/plugin/metadata/ (sqlite [default], postgres, mysql)
 //
-// Plugins register themselves with database/plugin on import. The
-// concrete plugin used at runtime is selected by configuration
-// (DINGO_DATABASE_BLOB_PLUGIN, DINGO_DATABASE_METADATA_PLUGIN).
+// Composition code explicitly registers providers on an instance-owned
+// plugin.Host. The selected stores are injected into New; Database does not
+// select providers or own their lifecycle.
 //
 // # CBOR extraction
 //

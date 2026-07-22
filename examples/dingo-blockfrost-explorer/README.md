@@ -19,20 +19,28 @@ The script sets:
 ```sh
 CARDANO_NETWORK=preview
 DINGO_STORAGE_MODE=api
-DINGO_BLOCKFROST_PORT=3000
-DINGO_UTXORPC_PORT=9090
-DINGO_MESH_PORT=8080
-DINGO_DATABASE_METADATA_PLUGIN=sqlite
-DINGO_DATABASE_BLOB_PLUGIN=badger
+DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT=3000
+DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT=9090
+DINGO_PLUGINS_API_MESH_CONFIG_PORT=8080
+DINGO_PLUGINS_STORAGE_METADATA_PROVIDER=sqlite
+DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=badger
 ```
 
 Equivalent YAML:
 
 ```yaml
 storageMode: "api"
-blockfrostPort: 3000
-utxorpcPort: 9090
-meshPort: 8080
+plugins:
+  api:
+    blockfrost:
+      provider: builtin
+      config: {port: 3000}
+    utxorpc:
+      provider: builtin
+      config: {port: 9090}
+    mesh:
+      provider: builtin
+      config: {port: 8080}
 ```
 
 `storageMode: api` is required because the explorer reads transaction, address,

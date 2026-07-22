@@ -38,7 +38,7 @@ func newTestDBWithMode(t *testing.T, mode string) *Database {
 		DataDir:     "", // In-memory
 		StorageMode: mode,
 	}
-	db, err := New(config)
+	db, err := newTestDatabase(t, config)
 	require.NoError(t, err, "failed to create test database")
 	t.Cleanup(func() {
 		require.NoError(t, db.Close(), "failed to close test database")

@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -42,13 +43,11 @@ func newPoolreapTestLedger(
 	t *testing.T,
 ) (*LedgerState, *database.Database, *gorm.DB) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
 	require.True(t, ok, "expected sqlite metadata store")
 	ls := &LedgerState{

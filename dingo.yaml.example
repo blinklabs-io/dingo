@@ -15,110 +15,45 @@ cardanoConfig: "./config/cardano/preview/config.json"
 
 # Global data directory for both blob and metadata storage plugins.
 # Can be overridden with CARDANO_DATABASE_PATH or --data-dir.
-# Plugin-specific data-dir settings below override this value.
 databasePath: ".dingo"
 
-# Database configuration
-database:
-  # Blob storage plugin configuration
-  blob:
-    # Plugin to use for blob storage (badger, gcs, s3)
-    # badger is always built; gcs and s3 require a build with
-    # -tags dingo_extra_plugins or an official release binary.
-    plugin: "badger"
-    # Configuration options for each plugin
-    badger:
-      # Data directory for BadgerDB storage
-      data-dir: ".dingo/badger"
-      # Block cache size in bytes.
-      # Leave unset to use the storage-mode default:
-      # - 0 when storageMode: "core"
-      # - 268435456 (256MB) when storageMode: "api"
-      # block-cache-size: 0
-      # Index cache size in bytes.
-      # Leave unset to use the runtime default (0 in both core and api modes).
-      # index-cache-size: 0
-      # Enable garbage collection (default: true)
-      gc: true
-      # Enable ZSTD compression.
-      # Leave unset to use the storage-mode default:
-      # - false when storageMode: "core"
-      # - true when storageMode: "api"
-      # compression: false
-      # ZSTD compression level used when compression is enabled.
-      # Higher levels give a better compression ratio at the cost of
-      # throughput. Badger recommends level 1 (default).
-      # compression-level: 1
-    gcs:
-      # Google Cloud Storage bucket name
-      bucket: ""
-      # Google Cloud project ID
-      project-id: ""
-      # Path prefix within the bucket
-      prefix: ""
-    s3:
-      # AWS Endpoint
-      endpoint: ""
-      # AWS S3 bucket name
-      bucket: ""
-      # AWS region
-      region: ""
-      # Path prefix within the bucket
-      prefix: ""
-      # AWS access key ID (optional - uses default credential chain if not set)
-      access-key-id: ""
-      # AWS secret access key (optional - uses default credential chain if not set)
-      secret-access-key: ""
-
-  # Metadata storage plugin configuration
-  metadata:
-    # Plugin to use for metadata storage (sqlite, postgres, mysql)
-    # sqlite is the default. postgres and mysql are still included in plain
-    # source builds on current main; issue #2586 tracks moving them behind
-    # -tags dingo_extra_plugins.
-    plugin: "sqlite"
-    # Configuration options for each plugin
-    sqlite:
-      # Path to SQLite database file
-      data-dir: ".dingo/metadata.db"
-    postgres:
-      # NOTE: These are example values for local development only.
-      # Do not use these credentials in production environments.
-      # Postgres host
-      host: "localhost"
-      # Postgres port
-      port: 5432
-      # Postgres user
-      user: "postgres"
-      # Postgres password (required - no default)
-      password: ""
-      # Postgres database name
-      database: "postgres"
-      # Postgres sslmode
-      ssl-mode: "disable"
-      # Postgres TimeZone
-      timezone: "UTC"
-      # Full Postgres DSN (overrides other options when set)
-      dsn: ""
-    mysql:
-      # NOTE: These are example values for local development only.
-      # Do not use these credentials in production environments.
-      # MySQL host
-      host: "localhost"
-      # MySQL port
-      port: 3306
-      # MySQL user
-      user: "root"
-      # MySQL password (required - no default)
-      password: ""
-      # MySQL database name
-      database: "mysql"
-      # MySQL TLS mode (mapped to tls= in DSN)
-      ssl-mode: ""
-      # MySQL time zone location
-      timezone: "UTC"
-      # Full MySQL DSN (overrides other options when set)
-      dsn: ""
+# Compiled-in plugin selection and provider configuration.
+plugins:
+  storage:
+    blob:
+      provider: "badger"
+      config:
+        # Optional Badger data directory. When unset, databasePath applies.
+        # dataDir: ".dingo"
+    metadata:
+      provider: "sqlite"
+      config:
+        # Optional SQLite data directory. When unset, databasePath applies.
+        # dataDir: ".dingo"
+  mempool:
+    provider: "default"
+    config:
+      # Mempool capacity in bytes. Left commented out so the run-mode default
+      # applies: 1048576 (1 MiB) for standard modes, 26214400 (25 MiB) for the
+      # leios run mode. An explicit value here overrides both defaults, so a
+      # leios node would silently run with the smaller capacity — uncomment
+      # only to pin a specific size for every run mode.
+      # capacity: 1048576
+      evictionWatermark: 0.90
+      rejectionWatermark: 0.95
+  api:
+    blockfrost:
+      provider: "builtin"
+      config:
+        port: 3000
+    mesh:
+      provider: "builtin"
+      config:
+        port: 8080
+    utxorpc:
+      provider: "builtin"
+      config:
+        port: 9090
 
 # Path to the UNIX domain socket file used by the server
 # CLI: --socket-path
@@ -197,22 +132,8 @@ relayPort: 3001
 # CLI: --storage-mode
 storageMode: "core"
 
-# API ports — only used when storageMode is "api".
-# In API mode, all APIs start on their default ports. Set a port to 0 to
-# disable an individual API.
-#
-# UTxO RPC gRPC API port (default: 9090)
-# Can be overridden with DINGO_UTXORPC_PORT
-# CLI: --utxorpc-port
-utxorpcPort: 9090
-# Blockfrost-compatible REST API port (default: 3000)
-# Can be overridden with DINGO_BLOCKFROST_PORT
-# CLI: --blockfrost-port
-blockfrostPort: 3000
-# Mesh (Coinbase Rosetta) REST API port (default: 8080)
-# Can be overridden with DINGO_MESH_PORT
-# CLI: --mesh-port
-meshPort: 8080
+# API ports are configured under plugins.api above. Set a port to 0 to
+# disable that API. APIs remain inactive outside API storage mode.
 
 # Base URL of a remote Bark archive server. When set, this node keeps using
 # its configured local blob plugin but wraps it with Bark archive fallback for
@@ -246,12 +167,11 @@ historyExpiry:
 #
 # Data node (all APIs start on defaults automatically):
 #   storageMode: "api"
-#   # Override individual ports or set to 0 to disable:
-#   # blockfrostPort: 3100
-#   # meshPort: 0            # disable Mesh API
+#   # Override individual ports under plugins.api, or set a port to 0 to
+#   # disable that API.
 #   # With storageMode: "api", leave mode-sensitive Badger settings unset to keep:
-#   #   block-cache-size: 268435456
-#   #   index-cache-size: 0
+#   #   blockCacheSize: 268435456
+#   #   indexCacheSize: 0
 #   #   compression: true
 #
 # Validator / block producer (core storage, API ports ignored):
@@ -261,30 +181,33 @@ historyExpiry:
 #   shelleyKesKey: "/keys/kes.skey"
 #   shelleyOperationalCertificate: "/keys/opcert.cert"
 #   # With storageMode: "core", Badger blob defaults switch to mmap-only:
-#   #   block-cache-size: 0
-#   #   index-cache-size: 0
+#   #   blockCacheSize: 0
+#   #   indexCacheSize: 0
 #   #   compression: false
-#   # You can still override any of those explicitly under database.blob.badger.
+#   # You can still override them under plugins.storage.blob.config.
 #   # Optional forging tolerances (0 = defaults)
 #   forgeSyncToleranceSlots: 0
 #   forgeStaleGapThresholdSlots: 0
 #
 # Archive node (full immutable block history in object storage, Bark enabled):
 #   storageMode: "core"
-#   database:
-#     blob:
-#       plugin: "s3" # or "gcs"
-#       s3:
-#         bucket: "dingo-archive"
-#         region: "us-east-1"
-#         prefix: "preview"
+#   plugins:
+#     storage:
+#       blob:
+#         provider: "s3" # or "gcs"
+#         config:
+#           bucket: "dingo-archive"
+#           region: "us-east-1"
+#           prefix: "preview"
 #   barkPort: 9091
 #
 # History-expiry node (local blobs plus remote archive fallback):
 #   storageMode: "core"
-#   database:
-#     blob:
-#       plugin: "badger"
+#   plugins:
+#     storage:
+#       blob:
+#         provider: "badger"
+#         config: {}
 #   historyExpiry:
 #     enabled: true
 #     frequency: 1h
@@ -298,18 +221,7 @@ historyExpiry:
 # This is experimental and may break — use with caution
 intersectTip: false
 
-# Mempool backend. Only "fifo" is accepted; it preserves successful-admission
-# order and is the default. Any other value is rejected during configuration
-# validation.
-# CLI: --mempool-implementation  Env: CARDANO_MEMPOOL_IMPLEMENTATION
-mempoolImplementation: "fifo"
-
-# Maximum total size (in bytes) of all transactions allowed in the mempool.
-# Transactions exceeding this limit will be rejected.
-# Default: 1048576 (1 MiB) for Praos modes; 26214400 (25 MiB) for Leios.
-# Leave commented to use the mode default; uncomment to override.
-# CLI: --mempool-capacity
-# mempoolCapacity: 1048576
+# Mempool capacity and watermarks are configured under plugins.mempool.
 
 # Forging tolerances (0 = defaults)
 # forgeSyncToleranceSlots controls how far the local chain can lag the upstream

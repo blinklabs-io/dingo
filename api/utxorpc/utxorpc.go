@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -216,10 +217,9 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			),
 		)
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
+			Addr: net.JoinHostPort(
 				u.config.Host,
-				u.config.Port,
+				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
 			Handler:           handler,
 			ReadHeaderTimeout: 60 * time.Second,
@@ -237,10 +237,9 @@ func (u *Utxorpc) Start(ctx context.Context) error {
 			),
 		)
 		server = &http.Server{
-			Addr: fmt.Sprintf(
-				"%s:%d",
+			Addr: net.JoinHostPort(
 				u.config.Host,
-				u.config.Port,
+				strconv.FormatUint(uint64(u.config.Port), 10),
 			),
 			Handler:           handler,
 			Protocols:         unencryptedHTTP2Protocols(),
