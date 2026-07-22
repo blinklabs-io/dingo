@@ -162,6 +162,78 @@ func TestConfigValidatePledgeLeverage(t *testing.T) {
 	}
 }
 
+func TestWithFullPotRewards(t *testing.T) {
+	cfg := &Config{}
+	WithFullPotRewards(true)(cfg)
+	assert.True(t, cfg.fullPotRewardsEnabled)
+	WithFullPotRewards(false)(cfg)
+	assert.False(t, cfg.fullPotRewardsEnabled)
+}
+
+func TestFullPotRewardsStandardNetworkValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    []ConfigOptionFunc
+		wantErr string
+	}{
+		{
+			name: "rejects standard network by name",
+			opts: []ConfigOptionFunc{
+				WithNetwork("preview"),
+			},
+			wantErr: "full pot rewards are not permitted on standard network \"preview\"",
+		},
+		{
+			name: "rejects standard network by magic",
+			opts: []ConfigOptionFunc{
+				WithNetwork("private-preview-mirror"),
+				WithNetworkMagic(2),
+			},
+			wantErr: "full pot rewards are not permitted on standard network \"preview\"",
+		},
+		{
+			name: "allows standard network with unsafe opt-in",
+			opts: []ConfigOptionFunc{
+				WithNetwork("preview"),
+				WithUnsafeFullPotRewardsOnStandardNetworks(true),
+			},
+		},
+		{
+			name: "allows custom network",
+			opts: []ConfigOptionFunc{
+				WithNetwork("private-net"),
+				WithNetworkMagic(9_999),
+			},
+		},
+		{
+			name: "allows devnet",
+			opts: []ConfigOptionFunc{
+				WithNetwork("devnet"),
+				WithNetworkMagic(42),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := []ConfigOptionFunc{
+				WithPrometheusRegistry(prometheus.NewRegistry()),
+				WithListeners(ListenerConfig{
+					ListenNetwork: "tcp",
+					ListenAddress: "127.0.0.1:0",
+				}),
+				WithFullPotRewards(true),
+			}
+			opts = append(opts, tt.opts...)
+			_, err := New(NewConfig(opts...))
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestExperimentalDijkstraEnabled(t *testing.T) {
 	tests := []struct {
 		name     string

@@ -712,6 +712,17 @@ func precomputedRewardPoolRewardsMatchInputs(
 		}
 		poolOutputByKey[string(output.PoolKeyHash)] = output
 	}
+	// Re-derive each pool's base reward B_i and pair it with its persisted
+	// output. The pool ID is not needed to compute the reward: it only labels
+	// the result and the pool keys were already validated upstream by
+	// validateRewardCalculatorInputs.
+	type verifyPool struct {
+		key    string
+		output *models.RewardPoolOutput
+		pool   rewards.Pool
+		base   uint64
+	}
+	verifyPools := make([]verifyPool, 0, len(poolInputs))
 	for _, input := range poolInputs {
 		if input == nil {
 			return false, nil
@@ -721,18 +732,17 @@ func precomputedRewardPoolRewardsMatchInputs(
 		if !ok {
 			return false, nil
 		}
-		// The pool ID is not needed here: it only labels the result and the pool
-		// keys were already validated upstream by validateRewardCalculatorInputs.
+		pool := rewards.Pool{
+			Margin:         ratOrZero(input.Margin),
+			Pledge:         uint64(input.Pledge),
+			Cost:           uint64(input.Cost),
+			DelegatedStake: uint64(input.DelegatedStake),
+			OwnerStake:     uint64(input.OwnerStake),
+			BlocksProduced: blockCounts[key],
+			TotalBlocks:    totalBlocks,
+		}
 		reward, err := rewards.CalculatePoolReward(
-			rewards.Pool{
-				Margin:         ratOrZero(input.Margin),
-				Pledge:         uint64(input.Pledge),
-				Cost:           uint64(input.Cost),
-				DelegatedStake: uint64(input.DelegatedStake),
-				OwnerStake:     uint64(input.OwnerStake),
-				BlocksProduced: blockCounts[key],
-				TotalBlocks:    totalBlocks,
-			},
+			pool,
 			availableRewards,
 			totalActiveStake,
 			totalCirculation,
@@ -742,8 +752,49 @@ func precomputedRewardPoolRewardsMatchInputs(
 		if err != nil {
 			return false, err
 		}
-		if uint64(output.TotalReward) != reward.PoolReward ||
-			uint64(output.LeaderReward) != reward.LeaderReward {
+		verifyPools = append(verifyPools, verifyPool{
+			key:    key,
+			output: output,
+			pool:   pool,
+			base:   reward.PoolReward,
+		})
+	}
+	// CIP-0163 full pot: the persisted TotalReward is the base reward scaled up
+	// so the per-pool totals sum to the entire available pot. Reproduce that
+	// apportionment in the same canonical order Calculate uses (ascending pool
+	// key hash, which equals ascending pool ID string), then re-derive the
+	// leader split from the scaled total. When the gate is off the scaled total
+	// is the base total, so this reduces to verifying against
+	// CalculatePoolReward's base pool and leader rewards.
+	scaled := make([]uint64, len(verifyPools))
+	for i := range verifyPools {
+		scaled[i] = verifyPools[i].base
+	}
+	if params.FullPotRewardsEnabled {
+		sort.Slice(verifyPools, func(i, j int) bool {
+			return verifyPools[i].key < verifyPools[j].key
+		})
+		baseTotals := make([]uint64, len(verifyPools))
+		for i := range verifyPools {
+			baseTotals[i] = verifyPools[i].base
+		}
+		scaled = rewards.ApportionFullPot(baseTotals, availableRewards)
+	}
+	for i := range verifyPools {
+		vp := verifyPools[i]
+		leader, err := rewards.LeaderRewardWithParameters(
+			scaled[i],
+			vp.pool.Cost,
+			vp.pool.Margin,
+			vp.pool.OwnerStake,
+			vp.pool.DelegatedStake,
+			params,
+		)
+		if err != nil {
+			return false, err
+		}
+		if uint64(vp.output.TotalReward) != scaled[i] ||
+			uint64(vp.output.LeaderReward) != leader {
 			return false, nil
 		}
 	}
@@ -2195,6 +2246,10 @@ func (ls *LedgerState) rewardParameters(
 	// the on-chain-derived parameters. This is the single chokepoint feeding
 	// both the boundary apply and the async precompute path, so both agree.
 	applyPledgeLeverageConfig(&params, ls.config)
+	// CIP-0163: overlay the operator-configured full-pot feature gate onto the
+	// on-chain-derived parameters. This is the single chokepoint feeding both
+	// the boundary apply and the async precompute path, so both agree.
+	applyFullPotConfig(&params, ls.config)
 	if params.MaxLovelaceSupply < uint64(pots.Reserves) {
 		return nil, rewards.Parameters{}, nil, fmt.Errorf(
 			"invalid reward pots: reserves %d exceed max supply %d",
@@ -2203,6 +2258,14 @@ func (ls *LedgerState) rewardParameters(
 		)
 	}
 	return pparams, params, performanceDecentralization, nil
+}
+
+// applyFullPotConfig copies the CIP-0163 full-pot feature gate from the ledger
+// config onto the reward parameters. When disabled the parameters are left with
+// FullPotRewardsEnabled false, preserving the pre-CIP-0163 residual-to-reserves
+// behavior.
+func applyFullPotConfig(params *rewards.Parameters, cfg LedgerStateConfig) {
+	params.FullPotRewardsEnabled = cfg.FullPotRewardsEnabled
 }
 
 func (ls *LedgerState) rewardBlockCounts(

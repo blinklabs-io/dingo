@@ -366,8 +366,12 @@ func (n *Node) Run(ctx context.Context) error {
 			// CIP-50 pledge-leverage reward cap. Operator-set (not derived from
 			// the network) and off by default; enable only where every node
 			// also enables it.
-			PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
-			PledgeLeverage:             n.config.pledgeLeverage,
+			PledgeLeverageEnabled: n.config.pledgeLeverageEnabled,
+			PledgeLeverage:        n.config.pledgeLeverage,
+			// CIP-0163 full-pot reward distribution. Operator-set (not derived
+			// from the network) and off by default; enable only where every node
+			// also enables it.
+			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
 			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,

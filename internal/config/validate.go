@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	ouroboros "github.com/blinklabs-io/gouroboros"
 )
 
 const (
@@ -47,6 +49,29 @@ var AcceptedChainsyncStrategies = []string{
 // resolveMithrilBackend. Kept in sync by the same parity test in
 // cmd/dingo as AcceptedChainsyncStrategies.
 var AcceptedMithrilBackends = []string{"", "v1", "v2"}
+
+// FullPotRewardsStandardNetwork reports whether network/networkMagic identifies
+// a predefined non-devnet network where CIP-0163 full-pot rewards must not be
+// enabled accidentally. Network magic is checked too, so a custom name cannot
+// opt in while still pointing at a public network magic.
+func FullPotRewardsStandardNetwork(
+	network string,
+	networkMagic uint32,
+) (string, bool) {
+	if network != "" {
+		if known, ok := ouroboros.NetworkByName(network); ok &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	if networkMagic != 0 {
+		if known, ok := ouroboros.NetworkByNetworkMagic(networkMagic); ok &&
+			known.Name != ouroboros.NetworkDevnet.Name {
+			return known.Name, true
+		}
+	}
+	return "", false
+}
 
 // Validate checks the fully merged configuration (defaults, YAML,
 // environment, CLI flags) for invalid values and nonsensical
@@ -326,6 +351,19 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 			"pledgeLeverage (%d) must be in [1, 10000] when pledgeLeverageEnabled",
 			c.PledgeLeverage,
 		))
+	}
+
+	if c.FullPotRewardsEnabled && !c.UnsafeFullPotRewardsOnStandardNetworks {
+		if network, ok := FullPotRewardsStandardNetwork(
+			c.Network,
+			c.NetworkMagic,
+		); ok {
+			errs = append(errs, fmt.Errorf(
+				"fullPotRewardsEnabled is not permitted on standard network %q "+
+					"without unsafeFullPotRewardsOnStandardNetworks",
+				network,
+			))
+		}
 	}
 
 	// Network identity

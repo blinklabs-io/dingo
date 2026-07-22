@@ -582,3 +582,24 @@ mithril:
 # Env: DINGO_PLEDGE_LEVERAGE_ENABLED / DINGO_PLEDGE_LEVERAGE
 # pledgeLeverageEnabled: false
 # pledgeLeverage: 100        # L; integer in [1, 10000]
+
+# ---
+# CIP-0163 full-pot reward distribution (experimental, consensus-affecting)
+#
+# Distributes the available reward pot (after the treasury tax) across pool
+# totals instead of returning the saturation, pledge-influence, and performance
+# residual to reserves. The per-pool base rewards are scaled up with the
+# largest-remainder method so the pool totals sum to the available pot exactly;
+# the treasury tax is still taken first, and account eligibility plus per-pool
+# leader/member handling can still route some or all of a pool's allocation to
+# treasury or reserves, so not every lovelace necessarily reaches a delegator.
+# This changes the ledger reward calculation, so it can only be enabled without
+# the unsafe override on a devnet or custom network where every node enables it.
+# Enabling it off-consensus, e.g. on mainnet or the public testnets, will fork
+# this node off the network. Standard networks require the explicit unsafe
+# override below. It is disabled by default.
+#
+# CLI: --full-pot-rewards-enabled / --unsafe-full-pot-rewards-on-standard-networks
+# Env: DINGO_FULL_POT_REWARDS_ENABLED / DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS
+# fullPotRewardsEnabled: false
+# unsafeFullPotRewardsOnStandardNetworks: false

@@ -4775,3 +4775,174 @@ func TestLedgerStateMinPoolMargin(t *testing.T) {
 	ls.config.MinPoolMargin = 150
 	require.Zero(t, big.NewRat(150, 10_000).Cmp(ls.MinPoolMargin()))
 }
+
+// --- CIP-0163 full-pot reward distribution -------------------------------
+
+func TestApplyFullPotConfigEnabled(t *testing.T) {
+	params := rewards.Parameters{}
+	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: true})
+	require.True(t, params.FullPotRewardsEnabled)
+}
+
+func TestApplyFullPotConfigDisabled(t *testing.T) {
+	params := rewards.Parameters{FullPotRewardsEnabled: true}
+	applyFullPotConfig(&params, LedgerStateConfig{FullPotRewardsEnabled: false})
+	require.False(t, params.FullPotRewardsEnabled)
+}
+
+// TestPrecomputedRewardPoolRewardsMatchInputsFullPot verifies that under
+// CIP-0163 full pot the reuse verifier reproduces the pot-filling apportionment:
+// it accepts persisted totals equal to the apportioned pool rewards (with the
+// leader split re-derived from the scaled total), and rejects both the
+// unscaled base totals and any perturbed total or leader reward. With the gate
+// off the same apportioned totals are rejected because the disabled path
+// expects each pool's base reward.
+func TestPrecomputedRewardPoolRewardsMatchInputsFullPot(t *testing.T) {
+	keyA := rewardCalcHash(0x51)
+	keyB := rewardCalcHash(0x52)
+
+	params := rewards.Parameters{
+		Decentralization:      new(big.Rat),
+		OptimalPoolCount:      10,
+		PledgeInfluence:       big.NewRat(1, 2),
+		FullPotRewardsEnabled: true,
+	}
+	const (
+		availableRewards = uint64(1_000_000)
+		totalActiveStake = uint64(1_000)
+		totalCirculation = uint64(10_000)
+		totalBlocks      = uint64(10)
+	)
+	blockCounts := map[string]uint64{
+		string(keyA): 6,
+		string(keyB): 4,
+	}
+	poolInputs := []*models.RewardPoolInput{
+		{
+			PoolKeyHash:    keyA,
+			Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:         100,
+			Cost:           1_000,
+			DelegatedStake: 600,
+			OwnerStake:     100,
+		},
+		{
+			PoolKeyHash:    keyB,
+			Margin:         &types.Rat{Rat: big.NewRat(1, 10)},
+			Pledge:         50,
+			Cost:           1_000,
+			DelegatedStake: 400,
+			OwnerStake:     50,
+		},
+	}
+
+	baseFor := func(in *models.RewardPoolInput) uint64 {
+		pr, err := rewards.CalculatePoolReward(
+			rewards.Pool{
+				Margin:         big.NewRat(1, 10),
+				Pledge:         uint64(in.Pledge),
+				Cost:           uint64(in.Cost),
+				DelegatedStake: uint64(in.DelegatedStake),
+				OwnerStake:     uint64(in.OwnerStake),
+				BlocksProduced: blockCounts[string(in.PoolKeyHash)],
+				TotalBlocks:    totalBlocks,
+			},
+			availableRewards,
+			totalActiveStake,
+			totalCirculation,
+			totalBlocks,
+			params,
+		)
+		require.NoError(t, err)
+		return pr.PoolReward
+	}
+	baseA := baseFor(poolInputs[0])
+	baseB := baseFor(poolInputs[1])
+	scaled := rewards.ApportionFullPot([]uint64{baseA, baseB}, availableRewards)
+	require.Equal(t, availableRewards, scaled[0]+scaled[1])
+	require.Greater(t, scaled[0], baseA)
+	require.Greater(t, scaled[1], baseB)
+
+	leaderA, err := rewards.LeaderReward(
+		scaled[0], 1_000, big.NewRat(1, 10), 100, 600,
+	)
+	require.NoError(t, err)
+	leaderB, err := rewards.LeaderReward(
+		scaled[1], 1_000, big.NewRat(1, 10), 50, 400,
+	)
+	require.NoError(t, err)
+
+	check := func(p rewards.Parameters, outs []*models.RewardPoolOutput) bool {
+		ok, err := precomputedRewardPoolRewardsMatchInputs(
+			poolInputs,
+			outs,
+			blockCounts,
+			availableRewards,
+			totalActiveStake,
+			totalCirculation,
+			totalBlocks,
+			p,
+		)
+		require.NoError(t, err)
+		return ok
+	}
+
+	apportioned := []*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  keyA,
+			TotalReward:  types.Uint64(scaled[0]),
+			LeaderReward: types.Uint64(leaderA),
+		},
+		{
+			PoolKeyHash:  keyB,
+			TotalReward:  types.Uint64(scaled[1]),
+			LeaderReward: types.Uint64(leaderB),
+		},
+	}
+	base := []*models.RewardPoolOutput{
+		{PoolKeyHash: keyA, TotalReward: types.Uint64(baseA)},
+		{PoolKeyHash: keyB, TotalReward: types.Uint64(baseB)},
+	}
+
+	// Gate on: the apportioned totals with re-derived leader rewards are
+	// accepted.
+	require.True(t, check(params, apportioned))
+
+	// Gate on: the unscaled base totals are rejected.
+	require.False(t, check(params, base))
+
+	// Gate on: a total that is not the apportioned value is rejected.
+	require.False(t, check(params, []*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  keyA,
+			TotalReward:  types.Uint64(scaled[0] + 1),
+			LeaderReward: types.Uint64(leaderA),
+		},
+		{
+			PoolKeyHash:  keyB,
+			TotalReward:  types.Uint64(scaled[1]),
+			LeaderReward: types.Uint64(leaderB),
+		},
+	}))
+
+	// Gate on: a leader reward not re-derivable from the scaled total is
+	// rejected.
+	require.False(t, check(params, []*models.RewardPoolOutput{
+		{
+			PoolKeyHash:  keyA,
+			TotalReward:  types.Uint64(scaled[0]),
+			LeaderReward: types.Uint64(leaderA + 1),
+		},
+		{
+			PoolKeyHash:  keyB,
+			TotalReward:  types.Uint64(scaled[1]),
+			LeaderReward: types.Uint64(leaderB),
+		},
+	}))
+
+	// Gate off: the apportioned totals are rejected because the disabled path
+	// expects each pool's base reward.
+	paramsOff := params
+	paramsOff.FullPotRewardsEnabled = false
+	require.False(t, check(paramsOff, apportioned))
+}

@@ -111,6 +111,30 @@ func TestPledgeLeverageEnvBinding(t *testing.T) {
 	}
 }
 
+func TestFullPotRewardsEnvBinding(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("DINGO_FULL_POT_REWARDS_ENABLED", "true")
+	t.Setenv("DINGO_UNSAFE_FULL_POT_REWARDS_ON_STANDARD_NETWORKS", "true")
+
+	tmpDir := t.TempDir()
+	configFile := filepath.Join(tmpDir, "dingo.yaml")
+	if err := os.WriteFile(configFile, []byte(""), 0o600); err != nil {
+		t.Fatalf("failed to write temp config file: %v", err)
+	}
+
+	cfg, err := LoadConfig(configFile)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if !cfg.FullPotRewardsEnabled {
+		t.Fatal("expected env var to enable full-pot rewards")
+	}
+	if !cfg.UnsafeFullPotRewardsOnStandardNetworks {
+		t.Fatal("expected env var to enable unsafe full-pot rewards override")
+	}
+}
+
 func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 	resetGlobalConfig()
 	t.Setenv("HOME", t.TempDir())

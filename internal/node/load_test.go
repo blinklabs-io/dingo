@@ -483,6 +483,101 @@ func TestLoadWithDBWiresEpochBoundarySnapshotHook(t *testing.T) {
 	require.True(t, captured.ManualBlockProcessing)
 }
 
+// TestLoadWithDBPropagatesFullPotRewards verifies that the CIP-0163 full-pot
+// feature gate flows from the loaded config into the load-mode ledger config,
+// so `dingo load` computes the same reward state as an enabled serve node
+// instead of the legacy residual-to-reserves behavior.
+func TestLoadWithDBPropagatesFullPotRewards(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stopAfterCapture := errors.New("stop after ledger config capture")
+
+	run := func(enabled bool) ledger.LedgerStateConfig {
+		db := newTestDB(t)
+		var captured ledger.LedgerStateConfig
+		oldNewLedgerStateForLoad := newLedgerStateForLoad
+		newLedgerStateForLoad = func(
+			cfg ledger.LedgerStateConfig,
+		) (*ledger.LedgerState, error) {
+			captured = cfg
+			return nil, stopAfterCapture
+		}
+		t.Cleanup(func() {
+			newLedgerStateForLoad = oldNewLedgerStateForLoad
+		})
+		err := LoadWithDB(
+			context.Background(),
+			&config.Config{
+				Network:                                "preview",
+				FullPotRewardsEnabled:                  enabled,
+				UnsafeFullPotRewardsOnStandardNetworks: enabled,
+			},
+			logger,
+			"unused",
+			db,
+		)
+		require.ErrorIs(t, err, stopAfterCapture)
+		return captured
+	}
+
+	require.True(t, run(true).FullPotRewardsEnabled)
+	require.False(t, run(false).FullPotRewardsEnabled)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsOnStandardNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := LoadWithDB(
+		context.Background(),
+		&config.Config{
+			Network:               "preview",
+			FullPotRewardsEnabled: true,
+		},
+		logger,
+		"unused",
+		nil,
+	)
+	require.ErrorContains(
+		t,
+		err,
+		"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+	)
+}
+
+func TestLoadWithDBRejectsFullPotRewardsFromCardanoConfigNetwork(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name         string
+		network      string
+		networkMagic uint32
+	}{
+		{name: "configured identity unset"},
+		{
+			name:         "configured identity claims custom network",
+			network:      "devnet",
+			networkMagic: 42,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := LoadWithDB(
+				context.Background(),
+				&config.Config{
+					Network:               test.network,
+					NetworkMagic:          test.networkMagic,
+					CardanoConfig:         "preview/config.json",
+					FullPotRewardsEnabled: true,
+				},
+				logger,
+				"unused",
+				nil,
+			)
+			require.ErrorContains(
+				t,
+				err,
+				"fullPotRewardsEnabled is not permitted on standard network \"preview\"",
+			)
+		})
+	}
+}
+
 // TestLoadCaptureFailureTrackerCleanReturnsNil verifies that a tracker with no
 // recorded failures reports success, so a clean load is never turned into an
 // error.
