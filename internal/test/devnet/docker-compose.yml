@@ -182,18 +182,8 @@ services:
       configurator-dingo:
         condition: service_completed_successfully
     environment:
-      CARDANO_NETWORK: devnet
-      CARDANO_CONFIG: /configs/configs/config.json
-      CARDANO_TOPOLOGY: /topology/topology.json
-      CARDANO_DATABASE_PATH: /data/db
-      CARDANO_NODE_SOCKET_PATH: /ipc/dingo.socket
-      DINGO_DEBUG: "1"
+      <<: *dingo-node-env
       CARDANO_BLOCK_PRODUCER: "false"
-      DINGO_PLEDGE_LEVERAGE_ENABLED: "${DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED:-false}"
-      DINGO_PLEDGE_LEVERAGE: "${DEVNET_DINGO_PLEDGE_LEVERAGE:-100}"
-      DINGO_MIN_POOL_MARGIN: "${DEVNET_DINGO_MIN_POOL_MARGIN:-0}"
-      DINGO_PRIVATE_BIND_ADDR: "0.0.0.0"
-      CARDANO_PRIVATE_BIND_ADDR: "0.0.0.0"
     volumes:
       - p1-configs:/configs:ro
       - ./topology/dingo-relay.json:/topology/topology.json:ro

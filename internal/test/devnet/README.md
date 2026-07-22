@@ -159,7 +159,8 @@ standalone.
 ```bash
 ./start.sh               # dingo mode (default): 3 producers + relay
 ./start.sh --conformance # conformance mode: dingo + cardano-node
-./stop.sh                 # tear down + remove volumes (same mode flag)
+./stop.sh                 # tear down the default dingo network
+./stop.sh --conformance   # tear down the conformance network
 ```
 
 Both scripts set `COMPOSE_PROFILES` for you (`dingo` or `conformance`), so
@@ -169,6 +170,10 @@ profile. Tail logs while it runs:
 ```bash
 docker compose -f docker-compose.yml logs -f
 docker compose -f docker-compose.yml logs -f dingo-1
+
+# conformance profile
+COMPOSE_PROFILES=conformance docker compose -f docker-compose.yml logs -f
+COMPOSE_PROFILES=conformance docker compose -f docker-compose.yml logs -f cardano-producer
 ```
 
 Open a shell inside a node:
@@ -283,11 +288,14 @@ DEVNET_CIP50_TEST=1 DEVNET_DINGO_PLEDGE_LEVERAGE_ENABLED=true \
 The baseline pass expects total member rewards greater than zero (rewards
 flow without a cap); the leveraged pass expects every delegated credential's
 reward to be exactly zero (the leverage cap with zero pledge zeroes
-reward-eligible stake). `run-tests.sh` does not run this scenario; drive it
-manually with the two invocations above. `DEVNET_STAKE_KEYS_DIR` must point
-at the genesis stake key directory exposed by the configurator (copy it out
-of the `utxo-keys` Docker volume, the same way `run-tests.sh` does for its
-own runs).
+reward-eligible stake). `run-tests.sh` does not run this scenario by default;
+setting `DEVNET_CIP50_TEST=1` can trigger one pass when the stake-key copy
+succeeds.
+A meaningful baseline-versus-leveraged comparison still requires the two
+separately launched passes shown above. `DEVNET_STAKE_KEYS_DIR` must point at
+the genesis stake key directory exposed by the configurator (copy it out of
+the `utxo-keys` Docker volume, the same way `run-tests.sh` does for its own
+runs).
 
 ## Test scenarios
 

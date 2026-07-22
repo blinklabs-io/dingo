@@ -27,19 +27,26 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Mode selection: default dingo (all-dingo network), --conformance for the
-# dingo + cardano-node reference network.
-MODE="dingo"
+# Mode selection precedence: CLI, COMPOSE_PROFILES, then dingo.
+MODE=""
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
+    *)
+      echo "Unknown argument: ${arg}" >&2
+      exit 1
+      ;;
   esac
 done
-if [[ "${MODE}" == "conformance" ]]; then
-  export COMPOSE_PROFILES="conformance"
-else
-  export COMPOSE_PROFILES="dingo"
-fi
+MODE="${MODE:-${COMPOSE_PROFILES:-dingo}}"
+case "${MODE}" in
+  conformance) export COMPOSE_PROFILES="conformance" ;;
+  dingo)       export COMPOSE_PROFILES="dingo" ;;
+  *)
+    echo "Unsupported COMPOSE_PROFILES mode: ${MODE}" >&2
+    exit 1
+    ;;
+esac
 
 echo "Starting DevNet containers (mode: ${MODE})..."
 docker compose -f "${SCRIPT_DIR}/docker-compose.yml" up -d

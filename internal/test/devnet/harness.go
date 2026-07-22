@@ -101,7 +101,7 @@ func (h *TestHarness) Producers() []NodeEndpoint {
 	return out
 }
 
-// Relay returns the first relay endpoint. It panics if none exists,
+// Relay returns the first relay endpoint. It fails the test if none exists,
 // since every supported topology includes exactly one relay.
 func (h *TestHarness) Relay() NodeEndpoint {
 	for _, ep := range h.endpoints {
@@ -109,7 +109,8 @@ func (h *TestHarness) Relay() NodeEndpoint {
 			return ep
 		}
 	}
-	panic("no relay endpoint configured")
+	h.t.Fatalf("no relay endpoint configured")
+	return NodeEndpoint{}
 }
 
 // DingoNode returns a Dingo producer to observe for chain progress.
@@ -119,7 +120,8 @@ func (h *TestHarness) DingoNode() NodeEndpoint {
 			return ep
 		}
 	}
-	panic("no dingo producer endpoint configured")
+	h.t.Fatalf("no dingo producer endpoint configured")
+	return NodeEndpoint{}
 }
 
 // ReferenceNode returns the cardano-node reference producer endpoint and true
