@@ -177,6 +177,26 @@ func (k *KoiosClient) get(
 			}
 			return nil, fmt.Errorf("koios rate-limited after %d retries on %s: %s", koiosMaxRetries, path, strings.TrimSpace(string(body)))
 		}
+		if resp.StatusCode >= 500 {
+			// 5xx here is Koios's load balancer or backend having a transient
+			// hiccup (e.g. 503 "No server is available to handle this
+			// request"), not a permanent rejection of the request — retry
+			// with backoff like a transport error instead of failing fast.
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if attempt < koiosMaxRetries-1 {
+				select {
+				case <-ctx.Done():
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					return nil, context.Canceled
+				case <-time.After(backoff * time.Duration(attempt+1)):
+				}
+				continue
+			}
+			return nil, fmt.Errorf("koios server error after %d retries on %s: status %d body: %s", koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)))
+		}
 		break
 	}
 	if resp == nil {
