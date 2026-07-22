@@ -345,6 +345,57 @@ func TestGenesisDivergentFastSourceNotSelected(t *testing.T) {
 		"expected corroboration-failure event for divergent source")
 }
 
+// In a realistic from-origin ChainSync flow a peer advertises a far-ahead tip
+// (slot 100000) but has only delivered early headers (slot 1). Genesis-mode exit
+// must key off the advertised network tip, not the observed frontier: otherwise
+// the node leaves Genesis mode — and disables the corroboration gate — as soon
+// as two peers corroborate an early header, long before the local tip is near
+// the network tip.
+func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         10, // window = 30
+		MinCorroboratingPeers: 1,
+	})
+	require.Equal(t, uint64(30), cs.GenesisWindowSlots())
+
+	peerA := corrConn(1)
+	peerB := corrConn(2)
+	// Both peers advertise slot 100000 but have only delivered the slot-1
+	// header so far (separate advertised Tip and observed ObservedTip).
+	advertised := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100000, Hash: []byte("net-tip")},
+		BlockNumber: 100000,
+	}
+	observed := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 1, Hash: []byte("h1")},
+		BlockNumber: 1,
+	}
+	require.True(t, cs.updatePeerTipObserved(peerA, advertised, observed, nil))
+	require.True(t, cs.updatePeerTipObserved(peerB, advertised, observed, nil))
+
+	// Two peers now corroborate the early header, but the advertised tip is far
+	// beyond the window, so the node must remain in Genesis mode.
+	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode(),
+		"must not exit Genesis on early observed headers")
+
+	// Advancing the local tip while still far behind the advertised tip keeps
+	// the node in Genesis mode.
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 50000, Hash: []byte("local-50000")},
+		BlockNumber: 50000,
+	})
+	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
+
+	// Only once the local tip catches up to within the window (30) of the
+	// advertised tip does the node exit to Praos.
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 99990, Hash: []byte("local-99990")},
+		BlockNumber: 99990,
+	})
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
+
 // Removing the only witness revokes the incumbent fast source's corroboration
 // and forces a re-evaluation that drops it, even though the removed peer was not
 // itself the selected best.

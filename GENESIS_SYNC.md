@@ -130,8 +130,9 @@ snapshot yields no usable peers, startup falls back to topology `bootstrapPeers`
   (it stalls) — this is expected and safe. Investigate whether the snapshot
   peers are reachable and on the same chain as the fast source.
 - **Exit to Praos**: once the local tip catches up to within the Genesis window
-  of the best corroborated peer, the node logs `exiting Genesis selection mode`
-  and emits `chainselection.genesis_mode_exited` (local slot, best known slot,
+  of the best corroborated peer's *advertised* tip (the network tip — not the
+  headers delivered so far), the node logs `exiting Genesis selection mode` and
+  emits `chainselection.genesis_mode_exited` (local slot, best known slot,
   window). Normal Praos selection takes over from there.
 
 `GenesisStatus()` on the chain selector exposes the live mode, window, selected

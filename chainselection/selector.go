@@ -234,15 +234,24 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return defaultGenesisWindowSlots
 }
 
+// bestKnownGenesisSlotLocked returns the highest ADVERTISED peer tip slot among
+// selectable peers — the network tip, used to decide when the local tip has
+// caught up enough to leave Genesis mode.
+//
+// It must use the advertised tip (pt.Tip), not the observed frontier
+// (SelectionTip, which prefers ObservedTip): a from-origin ChainSync delivers
+// early headers (slot 1) long before the local tip nears the network tip, so
+// keying exit off the observed frontier would leave Genesis mode — and disable
+// the corroboration gate — almost immediately (issue reproduced with two peers
+// advertising a far tip while delivering the same slot-1 header).
 func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 	var best uint64
 	for connId, pt := range cs.peerTips {
 		if !cs.isPeerSelectableLocked(connId, pt, false) {
 			continue
 		}
-		tip := pt.SelectionTip()
-		if tip.Point.Slot > best {
-			best = tip.Point.Slot
+		if pt.Tip.Point.Slot > best {
+			best = pt.Tip.Point.Slot
 		}
 	}
 	return best

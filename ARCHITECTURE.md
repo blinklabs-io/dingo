@@ -1240,7 +1240,8 @@ The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
 3. At equal length/slot, the reference implementation's opcert/VRF
    tie-breaker is used when the necessary select-view data is available
 4. During genesis bootstrap mode, observed density is used until the local tip
-   is close enough to the best observed peer tip to switch back to Praos
+   is close enough to the best advertised peer tip (the network tip) to switch
+   back to Praos
 
 The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
@@ -1334,7 +1335,10 @@ fast source, and per-peer density/corroboration. The selector emits
 `chainselection.genesis_corroboration_failed` when the densest fast source is
 denied for lack of corroboration (deduped per source; the warning is also logged
 without an EventBus) and `chainselection.genesis_mode_exited` with the exit
-reason (local slot, best known slot, window) when it returns to Praos. A change
+reason (local slot, best known *advertised* slot, window) when it returns to
+Praos — exit keys off the advertised network tip, not the observed frontier, so
+the gate stays active through from-origin sync until the local tip nears the
+real network tip. A change
 to any tracked peer's frontier re-runs selection while corroboration is active,
 so corroboration granted or revoked takes effect immediately rather than on the
 next periodic tick.
