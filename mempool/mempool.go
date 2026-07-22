@@ -107,6 +107,7 @@ type Mempool struct {
 	stopped            bool
 	sync.RWMutex
 	doneOnce       sync.Once
+	mutationMutex  sync.Mutex
 	consumersMutex sync.Mutex
 	overlay        *utxoOverlay
 }
@@ -446,6 +447,8 @@ func (m *Mempool) RemoveConsumer(connId ouroboros.ConnectionId) {
 func (m *Mempool) Stop(ctx context.Context) error {
 	// Context is accepted for API consistency but not used since cleanup is synchronous and fast
 	m.logger.Debug("stopping mempool")
+	m.mutationMutex.Lock()
+	defer m.mutationMutex.Unlock()
 
 	// Establish a terminal state before clearing data. AddTransaction and
 	// AddConsumer check this state while holding the same pool lock, so neither
@@ -531,10 +534,8 @@ func (m *Mempool) processChainEvents() {
 
 // rebuildOverlay re-validates all pending TXs sequentially, rebuilding the
 // UTxO overlay from scratch. TXs that fail re-validation are removed.
-// Runs under the write lock for the entire duration to prevent races with
-// AddTransaction (which also holds the write lock when updating the overlay).
-// This is safe because mempool TX submission rate is low at tip and
-// cardano-node also serializes mempool additions.
+// Mutations are serialized for the duration, but decoding and ledger validation
+// run without the primary pool lock so snapshot readers remain available.
 //
 // Returns ErrNilValidator if called on a Mempool whose validator is nil —
 // a programmer error the chain-update loop logs rather than crashes on.
@@ -542,78 +543,83 @@ func (m *Mempool) rebuildOverlay() error {
 	if m.validator == nil {
 		return ErrNilValidator
 	}
-	m.Lock()
-	prevApplied := make([]appliedTx, len(m.overlay.applied))
-	copy(prevApplied, m.overlay.applied)
-
-	if len(prevApplied) == 0 {
-		m.Unlock()
-		return nil
-	}
-
-	// Re-validate each TX in order against a fresh overlay.
-	// Build new overlay incrementally — each valid TX extends it.
-	newOverlay := newUtxoOverlay()
-	var invalidHashes []string
-
-	for _, at := range prevApplied {
-		tmpTx, err := gledger.NewTransactionFromCbor(at.txType, at.cbor)
-		if err != nil {
-			invalidHashes = append(invalidHashes, at.hash)
-			m.logger.Error(
-				"transaction failed decode during re-validation",
-				"component", "mempool",
-				"tx_hash", at.hash,
-				"error", err,
-			)
-			continue
-		}
-		if err := m.validator.ValidateTxWithOverlay(
-			tmpTx,
-			newOverlay.consumed,
-			newOverlay.created,
-		); err != nil {
-			invalidHashes = append(invalidHashes, at.hash)
-			m.logger.Debug(
-				"transaction failed re-validation",
-				"component", "mempool",
-				"tx_hash", at.hash,
-				"error", err,
-			)
-			continue
-		}
-		// TX still valid — add its effects to the new overlay
-		newOverlay.applyTx(at.hash, at.txType, at.cbor, tmpTx)
-	}
-
-	// Swap overlay AND remove invalid TXs atomically so readers
-	// never see TXs in m.transactions that aren't in the overlay.
-	m.overlay = newOverlay
 	var events []event.Event
-	if len(invalidHashes) > 0 {
-		hashSet := make(map[string]struct{}, len(invalidHashes))
-		for _, h := range invalidHashes {
-			hashSet[h] = struct{}{}
+	err := func() error {
+		m.mutationMutex.Lock()
+		defer m.mutationMutex.Unlock()
+
+		m.RLock()
+		prevApplied := make([]appliedTx, len(m.overlay.applied))
+		for i, at := range m.overlay.applied {
+			prevApplied[i] = at
+			prevApplied[i].cbor = slices.Clone(at.cbor)
 		}
-		m.consumersMutex.Lock()
-		for i, v := range slices.Backward(m.transactions) {
-			h := v.Hash
-			if _, found := hashSet[h]; found {
-				evt := m.removeTransactionByIndexLocked(i)
-				if evt != nil {
-					events = append(events, *evt)
-				}
-				delete(hashSet, h)
-				if len(hashSet) == 0 {
-					break
+		m.RUnlock()
+		if len(prevApplied) == 0 {
+			return nil
+		}
+
+		newOverlay := newUtxoOverlay()
+		var invalidHashes []string
+		for _, at := range prevApplied {
+			tmpTx, decodeErr := gledger.NewTransactionFromCbor(at.txType, at.cbor)
+			if decodeErr != nil {
+				invalidHashes = append(invalidHashes, at.hash)
+				m.logger.Error(
+					"transaction failed decode during re-validation",
+					"component", "mempool",
+					"tx_hash", at.hash,
+					"error", decodeErr,
+				)
+				continue
+			}
+			if validateErr := m.validator.ValidateTxWithOverlay(
+				tmpTx,
+				newOverlay.consumed,
+				newOverlay.created,
+			); validateErr != nil {
+				invalidHashes = append(invalidHashes, at.hash)
+				m.logger.Debug(
+					"transaction failed re-validation",
+					"component", "mempool",
+					"tx_hash", at.hash,
+					"error", validateErr,
+				)
+				continue
+			}
+			newOverlay.applyTx(at.hash, at.txType, at.cbor, tmpTx)
+		}
+
+		m.Lock()
+		defer m.Unlock()
+		m.overlay = newOverlay
+		if len(invalidHashes) > 0 {
+			hashSet := make(map[string]struct{}, len(invalidHashes))
+			for _, h := range invalidHashes {
+				hashSet[h] = struct{}{}
+			}
+			m.consumersMutex.Lock()
+			defer m.consumersMutex.Unlock()
+			for i, v := range slices.Backward(m.transactions) {
+				h := v.Hash
+				if _, found := hashSet[h]; found {
+					evt := m.removeTransactionByIndexLocked(i)
+					if evt != nil {
+						events = append(events, *evt)
+					}
+					delete(hashSet, h)
+					if len(hashSet) == 0 {
+						break
+					}
 				}
 			}
 		}
-		m.consumersMutex.Unlock()
+		return nil
+	}()
+	if err != nil {
+		return err
 	}
-	m.Unlock()
 
-	// MEM-03: Publish events outside locks
 	if m.eventBus != nil {
 		for _, evt := range events {
 			m.eventBus.Publish(RemoveTransactionEventType, evt)
@@ -650,6 +656,7 @@ func (m *Mempool) removeExpiredTransactions() {
 	now := time.Now()
 	var events []event.Event
 	var removedCount int
+	m.mutationMutex.Lock()
 	m.Lock()
 	m.consumersMutex.Lock()
 	// Collect expired transaction hashes
@@ -693,6 +700,7 @@ func (m *Mempool) removeExpiredTransactions() {
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
+	m.mutationMutex.Unlock()
 	// MEM-03: Publish events outside locks
 	if m.eventBus != nil {
 		for _, evt := range events {
@@ -737,50 +745,45 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		}
 	}
 	txHash := tmpTx.Hash().String()
-	// Collect events to publish outside locks (MEM-03 fix)
 	var addEvent *event.Event
 	var evictedEvents []event.Event
-	func() {
+	err = func() error {
+		// Serialize mutations without blocking snapshot readers during ledger
+		// validation. This gate also guarantees the overlay used for validation
+		// remains current until the transaction is committed.
+		m.mutationMutex.Lock()
+		defer m.mutationMutex.Unlock()
+
 		m.Lock()
 		if m.stopped {
-			err = ErrMempoolStopped
 			m.Unlock()
-			return
+			return ErrMempoolStopped
 		}
-		m.consumersMutex.Lock()
-		defer func() {
-			m.consumersMutex.Unlock()
-			m.Unlock()
-		}()
-		// Update last seen for existing TX
 		existingTx := m.getTransaction(txHash)
 		if existingTx != nil {
 			existingTx.LastSeen = time.Now()
+			m.Unlock()
 			m.logger.Debug(
 				"updated last seen for transaction",
 				"component", "mempool",
 				"tx_hash", txHash,
 			)
-			return
+			return nil
 		}
-		// Enforce mempool capacity using watermarks before validation
-		// so we don't waste time validating TXs that will be rejected.
 		txSize := int64(len(txBytes))
 		newSize := m.currentSizeBytes + txSize
 		rejectionThreshold := int64(
 			float64(m.config.MempoolCapacity) * m.rejectionWatermark,
 		)
 		if newSize > rejectionThreshold {
-			err = &MempoolFullError{
+			retErr := &MempoolFullError{
 				CurrentSize: int(m.currentSizeBytes),
 				TxSize:      int(txSize),
 				Capacity:    m.config.MempoolCapacity,
 			}
-			return
+			m.Unlock()
+			return retErr
 		}
-		// Determine if eviction is needed and simulate the
-		// post-eviction overlay to validate against. This avoids
-		// mutating state before we know the TX is valid.
 		validConsumed := m.overlay.consumed
 		validCreated := m.overlay.created
 		var needsEviction bool
@@ -801,27 +804,30 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			}
 			validConsumed, validCreated = m.overlay.simulateRemoveBatch(evictedHashes)
 		}
-		// Validate against the (possibly simulated) post-eviction
-		// overlay so we don't accept a TX whose inputs were created
-		// by an evicted parent, and don't evict live TXs if
-		// validation fails.
-		if err = m.validator.ValidateTxWithOverlay(
+		m.Unlock()
+
+		// The mutation gate keeps this overlay snapshot stable while the
+		// potentially expensive ledger validation runs without the pool locks.
+		if validateErr := m.validator.ValidateTxWithOverlay(
 			tmpTx,
 			validConsumed,
 			validCreated,
-		); err != nil {
-			err = fmt.Errorf("validate transaction: %w", err)
-			return
+		); validateErr != nil {
+			return fmt.Errorf("validate transaction: %w", validateErr)
 		}
-		// Validation passed: commit the eviction
+
+		m.Lock()
+		m.consumersMutex.Lock()
+		defer func() {
+			m.consumersMutex.Unlock()
+			m.Unlock()
+		}()
 		if needsEviction {
 			evictedEvents = m.evictOldestLocked(targetBytes)
 		}
 		overlayCbor := slices.Clone(txBytes)
 		txCbor := slices.Clone(txBytes)
-		// Update UTxO overlay with this TX's effects
 		m.overlay.applyTx(txHash, txType, overlayCbor, tmpTx)
-		// Add transaction record
 		tx := &MempoolTransaction{
 			Hash:     txHash,
 			Type:     txType,
@@ -839,7 +845,6 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 		m.metrics.txsProcessedNum.Inc()
 		m.metrics.txsInMempool.Inc()
 		m.metrics.mempoolBytes.Add(float64(txSize))
-		// Prepare event for publishing outside the lock
 		if m.eventBus != nil {
 			evt := event.NewEvent(
 				AddTransactionEventType,
@@ -851,6 +856,7 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 			)
 			addEvent = &evt
 		}
+		return nil
 	}()
 	if err != nil {
 		return err
@@ -909,6 +915,7 @@ func (m *Mempool) getTransaction(txHash string) *MempoolTransaction {
 
 func (m *Mempool) RemoveTransaction(txHash string) {
 	var events []event.Event
+	m.mutationMutex.Lock()
 	m.Lock()
 	m.consumersMutex.Lock()
 	// Remove from overlay with descendant pruning
@@ -945,6 +952,7 @@ func (m *Mempool) RemoveTransaction(txHash string) {
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
+	m.mutationMutex.Unlock()
 	// MEM-03: Publish events outside the lock
 	if m.eventBus != nil {
 		for _, evt := range events {
@@ -966,6 +974,7 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 		hashSet[h] = struct{}{}
 	}
 	var events []event.Event
+	m.mutationMutex.Lock()
 	m.Lock()
 	m.consumersMutex.Lock()
 	m.overlay.removeByHashes(hashSet)
@@ -979,6 +988,7 @@ func (m *Mempool) RemoveTxsByHash(hashes []string) {
 	}
 	m.consumersMutex.Unlock()
 	m.Unlock()
+	m.mutationMutex.Unlock()
 	if m.eventBus != nil {
 		for _, evt := range events {
 			m.eventBus.Publish(RemoveTransactionEventType, evt)

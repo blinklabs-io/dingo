@@ -36,8 +36,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/event"
+	dingotestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
 
 // =============================================================================
@@ -55,6 +55,36 @@ func newMockValidator() *mockValidator {
 	return &mockValidator{
 		failHashes: make(map[string]bool),
 	}
+}
+
+type blockingOverlayValidator struct {
+	started     chan struct{}
+	release     chan struct{}
+	startOnce   sync.Once
+	shouldBlock atomic.Bool
+}
+
+func newBlockingOverlayValidator() *blockingOverlayValidator {
+	return &blockingOverlayValidator{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (v *blockingOverlayValidator) ValidateTx(gledger.Transaction) error {
+	return nil
+}
+
+func (v *blockingOverlayValidator) ValidateTxWithOverlay(
+	gledger.Transaction,
+	map[string]struct{},
+	map[string]lcommon.Utxo,
+) error {
+	if v.shouldBlock.Load() {
+		v.startOnce.Do(func() { close(v.started) })
+		<-v.release
+	}
+	return nil
 }
 
 func (v *mockValidator) ValidateTx(tx gledger.Transaction) error {
@@ -2773,95 +2803,90 @@ func TestMempool_MEM03_SubscriberAccessesMempoolDuringRemove(
 	)
 }
 
-// TestMempool_MEM04_ConcurrentAccessDuringRevalidation verifies that
-// other goroutines can read/write the mempool while processChainEvents
-// is re-validating transactions. Before the MEM-04 fix, the write lock
-// was held during the entire re-validation loop.
-func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(
-	t *testing.T,
-) {
-	validator := newMockValidator()
+// TestMempool_MEM04_ConcurrentAccessDuringRevalidation synchronizes directly
+// with a paused validator to prove snapshot readers remain available while
+// mutations wait for the rebuild's stable overlay view.
+func TestMempool_MEM04_ConcurrentAccessDuringRevalidation(t *testing.T) {
+	validator := newBlockingOverlayValidator()
 	m := newTestMempoolWithValidator(t, validator)
 	defer m.Stop(context.Background())
 
-	// Add transactions
-	addMockTransactions(t, m, 10)
+	txBytes := getTestTxBytes(t)
+	require.NoError(t, m.AddTransaction(uint(conway.EraIdConway), txBytes))
+	txs := m.Transactions()
+	require.Len(t, txs, 1)
+	consumer := m.AddConsumer(newTestConnectionId(0))
+	validator.shouldBlock.Store(true)
 
-	// Start concurrent readers/writers
-	var wg sync.WaitGroup
-	done := make(chan struct{})
-	var readsCompleted atomic.Int32
+	rebuildDone := make(chan error, 1)
+	go func() { rebuildDone <- m.rebuildOverlay() }()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "revalidation start")
 
-	// Reader goroutine: continuously reads mempool
-	wg.Go(func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-				txs := m.Transactions()
-				_ = txs
-				readsCompleted.Add(1)
-			}
-		}
-	})
+	snapshotDone := make(chan []MempoolTransaction, 1)
+	go func() { snapshotDone <- m.Transactions() }()
+	assert.Len(
+		t,
+		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "mempool snapshot"),
+		1,
+	)
 
-	// Writer goroutine: continuously adds/removes
-	wg.Go(func() {
-		for i := 0; ; i++ {
-			select {
-			case <-done:
-				return
-			default:
-				m.Lock()
-				tx := &MempoolTransaction{
-					Hash:     fmt.Sprintf("revalidation-tx-%d", i),
-					Cbor:     fmt.Appendf(nil, "cbor-%d", i),
-					Type:     uint(conway.EraIdConway),
-					LastSeen: time.Now(),
-				}
-				m.transactions = append(m.transactions, tx)
-				m.txByHash[tx.Hash] = tx
-				m.Unlock()
-				time.Sleep(time.Millisecond)
-			}
-		}
-	})
-
-	// Trigger chain update events to cause re-validation
-	for range 5 {
-		m.eventBus.Publish(
-			chain.ChainUpdateEventType,
-			event.NewEvent(chain.ChainUpdateEventType, nil),
-		)
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Let things run concurrently
-	time.Sleep(100 * time.Millisecond)
-	close(done)
-
-	waitCh := make(chan struct{})
+	lookupDone := make(chan bool, 1)
 	go func() {
-		wg.Wait()
-		close(waitCh)
+		_, ok := m.GetTransaction(txs[0].Hash)
+		lookupDone <- ok
 	}()
+	assert.True(t, dingotestutil.RequireReceive(t, lookupDone, time.Second, "transaction lookup"))
 
-	select {
-	case <-waitCh:
-		t.Logf(
-			"Reads completed during re-validation: %d",
-			readsCompleted.Load(),
-		)
-		// Under the old code with write lock held during validation,
-		// reads would be blocked. With the fix, reads should proceed.
-		assert.Greater(
-			t, readsCompleted.Load(), int32(0),
-			"reads should complete during re-validation",
-		)
-	case <-time.After(5 * time.Second):
-		t.Fatal("deadlock: concurrent access blocked during re-validation")
-	}
+	consumerDone := make(chan *MempoolTransaction, 1)
+	go func() { consumerDone <- consumer.NextTx(false) }()
+	assert.NotNil(
+		t,
+		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer read"),
+	)
+
+	removeDone := make(chan struct{}, 1)
+	go func() {
+		m.RemoveTransaction(txs[0].Hash)
+		removeDone <- struct{}{}
+	}()
+	dingotestutil.RequireNoReceive(t, removeDone, 50*time.Millisecond, "mutation during rebuild")
+
+	close(validator.release)
+	require.NoError(t, dingotestutil.RequireReceive(t, rebuildDone, time.Second, "rebuild completion"))
+	dingotestutil.RequireReceive(t, removeDone, time.Second, "queued removal")
+	assert.Empty(t, m.Transactions())
+}
+
+func TestMempool_ReadsAndConsumerRegistrationProceedDuringAdmissionValidation(t *testing.T) {
+	validator := newBlockingOverlayValidator()
+	validator.shouldBlock.Store(true)
+	m := newTestMempoolWithValidator(t, validator)
+	defer m.Stop(context.Background())
+	txBytes := getTestTxBytes(t)
+
+	addDone := make(chan error, 1)
+	go func() {
+		addDone <- m.AddTransaction(uint(conway.EraIdConway), txBytes)
+	}()
+	dingotestutil.RequireReceive(t, validator.started, time.Second, "admission validation start")
+
+	snapshotDone := make(chan []MempoolTransaction, 1)
+	go func() { snapshotDone <- m.Transactions() }()
+	assert.Empty(
+		t,
+		dingotestutil.RequireReceive(t, snapshotDone, time.Second, "admission snapshot"),
+	)
+
+	consumerDone := make(chan *MempoolConsumer, 1)
+	go func() { consumerDone <- m.AddConsumer(newTestConnectionId(0)) }()
+	assert.NotNil(
+		t,
+		dingotestutil.RequireReceive(t, consumerDone, time.Second, "consumer registration"),
+	)
+
+	close(validator.release)
+	require.NoError(t, dingotestutil.RequireReceive(t, addDone, time.Second, "admission completion"))
+	assert.Len(t, m.Transactions(), 1)
 }
 
 // TestMempool_MEM03_NoDeadlockOnConcurrentPublish exercises the scenario
