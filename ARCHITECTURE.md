@@ -1338,7 +1338,11 @@ without an EventBus) and `chainselection.genesis_mode_exited` with the exit
 reason (local slot, best known *advertised* slot, window) when it returns to
 Praos — exit keys off the advertised network tip, not the observed frontier, so
 the gate stays active through from-origin sync until the local tip nears the
-real network tip. A change
+real network tip. The exit horizon is the highest advertised tip among all
+live/eligible/non-stale peers, **including an uncorroborated far-ahead source**,
+so a lower corroborated peer cannot trigger a premature exit that would let the
+uncorroborated source steer the chain under Praos (the implausible-tip check
+bounds how far ahead any peer can advertise). A change
 to any tracked peer's frontier re-runs selection while corroboration is active,
 so corroboration granted or revoked takes effect immediately rather than on the
 next periodic tick.

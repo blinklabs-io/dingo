@@ -234,20 +234,30 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return defaultGenesisWindowSlots
 }
 
-// bestKnownGenesisSlotLocked returns the highest ADVERTISED peer tip slot among
-// selectable peers — the network tip, used to decide when the local tip has
-// caught up enough to leave Genesis mode.
+// bestKnownGenesisSlotLocked returns the highest ADVERTISED peer tip slot — the
+// network tip — used to decide when the local tip has caught up enough to leave
+// Genesis mode.
 //
-// It must use the advertised tip (pt.Tip), not the observed frontier
-// (SelectionTip, which prefers ObservedTip): a from-origin ChainSync delivers
-// early headers (slot 1) long before the local tip nears the network tip, so
-// keying exit off the observed frontier would leave Genesis mode — and disable
-// the corroboration gate — almost immediately (issue reproduced with two peers
-// advertising a far tip while delivering the same slot-1 header).
+// Two properties matter for the exit horizon:
+//
+//   - It uses the advertised tip (pt.Tip), not the observed frontier
+//     (SelectionTip, which prefers ObservedTip): a from-origin ChainSync delivers
+//     early headers (slot 1) long before the local tip nears the network tip, so
+//     keying exit off the observed frontier would leave Genesis mode — and
+//     disable the corroboration gate — almost immediately (reproduced with two
+//     peers advertising a far tip while delivering the same slot-1 header).
+//   - It considers every live/eligible/non-stale peer, NOT only selectable ones.
+//     An uncorroborated (or behind-best) far-ahead source must still raise the
+//     horizon: otherwise a lower corroborated peer could trigger a premature
+//     exit, and once in Praos the now-disabled gate would let that uncorroborated
+//     source steer the chain via longest-chain. Including it keeps Genesis mode
+//     active until the local tip actually catches up. The implausible-tip check
+//     bounds how far ahead any peer can advertise, so a liar cannot pin the node
+//     in Genesis mode beyond the real network tip plus K (well within the window).
 func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
 	var best uint64
 	for connId, pt := range cs.peerTips {
-		if !cs.isPeerSelectableLocked(connId, pt, false) {
+		if !cs.peerLiveEligibleNonStaleLocked(connId, pt) {
 			continue
 		}
 		if pt.Tip.Point.Slot > best {
