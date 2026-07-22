@@ -6,8 +6,17 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/stretchr/testify/require"
 )
+
+func testStoragePlugins() StoragePlugins {
+	return StoragePlugins{
+		Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
+		Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+	}
+}
 
 // TestNeedsSyncReflectsSyncStatus drives the public NeedsSync against a real
 // on-disk database to pin its contract: a fresh database (empty sync_status,
@@ -22,23 +31,20 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 	cfg := SyncConfig{
 		DataDir:        dataDir,
 		Logger:         logger,
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
+		StoragePlugins: testStoragePlugins(),
 	}
 
 	// setSyncStatus opens the database at dataDir, writes sync_status, and
 	// closes it so the subsequent NeedsSync call can acquire the lock.
 	setSyncStatus := func(status string) {
 		t.Helper()
-		db, err := database.New(&database.Config{
-			DataDir:        dataDir,
-			Logger:         logger,
-			BlobPlugin:     "badger",
-			MetadataPlugin: "sqlite",
+		db, err := dbtest.NewDatabase(t, &database.Config{
+			DataDir: dataDir,
+			Logger:  logger,
 		})
 		require.NoError(t, err)
 		require.NoError(t, db.SetSyncState("sync_status", status, nil))
-		require.NoError(t, db.Close())
+		require.NoError(t, dbtest.CloseDatabase(db))
 	}
 
 	// Fresh database: empty sync_status and no chain data → needs sync.

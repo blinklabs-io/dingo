@@ -1,6 +1,28 @@
 # Architecture
 
-Last reviewed: 2026-07-09
+## In-process plugin host
+
+Dingo composition owns one `plugin.Host`. Providers are registered explicitly;
+domain packages do not self-register during package initialization. The host
+erases types only at its registry boundary while typed factories retain their
+provider configuration, service, and dependency bundles.
+
+Startup resolves storage, constructs database and ledger, resolves mempool,
+then resolves the enabled API capabilities. Each API provider (Blockfrost,
+Mesh, UTxO RPC) is resolved only in API storage mode and only when its
+configured port is nonzero, so core-mode nodes and disabled ports resolve
+none of them. Failures unwind providers in reverse order. Normal shutdown
+orders APIs, mempool, ledger/database, then storage.
+Database receives provider-owned stores through `database.Stores`.
+API providers are resolved for lifecycle only because node composition has no
+in-process consumer of their concrete server values.
+
+Composition injects the application `databasePath` into both storage provider
+dependency bundles, preserving `CARDANO_DATABASE_PATH` and `--data-dir` as a
+shortcut for both stores. Local providers can independently override that
+fallback through their typed `dataDir` configuration.
+
+Last reviewed: 2026-07-22
 
 Dingo is a high-performance Cardano blockchain node implementation in Go. This document describes its architecture, core components, and design patterns.
 
@@ -141,7 +163,7 @@ graph LR
     db["database"]
     db_models["database/models"]
     db_types["database/types"]
-    db_plugin["database/plugin"]
+    plugin["plugin"]
     db_blob["database/plugin/blob"]
     db_blob_impl["database/plugin/blob/{aws,badger,gcs}"]
     db_meta["database/plugin/metadata"]
@@ -164,6 +186,7 @@ graph LR
     peergov["peergov"]
     topology["topology"]
     intcfg["internal/config"]
+    intplugins["internal/plugins"]
     intnode["internal/node"]
     intnode_ledgerpeers["internal/node/ledgerpeers"]
     utxorpc["api/utxorpc"]
@@ -175,11 +198,11 @@ graph LR
 
     root --> chain & chainsync & chainsel & connmgr & db & ev
     root --> ledger & ledger_forging & ledger_leader & ledger_leios & ledger_snapshot
-    root --> mempool & ouroboros & peergov & topology
+    root --> mempool & ouroboros & peergov & topology & plugin & intplugins
     root --> intnode_ledgerpeers
     root --> utxorpc & blockfrost & mesh & bark & cardano_cfg
 
-    cmd --> root & cardano_cfg & db & db_models & db_plugin
+    cmd --> root & cardano_cfg & db & db_models & plugin & intplugins
     cmd --> intcfg & intnode & ledgerstate & ledger_eras
     cmd --> ledger_governance & mithril
 
@@ -203,17 +226,19 @@ graph LR
     ledger_leios --> chain & ev
     ledger_snapshot --> db & db_models & db_meta & db_types & ev
 
-    mempool --> chain & ev
+    mempool --> chain & ev & plugin
 
-    db --> db_plugin & db_blob & db_meta & db_types & db_models
-    db_blob --> db_plugin & db_blob_impl & db_types
-    db_blob_impl --> db_plugin & db_types
-    db_meta --> db_models & db_types & db_plugin & db_meta_impl
-    db_meta_impl --> db_models & db_types & db_plugin & db_meta_util
+    db --> db_blob & db_meta & db_types & db_models
+    db_blob --> db_types
+    db_blob_impl --> plugin & db_blob & db_types
+    db_meta --> db_models & db_types
+    db_meta_impl --> plugin & db_meta & db_models & db_types & db_meta_util
     db_meta_util --> db_models
     db_models --> db_types
 
-    intcfg --> db_plugin & topology
+    intcfg --> plugin & topology
+    intplugins --> plugin & db_blob_impl & db_meta_impl & mempool
+    intplugins --> utxorpc & blockfrost & mesh
     intnode --> root & chain & chainsync & cardano_cfg
     intnode --> db & db_immutable & db_models & db_meta
     intnode --> ledger & ledger_eras & ledger_governance & intcfg
@@ -221,9 +246,9 @@ graph LR
     ledgerstate --> db & db_models & db_meta & db_types & ledger_eras
 
     utxorpc --> chain & cardano_cfg & db & db_models & ev
-    utxorpc --> ledger & ledger_eras & mempool
-    mesh --> chain & db & db_models & ev & ledger & mempool
-    blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool
+    utxorpc --> ledger & ledger_eras & mempool & plugin
+    mesh --> chain & db & db_models & ev & ledger & mempool & plugin
+    blockfrost --> db & db_models & db_meta_util & ledger & ledger_eras & mempool & plugin
     bark --> db & db_blob & db_types
 ```
 
@@ -439,16 +464,17 @@ dingo/
 │   ├── models/          # Database models
 │   ├── types/           # Database types
 │   ├── sops/            # Storage operations
-│   └── plugin/          # Storage plugin system
-│       ├── plugin.go    # Plugin registry and interfaces
-│       ├── blob/        # Blob storage plugins
+│   └── plugin/          # Storage domain contracts and implementations
+│       ├── blob/        # Blob contract and providers
 │       │   ├── badger/  # Badger (default local storage)
 │       │   ├── aws/     # AWS S3
 │       │   └── gcs/     # Google Cloud Storage
-│       └── metadata/    # Metadata plugins
+│       └── metadata/    # Metadata contract and providers
 │           ├── sqlite/  # SQLite (default)
 │           ├── postgres/# PostgreSQL (tag-gated)
 │           └── mysql/   # MySQL (tag-gated)
+├── plugin/              # Generic instance-owned provider host
+├── internal/plugins/    # Explicit compiled-in provider composition
 ├── event/               # Event bus for decoupled communication
 │   ├── event.go         # EventBus, async delivery
 │   ├── epoch.go         # Epoch transition events
@@ -626,10 +652,10 @@ When `Node.Run()` is called, components are initialized in this order:
 
 ```
  1. EventBus creation in `New`, plus tracing/runtime metrics setup in `Run`
- 2. Database loading (blob + metadata plugins)
+ 2. Resolve blob and metadata providers, then inject both stores into Database
  3. ChainManager initialization and block-proposed event subscription
  4. Ouroboros protocol handler creation
- 5. LedgerState creation (UTXO tracking, validation)
+ 5. LedgerState creation, followed by mempool provider resolution
  6. Bark remote archive adapter and History Expiry worker (if configured)
  7. Database recovery, if startup detects a recoverable timestamp conflict
  8. Ledger startup epoch-cache preparation, then Midnight indexer creation +
@@ -1006,10 +1032,10 @@ Each CBOR reference is a fixed 52-byte `CborOffset` struct with magic prefix:
 
 ### Plugin System
 
-Plugins are registered via a global registry (`database/plugin/plugin.go`):
+Providers are registered explicitly on the application-owned host:
 
 ```go
-plugin.SetPluginOption() -> plugin.GetPlugin() -> plugin.Start() -> Use interface
+plugin.Register() -> plugin.Resolve() -> domain service + lifecycle
 ```
 
 Interfaces:
@@ -2327,7 +2353,9 @@ Small, focused interfaces allow swapping implementations:
 
 ### Plugin Architecture
 
-Storage backends are loaded dynamically through a plugin registry, allowing extension without modifying core code.
+Compiled-in storage providers are registered explicitly on the application host.
+The host returns domain interfaces and owns provider lifecycle; Database only
+uses the injected stores.
 
 ### Adapter Pattern
 
@@ -2408,14 +2436,18 @@ Configuration priority (highest to lowest):
 3. YAML config file (`dingo.yaml`)
 4. Hardcoded defaults
 
+The pre-plugin API port names `DINGO_UTXORPC_PORT`,
+`DINGO_BLOCKFROST_PORT`, and `DINGO_MESH_PORT` are compatibility aliases for
+their `DINGO_PLUGINS_API_*_CONFIG_PORT` counterparts. Within the environment
+tier, the plugin-form name takes precedence when both forms are set.
+
 `LoadConfig` (`internal/config`) only parses and merges the YAML and
 environment sources; it makes no semantic judgments about the merged values,
 because CLI flags are a higher-precedence source merged afterwards by
 `ApplyFlags` and may still replace an invalid or unset value. Once every
 source is merged, `Config.ApplyDefaults()` fills in unset values whose
 defaults are derived from other settings (an empty `runMode` selects `serve`;
-`mempoolImplementation` defaults to `fifo`, `mempoolCapacity` defaults by run
-mode — Leios raises it — and the watermarks,
+`plugins.mempool.config.capacity` defaults by run mode — Leios raises it — and the watermarks,
 forge slot thresholds, and history-expiry frequency take their standard
 values), and then `Config.Validate()` checks the resulting configuration
 before any services start. Topology resolution
@@ -2456,9 +2488,9 @@ runtimes commonly set 0).
 Key configuration areas:
 - Network selection (preview, preprod, mainnet)
 - Storage mode (`core` or `api`)
-- Database path and plugins
+- Database path and `plugins.storage` provider selections
 - Listen addresses and ports
-- Mempool capacity and watermarks
+- `plugins.mempool.config` capacity and watermarks
 - Peer targets and quotas
 - CBOR cache sizing (hot entries, block LRU)
 - Chainsync client limits and stall timeout

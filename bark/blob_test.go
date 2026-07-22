@@ -29,6 +29,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -133,11 +134,8 @@ func startFakeArchive(
 // avoids reaching into a specific blob plugin.
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err, "failed to create test database")
-	t.Cleanup(func() {
-		require.NoError(t, db.Close())
-	})
 	return db
 }
 

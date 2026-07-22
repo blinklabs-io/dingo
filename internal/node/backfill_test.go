@@ -25,6 +25,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,15 +34,19 @@ import (
 func newTestDB(t *testing.T) *database.Database {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	db, err := database.New(&database.Config{
+	db, err := dbtest.NewDatabase(t, &database.Config{
 		DataDir: "", // in-memory
 		Logger:  logger,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Close() //nolint:errcheck
+		dbtest.CloseDatabase(db) //nolint:errcheck
 	})
 	return db
+}
+
+func closeTestDB(db *database.Database) error {
+	return dbtest.CloseDatabase(db)
 }
 
 func TestBackfillBatchSizeDefaultAndOverride(t *testing.T) {

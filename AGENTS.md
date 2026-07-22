@@ -1,5 +1,9 @@
 # AGENTS.md
 
+Plugin composition uses the instance-owned top-level `plugin.Host`; providers
+register explicitly from composition code. Do not add package-init registration
+or process-global provider option destinations.
+
 Go Cardano node (Ouroboros). See `CLAUDE.md` for detailed rules; this file has additional content (Build/test section, `make golines` in pre-commit, Key events table) and a different structure — the two are related but not exact copies. Package layout, targets, and flags are derivable from `Makefile`, `go.mod`, `node.go`.
 
 ## Build / test
@@ -67,4 +71,4 @@ make golines
 
 ## Config
 
-Priority: CLI > env > YAML > defaults. Key env vars: `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, `DINGO_DATABASE_BLOB_PLUGIN`, `DINGO_DATABASE_METADATA_PLUGIN`.
+Priority: CLI provider selector > generic plugin env > YAML > provider defaults. Key env vars include `CARDANO_NETWORK`, `CARDANO_DATABASE_PATH`, and `DINGO_PLUGINS_<CAPABILITY>_{PROVIDER,CONFIG_*}`.

@@ -27,6 +27,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	"github.com/blinklabs-io/dingo/ledger/rewards"
 	"github.com/blinklabs-io/gouroboros/cbor"
@@ -4830,13 +4831,11 @@ func newRewardCalculationTestLedger(
 		"slotLength": 1,
 		"systemStart": "2022-10-25T00:00:00Z"
 	}`)))
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { db.Close() }) //nolint:errcheck
+	t.Cleanup(func() { dbtest.CloseDatabase(db) }) //nolint:errcheck
 
 	return &LedgerState{
 		db:         db,

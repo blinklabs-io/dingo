@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,7 +38,6 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/database/types"
 	dbtestutil "github.com/blinklabs-io/dingo/internal/test/testutil"
 )
@@ -321,67 +320,35 @@ func (m *mockTransactionOutput) String() string {
 	return ""
 }
 
-// isPostgresConfigured checks if postgres is configured via cmdlineOptions or environment variables.
-// It first checks cmdlineOptions (the plugin's configured state), then falls back to environment variables.
+// isPostgresConfigured checks whether integration-test credentials are present.
 // Returns true if a password or DSN is configured, false otherwise.
 func isPostgresConfigured() bool {
-	// Check if cmdlineOptions has a password or DSN set
-	cmdlineOptionsMutex.RLock()
-	password := cmdlineOptions.password
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	if password != "" || dsn != "" {
-		return true
-	}
-
-	// Fall back to environment variables
 	return os.Getenv("POSTGRES_PASSWORD") != "" ||
 		os.Getenv("POSTGRES_DSN") != ""
 }
 
 // getTestPostgresOptions returns options for creating a test postgres store.
-// It uses cmdlineOptions if configured, otherwise falls back to environment variables.
+// It reads the standard PostgreSQL integration-test environment variables.
 func getTestPostgresOptions() []PostgresOptionFunc {
-	cmdlineOptionsMutex.RLock()
-	host := cmdlineOptions.host
-	port := uint(cmdlineOptions.port)
-	user := cmdlineOptions.user
-	password := cmdlineOptions.password
-	database := cmdlineOptions.database
-	sslMode := cmdlineOptions.sslMode
-	timeZone := cmdlineOptions.timeZone
-	dsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	// Override with environment variables if cmdlineOptions password is not set
-	if password == "" {
-		password = os.Getenv("POSTGRES_PASSWORD")
-
-		// Also check for other env vars when using env-based config
-		if envHost := os.Getenv("POSTGRES_HOST"); envHost != "" {
-			host = envHost
+	host, port, user := "localhost", uint(5432), "postgres"
+	password, database := os.Getenv("POSTGRES_PASSWORD"), "dingo_test"
+	sslMode, timeZone, dsn := "disable", "UTC", os.Getenv("POSTGRES_DSN")
+	if envHost := os.Getenv("POSTGRES_HOST"); envHost != "" {
+		host = envHost
+	}
+	if envPort := os.Getenv("POSTGRES_PORT"); envPort != "" {
+		if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
+			port = uint(p)
 		}
-		if envPort := os.Getenv("POSTGRES_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				port = uint(p)
-			}
-		}
-		if envUser := os.Getenv("POSTGRES_USER"); envUser != "" {
-			user = envUser
-		}
-		if envDB := os.Getenv("POSTGRES_DATABASE"); envDB != "" {
-			database = envDB
-		} else if database == "postgres" {
-			// Use a separate test database by default
-			database = "dingo_test"
-		}
-		if envSSL := os.Getenv("POSTGRES_SSLMODE"); envSSL != "" {
-			sslMode = envSSL
-		}
-		if envDSN := os.Getenv("POSTGRES_DSN"); envDSN != "" {
-			dsn = envDSN
-		}
+	}
+	if envUser := os.Getenv("POSTGRES_USER"); envUser != "" {
+		user = envUser
+	}
+	if envDB := os.Getenv("POSTGRES_DATABASE"); envDB != "" {
+		database = envDB
+	}
+	if envSSL := os.Getenv("POSTGRES_SSLMODE"); envSSL != "" {
+		sslMode = envSSL
 	}
 
 	return []PostgresOptionFunc{
@@ -397,7 +364,7 @@ func getTestPostgresOptions() []PostgresOptionFunc {
 }
 
 // newTestPostgresStore creates a new postgres store for testing.
-// It skips the test if postgres is not configured (no password in cmdlineOptions or POSTGRES_PASSWORD env var).
+// It skips the test if PostgreSQL credentials are not configured.
 func newTestPostgresStore(t *testing.T) *MetadataStorePostgres {
 	t.Helper()
 
@@ -411,94 +378,6 @@ func newTestPostgresStore(t *testing.T) *MetadataStorePostgres {
 	store, err := NewWithOptions(opts...)
 	if err != nil {
 		t.Fatalf("failed to create postgres store: %v", err)
-	}
-
-	if err := store.Start(); err != nil {
-		t.Fatalf("failed to start postgres store: %v", err)
-	}
-
-	return store
-}
-
-// newTestPostgresStoreFromPlugin creates a postgres store using NewFromCmdlineOptions.
-// This tests the plugin registration path. Skips if not configured.
-func newTestPostgresStoreFromPlugin(t *testing.T) *MetadataStorePostgres {
-	t.Helper()
-
-	if !isPostgresConfigured() {
-		t.Skip(
-			"Skipping postgres integration test: postgres not configured (set POSTGRES_PASSWORD or configure via cmdline options)",
-		)
-	}
-
-	// Capture original cmdlineOptions before any modifications
-	cmdlineOptionsMutex.RLock()
-	originalHost := cmdlineOptions.host
-	originalPort := cmdlineOptions.port
-	originalUser := cmdlineOptions.user
-	originalPassword := cmdlineOptions.password
-	originalDatabase := cmdlineOptions.database
-	originalSslMode := cmdlineOptions.sslMode
-	originalTimeZone := cmdlineOptions.timeZone
-	originalDsn := cmdlineOptions.dsn
-	cmdlineOptionsMutex.RUnlock()
-
-	// Restore original cmdlineOptions after test setup
-	t.Cleanup(func() {
-		cmdlineOptionsMutex.Lock()
-		cmdlineOptions.host = originalHost
-		cmdlineOptions.port = originalPort
-		cmdlineOptions.user = originalUser
-		cmdlineOptions.password = originalPassword
-		cmdlineOptions.database = originalDatabase
-		cmdlineOptions.sslMode = originalSslMode
-		cmdlineOptions.timeZone = originalTimeZone
-		cmdlineOptions.dsn = originalDsn
-		cmdlineOptionsMutex.Unlock()
-	})
-
-	if originalPassword == "" && originalDsn == "" {
-		// Set cmdlineOptions from environment for this test
-		cmdlineOptionsMutex.Lock()
-		if envHost := os.Getenv("POSTGRES_HOST"); envHost != "" {
-			cmdlineOptions.host = envHost
-		}
-		if envPort := os.Getenv("POSTGRES_PORT"); envPort != "" {
-			if p, err := strconv.ParseUint(envPort, 10, 32); err == nil {
-				cmdlineOptions.port = p
-			}
-		}
-		if envUser := os.Getenv("POSTGRES_USER"); envUser != "" {
-			cmdlineOptions.user = envUser
-		}
-		cmdlineOptions.password = os.Getenv("POSTGRES_PASSWORD")
-		if envDB := os.Getenv("POSTGRES_DATABASE"); envDB != "" {
-			cmdlineOptions.database = envDB
-		} else {
-			cmdlineOptions.database = "dingo_test"
-		}
-		if envSSL := os.Getenv("POSTGRES_SSLMODE"); envSSL != "" {
-			cmdlineOptions.sslMode = envSSL
-		}
-		if envDSN := os.Getenv("POSTGRES_DSN"); envDSN != "" {
-			cmdlineOptions.dsn = envDSN
-		}
-		cmdlineOptionsMutex.Unlock()
-	}
-
-	p := NewFromCmdlineOptions()
-	if p == nil {
-		t.Fatal("NewFromCmdlineOptions returned nil")
-	}
-
-	// Check if it's an error plugin
-	if _, ok := p.(*plugin.ErrorPlugin); ok {
-		t.Fatal("NewFromCmdlineOptions returned an error plugin")
-	}
-
-	store, ok := p.(*MetadataStorePostgres)
-	if !ok {
-		t.Fatalf("expected *MetadataStorePostgres, got %T", p)
 	}
 
 	if err := store.Start(); err != nil {

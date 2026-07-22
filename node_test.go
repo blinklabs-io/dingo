@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	metadatasqlite "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/peergov"
@@ -45,13 +46,11 @@ import (
 )
 
 func TestBackfillRewardLiveStakeAtStartup(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	store, ok := db.Metadata().(*metadatasqlite.MetadataStoreSqlite)
 	require.True(t, ok)
@@ -180,13 +179,11 @@ func newNodeTestDivergedLedger(
 	t *testing.T,
 ) (*ledger.LedgerState, ochainsync.Tip, ochainsync.Tip, ochainsync.Tip) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	t.Cleanup(func() { require.NoError(t, dbtest.CloseDatabase(db)) })
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)

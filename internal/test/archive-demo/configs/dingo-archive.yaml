@@ -1,11 +1,12 @@
 # Archive node config: store all blobs in Minio (S3-compatible),
 # serve historical blocks via Bark gRPC on port 3003.
 # Network parameters come from env vars (see docker-compose.yml).
-database:
-  blob:
-    plugin: s3
-    s3:
-      endpoint: http://minio:9000
-      bucket: dingo-archive
-      region: us-east-1
+plugins:
+  storage:
+    blob:
+      provider: s3
+      config:
+        endpoint: http://minio:9000
+        bucket: dingo-archive
+        region: us-east-1
 barkPort: 3003

@@ -19,16 +19,78 @@ package integration
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/aws"
 	"github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
 	_ "github.com/blinklabs-io/dingo/database/plugin/blob/gcs"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 )
 
-func additionalBlobPlugins() []string {
-	return []string{"gcs", "s3"}
+// cloudStorageBenchmarkBackends returns GCS and S3 storage backends for the
+// storage benchmarks when their credentials are configured. Cloud blob stores
+// read the bucket (and S3 prefix) from provider config, so DataDir is consumed
+// only by the sqlite metadata store and must be a local filesystem path.
+func cloudStorageBenchmarkBackends(
+	diskDataDir, benchName string,
+) []storageBenchBackend {
+	var backends []storageBenchBackend
+	if hasGCSCredentials() {
+		bucket := os.Getenv("DINGO_TEST_GCS_BUCKET")
+		if bucket == "" {
+			bucket = "dingo-test-bucket"
+		}
+		backends = append(backends, storageBenchBackend{
+			name: "GCS",
+			opts: dbtest.Options{
+				Config: &database.Config{
+					DataDir: filepath.Join(diskDataDir, "gcs-metadata"),
+				},
+				Blob: dbtest.StorageProvider{
+					Name:     "gcs",
+					Config:   map[string]any{"bucket": bucket},
+					Register: gcs.RegisterProvider,
+				},
+			},
+		})
+	}
+	if hasS3Credentials() {
+		bucket := os.Getenv("DINGO_TEST_S3_BUCKET")
+		if bucket == "" {
+			bucket = "dingo-test-bucket"
+		}
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		s3Config := map[string]any{
+			"bucket": bucket,
+			// A path prefix isolates concurrent benchmark runs within one
+			// bucket instead of requiring a unique bucket per run.
+			"prefix": strings.ReplaceAll(benchName, "/", "-") + "/",
+			"region": region,
+		}
+		if endpoint := os.Getenv("AWS_ENDPOINT"); endpoint != "" {
+			s3Config["endpoint"] = endpoint
+		}
+		backends = append(backends, storageBenchBackend{
+			name: "S3",
+			opts: dbtest.Options{
+				Config: &database.Config{
+					DataDir: filepath.Join(diskDataDir, "s3-metadata"),
+				},
+				Blob: dbtest.StorageProvider{
+					Name:     "s3",
+					Config:   s3Config,
+					Register: aws.RegisterProvider,
+				},
+			},
+		})
+	}
+	return backends
 }
 
 func hasGCSCredentials() bool {

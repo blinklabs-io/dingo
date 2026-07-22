@@ -22,6 +22,7 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/prometheus/client_golang/prometheus"
@@ -38,9 +39,9 @@ import (
 // (η == candidateNonce) and failing every leader-VRF check in that epoch (the
 // Dijkstra/Leios at-tip wedge).
 func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// The last block of the epoch preceding epoch 5 (slot < 200). Its PrevHash
 	// is the lab value epoch 5 must recover to.
@@ -126,9 +127,9 @@ func TestHealEmptyLabNoncesRepairsAndRecomputes(t *testing.T) {
 // runtime nonce, so an epoch older than the window must be left untouched even
 // when it has a repairable (empty) lab.
 func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// A single boundary block precedes every epoch's start slot, so any epoch
 	// that is actually processed repairs its empty lab to this PrevHash.
@@ -177,9 +178,9 @@ func TestHealEmptyLabNoncesBoundsToRecentEpochs(t *testing.T) {
 // rather than left stale. Without the predecessor the first in-window nonce
 // check has no verified previous lab and is skipped.
 func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	prevHash := bytes.Repeat([]byte{0xbb}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -231,9 +232,9 @@ func TestHealEmptyLabNoncesRepairsOldestInWindowNonce(t *testing.T) {
 // no-op when no epoch has a repairable lab mismatch — it must not perturb
 // correct state.
 func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	lab := bytes.Repeat([]byte{0xcc}, 32)
 	nonce := bytes.Repeat([]byte{0xdd}, 32)
@@ -261,9 +262,9 @@ func TestHealEmptyLabNoncesLeavesValidRecordsUntouched(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	boundaryPrevHash := bytes.Repeat([]byte{0xbb}, 32)
@@ -311,9 +312,9 @@ func TestHealEmptyLabNoncesLeavesParentHashLabUntouched(t *testing.T) {
 // epoch's nonce cannot be re-verified would wedge the next rollover. The
 // nonce itself must be left untouched (no candidate to recompute it from).
 func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	boundaryPrevHash := bytes.Repeat([]byte{0xbb}, 32)
@@ -361,9 +362,9 @@ func TestHealEmptyLabNoncesRepairsLabWhenCandidateMissing(t *testing.T) {
 // TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate mirrors the test above
 // for an empty (rather than stale) lab.
 func TestHealEmptyLabNoncesRepairsEmptyLabWithoutCandidate(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	boundaryPrevHash := bytes.Repeat([]byte{0xbb}, 32)
@@ -441,9 +442,9 @@ func TestHealEmptyLabNoncesSkipsMissingCandidateBeforeBoundaryLookup(
 // nil lab — rewriting it would diverge the next boundary's eta on any chain
 // with a Byron era (mainnet, preprod).
 func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Last Byron block before the Shelley start at slot 200. Without the
 	// first-Praos guard, its PrevHash would be written as the lab.
@@ -493,9 +494,9 @@ func TestHealEmptyLabNoncesLeavesFirstPraosEpochLabNeutral(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	require.NoError(t, db.BlockCreate(models.Block{
@@ -538,9 +539,9 @@ func TestHealEmptyLabNoncesTrustsMithrilCoveredEpoch(t *testing.T) {
 }
 
 func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	boundaryHash := bytes.Repeat([]byte{0x01}, 32)
 	boundaryPrevHash := bytes.Repeat([]byte{0xbb}, 32)
@@ -593,9 +594,9 @@ func TestHealEmptyLabNoncesInPlaceRepairsReloadedEpochs(t *testing.T) {
 }
 
 func TestLoadEpochsRefreshesCurrentEpochAfterHealing(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer db.Close()
+	defer dbtest.CloseDatabase(db)
 
 	// Last block of epoch 4 (before slot 200): its PrevHash is epoch 5's lab.
 	epoch5BoundaryPrevHash := bytes.Repeat([]byte{0x44}, 32)

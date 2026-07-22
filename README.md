@@ -71,12 +71,15 @@ The following environment variables modify Dingo's behavior:
   - This socket speaks Ouroboros NtC and is used by client software
 - `CARDANO_TOPOLOGY`
   - Full path to the Cardano node topology (default: "")
-- `DINGO_UTXORPC_PORT`
-  - TCP port to bind for listening for UTxO RPC (default: `0`, disabled)
-- `DINGO_BLOCKFROST_PORT`
-  - TCP port for the Blockfrost-compatible REST API (default: `0`, disabled)
-- `DINGO_MESH_PORT`
-  - TCP port for the Mesh (Coinbase Rosetta) API (default: `0`, disabled)
+- `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT`
+  - TCP port to bind for listening for UTxO RPC (default: `9090`)
+  - Compatibility alias: `DINGO_UTXORPC_PORT`
+- `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT`
+  - TCP port for the Blockfrost-compatible REST API (default: `3000`)
+  - Compatibility alias: `DINGO_BLOCKFROST_PORT`
+- `DINGO_PLUGINS_API_MESH_CONFIG_PORT`
+  - TCP port for the Mesh (Coinbase Rosetta) API (default: `8080`)
+  - Compatibility alias: `DINGO_MESH_PORT`
 - `DINGO_BARK_PORT`
   - TCP port for the Bark block archive API (default: `0`, disabled)
 - `DINGO_BARK_BASE_URL`
@@ -187,18 +190,23 @@ storageMode: "api"
 
 Dingo includes three general-purpose external APIs plus Bark. UTxO RPC, Blockfrost, and Mesh are client-facing APIs and require `storageMode: "api"`. Bark is different: it is Dingo's own protocol for Dingo-to-Dingo C2/archive services, not a general-purpose application API. Set an individual port to 0 to disable a specific interface. The Blockfrost server currently exposes the latest, epoch, network, and pool subset.
 
+The shorter `DINGO_UTXORPC_PORT`, `DINGO_BLOCKFROST_PORT`, and
+`DINGO_MESH_PORT` names remain supported for compatibility. If both a
+compatibility name and its plugin-form name are set, the plugin-form value
+takes precedence.
+
 | Interface | Port Env Var | Default | Protocol | Role |
 |-----------|--------------|---------|----------|------|
-| UTxO RPC | `DINGO_UTXORPC_PORT` | disabled | gRPC | General-purpose client API |
-| Blockfrost | `DINGO_BLOCKFROST_PORT` | disabled | REST | General-purpose client API |
-| Mesh (Rosetta) | `DINGO_MESH_PORT` | disabled | REST | General-purpose client API |
+| UTxO RPC | `DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT` | 9090 | gRPC | General-purpose client API |
+| Blockfrost | `DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT` | 3000 | REST | General-purpose client API |
+| Mesh (Rosetta) | `DINGO_PLUGINS_API_MESH_CONFIG_PORT` | 8080 | REST | General-purpose client API |
 | Bark | `DINGO_BARK_PORT` | disabled | Connect/gRPC | Dingo-to-Dingo C2/archive protocol |
 
 ```bash
 # Enable Blockfrost API on port 3100 and UTxO RPC on port 9090
 DINGO_STORAGE_MODE=api \
-  DINGO_BLOCKFROST_PORT=3100 \
-  DINGO_UTXORPC_PORT=9090 \
+  DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT=3100 \
+  DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT=9090 \
   ./dingo
 ```
 
@@ -206,8 +214,10 @@ Or in `dingo.yaml`:
 
 ```yaml
 storageMode: "api"
-blockfrostPort: 3100
-utxorpcPort: 9090
+plugins:
+  api:
+    blockfrost: {provider: builtin, config: {port: 3100}}
+    utxorpc: {provider: builtin, config: {port: 9090}}
 ```
 
 ### Archive And History Expiry Nodes
@@ -231,13 +241,14 @@ the extra plugin tag.
 
 ```yaml
 storageMode: "core"
-database:
-  blob:
-    plugin: "s3"
-    s3:
-      bucket: "dingo-archive"
-      region: "us-east-1"
-      prefix: "preview"
+plugins:
+  storage:
+    blob:
+      provider: s3
+      config:
+        bucket: "dingo-archive"
+        region: "us-east-1"
+        prefix: "preview"
 barkPort: 9091
 ```
 
@@ -248,9 +259,11 @@ expired history unless an archive wrapper can serve them.
 
 ```yaml
 storageMode: "core"
-database:
-  blob:
-    plugin: "badger"
+plugins:
+  storage:
+    blob:
+      provider: badger
+      config: {}
 historyExpiry:
   enabled: true
   frequency: 1h
@@ -282,12 +295,12 @@ BlockFetch check through Bark.
 
 **API / data node** (full indexing, one or more APIs):
 ```bash
-DINGO_STORAGE_MODE=api DINGO_BLOCKFROST_PORT=3100 ./dingo
+DINGO_STORAGE_MODE=api DINGO_PLUGINS_API_BLOCKFROST_CONFIG_PORT=3100 ./dingo
 ```
 
 **Archive node** (cloud object storage plus Bark archive service):
 ```bash
-DINGO_DATABASE_BLOB_PLUGIN=s3 DINGO_BARK_PORT=9091 ./dingo
+DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=s3 DINGO_BARK_PORT=9091 ./dingo
 ```
 
 **History-expiry node** (local storage plus a remote Bark archive):
@@ -305,7 +318,7 @@ CARDANO_BLOCK_PRODUCER=true \
   ./dingo
 ```
 
-When `storageMode=core`, the Badger blob store defaults to mmap-only settings: `block-cache-size=0`, `index-cache-size=0`, and `compression=false`. When `storageMode=api`, the default Badger profile is `block-cache-size=268435456`, `index-cache-size=0`, and `compression=true`. YAML, environment variable, and CLI Badger options override those defaults only when explicitly set.
+When `storageMode=core`, the Badger blob store defaults to mmap-only settings: `block-cache-size=0`, `index-cache-size=0`, and `compression=false`. When `storageMode=api`, the default Badger profile is `block-cache-size=268435456`, `index-cache-size=0`, and `compression=true`. The `plugins.storage.blob.config` Badger settings (YAML or the matching `DINGO_PLUGINS_STORAGE_BLOB_CONFIG_*` environment variables) override those defaults only when explicitly set.
 
 See `dingo.yaml.example` for the full set of configuration options.
 
@@ -378,10 +391,9 @@ Dingo supports pluggable storage backends for both blob storage (blocks, transac
 
 ### Available Plugins
 
-For local source builds, `badger` is always available. The `gcs` and `s3` blob
-plugins require `-tags dingo_extra_plugins` or `make build`. `postgres` and
-`mysql` are still compiled into plain builds on current `main`; issue #2586
-tracks moving them behind the same tag.
+For local source builds, `badger`, `sqlite`, the default mempool, and all three
+built-in API providers are always available. GCS, S3, PostgreSQL, and MySQL
+require `-tags dingo_extra_plugins` or an official release binary.
 
 Blob Storage Plugins:
 - `badger` - BadgerDB local key-value store (default)
@@ -402,51 +414,68 @@ Plugins can be selected via command-line flags, environment variables, or config
 ./dingo --blob gcs --metadata sqlite
 
 # Environment variables
-DINGO_DATABASE_BLOB_PLUGIN=gcs
-DINGO_DATABASE_METADATA_PLUGIN=sqlite
+DINGO_PLUGINS_STORAGE_BLOB_PROVIDER=gcs
+DINGO_PLUGINS_STORAGE_METADATA_PROVIDER=sqlite
 
 # Configuration file (dingo.yaml)
-database:
-  blob:
-    plugin: "gcs"
-  metadata:
-    plugin: "sqlite"
+plugins:
+  storage:
+    blob:
+      provider: gcs
+      config:
+        bucket: my-cardano-blocks
+    metadata:
+      provider: sqlite
+      config: {}
 ```
 
 ### Plugin Configuration
 
-Each plugin supports specific configuration options. See `dingo.yaml.example` for detailed configuration examples.
+Each capability has exactly one selected provider. Provider configuration is
+strictly decoded; unknown fields fail startup. Generic environment variables
+flatten the capability and config path, for example
+`DINGO_PLUGINS_MEMPOOL_CONFIG_CAPACITY` and
+`DINGO_PLUGINS_API_UTXORPC_CONFIG_PORT`. See `dingo.yaml.example`.
+
+`CARDANO_DATABASE_PATH` (or `databasePath` / `--data-dir`) remains a shortcut
+that supplies the data directory to both local storage providers. Set
+`dataDir` on either local provider when blob and metadata storage need separate
+paths; the provider value overrides the shared shortcut.
 
 BadgerDB Options:
-- `data-dir` - Directory for database files
-- `block-cache-size` - Block cache size in bytes
-- `index-cache-size` - Index cache size in bytes
-- `compression` - Enable Snappy compression
+- `dataDir` - Badger data directory (defaults to the shared database path)
+- `blockCacheSize` - Block cache size in bytes
+- `indexCacheSize` - Index cache size in bytes
+- `compression` - Enable ZSTD compression
 - `gc` - Enable garbage collection
 
-Leave the mode-sensitive Badger settings unset if you want Dingo's storage-mode defaults. `storageMode=core` uses `block-cache-size=0`, `index-cache-size=0`, and `compression=false`; `storageMode=api` uses `block-cache-size=268435456`, `index-cache-size=0`, and `compression=true`.
+Leave mode-sensitive Badger settings unset to use storage-mode defaults.
 
 Google Cloud Storage Options:
 - `bucket` - GCS bucket name
-- `project-id` - Google Cloud project ID
-- `prefix` - Path prefix within bucket
 
 AWS S3 Options:
+- `endpoint` - Optional custom S3-compatible endpoint
 - `bucket` - S3 bucket name
 - `region` - AWS region
 - `prefix` - Path prefix within bucket
-- `access-key-id` - AWS access key ID (optional - uses default credential chain if not provided)
-- `secret-access-key` - AWS secret access key (optional - uses default credential chain if not provided)
+- `timeout` - Request timeout
+
+S3 credentials use the standard AWS credential chain.
 
 SQLite Options:
-- `data-dir` - Path to SQLite database file
+- `dataDir` - SQLite data directory (defaults to the shared database path)
+- `maxConnections` - Maximum connection count
 
 PostgreSQL Options:
 - `host` - PostgreSQL server hostname
 - `port` - PostgreSQL server port
-- `username` - Database user
+- `user` - Database user
 - `password` - Database password
 - `database` - Database name
+- `sslMode` - PostgreSQL SSL mode
+- `timeZone` - PostgreSQL time zone (default: UTC)
+- `dsn` - Full PostgreSQL DSN (overrides the individual connection fields)
 
 MySQL Options:
 - `host` - MySQL server hostname
@@ -454,10 +483,35 @@ MySQL Options:
 - `user` - Database user
 - `password` - Database password
 - `database` - Database name
-- `ssl-mode` - MySQL TLS mode (mapped to tls= in DSN)
-- `timezone` - MySQL time zone location (default: UTC)
+- `sslMode` - MySQL TLS mode (mapped to `tls` in the DSN)
+- `timeZone` - MySQL time zone location (default: UTC)
 - `dsn` - Full MySQL DSN (overrides other options when set)
-- `storage-mode` - Storage tier: core or api (default: core)
+
+### Migrating From Pre-Plugin Configuration
+
+The plugin platform replaces the earlier per-plugin CLI flags and environment
+variables for storage, mempool, and API ports with the `plugins.*` config tree
+(YAML), the generic `DINGO_PLUGINS_*` environment scheme, and the provider
+selector flags. Every removed setting has an equivalent below; values are
+unchanged, only where they are set has moved.
+
+| Removed setting | New equivalent |
+| --- | --- |
+| `--mempool-capacity`, `CARDANO_MEMPOOL_CAPACITY` | `plugins.mempool.config.capacity` / `DINGO_PLUGINS_MEMPOOL_CONFIG_CAPACITY` |
+| `--eviction-watermark`, `DINGO_MEMPOOL_EVICTION_WATERMARK` | `plugins.mempool.config.evictionWatermark` / `DINGO_PLUGINS_MEMPOOL_CONFIG_EVICTION_WATERMARK` |
+| `--rejection-watermark`, `DINGO_MEMPOOL_REJECTION_WATERMARK` | `plugins.mempool.config.rejectionWatermark` / `DINGO_PLUGINS_MEMPOOL_CONFIG_REJECTION_WATERMARK` |
+| `DINGO_DATABASE_BLOB_PLUGIN` | `--blob`, `plugins.storage.blob.provider`, or `DINGO_PLUGINS_STORAGE_BLOB_PROVIDER` |
+| `DINGO_DATABASE_METADATA_PLUGIN` | `--metadata`, `plugins.storage.metadata.provider`, or `DINGO_PLUGINS_STORAGE_METADATA_PROVIDER` |
+| `--blob-badger-*`, `DINGO_DATABASE_BLOB_BADGER_*` | `plugins.storage.blob.config.*` / `DINGO_PLUGINS_STORAGE_BLOB_CONFIG_*` |
+| `--metadata-sqlite-*`, `DINGO_DATABASE_METADATA_SQLITE_*` | `plugins.storage.metadata.config.*` / `DINGO_PLUGINS_STORAGE_METADATA_CONFIG_*` |
+| `MYSQL_*` MySQL connection aliases (`-tags dingo_extra_plugins`) | `plugins.storage.metadata.config.*` / `DINGO_PLUGINS_STORAGE_METADATA_CONFIG_*` |
+| `--utxorpc-port`, `--blockfrost-port`, `--mesh-port` | `plugins.api.<name>.config.port` / `DINGO_PLUGINS_API_<NAME>_CONFIG_PORT` |
+
+Provider config fields use lowerCamelCase in YAML; the environment form
+uppercases them with underscore separators (`dataDir` becomes
+`..._CONFIG_DATA_DIR`). The pre-plugin API port variables `DINGO_UTXORPC_PORT`,
+`DINGO_BLOCKFROST_PORT`, and `DINGO_MESH_PORT` still work as compatibility
+aliases, and setting an API port to `0` disables that server.
 
 ### Listing Available Plugins
 

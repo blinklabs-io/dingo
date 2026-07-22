@@ -30,7 +30,9 @@ import (
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/internal/node"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/ledgerstate"
+	"github.com/blinklabs-io/dingo/plugin"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"golang.org/x/sync/errgroup"
 )
@@ -251,13 +253,19 @@ type SyncConfig struct {
 	DownloadMaxIdleRetries int                        // must be >= 0
 	VerifyCertChain        bool
 	CleanupAfterLoad       bool
-	BlobPlugin             string // database plugin selection (match the node's)
-	MetadataPlugin         string
+	StoragePlugins         StoragePlugins
 	RunMode                string
 	BackfillBatchSize      int
 	DatabaseWorkers        int
 	Logger                 *slog.Logger     // optional; defaults to slog.Default()
 	OnProgress             SyncProgressFunc // optional
+}
+
+// StoragePlugins contains canonical storage provider selections used during
+// Mithril bootstrap.
+type StoragePlugins struct {
+	Blob     plugin.Selection
+	Metadata plugin.Selection
 }
 
 // SyncResult summarises a completed bootstrap.
@@ -375,21 +383,25 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 	// Open the database before bootstrap so the immutable copy can overlap the
 	// download: chunks are copied into the blob store in contiguous order as
 	// they finish downloading, instead of waiting for the whole download.
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DataDir,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        cfg.RunMode,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: cfg.DatabaseWorkers,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openDatabase(ctx, cfg, logger, cfg.DatabaseWorkers)
+	if runtime == nil || runtime.Database == nil {
+		if err != nil {
+			return SyncResult{}, fmt.Errorf("opening database: %w", err)
+		}
+		return SyncResult{}, errors.New(
+			"opening database: runtime did not provide a database",
+		)
+	}
+	db := runtime.Database
+	// runtime carries a live database past the guard above, so close it on
+	// every return below, including the non-recoverable error path that
+	// openDatabase can reach with a live runtime when database.New fails after
+	// opening the stores.
+	defer runtime.Close(context.Background()) //nolint:contextcheck
 	if err != nil {
 		// Tolerate a recoverable commit-timestamp mismatch from a previously
 		// interrupted run; mithril import heals it on forward progress.
-		var cte database.CommitTimestampError
-		if errors.As(err, &cte) && db != nil {
+		if cte, ok := errors.AsType[database.CommitTimestampError](err); ok {
 			logger.Warn(
 				"opened database with commit timestamp mismatch; "+
 					"continuing mithril sync — import will heal it",
@@ -401,7 +413,6 @@ func Sync(ctx context.Context, cfg SyncConfig) (SyncResult, error) {
 			return SyncResult{}, fmt.Errorf("opening database: %w", err)
 		}
 	}
-	defer db.Close()
 
 	// Catch-up dispatch. A complete core database (chain data present,
 	// sync_status clear) running against the v2 backend is advanced with
@@ -1079,23 +1090,23 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	db, err := database.New(&database.Config{
-		DataDir:        cfg.DataDir,
-		Logger:         logger,
-		BlobPlugin:     cfg.BlobPlugin,
-		RunMode:        cfg.RunMode,
-		MetadataPlugin: cfg.MetadataPlugin,
-		MaxConnections: 1,
-		StorageMode:    cfg.StorageMode,
-		Network:        cfg.Network,
-	})
+	runtime, err := openDatabase(context.Background(), cfg, logger, 1)
+	if runtime == nil || runtime.Database == nil {
+		if err != nil {
+			return false, fmt.Errorf("opening database: %w", err)
+		}
+		return false, errors.New(
+			"opening database: runtime did not provide a database",
+		)
+	}
+	db := runtime.Database
+	defer runtime.Close(context.Background())
 	if err != nil {
 		var cte database.CommitTimestampError
-		if !errors.As(err, &cte) || db == nil {
+		if !errors.As(err, &cte) {
 			return false, fmt.Errorf("opening database: %w", err)
 		}
 	}
-	defer db.Close()
 	val, err := db.GetSyncState("sync_status", nil)
 	if err != nil {
 		return false, fmt.Errorf("checking sync state: %w", err)
@@ -1113,6 +1124,30 @@ func NeedsSync(cfg SyncConfig) (bool, error) {
 		return len(recent) == 0, nil
 	}
 	return val != syncStatusBackfill, nil
+}
+
+func openDatabase(
+	ctx context.Context,
+	cfg SyncConfig,
+	logger *slog.Logger,
+	maxConnections int,
+) (*internalplugins.DatabaseRuntime, error) {
+	return internalplugins.OpenDatabase(
+		ctx,
+		&database.Config{
+			DataDir: cfg.DataDir, Logger: logger,
+			StorageMode: cfg.StorageMode, Network: cfg.Network,
+		},
+		internalplugins.StorageSelections{
+			Blob:     cfg.StoragePlugins.Blob,
+			Metadata: cfg.StoragePlugins.Metadata,
+		},
+		internalplugins.StorageDependencies{
+			DataDir: cfg.DataDir, RunMode: cfg.RunMode,
+			StorageMode: cfg.StorageMode, MaxConnections: maxConnections,
+			Logger: logger,
+		},
+	)
 }
 
 // parseOptionalDuration parses an optional duration string.

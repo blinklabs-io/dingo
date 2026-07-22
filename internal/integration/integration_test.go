@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,425 +15,92 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/blinklabs-io/dingo/database"
-	"github.com/prometheus/client_golang/prometheus"
-	"gopkg.in/yaml.v3"
-
 	"github.com/blinklabs-io/dingo"
-	"github.com/blinklabs-io/dingo/database/plugin"
-	_ "github.com/blinklabs-io/dingo/database/plugin/blob/badger"
-	_ "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
-	"github.com/blinklabs-io/dingo/internal/config"
+	"github.com/blinklabs-io/dingo/database"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
+	"github.com/blinklabs-io/dingo/plugin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 )
 
-func TestMain(m *testing.M) {
-	// Create a package-level temp dir and set plugin data-dir options
-	tmpDir, err := os.MkdirTemp("", "dingo-integration-")
-	if err != nil {
-		panic("failed to create temp dir for integration tests: " + err.Error())
-	}
-
-	// Set data-dir for blob and metadata plugins before any tests run
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		panic("failed to set blob plugin data-dir: " + err.Error())
-	}
-	if err := plugin.SetPluginOption(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-		"data-dir",
-		tmpDir,
-	); err != nil {
-		panic("failed to set metadata plugin data-dir: " + err.Error())
-	}
-
-	// Run tests
-	code := m.Run()
-
-	// Clean up temp directory after tests finish
-	if err := os.RemoveAll(tmpDir); err != nil {
-		// Log cleanup error but don't fail since tests already ran
-		fmt.Fprintf(
-			os.Stderr,
-			"failed to clean up temp dir %s: %v\n",
-			tmpDir,
-			err,
-		)
-	}
-
-	os.Exit(code)
-}
-
 func TestPluginSystemIntegration(t *testing.T) {
-	// Ensure on-disk plugins use a temp dir to avoid collisions when tests run
-	// in parallel or on shared working directories.
-	if err := plugin.SetPluginOption(plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", t.TempDir()); err != nil {
-		t.Fatalf("failed to set badger data-dir: %v", err)
-	}
-	if err := plugin.SetPluginOption(plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", t.TempDir()); err != nil {
-		t.Fatalf("failed to set sqlite data-dir: %v", err)
-	}
+	host, err := internalplugins.NewHost()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, host.Stop(context.Background())) })
+	providers := host.Providers()
+	require.NotEmpty(t, providers)
+	require.Contains(t, providers, plugin.Descriptor{
+		Capability: plugin.CapabilityStorageBlob,
+		Name:       "badger", Description: "BadgerDB local key-value store",
+	})
+	require.Contains(t, providers, plugin.Descriptor{
+		Capability: plugin.CapabilityStorageMetadata,
+		Name:       "sqlite", Description: "SQLite relational database",
+	})
 
-	// Test that all plugins are registered
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	if len(blobPlugins) == 0 {
-		t.Fatal("no blob plugins registered")
-	}
-
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-	if len(metadataPlugins) == 0 {
-		t.Fatal("no metadata plugins registered")
-	}
-
-	// Test that we can get specific plugins
-	badgerPlugin := plugin.GetPlugin(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-	)
-	if badgerPlugin == nil {
-		t.Fatal("badger plugin not found")
-	}
-
-	sqlitePlugin := plugin.GetPlugin(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-	)
-	if sqlitePlugin == nil {
-		t.Fatal("sqlite plugin not found")
-	}
-
-	// Test that plugins can start and stop (basic lifecycle)
-	if err := badgerPlugin.Start(); err != nil {
-		t.Fatalf("failed to start badger plugin: %v", err)
-	}
-	defer func() {
-		if err := badgerPlugin.Stop(); err != nil {
-			t.Errorf("failed to stop badger plugin: %v", err)
-		}
-	}()
-
-	if err := sqlitePlugin.Start(); err != nil {
-		t.Fatalf("failed to start sqlite plugin: %v", err)
-	}
-	defer func() {
-		if err := sqlitePlugin.Stop(); err != nil {
-			t.Errorf("failed to stop sqlite plugin: %v", err)
-		}
-	}()
-
-	// Plugins will be stopped automatically by deferred calls
-}
-
-func TestPluginDescriptions(t *testing.T) {
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-
-	// Check that all plugins have descriptions
-	for _, p := range blobPlugins {
-		if p.Description == "" {
-			t.Errorf("blob plugin %q has empty description", p.Name)
-		}
-	}
-
-	for _, p := range metadataPlugins {
-		if p.Description == "" {
-			t.Errorf("metadata plugin %q has empty description", p.Name)
-		}
-	}
-
-	// Check specific descriptions
-	foundBadger := false
-	foundSqlite := false
-
-	for _, p := range blobPlugins {
-		if p.Name == "badger" {
-			foundBadger = true
-			if p.Description != "BadgerDB local key-value store" {
-				t.Errorf("badger description mismatch: got %q, want %q",
-					p.Description, "BadgerDB local key-value store")
-			}
-		}
-	}
-
-	for _, p := range metadataPlugins {
-		if p.Name == "sqlite" {
-			foundSqlite = true
-			if p.Description != "SQLite relational database" {
-				t.Errorf("sqlite description mismatch: got %q, want %q",
-					p.Description, "SQLite relational database")
-			}
-		}
-	}
-
-	if !foundBadger {
-		t.Error("badger plugin not found in blob plugins")
-	}
-	if !foundSqlite {
-		t.Error("sqlite plugin not found in metadata plugins")
-	}
-}
-
-func TestPluginLifecycleEndToEnd(t *testing.T) {
-	// Test the complete plugin lifecycle: registration → instantiation → config → usage
-	// Note: This test focuses on plugins that can be instantiated with default/empty config
-
-	// 1. Verify plugins are registered
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	// Check for expected plugins by name instead of count
-	expectedBlobs := append([]string{config.DefaultBlobPlugin}, additionalBlobPlugins()...)
-	for _, name := range expectedBlobs {
-		if findPluginEntry(blobPlugins, name) == nil {
-			t.Errorf("expected blob plugin %q not found", name)
-		}
-	}
-
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-	// Check for expected metadata plugins
-	expectedMetadata := []string{config.DefaultMetadataPlugin}
-	for _, name := range expectedMetadata {
-		if findPluginEntry(metadataPlugins, name) == nil {
-			t.Errorf("expected metadata plugin %q not found", name)
-		}
-	}
-
-	// 2. Test instantiation of plugins that can work with defaults
-	// Set data-dir to temp directories to avoid collisions
-	if err := plugin.SetPluginOption(plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", t.TempDir()); err != nil {
-		t.Fatalf("failed to set badger data-dir: %v", err)
-	}
-	badgerPlugin := plugin.GetPlugin(
-		plugin.PluginTypeBlob,
-		config.DefaultBlobPlugin,
-	)
-	if badgerPlugin == nil {
-		t.Error("failed to instantiate badger plugin")
-	} else {
-		// Test lifecycle methods
-		if err := badgerPlugin.Start(); err != nil {
-			t.Errorf("failed to start badger plugin: %v", err)
-		}
-		if err := badgerPlugin.Stop(); err != nil {
-			t.Errorf("failed to stop badger plugin: %v", err)
-		}
-	}
-
-	if err := plugin.SetPluginOption(plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", t.TempDir()); err != nil {
-		t.Fatalf("failed to set sqlite data-dir: %v", err)
-	}
-	// SQLite should work with defaults (creates temp database)
-	sqlitePlugin := plugin.GetPlugin(
-		plugin.PluginTypeMetadata,
-		config.DefaultMetadataPlugin,
-	)
-	if sqlitePlugin == nil {
-		t.Error("failed to instantiate sqlite plugin")
-	} else {
-		// Test lifecycle methods
-		if err := sqlitePlugin.Start(); err != nil {
-			t.Errorf("failed to start sqlite plugin: %v", err)
-		}
-		if err := sqlitePlugin.Stop(); err != nil {
-			t.Errorf("failed to stop sqlite plugin: %v", err)
-		}
-	}
-
-	// Note: GCS and S3 plugins require configuration (bucket, credentials) and cannot
-	// be tested in this basic lifecycle test without proper setup
-}
-
-func TestPluginConfigurationIntegration(t *testing.T) {
-	// Test that plugin configuration works end-to-end
-	// This tests the integration between config loading and plugin instantiation
-
-	// Create temp directories for test paths
-	tempDir := t.TempDir()
-	badgerDataDir := filepath.Join(tempDir, "test-config-badger")
-	sqliteDataDir := filepath.Join(tempDir, "test-config-sqlite.db")
-
-	// Create a config structure and marshal to YAML (avoid formatting pitfalls)
-	cfgMap := map[string]any{
-		"database": map[string]any{
-			"blob": map[string]any{
-				"plugin": config.DefaultBlobPlugin,
-				config.DefaultBlobPlugin: map[string]any{
-					"data-dir":         badgerDataDir,
-					"block-cache-size": 1000000,
-				},
-			},
-			"metadata": map[string]any{
-				"plugin": config.DefaultMetadataPlugin,
-				config.DefaultMetadataPlugin: map[string]any{
-					"data-dir": sqliteDataDir,
-				},
-			},
+	runtime, err := internalplugins.OpenDatabase(
+		context.Background(),
+		&database.Config{DataDir: t.TempDir()},
+		internalplugins.StorageSelections{
+			Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
+			Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
 		},
-	}
-
-	yamlBytes, err := yaml.Marshal(cfgMap)
-	if err != nil {
-		t.Fatalf("failed to marshal yaml: %v", err)
-	}
-
-	// Write config to a temporary file
-	tmpFile, err := os.CreateTemp("", "dingo-config-*.yaml")
-	if err != nil {
-		t.Fatalf("failed to create temp config file: %v", err)
-	}
-	t.Cleanup(func() { os.Remove(tmpFile.Name()) })
-
-	if _, err := tmpFile.Write(yamlBytes); err != nil {
-		t.Fatalf("failed to write config: %v", err)
-	}
-	tmpFile.Close()
-
-	// Test that we can load this config and verify plugin settings are applied
-	cfg, err := config.LoadConfig(tmpFile.Name())
-	if err != nil {
-		t.Fatalf("failed to load config: %v", err)
-	}
-
-	// Verify that the config was loaded with the expected plugin settings
-	if cfg.BlobPlugin != config.DefaultBlobPlugin {
-		t.Errorf(
-			"expected BlobPlugin to be '%s', got '%s'",
-			config.DefaultBlobPlugin,
-			cfg.BlobPlugin,
-		)
-	}
-	if cfg.MetadataPlugin != config.DefaultMetadataPlugin {
-		t.Errorf(
-			"expected MetadataPlugin to be '%s', got '%s'",
-			config.DefaultMetadataPlugin,
-			cfg.MetadataPlugin,
-		)
-	}
-
-	// Note: Plugin-specific options like data-dir are stored in cmdlineOptions
-	// and would be used when creating plugin instances
-}
-
-func TestPluginSwitching(t *testing.T) {
-	// Test that we can switch between different plugins of the same type
-	// This validates that the plugin system allows runtime plugin selection
-
-	// For now, test that we can at least get different plugin entries
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	if len(blobPlugins) < 2 {
-		t.Skip("need at least 2 blob plugins to test switching")
-	}
-
-	// Test that we can retrieve different plugin entries
-	badgerEntry := findPluginEntry(blobPlugins, config.DefaultBlobPlugin)
-	if badgerEntry == nil {
-		t.Error("badger plugin entry not found")
-	}
-
-	// Note: We don't instantiate cloud plugins here as they require configuration
-	// This test validates that the plugin registry works correctly
-}
-
-func findPluginEntry(
-	plugins []plugin.PluginEntry,
-	name string,
-) *plugin.PluginEntry {
-	for i := range plugins {
-		p := &plugins[i]
-		if p.Name == name {
-			return p
-		}
-	}
-	return nil
+		internalplugins.StorageDependencies{DataDir: t.TempDir()},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, runtime.Database.Blob())
+	require.NotNil(t, runtime.Database.Metadata())
+	require.NoError(t, runtime.Close(context.Background()))
+	require.NoError(t, runtime.Close(context.Background()))
 }
 
 func TestNodeShutdownIntegration(t *testing.T) {
-	// Create a temporary directory for the test
-	tmpDir := t.TempDir()
-
-	// Create a minimal node config
 	cfg := dingo.NewConfig(
-		dingo.WithDatabasePath(tmpDir),
+		dingo.WithDatabasePath(t.TempDir()),
 		dingo.WithLogger(slog.New(slog.NewJSONHandler(io.Discard, nil))),
 		dingo.WithPrometheusRegistry(prometheus.NewRegistry()),
-		dingo.WithNetworkMagic(764824073), // preview testnet magic
+		dingo.WithNetworkMagic(764824073),
 		dingo.WithShutdownTimeout(5*time.Second),
 		dingo.WithListeners(dingo.ListenerConfig{
-			ListenNetwork: "tcp",
-			ListenAddress: "127.0.0.1:0", // dummy listener, won't actually be used
+			ListenNetwork: "tcp", ListenAddress: "127.0.0.1:0",
 		}),
 	)
-
-	// Create node (this should work without listeners since we're not calling Run)
 	node, err := dingo.New(cfg)
-	if err != nil {
-		t.Fatalf("failed to create node: %v", err)
-	}
-
-	// Test that Stop works even when no components are initialized
-	stopErr := node.Stop()
-	if stopErr != nil {
-		t.Fatalf("node shutdown failed: %v", stopErr)
-	}
-
-	// Test that calling Stop multiple times is safe
-	stopErr2 := node.Stop()
-	if stopErr2 != nil {
-		t.Fatalf("second node shutdown failed: %v", stopErr2)
-	}
-
-	t.Log("node shutdown integration test passed")
+	require.NoError(t, err)
+	require.NoError(t, node.Stop())
+	require.NoError(t, node.Stop())
 }
 
 func TestStorageBackends(t *testing.T) {
-	backends := getTestBackends(t, t.TempDir())
-	for _, backend := range backends {
-		t.Run(backend.name, func(t *testing.T) {
-			testStorageBackend(t, backend.config)
+	for _, dataDir := range []string{"", t.TempDir()} {
+		t.Run(fmt.Sprintf("dir-%t", dataDir != ""), func(t *testing.T) {
+			runtime, err := internalplugins.OpenDatabase(
+				context.Background(),
+				&database.Config{DataDir: dataDir},
+				internalplugins.StorageSelections{
+					Blob:     plugin.Selection{Provider: "badger", Config: map[string]any{}},
+					Metadata: plugin.Selection{Provider: "sqlite", Config: map[string]any{}},
+				},
+				internalplugins.StorageDependencies{DataDir: dataDir},
+			)
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, runtime.Close(context.Background())) })
+
+			blocks, err := loadBlockData(10)
+			require.NoError(t, err)
+			for i := range 10 {
+				txn := runtime.Database.Transaction(true)
+				key := fmt.Appendf(nil, "block-%d", i)
+				require.NoError(t, txn.DB().Blob().Set(txn.Blob(), key, blocks[i]))
+				require.NoError(t, txn.Commit())
+			}
 		})
-	}
-}
-
-func testStorageBackend(t *testing.T, config *database.Config) {
-	// Create database with the specified backend
-	db, err := database.New(config)
-	if err != nil {
-		t.Fatalf(
-			"failed to create database with: %v",
-			err,
-		)
-	}
-	defer db.Close()
-
-	blocks, err := loadBlockData(10)
-	if err != nil {
-		t.Fatalf("failed to load block data: %v", err)
-	}
-
-	for i := range 10 {
-		txn := db.Transaction(true)
-		key := fmt.Appendf(nil, "block-%d", i)
-		blob := txn.DB().Blob()
-		if blob == nil || txn.Blob() == nil {
-			txn.Rollback()
-			t.Fatalf("blob store/txn not available")
-		}
-		if err := blob.Set(txn.Blob(), key, blocks[i]); err != nil {
-			txn.Rollback()
-			t.Fatalf("failed to set block %d: %v", i, err)
-		}
-		if err := txn.Commit(); err != nil {
-			t.Fatalf("failed to commit block %d: %v", i, err)
-		}
 	}
 }

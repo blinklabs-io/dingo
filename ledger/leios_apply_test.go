@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -35,13 +36,10 @@ func newLeiosApplyTestLedger(
 	t *testing.T,
 ) (*LedgerState, *database.Database, *gorm.DB) {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	store, ok := db.Metadata().(*sqlite.MetadataStoreSqlite)
 	require.True(t, ok, "expected sqlite metadata store")
 	ls := &LedgerState{

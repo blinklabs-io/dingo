@@ -30,6 +30,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/dingo/event"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	gledger "github.com/blinklabs-io/gouroboros/ledger"
@@ -75,13 +76,10 @@ func (m *replayRecoveryInput) ToPlutusData() pdata.PlutusData {
 func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -218,13 +216,10 @@ func TestTryRecoverFromTxValidationErrorRollsBackToEarliestProducerParent(
 func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -406,13 +401,10 @@ func TestTryRecoverFromTxValidationErrorRejectsReplayBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -555,13 +547,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRewindsPrimaryChain(
 func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -697,13 +686,10 @@ func TestTryRecoverFromTxValidationErrorAtTipRejectsRewindBelowMithrilBoundary(
 func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -807,13 +793,10 @@ func TestTryRecoverFromTxValidationErrorFallsBackToTxBlobOffsets(
 }
 
 func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -946,13 +929,10 @@ func TestTryRecoverFromTxValidationErrorFallsBackToChainScan(t *testing.T) {
 func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -1095,13 +1075,10 @@ func TestTryRecoverFromTxValidationErrorRecoversDependencyClosure(
 func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 	t *testing.T,
 ) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
@@ -1166,13 +1143,10 @@ func TestTryRecoverFromTxValidationErrorFallsBackToSecurityParamWindow(
 }
 
 func TestTryRecoverFromTxValidationErrorSkipsUnknownProducer(t *testing.T) {
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        t.TempDir(),
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: t.TempDir(),
 	})
 	require.NoError(t, err)
-	defer db.Close()
 
 	ls := &LedgerState{
 		db: db,

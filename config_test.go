@@ -22,39 +22,12 @@ import (
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
-	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestMempoolImplementationValidation(t *testing.T) {
-	n, err := New(NewConfig(
-		WithPrometheusRegistry(prometheus.NewRegistry()),
-		WithNetwork("preview"),
-		WithListeners(ListenerConfig{
-			ListenNetwork: "tcp",
-			ListenAddress: "127.0.0.1:0",
-		}),
-		WithMempoolImplementation(mempool.ImplementationFIFO),
-	))
-	require.NoError(t, err)
-	// New starts the event bus' background goroutines; Stop releases them.
-	t.Cleanup(func() { _ = n.Stop() })
-
-	_, err = New(NewConfig(
-		WithPrometheusRegistry(prometheus.NewRegistry()),
-		WithNetwork("preview"),
-		WithListeners(ListenerConfig{
-			ListenNetwork: "tcp",
-			ListenAddress: "127.0.0.1:0",
-		}),
-		WithMempoolImplementation("priority"),
-	))
-	require.ErrorContains(t, err, "invalid mempool implementation")
-}
 
 func TestStorageModeValid(t *testing.T) {
 	tests := []struct {

@@ -23,6 +23,7 @@ import (
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/immutable"
 	"github.com/blinklabs-io/dingo/database/models"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	"github.com/blinklabs-io/dingo/midnight"
 	"github.com/blinklabs-io/dingo/midnight/server"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -54,13 +55,11 @@ func (fakeSlotTimer) TimeToSlot(t time.Time) (uint64, error) {
 // server's SlotTimer.
 func newTestDatabase(t *testing.T) *database.Database {
 	t.Helper()
-	db, err := database.New(&database.Config{
-		BlobPlugin:     "badger",
-		MetadataPlugin: "sqlite",
-		DataDir:        "",
+	db, err := dbtest.NewDatabase(t, &database.Config{
+		DataDir: "",
 	})
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	t.Cleanup(func() { _ = dbtest.CloseDatabase(db) })
 	require.NoError(t, db.SetEpoch(
 		0, 0,
 		[]byte("epoch-0-nonce"), nil, nil, nil,

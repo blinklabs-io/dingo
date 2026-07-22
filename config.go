@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
-	"github.com/blinklabs-io/dingo/mempool"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -126,19 +126,13 @@ type Config struct {
 	cardanoNodeConfig        *cardano.CardanoNodeConfig
 	dataDir                  string
 	bindAddr                 string
-	blobPlugin               string
-	metadataPlugin           string
+	pluginSelections         map[plugin.Capability]plugin.Selection
 	network                  string
 	tlsCertFilePath          string
 	tlsKeyFilePath           string
 	intersectPoints          []ocommon.Point
 	listeners                []ListenerConfig
-	mempoolCapacity          int64
-	mempoolImplementation    mempool.Implementation
-	evictionWatermark        float64
-	rejectionWatermark       float64
 	outboundSourcePort       uint
-	utxorpcPort              uint
 	barkBaseUrl              string
 	barkBlockDownloadHosts   []string
 	barkPort                 uint
@@ -219,8 +213,6 @@ type Config struct {
 	// Leios pipeline timing override (experimental, provisional). Nil
 	// uses leios.DefaultPipelineTiming.
 	leiosPipelineTiming *leios.PipelineTiming
-	// Blockfrost API port (0 = disabled)
-	blockfrostPort uint
 	// Off-chain metadata fetcher configuration
 	offchainMetadata OffchainMetadataConfig
 	// Midnight indexer and gRPC API configuration
@@ -230,7 +222,6 @@ type Config struct {
 	chainsyncStallTimeout time.Duration
 	chainsyncStrategy     chainsync.HeaderSyncStrategy
 	// Mesh API port (0 = disabled)
-	meshPort uint
 	// Storage mode: "core" or "api"
 	storageMode StorageMode
 	// CBOR cache configuration
@@ -435,16 +426,6 @@ func (c *Config) experimentalDijkstraEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
-	if n.config.mempoolImplementation == "" {
-		n.config.mempoolImplementation = mempool.ImplementationFIFO
-	}
-	if !n.config.mempoolImplementation.Valid() {
-		return fmt.Errorf(
-			"invalid mempool implementation %q: must be %q",
-			n.config.mempoolImplementation,
-			mempool.ImplementationFIFO,
-		)
-	}
 	// Default storageMode to "core" when unset, and validate.
 	if n.config.storageMode == "" {
 		n.config.storageMode = StorageModeCore
@@ -457,6 +438,9 @@ func (n *Node) configValidate() error {
 			StorageModeAPI,
 		)
 	}
+	// In core mode, ignore API ports — they are only used in API mode.
+	// This lets defaults stay non-zero without requiring core-mode users
+	// to explicitly disable each one.
 	if !n.config.startEra.Valid() {
 		return fmt.Errorf(
 			"invalid start era %q: must be empty or %q",
@@ -493,9 +477,6 @@ func (n *Node) configValidate() error {
 			)
 		}
 	}
-	// In core mode, ignore API ports — they are only used in API mode.
-	// This lets defaults stay non-zero without requiring core-mode users
-	// to explicitly disable each one.
 	if n.config.networkMagic == 0 {
 		return fmt.Errorf(
 			"invalid network magic value: %d",
@@ -547,9 +528,8 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		mempoolImplementation: mempool.ImplementationFIFO,
-		genesisBootstrap:      true,
+		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		genesisBootstrap: true,
 		historyExpiry: HistoryExpiryConfig{
 			Frequency: time.Hour,
 		},
@@ -560,12 +540,36 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 		corsAllowedOrigins: []string{
 			"*",
 		},
+		pluginSelections: map[plugin.Capability]plugin.Selection{
+			plugin.CapabilityStorageBlob:     {Provider: "badger", Config: map[string]any{}},
+			plugin.CapabilityStorageMetadata: {Provider: "sqlite", Config: map[string]any{}},
+			plugin.CapabilityMempool: {Provider: "default", Config: map[string]any{
+				"capacity": int64(1048576), "evictionWatermark": 0.90,
+				"rejectionWatermark": 0.95,
+			}},
+			plugin.CapabilityAPIBlockfrost: {Provider: "builtin", Config: map[string]any{"port": uint(3000)}},
+			plugin.CapabilityAPIMesh:       {Provider: "builtin", Config: map[string]any{"port": uint(8080)}},
+			plugin.CapabilityAPIUtxorpc:    {Provider: "builtin", Config: map[string]any{"port": uint(9090)}},
+		},
 	}
 	// Apply options
 	for _, opt := range opts {
 		opt(&c)
 	}
 	return c
+}
+
+// WithPluginSelection selects and configures one plugin capability.
+func WithPluginSelection(
+	capability plugin.Capability,
+	selection plugin.Selection,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		if c.pluginSelections == nil {
+			c.pluginSelections = make(map[plugin.Capability]plugin.Selection)
+		}
+		c.pluginSelections[capability] = selection
+	}
 }
 
 // WithCardanoNodeConfig specifies the CardanoNodeConfig object to use. This is mostly used for loading genesis config files
@@ -590,20 +594,6 @@ func WithBindAddr(addr string) ConfigOptionFunc {
 func WithDatabasePath(dataDir string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.dataDir = dataDir
-	}
-}
-
-// WithBlobPlugin specifies the blob storage plugin to use.
-func WithBlobPlugin(plugin string) ConfigOptionFunc {
-	return func(c *Config) {
-		c.blobPlugin = plugin
-	}
-}
-
-// WithMetadataPlugin specifies the metadata storage plugin to use.
-func WithMetadataPlugin(plugin string) ConfigOptionFunc {
-	return func(c *Config) {
-		c.metadataPlugin = plugin
 	}
 }
 
@@ -670,13 +660,6 @@ func WithUtxorpcTlsKeyFilePath(path string) ConfigOptionFunc {
 	}
 }
 
-// WithUtxorpcPort specifies the port to use for the gRPC API listener. 0 disables the server (default)
-func WithUtxorpcPort(port uint) ConfigOptionFunc {
-	return func(c *Config) {
-		c.utxorpcPort = port
-	}
-}
-
 // WithPeerSharing specifies whether to enable peer sharing. This is disabled by default
 func WithPeerSharing(peerSharing bool) ConfigOptionFunc {
 	return func(c *Config) {
@@ -720,46 +703,6 @@ func WithTracingStdout(stdout bool) ConfigOptionFunc {
 func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shutdownTimeout = timeout
-	}
-}
-
-// WithMempoolImplementation selects the mempool backend. FIFO is the default.
-func WithMempoolImplementation(
-	implementation mempool.Implementation,
-) ConfigOptionFunc {
-	return func(c *Config) {
-		c.mempoolImplementation = implementation
-	}
-}
-
-// WithMempoolCapacity sets the mempool capacity (in bytes)
-func WithMempoolCapacity(capacity int64) ConfigOptionFunc {
-	return func(c *Config) {
-		c.mempoolCapacity = capacity
-	}
-}
-
-// WithEvictionWatermark sets the mempool eviction watermark
-// as a fraction of capacity (0.0-1.0). When a new TX would
-// push the mempool past this fraction, oldest TXs are evicted
-// to make room. Default is 0.90 (90%).
-func WithEvictionWatermark(
-	watermark float64,
-) ConfigOptionFunc {
-	return func(c *Config) {
-		c.evictionWatermark = watermark
-	}
-}
-
-// WithRejectionWatermark sets the mempool rejection watermark
-// as a fraction of capacity (0.0-1.0). New TXs are rejected
-// when the mempool would exceed this fraction even after
-// eviction. Default is 0.95 (95%).
-func WithRejectionWatermark(
-	watermark float64,
-) ConfigOptionFunc {
-	return func(c *Config) {
-		c.rejectionWatermark = watermark
 	}
 }
 
@@ -1114,16 +1057,6 @@ func WithDelegatorInactivity(enabled bool, epochs uint64) ConfigOptionFunc {
 	}
 }
 
-// WithBlockfrostPort specifies the port for the
-// Blockfrost-compatible REST API server. The server binds
-// to the node's bindAddr on this port. 0 disables the
-// server (default).
-func WithBlockfrostPort(port uint) ConfigOptionFunc {
-	return func(c *Config) {
-		c.blockfrostPort = port
-	}
-}
-
 func WithBarkBaseUrl(baseUrl string) ConfigOptionFunc {
 	return func(c *Config) {
 		c.barkBaseUrl = baseUrl
@@ -1203,16 +1136,6 @@ func WithChainsyncHeaderStrategy(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.chainsyncStrategy = strategy
-	}
-}
-
-// WithMeshPort specifies the port for the Mesh (Coinbase
-// Rosetta) compatible REST API server. The server binds
-// to the node's bindAddr on this port. 0 disables the
-// server (default).
-func WithMeshPort(port uint) ConfigOptionFunc {
-	return func(c *Config) {
-		c.meshPort = port
 	}
 }
 

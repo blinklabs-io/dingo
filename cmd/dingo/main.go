@@ -1,4 +1,4 @@
-// Copyright 2025 Blink Labs Software
+// Copyright 2026 Blink Labs Software
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -23,8 +23,8 @@ import (
 	"runtime/pprof"
 	"strings"
 
-	"github.com/blinklabs-io/dingo/database/plugin"
 	"github.com/blinklabs-io/dingo/internal/config"
+	internalplugins "github.com/blinklabs-io/dingo/internal/plugins"
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/spf13/cobra"
 	"go.uber.org/automaxprocs/maxprocs"
@@ -137,53 +137,21 @@ func parseLogLevel(level string) (slog.Level, bool) {
 	}
 }
 
-func listPlugins(
-	blobPlugin, metadataPlugin string,
-) (shouldExit bool, output string) {
-	var buf strings.Builder
-	listed := false
-
-	if blobPlugin == "list" {
-		buf.WriteString("Available blob plugins:\n")
-		blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-		for _, p := range blobPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if metadataPlugin == "list" {
-		if listed {
-			buf.WriteString("\n")
-		}
-		buf.WriteString("Available metadata plugins:\n")
-		metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-		for _, p := range metadataPlugins {
-			fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
-		}
-		listed = true
-	}
-
-	if listed {
-		return true, buf.String()
-	}
-	return false, ""
-}
-
 func listAllPlugins() string {
 	var buf strings.Builder
-	buf.WriteString("Available plugins:\n\n")
-
-	buf.WriteString("Blob Storage Plugins:\n")
-	blobPlugins := plugin.GetPlugins(plugin.PluginTypeBlob)
-	for _, p := range blobPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	host, err := internalplugins.NewHost()
+	if err != nil {
+		return fmt.Sprintf("failed to build plugin host: %v\n", err)
 	}
-
-	buf.WriteString("\nMetadata Storage Plugins:\n")
-	metadataPlugins := plugin.GetPlugins(plugin.PluginTypeMetadata)
-	for _, p := range metadataPlugins {
-		fmt.Fprintf(&buf, "  %s: %s\n", p.Name, p.Description)
+	buf.WriteString("Available plugins:\n")
+	var previous string
+	for _, provider := range host.Providers() {
+		capability := string(provider.Capability)
+		if capability != previous {
+			fmt.Fprintf(&buf, "\n%s:\n", capability)
+			previous = capability
+		}
+		fmt.Fprintf(&buf, "  %s: %s\n", provider.Name, provider.Description)
 	}
 
 	return buf.String()
@@ -343,23 +311,16 @@ Configuration Precedence (highest to lowest):
   3. Config file        (dingo.yaml or --config path)
   4. Built-in defaults
 
-Data Directory:
-  The CARDANO_DATABASE_PATH env var (or databasePath in config) sets the
-  data directory for both blob and metadata storage plugins. Plugin-specific
-  flags override this global setting:
-
-    --blob-badger-data-dir      overrides the blob plugin data directory
-    --metadata-sqlite-data-dir  overrides the metadata plugin data directory
-
-  For example, to store metadata separately from block data:
-    dingo --blob-badger-data-dir /fast-ssd/blocks \
-          --metadata-sqlite-data-dir /nvme/indexes
+Plugins:
+  Provider selectors use --blob, --metadata, --mempool,
+  --blockfrost-provider, --mesh-provider, and --utxorpc-provider.
+  Provider configuration uses the plugins YAML tree or generic
+  DINGO_PLUGINS_* environment variables. Run 'dingo list' to see providers.
 
 Storage Mode:
   --storage-mode sets the global storage mode for all plugins. Use "core"
   for minimal validation data or "api" for full indexing (witnesses,
   scripts, datums, redeemers). Dev mode always enables "api" mode.
-  Per-plugin overrides: --blob-badger-storage-mode, --metadata-*-storage-mode.
 
 Network:
   --network sets the Cardano network name and automatically derives the
@@ -367,12 +328,7 @@ Network:
   This overrides the CARDANO_NETWORK env var and the network config field.
 
 Database Workers:
-  --db-workers controls the worker pool size. When using SQLite, set
-  --metadata-sqlite-max-connections to match (both default to 5).
-
-DSN Override:
-  --metadata-mysql-dsn and --metadata-postgres-dsn override all individual
-  connection flags (host, port, user, password, database) when set.`,
+  --db-workers controls the worker pool size.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -406,23 +362,7 @@ DSN Override:
 		StringVar(&configFile, "config", "", "path to config file")
 	config.RegisterFlags(rootCmd)
 
-	// Add plugin-specific flags
-	if err := plugin.PopulateCmdlineOptions(rootCmd.PersistentFlags()); err != nil {
-		fmt.Fprintf(os.Stderr, "Error adding plugin flags: %v\n", err)
-		os.Exit(1)
-	}
-
 	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		// Handle plugin listing before config loading
-		blobPlugin, _ := cmd.Root().PersistentFlags().GetString("blob")
-		metadataPlugin, _ := cmd.Root().PersistentFlags().GetString("metadata")
-
-		shouldExit, output := listPlugins(blobPlugin, metadataPlugin)
-		if shouldExit {
-			fmt.Print(output)
-			os.Exit(0)
-		}
-
 		top := topLevelCommand(cmd)
 
 		// The informational commands (version, list, help, completion)

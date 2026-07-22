@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/blinklabs-io/dingo/database"
+	dbtest "github.com/blinklabs-io/dingo/internal/test/dbtest"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
@@ -44,9 +45,9 @@ import (
 // metadata-store state after the rollback API is called as the chainsync
 // path calls it) so a regression there fails with a clear signal.
 func TestSlotBattleResolution_BlockNonceTableIsFullyCleaned(t *testing.T) {
-	db, err := database.New(&database.Config{DataDir: ""})
+	db, err := dbtest.NewDatabase(t, &database.Config{DataDir: ""})
 	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
+	defer func() { _ = dbtest.CloseDatabase(db) }()
 
 	const ancestorSlot uint64 = 4
 	const battleSlot uint64 = 5
