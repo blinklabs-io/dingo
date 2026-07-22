@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/blinklabs-io/dingo/database/models"
+	"github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/ledger/hardfork"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
@@ -417,7 +418,17 @@ func picosecondsToDuration(p *big.Int) time.Duration {
 func (ls *LedgerState) queryShelley(
 	query *olocalstatequery.ShelleyQuery,
 ) (any, error) {
-	switch q := query.Query.(type) {
+	return ls.queryShelleyLeaf(query.Query)
+}
+
+// queryShelleyLeaf dispatches a decoded Shelley block-query leaf and returns
+// its result in the single-element MsgResult wire form (`[]any{value}`). It
+// is shared by queryShelley and by the GetCBOR combinator handler, which
+// re-runs the wrapped inner query through it.
+func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
+	switch q := query.(type) {
+	case *olocalstatequery.ShelleyCborQuery:
+		return ls.queryShelleyCbor(q)
 	case *olocalstatequery.ShelleyEpochNoQuery:
 		return []any{ls.loadConsensusSnapshot().currentEpoch.EpochId}, nil
 	case *olocalstatequery.ShelleyCurrentProtocolParamsQuery:
@@ -440,6 +451,8 @@ func (ls *LedgerState) queryShelley(
 		return ls.queryShelleyDRepState(q.Credentials.Items())
 	case *olocalstatequery.ShelleyAccountStateQuery:
 		return ls.queryShelleyAccountState()
+	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
+		return ls.queryShelleyStakeSnapshots(q)
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -448,19 +461,271 @@ func (ls *LedgerState) queryShelley(
 		case *olocalstatequery.ShelleyStakeDistributionQuery:
 		case *olocalstatequery.ShelleyUtxoWholeQuery:
 		case *olocalstatequery.ShelleyDebugEpochStateQuery:
-		case *olocalstatequery.ShelleyCborQuery:
 		case *olocalstatequery.ShelleyDebugNewEpochStateQuery:
 		case *olocalstatequery.ShelleyDebugChainDepStateQuery:
 		case *olocalstatequery.ShelleyRewardProvenanceQuery:
 		case *olocalstatequery.ShelleyStakePoolParamsQuery:
 		case *olocalstatequery.ShelleyRewardInfoPoolsQuery:
 		case *olocalstatequery.ShelleyPoolStateQuery:
-		case *olocalstatequery.ShelleyStakeSnapshotsQuery:
 		case *olocalstatequery.ShelleyPoolDistrQuery:
 	*/
 	default:
 		return nil, fmt.Errorf("unsupported query type: %T", q)
 	}
+}
+
+// queryShelleyCbor answers the GetCBOR query combinator. It runs the wrapped
+// inner query and returns its result re-encoded as raw serialised CBOR
+// (CBOR-in-CBOR, tag 24), matching cardano-node. cardano-cli wraps several
+// queries this way (e.g. `query stake-snapshot`), so the whole class of
+// GetCBOR-wrapped queries flows through here. See issue #2917.
+func (ls *LedgerState) queryShelleyCbor(
+	q *olocalstatequery.ShelleyCborQuery,
+) (any, error) {
+	inner, err := ls.queryShelleyLeaf(q.Query)
+	if err != nil {
+		return nil, err
+	}
+	// Inner handlers return the result in the single-element MsgResult wire
+	// form ([]any{value}); GetCBOR serialises just the wrapped value.
+	values, ok := inner.([]any)
+	if !ok || len(values) != 1 {
+		return nil, fmt.Errorf(
+			"unexpected inner query result shape for GetCBOR: %T",
+			inner,
+		)
+	}
+	encoded, err := cbor.Encode(values[0])
+	if err != nil {
+		return nil, err
+	}
+	return []any{cbor.Tag{Number: cbor.CborTagCbor, Content: encoded}}, nil
+}
+
+// queryShelleyStakeSnapshots answers GetStakeSnapshots. It returns the
+// mark/set/go stake for each requested pool (or every pool with a snapshot
+// when the query carries no pool filter) plus the mark/set/go totals.
+//
+// In Ouroboros the current epoch's boundary snapshot is "mark"; "set" is the
+// previous epoch's snapshot and "go" the one before that (the active stake
+// used for the current epoch's rewards/leader election). dingo persists each
+// boundary snapshot under type "mark" keyed by its epoch, so set/go for the
+// current epoch are read from the mark snapshots at epoch-1 and epoch-2.
+func (ls *LedgerState) queryShelleyStakeSnapshots(
+	q *olocalstatequery.ShelleyStakeSnapshotsQuery,
+) (any, error) {
+	consensus := ls.loadConsensusSnapshot()
+	epoch := consensus.currentEpoch.EpochId
+	setEpoch, hasSet := priorEpoch(epoch, 1)
+	goEpoch, hasGo := priorEpoch(epoch, 2)
+
+	// From protocol version 11, GetStakeSnapshots omits any pool whose
+	// mark/set/go stake are all zero, regardless of the reason (unregistered,
+	// no delegations, or zero stake) and regardless of whether the pool was
+	// explicitly requested (cardano-ledger issue 5581). Below PV11 an
+	// explicitly requested pool is always returned, even with zero stake.
+	omitZeroPools := false
+	if pv, err := GetProtocolVersion(consensus.currentPParams); err == nil {
+		omitZeroPools = pv.Major >= 11
+	}
+
+	// Read the mark/set/go snapshots under a single read transaction so all
+	// three epochs come from one consistent view even if an epoch boundary
+	// fires mid-query.
+	txn := ls.db.Transaction(false)
+	defer txn.Release()
+	metaTxn := txn.Metadata()
+
+	pools, all := q.PoolFilter()
+
+	var poolSnapshots map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot
+	if all {
+		// Bulk-load each epoch's mark snapshot once (one read per epoch, not
+		// one per pool) and report every pool that appears in any of the
+		// three: a pool that has retired keeps historical set/go stake that
+		// must still be returned, so the pool set is the union of all three
+		// snapshots rather than the mark snapshot alone.
+		mark, err := ls.markStakeByPool(epoch, true, metaTxn)
+		if err != nil {
+			return nil, err
+		}
+		set, err := ls.markStakeByPool(setEpoch, hasSet, metaTxn)
+		if err != nil {
+			return nil, err
+		}
+		snapshotGo, err := ls.markStakeByPool(goEpoch, hasGo, metaTxn)
+		if err != nil {
+			return nil, err
+		}
+		poolSnapshots = make(
+			map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot,
+		)
+		for _, byPool := range []map[string]uint64{mark, set, snapshotGo} {
+			for hash := range byPool {
+				key := ledger.NewBlake2b224([]byte(hash))
+				if _, ok := poolSnapshots[key]; ok {
+					continue
+				}
+				markStake, setStake, goStake := mark[hash], set[hash], snapshotGo[hash]
+				if omitZeroPools && markStake == 0 && setStake == 0 && goStake == 0 {
+					continue
+				}
+				poolSnapshots[key] = &olocalstatequery.PoolStakeSnapshot{
+					StakeMark: markStake,
+					StakeSet:  setStake,
+					StakeGo:   goStake,
+				}
+			}
+		}
+	} else {
+		// A pool filter is bounded by the caller, so read only the requested
+		// pools' snapshots rather than every pool's.
+		poolSnapshots = make(
+			map[ledger.Blake2b224]*olocalstatequery.PoolStakeSnapshot,
+			len(pools),
+		)
+		for _, pool := range pools {
+			hash := make([]byte, len(pool))
+			copy(hash, pool[:])
+			mark, err := ls.poolSnapshotStake(epoch, true, hash, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+			set, err := ls.poolSnapshotStake(setEpoch, hasSet, hash, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+			snapshotGo, err := ls.poolSnapshotStake(goEpoch, hasGo, hash, metaTxn)
+			if err != nil {
+				return nil, err
+			}
+			if omitZeroPools && mark == 0 && set == 0 && snapshotGo == 0 {
+				continue
+			}
+			poolSnapshots[ledger.NewBlake2b224(hash)] = &olocalstatequery.PoolStakeSnapshot{
+				StakeMark: mark,
+				StakeSet:  set,
+				StakeGo:   snapshotGo,
+			}
+		}
+	}
+
+	markTotal, err := ls.totalActiveStake(epoch, true, metaTxn)
+	if err != nil {
+		return nil, err
+	}
+	setTotal, err := ls.totalActiveStake(setEpoch, hasSet, metaTxn)
+	if err != nil {
+		return nil, err
+	}
+	goTotal, err := ls.totalActiveStake(goEpoch, hasGo, metaTxn)
+	if err != nil {
+		return nil, err
+	}
+
+	result := olocalstatequery.StakeSnapshotsResult{
+		PoolSnapshots:  poolSnapshots,
+		TotalStakeMark: markTotal,
+		TotalStakeSet:  setTotal,
+		TotalStakeGo:   goTotal,
+	}
+	return []any{result}, nil
+}
+
+// snapshotTypeMark is the physical snapshot type dingo persists at each
+// epoch boundary; set/go are derived from earlier epochs' mark snapshots.
+const snapshotTypeMark = "mark"
+
+// priorEpoch returns epoch-n and true when that prior epoch exists, or
+// (0, false) when it would underflow (epoch < n) — i.e. the chain does not
+// yet have n epochs of snapshot history behind the current one.
+func priorEpoch(epoch, n uint64) (uint64, bool) {
+	if epoch < n {
+		return 0, false
+	}
+	return epoch - n, true
+}
+
+// markStakeByPool bulk-loads the mark snapshot for the given epoch and indexes
+// each pool's stake by pool key hash (string). It returns nil when the epoch
+// does not exist (exists=false).
+func (ls *LedgerState) markStakeByPool(
+	epoch uint64,
+	exists bool,
+	txn types.Txn,
+) (map[string]uint64, error) {
+	if !exists {
+		return nil, nil
+	}
+	snapshots, err := ls.db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		epoch,
+		snapshotTypeMark,
+		txn,
+	)
+	if err != nil {
+		return nil, err
+	}
+	byPool := make(map[string]uint64, len(snapshots))
+	for _, snapshot := range snapshots {
+		byPool[string(snapshot.PoolKeyHash)] = uint64(snapshot.TotalStake)
+	}
+	return byPool, nil
+}
+
+// poolSnapshotStake returns a single pool's mark-snapshot stake at the given
+// epoch, or 0 when the epoch does not exist (exists=false) or has no snapshot
+// row for the pool. Used for the bounded pool-filter path; the all-pools path
+// uses markStakeByPool to avoid a per-pool query.
+func (ls *LedgerState) poolSnapshotStake(
+	epoch uint64,
+	exists bool,
+	poolKeyHash []byte,
+	txn types.Txn,
+) (uint64, error) {
+	if !exists {
+		return 0, nil
+	}
+	snapshot, err := ls.db.Metadata().GetPoolStakeSnapshot(
+		epoch,
+		snapshotTypeMark,
+		poolKeyHash,
+		txn,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if snapshot == nil {
+		return 0, nil
+	}
+	return uint64(snapshot.TotalStake), nil
+}
+
+// totalActiveStake returns the total mark-snapshot stake at the given epoch,
+// clamped to a minimum of 1.
+//
+// The three StakeSnapshots totals are decoded by cardano clients as NonZero
+// values: cardano-node emits 1 for an empty snapshot total (verified against
+// cardano-node 11.0.1 on a fresh devnet, where every pool's set/go stake is 0
+// yet the set/go totals are reported as 1). Emitting a literal 0 makes
+// cardano-cli fail with "Encountered zero while trying to construct a NonZero
+// value". Per-pool stakes are plain Coin and are left un-clamped. See issue
+// #2917.
+func (ls *LedgerState) totalActiveStake(
+	epoch uint64,
+	exists bool,
+	txn types.Txn,
+) (uint64, error) {
+	if !exists {
+		return 1, nil
+	}
+	total, err := ls.db.Metadata().GetTotalActiveStake(epoch, snapshotTypeMark, txn)
+	if err != nil {
+		return 0, err
+	}
+	if total == 0 {
+		return 1, nil
+	}
+	return total, nil
 }
 
 func (ls *LedgerState) queryShelleyGenesisConfig() (any, error) {

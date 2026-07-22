@@ -17,9 +17,9 @@ require (
 	github.com/aws/smithy-go v1.27.4
 	github.com/blinklabs-io/bark v0.0.2
 	github.com/blinklabs-io/bursa v0.16.0
-	github.com/blinklabs-io/gouroboros v0.188.0
-	github.com/blinklabs-io/ouroboros-mock v0.14.0
-	github.com/blinklabs-io/plutigo v0.1.16
+	github.com/blinklabs-io/gouroboros v0.189.1
+	github.com/blinklabs-io/ouroboros-mock v0.15.0
+	github.com/blinklabs-io/plutigo v0.1.17
 	github.com/blockfrost/blockfrost-go v0.4.0
 	github.com/btcsuite/btcd/btcutil v1.2.0
 	github.com/consensys/gnark-crypto v0.20.1
@@ -129,7 +129,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0 // indirect
 	github.com/envoyproxy/protoc-gen-validate v1.3.3 // indirect
-	github.com/ethereum/go-ethereum v1.17.3 // indirect
+	github.com/ethereum/go-ethereum v1.17.4 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/getsops/gopgagent v0.0.0-20241224165529-7044f28e491e // indirect
