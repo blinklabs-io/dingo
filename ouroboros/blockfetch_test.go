@@ -364,6 +364,55 @@ func TestBlockfetchServerSendBatch_BatchDoneAtChainTip(t *testing.T) {
 	assert.Equal(t, 1, iter.cancelCalls)
 }
 
+func TestBlockfetchServerSendBatch_RollbackEndsBatchWithoutServingBlock(
+	t *testing.T,
+) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	o := NewOuroboros(OuroborosConfig{
+		Logger:   logger,
+		EventBus: event.NewEventBus(nil, logger),
+	})
+	// The chain iterator surfaces a rollback as a sentinel result with
+	// Rollback=true and a zero-value Block. Serving that zero block streams a
+	// [0, null] block that a fetching peer decodes as a nil-header Byron EBB
+	// and crashes dereferencing it in SlotNumber(). The server must end the
+	// batch instead of serving the sentinel.
+	iter := &stubBlockfetchIterator{
+		steps: []blockfetchIteratorStep{
+			{result: &chain.ChainIteratorResult{
+				Point:    ocommon.NewPoint(150, []byte{0x03}),
+				Rollback: true,
+			}},
+		},
+	}
+	server := &stubBlockfetchBatchServer{}
+	conn := &stubBlockfetchConnection{
+		errChan: make(chan error),
+	}
+	start := ocommon.NewPoint(100, []byte{0x01})
+	end := ocommon.NewPoint(200, []byte{0x02})
+
+	err := o.blockfetchServerSendBatch(
+		testConnId().String(),
+		start,
+		end,
+		iter,
+		server,
+		conn,
+	)
+
+	assert.NoError(t, err)
+	assert.Equal(t, 1, server.startBatchCalls)
+	// The rollback sentinel must NOT be streamed as a block.
+	assert.Equal(t, 0, server.blockCalls,
+		"rollback sentinel must not be streamed as a block")
+	// The batch ends cleanly so the client re-requests against its updated
+	// chain (blockfetch has no rollback message).
+	assert.Equal(t, 1, server.batchDoneCalls)
+	assert.Equal(t, 0, conn.closeCalls)
+	assert.Equal(t, 1, iter.cancelCalls)
+}
+
 func TestBlockfetchServerSendBatch_WaitsForSendDrainBetweenMessages(
 	t *testing.T,
 ) {

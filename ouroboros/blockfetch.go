@@ -296,6 +296,17 @@ Loop:
 			if next == nil {
 				break Loop
 			}
+			if next.Rollback {
+				// A rollback raced this in-flight batch: the iterator
+				// surfaced a rollback sentinel with a zero-value Block.
+				// Serving it would stream a [0, null] block that a fetching
+				// peer decodes as a nil-header Byron EBB and crashes
+				// dereferencing it in SlotNumber(). Blockfetch has no
+				// rollback message, so end the batch cleanly; the client
+				// re-requests against its updated chain. Mirrors the
+				// next.Rollback handling in chainsync.
+				break Loop
+			}
 			if next.Block.Slot > end.Slot {
 				break Loop
 			}
