@@ -30,6 +30,10 @@ MODE="dingo"
 for arg in "$@"; do
   case "${arg}" in
     --conformance) MODE="conformance" ;;
+    *)
+      echo "Unknown argument: ${arg}" >&2
+      exit 1
+      ;;
   esac
 done
 if [[ "${MODE}" == "conformance" ]]; then

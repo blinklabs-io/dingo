@@ -122,11 +122,11 @@ func (h *TestHarness) DingoNode() NodeEndpoint {
 	panic("no dingo producer endpoint configured")
 }
 
-// ReferenceNode returns the cardano-node reference endpoint and true when
-// running in conformance mode; false otherwise.
+// ReferenceNode returns the cardano-node reference producer endpoint and true
+// when running in conformance mode; false otherwise.
 func (h *TestHarness) ReferenceNode() (NodeEndpoint, bool) {
 	for _, ep := range h.endpoints {
-		if ep.IsReference {
+		if ep.IsReference && ep.Role == "producer" {
 			return ep, true
 		}
 	}

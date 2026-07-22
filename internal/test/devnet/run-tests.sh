@@ -180,18 +180,25 @@ if [[ "${MODE}" == "dingo" ]]; then
   fi
   STAKE_KEYS_HOST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dingo-devnet-stake-keys.XXXXXX")"
   if [[ -z "${UTXO_KEYS_VOLUME}" ]]; then
-    warn "Unable to locate the utxo-keys Docker volume; skipping stake-keys copy (CIP-50 scenario tolerates missing keys)"
+    warn "Unable to locate the utxo-keys Docker volume; skipping stake-keys copy"
   else
-    # Never let a copy failure abort the run: the CIP-50 scenario already
-    # skips when stake keys are absent, so a missing/renamed "stake" dir
-    # inside the volume is a soft condition, not a fatal one.
+    # Never let a copy failure abort the run. Missing stake keys are handled
+    # below by disabling the opt-in CIP-50 scenario for this invocation.
     docker run --rm \
       -v "${UTXO_KEYS_VOLUME}:/k:ro" \
       -v "${STAKE_KEYS_HOST_DIR}:/out" \
       alpine sh -c 'cp -r /k/stake /out/stake' 2>/dev/null || true
   fi
-  export DEVNET_STAKE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}/stake"
-  log "DEVNET_STAKE_KEYS_DIR=${DEVNET_STAKE_KEYS_DIR}"
+  if [[ -d "${STAKE_KEYS_HOST_DIR}/stake" ]]; then
+    export DEVNET_STAKE_KEYS_DIR="${STAKE_KEYS_HOST_DIR}/stake"
+    log "DEVNET_STAKE_KEYS_DIR=${DEVNET_STAKE_KEYS_DIR}"
+  else
+    unset DEVNET_STAKE_KEYS_DIR
+    if [[ "${DEVNET_CIP50_TEST:-}" == "1" ]]; then
+      warn "Genesis stake keys were not copied; skipping the CIP-50 scenario"
+      unset DEVNET_CIP50_TEST
+    fi
+  fi
 fi
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +225,10 @@ else
   export DEVNET_DINGO2_ADDR="localhost:${DEVNET_DINGO2_PORT:-3013}"
   export DEVNET_DINGO3_ADDR="localhost:${DEVNET_DINGO3_PORT:-3014}"
   export DEVNET_DINGO_RELAY_ADDR="localhost:${DEVNET_DINGO_RELAY_PORT:-3015}"
+  export DEVNET_DINGO1_NTC_ADDR="${DEVNET_DINGO1_NTC_ADDR:-localhost:${DEVNET_DINGO1_NTC_PORT:-3020}}"
+  export DEVNET_DINGO2_NTC_ADDR="${DEVNET_DINGO2_NTC_ADDR:-localhost:${DEVNET_DINGO2_NTC_PORT:-3021}}"
+  export DEVNET_DINGO3_NTC_ADDR="${DEVNET_DINGO3_NTC_ADDR:-localhost:${DEVNET_DINGO3_NTC_PORT:-3022}}"
+  export DEVNET_DINGO_RELAY_NTC_ADDR="${DEVNET_DINGO_RELAY_NTC_ADDR:-localhost:${DEVNET_DINGO_RELAY_NTC_PORT:-3023}}"
 fi
 
 # Run tests with the mode's build tags.
