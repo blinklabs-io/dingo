@@ -108,6 +108,7 @@ var flagSpecs = []flagSpec{
 	durationFlag("HistoryExpiry.Frequency", "history-expiry-frequency", "history expiry scan frequency"),
 
 	// Mempool
+	stringFlag("MempoolImplementation", "mempool-implementation", "", "mempool implementation: fifo"),
 	int64Flag("MempoolCapacity", "mempool-capacity", "mempool max bytes"),
 	float64Flag("EvictionWatermark", "eviction-watermark", "mempool eviction watermark"),
 	float64Flag("RejectionWatermark", "rejection-watermark", "mempool rejection watermark"),

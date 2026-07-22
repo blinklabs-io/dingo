@@ -52,6 +52,17 @@ import (
 // to keep defaults consistent.
 const defaultMaxChainsyncClients = chainsync.DefaultMaxClients
 
+// Mempool is the protocol-facing subset of the backend-neutral mempool. Keeping
+// this interface local prevents networking from depending on FIFO internals.
+type Mempool interface {
+	AddTransaction(txType uint, txBytes []byte) error
+	Transactions() []mempool.MempoolTransaction
+	CapacityBytes() int64
+	AddConsumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+	RemoveConsumer(connId ouroboros.ConnectionId)
+	Consumer(connId ouroboros.ConnectionId) mempool.RelayConsumer
+}
+
 func blockfetchConfig(
 	opts ...oblockfetch.BlockFetchOptionFunc,
 ) oblockfetch.Config {
@@ -67,7 +78,7 @@ type Ouroboros struct {
 	PeerGov                  *peergov.PeerGovernor
 	ChainsyncState           *chainsync.State
 	EventBus                 *event.EventBus
-	Mempool                  *mempool.Mempool
+	Mempool                  Mempool
 	LedgerState              *ledger.LedgerState
 	LeiosVotes               LeiosVoteHandler
 	LeiosPipeline            LeiosPipelineHandler

@@ -298,6 +298,12 @@ historyExpiry:
 # This is experimental and may break — use with caution
 intersectTip: false
 
+# Mempool backend. Only "fifo" is accepted; it preserves successful-admission
+# order and is the default. Any other value is rejected during configuration
+# validation.
+# CLI: --mempool-implementation  Env: CARDANO_MEMPOOL_IMPLEMENTATION
+mempoolImplementation: "fifo"
+
 # Maximum total size (in bytes) of all transactions allowed in the mempool.
 # Transactions exceeding this limit will be rejected.
 # Default: 1048576 (1 MiB) for Praos modes; 26214400 (25 MiB) for Leios.

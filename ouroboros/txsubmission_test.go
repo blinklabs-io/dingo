@@ -361,7 +361,7 @@ func newTxSubmissionTestOuroboros(
 	o.ConnManager = connmanager.NewConnectionManager(connmanager.ConnectionManagerConfig{
 		Logger: logger,
 	})
-	o.Mempool = m
+	o.Mempool = &mempool.FIFO{Mempool: m}
 	return o, txsubmissionTestConnId(t)
 }
 
@@ -415,7 +415,9 @@ func txsubmissionTestFixtures(t *testing.T) []txsubmissionTestFixture {
 
 func addTxSubmissionTestFixtures(
 	t *testing.T,
-	m *mempool.Mempool,
+	m interface {
+		AddTransaction(txType uint, txBytes []byte) error
+	},
 	fixtures ...txsubmissionTestFixture,
 ) {
 	t.Helper()
@@ -518,9 +520,9 @@ func newTxSubmissionRelayHarnessWithOpts(
 	)
 
 	nodeA := NewOuroboros(OuroborosConfig{ConnManager: cmA, Logger: logger})
-	nodeA.Mempool = mA
+	nodeA.Mempool = &mempool.FIFO{Mempool: mA}
 	nodeB := NewOuroboros(OuroborosConfig{ConnManager: cmB, Logger: logger})
-	nodeB.Mempool = mB
+	nodeB.Mempool = &mempool.FIFO{Mempool: mB}
 
 	serverPipe, clientPipe := net.Pipe()
 

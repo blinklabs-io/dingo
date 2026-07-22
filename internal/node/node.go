@@ -32,6 +32,7 @@ import (
 	"github.com/blinklabs-io/dingo/config/cardano"
 	"github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/ledger"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -316,6 +317,9 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithDatabasePath(cfg.DatabasePath),
 			dingo.WithBlobPlugin(cfg.BlobPlugin),
 			dingo.WithMetadataPlugin(cfg.MetadataPlugin),
+			dingo.WithMempoolImplementation(
+				mempool.Implementation(cfg.MempoolImplementation),
+			),
 			dingo.WithMempoolCapacity(cfg.MempoolCapacity),
 			dingo.WithEvictionWatermark(cfg.EvictionWatermark),
 			dingo.WithRejectionWatermark(cfg.RejectionWatermark),

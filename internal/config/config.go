@@ -86,6 +86,7 @@ const (
 	DefaultForgeStaleGapThresholdSlots = 1000
 	DefaultMempoolCapacityPraos        = 1048576  // 1 MiB
 	DefaultMempoolCapacityLeios        = 26214400 // 25 MiB
+	DefaultMempoolImplementation       = "fifo"
 )
 
 // ErrPluginListRequested is returned when the user requests to list
@@ -458,6 +459,7 @@ type Config struct {
 	Network                string   `yaml:"network"`
 	NetworkMagic           uint32   `yaml:"networkMagic"                                                     split_words:"true"`
 	MempoolCapacity        int64    `yaml:"mempoolCapacity"                                                  split_words:"true"`
+	MempoolImplementation  string   `yaml:"mempoolImplementation" split_words:"true"`
 	EvictionWatermark      float64  `yaml:"evictionWatermark"  envconfig:"DINGO_MEMPOOL_EVICTION_WATERMARK"`
 	RejectionWatermark     float64  `yaml:"rejectionWatermark" envconfig:"DINGO_MEMPOOL_REJECTION_WATERMARK"`
 	PrivatePort            uint     `yaml:"privatePort"                                                      split_words:"true"`
@@ -821,42 +823,43 @@ var globalConfig = &Config{
 	// MempoolCapacity is left as the zero sentinel; LoadConfig fills
 	// it in based on RunMode (Praos vs Leios) after CLI/env/YAML have
 	// been merged.
-	MempoolCapacity:      0,
-	EvictionWatermark:    DefaultEvictionWatermark,
-	RejectionWatermark:   DefaultRejectionWatermark,
-	BindAddr:             "0.0.0.0",
-	CardanoConfig:        "", // Will be set dynamically based on network
-	DatabasePath:         ".dingo",
-	SocketPath:           "dingo.socket",
-	IntersectTip:         false,
-	ValidateHistorical:   false,
-	StrictUtxoValidation: false,
-	Tracing:              false,
-	TracingStdout:        false,
-	Network:              "preview",
-	NetworkMagic:         0,
-	MetricsPort:          12798,
-	DebugPort:            0,
-	PrivateBindAddr:      "127.0.0.1",
-	PrivatePort:          3002,
-	RelayPort:            3001,
-	BarkBaseUrl:          "",
-	BarkPort:             0,
-	UtxorpcPort:          9090,
-	CORSAllowedOrigins:   []string{"*"},
-	BlockfrostPort:       3000,
-	MeshPort:             8080,
-	Topology:             "",
-	TlsCertFilePath:      "",
-	TlsKeyFilePath:       "",
-	BlobPlugin:           DefaultBlobPlugin,
-	MetadataPlugin:       DefaultMetadataPlugin,
-	StorageMode:          "core",
-	RunMode:              RunModeServe,
-	StartEra:             StartEraDefault,
-	ImmutableDbPath:      "",
-	ShutdownTimeout:      DefaultShutdownTimeout,
-	LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
+	MempoolCapacity:       0,
+	MempoolImplementation: DefaultMempoolImplementation,
+	EvictionWatermark:     DefaultEvictionWatermark,
+	RejectionWatermark:    DefaultRejectionWatermark,
+	BindAddr:              "0.0.0.0",
+	CardanoConfig:         "", // Will be set dynamically based on network
+	DatabasePath:          ".dingo",
+	SocketPath:            "dingo.socket",
+	IntersectTip:          false,
+	ValidateHistorical:    false,
+	StrictUtxoValidation:  false,
+	Tracing:               false,
+	TracingStdout:         false,
+	Network:               "preview",
+	NetworkMagic:          0,
+	MetricsPort:           12798,
+	DebugPort:             0,
+	PrivateBindAddr:       "127.0.0.1",
+	PrivatePort:           3002,
+	RelayPort:             3001,
+	BarkBaseUrl:           "",
+	BarkPort:              0,
+	UtxorpcPort:           9090,
+	CORSAllowedOrigins:    []string{"*"},
+	BlockfrostPort:        3000,
+	MeshPort:              8080,
+	Topology:              "",
+	TlsCertFilePath:       "",
+	TlsKeyFilePath:        "",
+	BlobPlugin:            DefaultBlobPlugin,
+	MetadataPlugin:        DefaultMetadataPlugin,
+	StorageMode:           "core",
+	RunMode:               RunModeServe,
+	StartEra:              StartEraDefault,
+	ImmutableDbPath:       "",
+	ShutdownTimeout:       DefaultShutdownTimeout,
+	LedgerCatchupTimeout:  DefaultLedgerCatchupTimeout,
 	// Defaults for database worker pool and API backfill tuning
 	DatabaseWorkers:   5,
 	DatabaseQueueSize: 50,
@@ -1063,6 +1066,9 @@ func (c *Config) ApplyDefaults() {
 		} else {
 			c.MempoolCapacity = DefaultMempoolCapacityPraos
 		}
+	}
+	if c.MempoolImplementation == "" {
+		c.MempoolImplementation = DefaultMempoolImplementation
 	}
 	// Unset float64 fields are 0, which is indistinguishable from an
 	// explicit 0; both select the standard watermark

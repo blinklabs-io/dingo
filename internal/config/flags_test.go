@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRegisterFlags_CoversAllExportedConfigFields(t *testing.T) {
@@ -286,6 +288,36 @@ func TestApplyFlags_PriorityOrderFlagsOverrideEnv(t *testing.T) {
 			cfg.Midnight.Host,
 		)
 	}
+}
+
+func TestMempoolImplementationSourcePrecedence(t *testing.T) {
+	resetGlobalConfig()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CARDANO_MEMPOOL_IMPLEMENTATION", "fifo")
+
+	configFile := filepath.Join(t.TempDir(), "dingo.yaml")
+	require.NoError(
+		t,
+		os.WriteFile(
+			configFile,
+			[]byte("mempoolImplementation: priority\n"),
+			0o600,
+		),
+	)
+	cfg, err := LoadConfig(configFile)
+	require.NoError(t, err)
+	assert.Equal(t, "fifo", cfg.MempoolImplementation, "environment overrides YAML")
+
+	cmd := &cobra.Command{Use: "dingo"}
+	RegisterFlags(cmd)
+	require.NoError(t, cmd.ParseFlags([]string{"--mempool-implementation=priority"}))
+	require.NoError(t, ApplyFlags(cmd, cfg))
+	assert.Equal(t, "priority", cfg.MempoolImplementation, "CLI overrides environment")
+	require.ErrorContains(
+		t,
+		cfg.validate(cfg.RunMode, minUnprivilegedPort),
+		"invalid mempoolImplementation",
+	)
 }
 
 func TestRegisterFlags_MidnightAddressAndPolicyFieldsAreYAMLOnly(t *testing.T) {
