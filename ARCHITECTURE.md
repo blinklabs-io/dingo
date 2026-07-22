@@ -1340,20 +1340,26 @@ Praos — exit keys off the advertised network tip, not the observed frontier, s
 the gate stays active through from-origin sync until the local tip nears the
 real network tip.
 
-The exit horizon is the highest advertised tip slot among **corroborated
-(selectable)** peers. It must be corroborated, not any live peer's raw tip,
-because the advertised tip is untrusted and the implausible-tip check bounds only
-the advertised *block number*, not the *slot* (and the first peer is accepted
-with no reference): a single peer advertising a plausible block with a slot near
-`math.MaxUint64` would otherwise pin the node in Genesis mode forever — a
-liveness DoS. Requiring corroboration means `MinCorroboratingPeers` independent
-peers must have delivered matching headers, so a lone liar cannot inflate the
-horizon. The trade-off is that an uncorroborated source that is ahead in block
-number could win Praos selection once the local tip has caught up to the
-corroborated tip and the node has exited; closing that residual needs
-density-at-intersection (deferred, below). Liveness is prioritized over that
-residual because an unbounded advertised slot is a trivially exploitable
-single-peer stall. A change
+The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
+slot among **corroborated (selectable)** peers that have **actually delivered
+headers up to within the window of that advertised tip**
+(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded —
+the implausible-tip check bounds the advertised *block number* but not the
+*slot*, and the first peer is accepted with no reference — and corroboration
+alone does not fix this, because it validates the *delivered* headers (the
+observed frontier), not the advertised claim: a peer that delivers one shared
+early header (passing corroboration) can still advertise a slot near
+`math.MaxUint64`. Binding the horizon to *delivered* data closes this: a liar
+cannot deliver headers up to a `MaxUint64` slot, and an honest peer early in
+from-origin sync has not yet delivered up to its far advertised tip, so neither
+raises the horizon prematurely; the advertised tip becomes the exit target only
+once a corroborated peer has served its chain up to (near) it, which is reached
+exactly when the local tip has caught up. This satisfies both bounds — no
+single-peer liveness pin (an unbounded slot never counts until delivered) and no
+premature exit at the start of sync (delivered headers only reach the far tip
+once caught up). The trade-off is that an uncorroborated source ahead in block
+number could win Praos selection after exit; closing that residual needs
+density-at-intersection (deferred, below). A change
 to any tracked peer's frontier re-runs selection while corroboration is active,
 so corroboration granted or revoked takes effect immediately rather than on the
 next periodic tick.

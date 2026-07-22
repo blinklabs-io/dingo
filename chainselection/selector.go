@@ -234,43 +234,49 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return defaultGenesisWindowSlots
 }
 
-// bestKnownGenesisSlotLocked returns the exit horizon: the highest advertised
-// tip slot among CORROBORATED (selectable) peers, used to decide when the local
-// tip has caught up enough to leave Genesis mode.
+// bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
+// local tip must catch up to (within the window) before leaving Genesis mode.
 //
-// Two properties matter:
+// The advertised tip (pt.Tip) is untrusted and unbounded — the implausible-tip
+// check bounds the advertised BLOCK number but NOT the advertised slot, and the
+// first peer is accepted with no reference — so a peer can advertise a plausible
+// block with a slot near math.MaxUint64. Corroboration alone does not fix this:
+// it validates the DELIVERED headers (the observed frontier), not the advertised
+// claim, so a peer that delivers one shared early header (passing corroboration)
+// can still advertise an arbitrary tip. Using that raw advertised slot as the
+// horizon lets a single peer pin the node in Genesis mode indefinitely — a
+// liveness DoS.
 //
-//   - It uses the advertised tip (pt.Tip), not the observed frontier
-//     (SelectionTip, which prefers ObservedTip): a from-origin ChainSync delivers
-//     early headers (slot 1) long before the local tip nears the network tip, so
-//     keying exit off the observed frontier would leave Genesis mode — and
-//     disable the corroboration gate — almost immediately (reproduced with two
-//     peers advertising a far tip while delivering the same slot-1 header).
-//   - It considers only selectable (corroborated) peers. The advertised tip is
-//     untrusted, and the implausible-tip check bounds the advertised BLOCK number
-//     but NOT the advertised slot — a peer can advertise a plausible block with a
-//     slot near math.MaxUint64 (and the first peer is accepted with no reference
-//     at all). If uncorroborated peers counted toward the horizon, a single such
-//     peer could pin the node in Genesis mode indefinitely (a liveness DoS).
-//     Requiring corroboration means MinCorroboratingPeers independent peers must
-//     have delivered matching headers, so a lone liar cannot inflate the horizon.
+// The horizon is therefore bound to DELIVERED data: a peer's advertised tip
+// counts only when the peer is corroborated (selectable) AND it has actually
+// delivered headers up to within the window of that advertised tip
+// (ObservedTip + window >= Tip). A liar cannot deliver up to a MaxUint64 slot,
+// and an honest peer early in from-origin sync has not yet delivered up to its
+// far advertised tip, so neither raises the horizon prematurely. Once a
+// corroborated peer has served its chain up to (near) its advertised tip, that
+// tip is trustworthy and becomes the exit target — reached exactly when the
+// local tip has caught up.
 //
-// Trade-off: keying exit off corroborated peers means an uncorroborated source
-// that is ahead in block number can, in principle, win Praos selection once the
-// local tip has caught up to the corroborated tip and the node has exited. That
-// residual is a limitation of the density heuristic (a divergent chain dense
-// enough to be plausible but uncorroborated); resolving it fully needs
-// density-at-intersection, which is deferred (see ARCHITECTURE.md). Liveness is
-// prioritized over that residual here because an unbounded advertised slot is a
-// trivially exploitable single-peer stall.
+// Residual (documented, deferred): an uncorroborated source ahead in block
+// number could win Praos selection after exit; closing that needs
+// density-at-intersection (see ARCHITECTURE.md).
 func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
+	window := cs.genesisWindowSlotsLocked()
 	var best uint64
 	for connId, pt := range cs.peerTips {
 		if !cs.isPeerSelectableLocked(connId, pt, false) {
 			continue
 		}
-		if pt.Tip.Point.Slot > best {
-			best = pt.Tip.Point.Slot
+		advertised := pt.Tip.Point.Slot
+		delivered := pt.ObservedTip.Point.Slot
+		// Ignore an advertised tip the peer has not delivered headers up to:
+		// it is either a lie or a not-yet-synced far tip, and must not raise
+		// the exit horizon.
+		if safeAddUint64(delivered, window) < advertised {
+			continue
+		}
+		if advertised > best {
+			best = advertised
 		}
 	}
 	return best

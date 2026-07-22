@@ -361,39 +361,102 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 
 	peerA := corrConn(1)
 	peerB := corrConn(2)
-	// Both peers advertise slot 100000 but have only delivered the slot-1
-	// header so far (separate advertised Tip and observed ObservedTip).
+	// Both peers advertise slot 100000 throughout; only their DELIVERED
+	// (observed) frontier advances as sync progresses.
 	advertised := ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 100000, Hash: []byte("net-tip")},
 		BlockNumber: 100000,
 	}
-	observed := ochainsync.Tip{
-		Point:       ocommon.Point{Slot: 1, Hash: []byte("h1")},
-		BlockNumber: 1,
+	deliver := func(slot uint64) {
+		obs := ochainsync.Tip{
+			Point: ocommon.Point{
+				Slot: slot,
+				Hash: []byte(fmt.Sprintf("h%d", slot)),
+			},
+			BlockNumber: slot,
+		}
+		require.True(t, cs.updatePeerTipObserved(peerA, advertised, obs, nil))
+		require.True(t, cs.updatePeerTipObserved(peerB, advertised, obs, nil))
 	}
-	require.True(t, cs.updatePeerTipObserved(peerA, advertised, observed, nil))
-	require.True(t, cs.updatePeerTipObserved(peerB, advertised, observed, nil))
 
-	// Two peers now corroborate the early header, but the advertised tip is far
-	// beyond the window, so the node must remain in Genesis mode.
+	// Both peers advertise slot 100000 but have only delivered the slot-1
+	// header. The far advertised tip has not been delivered, so the node must
+	// stay in Genesis (no premature exit on early observed headers).
+	deliver(1)
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode(),
 		"must not exit Genesis on early observed headers")
 
-	// Advancing the local tip while still far behind the advertised tip keeps
-	// the node in Genesis mode.
+	// Sync progresses: headers are delivered up to slot 50000 and the local tip
+	// follows. Still far below the advertised tip, so stay in Genesis.
+	deliver(50000)
 	cs.SetLocalTip(ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 50000, Hash: []byte("local-50000")},
 		BlockNumber: 50000,
 	})
 	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode())
 
-	// Only once the local tip catches up to within the window (30) of the
-	// advertised tip does the node exit to Praos.
+	// Only once the peers have DELIVERED headers up to within the window (30) of
+	// their advertised tip — and the local tip has caught up — does the node
+	// exit to Praos.
+	deliver(99990)
 	cs.SetLocalTip(ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 99990, Hash: []byte("local-99990")},
 		BlockNumber: 99990,
 	})
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
+}
+
+// A corroborated peer can still lie about its advertised tip: it delivers a
+// shared early header (passing corroboration) but advertises a slot near
+// MaxUint64 it has not delivered. That undelivered advertised slot must not pin
+// Genesis mode — the exit horizon is bound to delivered headers, so the node
+// still exits once the local tip catches up to the delivered/corroborated tip.
+func TestGenesisExitNotPinnedByCorroboratedLiarAdvertisingFarTip(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         10, // window = 30
+		MinCorroboratingPeers: 1,
+	})
+
+	honest := corrConn(1)
+	liar := corrConn(2)
+	// Both deliver the same header at slot 100, so they corroborate each other.
+	sharedObs := ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("h100")},
+		BlockNumber: 100,
+	}
+	// Honest advertises what it has delivered.
+	require.True(t, cs.updatePeerTipObserved(
+		honest,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: 100, Hash: []byte("honest-tip")},
+			BlockNumber: 100,
+		},
+		sharedObs,
+		nil,
+	))
+	// Liar is corroborated on the shared slot-100 header but advertises an
+	// extreme tip it has NOT delivered.
+	const extremeSlot = uint64(1) << 62
+	require.True(t, cs.updatePeerTipObserved(
+		liar,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-tip")},
+			BlockNumber: 100,
+		},
+		sharedObs,
+		nil,
+	))
+
+	// Local catches up to the delivered/corroborated tip (slot 100).
+	cs.SetLocalTip(ochainsync.Tip{
+		Point:       ocommon.Point{Slot: 100, Hash: []byte("local-100")},
+		BlockNumber: 100,
+	})
+
+	// The liar's undelivered extreme advertised slot must not pin Genesis mode.
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
+		"a corroborated peer's undelivered advertised slot must not pin Genesis")
 }
 
 // The Genesis exit horizon must be bounded so a single uncorroborated peer
