@@ -23,8 +23,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestHarnessReferenceNodeSelectsProducer(t *testing.T) {
+	endpoints := []NodeEndpoint{
+		{
+			Name:        "cardano-relay",
+			Role:        "relay",
+			IsReference: true,
+		},
+		{
+			Name:        "cardano-producer",
+			Role:        "producer",
+			IsReference: true,
+		},
+	}
+	h := NewTestHarness(t, endpoints)
+
+	referenceNode, ok := h.ReferenceNode()
+
+	require.True(t, ok)
+	require.Equal(t, endpoints[1], referenceNode)
+}
+
 func TestHarnessGetChainTip(t *testing.T) {
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(DefaultNetworkMagic),
 	)
@@ -46,7 +67,7 @@ func TestHarnessWaitForSlot(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)
@@ -67,7 +88,7 @@ func TestHarnessVerifyConsensus(t *testing.T) {
 	cfg, err := LoadDevNetConfig()
 	require.NoError(t, err, "failed to load devnet config")
 
-	endpoints := DefaultEndpoints()
+	endpoints := LoadEndpoints()
 	h := NewTestHarness(t, endpoints,
 		WithNetworkMagic(cfg.NetworkMagic),
 	)
