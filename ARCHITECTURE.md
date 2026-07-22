@@ -1596,6 +1596,12 @@ The `Mempool` (`mempool/mempool.go`) manages pending transactions:
     -------------------------------------------------
 ```
 
+Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
+clearing transaction and consumer state; later transaction admission returns
+`mempool.ErrMempoolStopped`, and later consumer registration is rejected. This
+prevents in-flight protocol callbacks from repopulating a pool whose background
+expiry and chain-update workers have already been stopped.
+
 ## Block Production
 
 When running as a stake pool operator, Dingo can produce blocks. This involves three subsystems under `ledger/`:

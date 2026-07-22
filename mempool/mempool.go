@@ -104,6 +104,7 @@ type Mempool struct {
 	cleanupInterval    time.Duration
 	evictionWatermark  float64
 	rejectionWatermark float64
+	stopped            bool
 	sync.RWMutex
 	doneOnce       sync.Once
 	consumersMutex sync.Mutex
@@ -313,6 +314,9 @@ func (o *utxoOverlay) simulateRemoveBatch(
 // crash the node.
 var ErrNilValidator = errors.New("mempool: validator is nil")
 
+// ErrMempoolStopped is returned when admission is attempted after shutdown.
+var ErrMempoolStopped = errors.New("mempool: stopped")
+
 type MempoolFullError struct {
 	CurrentSize int
 	TxSize      int
@@ -418,6 +422,11 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 }
 
 func (m *Mempool) AddConsumer(connId ouroboros.ConnectionId) *MempoolConsumer {
+	m.RLock()
+	defer m.RUnlock()
+	if m.stopped {
+		return nil
+	}
 	m.consumersMutex.Lock()
 	defer m.consumersMutex.Unlock()
 	if consumer := m.consumers[connId]; consumer != nil {
@@ -438,10 +447,17 @@ func (m *Mempool) Stop(ctx context.Context) error {
 	// Context is accepted for API consistency but not used since cleanup is synchronous and fast
 	m.logger.Debug("stopping mempool")
 
-	// Signal the processChainEvents goroutine to stop (safe to call multiple times)
+	// Establish a terminal state before clearing data. AddTransaction and
+	// AddConsumer check this state while holding the same pool lock, so neither
+	// can repopulate the mempool once shutdown begins.
+	m.Lock()
+	if m.stopped {
+		m.Unlock()
+		return nil
+	}
+	m.stopped = true
 	m.doneOnce.Do(func() { close(m.done) })
 
-	// Stop all consumers
 	m.consumersMutex.Lock()
 	for _, consumer := range m.consumers {
 		if consumer != nil {
@@ -451,8 +467,6 @@ func (m *Mempool) Stop(ctx context.Context) error {
 	m.consumers = make(map[ouroboros.ConnectionId]*MempoolConsumer)
 	m.consumersMutex.Unlock()
 
-	// Clear transactions
-	m.Lock()
 	m.transactions = []*MempoolTransaction{}
 	m.txByHash = make(map[string]*MempoolTransaction)
 	m.currentSizeBytes = 0
@@ -728,6 +742,11 @@ func (m *Mempool) AddTransaction(txType uint, txBytes []byte) error {
 	var evictedEvents []event.Event
 	func() {
 		m.Lock()
+		if m.stopped {
+			err = ErrMempoolStopped
+			m.Unlock()
+			return
+		}
 		m.consumersMutex.Lock()
 		defer func() {
 			m.consumersMutex.Unlock()

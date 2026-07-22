@@ -140,7 +140,9 @@ func (o *Ouroboros) txsubmissionClientStart(
 	}
 	// Register only after all required connection state has been verified. This
 	// avoids leaving a stale consumer behind when startup cannot proceed.
-	o.Mempool.AddConsumer(connId)
+	if consumer := o.Mempool.AddConsumer(connId); consumer == nil {
+		return mempool.ErrMempoolStopped
+	}
 	tx.Client.Init()
 	return nil
 }

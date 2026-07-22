@@ -1172,6 +1172,21 @@ func TestMempool_ConsumerAfterStop(t *testing.T) {
 	m.RUnlock()
 }
 
+func TestMempool_RejectsOperationsAfterStop(t *testing.T) {
+	m := newTestMempool(t)
+	connId := newTestConnectionId(0)
+
+	require.NoError(t, m.Stop(context.Background()))
+
+	err := m.AddTransaction(uint(conway.EraIdConway), getTestTxBytes(t))
+	require.ErrorIs(t, err, ErrMempoolStopped)
+	assert.Empty(t, m.Transactions())
+	assert.Nil(t, m.AddConsumer(connId))
+	assert.Nil(t, m.Consumer(connId))
+
+	require.NoError(t, m.Stop(context.Background()))
+}
+
 func TestMempool_BlockingNextTx_WithEmptyMempool(t *testing.T) {
 	m := newTestMempool(t)
 	defer m.Stop(context.Background())
