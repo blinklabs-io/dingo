@@ -573,18 +573,18 @@ var ErrNoSnapshotsAvailable = errors.New(
 var defaultNetworkConfigs = map[string]NetworkConfig{
 	"mainnet": {
 		AggregatorURL:               "https://aggregator.release-mainnet.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/mainnet/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-mainnet/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-mainnet/ancillary.vkey",
 	},
 	"preprod": {
 		AggregatorURL:               "https://aggregator.release-preprod.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/preprod/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/release-preprod/ancillary.vkey",
 	},
 	"preview": {
 		AggregatorURL:               "https://aggregator.pre-release-preview.api.mithril.network/aggregator",
-		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis.vkey",
-		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/data/network-config/preview/genesis-ancillary.vkey",
+		GenesisVerificationKeyURL:   "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/genesis.vkey",
+		AncillaryVerificationKeyURL: "https://raw.githubusercontent.com/IntersectMBO/mithril/main/mithril-infra/configuration/pre-release-preview/ancillary.vkey",
 	},
 }
 
