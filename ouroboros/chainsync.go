@@ -631,6 +631,31 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
+	// Observe the rollback for chain selection first (trims the peer's observed
+	// history) so corroboration tracking stays correct even for a peer whose
+	// blocks we are withholding via the apply gate below.
+	o.EventBus.Publish(
+		chainselection.PeerRollbackEventType,
+		event.NewEvent(
+			chainselection.PeerRollbackEventType,
+			chainselection.PeerRollbackEvent{
+				ConnectionId: ctx.ConnectionId,
+				Point:        point,
+				Tip:          tip,
+			},
+		),
+	)
+	// Apply gate: withhold an uncorroborated peer's rollback from the ledger,
+	// mirroring the roll-forward apply gate.
+	if !o.shouldApplyChainsyncToLedger(ctx.ConnectionId) {
+		o.config.Logger.Debug(
+			"chainsync: rollback withheld (not apply eligible)",
+			"component", "ouroboros",
+			"slot", point.Slot,
+			"connection_id", ctx.ConnectionId.String(),
+		)
+		return nil
+	}
 	// Generate event. This stream is ordering-critical: dropping a
 	// rollback/header event can strand the ledger pipeline, so use blocking
 	// delivery to apply backpressure instead of lossy buffer overflow.
@@ -648,17 +673,6 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	); err != nil {
 		return err
 	}
-	o.EventBus.Publish(
-		chainselection.PeerRollbackEventType,
-		event.NewEvent(
-			chainselection.PeerRollbackEventType,
-			chainselection.PeerRollbackEvent{
-				ConnectionId: ctx.ConnectionId,
-				Point:        point,
-				Tip:          tip,
-			},
-		),
-	)
 	return nil
 }
 
@@ -789,6 +803,21 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
 			return nil
 		}
+		// Apply gate: a peer's tips have already been observed for chain
+		// selection above, but its headers are applied to the ledger only when
+		// apply-eligible. This withholds blocks from an uncorroborated Genesis
+		// fast source (it is observed but cannot steer the ledger) while letting
+		// corroboration still form from the observed tips.
+		if !o.shouldApplyChainsyncToLedger(ctx.ConnectionId) {
+			o.config.Logger.Debug(
+				"chainsync: header withheld (not apply eligible)",
+				"component", "ouroboros",
+				"slot", blockSlot,
+				"connection_id", ctx.ConnectionId.String(),
+			)
+			o.updateChainsyncMetrics(ctx.ConnectionId, tip)
+			return nil
+		}
 		if err := o.EventBus.PublishBlocking(
 			ledger.ChainsyncEventType,
 			event.NewEvent(
@@ -848,6 +877,21 @@ func (o *Ouroboros) shouldPublishChainsyncToLedger(
 	}
 	outbound, exists := o.ChainsyncState.ClientStartedAsOutbound(connId)
 	return exists && outbound
+}
+
+// shouldApplyChainsyncToLedger reports whether an ingress-eligible peer's
+// headers/rollbacks may be APPLIED to the ledger. It is the second, stricter
+// gate (see ChainsyncApplyEligible): it runs after the peer's tips have already
+// been observed for chain selection, so an uncorroborated Genesis fast source is
+// observed but its blocks are withheld. When no policy is wired, every ingress-
+// eligible peer is apply-eligible.
+func (o *Ouroboros) shouldApplyChainsyncToLedger(
+	connId ouroboros.ConnectionId,
+) bool {
+	if o.config.ChainsyncApplyEligible == nil {
+		return true
+	}
+	return o.config.ChainsyncApplyEligible(connId)
 }
 
 // isInboundChainsyncClient returns true if the chainsync client for

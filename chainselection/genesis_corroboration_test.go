@@ -231,6 +231,122 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 	assert.False(t, ahead.confirmsRecentChain(behind))
 }
 
+// ShouldApplyIngress is the real enforcement of the corroboration stall: an
+// uncorroborated peer is observed (tips feed corroboration) but its blocks must
+// not be applied. It gates apply on corroboration while active, denying unknown
+// and uncorroborated peers, and re-denies when corroboration is revoked.
+func TestGenesisShouldApplyIngressGatesUncorroborated(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	fast := corrConn(1)
+	witness := corrConn(2)
+
+	// Unknown peer: fail closed (deny apply) while the gate is active.
+	assert.False(t, cs.ShouldApplyIngress(fast))
+
+	// Lone uncorroborated fast source: observed but denied application.
+	feedFrontier(cs, fast,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	assert.False(t, cs.ShouldApplyIngress(fast),
+		"uncorroborated fast source must not be apply-eligible")
+
+	// A corroborator arrives: both become apply-eligible.
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	assert.True(t, cs.ShouldApplyIngress(fast))
+	assert.True(t, cs.ShouldApplyIngress(witness))
+
+	// The witness disconnects: corroboration is revoked, so the fast source is
+	// denied application again (no post-revocation ingress).
+	cs.RemovePeer(witness)
+	assert.False(t, cs.ShouldApplyIngress(fast),
+		"apply must be denied again once corroboration is revoked")
+}
+
+// Outside Genesis corroboration (Praos, or Genesis with the gate disabled) every
+// peer is apply-eligible — no behavior change.
+func TestShouldApplyIngressAllowsWhenCorroborationInactive(t *testing.T) {
+	conn := corrConn(1)
+
+	praos := NewChainSelector(ChainSelectorConfig{})
+	assert.True(t, praos.ShouldApplyIngress(conn))
+
+	genesisNoGate := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:   true,
+		SecurityParam: 20,
+	})
+	assert.True(t, genesisNoGate.ShouldApplyIngress(conn))
+}
+
+// A best-peer → none transition publishes an explicit ChainSelectedNoneEvent so
+// subscribers can observe that selection has stalled.
+func TestChainSelectedNoneEventOnCorroborationRevocation(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	var mu sync.Mutex
+	var events []ChainSelectedNoneEvent
+	bus.SubscribeFunc(
+		ChainSelectedNoneEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ChainSelectedNoneEvent)
+			if !ok {
+				return
+			}
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		},
+	)
+
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+		EventBus:              bus,
+	})
+
+	fast := corrConn(1)
+	witness := corrConn(2)
+	feedFrontier(cs, fast,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	require.Equal(t, fast, *cs.GetBestPeer())
+
+	// Revoke corroboration by removing the witness.
+	cs.RemovePeer(witness)
+	require.Nil(t, cs.GetBestPeer())
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range events {
+			if e.PreviousConnectionId == fast && e.GenesisCorroboration {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected ChainSelectedNoneEvent for the stalled incumbent")
+}
+
 // A dense fast source whose recent blocks are also reported by other eligible
 // peers (shared block hashes at shared slots) is corroborated, so it is
 // selected as the best chain in Genesis mode.
@@ -650,6 +766,39 @@ func TestGenesisCorroborationDedupsBySybilHost(t *testing.T) {
 	cs.EvaluateAndSwitch()
 	require.NotNil(t, cs.GetBestPeer(),
 		"an independent-host corroborator should satisfy the gate")
+}
+
+// A negative corroboration threshold (reachable via the public programmatic API,
+// e.g. NewConfig(WithGenesisCorroborationPeers(-1))) must fail closed: the gate
+// stays active rather than being silently disabled. Only 0 disables it.
+func TestGenesisNegativeCorroborationFailsClosed(t *testing.T) {
+	cs := NewChainSelector(ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: -1,
+	})
+
+	// The gate is active (clamped to 1), not disabled: a lone fast source with
+	// no corroborators is denied selection and stalls.
+	fast := corrConn(1)
+	feedFrontier(cs, fast,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+		genesisTip(110, "h110", 110),
+	)
+	cs.EvaluateAndSwitch()
+	assert.Nil(t, cs.GetBestPeer(),
+		"negative threshold must fail closed (gate active), not disable the gate")
+
+	// Adding one independent corroborator satisfies the clamped threshold of 1.
+	witness := corrConn(2)
+	feedFrontier(cs, witness,
+		genesisTip(100, "h100", 100),
+		genesisTip(105, "h105", 105),
+	)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+	assert.Equal(t, fast, *cs.GetBestPeer())
 }
 
 // Corroboration is opt-in. With MinCorroboratingPeers == 0 (the default), a

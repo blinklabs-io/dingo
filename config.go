@@ -881,8 +881,12 @@ func WithGenesisWindowSlots(slots uint64) ConfigOptionFunc {
 // Genesis-mode chain selection. This is the Ouroboros Genesis trust control for
 // biased fast-sync sources (e.g. the Genesis Sync Accelerator): an
 // uncorroborated or divergent fast source is denied selection and stalls rather
-// than steering the local chain. A zero value disables corroboration
-// (density-only Genesis selection).
+// than steering the local chain.
+//
+// Only a zero value disables corroboration (density-only Genesis selection). A
+// negative value is invalid and fails closed: the chain selector clamps it to 1
+// (require one corroborator) rather than treating it as disabled, so a
+// misconfiguration cannot silently switch off the security gate.
 func WithGenesisCorroborationPeers(peers int) ConfigOptionFunc {
 	return func(c *Config) {
 		c.genesisCorroborationPeers = peers

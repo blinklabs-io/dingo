@@ -153,6 +153,15 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncApplyEligible reports whether a peer's chainsync headers
+	// and rollbacks may be APPLIED to the ledger. It is a second gate,
+	// stricter than ChainsyncIngressEligible: a peer can be ingress-
+	// eligible (so its tips are observed for chain selection) yet not
+	// apply-eligible, so its blocks are not applied. This enforces the
+	// Ouroboros Genesis corroboration stall — an uncorroborated fast source
+	// is observed but cannot steer the ledger. When nil, every ingress-
+	// eligible peer is apply-eligible (no behavior change).
+	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
 	// EnableLeiosVotes initiates the standalone leios-votes mini-protocol

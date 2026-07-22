@@ -41,6 +41,15 @@ const (
 	// local tip has caught up to within the Genesis window of the best known
 	// peer tip.
 	GenesisModeExitedEventType event.EventType = "chainselection.genesis_mode_exited"
+
+	// ChainSelectedNoneEventType is published when the selector transitions to
+	// having no selectable best peer (e.g. an uncorroborated Genesis fast source
+	// is denied). It is the explicit selected-to-none transition that the
+	// ChainSwitchEvent (which always carries a non-nil replacement) cannot
+	// express, so subscribers can observe that selection has stalled. Ledger
+	// application from uncorroborated peers is separately gated via
+	// ShouldApplyIngress; this event is for observability of the stall.
+	ChainSelectedNoneEventType event.EventType = "chainselection.selected_none"
 )
 
 // PeerTipUpdateEvent is published when a peer's chain tip is updated via
@@ -118,6 +127,20 @@ type GenesisCorroborationFailedEvent struct {
 	CorroboratingPeers int
 	RequiredPeers      int
 	GenesisWindowSlots uint64
+}
+
+// ChainSelectedNoneEvent is published when best-peer selection transitions from
+// some peer to none (selection stalled).
+//
+// Fields:
+//   - PreviousConnectionId: the peer that was selected before the stall (zero
+//     value if none was selected).
+//   - GenesisCorroboration: true when the stall is due to the Genesis
+//     corroboration gate (no corroborated peer), as opposed to simply having no
+//     eligible peers.
+type ChainSelectedNoneEvent struct {
+	PreviousConnectionId ouroboros.ConnectionId
+	GenesisCorroboration bool
 }
 
 // GenesisModeExitedEvent is published when the selector leaves Genesis mode.

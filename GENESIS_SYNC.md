@@ -126,9 +126,13 @@ snapshot yields no usable peers, startup falls back to topology `bootstrapPeers`
   `genesis fast source lacks corroboration; denying chain selection` and a
   `chainselection.genesis_corroboration_failed` event carrying the source
   connection, its observed density, the corroborator count, and the required
-  count. While this persists the node makes no forward progress on that source
-  (it stalls) — this is expected and safe. Investigate whether the snapshot
-  peers are reachable and on the same chain as the fast source.
+  count. While this persists the source's **blocks are withheld from the ledger**
+  (its tips are still observed so corroboration can form, but its
+  `ledger.ChainsyncEvent`/blockfetch is gated off), so the node makes no forward
+  progress on that source — this is expected and safe. A best-peer → none
+  transition also logs `chain selection stalled: no selectable peer` and emits
+  `chainselection.selected_none`. Investigate whether the snapshot peers are
+  reachable and on the same chain as the fast source.
 - **Exit to Praos**: once the local tip catches up to within the Genesis window
   of the best corroborated peer's *advertised* tip (the network tip — not the
   headers delivered so far), the node logs `exiting Genesis selection mode` and

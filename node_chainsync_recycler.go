@@ -31,6 +31,22 @@ func plateauThreshold(stallTimeout time.Duration) time.Duration {
 	return max(2*stallTimeout, 4*time.Minute)
 }
 
+// chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
+// the ledger, on top of ingress eligibility. It defers to the chain selector's
+// corroboration decision so an uncorroborated Genesis fast source is observed
+// (its tips still feed corroboration) but its blocks are withheld — the real
+// enforcement of the corroboration stall, since ingress is otherwise independent
+// of the selected best peer. Returns true (apply) when no chain selector is
+// wired yet or outside Genesis corroboration.
+func (n *Node) chainsyncApplyEligible(
+	connId ouroboros.ConnectionId,
+) bool {
+	if n.chainSelector == nil {
+		return true
+	}
+	return n.chainSelector.ShouldApplyIngress(connId)
+}
+
 func (n *Node) isChainsyncIngressEligible(
 	connId ouroboros.ConnectionId,
 ) bool {
@@ -646,6 +662,27 @@ func (n *Node) handleChainSwitchEvent(evt event.Event) {
 	// the ledger. Restarting chainsync here re-enters FindIntersect and can
 	// race the protocol state machine under load.
 	n.chainsyncState.SetClientConnId(e.NewConnectionId)
+}
+
+// handleChainSelectedNoneEvent logs a selected-to-none transition. Chain
+// selection has stalled with no eligible/corroborated peer; under Genesis
+// corroboration the stalled source's blocks are already withheld from the ledger
+// by the ChainsyncApplyEligible gate, so this is observability only.
+func (n *Node) handleChainSelectedNoneEvent(evt event.Event) {
+	e, ok := evt.Data.(chainselection.ChainSelectedNoneEvent)
+	if !ok {
+		return
+	}
+	prevConn := "(none)"
+	if e.PreviousConnectionId.LocalAddr != nil &&
+		e.PreviousConnectionId.RemoteAddr != nil {
+		prevConn = e.PreviousConnectionId.String()
+	}
+	n.config.logger.Info(
+		"chain selection stalled: no selectable peer",
+		"previous_connection", prevConn,
+		"genesis_corroboration", e.GenesisCorroboration,
+	)
 }
 
 func (n *Node) runStallCheckerTick(fn func()) {

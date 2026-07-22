@@ -165,6 +165,11 @@ type ChainSelector struct {
 	// held (on the Genesis→Praos transition) for publishing outside the lock.
 	// Guarded by mutex.
 	pendingGenesisExit *GenesisModeExitedEvent
+
+	// pendingSelectedNone stages a ChainSelectedNoneEvent set while the mutex is
+	// held (on a best-peer → none transition) for publishing outside the lock.
+	// Guarded by mutex.
+	pendingSelectedNone *ChainSelectedNoneEvent
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -182,6 +187,18 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
 		maxPeers = DefaultMaxTrackedPeers
+	}
+	// Fail closed on a negative corroboration threshold. Only 0 disables the
+	// Genesis corroboration security gate; a negative value (reachable via the
+	// public programmatic API, e.g. WithGenesisCorroborationPeers(-1)) must not
+	// silently disable it. Clamp to the minimum meaningful gate (require one
+	// corroborator) and warn, rather than treating it as disabled.
+	if cfg.MinCorroboratingPeers < 0 {
+		cfg.Logger.Warn(
+			"negative genesis corroboration threshold; failing closed to 1",
+			"configured", cfg.MinCorroboratingPeers,
+		)
+		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
 		config:            cfg,
@@ -1167,6 +1184,7 @@ func (cs *ChainSelector) publishSelectionEvents(
 		)
 	}
 	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
 }
 
 // publishPendingGenesisExitEvent drains and publishes a staged
@@ -1183,6 +1201,24 @@ func (cs *ChainSelector) publishPendingGenesisExitEvent() {
 		cs.config.EventBus.Publish(
 			GenesisModeExitedEventType,
 			event.NewEvent(GenesisModeExitedEventType, *pending),
+		)
+	}
+}
+
+// publishPendingSelectedNoneEvent drains and publishes a staged
+// ChainSelectedNoneEvent outside the selector mutex.
+func (cs *ChainSelector) publishPendingSelectedNoneEvent() {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.mutex.Lock()
+	pending := cs.pendingSelectedNone
+	cs.pendingSelectedNone = nil
+	cs.mutex.Unlock()
+	if pending != nil {
+		cs.config.EventBus.Publish(
+			ChainSelectedNoneEventType,
+			event.NewEvent(ChainSelectedNoneEventType, *pending),
 		)
 	}
 }
@@ -1298,6 +1334,18 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 
 	newBest := cs.selectBestChainLocked()
 	if newBest == nil {
+		// Selection stalled. Stage an explicit selected-to-none transition when
+		// we were previously following a peer, so subscribers can observe the
+		// stall (ChainSwitchEvent cannot express "none"). Enforcement that the
+		// stalled source stops feeding the ledger is handled separately by
+		// ShouldApplyIngress.
+		previousBest := cs.bestPeerConn
+		if previousBest != nil && cs.config.EventBus != nil {
+			cs.pendingSelectedNone = &ChainSelectedNoneEvent{
+				PreviousConnectionId: *previousBest,
+				GenesisCorroboration: cs.genesisCorroborationActiveLocked(),
+			}
+		}
 		// Clear stale reference to avoid returning a disconnected peer
 		cs.bestPeerConn = nil
 		return false, nil, nil, corroborationEvent

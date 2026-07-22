@@ -287,6 +287,7 @@ func (n *Node) Run(ctx context.Context) error {
 		EnableLeiosTxFetch:       enableLeiosNetworking,
 		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:   n.chainsyncApplyEligible,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
@@ -757,6 +758,14 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSwitchEventType,
 		n.handleChainSwitchEvent,
+	)
+	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
+	// uncorroborated Genesis fast source). Enforcement that the stalled source
+	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
+	// this handler surfaces the stall for observability.
+	n.eventBus.SubscribeFunc(
+		chainselection.ChainSelectedNoneEventType,
+		n.handleChainSelectedNoneEvent,
 	)
 	// Subscribe to chain fork events for monitoring
 	n.eventBus.SubscribeFunc(

@@ -742,6 +742,7 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.peer_evicted` | ChainSelector | Peer evicted |
 | `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
 | `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos after catching up to the best known tip |
+| `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainsync.client_added` | ChainsyncState | Client tracking added |
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
@@ -1309,10 +1310,26 @@ it. Dingo implements this as a **corroboration gate**
   source that has raced far beyond every corroborator's window) is not confirmed
   and stalls, so operators must keep corroborators within the Genesis window of
   the fast source.
-- The gate **denies selection but does not disconnect** the fast source. Genesis
+- **Enforcement is at ledger application, not just peer selection.** Header
+  ingress into the ledger is gated by *peer-governance* eligibility, independent
+  of the selected best peer (any ingress-eligible peer's headers are applied and
+  blockfetched under the default primary strategy). So denying an uncorroborated
+  source the "best peer" slot — or clearing the active chainsync driver — does
+  **not** by itself stop it feeding the ledger. The real stall is enforced by
+  `ChainSelector.ShouldApplyIngress`, wired to `OuroborosConfig.ChainsyncApplyEligible`
+  (`ouroboros/chainsync.go`): while Genesis corroboration is active, only
+  corroborated peers are *apply-eligible*. An uncorroborated peer is still
+  **observed** — its `PeerTipUpdateEvent` tips feed corroboration — but its
+  `ledger.ChainsyncEvent` (and therefore blockfetch) is withheld, so it cannot
+  steer the ledger. When no peer is corroborated, nothing is applied and the
+  ledger genuinely stalls. Observation happening before the apply gate is what
+  avoids a deadlock (a peer must be observed to become corroborated).
+- The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.
-  Peer governance may still subscribe to the failure event to react.
+  A best-peer → none transition publishes `chainselection.selected_none` for
+  observability of the stall; peer governance may also subscribe to the
+  corroboration-failure event to react.
 - `corroborationPeers = 0` disables the gate (density-only Genesis selection,
   the historical default), preserving prior behavior for nodes that do not opt
   into the Genesis trust model. While the gate is disabled the per-peer hash

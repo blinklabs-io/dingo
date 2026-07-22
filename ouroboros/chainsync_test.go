@@ -1099,6 +1099,85 @@ func TestNormalizeIntersectPoints(t *testing.T) {
 	)
 }
 
+// The apply gate (ChainsyncApplyEligible) withholds a peer's headers from the
+// ledger while still observing its tips for chain selection: an uncorroborated
+// Genesis fast source is seen but cannot steer the ledger (no post-denial
+// ingress). This is the ouroboros-layer enforcement of the corroboration stall.
+func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+	_, tipCh := bus.Subscribe(chainselection.PeerTipUpdateEventType)
+	state := dchainsync.NewState(bus, nil)
+	conn := newTestConnId("127.0.0.1:6000", "1.1.1.1:3001")
+	require.True(t, state.AddClientConnId(conn))
+
+	applyEligible := false
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		ChainsyncApplyEligible: func(ouroboros.ConnectionId) bool {
+			return applyEligible
+		},
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// Apply denied: the tip is observed for chain selection, but the header is
+	// NOT applied to the ledger.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt := <-tipCh:
+		_, ok := evt.Data.(chainselection.PeerTipUpdateEvent)
+		require.True(t, ok, "tip must be observed even when apply is denied")
+	case <-time.After(time.Second):
+		t.Fatal("expected PeerTipUpdateEvent (observation) while apply denied")
+	}
+	select {
+	case <-ledgerCh:
+		t.Fatal("ledger ingress must be withheld while apply is denied")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Apply now allowed (peer corroborated): the same header is applied.
+	applyEligible = true
+	header2 := newTestBlockHeader(101, 2, 0xbb)
+	tip2 := ochainsync.Tip{
+		Point:       ocommon.NewPoint(101, header2.Hash().Bytes()),
+		BlockNumber: 2,
+	}
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: conn},
+		0,
+		header2,
+		tip2,
+	))
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, conn, data.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal("expected ledger ingress once apply is allowed")
+	}
+}
+
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {

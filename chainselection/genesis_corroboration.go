@@ -138,6 +138,35 @@ func (cs *ChainSelector) isPeerCorroboratedLocked(
 		cs.config.MinCorroboratingPeers
 }
 
+// ShouldApplyIngress reports whether headers/blocks from connId may be applied
+// to the ledger. It returns false only while Genesis corroboration is active
+// (Genesis mode with a positive threshold) and the peer is not corroborated, so
+// an uncorroborated or divergent fast source is OBSERVED — its tips still feed
+// corroboration via PeerTipUpdateEvent — but its blocks are not applied and it
+// cannot steer the ledger. Enforcing the stall here (ledger application) rather
+// than only at peer selection is required because ingress is gated on peer-
+// governance eligibility, independent of the selected best peer: clearing the
+// active chainsync driver alone would not stop an eligible uncorroborated peer's
+// headers from being applied.
+//
+// An unknown peer (no tips observed yet) is treated as uncorroborated and denied
+// while the gate is active — fail closed until corroboration forms. Outside
+// Genesis corroboration it always returns true (no behavior change).
+func (cs *ChainSelector) ShouldApplyIngress(
+	connId ouroboros.ConnectionId,
+) bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	if !cs.genesisCorroborationActiveLocked() {
+		return true
+	}
+	peerTip := cs.peerTips[connId]
+	if peerTip == nil {
+		return false
+	}
+	return cs.isPeerCorroboratedLocked(connId, peerTip)
+}
+
 // rawDensityLeaderLocked returns the connection with the highest observed
 // density among live/eligible/non-stale peers, ignoring corroboration. This is
 // the fast source Genesis selection would pick on density alone; comparing it
