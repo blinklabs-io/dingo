@@ -396,38 +396,22 @@ func TestGenesisDoesNotExitOnEarlyObservedHeaders(t *testing.T) {
 	assert.Equal(t, SelectionModePraos, cs.SelectionMode())
 }
 
-// The Genesis exit horizon must include an uncorroborated far-ahead source, not
-// only selectable (corroborated) peers. Otherwise a lower corroborated peer can
-// trigger a premature exit to Praos, which disables the corroboration gate and
-// lets the uncorroborated source steer the chain. The source here has a high
-// slot but a block number close to the honest peers (a low-density divergent
-// chain), so the block-based behind-best filter does not exclude it.
-func TestGenesisExitHorizonIncludesUncorroboratedSource(t *testing.T) {
+// The Genesis exit horizon must be bounded so a single uncorroborated peer
+// cannot pin Genesis mode indefinitely. The advertised slot is untrusted and the
+// implausible-tip check bounds only the advertised block number, so a peer can
+// advertise a plausible block with a near-MaxUint64 slot. Because the horizon is
+// built from corroborated peers only, that extreme slot is ignored and the node
+// still exits once the local tip catches up to the corroborated network tip.
+func TestGenesisExitNotPinnedByUncorroboratedExtremeSlot(t *testing.T) {
 	cs := NewChainSelector(ChainSelectorConfig{
 		GenesisMode:           true,
 		SecurityParam:         10, // window = 30
 		MinCorroboratingPeers: 1,
 	})
 
-	fast := corrConn(1)
-	honestA := corrConn(2)
-	honestB := corrConn(3)
-
-	// Uncorroborated far source: advertises slot 100000 but block only 205 (a
-	// sparse/divergent chain), so it is within K blocks of the honest peers and
-	// is not behind-best-filtered, yet nobody corroborates its chain.
-	require.True(t, cs.updatePeerTipObserved(
-		fast,
-		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: 100000, Hash: []byte("fast-tip")},
-			BlockNumber: 205,
-		},
-		ochainsync.Tip{
-			Point:       ocommon.Point{Slot: 100000, Hash: []byte("fast-hdr")},
-			BlockNumber: 205,
-		},
-		nil,
-	))
+	honestA := corrConn(1)
+	honestB := corrConn(2)
+	liar := corrConn(3)
 
 	// Honest peers on the real chain at slot 200 / block 200, corroborating each
 	// other.
@@ -442,19 +426,32 @@ func TestGenesisExitHorizonIncludesUncorroboratedSource(t *testing.T) {
 	require.True(t, cs.updatePeerTipObserved(honestA, honestAdv, honestObs, nil))
 	require.True(t, cs.updatePeerTipObserved(honestB, honestAdv, honestObs, nil))
 
-	// Local tip has caught up to the honest corroborated tip (slot 200).
+	// Uncorroborated liar: a plausible block number (200, within K of the honest
+	// peers) but an extreme advertised slot that nothing corroborates.
+	const extremeSlot = uint64(1) << 62
+	require.True(t, cs.updatePeerTipObserved(
+		liar,
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-tip")},
+			BlockNumber: 200,
+		},
+		ochainsync.Tip{
+			Point:       ocommon.Point{Slot: extremeSlot, Hash: []byte("liar-hdr")},
+			BlockNumber: 200,
+		},
+		nil,
+	))
+
+	// Local tip catches up to the corroborated honest tip (slot 200).
 	cs.SetLocalTip(ochainsync.Tip{
 		Point:       ocommon.Point{Slot: 200, Hash: []byte("local-200")},
 		BlockNumber: 200,
 	})
 
-	// The uncorroborated far source's advertised slot (100000) must keep the
-	// exit horizon high, so the node stays in Genesis and the gate stays active.
-	assert.Equal(t, SelectionModeGenesis, cs.SelectionMode(),
-		"an uncorroborated far source must keep Genesis mode active")
-	// The honest corroborated peers are what actually drive selection.
-	require.NotNil(t, cs.GetBestPeer())
-	assert.Contains(t, []ouroboros.ConnectionId{honestA, honestB}, *cs.GetBestPeer())
+	// The liar's extreme advertised slot must NOT pin Genesis mode: the horizon
+	// is the corroborated tip (200), so the node exits to Praos.
+	assert.Equal(t, SelectionModePraos, cs.SelectionMode(),
+		"an uncorroborated extreme advertised slot must not pin Genesis mode")
 }
 
 // Removing the only witness revokes the incumbent fast source's corroboration

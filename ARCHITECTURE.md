@@ -1338,11 +1338,22 @@ without an EventBus) and `chainselection.genesis_mode_exited` with the exit
 reason (local slot, best known *advertised* slot, window) when it returns to
 Praos — exit keys off the advertised network tip, not the observed frontier, so
 the gate stays active through from-origin sync until the local tip nears the
-real network tip. The exit horizon is the highest advertised tip among all
-live/eligible/non-stale peers, **including an uncorroborated far-ahead source**,
-so a lower corroborated peer cannot trigger a premature exit that would let the
-uncorroborated source steer the chain under Praos (the implausible-tip check
-bounds how far ahead any peer can advertise). A change
+real network tip.
+
+The exit horizon is the highest advertised tip slot among **corroborated
+(selectable)** peers. It must be corroborated, not any live peer's raw tip,
+because the advertised tip is untrusted and the implausible-tip check bounds only
+the advertised *block number*, not the *slot* (and the first peer is accepted
+with no reference): a single peer advertising a plausible block with a slot near
+`math.MaxUint64` would otherwise pin the node in Genesis mode forever — a
+liveness DoS. Requiring corroboration means `MinCorroboratingPeers` independent
+peers must have delivered matching headers, so a lone liar cannot inflate the
+horizon. The trade-off is that an uncorroborated source that is ahead in block
+number could win Praos selection once the local tip has caught up to the
+corroborated tip and the node has exited; closing that residual needs
+density-at-intersection (deferred, below). Liveness is prioritized over that
+residual because an unbounded advertised slot is a trivially exploitable
+single-peer stall. A change
 to any tracked peer's frontier re-runs selection while corroboration is active,
 so corroboration granted or revoked takes effect immediately rather than on the
 next periodic tick.
