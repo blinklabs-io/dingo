@@ -9,7 +9,7 @@ WORKDIR /code
 COPY . .
 WORKDIR /code/internal/test/antithesis
 RUN --mount=type=cache,target=/gomod-cache --mount=type=cache,target=/go-cache \
-    go build -o /code/analysis ./cmd/analysis/
+    go build -tags antithesis -o /code/analysis ./cmd/analysis/
 
 FROM debian:bookworm-slim
 RUN apt-get update -y && \
