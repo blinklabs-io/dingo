@@ -507,6 +507,53 @@ func (d *Database) BlockByIndex(
 	return blockByKey(txn, val)
 }
 
+// BlockAtOrAfterIndex returns the first block whose chain index is greater
+// than or equal to blockIndex. It seeks the ordered block-index keys so sparse
+// imported chains do not require one lookup and transaction per missing index.
+func (d *Database) BlockAtOrAfterIndex(
+	blockIndex uint64,
+	txn *Txn,
+) (models.Block, error) {
+	if txn == nil {
+		txn = d.BlobTxn(false)
+		defer txn.Rollback() //nolint:errcheck
+	}
+	blobTxn := txn.Blob()
+	if blobTxn == nil {
+		return models.Block{}, types.ErrNilTxn
+	}
+	blob := txn.DB().Blob()
+	if blob == nil {
+		return models.Block{}, types.ErrBlobStoreUnavailable
+	}
+	prefix := []byte(types.BlockBlobIndexKeyPrefix)
+	it := blob.NewIterator(
+		blobTxn,
+		types.BlobIteratorOptions{Prefix: prefix},
+	)
+	if it == nil {
+		return models.Block{}, errors.New("blob iterator is nil")
+	}
+	defer it.Close()
+	it.Seek(types.BlockBlobIndexKey(blockIndex))
+	for it.ValidForPrefix(prefix) {
+		item := it.Item()
+		if item == nil {
+			it.Next()
+			continue
+		}
+		blockKey, err := item.ValueCopy(nil)
+		if err != nil {
+			return models.Block{}, err
+		}
+		return blockByKey(txn, blockKey)
+	}
+	if err := it.Err(); err != nil {
+		return models.Block{}, err
+	}
+	return models.Block{}, models.ErrBlockNotFound
+}
+
 func BlocksRecent(db *Database, count int) ([]models.Block, error) {
 	var ret []models.Block
 	txn := db.Transaction(false)

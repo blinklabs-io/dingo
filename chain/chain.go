@@ -1321,31 +1321,31 @@ func (c *Chain) nextPersistentBlockAfterSparseIndex(
 		return models.Block{}, false, nil
 	}
 	previousPoint := chainIteratorPreviousPoint(iter)
-	for idx := iter.nextBlockIndex + 1; idx <= c.tipBlockIndex; idx++ {
-		block, err := c.blockByIndex(idx)
-		if errors.Is(err, models.ErrBlockNotFound) {
-			continue
-		}
-		if err != nil {
-			return models.Block{}, false, err
-		}
-		if blockFollowsPoint(block, previousPoint) {
-			return block, true, nil
-		}
+	block, err := c.manager.blockAtOrAfterIndex(
+		iter.nextBlockIndex+1,
+		nil,
+	)
+	if errors.Is(err, models.ErrBlockNotFound) {
 		return models.Block{}, false, fmt.Errorf(
-			"persistent chain index gap after index %d: block %d/%s at index %d has prev hash %s, expected %s",
+			"persistent chain tip index %d is ahead of missing iterator index %d, but no later indexed block was found",
+			c.tipBlockIndex,
 			iter.nextBlockIndex,
-			block.Slot,
-			hex.EncodeToString(block.Hash),
-			block.ID,
-			hex.EncodeToString(block.PrevHash),
-			hex.EncodeToString(previousPoint.Hash),
 		)
 	}
+	if err != nil {
+		return models.Block{}, false, err
+	}
+	if blockFollowsPoint(block, previousPoint) {
+		return block, true, nil
+	}
 	return models.Block{}, false, fmt.Errorf(
-		"persistent chain tip index %d is ahead of missing iterator index %d, but no later indexed block was found",
-		c.tipBlockIndex,
+		"persistent chain index gap after index %d: block %d/%s at index %d has prev hash %s, expected %s",
 		iter.nextBlockIndex,
+		block.Slot,
+		hex.EncodeToString(block.Hash),
+		block.ID,
+		hex.EncodeToString(block.PrevHash),
+		hex.EncodeToString(previousPoint.Hash),
 	)
 }
 

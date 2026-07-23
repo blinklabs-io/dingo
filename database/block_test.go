@@ -73,6 +73,25 @@ func TestBlockBySlotSkipsStaleSameSlotIndex(t *testing.T) {
 	require.Equal(t, lowerIDBlock.Hash, block.Hash)
 }
 
+func TestBlockAtOrAfterIndexSkipsSparseIndexes(t *testing.T) {
+	db := newTestDB(t)
+	blocks := []models.Block{
+		testIndexedBlock(10, 1, 0x01),
+		testIndexedBlock(20, 1_000_000, 0x02),
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	block, err := db.BlockAtOrAfterIndex(2, nil)
+	require.NoError(t, err)
+	require.Equal(t, blocks[1].ID, block.ID)
+	require.Equal(t, blocks[1].Hash, block.Hash)
+
+	_, err = db.BlockAtOrAfterIndex(blocks[1].ID+1, nil)
+	require.ErrorIs(t, err, models.ErrBlockNotFound)
+}
+
 // TestBlockBeforeSlotSkipsSyntheticBlobs verifies BlockBeforeSlot returns the
 // highest real ranking block before a slot and skips synthetic blobs. Genesis
 // CBOR and Leios endorser blocks are persisted at block-blob keys via

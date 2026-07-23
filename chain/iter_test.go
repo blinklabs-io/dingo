@@ -62,7 +62,7 @@ func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 			Cbor:     []byte{0x80},
 		},
 		{
-			ID:       initialBlockIndex + 3,
+			ID:       initialBlockIndex + 1_000_000,
 			Slot:     30,
 			Hash:     bytes.Repeat([]byte{0x03}, 32),
 			PrevHash: bytes.Repeat([]byte{0x02}, 32),
@@ -71,7 +71,7 @@ func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
 			Cbor:     []byte{0x80},
 		},
 		{
-			ID:       initialBlockIndex + 4,
+			ID:       initialBlockIndex + 1_000_001,
 			Slot:     40,
 			Hash:     bytes.Repeat([]byte{0x04}, 32),
 			PrevHash: bytes.Repeat([]byte{0x03}, 32),

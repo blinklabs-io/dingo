@@ -327,6 +327,20 @@ func (cm *ChainManager) blockByIndex(
 	return models.Block{}, models.ErrBlockNotFound
 }
 
+func (cm *ChainManager) blockAtOrAfterIndex(
+	blockIndex uint64,
+	txn *database.Txn,
+) (models.Block, error) {
+	if cm.db == nil {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	block, err := cm.db.BlockAtOrAfterIndex(blockIndex, txn)
+	if errors.Is(err, models.ErrBlockNotFound) {
+		return models.Block{}, models.ErrBlockNotFound
+	}
+	return block, err
+}
+
 func (cm *ChainManager) loadPrimaryChain() error {
 	persistent := (cm.db != nil)
 	chain := &Chain{
