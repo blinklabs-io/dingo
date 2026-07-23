@@ -1340,6 +1340,89 @@ func TestChainsyncClientRollForward_WithheldHeaderNotPermanentlyDeduped(
 // the tip is folded into chain selection before the apply gate runs, so a
 // header that establishes corroboration is applied in the same roll-forward
 // rather than withheld until an asynchronous tip update is processed.
+// The roll-backward apply gate must reflect the rollback currently being
+// admitted: a rollback trims the peer's observed frontier (via ApplyRollback),
+// which can change its corroboration status, so the observation must be applied
+// to chain selection synchronously before the apply-eligibility check. Here a
+// peer corroborated on its pre-rollback frontier rolls back below that frontier
+// (trimming its observed points to empty), which makes it uncorroborated; the
+// rollback must therefore be withheld from the ledger — decided in the same
+// roll-backward call, with no async lag.
+func TestChainsyncClientRollBackwardSyncObservationOrdersApplyGate(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	state := dchainsync.NewState(bus, nil)
+	// Distinct remote hosts so the two peers count as independent corroborators.
+	connP := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	connW := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(connP))
+	require.True(t, state.AddClientConnId(connW))
+
+	mkTip := func(slot uint64, hash string, block uint64) ochainsync.Tip {
+		return ochainsync.Tip{
+			Point:       ocommon.Point{Slot: slot, Hash: []byte(hash)},
+			BlockNumber: block,
+		}
+	}
+	// P and W corroborate each other on slots 100 and 105.
+	for _, c := range []ouroboros.ConnectionId{connP, connW} {
+		cs.UpdatePeerTip(c, mkTip(100, "h100", 100), nil)
+		cs.UpdatePeerTip(c, mkTip(105, "h105", 105), nil)
+	}
+	require.True(t, cs.ShouldApplyIngress(connP),
+		"P must be apply-eligible (corroborated) before the rollback")
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		// Synchronous observation, exactly like node.chainsyncObserveRollback.
+		ChainsyncObserveRollback: func(
+			e chainselection.PeerRollbackEvent,
+		) bool {
+			cs.HandlePeerRollbackEvent(
+				event.NewEvent(chainselection.PeerRollbackEventType, e),
+			)
+			return true
+		},
+		ChainsyncApplyEligible: cs.ShouldApplyIngress,
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	// P rolls back to slot 99, below its entire corroborated frontier, trimming
+	// its observed points to empty. Its synchronous observation makes P
+	// uncorroborated before the apply gate, so the rollback is withheld.
+	rollbackPoint := ocommon.NewPoint(99, []byte("rb99"))
+	require.NoError(t, o.chainsyncClientRollBackward(
+		ochainsync.CallbackContext{ConnectionId: connP},
+		rollbackPoint,
+		mkTip(99, "rb99", 99),
+	))
+	select {
+	case <-ledgerCh:
+		t.Fatal(
+			"rollback must be withheld: the apply gate must reflect the " +
+				"post-rollback (trimmed) corroboration state",
+		)
+	case <-time.After(200 * time.Millisecond):
+	}
+	require.False(t, cs.ShouldApplyIngress(connP),
+		"P must be uncorroborated after the rollback trims its frontier")
+}
+
 func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
 	t *testing.T,
 ) {

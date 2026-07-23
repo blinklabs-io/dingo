@@ -58,6 +58,33 @@ func (n *Node) chainsyncObservePeerTip(
 	return true
 }
 
+// chainsyncObserveRollback synchronously applies a peer rollback into chain
+// selection when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-backward
+// handler reflects the post-rollback corroboration state. A rollback trims the
+// peer's observed frontier (ApplyRollback), which can change its corroboration
+// status; delivering that observation asynchronously would let the apply gate
+// read pre-trim state and forward a rollback for a peer that the rollback has
+// just made uncorroborated (issue #2928). It returns true when handled
+// synchronously, so the ouroboros layer skips the async PeerRollbackEvent
+// publish to avoid a double update. Unlike chainsyncObservePeerTip there is no
+// peergov touch: only the chain selector subscribes to PeerRollbackEvent.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false).
+func (n *Node) chainsyncObserveRollback(
+	e chainselection.PeerRollbackEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerRollbackEvent(
+		event.NewEvent(chainselection.PeerRollbackEventType, e),
+	)
+	return true
+}
+
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
 // the ledger, on top of ingress eligibility. It defers to the chain selector's
 // corroboration decision so an uncorroborated Genesis fast source is observed
