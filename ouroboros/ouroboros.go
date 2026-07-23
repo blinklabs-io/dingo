@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/blinklabs-io/dingo/chainselection"
 	"github.com/blinklabs-io/dingo/chainsync"
 	"github.com/blinklabs-io/dingo/connmanager"
 	"github.com/blinklabs-io/dingo/event"
@@ -170,6 +171,24 @@ type OuroborosConfig struct {
 	// keep inbound/public noise out of ledger ingress while still
 	// tracking peer tips separately for selection and observability.
 	ChainsyncIngressEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncApplyEligible reports whether a peer's chainsync headers
+	// and rollbacks may be APPLIED to the ledger. It is a second gate,
+	// stricter than ChainsyncIngressEligible: a peer can be ingress-
+	// eligible (so its tips are observed for chain selection) yet not
+	// apply-eligible, so its blocks are not applied. This enforces the
+	// Ouroboros Genesis corroboration stall — an uncorroborated fast source
+	// is observed but cannot steer the ledger. When nil, every ingress-
+	// eligible peer is apply-eligible (no behavior change).
+	ChainsyncApplyEligible func(ouroboros.ConnectionId) bool
+	// ChainsyncObservePeerTip observes a peer tip update. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerTipUpdateEvent (avoids a double update). This
+	// lets the node update chain-selection state synchronously before the
+	// ChainsyncApplyEligible gate runs, so an apply decision reflects the header
+	// currently being admitted (closing the race where an async tip update that
+	// revokes corroboration is not yet processed). Returning false (or nil hook)
+	// falls back to the async PeerTipUpdateEvent path.
+	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync

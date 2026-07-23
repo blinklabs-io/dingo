@@ -104,10 +104,17 @@ type ChainSelectorConfig struct {
 	SecurityParam      uint64
 	GenesisMode        bool
 	GenesisWindowSlots uint64
-	ConnectionLive     func(ouroboros.ConnectionId) bool
-	ConnectionEligible func(ouroboros.ConnectionId) bool
-	ConnectionPriority func(ouroboros.ConnectionId) int
-	MaxTrackedPeers    int // 0 means use DefaultMaxTrackedPeers
+	// MinCorroboratingPeers is the number of distinct other eligible peers
+	// that must report the same recent blocks as a candidate before that
+	// candidate can drive chain selection in Genesis mode. It implements the
+	// Ouroboros Genesis trust property that a fast (shallow) block source is
+	// followed only while corroborated by independent peers. 0 disables
+	// corroboration (density-only Genesis selection, the historical default).
+	MinCorroboratingPeers int
+	ConnectionLive        func(ouroboros.ConnectionId) bool
+	ConnectionEligible    func(ouroboros.ConnectionId) bool
+	ConnectionPriority    func(ouroboros.ConnectionId) int
+	MaxTrackedPeers       int // 0 means use DefaultMaxTrackedPeers
 	// DisableEventSubscriptions leaves EventBus configured for publishing
 	// selector events but skips automatic input subscriptions. This is useful
 	// for deterministic replay harnesses that feed input events synchronously.
@@ -147,6 +154,22 @@ type ChainSelector struct {
 	localTipProgressAt    time.Time
 	// nowFn is injectable for deterministic tests; defaults to time.Now.
 	nowFn func() time.Time
+
+	// lastCorroborationFailedConn dedups GenesisCorroborationFailedEvent so a
+	// persistently uncorroborated fast source does not emit an event on every
+	// evaluation. Reset when the leading density source becomes corroborated
+	// or changes. Guarded by mutex.
+	lastCorroborationFailedConn *ouroboros.ConnectionId
+
+	// pendingGenesisExit stages a GenesisModeExitedEvent set while the mutex is
+	// held (on the Genesis→Praos transition) for publishing outside the lock.
+	// Guarded by mutex.
+	pendingGenesisExit *GenesisModeExitedEvent
+
+	// pendingSelectedNone stages a ChainSelectedNoneEvent set while the mutex is
+	// held (on a best-peer → none transition) for publishing outside the lock.
+	// Guarded by mutex.
+	pendingSelectedNone *ChainSelectedNoneEvent
 }
 
 // NewChainSelector creates a new ChainSelector with the given configuration.
@@ -164,6 +187,18 @@ func NewChainSelector(cfg ChainSelectorConfig) *ChainSelector {
 	maxPeers := cfg.MaxTrackedPeers
 	if maxPeers <= 0 {
 		maxPeers = DefaultMaxTrackedPeers
+	}
+	// Fail closed on a negative corroboration threshold. Only 0 disables the
+	// Genesis corroboration security gate; a negative value (reachable via the
+	// public programmatic API, e.g. WithGenesisCorroborationPeers(-1)) must not
+	// silently disable it. Clamp to the minimum meaningful gate (require one
+	// corroborator) and warn, rather than treating it as disabled.
+	if cfg.MinCorroboratingPeers < 0 {
+		cfg.Logger.Warn(
+			"negative genesis corroboration threshold; failing closed to 1",
+			"configured", cfg.MinCorroboratingPeers,
+		)
+		cfg.MinCorroboratingPeers = 1
 	}
 	cs := &ChainSelector{
 		config:            cfg,
@@ -216,15 +251,49 @@ func (cs *ChainSelector) genesisWindowSlotsLocked() uint64 {
 	return defaultGenesisWindowSlots
 }
 
+// bestKnownGenesisSlotLocked returns the exit horizon: the network tip slot the
+// local tip must catch up to (within the window) before leaving Genesis mode.
+//
+// The advertised tip (pt.Tip) is untrusted and unbounded — the implausible-tip
+// check bounds the advertised BLOCK number but NOT the advertised slot, and the
+// first peer is accepted with no reference — so a peer can advertise a plausible
+// block with a slot near math.MaxUint64. Corroboration alone does not fix this:
+// it validates the DELIVERED headers (the observed frontier), not the advertised
+// claim, so a peer that delivers one shared early header (passing corroboration)
+// can still advertise an arbitrary tip. Using that raw advertised slot as the
+// horizon lets a single peer pin the node in Genesis mode indefinitely — a
+// liveness DoS.
+//
+// The horizon is therefore bound to DELIVERED data: a peer's advertised tip
+// counts only when the peer is corroborated (selectable) AND it has actually
+// delivered headers up to within the window of that advertised tip
+// (ObservedTip + window >= Tip). A liar cannot deliver up to a MaxUint64 slot,
+// and an honest peer early in from-origin sync has not yet delivered up to its
+// far advertised tip, so neither raises the horizon prematurely. Once a
+// corroborated peer has served its chain up to (near) its advertised tip, that
+// tip is trustworthy and becomes the exit target — reached exactly when the
+// local tip has caught up.
+//
+// Residual (documented, deferred): an uncorroborated source ahead in block
+// number could win Praos selection after exit; closing that needs
+// density-at-intersection (see ARCHITECTURE.md).
 func (cs *ChainSelector) bestKnownGenesisSlotLocked() uint64 {
+	window := cs.genesisWindowSlotsLocked()
 	var best uint64
 	for connId, pt := range cs.peerTips {
 		if !cs.isPeerSelectableLocked(connId, pt, false) {
 			continue
 		}
-		tip := pt.SelectionTip()
-		if tip.Point.Slot > best {
-			best = tip.Point.Slot
+		advertised := pt.Tip.Point.Slot
+		delivered := pt.ObservedTip.Point.Slot
+		// Ignore an advertised tip the peer has not delivered headers up to:
+		// it is either a lie or a not-yet-synced far tip, and must not raise
+		// the exit horizon.
+		if safeAddUint64(delivered, window) < advertised {
+			continue
+		}
+		if advertised > best {
+			best = advertised
 		}
 	}
 	return best
@@ -248,13 +317,31 @@ func (cs *ChainSelector) advanceSelectionModeLocked() bool {
 	if !cs.shouldExitGenesisModeLocked() {
 		return false
 	}
+	// Capture exit context while still in Genesis mode so the best-known slot
+	// reflects the Genesis-mode selectable set.
+	localSlot := cs.localTip.Point.Slot
+	bestSlot := cs.bestKnownGenesisSlotLocked()
+	window := cs.genesisWindowSlotsLocked()
 	cs.mode = SelectionModePraos
+	// Corroboration no longer applies in Praos; drop the per-peer hash
+	// frontier so it does not linger for the full window on every tracked peer.
+	for _, peerTip := range cs.peerTips {
+		peerTip.observedPoints = nil
+	}
+	cs.lastCorroborationFailedConn = nil
 	cs.config.Logger.Info(
 		"exiting Genesis selection mode",
-		"local_slot", cs.localTip.Point.Slot,
-		"best_known_slot", cs.bestKnownGenesisSlotLocked(),
-		"genesis_window_slots", cs.genesisWindowSlotsLocked(),
+		"local_slot", localSlot,
+		"best_known_slot", bestSlot,
+		"genesis_window_slots", window,
 	)
+	if cs.config.EventBus != nil {
+		cs.pendingGenesisExit = &GenesisModeExitedEvent{
+			LocalSlot:          localSlot,
+			BestKnownSlot:      bestSlot,
+			GenesisWindowSlots: window,
+		}
+	}
 	return true
 }
 
@@ -383,6 +470,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 			}
 		}
 
+		trackHashes := cs.genesisCorroborationActiveLocked()
 		if peerTip, exists := cs.peerTips[connId]; exists {
 			peerTip.UpdateTipWithObservedPraosView(
 				tip,
@@ -390,9 +478,10 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				vrfOutput,
 				praosView,
 			)
-			peerTip.recordObservedSlot(
-				observedTip.Point.Slot,
+			peerTip.recordObservedPoint(
+				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
+				trackHashes,
 			)
 		} else {
 			// Evict the least-recently-updated peer if at capacity
@@ -417,9 +506,10 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 				PraosView:    praosView,
 				LastUpdated:  time.Now(),
 			}
-			peerTip.recordObservedSlot(
-				observedTip.Point.Slot,
+			peerTip.recordObservedPoint(
+				observedTip.Point,
 				cs.genesisWindowSlotsLocked(),
+				trackHashes,
 			)
 			cs.peerTips[connId] = peerTip
 		}
@@ -434,9 +524,15 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 		)
 
 		// Check if this peer's tip is better than the current best peer's tip
-		if modeChanged {
+		switch {
+		case modeChanged:
 			shouldEvaluate = true
-		} else if cs.bestPeerConn != nil {
+		case trackHashes:
+			// Under Genesis corroboration any peer's frontier change can grant
+			// or revoke corroboration of the incumbent/leader, so always
+			// re-evaluate rather than only when this peer beats the best.
+			shouldEvaluate = true
+		case cs.bestPeerConn != nil:
 			if bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]; ok {
 				shouldEvaluate = cs.comparePeerTips(
 					connId,
@@ -445,7 +541,7 @@ func (cs *ChainSelector) updatePeerTipObservedPraosView(
 					bestPeerTip,
 				) == ChainABetter
 			}
-		} else {
+		default:
 			// No best peer yet, trigger evaluation
 			shouldEvaluate = true
 		}
@@ -482,6 +578,7 @@ func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
 	}
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
+	var corroborationEvent *event.Event
 
 	func() {
 		cs.mutex.Lock()
@@ -492,10 +589,10 @@ func (cs *ChainSelector) TouchPeerActivity(connId ouroboros.ConnectionId) {
 			return
 		}
 		peerTip.Touch()
-		_, switchEvent, selectionEvent = cs.evaluateBestPeerLocked()
+		_, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
 	}()
 
-	cs.publishSelectionEvents(switchEvent, selectionEvent)
+	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
 }
 
 // evictLeastRecentPeerLocked removes the peer with the oldest LastUpdated
@@ -574,12 +671,19 @@ func (cs *ChainSelector) deletePeerLocked(connId ouroboros.ConnectionId) {
 // RemovePeer removes a peer from tracking.
 func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	var switchEvent *event.Event
+	var reevaluate bool
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
 
 		cs.deletePeerLocked(connId)
+
+		// Removing a witness can revoke the incumbent's corroboration even
+		// when the removed peer was not itself the best; force a re-evaluation
+		// so an incumbent that just lost corroboration is dropped.
+		reevaluate = cs.genesisCorroborationActiveLocked() &&
+			(cs.bestPeerConn == nil || *cs.bestPeerConn != connId)
 
 		if cs.bestPeerConn != nil && *cs.bestPeerConn == connId {
 			previousBest := *cs.bestPeerConn
@@ -614,6 +718,10 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 					)
 					switchEvent = &evt
 				}
+			} else {
+				// No replacement selected: this is a selected-to-none transition,
+				// so stage the explicit event like the main evaluation path.
+				cs.stageSelectedNoneLocked(previousBest)
 			}
 		}
 	}()
@@ -622,6 +730,11 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 	// call back into ChainSelector
 	if switchEvent != nil {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
+	}
+	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
+	if reevaluate {
+		cs.EvaluateAndSwitch()
 	}
 }
 
@@ -717,6 +830,7 @@ func (cs *ChainSelector) GetPeerTip(
 		tipCopy.observedSlots = make([]uint64, len(pt.observedSlots))
 		copy(tipCopy.observedSlots, pt.observedSlots)
 	}
+	tipCopy.observedPoints = cloneObservedPoints(pt.observedPoints)
 	return &tipCopy
 }
 
@@ -739,6 +853,7 @@ func (cs *ChainSelector) GetAllPeerTips() map[ouroboros.ConnectionId]*PeerChainT
 			tipCopy.observedSlots = make([]uint64, len(v.observedSlots))
 			copy(tipCopy.observedSlots, v.observedSlots)
 		}
+		tipCopy.observedPoints = cloneObservedPoints(v.observedPoints)
 		result[k] = &tipCopy
 	}
 	return result
@@ -755,8 +870,12 @@ func (cs *ChainSelector) PeerCount() int {
 // the peer with the best chain.
 func (cs *ChainSelector) SelectBestChain() *ouroboros.ConnectionId {
 	cs.mutex.Lock()
-	defer cs.mutex.Unlock()
-	return cs.selectBestChainLocked()
+	best := cs.selectBestChainLocked()
+	cs.mutex.Unlock()
+	// selectBestChainLocked may have exited Genesis mode; publish the staged
+	// exit event outside the lock.
+	cs.publishPendingGenesisExitEvent()
+	return best
 }
 
 func (cs *ChainSelector) isPeerSelectableLocked(
@@ -764,23 +883,12 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 	peerTip *PeerChainTip,
 	logSkip bool,
 ) bool {
-	if peerTip == nil {
-		return false
-	}
-	if cs.config.ConnectionLive != nil &&
-		!cs.config.ConnectionLive(connId) {
+	// Shared live/eligible/non-stale prerequisite (single source of truth,
+	// also used by the Genesis corroboration witness check).
+	if !cs.peerLiveEligibleNonStaleLocked(connId, peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
-				"skipping closed peer",
-				"connection_id", connId.String(),
-			)
-		}
-		return false
-	}
-	if !cs.isConnectionEligible(connId) {
-		if logSkip {
-			cs.config.Logger.Debug(
-				"skipping ineligible peer",
+				"skipping closed, ineligible, or stale peer",
 				"connection_id", connId.String(),
 			)
 		}
@@ -822,12 +930,15 @@ func (cs *ChainSelector) isPeerSelectableLocked(
 			return false
 		}
 	}
-	if cs.isPeerTipStale(peerTip) {
+	// Genesis corroboration gate: a fast source must be corroborated by the
+	// configured minimum number of independent peers before it can steer
+	// selection. No-op outside Genesis mode / with corroboration disabled.
+	if !cs.isPeerCorroboratedLocked(connId, peerTip) {
 		if logSkip {
 			cs.config.Logger.Debug(
-				"skipping stale peer",
+				"skipping uncorroborated genesis fast source",
 				"connection_id", connId.String(),
-				"last_updated", peerTip.LastUpdated,
+				"min_corroborating_peers", cs.config.MinCorroboratingPeers,
 			)
 		}
 		return false
@@ -1060,6 +1171,7 @@ func (cs *ChainSelector) triggerEvaluation() {
 func (cs *ChainSelector) publishSelectionEvents(
 	switchEvent *event.Event,
 	selectionEvent *event.Event,
+	corroborationEvent *event.Event,
 ) {
 	if cs.config.EventBus == nil {
 		return
@@ -1069,6 +1181,66 @@ func (cs *ChainSelector) publishSelectionEvents(
 	}
 	if selectionEvent != nil {
 		cs.config.EventBus.Publish(ChainSelectionEventType, *selectionEvent)
+	}
+	if corroborationEvent != nil {
+		cs.config.EventBus.Publish(
+			GenesisCorroborationFailedEventType,
+			*corroborationEvent,
+		)
+	}
+	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
+}
+
+// publishPendingGenesisExitEvent drains and publishes a staged
+// GenesisModeExitedEvent outside the selector mutex.
+func (cs *ChainSelector) publishPendingGenesisExitEvent() {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.mutex.Lock()
+	pending := cs.pendingGenesisExit
+	cs.pendingGenesisExit = nil
+	cs.mutex.Unlock()
+	if pending != nil {
+		cs.config.EventBus.Publish(
+			GenesisModeExitedEventType,
+			event.NewEvent(GenesisModeExitedEventType, *pending),
+		)
+	}
+}
+
+// stageSelectedNoneLocked stages a ChainSelectedNoneEvent for a best-peer →
+// none transition (a peer was previously selected, now none is). Must be called
+// with cs.mutex held; the event is published later by
+// publishPendingSelectedNoneEvent outside the lock.
+func (cs *ChainSelector) stageSelectedNoneLocked(
+	previousBest ouroboros.ConnectionId,
+) {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.pendingSelectedNone = &ChainSelectedNoneEvent{
+		PreviousConnectionId: previousBest,
+		GenesisCorroboration: cs.genesisCorroborationActiveLocked(),
+	}
+}
+
+// publishPendingSelectedNoneEvent drains and publishes a staged
+// ChainSelectedNoneEvent outside the selector mutex.
+func (cs *ChainSelector) publishPendingSelectedNoneEvent() {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.mutex.Lock()
+	pending := cs.pendingSelectedNone
+	cs.pendingSelectedNone = nil
+	cs.mutex.Unlock()
+	if pending != nil {
+		cs.config.EventBus.Publish(
+			ChainSelectedNoneEventType,
+			event.NewEvent(ChainSelectedNoneEventType, *pending),
+		)
 	}
 }
 
@@ -1171,16 +1343,29 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	bool,
 	*event.Event,
 	*event.Event,
+	*event.Event,
 ) {
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
 	switchOccurred := false
+	// Compute Genesis corroboration status once per evaluation, independent of
+	// which peer (if any) is ultimately selected, so a stalled selection still
+	// reports why the densest fast source was denied.
+	corroborationEvent := cs.genesisCorroborationFailureLocked()
 
 	newBest := cs.selectBestChainLocked()
 	if newBest == nil {
+		// Selection stalled. Stage an explicit selected-to-none transition when
+		// we were previously following a peer, so subscribers can observe the
+		// stall (ChainSwitchEvent cannot express "none"). Enforcement that the
+		// stalled source stops feeding the ledger is handled separately by
+		// ShouldApplyIngress.
+		if previousBest := cs.bestPeerConn; previousBest != nil {
+			cs.stageSelectedNoneLocked(*previousBest)
+		}
 		// Clear stale reference to avoid returning a disconnected peer
 		cs.bestPeerConn = nil
-		return false, nil, nil
+		return false, nil, nil, corroborationEvent
 	}
 
 	previousBest := cs.bestPeerConn
@@ -1189,7 +1374,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 		if ok && cs.isPeerSelectableLocked(*previousBest, previousPeerTip, false) {
 			newPeerTip, ok := cs.peerTips[*newBest]
 			if !ok {
-				return false, nil, nil
+				return false, nil, nil, corroborationEvent
 			}
 			if ComparePraosTips(
 				newPeerTip.SelectionTip(),
@@ -1242,7 +1427,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	if previousBest == nil || *previousBest != *newBest {
 		newPeerTip, ok := cs.peerTips[*newBest]
 		if !ok {
-			return false, nil, nil
+			return false, nil, nil, corroborationEvent
 		}
 		newTip := newPeerTip.Tip
 		cs.bestPeerConn = newBest
@@ -1298,7 +1483,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 	if cs.config.EventBus != nil && cs.bestPeerConn != nil {
 		bestPeerTip, ok := cs.peerTips[*cs.bestPeerConn]
 		if !ok {
-			return false, nil, nil
+			return false, nil, nil, corroborationEvent
 		}
 		bestTip := bestPeerTip.Tip
 		evt := event.NewEvent(
@@ -1313,7 +1498,7 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 		selectionEvent = &evt
 	}
 
-	return switchOccurred, switchEvent, selectionEvent
+	return switchOccurred, switchEvent, selectionEvent, corroborationEvent
 }
 
 // EvaluateAndSwitch evaluates all peer tips and switches to the best chain if
@@ -1321,15 +1506,16 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 func (cs *ChainSelector) EvaluateAndSwitch() bool {
 	var switchEvent *event.Event
 	var selectionEvent *event.Event
+	var corroborationEvent *event.Event
 	switchOccurred := false
 
 	func() {
 		cs.mutex.Lock()
 		defer cs.mutex.Unlock()
-		switchOccurred, switchEvent, selectionEvent = cs.evaluateBestPeerLocked()
+		switchOccurred, switchEvent, selectionEvent, corroborationEvent = cs.evaluateBestPeerLocked()
 	}()
 
-	cs.publishSelectionEvents(switchEvent, selectionEvent)
+	cs.publishSelectionEvents(switchEvent, selectionEvent, corroborationEvent)
 	return switchOccurred
 }
 
@@ -1495,6 +1681,10 @@ func (cs *ChainSelector) cleanupStalePeers() {
 					)
 					switchEvent = &evt
 				}
+			} else {
+				// No replacement selected after stale cleanup: this is a
+				// selected-to-none transition.
+				cs.stageSelectedNoneLocked(*previousBest)
 			}
 		}
 	}()
@@ -1504,4 +1694,6 @@ func (cs *ChainSelector) cleanupStalePeers() {
 	if switchEvent != nil {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
 	}
+	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
 }

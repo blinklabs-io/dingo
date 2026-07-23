@@ -331,6 +331,7 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		"DINGO_GENESIS_BOOTSTRAP_PROMOTION_MIN_DIVERSITY_GROUPS",
 		"6",
 	)
+	t.Setenv("DINGO_GENESIS_BOOTSTRAP_CORROBORATION_PEERS", "3")
 
 	cfg, err := LoadConfig("")
 	if err != nil {
@@ -350,6 +351,12 @@ func TestLoad_GenesisBootstrapEnvVars(t *testing.T) {
 		t.Fatalf(
 			"expected GenesisBootstrap.PromotionMinDiversityGroups to be 6, got %d",
 			cfg.GenesisBootstrap.PromotionMinDiversityGroups,
+		)
+	}
+	if cfg.GenesisBootstrap.CorroborationPeers != 3 {
+		t.Fatalf(
+			"expected GenesisBootstrap.CorroborationPeers to be 3, got %d",
+			cfg.GenesisBootstrap.CorroborationPeers,
 		)
 	}
 }

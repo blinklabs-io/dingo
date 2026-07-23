@@ -442,6 +442,16 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	// Genesis corroboration is a security gate: a negative value must fail
+	// closed rather than silently disabling it (only 0 disables it).
+	if c.GenesisBootstrap.CorroborationPeers < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid genesisBootstrap.corroborationPeers: %d "+
+				"(must not be negative; 0 disables corroboration)",
+			c.GenesisBootstrap.CorroborationPeers,
+		))
+	}
+
 	// Mithril backend; accepted values come from
 	// AcceptedMithrilBackends, kept in sync with cmd/dingo's
 	// resolveMithrilBackend by a parity test in cmd/dingo (empty

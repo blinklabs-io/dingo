@@ -740,6 +740,9 @@ All event types follow the `subsystem.snake_case_name` convention.
 | `chainselection.chain_switch` | ChainSelector | Active peer changed |
 | `chainselection.selection` | ChainSelector | Chain selection made |
 | `chainselection.peer_evicted` | ChainSelector | Peer evicted |
+| `chainselection.genesis_corroboration_failed` | ChainSelector | Densest Genesis fast source lacked corroboration and was denied selection |
+| `chainselection.genesis_mode_exited` | ChainSelector | Left Genesis mode for Praos after catching up to the best known tip |
+| `chainselection.selected_none` | ChainSelector | Best-peer selection transitioned to none (selection stalled) |
 | `chainsync.client_added` | ChainsyncState | Client tracking added |
 | `chainsync.client_removed` | ChainsyncState | Client tracking removed |
 | `chainsync.client_synced` | ChainsyncState | Client caught up |
@@ -1272,7 +1275,8 @@ The `ChainSelector` (`chainselection/`) implements Ouroboros Praos rules:
 3. At equal length/slot, the reference implementation's opcert/VRF
    tie-breaker is used when the necessary select-view data is available
 4. During genesis bootstrap mode, observed density is used until the local tip
-   is close enough to the best observed peer tip to switch back to Praos
+   is close enough to the best advertised peer tip (the network tip) to switch
+   back to Praos
 
 The selector tracks tips from all connected peers, honors peer eligibility and
 priority updates from peer governance, and switches the active chainsync
@@ -1289,6 +1293,152 @@ Bootstrap topology peers remain chain-selection eligible after bootstrap exit
 as a fallback ingress source, but peer governance lowers their priority to zero.
 This lets non-bootstrap peers win same-tip transport selection without
 stranding ChainSync when the bootstrap peer is still the only usable upstream.
+
+#### Ouroboros Genesis trust model
+
+Genesis mode (`genesisBootstrap`, active only for from-origin sync with no
+`intersectTip`/`intersectPoints`) selects the chain by observed header
+*density* within a window of `3k/f` slots rather than by longest-chain length,
+so a from-origin node can prefer the denser (honest) chain before it has the
+history to run the full Praos comparison. The window is derived from Shelley
+genesis params (`GenesisWindowSlotsForParams`) or overridden by
+`genesisWindowSlots`. Each tracked peer keeps a bounded recent frontier of
+`(slot, hash)` points (`PeerChainTip.observedPoints`, in lockstep with the
+`observedSlots` used for density), trimmed to the window and on rollback.
+
+The trust problem Genesis solves for **biased fast-sync sources** — e.g. a
+local shallow peer or the Genesis Sync Accelerator (GSA), which serve blocks
+quickly but are not themselves trustworthy — is that the densest/longest source
+must not be allowed to steer the local chain unless independent peers confirm
+it. Dingo implements this as a **corroboration gate**
+(`chainselection/genesis_corroboration.go`), controlled by
+`genesisBootstrap.corroborationPeers` (`MinCorroboratingPeers`):
+
+- A candidate peer is **corroborated** when at least `corroborationPeers`
+  independent witness peers *confirm the candidate's recent chain*
+  (`confirmsRecentChain`): every block a witness observed within the candidate's
+  window slot range matches the candidate's own `(slot, hash)`, and they share at
+  least one such block. The observed frontier is populated per header during
+  chainsync (dense), so two peers on the same chain agree on every block in their
+  overlap. This is deliberately stronger than "share any common point": a fast
+  source that agrees on one old ancestor and then produces different blocks for
+  the rest of the window is **not** confirmed, because the witness observed
+  recent blocks the candidate lacks (or a conflicting hash at the same slot).
+- Witnesses are counted by distinct remote **host**, and a witness on the
+  candidate's own host is excluded, so several connections from one operator
+  cannot self-corroborate a private fork. This is a lower bound on independence,
+  not a guarantee: genuine independence (distinct operators, ASNs, and chain
+  views) depends on the operator's validated topology and peer-governance
+  diversity groups. Raising `corroborationPeers` raises the *count* required, not
+  the independence of the peers supplied — that remains an operator
+  responsibility.
+- In Genesis mode with `corroborationPeers > 0`, an **uncorroborated** candidate
+  is denied chain selection (`isPeerSelectableLocked`). A fully divergent fast
+  source shares no recent block with any honest peer, so it is never corroborated
+  and cannot become the best peer. With no corroborated peer, selection returns
+  none and the node **stalls** rather than following an untrue chain: a bad or
+  divergent fast source can at worst stall the node under the documented
+  assumption of at least one honest, independent corroborating peer within the
+  window (e.g. seeded from a ledger peer snapshot). Corroboration fails **closed**
+  — a candidate whose window does not overlap any witness's frontier (e.g. a fast
+  source that has raced far beyond every corroborator's window) is not confirmed
+  and stalls, so operators must keep corroborators within the Genesis window of
+  the fast source.
+- **Enforcement is at ledger application, not just peer selection.** Header
+  ingress into the ledger is gated by *peer-governance* eligibility, independent
+  of the selected best peer (any ingress-eligible peer's headers are applied and
+  blockfetched under the default primary strategy). So denying an uncorroborated
+  source the "best peer" slot — or clearing the active chainsync driver — does
+  **not** by itself stop it feeding the ledger. The real stall is enforced by
+  `ChainSelector.ShouldApplyIngress`, wired to `OuroborosConfig.ChainsyncApplyEligible`
+  (`ouroboros/chainsync.go`): while Genesis corroboration is active, only
+  corroborated peers are *apply-eligible*. An uncorroborated peer is still
+  **observed** — its `PeerTipUpdateEvent` tips feed corroboration — but its
+  `ledger.ChainsyncEvent` (and therefore blockfetch) is withheld, so it cannot
+  steer the ledger. When no peer is corroborated, nothing is applied and the
+  ledger genuinely stalls. Observation happening before the apply gate is what
+  avoids a deadlock (a peer must be observed to become corroborated). While the
+  gate is active the observation is made **synchronously** with the gate
+  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to update chain selection in
+  the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
+  apply decision reflects the header currently being admitted rather than a tip
+  update that has not been processed yet — an async observation could otherwise
+  let a header slip through in the window before it revoked corroboration. With
+  the gate disabled the async path is used unchanged.
+- The gate **denies application but does not disconnect** the fast source. Genesis
+  wants the fast source kept connected so it can serve blocks as soon as
+  corroboration arrives; demoting or dropping it would defeat the accelerator.
+  A best-peer → none transition publishes `chainselection.selected_none` for
+  observability of the stall; peer governance may also subscribe to the
+  corroboration-failure event to react.
+- `corroborationPeers = 0` disables the gate (density-only Genesis selection,
+  the historical default), preserving prior behavior for nodes that do not opt
+  into the Genesis trust model. While the gate is disabled the per-peer hash
+  frontier is not tracked, so normal Praos operation carries no extra state.
+
+**Supported GSA-style configuration**: a trustable `localRoots` peer (the fast
+source) plus a ledger peer snapshot (`peerSnapshotFile`) that seeds
+`PeerSourceP2PLedger` corroborators before outbound startup (see Peer
+Governance). Set `corroborationPeers` to the number of *independent* snapshot
+peers that must agree — where independence must be established by the operator
+(distinct operators/infrastructure/chain views), since the selector can only
+enforce distinct remote hosts. See `GENESIS_SYNC.md` for the operator runbook.
+This differs from normal Praos sync (which trusts the longest valid chain from
+any peer) and from Mithril bootstrap (which trusts a signed snapshot at a trust
+boundary): Genesis trusts *density corroborated by peers the operator has reason
+to believe are independent* from origin.
+
+**Observability**: `GenesisStatus()` exposes the current mode, window, selected
+fast source, and per-peer density/corroboration. The selector emits
+`chainselection.genesis_corroboration_failed` when the densest fast source is
+denied for lack of corroboration (deduped per source; the warning is also logged
+without an EventBus) and `chainselection.genesis_mode_exited` with the exit
+reason (local slot, best known *advertised* slot, window) when it returns to
+Praos — exit keys off the advertised network tip, not the observed frontier, so
+the gate stays active through from-origin sync until the local tip nears the
+real network tip.
+
+The exit horizon (`bestKnownGenesisSlotLocked`) is the highest advertised tip
+slot among **corroborated (selectable)** peers that have **actually delivered
+headers up to within the window of that advertised tip**
+(`ObservedTip + window >= Tip`). The advertised tip is untrusted and unbounded —
+the implausible-tip check bounds the advertised *block number* but not the
+*slot*, and the first peer is accepted with no reference — and corroboration
+alone does not fix this, because it validates the *delivered* headers (the
+observed frontier), not the advertised claim: a peer that delivers one shared
+early header (passing corroboration) can still advertise a slot near
+`math.MaxUint64`. Binding the horizon to *delivered* data closes this: a liar
+cannot deliver headers up to a `MaxUint64` slot, and an honest peer early in
+from-origin sync has not yet delivered up to its far advertised tip, so neither
+raises the horizon prematurely; the advertised tip becomes the exit target only
+once a corroborated peer has served its chain up to (near) it, which is reached
+exactly when the local tip has caught up. This satisfies both bounds — no
+single-peer liveness pin (an unbounded slot never counts until delivered) and no
+premature exit at the start of sync (delivered headers only reach the far tip
+once caught up). The trade-off is that an uncorroborated source ahead in block
+number could win Praos selection after exit; closing that residual needs
+density-at-intersection (deferred, below). A change
+to any tracked peer's frontier re-runs selection while corroboration is active,
+so corroboration granted or revoked takes effect immediately rather than on the
+next periodic tick.
+
+**Deferred / not implemented** (explicit scope boundary — some of these are
+security limitations, not only performance): the gate is a corroboration check,
+not the reference implementation's full Ouroboros Genesis density-at-intersection
+with **ChainSync Jumping** and devoted BlockFetch dynamics. It confirms that a
+witness's chain is a prefix of the candidate's within the overlapping window; it
+does **not** resolve a fork whose intersection lies *inside* the window by
+counting blocks after the exact intersection, and it cannot testify about blocks
+a fast source produced *beyond* every witness's frontier. Consequently a fast
+source that stays consistent with honest peers up to their frontiers but forks
+only in the not-yet-witnessed suffix is corroborated until a witness advances
+past the fork — full density-at-intersection would decide such cases sooner, so
+its absence is a **security** limitation for that window, mitigated (not closed)
+by the fail-closed overlap requirement and the per-header density comparison.
+Wiring peer-governance demotion to the corroboration-failure event is likewise
+deferred. These remain future work; the density comparison plus the corroboration
+gate provide the from-origin property that a fast source cannot steer the node
+onto a chain no independent witness shares.
 
 #### Anti-flap incumbent pin
 
@@ -1595,6 +1745,18 @@ Genesis initial sync while preserving the existing `UseLedgerAfterSlot` path:
 later ledger peer refreshes still query the live ledger/database provider.
 If the snapshot produces no usable peers, startup falls back to topology
 bootstrap peers.
+
+These snapshot-seeded ledger peers are the configured corroborators for the
+Genesis corroboration gate (see Chain Selection → Ouroboros Genesis trust
+model). In a GSA-style deployment the fast source is a trustable `localRoots`
+peer and the snapshot supplies the corroborating ledger peers; setting
+`genesisBootstrap.corroborationPeers` to the number of snapshot peers that must
+agree makes the node stall rather than follow the fast source until that many
+distinct-host corroborators confirm its recent blocks. Their *independence*
+(distinct operators, infrastructure, and chain views) is not something the
+selector can verify — it enforces only distinct remote hosts — so the operator
+is responsible for populating the snapshot with genuinely independent large
+ledger peers.
 
 Live ledger peer discovery is adapted at the node composition boundary:
 `ledger/` exposes stake pool relay data and current slot through neutral

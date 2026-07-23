@@ -434,6 +434,19 @@ func TestValidate(t *testing.T) {
 			wantErr: "invalid chainsync.maxClients",
 		},
 		{
+			name: "negative genesis corroboration peers",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = -1
+			},
+			wantErr: "invalid genesisBootstrap.corroborationPeers",
+		},
+		{
+			name: "zero genesis corroboration peers allowed",
+			modify: func(c *Config) {
+				c.GenesisBootstrap.CorroborationPeers = 0
+			},
+		},
+		{
 			name:    "invalid mithril backend",
 			modify:  func(c *Config) { c.Mithril.Backend = "v3" },
 			wantErr: "invalid mithril.backend",

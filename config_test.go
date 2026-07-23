@@ -422,6 +422,24 @@ func TestPeerGovernorOptionsApplyPositiveValues(t *testing.T) {
 	assert.Equal(t, 25, cfg.maxInboundConns)
 }
 
+// TestWithGenesisCorroborationPeers covers the public programmatic API path for
+// the Genesis corroboration threshold. A negative value is stored as-is on the
+// Config; the chain selector fails closed on it (clamps to 1) rather than
+// disabling the security gate — see chainselection.NewChainSelector and
+// TestGenesisNegativeCorroborationFailsClosed. node.go passes this field to
+// ChainSelectorConfig.MinCorroboratingPeers.
+func TestWithGenesisCorroborationPeers(t *testing.T) {
+	cfg := &Config{}
+	WithGenesisCorroborationPeers(3)(cfg)
+	assert.Equal(t, 3, cfg.genesisCorroborationPeers)
+
+	WithGenesisCorroborationPeers(0)(cfg)
+	assert.Zero(t, cfg.genesisCorroborationPeers)
+
+	WithGenesisCorroborationPeers(-1)(cfg)
+	assert.Equal(t, -1, cfg.genesisCorroborationPeers)
+}
+
 // TestUpdateRTSMetrics verifies the pure-function mapping from
 // runtime.MemStats fields to the four cardano_node_metrics_RTS_* gauges.
 // Specifically exercises the NumGC - NumForcedGC subtraction so a future

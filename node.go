@@ -293,6 +293,8 @@ func (n *Node) Run(ctx context.Context) error {
 		EnableLeiosTxFetch:       enableLeiosNetworking,
 		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:   n.chainsyncApplyEligible,
+		ChainsyncObservePeerTip:  n.chainsyncObservePeerTip,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
@@ -725,11 +727,12 @@ func (n *Node) Run(ctx context.Context) error {
 		len(n.config.intersectPoints) == 0
 	n.chainSelector = chainselection.NewChainSelector(
 		chainselection.ChainSelectorConfig{
-			Logger:             n.config.logger,
-			EventBus:           n.eventBus,
-			SecurityParam:      chainSelectorSecurityParam,
-			GenesisMode:        genesisSelectionMode,
-			GenesisWindowSlots: genesisWindowSlots,
+			Logger:                n.config.logger,
+			EventBus:              n.eventBus,
+			SecurityParam:         chainSelectorSecurityParam,
+			GenesisMode:           genesisSelectionMode,
+			GenesisWindowSlots:    genesisWindowSlots,
+			MinCorroboratingPeers: n.config.genesisCorroborationPeers,
 			ConnectionLive: func(connId ouroboros.ConnectionId) bool {
 				return n.connManager != nil &&
 					n.connManager.GetConnectionById(connId) != nil
@@ -747,6 +750,7 @@ func (n *Node) Run(ctx context.Context) error {
 			"Genesis chain selection enabled",
 			"genesis_window_slots", genesisWindowSlots,
 			"security_param", chainSelectorSecurityParam,
+			"min_corroborating_peers", n.config.genesisCorroborationPeers,
 		)
 	}
 	// Subscribe chain selector to peer tip update events
@@ -781,6 +785,14 @@ func (n *Node) Run(ctx context.Context) error {
 	n.eventBus.SubscribeFunc(
 		chainselection.ChainSwitchEventType,
 		n.handleChainSwitchEvent,
+	)
+	// Subscribe to selected-to-none transitions (selection stalled, e.g. an
+	// uncorroborated Genesis fast source). Enforcement that the stalled source
+	// stops feeding the ledger is handled by the ChainsyncApplyEligible gate;
+	// this handler surfaces the stall for observability.
+	n.eventBus.SubscribeFunc(
+		chainselection.ChainSelectedNoneEventType,
+		n.handleChainSelectedNoneEvent,
 	)
 	// Subscribe to chain fork events for monitoring
 	n.eventBus.SubscribeFunc(
