@@ -2591,8 +2591,8 @@ CIP-0163 reward-account inactivity (proof-of-life) tracks each account's
 DRep activity uses a boundary one epoch later —
 `drep.ExpiryEpoch == 0 || drep.ExpiryEpoch > currentEpoch`
 (`ledger/governance/epoch.go` `drepActiveAtEpoch`) — so a stored expiry equal
-to `currentEpoch` is still active for a DRep but already expired for an
-account; the two predicates are intentionally not shared code, matching the
+to `currentEpoch` is still active for an account but already expired for a
+DRep; the two predicates are intentionally not shared code, matching the
 CIP text's separate account and DRep expiry semantics. When the
 delegator-inactivity gate
 (`LedgerStateConfig.DelegatorInactivityEnabled` / `DelegatorInactivity`) is

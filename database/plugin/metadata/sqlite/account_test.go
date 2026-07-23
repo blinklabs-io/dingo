@@ -123,6 +123,13 @@ func TestRenewAccountExpirations_Chunking(t *testing.T) {
 	store := setupTestStore(t)
 	db := store.DB()
 
+	require.LessOrEqual(
+		t,
+		1+2*renewAccountExpirationsChunkSize,
+		sqliteBindVarLimit,
+		"chunk bindings must include the shared expiration_epoch value",
+	)
+
 	// Span more than two chunks so the batching loop runs at least three times.
 	const total = renewAccountExpirationsChunkSize*2 + 5
 	mkKey := func(i int) []byte {

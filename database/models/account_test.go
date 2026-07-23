@@ -468,11 +468,13 @@ func TestAccountInactivityActivationCompositeIdentity(t *testing.T) {
 	}
 
 	key := bytes.Repeat([]byte{0xA5}, 28)
+	otherKey := bytes.Repeat([]byte{0x5A}, 28)
 	if err := db.Create(&[]AccountInactivityActivation{
 		{CredentialTag: 0, StakingKey: key},
 		{CredentialTag: 1, StakingKey: key},
+		{CredentialTag: 0, StakingKey: otherKey},
 	}).Error; err != nil {
-		t.Fatalf("insert tag-distinct activation members: %v", err)
+		t.Fatalf("insert composite-distinct activation members: %v", err)
 	}
 	if err := db.Create(&AccountInactivityActivation{
 		CredentialTag: 0,

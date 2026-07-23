@@ -796,7 +796,7 @@ func (d *MetadataStoreSqlite) GetAccountsByCredential(
 // set-based UPDATE. Each ref contributes two bind vars (credential_tag,
 // staking_key) plus the shared SET value, so this keeps the total under the
 // self-imposed sqliteBindVarLimit (mirrors markUtxosDeletedChunkSize).
-const renewAccountExpirationsChunkSize = sqliteBindVarLimit / 2
+const renewAccountExpirationsChunkSize = (sqliteBindVarLimit - 1) / 2
 
 // RenewAccountExpirations sets expiration_epoch for every existing account
 // row matching one of refs. Rows with no match are ignored (an account must

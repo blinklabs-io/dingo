@@ -405,6 +405,13 @@ func TestRecomputeAccountExpirationsAfterRollbackDoesNotFloorAccountInactiveAtAc
 	)
 	ls, db := newExpiryRollbackTestLedger(t, true, inactivity)
 	cred := renewTestCred(0x54)
+	require.NoError(t, db.CreateAccount(nil, &models.Account{
+		StakingKey:    cred,
+		CredentialTag: 0,
+		Active:        false,
+		AddedSlot:     50,
+		CreatedSlot:   50,
+	}))
 	seedRollbackCertificate(
 		t, db, 50, rollbackStakeRegistrationCertificate(cred),
 	)

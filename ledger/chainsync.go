@@ -3850,7 +3850,7 @@ func (ls *LedgerState) processEpochRollover(
 	if err := ls.activateDelegatorInactivityIfNeeded(
 		txn, currentEpoch.EpochId+1,
 	); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("activate delegator inactivity: %w", err)
 	}
 
 	// Run the CIP-1694 governance tick: enact proposals ratified in the

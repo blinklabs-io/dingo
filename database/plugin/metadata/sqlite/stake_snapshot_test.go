@@ -16,6 +16,7 @@ package sqlite
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 
@@ -1106,11 +1107,14 @@ func TestGetRewardStakeInputsForPoolsDeduplicatesPoolsAcrossChunks(t *testing.T)
 	}).Error)
 
 	// SQLite's historical query chunk size is 800. Put the same real pool in
-	// the first and second chunks, separated by unmatched duplicate hashes.
+	// the first and second chunks, separated by distinct unmatched hashes so
+	// production deduplication does not collapse the request to one chunk.
 	pools := make([][]byte, 0, 802)
 	pools = append(pools, pool)
-	for range 800 {
-		pools = append(pools, bytes.Repeat([]byte{0xEE}, 28))
+	for i := range 800 {
+		unmatched := bytes.Repeat([]byte{0xEE}, 28)
+		binary.BigEndian.PutUint32(unmatched[24:], uint32(i)) // #nosec G115
+		pools = append(pools, unmatched)
 	}
 	pools = append(pools, pool)
 

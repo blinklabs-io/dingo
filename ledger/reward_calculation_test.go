@@ -3522,7 +3522,6 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		seedOutputs(t, db)
 
 		txn := db.Transaction(false)
-		defer func() { _ = txn.Rollback() }()
 		app, ok, err := ls.precomputedStakeRewardApplication(
 			txn,
 			newEpoch,
@@ -3555,6 +3554,59 @@ func TestPrecomputedStakeRewardsRejectEarlyPreBabbageOutputs(t *testing.T) {
 		require.True(t, ok)
 		require.NotNil(t, app)
 		require.True(t, app.precomputed)
+		require.Equal(t, uint64(100), app.snapshotCapturedSlot)
+		require.Equal(t, uint64(100), app.snapshotBoundarySlot)
+		require.NoError(t, txn.Rollback())
+
+		// Exercise the application-time expiry guard with a renewal after the
+		// captured snapshot. The fixture's reward epoch is 1, but the earliest
+		// concrete expiry is also 1, so judge this isolated boundary case at
+		// epoch 2: the slot-50 witness gives expiry 1 (expired), while the
+		// slot-150 renewal projected onto the mutable account row gives expiry
+		// 2 (active at equality). The precomputed application must retain its
+		// captured-slot cutoff and therefore ignore that later renewal.
+		ls.config.DelegatorInactivityEnabled = true
+		ls.config.DelegatorInactivity = 1
+		ls.epochCache = []models.Epoch{
+			{
+				EpochId: 0, StartSlot: 0, SlotLength: 1000,
+				LengthInSlots: 100, EraId: eras.ShelleyEraDesc.Id,
+			},
+			{
+				EpochId: 1, StartSlot: 100, SlotLength: 1000,
+				LengthInSlots: 100, EraId: eras.ShelleyEraDesc.Id,
+			},
+		}
+		ls.publishSnapshotsLocked()
+		rewardAccount := rewardCalcHash(0x5a)
+		seedRollbackCertificate(
+			t, db, 50, rollbackStakeRegistrationCertificate(rewardAccount),
+		)
+		seedRollbackCertificate(
+			t, db, 150, rollbackStakeRegistrationCertificate(rewardAccount),
+		)
+		require.NoError(t, db.RenewAccountExpirations(
+			[]models.StakeCredentialRef{
+				models.NewStakeCredentialRef(0, rewardAccount),
+			},
+			2,
+			nil,
+		))
+		app.epochs.snapshot = 2
+
+		guardTxn := db.Transaction(false)
+		require.NoError(t, guardTxn.Do(func(txn *database.Txn) error {
+			guarded, err := ls.guardedExpiredRewardCredentials(txn, app)
+			if err != nil {
+				return err
+			}
+			require.Contains(
+				t,
+				guarded,
+				models.NewStakeCredentialRef(0, rewardAccount).MapKey(),
+			)
+			return nil
+		}))
 	})
 }
 

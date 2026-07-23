@@ -765,15 +765,22 @@ func (ls *LedgerState) precomputedStakeRewardApplication(
 		return nil, false, err
 	}
 	app := &stakeRewardApplication{
-		epochs:         epochs,
-		pparams:        pparams,
-		params:         params,
-		pots:           pots,
-		poolOutputs:    poolOutputs,
-		accountOutputs: accountOutputs,
-		totalRewardPot: uint64(pots.Rewards),
-		precomputed:    true,
-		outputsUpdated: outputsUpdated,
+		epochs:                   epochs,
+		pparams:                  pparams,
+		params:                   params,
+		pots:                     pots,
+		poolOutputs:              poolOutputs,
+		accountOutputs:           accountOutputs,
+		totalRewardPot:           uint64(pots.Rewards),
+		precomputed:              true,
+		outputsUpdated:           outputsUpdated,
+		snapshotCapturedSlot:     rewardSnapshot.CapturedSlot,
+		snapshotBoundarySlot:     rewardSnapshot.BoundarySlot,
+		snapshotEpochNonce:       rewardSnapshot.EpochNonce,
+		snapshotTotalActiveStake: rewardSnapshot.TotalActiveStake,
+		snapshotTotalPoolCount:   rewardSnapshot.TotalPoolCount,
+		snapshotTotalDelegators:  rewardSnapshot.TotalDelegators,
+		snapshotProtocolVersion:  rewardSnapshot.ProtocolVersion,
 	}
 	if err := deriveStakeRewardApplicationTotals(app); err != nil {
 		return nil, false, err

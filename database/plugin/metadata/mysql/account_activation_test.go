@@ -30,7 +30,9 @@ import (
 // value must be replaced by the activation expiration.
 func TestStampAllActiveAccountExpirationsMysql(t *testing.T) {
 	store := newTestMysqlStore(t)
-	defer store.Close() //nolint:errcheck
+	t.Cleanup(func() {
+		require.NoError(t, store.Close())
+	})
 	db := store.DB()
 
 	keyUnset := bytes.Repeat([]byte{0xD1}, 28)
@@ -39,9 +41,10 @@ func TestStampAllActiveAccountExpirationsMysql(t *testing.T) {
 	keys := [][]byte{keyUnset, keyWitnessed, keyInactive}
 	cleanup := func() {
 		for _, key := range keys {
-			_ = db.Where("staking_key = ?", key).Delete(&models.Account{}).Error
-			_ = db.Where("staking_key = ?", key).
-				Delete(&models.AccountInactivityActivation{}).Error
+			require.NoError(t, db.Where("staking_key = ?", key).
+				Delete(&models.AccountInactivityActivation{}).Error)
+			require.NoError(t, db.Where("staking_key = ?", key).
+				Delete(&models.Account{}).Error)
 		}
 	}
 	cleanup()
@@ -70,6 +73,17 @@ func TestStampAllActiveAccountExpirationsMysql(t *testing.T) {
 	rows, err := store.StampAllActiveAccountExpirations(150, nil)
 	require.NoError(t, err)
 	require.EqualValues(t, 2, rows)
+
+	refs := []models.StakeCredentialRef{
+		models.NewStakeCredentialRef(0, keyUnset),
+		models.NewStakeCredentialRef(0, keyWitnessed),
+		models.NewStakeCredentialRef(0, keyInactive),
+	}
+	membership, err := store.AccountInactivityActivationMembership(refs, nil)
+	require.NoError(t, err)
+	require.Contains(t, membership, refs[0].MapKey())
+	require.Contains(t, membership, refs[1].MapKey())
+	require.NotContains(t, membership, refs[2].MapKey())
 
 	var gotUnset models.Account
 	require.NoError(t, db.First(&gotUnset, accounts[0].ID).Error)
