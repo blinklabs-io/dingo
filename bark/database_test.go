@@ -104,6 +104,9 @@ func waitForOperationStatus(
 ) *databasev1alpha1.OperationProgress {
 	t.Helper()
 	var progress *databasev1alpha1.OperationProgress
+	// Snapshot and restore exercise real Badger and SQLite files. In
+	// particular, SQLite's VACUUM INTO can take more than five seconds on a
+	// race-enabled CI runner when every package is tested concurrently.
 	require.Eventually(t, func() bool {
 		progress = get()
 		switch progress.GetStatus() {
@@ -114,7 +117,9 @@ func waitForOperationStatus(
 		default:
 			return false
 		}
-	}, 5*time.Second, 10*time.Millisecond, "operation must reach a terminal state")
+	}, 30*time.Second, 10*time.Millisecond,
+		"operation must reach a terminal state",
+	)
 	return progress
 }
 
