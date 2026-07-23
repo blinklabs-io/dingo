@@ -27,24 +27,25 @@ import (
 // validation, mirroring the production defaults.
 func validTestConfig() *Config {
 	return &Config{
-		Network:              "preview",
-		RunMode:              RunModeServe,
-		StorageMode:          storageModeCore,
-		EvictionWatermark:    DefaultEvictionWatermark,
-		RejectionWatermark:   DefaultRejectionWatermark,
-		MempoolCapacity:      DefaultMempoolCapacityPraos,
-		RelayPort:            3001,
-		PrivatePort:          3002,
-		MetricsPort:          12798,
-		UtxorpcPort:          9090,
-		BlockfrostPort:       3000,
-		MeshPort:             8080,
-		ShutdownTimeout:      DefaultShutdownTimeout,
-		LedgerCatchupTimeout: DefaultLedgerCatchupTimeout,
-		Cache:                DefaultCacheConfig(),
-		Chainsync:            DefaultChainsyncConfig(),
-		HistoryExpiry:        DefaultHistoryExpiryConfig(),
-		Midnight:             DefaultMidnightConfig(),
+		Network:               "preview",
+		RunMode:               RunModeServe,
+		StorageMode:           storageModeCore,
+		MempoolImplementation: DefaultMempoolImplementation,
+		EvictionWatermark:     DefaultEvictionWatermark,
+		RejectionWatermark:    DefaultRejectionWatermark,
+		MempoolCapacity:       DefaultMempoolCapacityPraos,
+		RelayPort:             3001,
+		PrivatePort:           3002,
+		MetricsPort:           12798,
+		UtxorpcPort:           9090,
+		BlockfrostPort:        3000,
+		MeshPort:              8080,
+		ShutdownTimeout:       DefaultShutdownTimeout,
+		LedgerCatchupTimeout:  DefaultLedgerCatchupTimeout,
+		Cache:                 DefaultCacheConfig(),
+		Chainsync:             DefaultChainsyncConfig(),
+		HistoryExpiry:         DefaultHistoryExpiryConfig(),
+		Midnight:              DefaultMidnightConfig(),
 		Mithril: MithrilConfig{
 			Enabled: true,
 			Backend: "v2",
@@ -63,6 +64,13 @@ func TestValidate(t *testing.T) {
 		modify  func(*Config)
 		wantErr string
 	}{
+		{
+			name: "invalid mempool implementation",
+			modify: func(c *Config) {
+				c.MempoolImplementation = "priority"
+			},
+			wantErr: "invalid mempoolImplementation",
+		},
 		{
 			name:    "invalid run mode",
 			modify:  func(c *Config) { c.RunMode = "batch" },

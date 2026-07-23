@@ -90,6 +90,7 @@ type Mempool struct {
 		mempoolBytes    prometheus.Gauge
 		txsEvicted      prometheus.Counter
 		txsExpired      prometheus.Counter
+		implementation  prometheus.Gauge
 	}
 	validator          TxValidator
 	logger             *slog.Logger
@@ -415,6 +416,16 @@ func NewMempool(config MempoolConfig) (*Mempool, error) {
 			Help: "total transactions expired from mempool by TTL",
 		},
 	)
+	m.metrics.implementation = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "dingo_metrics_mempool_info",
+			Help: "mempool implementation identity",
+			ConstLabels: prometheus.Labels{
+				"implementation": string(ImplementationFIFO),
+			},
+		},
+	)
+	m.metrics.implementation.Set(1)
 	// Subscribe to chain update events
 	go m.processChainEvents()
 	// Start TTL cleanup goroutine

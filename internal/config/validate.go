@@ -285,6 +285,13 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 	}
 
 	// Mempool
+	if c.MempoolImplementation != "" &&
+		c.MempoolImplementation != "fifo" {
+		errs = append(errs, fmt.Errorf(
+			"invalid mempoolImplementation %q (must be \"fifo\")",
+			c.MempoolImplementation,
+		))
+	}
 	if c.MempoolCapacity < 0 {
 		errs = append(errs, fmt.Errorf(
 			"invalid mempoolCapacity: %d (must not be negative)",

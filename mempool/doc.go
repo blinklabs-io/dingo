@@ -17,7 +17,12 @@
 // traffic (N2N), validates them against the current ledger state,
 // and holds them until they are included in a block or evicted.
 //
-// Mempool is the top-level type. It validates every submitted
+// Pool is the backend-neutral node contract. FIFO is the default backend and
+// orders transactions by successful admission: independent submissions retain
+// arrival order, and a duplicate refresh does not move a transaction. Mempool
+// remains the concrete queue embedded by FIFO for source compatibility.
+//
+// The FIFO backend validates every submitted
 // transaction through the ledger package — UTxO resolution, fees,
 // ExUnit budgets, validity interval, size, and the full UTxO validation
 // rules enforced by the ledger package — before admitting it. Transactions
@@ -28,14 +33,13 @@
 //
 // The pool uses a two-level watermark scheme:
 //
-//   - EvictionWatermark  — above this fill level, lowest-priority txs
-//     are evicted to make room for higher-priority ones
+//   - EvictionWatermark  — above this fill level, the oldest transactions
+//     are evicted in successful-admission order to make room for new ones
 //   - RejectionWatermark — above this fill level, new submissions are
 //     rejected outright
 //
-// Eviction is driven by transaction priority (fee density), not
-// arrival order. This keeps the pool stable under burst submission
-// without unfairly discarding high-value txs.
+// Eviction is oldest-first in successful-admission order. It is not driven by
+// fee density or another priority score.
 //
 // # Events
 //

@@ -61,7 +61,7 @@ type Node struct {
 	chainsyncState                   *chainsync.State
 	chainSelector                    *chainselection.ChainSelector
 	eventBus                         *event.EventBus
-	mempool                          *mempool.Mempool
+	mempool                          mempool.Pool
 	chainManager                     *chain.ChainManager
 	db                               *database.Database
 	ledgerState                      *ledger.LedgerState
@@ -105,10 +105,14 @@ func New(cfg Config) (*Node, error) {
 	n.configWrapPromRegistry()
 	n.registerBuildInfo()
 	n.registerRTSMetrics()
-	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
 	if err := n.configValidate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
+	// NewEventBus starts background async-worker goroutines, so create the bus
+	// only after configuration validates. If it were created earlier, a
+	// validation failure would return a nil Node while leaving those goroutines
+	// running, with no handle for the caller to Stop() them.
+	n.eventBus = event.NewEventBus(n.config.promRegistry, n.config.logger)
 	return n, nil
 }
 
@@ -153,8 +157,10 @@ func (n *Node) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Register eventBus cleanup (created in New(), has background goroutines)
-	started = append(started, func() { n.eventBus.Stop() })
+	// Register eventBus cleanup (created in New(), has background goroutines).
+	// Close (not Stop): startup-failure cleanup is terminal, and Stop restarts
+	// the async-worker pool, leaking those goroutines.
+	started = append(started, func() { n.eventBus.Close() })
 
 	// Load database
 	dbNeedsRecovery := false
@@ -640,20 +646,28 @@ func (n *Node) Run(ctx context.Context) error {
 		)
 	}
 	// Initialize mempool
-	n.mempool, err = mempool.NewMempool(mempool.MempoolConfig{
-		MempoolCapacity:    n.config.mempoolCapacity,
-		EvictionWatermark:  n.config.evictionWatermark,
-		RejectionWatermark: n.config.rejectionWatermark,
-		Logger:             n.config.logger,
-		EventBus:           n.eventBus,
-		PromRegistry:       n.config.promRegistry,
-		Validator:          n.ledgerState,
-		CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
-	},
+	n.mempool, err = mempool.New(
+		n.config.mempoolImplementation,
+		mempool.MempoolConfig{
+			MempoolCapacity:    n.config.mempoolCapacity,
+			EvictionWatermark:  n.config.evictionWatermark,
+			RejectionWatermark: n.config.rejectionWatermark,
+			Logger:             n.config.logger,
+			EventBus:           n.eventBus,
+			PromRegistry:       n.config.promRegistry,
+			Validator:          n.ledgerState,
+			CurrentSlotFunc:    n.ledgerState.CurrentOrTipSlot,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create mempool: %w", err)
 	}
+	n.config.logger.Info(
+		"mempool initialized",
+		"component", "mempool",
+		"implementation", n.mempool.Implementation(),
+		"capacity_bytes", n.mempool.CapacityBytes(),
+	)
 	started = append(started, func() { //nolint:contextcheck
 		if err := n.mempool.Stop(context.Background()); err != nil {
 			n.config.logger.Error(

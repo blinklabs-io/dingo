@@ -599,7 +599,7 @@ type Node struct {
     chainsyncState *chainsync.State               // Multi-peer sync state
     chainSelector  *chainselection.ChainSelector  // Chain comparison
     eventBus       *event.EventBus                // Event routing
-    mempool        *mempool.Mempool               // Transaction pool
+    mempool        mempool.Pool                   // Selected transaction pool
     chainManager   *chain.ChainManager            // Blockchain state
     db             *database.Database             // Storage layer
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
@@ -1610,7 +1610,15 @@ ChainSync streams ineligible.
 
 ## Transaction Mempool
 
-The `Mempool` (`mempool/mempool.go`) manages pending transactions:
+`mempool.Pool` is the backend-neutral contract used by node composition.
+`mempool.FIFO` embeds the existing ordered queue and is the default backend.
+Successful admissions append to that queue; independent transactions are
+therefore exposed to forging and relay consumers in admission order. Duplicate
+submission refreshes `LastSeen` without changing position, and oldest entries
+are removed first when watermark eviction is active. FIFO is not a fee-density
+priority queue.
+
+The selected pool manages pending transactions:
 
 ```
                         Mempool
@@ -1626,9 +1634,18 @@ The `Mempool` (`mempool/mempool.go`) manages pending transactions:
     |                                                |
     | Metrics                                        |
     |   Transaction count, total size,               |
-    |   validation statistics                        |
+    |   validation statistics, backend identity      |
     -------------------------------------------------
 ```
+
+The `mempoolImplementation` setting accepts only `fifo`, which is also the
+default; configuration validation rejects every other value. Selection and
+construction happen in `node.go`; networking depends on its own narrow mempool
+interface, forging and APIs retain their existing narrow adapters, and none of
+them import FIFO state. Cardano-compatible metrics and `mempool.add_tx` /
+`mempool.remove_tx` events remain backend-neutral;
+`dingo_metrics_mempool_info{implementation="fifo"}` identifies the selected
+backend.
 
 Mempool shutdown is terminal. `Stop` atomically marks the pool stopped before
 clearing transaction and consumer state; later transaction admission returns
@@ -2234,7 +2251,8 @@ because CLI flags are a higher-precedence source merged afterwards by
 `ApplyFlags` and may still replace an invalid or unset value. Once every
 source is merged, `Config.ApplyDefaults()` fills in unset values whose
 defaults are derived from other settings (an empty `runMode` selects `serve`;
-`mempoolCapacity` defaults by run mode — Leios raises it — and the watermarks,
+`mempoolImplementation` defaults to `fifo`, `mempoolCapacity` defaults by run
+mode — Leios raises it — and the watermarks,
 forge slot thresholds, and history-expiry frequency take their standard
 values), and then `Config.Validate()` checks the resulting configuration
 before any services start. Topology resolution
@@ -2244,7 +2262,7 @@ configuration is defaulted and valid, because it derives from the
 YAML or environment value that a CLI flag has since repaired. Validate
 checks: mode enums, listener port ranges (privileged/out-of-range/duplicate),
 load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
-pairing, mempool watermarks, block-producer credential paths, and
+pairing, mempool implementation and watermarks, block-producer credential paths, and
 duration/strategy strings that are otherwise only parsed at their point of use.
 Port checks apply only to the listeners a given invocation actually starts,
 derived from the *effective* run mode plus the storage mode: the serving modes

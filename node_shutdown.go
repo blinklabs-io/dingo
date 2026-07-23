@@ -292,7 +292,9 @@ func (n *Node) shutdown() error {
 	n.shutdownFuncs = nil
 
 	if n.eventBus != nil {
-		n.eventBus.Stop()
+		// Close (not Stop): this is a terminal shutdown, and Stop restarts the
+		// async-worker pool, leaking those goroutines past node teardown.
+		n.eventBus.Close()
 	}
 
 	n.config.logger.Info(

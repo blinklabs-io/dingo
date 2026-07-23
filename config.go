@@ -34,6 +34,7 @@ import (
 	"github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/dingo/ledger"
 	"github.com/blinklabs-io/dingo/ledger/leios"
+	"github.com/blinklabs-io/dingo/mempool"
 	"github.com/blinklabs-io/dingo/topology"
 	ouroboros "github.com/blinklabs-io/gouroboros"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
@@ -133,6 +134,7 @@ type Config struct {
 	intersectPoints          []ocommon.Point
 	listeners                []ListenerConfig
 	mempoolCapacity          int64
+	mempoolImplementation    mempool.Implementation
 	evictionWatermark        float64
 	rejectionWatermark       float64
 	outboundSourcePort       uint
@@ -427,6 +429,16 @@ func (c *Config) experimentalDijkstraEnabled() bool {
 }
 
 func (n *Node) configValidate() error {
+	if n.config.mempoolImplementation == "" {
+		n.config.mempoolImplementation = mempool.ImplementationFIFO
+	}
+	if !n.config.mempoolImplementation.Valid() {
+		return fmt.Errorf(
+			"invalid mempool implementation %q: must be %q",
+			n.config.mempoolImplementation,
+			mempool.ImplementationFIFO,
+		)
+	}
 	// Default storageMode to "core" when unset, and validate.
 	if n.config.storageMode == "" {
 		n.config.storageMode = StorageModeCore
@@ -522,8 +534,9 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	c := Config{
 		// Default logger will throw away logs
 		// We do this so we don't have to add guards around every log operation
-		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
-		genesisBootstrap: true,
+		logger:                slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		mempoolImplementation: mempool.ImplementationFIFO,
+		genesisBootstrap:      true,
 		historyExpiry: HistoryExpiryConfig{
 			Frequency: time.Hour,
 		},
@@ -694,6 +707,15 @@ func WithTracingStdout(stdout bool) ConfigOptionFunc {
 func WithShutdownTimeout(timeout time.Duration) ConfigOptionFunc {
 	return func(c *Config) {
 		c.shutdownTimeout = timeout
+	}
+}
+
+// WithMempoolImplementation selects the mempool backend. FIFO is the default.
+func WithMempoolImplementation(
+	implementation mempool.Implementation,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.mempoolImplementation = implementation
 	}
 }
 
