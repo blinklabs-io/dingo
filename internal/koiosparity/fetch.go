@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -400,15 +401,30 @@ outer:
 				return // Pool wasn't active this epoch.
 			}
 
+			var margin, memberRewards string
+			if item.Margin != nil {
+				// Format without trailing zeros so "0.100" and "0.1" compare
+				// equally after Rat normalisation in ComparePoolEpoch.
+				margin = strconv.FormatFloat(*item.Margin, 'g', -1, 64)
+			}
+			if item.MemberRewards != nil {
+				memberRewards = *item.MemberRewards
+			}
+
 			poolMu.Lock()
 			poolRows = append(poolRows, KoiosPoolEpoch{
-				Network:     network,
-				Epoch:       epoch,
-				PoolBech32:  id,
-				ActiveStake: item.ActiveStake,
-				BlockCnt:    item.BlockCnt,
-				Delegators:  item.DelegatorCnt,
-				FetchedAt:   now,
+				Network:       network,
+				Epoch:         epoch,
+				PoolBech32:    id,
+				ActiveStake:   item.ActiveStake,
+				BlockCnt:      item.BlockCnt,
+				Delegators:    item.DelegatorCnt,
+				Margin:        margin,
+				FixedCost:     item.FixedCost,
+				PoolFees:      item.PoolFees,
+				DelegRewards:  item.DelegRewards,
+				MemberRewards: memberRewards,
+				FetchedAt:     now,
 			})
 			poolMu.Unlock()
 		}(poolID)
