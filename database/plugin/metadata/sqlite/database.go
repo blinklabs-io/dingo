@@ -539,6 +539,15 @@ func (d *MetadataStoreSqlite) Start() error {
 			"reward live stake pool index migration failed: %w", err,
 		)
 	}
+	// Repair duplicate reward_live_stake rows from pre-index databases before
+	// AutoMigrate creates the credential identity constraint.
+	if err := models.DedupeRewardLiveStake(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward_live_stake dedup failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children

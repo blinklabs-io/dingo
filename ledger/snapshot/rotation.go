@@ -365,13 +365,20 @@ func rewardStakeDistribution(
 	if dist == nil {
 		return nil, errors.New("missing stake distribution")
 	}
-	reward := &StakeDistribution{
-		Slot:           dist.Slot,
-		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	// Collapse duplicate credential stake inputs using the RewardLiveStake
+	// identity. reward_live_stake is unique on (credential_tag, staking_key),
+	// so a credential cannot contribute stake to multiple pools. Corrupt
+	// duplicate rows (for example, rows seeded before the unique index was
+	// installed) would otherwise reward the same credential more than once.
+	// Keep the final occurrence deterministically. For input with no duplicates
+	// this is a no-op.
+	type stakeInputKey struct {
+		key string
+		tag uint8
 	}
-	for _, input := range reward.StakeInputs {
+	seen := make(map[stakeInputKey]int, len(dist.StakeInputs))
+	deduped := make([]StakeInput, 0, len(dist.StakeInputs))
+	for _, input := range dist.StakeInputs {
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
 			return nil, fmt.Errorf(
 				"invalid reward stake input pool key length %d",
@@ -390,6 +397,25 @@ func rewardStakeDistribution(
 				input.CredentialTag,
 			)
 		}
+		k := stakeInputKey{
+			key: string(input.StakingKey),
+			tag: input.CredentialTag,
+		}
+		if idx, ok := seen[k]; ok {
+			// Retain the final assignment for this credential.
+			deduped[idx] = input
+			continue
+		}
+		seen[k] = len(deduped)
+		deduped = append(deduped, input)
+	}
+	reward := &StakeDistribution{
+		Slot:           dist.Slot,
+		StakeInputs:    deduped,
+		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
+		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	}
+	for _, input := range reward.StakeInputs {
 		if input.Stake == 0 {
 			continue
 		}
