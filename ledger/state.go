@@ -1391,33 +1391,40 @@ func (ls *LedgerState) Close() error {
 		return nil
 	}
 
-	// Unsubscribe from event bus to stop receiving new events
+	// Unsubscribe from event bus to stop receiving new events. Use
+	// UnsubscribeAndWait, not Unsubscribe: several of these handlers read
+	// component fields (e.g. chainsyncState via GetActiveConnectionFunc)
+	// that callers of Close() go on to nil out or replace immediately
+	// after it returns (see node_lifecycle.go's live restore/truncate
+	// path). Plain Unsubscribe only stops future deliveries -- a handler
+	// goroutine that already dequeued an event before this loop runs could
+	// otherwise still be executing concurrently with that teardown.
 	if ls.config.EventBus != nil {
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ChainsyncEventType,
 			ls.chainsyncSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ChainsyncAwaitReplyEventType,
 			ls.chainsyncAwaitReplySubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			BlockfetchEventType,
 			ls.blockfetchSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			chain.ChainUpdateEventType,
 			ls.chainUpdateSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			chainselection.ChainSwitchEventType,
 			ls.chainSwitchSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			ConnectionClosedEventType,
 			ls.connClosedSubID,
 		)
-		ls.config.EventBus.Unsubscribe(
+		ls.config.EventBus.UnsubscribeAndWait(
 			event.EpochTransitionEventType,
 			ls.rewardPrecomputeSubID,
 		)

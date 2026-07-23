@@ -190,6 +190,14 @@ type channelSubscriber struct {
 	logger *slog.Logger
 	mu     sync.RWMutex
 	closed bool
+
+	// done, when non-nil, is closed by SubscribeFuncWithBuffer's dispatch
+	// goroutine right before it exits -- including after it finishes any
+	// handler call already in flight when Close was called. It is nil for
+	// subscribers created via Subscribe/SubscribeWithBuffer, which have no
+	// bus-owned goroutine to wait for; the caller there owns its own read
+	// loop. See waitDone.
+	done chan struct{}
 }
 
 func newChannelSubscriber(
@@ -200,6 +208,15 @@ func newChannelSubscriber(
 		ch:     make(chan Event, buffer),
 		logger: logger,
 	}
+}
+
+// waitDone blocks until the owning SubscribeFunc dispatch goroutine has
+// fully exited, if this subscriber has one. No-op otherwise.
+func (c *channelSubscriber) waitDone() {
+	if c.done == nil {
+		return
+	}
+	<-c.done
 }
 
 func (c *channelSubscriber) Deliver(evt Event) (err error) {
@@ -360,9 +377,15 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 	}
 	subId, chSub := e.subscribeInternal(eventType, buffer)
 	e.subscriberWg.Add(1)
+	// Set before returning subId to the caller: nothing else can reach
+	// Unsubscribe(subId) -- and therefore waitDone -- until this call
+	// returns, so there is no window where a concurrent Unsubscribe could
+	// observe done as nil and skip waiting.
+	chSub.done = make(chan struct{})
 	e.stopMu.RUnlock()
 
-	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc) {
+	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
+		defer close(done)
 		defer e.subscriberWg.Done()
 		for {
 			evt, ok := <-evtCh
@@ -371,7 +394,7 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 			}
 			e.safeHandlerCall(handlerFunc, evt)
 		}
-	}(chSub.ch, handlerFunc)
+	}(chSub.ch, handlerFunc, chSub.done)
 	return subId
 }
 
@@ -399,6 +422,33 @@ func (e *EventBus) safeHandlerCall(
 
 // Unsubscribe stops delivery of events for a particular type for an existing subscriber
 func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
+	e.unsubscribe(eventType, subId, false)
+}
+
+// UnsubscribeAndWait is like Unsubscribe, but for SubscribeFunc/
+// SubscribeFuncWithBuffer subscribers it additionally blocks until that
+// subscriber's dispatch goroutine has fully exited -- including finishing
+// any handler call already in flight when this is called. Plain Subscribe/
+// SubscribeWithBuffer subscribers have no bus-owned goroutine, so this
+// behaves exactly like Unsubscribe for them.
+//
+// Use this wherever a caller unsubscribes and then, in the same teardown
+// sequence, mutates or discards state that the handler closure reads
+// without its own synchronization (e.g. a component field nilled out right
+// after Close()) -- plain Unsubscribe only stops *future* deliveries, so a
+// handler goroutine that already dequeued an event can still be executing
+// concurrently with that teardown. Do not call this from within the
+// subscriber's own handler: waiting for a goroutine to exit from inside
+// that same goroutine deadlocks forever.
+func (e *EventBus) UnsubscribeAndWait(eventType EventType, subId EventSubscriberId) {
+	e.unsubscribe(eventType, subId, true)
+}
+
+func (e *EventBus) unsubscribe(
+	eventType EventType,
+	subId EventSubscriberId,
+	wait bool,
+) {
 	e.mu.Lock()
 	var subToClose Subscriber
 	if evtTypeSubs, ok := e.subscribers[eventType]; ok {
@@ -425,6 +475,11 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 
 	if subToClose != nil {
 		subToClose.Close()
+		if wait {
+			if chSub, ok := subToClose.(*channelSubscriber); ok {
+				chSub.waitDone()
+			}
+		}
 	}
 }
 
