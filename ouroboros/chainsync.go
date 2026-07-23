@@ -740,19 +740,31 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				Point:       point,
 				BlockNumber: v.BlockNumber(),
 			}
-			o.EventBus.Publish(
-				chainselection.PeerTipUpdateEventType,
-				event.NewEvent(
+			peerTipUpdate := chainselection.PeerTipUpdateEvent{
+				ConnectionId: ctx.ConnectionId,
+				Tip:          tip,
+				ObservedTip:  observedTip,
+				VRFOutput:    vrfOutput,
+				PraosView:    praosView,
+			}
+			// Observe the tip. If the hook handles it synchronously (Genesis
+			// corroboration active, so the apply gate below must reflect this
+			// header), skip the async publish to avoid a double update;
+			// otherwise publish for the async chain-selection and peergov
+			// subscribers.
+			observedSync := false
+			if o.config.ChainsyncObservePeerTip != nil {
+				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
+			}
+			if !observedSync {
+				o.EventBus.Publish(
 					chainselection.PeerTipUpdateEventType,
-					chainselection.PeerTipUpdateEvent{
-						ConnectionId: ctx.ConnectionId,
-						Tip:          tip,
-						ObservedTip:  observedTip,
-						VRFOutput:    vrfOutput,
-						PraosView:    praosView,
-					},
-				),
-			)
+					event.NewEvent(
+						chainselection.PeerTipUpdateEventType,
+						peerTipUpdate,
+					),
+				)
+			}
 		}
 		if ingressEligible && o.ChainsyncState != nil {
 			o.ChainsyncState.RecordObservedHeader(

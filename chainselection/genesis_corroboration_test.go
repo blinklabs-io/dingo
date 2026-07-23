@@ -231,6 +231,50 @@ func TestConfirmsRecentChainRequiresOverlap(t *testing.T) {
 	assert.False(t, ahead.confirmsRecentChain(behind))
 }
 
+// Removing the selected best peer with no replacement also publishes a
+// ChainSelectedNoneEvent (the event represents every selected-to-none
+// transition, not only the evaluate-loop path).
+func TestChainSelectedNoneEventOnBestPeerRemoval(t *testing.T) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	var mu sync.Mutex
+	var events []ChainSelectedNoneEvent
+	bus.SubscribeFunc(
+		ChainSelectedNoneEventType,
+		func(evt event.Event) {
+			e, ok := evt.Data.(ChainSelectedNoneEvent)
+			if !ok {
+				return
+			}
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		},
+	)
+
+	cs := NewChainSelector(ChainSelectorConfig{EventBus: bus})
+	conn := corrConn(1)
+	cs.UpdatePeerTip(conn, genesisTip(100, "h100", 100), nil)
+	cs.EvaluateAndSwitch()
+	require.NotNil(t, cs.GetBestPeer())
+
+	cs.RemovePeer(conn)
+	require.Nil(t, cs.GetBestPeer())
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range events {
+			if e.PreviousConnectionId == conn {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond,
+		"expected ChainSelectedNoneEvent when the selected best peer is removed")
+}
+
 // ShouldApplyIngress is the real enforcement of the corroboration stall: an
 // uncorroborated peer is observed (tips feed corroboration) but its blocks must
 // not be applied. It gates apply on corroboration while active, denying unknown

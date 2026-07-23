@@ -44,6 +44,16 @@ func (cs *ChainSelector) genesisCorroborationActiveLocked() bool {
 		cs.config.MinCorroboratingPeers > 0
 }
 
+// GenesisCorroborationActive reports whether the Genesis corroboration gate is
+// currently in effect. Callers use it to decide whether tip observation must be
+// ordered synchronously with the apply-eligibility gate (see ShouldApplyIngress):
+// the gate is only non-trivial while corroboration is active.
+func (cs *ChainSelector) GenesisCorroborationActive() bool {
+	cs.mutex.RLock()
+	defer cs.mutex.RUnlock()
+	return cs.genesisCorroborationActiveLocked()
+}
+
 // peerLiveEligibleNonStaleLocked reports whether a peer passes the shared
 // live/eligible/non-stale prerequisite used by both Genesis corroboration
 // witness eligibility and normal selection eligibility. It is the single

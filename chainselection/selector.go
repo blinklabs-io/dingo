@@ -718,6 +718,10 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 					)
 					switchEvent = &evt
 				}
+			} else {
+				// No replacement selected: this is a selected-to-none transition,
+				// so stage the explicit event like the main evaluation path.
+				cs.stageSelectedNoneLocked(previousBest)
 			}
 		}
 	}()
@@ -728,6 +732,7 @@ func (cs *ChainSelector) RemovePeer(connId ouroboros.ConnectionId) {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
 	}
 	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
 	if reevaluate {
 		cs.EvaluateAndSwitch()
 	}
@@ -1205,6 +1210,22 @@ func (cs *ChainSelector) publishPendingGenesisExitEvent() {
 	}
 }
 
+// stageSelectedNoneLocked stages a ChainSelectedNoneEvent for a best-peer →
+// none transition (a peer was previously selected, now none is). Must be called
+// with cs.mutex held; the event is published later by
+// publishPendingSelectedNoneEvent outside the lock.
+func (cs *ChainSelector) stageSelectedNoneLocked(
+	previousBest ouroboros.ConnectionId,
+) {
+	if cs.config.EventBus == nil {
+		return
+	}
+	cs.pendingSelectedNone = &ChainSelectedNoneEvent{
+		PreviousConnectionId: previousBest,
+		GenesisCorroboration: cs.genesisCorroborationActiveLocked(),
+	}
+}
+
 // publishPendingSelectedNoneEvent drains and publishes a staged
 // ChainSelectedNoneEvent outside the selector mutex.
 func (cs *ChainSelector) publishPendingSelectedNoneEvent() {
@@ -1339,12 +1360,8 @@ func (cs *ChainSelector) evaluateBestPeerLocked() (
 		// stall (ChainSwitchEvent cannot express "none"). Enforcement that the
 		// stalled source stops feeding the ledger is handled separately by
 		// ShouldApplyIngress.
-		previousBest := cs.bestPeerConn
-		if previousBest != nil && cs.config.EventBus != nil {
-			cs.pendingSelectedNone = &ChainSelectedNoneEvent{
-				PreviousConnectionId: *previousBest,
-				GenesisCorroboration: cs.genesisCorroborationActiveLocked(),
-			}
+		if previousBest := cs.bestPeerConn; previousBest != nil {
+			cs.stageSelectedNoneLocked(*previousBest)
 		}
 		// Clear stale reference to avoid returning a disconnected peer
 		cs.bestPeerConn = nil
@@ -1664,6 +1681,10 @@ func (cs *ChainSelector) cleanupStalePeers() {
 					)
 					switchEvent = &evt
 				}
+			} else {
+				// No replacement selected after stale cleanup: this is a
+				// selected-to-none transition.
+				cs.stageSelectedNoneLocked(*previousBest)
 			}
 		}
 	}()
@@ -1674,4 +1695,5 @@ func (cs *ChainSelector) cleanupStalePeers() {
 		cs.config.EventBus.Publish(ChainSwitchEventType, *switchEvent)
 	}
 	cs.publishPendingGenesisExitEvent()
+	cs.publishPendingSelectedNoneEvent()
 }

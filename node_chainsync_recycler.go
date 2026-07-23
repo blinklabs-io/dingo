@@ -31,6 +31,33 @@ func plateauThreshold(stallTimeout time.Duration) time.Duration {
 	return max(2*stallTimeout, 4*time.Minute)
 }
 
+// chainsyncObservePeerTip synchronously feeds a peer tip update into chain
+// selection (and peergov) when the Genesis corroboration gate is active, so the
+// ChainsyncApplyEligible check that immediately follows in the roll-forward
+// handler reflects the header currently being admitted. This closes the race
+// where the apply gate would otherwise read corroboration state that predates
+// this header (the tip update is normally delivered asynchronously). It returns
+// true when it handled the observation synchronously, so the ouroboros layer
+// skips the async PeerTipUpdateEvent publish to avoid a double update.
+//
+// When corroboration is inactive the async path is used unchanged (returns
+// false), so normal high-throughput sync keeps its parallelism.
+func (n *Node) chainsyncObservePeerTip(
+	e chainselection.PeerTipUpdateEvent,
+) bool {
+	if n.chainSelector == nil ||
+		!n.chainSelector.GenesisCorroborationActive() {
+		return false
+	}
+	n.chainSelector.HandlePeerTipUpdateEvent(
+		event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+	)
+	if n.peerGov != nil {
+		n.peerGov.TouchPeerByConnId(e.ConnectionId)
+	}
+	return true
+}
+
 // chainsyncApplyEligible gates whether a peer's headers/rollbacks are APPLIED to
 // the ledger, on top of ingress eligibility. It defers to the chain selector's
 // corroboration decision so an uncorroborated Genesis fast source is observed

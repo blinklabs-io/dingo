@@ -1323,7 +1323,14 @@ it. Dingo implements this as a **corroboration gate**
   `ledger.ChainsyncEvent` (and therefore blockfetch) is withheld, so it cannot
   steer the ledger. When no peer is corroborated, nothing is applied and the
   ledger genuinely stalls. Observation happening before the apply gate is what
-  avoids a deadlock (a peer must be observed to become corroborated).
+  avoids a deadlock (a peer must be observed to become corroborated). While the
+  gate is active the observation is made **synchronously** with the gate
+  (`OuroborosConfig.ChainsyncObservePeerTip`, wired to update chain selection in
+  the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
+  apply decision reflects the header currently being admitted rather than a tip
+  update that has not been processed yet — an async observation could otherwise
+  let a header slip through in the window before it revoked corroboration. With
+  the gate disabled the async path is used unchanged.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.

@@ -1178,6 +1178,95 @@ func TestChainsyncClientRollForwardApplyGateWithholdsLedgerButObservesTip(
 	}
 }
 
+// With the synchronous observe hook wired (as the node does when Genesis
+// corroboration is active), a header's apply decision reflects that header:
+// the tip is folded into chain selection before the apply gate runs, so a
+// header that establishes corroboration is applied in the same roll-forward
+// rather than withheld until an asynchronous tip update is processed.
+func TestChainsyncClientRollForwardSyncObservationOrdersApplyGate(
+	t *testing.T,
+) {
+	bus := event.NewEventBus(nil, nil)
+	defer bus.Close()
+
+	_, ledgerCh := bus.Subscribe(ledger.ChainsyncEventType)
+
+	cs := chainselection.NewChainSelector(chainselection.ChainSelectorConfig{
+		GenesisMode:           true,
+		SecurityParam:         20,
+		MinCorroboratingPeers: 1,
+	})
+
+	state := dchainsync.NewState(bus, nil)
+	// Distinct remote hosts so the two peers count as independent corroborators.
+	connA := newTestConnId("127.0.0.1:6000", "10.0.0.1:3001")
+	connB := newTestConnId("127.0.0.1:6000", "10.0.0.2:3001")
+	require.True(t, state.AddClientConnId(connA))
+	require.True(t, state.AddClientConnId(connB))
+	// connA drives, so it may replay a duplicate header first seen from connB.
+	state.SetClientConnId(connA)
+
+	o := NewOuroboros(OuroborosConfig{
+		EventBus: bus,
+		ChainsyncIngressEligible: func(ouroboros.ConnectionId) bool {
+			return true
+		},
+		// Synchronous observation, exactly like node.chainsyncObservePeerTip.
+		ChainsyncObservePeerTip: func(
+			e chainselection.PeerTipUpdateEvent,
+		) bool {
+			cs.HandlePeerTipUpdateEvent(
+				event.NewEvent(chainselection.PeerTipUpdateEventType, e),
+			)
+			return true
+		},
+		ChainsyncApplyEligible: cs.ShouldApplyIngress,
+	})
+	o.ChainsyncState = state
+	o.EventBus = bus
+
+	header := newTestBlockHeader(100, 1, 0xaa)
+	tip := ochainsync.Tip{
+		Point:       ocommon.NewPoint(100, header.Hash().Bytes()),
+		BlockNumber: 1,
+	}
+
+	// connB delivers the header first. It is observed but uncorroborated (no
+	// witness yet), so it is withheld from the ledger.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connB},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case <-ledgerCh:
+		t.Fatal("connB header must be withheld while uncorroborated")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// connA (the driver) delivers the same header. Its synchronous observation
+	// makes connA and connB corroborate each other, so by the time the apply
+	// gate runs connA is corroborated and the header is applied — in the same
+	// roll-forward, with no async lag.
+	require.NoError(t, o.chainsyncClientRollForward(
+		ochainsync.CallbackContext{ConnectionId: connA},
+		0,
+		header,
+		tip,
+	))
+	select {
+	case evt := <-ledgerCh:
+		data, ok := evt.Data.(ledger.ChainsyncEvent)
+		require.True(t, ok)
+		require.Equal(t, connA, data.ConnectionId)
+	case <-time.After(time.Second):
+		t.Fatal(
+			"corroborating header must be applied in the same roll-forward",
+		)
+	}
+}
+
 func TestChainsyncClientRollForwardReplaysDuplicateFromSelectedPeerSeenElsewhere(
 	t *testing.T,
 ) {
