@@ -63,6 +63,12 @@ type DingoPoolEpochData struct {
 	DelegatorCount uint64
 	FixedCost      string // lovelace decimal string (reward_pool_input.cost)
 	Margin         string // rational string (e.g. "1/10"); empty when null
+
+	// MemberRewardTotal is reward_pool_output.member_reward_total (lovelace
+	// decimal string); "" when Dingo hasn't yet computed rewards for this
+	// pool/epoch (no reward_pool_output row), which is distinct from a
+	// genuine zero reward.
+	MemberRewardTotal string
 }
 
 // DingoDB reads reward state directly from Dingo's metadata database.
@@ -190,7 +196,10 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 }
 
 // GetPoolEpochDataMap returns all pools with a reward_pool_input row for the
-// given epoch, keyed by pool-key-hash hex. One bulk query per epoch.
+// given epoch, keyed by pool-key-hash hex, merged with reward_pool_output rows
+// (reward outputs are computed later than inputs, so an output row may not
+// exist yet for a pool that already has an input row — that pool's
+// MemberRewardTotal is simply left ""). One bulk query per table per epoch.
 func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochData, error) {
 	var inputs []models.RewardPoolInput
 	if err := d.db.Where("epoch = ?", epoch).Find(&inputs).Error; err != nil {
@@ -206,7 +215,7 @@ func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochD
 		}
 		var margin string
 		if inp.Margin != nil && inp.Margin.Rat != nil {
-			margin = inp.Margin.Rat.String()
+			margin = inp.Margin.String()
 		}
 		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
@@ -214,6 +223,22 @@ func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochD
 			DelegatorCount: inp.DelegatorCount,
 			FixedCost:      strconv.FormatUint(uint64(inp.Cost), 10),
 			Margin:         margin,
+		}
+	}
+
+	var outputs []models.RewardPoolOutput
+	if err := d.db.Where("epoch = ?", epoch).Find(&outputs).Error; err != nil {
+		return nil, fmt.Errorf("reward_pool_output epoch %d: %w", epoch, err)
+	}
+	for i := range outputs {
+		out := &outputs[i]
+		// reward_pool_input is captured before reward_pool_output is computed,
+		// so every output row should have a matching input row already in m.
+		// Skip silently on the (unexpected) alternative rather than
+		// synthesizing a partial entry with zeroed input fields, which would
+		// misreport as a set of spurious value_mismatch results below.
+		if data, ok := m[hex.EncodeToString(out.PoolKeyHash)]; ok {
+			data.MemberRewardTotal = strconv.FormatUint(uint64(out.MemberRewardTotal), 10)
 		}
 	}
 	return m, nil

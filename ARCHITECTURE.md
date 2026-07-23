@@ -2310,7 +2310,10 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
 **Data sources:**
 - **Reference (Koios):** fetched once into `cache.db` (default `.koios/cache.db`)
   via the `fetch` subcommand. The cache holds `koios_epoch_info` and
-  `koios_pool_epoch` rows per closed epoch.
+  `koios_pool_epoch` rows per closed epoch, storing the full documented
+  `/epoch_info` and `/pool_history` field sets (not just the subset compared
+  against Dingo) so the cache is a complete Koios reference even as new
+  comparisons are added later.
 - **Dingo:** read directly from Dingo's metadata database during the `check`
   phase — no HTTP endpoint on the Dingo node is contacted. Three backends are
   supported via `--metadata-plugin` (defaulting to `sqlite`):
@@ -2318,8 +2321,19 @@ cmd/koios-parity/          # thin Cobra CLI wrapper
   - `postgres` / `mysql`: connects via `--metadata-dsn` or `DINGO_METADATA_DSN`
 
   Tables queried: `reward_pool_input` (per-pool stake/blocks/delegators),
-  `epoch_summary` (total active stake, pool count, delegator count),
-  `reward_ada_pots` (epoch fees).
+  `reward_pool_output` (per-pool `member_reward_total`, merged into the same
+  per-pool map keyed by pool-key-hash — a pool may have an input row before
+  its output row is computed), `epoch_summary` (total active stake, pool
+  count, delegator count), `reward_ada_pots` (epoch fees).
+
+  Koios's `pool_fees`/`deleg_rewards` pool_history fields are intentionally
+  *not* compared against Dingo's `LeaderReward`/`TotalReward`: Koios recomputes
+  `pool_fees` from `fixed_cost`+`margin` alone, omitting the pledge/owner-stake
+  bonus the Shelley ledger spec folds into the true leader reward, so it
+  systematically diverges from Dingo's exact value for any pool with owner
+  stake. `member_rewards` has no such approximation (it's a direct sum of
+  per-delegator reward amounts) and is compared 1:1 against
+  `reward_pool_output.member_reward_total`.
 
 **Mismatch categories:** `value_mismatch`, `pool_only_dingo`, `pool_only_koios`,
 `dingo_db_missing` (epoch/pool row not yet computed by Dingo), `dingo_db_error`

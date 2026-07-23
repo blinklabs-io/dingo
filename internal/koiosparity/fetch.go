@@ -290,16 +290,20 @@ func fetchEpoch(
 	// instead of being cached.
 	const preStakingThroughEpoch = 1
 	if info.ActiveStake == nil && epoch <= preStakingThroughEpoch {
-		var epochEndTime time.Time
-		if info.EndTime != 0 {
-			epochEndTime = time.Unix(info.EndTime, 0).UTC()
-		}
 		if err := cache.CommitEpochData(KoiosEpochInfo{
-			Network:      network,
-			Epoch:        epoch,
-			PreStaking:   true,
-			EpochEndTime: epochEndTime,
-			FetchedAt:    time.Now(),
+			Network:        network,
+			Epoch:          epoch,
+			PreStaking:     true,
+			EpochEndTime:   unixTime(info.EndTime),
+			Era:            info.Era,
+			OutSum:         strOrEmpty(info.OutSum),
+			TxCount:        info.TxCount,
+			BlkCount:       info.BlkCount,
+			EpochStartTime: unixTime(info.StartTime),
+			FirstBlockTime: unixTime(info.FirstBlockTime),
+			LastBlockTime:  unixTime(info.LastBlockTime),
+			AvgBlkReward:   strOrEmpty(info.AvgBlkReward),
+			FetchedAt:      time.Now(),
 		}, nil); err != nil {
 			return 0, fmt.Errorf("commit pre-staking marker: %w", err)
 		}
@@ -322,11 +326,11 @@ func fetchEpoch(
 	if info.EndTime == 0 {
 		return 0, fmt.Errorf("epoch %d: koios returned end_time=0 — epoch may not be fully closed yet", epoch)
 	}
-	epochEndTime := time.Unix(info.EndTime, 0).UTC()
+	epochEndTime := unixTime(info.EndTime)
 
-	// fees and total_rewards may also be null for early epochs; store as ""
-	// so the cache constraint is satisfied. The comparer skips fees comparison
-	// when koios.Fees is "".
+	// fees, total_rewards, out_sum, and avg_blk_reward may also be null for
+	// early epochs; store as "" so the cache constraint is satisfied. The
+	// comparer skips fees/total_rewards comparison when the Koios value is "".
 	var fees, totalRewards string
 	if info.Fees != nil {
 		fees = *info.Fees
@@ -334,6 +338,8 @@ func fetchEpoch(
 	if info.TotalRewards != nil {
 		totalRewards = *info.TotalRewards
 	}
+	outSum := strOrEmpty(info.OutSum)
+	avgBlkReward := strOrEmpty(info.AvgBlkReward)
 
 	now := time.Now()
 
@@ -401,30 +407,34 @@ outer:
 				return // Pool wasn't active this epoch.
 			}
 
-			var margin, memberRewards string
+			var margin, activeStakePct string
 			if item.Margin != nil {
 				// Format without trailing zeros so "0.100" and "0.1" compare
 				// equally after Rat normalisation in ComparePoolEpoch.
 				margin = strconv.FormatFloat(*item.Margin, 'g', -1, 64)
 			}
-			if item.MemberRewards != nil {
-				memberRewards = *item.MemberRewards
+			if item.ActiveStakePct != nil {
+				activeStakePct = strconv.FormatFloat(*item.ActiveStakePct, 'g', -1, 64)
 			}
+			memberRewards := strOrEmpty(item.MemberRewards)
 
 			poolMu.Lock()
 			poolRows = append(poolRows, KoiosPoolEpoch{
-				Network:       network,
-				Epoch:         epoch,
-				PoolBech32:    id,
-				ActiveStake:   item.ActiveStake,
-				BlockCnt:      item.BlockCnt,
-				Delegators:    item.DelegatorCnt,
-				Margin:        margin,
-				FixedCost:     item.FixedCost,
-				PoolFees:      item.PoolFees,
-				DelegRewards:  item.DelegRewards,
-				MemberRewards: memberRewards,
-				FetchedAt:     now,
+				Network:        network,
+				Epoch:          epoch,
+				PoolBech32:     id,
+				ActiveStake:    item.ActiveStake,
+				BlockCnt:       item.BlockCnt,
+				Delegators:     item.DelegatorCnt,
+				Margin:         margin,
+				FixedCost:      item.FixedCost,
+				PoolFees:       item.PoolFees,
+				DelegRewards:   item.DelegRewards,
+				MemberRewards:  memberRewards,
+				ActiveStakePct: activeStakePct,
+				SaturationPct:  strconv.FormatFloat(item.SaturationPct, 'g', -1, 64),
+				EpochRos:       strconv.FormatFloat(item.EpochRos, 'g', -1, 64),
+				FetchedAt:      now,
 			})
 			poolMu.Unlock()
 		}(poolID)
@@ -452,16 +462,42 @@ outer:
 	// freshness marker (fetched_at) is never left stale relative to the
 	// pool rows, which would suppress the automatic recheck.
 	if err := cache.CommitEpochData(KoiosEpochInfo{
-		Network:      network,
-		Epoch:        epoch,
-		ActiveStake:  activeStake,
-		Fees:         fees,
-		TotalRewards: totalRewards,
-		EpochEndTime: epochEndTime,
-		FetchedAt:    now,
+		Network:        network,
+		Epoch:          epoch,
+		ActiveStake:    activeStake,
+		Fees:           fees,
+		TotalRewards:   totalRewards,
+		EpochEndTime:   epochEndTime,
+		Era:            info.Era,
+		OutSum:         outSum,
+		TxCount:        info.TxCount,
+		BlkCount:       info.BlkCount,
+		EpochStartTime: unixTime(info.StartTime),
+		FirstBlockTime: unixTime(info.FirstBlockTime),
+		LastBlockTime:  unixTime(info.LastBlockTime),
+		AvgBlkReward:   avgBlkReward,
+		FetchedAt:      now,
 	}, poolRows); err != nil {
 		return 0, fmt.Errorf("commit epoch: %w", err)
 	}
 
 	return len(poolRows), nil
+}
+
+// unixTime converts a Koios Unix-seconds timestamp to a UTC time.Time, leaving
+// it as the zero value when Koios reports 0 (unset/unknown) rather than
+// producing the 1970-01-01 epoch, which would be misleading for "unknown".
+func unixTime(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
+}
+
+// strOrEmpty dereferences a nullable Koios string field, returning "" when nil.
+func strOrEmpty(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

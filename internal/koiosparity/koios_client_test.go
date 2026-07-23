@@ -53,8 +53,34 @@ func TestGetRetriesOn503ThenSucceeds(t *testing.T) {
 	k := newTestKoiosClient(srv.URL)
 	resp, err := k.get(context.Background(), "/tip", -1, -1)
 	require.NoError(t, err)
-	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.EqualValues(t, 2, attempts.Load())
+}
+
+func TestGetRetriesOnBodyReadFailure(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			// Declare a body longer than what's actually written so the
+			// server aborts the connection mid-transfer, forcing the
+			// client's io.ReadAll to fail with io.ErrUnexpectedEOF — a
+			// transient failure distinct from a non-2xx status or a
+			// connect-time transport error.
+			w.Header().Set("Content-Length", "1000")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`[{"epoch_no":1}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`[{"epoch_no":1}]`))
+	}))
+	defer srv.Close()
+
+	k := newTestKoiosClient(srv.URL)
+	resp, err := k.get(context.Background(), "/tip", -1, -1)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.JSONEq(t, `[{"epoch_no":1}]`, string(resp.Body))
 	require.EqualValues(t, 2, attempts.Load())
 }
 
@@ -109,7 +135,6 @@ func TestGetRetriesBurst429HonoringRetryAfter(t *testing.T) {
 	resp, err := k.get(context.Background(), "/tip", -1, -1)
 	elapsed := time.Since(start)
 	require.NoError(t, err)
-	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.EqualValues(t, 2, attempts.Load())
 	// Must have waited at least the Retry-After second (not the old 2s keyed backoff).

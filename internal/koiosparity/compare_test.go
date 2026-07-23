@@ -72,3 +72,36 @@ func TestComparePoolEpochFixedCostAndMargin(t *testing.T) {
 	require.Len(t, ms, 1)
 	require.Equal(t, "margin", ms[0].Field)
 }
+
+func TestComparePoolEpochMemberRewards(t *testing.T) {
+	now := time.Now()
+	koios := &KoiosPoolEpoch{
+		PoolBech32:    "pool1test",
+		ActiveStake:   "1000",
+		BlockCnt:      2,
+		Delegators:    3,
+		FixedCost:     "340000000",
+		Margin:        "0.1",
+		MemberRewards: "123456789",
+	}
+	dingo := &DingoPoolEpochData{
+		DelegatedStake:    "1000",
+		BlocksProduced:    2,
+		DelegatorCount:    3,
+		FixedCost:         "340000000",
+		Margin:            "1/10",
+		MemberRewardTotal: "123456789",
+	}
+	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
+
+	// Reward calculation not yet finished for this pool/epoch: Dingo has no
+	// reward_pool_output row, so the field is skipped rather than flagged.
+	dingo.MemberRewardTotal = ""
+	require.Empty(t, ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{}))
+
+	dingo.MemberRewardTotal = "1"
+	ms := ComparePoolEpoch("preview", 5, koios, dingo, now, 0, time.Time{})
+	require.Len(t, ms, 1)
+	require.Equal(t, "member_rewards", ms[0].Field)
+	require.Equal(t, CategoryValueMismatch, ms[0].Category)
+}

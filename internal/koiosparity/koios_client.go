@@ -65,33 +65,51 @@ var koiosBaseURLs = map[string]string{
 	"preprod": "https://preprod.koios.rest/api/v1",
 }
 
-// KoiosEpochInfoResp is the Koios /epoch_info response shape.
+// KoiosEpochInfoResp is the Koios /epoch_info response shape, covering every
+// field in the documented schema (components/schemas/epoch_info in
+// https://api.koios.rest/koiosapi.yaml).
 // Note: pool_cnt and delegator_cnt are not returned by preview/preprod and are omitted.
-// active_stake, fees, and total_rewards are nullable on early epochs (pre-staking, pre-rewards).
+// active_stake, fees, and total_rewards are documented nullable on early
+// epochs (pre-staking, pre-rewards). out_sum and avg_blk_reward are not
+// documented nullable but are defensively typed as pointers because Koios has
+// been observed returning null for them on the same early epochs as fees.
 type KoiosEpochInfoResp struct {
-	EpochNo      uint64  `json:"epoch_no"`
-	EndTime      int64   `json:"end_time"` // Unix timestamp of epoch boundary
-	ActiveStake  *string `json:"active_stake"`
-	Fees         *string `json:"fees"`
-	TotalRewards *string `json:"total_rewards"`
+	EpochNo        uint64  `json:"epoch_no"`
+	Era            string  `json:"era"`
+	OutSum         *string `json:"out_sum"`
+	Fees           *string `json:"fees"`
+	TxCount        int64   `json:"tx_count"`
+	BlkCount       int64   `json:"blk_count"`
+	StartTime      int64   `json:"start_time"`
+	EndTime        int64   `json:"end_time"` // Unix timestamp of epoch boundary
+	FirstBlockTime int64   `json:"first_block_time"`
+	LastBlockTime  int64   `json:"last_block_time"`
+	ActiveStake    *string `json:"active_stake"`
+	TotalRewards   *string `json:"total_rewards"`
+	AvgBlkReward   *string `json:"avg_blk_reward"`
 }
 
-// KoiosPoolHistoryItem is one epoch entry from /pool_history.
+// KoiosPoolHistoryItem is one epoch entry from /pool_history, covering every
+// field in the documented pool_history_info schema.
 // pool_id_bech32 is excluded from the projection — the caller already knows the pool ID.
 //
 // Reward-related fields (margin, fixed_cost, pool_fees, deleg_rewards,
-// member_rewards) are part of the documented pool_history schema and are
-// stored so the cache holds a complete reward reference for each pool epoch.
+// member_rewards, epoch_ros) are part of the documented pool_history schema
+// and are stored so the cache holds a complete reward reference for each pool
+// epoch.
 type KoiosPoolHistoryItem struct {
-	EpochNo       uint64   `json:"epoch_no"`
-	ActiveStake   string   `json:"active_stake"`
-	BlockCnt      int      `json:"block_cnt"`
-	DelegatorCnt  int      `json:"delegator_cnt"`
-	Margin        *float64 `json:"margin"`
-	FixedCost     string   `json:"fixed_cost"`
-	PoolFees      string   `json:"pool_fees"`
-	DelegRewards  string   `json:"deleg_rewards"`
-	MemberRewards *string  `json:"member_rewards"`
+	EpochNo        uint64   `json:"epoch_no"`
+	ActiveStake    string   `json:"active_stake"`
+	ActiveStakePct *float64 `json:"active_stake_pct"`
+	SaturationPct  float64  `json:"saturation_pct"`
+	BlockCnt       int      `json:"block_cnt"`
+	DelegatorCnt   int      `json:"delegator_cnt"`
+	Margin         *float64 `json:"margin"`
+	FixedCost      string   `json:"fixed_cost"`
+	PoolFees       string   `json:"pool_fees"`
+	DelegRewards   string   `json:"deleg_rewards"`
+	MemberRewards  *string  `json:"member_rewards"`
+	EpochRos       float64  `json:"epoch_ros"`
 }
 
 // KoiosTipResp is the shape of /tip.
@@ -161,10 +179,7 @@ func (b *burstLimiter) wait(ctx context.Context) error {
 		}
 		sleepUntil := b.times[0].Add(b.window)
 		b.mu.Unlock()
-		wait := time.Until(sleepUntil)
-		if wait < time.Millisecond {
-			wait = time.Millisecond
-		}
+		wait := max(time.Until(sleepUntil), time.Millisecond)
 		select {
 		case <-ctx.Done():
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -219,13 +234,29 @@ func waitCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// get executes a GET request against the Koios API with optional Range header.
+// koiosResponse is a fully-drained Koios HTTP response: the body is read out
+// and the underlying connection closed before get() returns, so callers never
+// need to manage resp.Body themselves and a body read failure can be retried
+// exactly like a transport or 5xx error (see get()).
+type koiosResponse struct {
+	StatusCode int
+	Body       []byte
+	Header     http.Header
+}
+
+// get executes a GET request against the Koios API with optional Range header,
+// retrying transport errors, 5xx responses, burst 429s, and body-read failures.
 // rangeStart/rangeEnd < 0 means no Range header.
+//
+// The body is read to completion inside the retry loop (not left to the
+// caller) so a connection that drops mid-transfer — after a successful status
+// line but before the full body arrives — is retried the same as a transport
+// error, instead of surfacing as a hard, non-retried failure.
 func (k *KoiosClient) get(
 	ctx context.Context,
 	path string,
 	rangeStart, rangeEnd int,
-) (*http.Response, error) {
+) (*koiosResponse, error) {
 	url := k.baseURL + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -239,29 +270,52 @@ func (k *KoiosClient) get(
 		req.Header.Set("Range", fmt.Sprintf("%d-%d", rangeStart, rangeEnd))
 	}
 
-	var resp *http.Response
+	// retryOrFail waits `delay` and returns nil (meaning: loop back and retry)
+	// when attempts remain, or the formatted failure error on the final
+	// attempt. A non-nil error can also mean the wait itself was interrupted
+	// by ctx cancellation — either way, the caller should return it as-is.
+	retryOrFail := func(attempt int, delay time.Duration, failFmt string, failArgs ...any) error {
+		if attempt < koiosMaxRetries-1 {
+			return waitCtx(ctx, delay)
+		}
+		return fmt.Errorf(failFmt, failArgs...)
+	}
+
 	for attempt := range koiosMaxRetries {
 		if err := k.limiter.wait(ctx); err != nil {
 			return nil, err
 		}
-		resp, err = k.http.Do(req.Clone(ctx))
-		if err != nil {
-			if attempt < koiosMaxRetries-1 {
-				if waitErr := waitCtx(ctx, koiosRetryBackoff5xx*time.Duration(attempt+1)); waitErr != nil {
-					return nil, waitErr
-				}
-				continue
+		resp, doErr := k.http.Do(req.Clone(ctx))
+		if doErr != nil {
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios GET %s: %w", path, doErr,
+			); err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("koios GET %s: %w", path, err)
+			continue
 		}
 		// http.Client.Do guarantees non-nil resp when err is nil, but nilaway
 		// can't see that invariant through the stdlib. Guard explicitly.
 		if resp == nil {
 			return nil, errors.New("koios: http.Do returned nil response without error")
 		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			// Treat a body-read failure (e.g. connection reset mid-transfer)
+			// exactly like a transport error: it's transient and safe to retry.
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios GET %s: read body: %w", path, readErr,
+			); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		if resp.StatusCode == http.StatusTooManyRequests {
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
 			bodyStr := strings.TrimSpace(string(body))
 			// Daily quota: retrying with the burst cooldown cannot help.
 			if isDailyQuotaExceeded(bodyStr) {
@@ -273,41 +327,35 @@ func (k *KoiosClient) get(
 			}
 			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
 			// Retry-After when the gateway sends it.
-			if attempt < koiosMaxRetries-1 {
-				delay := retryAfterDelay(resp)
-				if waitErr := waitCtx(ctx, delay); waitErr != nil {
-					return nil, waitErr
-				}
-				continue
-			}
-			return nil, fmt.Errorf(
+			if err := retryOrFail(attempt, retryAfterDelay(resp),
 				"koios burst rate-limited after %d retries on %s (Public/Free = %d req/%s; wait ~%s between bursts): %s",
 				koiosMaxRetries, path, koiosBurstLimitPublic, koiosBurstWindow, koiosBurstCooldown, bodyStr,
-			)
+			); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		if resp.StatusCode >= 500 {
 			// 5xx here is Koios's load balancer or backend having a transient
 			// hiccup (e.g. 503 "No server is available to handle this
 			// request"), not a permanent rejection of the request — retry
 			// with backoff like a transport error instead of failing fast.
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if attempt < koiosMaxRetries-1 {
-				if waitErr := waitCtx(ctx, koiosRetryBackoff5xx*time.Duration(attempt+1)); waitErr != nil {
-					return nil, waitErr
-				}
-				continue
+			if err := retryOrFail(attempt,
+				koiosRetryBackoff5xx*time.Duration(attempt+1),
+				"koios server error after %d retries on %s: status %d body: %s",
+				koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)),
+			); err != nil {
+				return nil, err
 			}
-			return nil, fmt.Errorf("koios server error after %d retries on %s: status %d body: %s", koiosMaxRetries, path, resp.StatusCode, strings.TrimSpace(string(body)))
+			continue
 		}
-		break
+
+		return &koiosResponse{StatusCode: resp.StatusCode, Body: body, Header: resp.Header}, nil
 	}
-	if resp == nil {
-		// Unreachable: the loop always returns early on permanent error or breaks
-		// on a successful Do(). Guard satisfies nilaway's nil-flow analysis.
-		return nil, errors.New("koios: internal: no response after retry loop")
-	}
-	return resp, nil
+	// Unreachable: every loop iteration either returns or continues; the range
+	// is bounded by koiosMaxRetries and the last iteration always returns via
+	// retryOrFail's fail branch. Guard satisfies nilaway's nil-flow analysis.
+	return nil, errors.New("koios: internal: no response after retry loop")
 }
 
 // GetTipEpoch returns the current tip epoch number.
@@ -316,16 +364,11 @@ func (k *KoiosClient) GetTipEpoch(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return 0, fmt.Errorf("koios /tip read: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("koios /tip: status %d body: %s", resp.StatusCode, body)
+		return 0, fmt.Errorf("koios /tip: status %d body: %s", resp.StatusCode, resp.Body)
 	}
 	var tips []KoiosTipResp
-	if err := json.Unmarshal(body, &tips); err != nil {
+	if err := json.Unmarshal(resp.Body, &tips); err != nil {
 		return 0, fmt.Errorf("koios /tip decode: %w", err)
 	}
 	if len(tips) == 0 {
@@ -341,16 +384,11 @@ func (k *KoiosClient) GetEpochInfo(ctx context.Context, epoch uint64) (*KoiosEpo
 	if err != nil {
 		return nil, err
 	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("koios /epoch_info read: %w", err)
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /epoch_info: status %d body: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("koios /epoch_info: status %d body: %s", resp.StatusCode, resp.Body)
 	}
 	var items []KoiosEpochInfoResp
-	if err := json.Unmarshal(body, &items); err != nil {
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
 		return nil, fmt.Errorf("koios /epoch_info decode: %w", err)
 	}
 	if len(items) == 0 {
@@ -377,16 +415,11 @@ func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, er
 		if err != nil {
 			return nil, err
 		}
-		body, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("koios /pool_list read: %w", readErr)
-		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			return nil, fmt.Errorf("koios /pool_list: status %d body: %s", resp.StatusCode, body)
+			return nil, fmt.Errorf("koios /pool_list: status %d body: %s", resp.StatusCode, resp.Body)
 		}
 		var page []listItem
-		if err := json.Unmarshal(body, &page); err != nil {
+		if err := json.Unmarshal(resp.Body, &page); err != nil {
 			return nil, fmt.Errorf("koios /pool_list decode: %w", err)
 		}
 		for _, item := range page {
@@ -421,23 +454,18 @@ func (k *KoiosClient) GetPoolEpochHistory(
 	epoch uint64,
 ) (*KoiosPoolHistoryItem, error) {
 	path := fmt.Sprintf(
-		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=epoch_no,active_stake,block_cnt,delegator_cnt,margin,fixed_cost,pool_fees,deleg_rewards,member_rewards",
+		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=epoch_no,active_stake,active_stake_pct,block_cnt,delegator_cnt,margin,fixed_cost,saturation_pct,pool_fees,deleg_rewards,member_rewards,epoch_ros",
 		poolBech32, epoch,
 	)
 	resp, err := k.get(ctx, path, -1, -1)
 	if err != nil {
 		return nil, err
 	}
-	body, readErr := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if readErr != nil {
-		return nil, fmt.Errorf("koios /pool_history read: %w", readErr)
-	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("koios /pool_history: status %d body: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("koios /pool_history: status %d body: %s", resp.StatusCode, resp.Body)
 	}
 	var items []KoiosPoolHistoryItem
-	if err := json.Unmarshal(body, &items); err != nil {
+	if err := json.Unmarshal(resp.Body, &items); err != nil {
 		return nil, fmt.Errorf("koios /pool_history decode: %w", err)
 	}
 	if len(items) == 0 {

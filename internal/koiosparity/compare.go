@@ -292,6 +292,37 @@ func ComparePoolEpoch(
 		})
 	}
 
+	// member_rewards — reward_pool_output.member_reward_total vs Koios
+	// pool_history.member_rewards. Both are a direct sum of per-delegator
+	// reward amounts (excluding the pool operator's own leader/margin cut),
+	// so, unlike pool_fees/deleg_rewards below, this is safe to compare 1:1.
+	//
+	// pool_fees and deleg_rewards are intentionally NOT compared against
+	// Dingo's LeaderReward/TotalReward: Koios's grest.get_pool_history_data_bulk
+	// recomputes pool_fees from fixed_cost+margin alone
+	// (https://github.com/cardano-community/koios-artifacts, files/grest/rpc/
+	// 00_cached_tables/pool_history_cache.sql), which omits the pledge/owner-
+	// stake bonus term the Shelley ledger spec folds into the true leader
+	// reward. That recomputed value systematically diverges from
+	// RewardPoolOutput.LeaderReward for any pool with owner stake, and
+	// deleg_rewards is derived from that same approximation plus a ROUND()
+	// on each side, so their difference isn't even guaranteed to cancel out
+	// to the exact lovelace. Comparing either would produce mismatches that
+	// reflect Koios's own reporting approximation, not a real Dingo bug.
+	if koiosPool.MemberRewards != "" && dingoPool.MemberRewardTotal != "" &&
+		dingoPool.MemberRewardTotal != koiosPool.MemberRewards {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			PoolBech32: koiosPool.PoolBech32,
+			Field:      "member_rewards",
+			DingoValue: dingoPool.MemberRewardTotal,
+			KoiosValue: koiosPool.MemberRewards,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
 	return out
 }
 

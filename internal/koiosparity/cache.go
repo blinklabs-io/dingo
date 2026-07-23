@@ -44,6 +44,19 @@ type KoiosEpochInfo struct {
 	// instead of erroring/retrying forever, and check skips comparison entirely.
 	PreStaking bool      `gorm:"not null;default:false"`
 	FetchedAt  time.Time `gorm:"not null"`
+
+	// Remaining fields are stored for reference from the full Koios
+	// epoch_info schema but are not currently compared against any Dingo
+	// value (Dingo doesn't track tx/block counts or wall-clock block times
+	// per epoch).
+	Era            string    `gorm:"not null;default:''"`
+	OutSum         string    `gorm:"not null;default:''"` // "" when Koios returns null (early epochs)
+	TxCount        int64     `gorm:"not null;default:0"`
+	BlkCount       int64     `gorm:"not null;default:0"`
+	EpochStartTime time.Time // from Koios start_time; zero for old cache rows
+	FirstBlockTime time.Time // from Koios first_block_time; zero for old cache rows
+	LastBlockTime  time.Time // from Koios last_block_time; zero for old cache rows
+	AvgBlkReward   string    `gorm:"not null;default:''"` // "" when Koios returns null (early epochs)
 }
 
 func (KoiosEpochInfo) TableName() string { return "koios_epoch_info" }
@@ -67,6 +80,13 @@ type KoiosPoolEpoch struct {
 	DelegRewards  string    `gorm:"not null;default:''"` // total delegator rewards that epoch
 	MemberRewards string    `gorm:"not null;default:''"` // member (non-owner) rewards; "" when Koios returns null
 	FetchedAt     time.Time `gorm:"not null"`
+
+	// Remaining fields are stored for reference from the full Koios
+	// pool_history schema but are not currently compared against any Dingo
+	// value — Dingo has no equivalent network-share/saturation aggregate.
+	ActiveStakePct string `gorm:"not null;default:''"` // "" when Koios returns null
+	SaturationPct  string `gorm:"not null;default:''"`
+	EpochRos       string `gorm:"not null;default:''"` // annualised return-on-stake
 }
 
 func (KoiosPoolEpoch) TableName() string { return "koios_pool_epoch" }
@@ -200,6 +220,8 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"active_stake", "fees", "total_rewards", "epoch_end_time", "pre_staking", "fetched_at",
+			"era", "out_sum", "tx_count", "blk_count",
+			"epoch_start_time", "first_block_time", "last_block_time", "avg_blk_reward",
 		}),
 	}).Create(&info).Error
 }
@@ -260,6 +282,7 @@ func (c *Cache) UpsertPoolEpoch(pe KoiosPoolEpoch) error {
 		DoUpdates: clause.AssignmentColumns([]string{
 			"active_stake", "block_cnt", "delegators",
 			"margin", "fixed_cost", "pool_fees", "deleg_rewards", "member_rewards",
+			"active_stake_pct", "saturation_pct", "epoch_ros",
 			"fetched_at",
 		}),
 	}).Create(&pe).Error
