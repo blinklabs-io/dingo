@@ -425,25 +425,12 @@ func (o *Ouroboros) reportBlockfetchServerAsyncError(
 		"end_slot", end.Slot,
 		"error", err,
 	)
-	if !sendBlockfetchConnError(conn.ErrorChan(), err) {
+	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
-			"blockfetch: failed to forward async server error to connection error channel",
+			"blockfetch: failed to close connection after async server error",
 			"connection_id", connectionID,
+			"error", closeErr,
 		)
-	}
-}
-
-func sendBlockfetchConnError(errCh chan error, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case errCh <- err:
-		return true
-	default:
-		return false
 	}
 }
 

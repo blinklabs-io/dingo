@@ -616,28 +616,13 @@ func (o *Ouroboros) reportChainsyncServerAsyncError(
 		"operation", operation,
 		"error", err,
 	)
-	if !sendChainsyncConnError(conn.ErrorChan(), err) {
+	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
-			"chainsync server: failed to forward async send error to connection error channel",
-			"connection_id",
-			connectionID,
-			"operation",
-			operation,
+			"chainsync server: failed to close connection after async send error",
+			"connection_id", connectionID,
+			"operation", operation,
+			"error", closeErr,
 		)
-	}
-}
-
-func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
-	defer func() {
-		if recover() != nil {
-			sent = false
-		}
-	}()
-	select {
-	case errCh <- err:
-		return true
-	default:
-		return false
 	}
 }
 
@@ -646,12 +631,9 @@ func sendChainsyncConnError(errCh chan error, err error) (sent bool) {
 // endorser closure did not resolve). This runs after the RequestNext callback
 // has already returned AwaitReply, so gouroboros cannot propagate the error
 // through the callback-owned teardown path the synchronous path relies on. A
-// best-effort send to the connection error channel only drives the connmanager
-// bookkeeping (RemoveConnection + conn_closed); it does not close the transport,
-// which would leave the NtC client parked in AwaitReply. Calling conn.Close()
-// actually tears down the bearer so the client reconnects and retries the point.
-// Both are done: the error send unblocks the connmanager watcher with a reason,
-// and Close() (idempotent) closes the transport.
+// direct Close tears down the bearer so the client reconnects and retries the
+// point. It also closes the gouroboros-owned error channel, which wakes the
+// connmanager watcher without racing a Dingo send against channel closure.
 func (o *Ouroboros) closeChainsyncServerConn(
 	conn *ouroboros.Connection,
 	connectionID string,
@@ -662,7 +644,6 @@ func (o *Ouroboros) closeChainsyncServerConn(
 		"connection_id", connectionID,
 		"error", err,
 	)
-	sendChainsyncConnError(conn.ErrorChan(), err)
 	if closeErr := conn.Close(); closeErr != nil {
 		o.config.Logger.Debug(
 			"chainsync server: connection close failed",

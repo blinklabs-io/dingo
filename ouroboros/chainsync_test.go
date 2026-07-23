@@ -395,8 +395,9 @@ func sendChainsyncTestConnError(errCh chan error, err error) {
 	}
 }
 
-// requireChainsyncClosedEvent verifies that the async send failure reached
-// connmanager's lifecycle path instead of being logged and dropped.
+// requireChainsyncClosedEvent verifies that the async send failure closed the
+// connection and reached connmanager's lifecycle path. The event error is nil
+// because channel closure, rather than an unsafe send, wakes the watcher.
 func requireChainsyncClosedEvent(
 	t *testing.T,
 	h chainsyncAsyncSendFailureHarness,
@@ -412,7 +413,7 @@ func requireChainsyncClosedEvent(
 	closed, ok := evt.Data.(connmanager.ConnectionClosedEvent)
 	require.True(t, ok)
 	require.Equal(t, h.conn.Id(), closed.ConnectionId)
-	require.Error(t, closed.Error)
+	require.NoError(t, closed.Error)
 }
 
 // requestNextIntoAsyncAwait performs the initial rollback handshake and then

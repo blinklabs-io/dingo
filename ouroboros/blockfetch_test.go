@@ -497,7 +497,7 @@ func TestBlockfetchServerSendBatch_ClosesConnectionWhenSendDrainStalls(
 	assert.Equal(t, 2, server.drainCalls)
 }
 
-func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
+func TestReportBlockfetchServerAsyncError_ClosesConnection(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -505,30 +505,21 @@ func TestReportBlockfetchServerAsyncError_ForwardsToConnectionErrorChan(
 		Logger:   logger,
 		EventBus: event.NewEventBus(nil, logger),
 	})
-	conn := &stubBlockfetchConnection{
-		errChan: make(chan error, 1),
-	}
+	conn := &stubBlockfetchConnection{errChan: make(chan error)}
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
-	expectedErr := errors.New("async blockfetch failure")
-
 	o.reportBlockfetchServerAsyncError(
 		conn,
 		testConnId().String(),
 		start,
 		end,
-		expectedErr,
+		errors.New("async blockfetch failure"),
 	)
 
-	select {
-	case gotErr := <-conn.errChan:
-		assert.Equal(t, expectedErr, gotErr)
-	default:
-		t.Fatal("expected async error to be forwarded to connection error channel")
-	}
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
-func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
+func TestReportBlockfetchServerAsyncError_ReportsCloseErrorWithoutPanic(
 	t *testing.T,
 ) {
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -537,9 +528,9 @@ func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
 		EventBus: event.NewEventBus(nil, logger),
 	})
 	conn := &stubBlockfetchConnection{
-		errChan: make(chan error),
+		errChan:  make(chan error),
+		closeErr: errors.New("close failed"),
 	}
-	close(conn.errChan)
 	start := ocommon.NewPoint(100, []byte{0x01})
 	end := ocommon.NewPoint(200, []byte{0x02})
 
@@ -552,6 +543,7 @@ func TestReportBlockfetchServerAsyncError_ClosedErrorChan_NoPanic(
 			errors.New("closed channel test"),
 		)
 	})
+	assert.Equal(t, 1, conn.closeCalls)
 }
 
 // TestBlockfetchRecordNoBlocks_BelowThreshold verifies repeated NoBlocks stay
