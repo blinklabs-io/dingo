@@ -15,11 +15,14 @@
 package chain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/database/models"
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	mockfixtures "github.com/blinklabs-io/ouroboros-mock/fixtures"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +31,143 @@ import (
 	"github.com/blinklabs-io/dingo/event"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
 )
+
+func TestPersistentIteratorDrainsAlreadyAheadPrimaryChainAcrossSparseIndex(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		DataDir:        t.TempDir(),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	blocks := []models.Block{
+		{
+			ID:     initialBlockIndex,
+			Slot:   10,
+			Hash:   bytes.Repeat([]byte{0x01}, 32),
+			Number: 1,
+			Type:   1,
+			Cbor:   []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1,
+			Slot:     20,
+			Hash:     bytes.Repeat([]byte{0x02}, 32),
+			PrevHash: bytes.Repeat([]byte{0x01}, 32),
+			Number:   2,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1_000_000,
+			Slot:     30,
+			Hash:     bytes.Repeat([]byte{0x03}, 32),
+			PrevHash: bytes.Repeat([]byte{0x02}, 32),
+			Number:   3,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1_000_001,
+			Slot:     40,
+			Hash:     bytes.Repeat([]byte{0x04}, 32),
+			PrevHash: bytes.Repeat([]byte{0x03}, 32),
+			Number:   4,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+	require.Equal(t, blocks[len(blocks)-1].Slot, c.Tip().Point.Slot)
+
+	iter, err := c.FromPoint(
+		ocommon.NewPoint(blocks[1].Slot, blocks[1].Hash),
+		false,
+	)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	next, err := iter.Next(false)
+	require.NoError(t, err)
+	require.Equal(t, blocks[2].Slot, next.Point.Slot)
+	require.Equal(t, blocks[2].Hash, next.Point.Hash)
+
+	next, err = iter.Next(false)
+	require.NoError(t, err)
+	require.Equal(t, blocks[3].Slot, next.Point.Slot)
+	require.Equal(t, blocks[3].Hash, next.Point.Hash)
+
+	next, err = iter.Next(false)
+	require.Nil(t, next)
+	require.ErrorIs(t, err, ErrIteratorChainTip)
+}
+
+func TestPersistentIteratorRejectsSparseIndexWithHashDiscontinuity(
+	t *testing.T,
+) {
+	db, err := database.New(&database.Config{
+		DataDir:        t.TempDir(),
+		BlobPlugin:     "badger",
+		MetadataPlugin: "sqlite",
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ledgerTipHash := bytes.Repeat([]byte{0x02}, 32)
+	blocks := []models.Block{
+		{
+			ID:     initialBlockIndex,
+			Slot:   10,
+			Hash:   bytes.Repeat([]byte{0x01}, 32),
+			Number: 1,
+			Type:   1,
+			Cbor:   []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 1,
+			Slot:     20,
+			Hash:     ledgerTipHash,
+			PrevHash: bytes.Repeat([]byte{0x01}, 32),
+			Number:   2,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+		{
+			ID:       initialBlockIndex + 3,
+			Slot:     30,
+			Hash:     bytes.Repeat([]byte{0x03}, 32),
+			PrevHash: bytes.Repeat([]byte{0xff}, 32),
+			Number:   3,
+			Type:     1,
+			Cbor:     []byte{0x80},
+		},
+	}
+	for _, block := range blocks {
+		require.NoError(t, db.BlockCreate(block, nil))
+	}
+
+	cm, err := NewManager(db, nil)
+	require.NoError(t, err)
+	c := cm.PrimaryChain()
+
+	iter, err := c.FromPoint(ocommon.NewPoint(blocks[1].Slot, ledgerTipHash), false)
+	require.NoError(t, err)
+	defer iter.Cancel()
+
+	next, err := iter.Next(false)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, ErrIteratorChainTip)
+	require.False(t, next != nil && next.Point.Slot == blocks[2].Slot)
+}
 
 func TestIteratorCancelRemovesFromChain(t *testing.T) {
 	// Create a chain manager without a database (in-memory only)
