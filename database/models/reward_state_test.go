@@ -131,9 +131,12 @@ func TestDedupeRewardLiveStake(t *testing.T) {
 	other[0] = 0x32
 
 	// Two rows for the same credential (the corruption), plus a distinct one.
-	require.NoError(t, db.Create(&noIndexRewardLiveStake{
+	// Capture the lowest-ID row because that is the row GORM First selects in
+	// RefreshLiveStakeAggregate before the unique index exists.
+	refreshed := noIndexRewardLiveStake{
 		CredentialTag: 0, StakingKey: stakingKey, TotalStake: 40, Registered: true,
-	}).Error)
+	}
+	require.NoError(t, db.Create(&refreshed).Error)
 	require.NoError(t, db.Create(&noIndexRewardLiveStake{
 		CredentialTag: 0, StakingKey: stakingKey, TotalStake: 70, Registered: true,
 	}).Error)
@@ -141,19 +144,30 @@ func TestDedupeRewardLiveStake(t *testing.T) {
 		CredentialTag: 0, StakingKey: other, TotalStake: 30, Registered: true,
 	}).Error)
 
+	// Mirror an incremental refresh after duplicates already exist. The
+	// lowest-ID row becomes canonical while the higher-ID duplicate remains
+	// stale.
+	require.NoError(t, db.Model(&refreshed).Updates(map[string]any{
+		"total_stake":  types.Uint64(90),
+		"updated_slot": uint64(100),
+	}).Error)
+
 	require.NoError(t, DedupeRewardLiveStake(db, nil))
 
-	// The duplicate credential collapses to the highest-id row (70); the
-	// distinct credential is untouched.
+	// Dedup preserves the row updated by RefreshLiveStakeAggregate; keeping the
+	// highest-ID row here would retain stale total_stake 70 indefinitely
+	// because the backfill check only looks for missing credential keys.
 	var rows []noIndexRewardLiveStake
 	require.NoError(t, db.Order("id ASC").Find(&rows).Error)
 	require.Len(t, rows, 2)
-	byKey := map[string]uint64{}
+	byKey := map[string]noIndexRewardLiveStake{}
 	for _, r := range rows {
-		byKey[string(r.StakingKey)] = uint64(r.TotalStake)
+		byKey[string(r.StakingKey)] = r
 	}
-	require.Equal(t, uint64(70), byKey[string(stakingKey)])
-	require.Equal(t, uint64(30), byKey[string(other)])
+	require.Equal(t, refreshed.ID, byKey[string(stakingKey)].ID)
+	require.Equal(t, uint64(90), uint64(byKey[string(stakingKey)].TotalStake))
+	require.Equal(t, uint64(100), byKey[string(stakingKey)].UpdatedSlot)
+	require.Equal(t, uint64(30), uint64(byKey[string(other)].TotalStake))
 
 	// After dedup, the enforced schema's unique index installs successfully.
 	require.NoError(t, db.AutoMigrate(&RewardLiveStake{}))

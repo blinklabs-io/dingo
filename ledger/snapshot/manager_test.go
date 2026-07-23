@@ -980,26 +980,26 @@ func TestValidateRewardStakeInputTotals(t *testing.T) {
 	})
 }
 
-// TestRewardStakeDistributionDedupesDuplicateCredential verifies that a
-// duplicate (pool, credential) stake input collapses to a single row with the
-// pool total and delegator count derived from the deduped set, mirroring the
-// SaveStakeInputs upsert. Without this, a duplicate reward_live_stake credential
-// row (e.g. seeded by a rebuild that ran before its unique index existed) would
-// double-count the pool total in memory while collapsing to one persisted stake
-// row, crashing the delayed reward application with a "reward stake input total
-// mismatch".
+// TestRewardStakeDistributionDedupesDuplicateCredential verifies that duplicate
+// live-stake credential inputs collapse to a single row even when the corrupt
+// rows assign the credential to different pools. RewardLiveStake identity does
+// not include the pool, so retaining both assignments would reward one
+// credential twice.
 func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
 	var poolA lcommon.PoolKeyHash
+	var poolB lcommon.PoolKeyHash
 	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x22}, len(poolB)))
 	stakeA := bytes.Repeat([]byte{0x31}, len(poolA))
 	stakeB := bytes.Repeat([]byte{0x32}, len(poolA))
 
 	reward, err := rewardStakeDistribution(&StakeDistribution{
 		Slot: 100,
 		StakeInputs: []StakeInput{
-			// Duplicate credential for poolA: last-writer-wins keeps 70.
+			// Duplicate credential across pools: last-writer-wins keeps the
+			// poolB assignment with stake 70.
 			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 40},
-			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 70},
+			{PoolKeyHash: poolB[:], StakingKey: stakeA, Stake: 70},
 			{PoolKeyHash: poolA[:], StakingKey: stakeB, Stake: 30},
 		},
 	})
@@ -1007,17 +1007,21 @@ func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
 
 	// The duplicate collapses: two distinct credentials remain.
 	require.Len(t, reward.StakeInputs, 2)
-	require.Equal(t, uint64(2), reward.DelegatorCount[poolA])
+	require.Equal(t, poolB[:], reward.StakeInputs[0].PoolKeyHash)
+	require.Equal(t, stakeA, reward.StakeInputs[0].StakingKey)
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolA])
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolB])
 
-	// Pool total equals the sum of the deduped stake inputs (70 + 30), not the
-	// double-counted 40 + 70 + 30.
+	// Pool totals equal the deduped stake assignments, not the double-counted
+	// 40 + 70 + 30.
 	var inputSum uint64
 	for _, input := range reward.StakeInputs {
 		inputSum += input.Stake
 	}
-	require.Equal(t, reward.PoolStakes[poolA], inputSum)
-	require.Equal(t, uint64(100), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(30), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(70), reward.PoolStakes[poolB])
 	require.Equal(t, uint64(100), reward.TotalStake)
+	require.Equal(t, reward.TotalStake, inputSum)
 
 	// The invariant the reward application checks now holds by construction.
 	require.NoError(t, validateRewardStakeInputTotals(reward))

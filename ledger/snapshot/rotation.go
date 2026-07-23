@@ -365,23 +365,16 @@ func rewardStakeDistribution(
 	if dist == nil {
 		return nil, errors.New("missing stake distribution")
 	}
-	// Collapse duplicate (pool, credential) stake inputs the same way the
-	// persistence layer will. reward_stake_input is unique on
-	// (epoch, pool_key_hash, credential_tag, staking_key), so SaveStakeInputs
-	// upserts a repeated key down to a single last-writer-wins row, whereas
-	// reward_live_stake is unique on (credential_tag, staking_key) only. A
-	// duplicate credential row in reward_live_stake (e.g. seeded by a rebuild
-	// that ran before its unique index was installed) would otherwise be
-	// double-counted into the pool total and delegator count here while
-	// collapsing to one row on write, leaving delegated_stake and
-	// delegator_count larger than the persisted stake-input rows and crashing
-	// the later reward application with a "reward stake input total mismatch".
-	// Deduplicating first keeps the in-memory pool totals and counts equal to
-	// what actually persists. For input with no duplicates this is a no-op.
+	// Collapse duplicate credential stake inputs using the RewardLiveStake
+	// identity. reward_live_stake is unique on (credential_tag, staking_key),
+	// so a credential cannot contribute stake to multiple pools. Corrupt
+	// duplicate rows (for example, rows seeded before the unique index was
+	// installed) would otherwise reward the same credential more than once.
+	// Keep the final occurrence deterministically. For input with no duplicates
+	// this is a no-op.
 	type stakeInputKey struct {
-		pool string
-		key  string
-		tag  uint8
+		key string
+		tag uint8
 	}
 	seen := make(map[stakeInputKey]int, len(dist.StakeInputs))
 	deduped := make([]StakeInput, 0, len(dist.StakeInputs))
@@ -405,12 +398,11 @@ func rewardStakeDistribution(
 			)
 		}
 		k := stakeInputKey{
-			pool: string(input.PoolKeyHash),
-			key:  string(input.StakingKey),
-			tag:  input.CredentialTag,
+			key: string(input.StakingKey),
+			tag: input.CredentialTag,
 		}
 		if idx, ok := seen[k]; ok {
-			// Last-writer-wins, mirroring the SaveStakeInputs upsert.
+			// Retain the final assignment for this credential.
 			deduped[idx] = input
 			continue
 		}

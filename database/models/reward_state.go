@@ -196,13 +196,15 @@ func MigrateRewardLiveStakePoolIndex(db *gorm.DB, logger *slog.Logger) error {
 // (credential_tag, staking_key) can be created safely by AutoMigrate. This
 // must be called before AutoMigrate for RewardLiveStake.
 //
-// A duplicate credential row would otherwise be double-counted into a pool's
-// delegated_stake and delegator_count at snapshot capture while collapsing to
-// a single row when the per-credential reward_stake_input is written, which
-// crashes the delayed reward application with a "reward stake input total
-// mismatch". Keeping only the highest-id row per credential matches the
-// last-writer-wins semantics of the RefreshLiveStakeAggregate upsert; any
-// residual value drift is corrected by the next RebuildLiveStake/backfill.
+// The unique credential identity ensures one aggregate can contribute to only
+// one reward pool input. Snapshot capture defensively applies the same identity,
+// while this migration repairs pre-existing duplicates so AutoMigrate can
+// install the constraint. Keeping only the lowest-id row per credential
+// preserves the row selected by RefreshLiveStakeAggregate's First query before
+// the unique index exists. This is important for upgraded databases: a refresh
+// may have already repaired that row, while the missing-key backfill check will
+// not rebuild a credential merely because another duplicate retained stale
+// values.
 //
 // The function is a no-op when the table does not exist or contains no
 // duplicates.
@@ -239,20 +241,22 @@ func DedupeRewardLiveStake(db *gorm.DB, logger *slog.Logger) error {
 		"duplicate_groups", len(dups),
 	)
 
-	// For each duplicate group, SELECT the MAX(id) to keep, then DELETE by id.
+	// For each duplicate group, SELECT the MIN(id) to keep, then DELETE by id.
+	// RefreshLiveStakeAggregate uses GORM First, which orders by primary key and
+	// updates this same row when duplicates predate the unique index.
 	// This avoids the MySQL error 1093 ("can't specify target table for update
 	// in FROM clause") that occurs when a DELETE subquery references the same
 	// table.
 	for _, d := range dups {
 		var keepID uint
 		if err := db.Raw(`
-			SELECT MAX(id) FROM reward_live_stake
+			SELECT MIN(id) FROM reward_live_stake
 			WHERE credential_tag = ?
 			  AND staking_key = ?
 		`, d.CredentialTag, d.StakingKey,
 		).Scan(&keepID).Error; err != nil {
 			return fmt.Errorf(
-				"select max id for reward_live_stake (tag=%d): %w",
+				"select min id for reward_live_stake (tag=%d): %w",
 				d.CredentialTag, err,
 			)
 		}

@@ -432,9 +432,8 @@ func (d *MetadataStoreMysql) Start() error {
 			"reward live stake pool index migration failed: %w", err,
 		)
 	}
-	// Deduplicate reward_live_stake rows before AutoMigrate creates the unique
-	// index idx_reward_live_stake_cred; a duplicate credential row otherwise
-	// crashes the delayed reward application with a stake input total mismatch.
+	// Repair duplicate reward_live_stake rows from pre-index databases before
+	// AutoMigrate creates the credential identity constraint.
 	if err := models.DedupeRewardLiveStake(
 		d.db, d.logger,
 	); err != nil {
