@@ -980,6 +980,78 @@ func TestValidateRewardStakeInputTotals(t *testing.T) {
 	})
 }
 
+// TestRewardStakeDistributionDedupesDuplicateCredential verifies that a
+// duplicate (pool, credential) stake input collapses to a single row with the
+// pool total and delegator count derived from the deduped set, mirroring the
+// SaveStakeInputs upsert. Without this, a duplicate reward_live_stake credential
+// row (e.g. seeded by a rebuild that ran before its unique index existed) would
+// double-count the pool total in memory while collapsing to one persisted stake
+// row, crashing the delayed reward application with a "reward stake input total
+// mismatch".
+func TestRewardStakeDistributionDedupesDuplicateCredential(t *testing.T) {
+	var poolA lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
+	stakeA := bytes.Repeat([]byte{0x31}, len(poolA))
+	stakeB := bytes.Repeat([]byte{0x32}, len(poolA))
+
+	reward, err := rewardStakeDistribution(&StakeDistribution{
+		Slot: 100,
+		StakeInputs: []StakeInput{
+			// Duplicate credential for poolA: last-writer-wins keeps 70.
+			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 40},
+			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 70},
+			{PoolKeyHash: poolA[:], StakingKey: stakeB, Stake: 30},
+		},
+	})
+	require.NoError(t, err)
+
+	// The duplicate collapses: two distinct credentials remain.
+	require.Len(t, reward.StakeInputs, 2)
+	require.Equal(t, uint64(2), reward.DelegatorCount[poolA])
+
+	// Pool total equals the sum of the deduped stake inputs (70 + 30), not the
+	// double-counted 40 + 70 + 30.
+	var inputSum uint64
+	for _, input := range reward.StakeInputs {
+		inputSum += input.Stake
+	}
+	require.Equal(t, reward.PoolStakes[poolA], inputSum)
+	require.Equal(t, uint64(100), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(100), reward.TotalStake)
+
+	// The invariant the reward application checks now holds by construction.
+	require.NoError(t, validateRewardStakeInputTotals(reward))
+}
+
+// TestRewardStakeDistributionPreservesDistinctCredentials verifies the dedup is a
+// no-op for input without duplicates: every distinct credential is preserved and
+// the pool total is the full sum.
+func TestRewardStakeDistributionPreservesDistinctCredentials(t *testing.T) {
+	var poolA lcommon.PoolKeyHash
+	var poolB lcommon.PoolKeyHash
+	copy(poolA[:], bytes.Repeat([]byte{0x11}, len(poolA)))
+	copy(poolB[:], bytes.Repeat([]byte{0x22}, len(poolB)))
+	stakeA := bytes.Repeat([]byte{0x31}, len(poolA))
+	stakeB := bytes.Repeat([]byte{0x32}, len(poolA))
+	stakeC := bytes.Repeat([]byte{0x33}, len(poolA))
+
+	reward, err := rewardStakeDistribution(&StakeDistribution{
+		Slot: 100,
+		StakeInputs: []StakeInput{
+			{PoolKeyHash: poolA[:], StakingKey: stakeA, Stake: 40},
+			{PoolKeyHash: poolA[:], StakingKey: stakeB, Stake: 60},
+			{PoolKeyHash: poolB[:], StakingKey: stakeC, Stake: 50},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, reward.StakeInputs, 3)
+	require.Equal(t, uint64(100), reward.PoolStakes[poolA])
+	require.Equal(t, uint64(50), reward.PoolStakes[poolB])
+	require.Equal(t, uint64(2), reward.DelegatorCount[poolA])
+	require.Equal(t, uint64(1), reward.DelegatorCount[poolB])
+	require.Equal(t, uint64(150), reward.TotalStake)
+}
+
 func TestRewardInputsRejectMissingPoolRegistration(t *testing.T) {
 	db := setupTestDB(t)
 	seedEpochs(t, db, []models.Epoch{

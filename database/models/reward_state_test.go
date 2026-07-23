@@ -98,3 +98,73 @@ func TestMigrateRewardLiveStakePoolIndex(t *testing.T) {
 	)
 	require.NoError(t, MigrateRewardLiveStakePoolIndex(db, nil))
 }
+
+// noIndexRewardLiveStake mirrors RewardLiveStake but without the unique
+// credential index, so a test can seed duplicate credential rows that the
+// enforced schema would reject.
+type noIndexRewardLiveStake struct {
+	PoolKeyHash              []byte `gorm:"size:28"`
+	StakingKey               []byte `gorm:"size:28;not null"`
+	ID                       uint   `gorm:"primarykey"`
+	CredentialTag            uint8  `gorm:"not null;default:0"`
+	UtxoStake                types.Uint64
+	RewardStake              types.Uint64
+	TotalStake               types.Uint64
+	Registered               bool
+	PoolDelegationSlot       uint64 `gorm:"not null;default:0"`
+	PoolDelegationBlockIndex uint64 `gorm:"not null;default:0"`
+	PoolDelegationCertIndex  uint32 `gorm:"not null;default:0"`
+	UpdatedSlot              uint64 `gorm:"not null;default:0"`
+}
+
+func (noIndexRewardLiveStake) TableName() string {
+	return "reward_live_stake"
+}
+
+func TestDedupeRewardLiveStake(t *testing.T) {
+	db := openMemoryDB(t)
+	require.NoError(t, db.AutoMigrate(&noIndexRewardLiveStake{}))
+
+	stakingKey := make([]byte, 28)
+	stakingKey[0] = 0x31
+	other := make([]byte, 28)
+	other[0] = 0x32
+
+	// Two rows for the same credential (the corruption), plus a distinct one.
+	require.NoError(t, db.Create(&noIndexRewardLiveStake{
+		CredentialTag: 0, StakingKey: stakingKey, TotalStake: 40, Registered: true,
+	}).Error)
+	require.NoError(t, db.Create(&noIndexRewardLiveStake{
+		CredentialTag: 0, StakingKey: stakingKey, TotalStake: 70, Registered: true,
+	}).Error)
+	require.NoError(t, db.Create(&noIndexRewardLiveStake{
+		CredentialTag: 0, StakingKey: other, TotalStake: 30, Registered: true,
+	}).Error)
+
+	require.NoError(t, DedupeRewardLiveStake(db, nil))
+
+	// The duplicate credential collapses to the highest-id row (70); the
+	// distinct credential is untouched.
+	var rows []noIndexRewardLiveStake
+	require.NoError(t, db.Order("id ASC").Find(&rows).Error)
+	require.Len(t, rows, 2)
+	byKey := map[string]uint64{}
+	for _, r := range rows {
+		byKey[string(r.StakingKey)] = uint64(r.TotalStake)
+	}
+	require.Equal(t, uint64(70), byKey[string(stakingKey)])
+	require.Equal(t, uint64(30), byKey[string(other)])
+
+	// After dedup, the enforced schema's unique index installs successfully.
+	require.NoError(t, db.AutoMigrate(&RewardLiveStake{}))
+	require.True(
+		t,
+		db.Migrator().HasIndex(
+			&RewardLiveStake{},
+			"idx_reward_live_stake_cred",
+		),
+	)
+
+	// Idempotent: a second run with no duplicates is a no-op.
+	require.NoError(t, DedupeRewardLiveStake(db, nil))
+}

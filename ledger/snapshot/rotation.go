@@ -365,13 +365,27 @@ func rewardStakeDistribution(
 	if dist == nil {
 		return nil, errors.New("missing stake distribution")
 	}
-	reward := &StakeDistribution{
-		Slot:           dist.Slot,
-		StakeInputs:    append([]StakeInput(nil), dist.StakeInputs...),
-		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
-		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	// Collapse duplicate (pool, credential) stake inputs the same way the
+	// persistence layer will. reward_stake_input is unique on
+	// (epoch, pool_key_hash, credential_tag, staking_key), so SaveStakeInputs
+	// upserts a repeated key down to a single last-writer-wins row, whereas
+	// reward_live_stake is unique on (credential_tag, staking_key) only. A
+	// duplicate credential row in reward_live_stake (e.g. seeded by a rebuild
+	// that ran before its unique index was installed) would otherwise be
+	// double-counted into the pool total and delegator count here while
+	// collapsing to one row on write, leaving delegated_stake and
+	// delegator_count larger than the persisted stake-input rows and crashing
+	// the later reward application with a "reward stake input total mismatch".
+	// Deduplicating first keeps the in-memory pool totals and counts equal to
+	// what actually persists. For input with no duplicates this is a no-op.
+	type stakeInputKey struct {
+		pool string
+		key  string
+		tag  uint8
 	}
-	for _, input := range reward.StakeInputs {
+	seen := make(map[stakeInputKey]int, len(dist.StakeInputs))
+	deduped := make([]StakeInput, 0, len(dist.StakeInputs))
+	for _, input := range dist.StakeInputs {
 		if len(input.PoolKeyHash) != len(lcommon.PoolKeyHash{}) {
 			return nil, fmt.Errorf(
 				"invalid reward stake input pool key length %d",
@@ -390,6 +404,26 @@ func rewardStakeDistribution(
 				input.CredentialTag,
 			)
 		}
+		k := stakeInputKey{
+			pool: string(input.PoolKeyHash),
+			key:  string(input.StakingKey),
+			tag:  input.CredentialTag,
+		}
+		if idx, ok := seen[k]; ok {
+			// Last-writer-wins, mirroring the SaveStakeInputs upsert.
+			deduped[idx] = input
+			continue
+		}
+		seen[k] = len(deduped)
+		deduped = append(deduped, input)
+	}
+	reward := &StakeDistribution{
+		Slot:           dist.Slot,
+		StakeInputs:    deduped,
+		PoolStakes:     make(map[lcommon.PoolKeyHash]uint64),
+		DelegatorCount: make(map[lcommon.PoolKeyHash]uint64),
+	}
+	for _, input := range reward.StakeInputs {
 		if input.Stake == 0 {
 			continue
 		}

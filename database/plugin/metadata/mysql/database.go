@@ -432,6 +432,16 @@ func (d *MetadataStoreMysql) Start() error {
 			"reward live stake pool index migration failed: %w", err,
 		)
 	}
+	// Deduplicate reward_live_stake rows before AutoMigrate creates the unique
+	// index idx_reward_live_stake_cred; a duplicate credential row otherwise
+	// crashes the delayed reward application with a stake input total mismatch.
+	if err := models.DedupeRewardLiveStake(
+		d.db, d.logger,
+	); err != nil {
+		return fmt.Errorf(
+			"reward_live_stake dedup failed: %w", err,
+		)
+	}
 	// Purge child rows whose OnDelete:CASCADE parent no longer exists before
 	// AutoMigrate adds the foreign keys. Databases created before auto-migrate
 	// was enabled never enforced these cascades, so orphaned children

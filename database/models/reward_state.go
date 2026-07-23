@@ -190,3 +190,84 @@ func MigrateRewardLiveStakePoolIndex(db *gorm.DB, logger *slog.Logger) error {
 	}
 	return nil
 }
+
+// DedupeRewardLiveStake removes duplicate rows from the reward_live_stake
+// table so that the unique index idx_reward_live_stake_cred
+// (credential_tag, staking_key) can be created safely by AutoMigrate. This
+// must be called before AutoMigrate for RewardLiveStake.
+//
+// A duplicate credential row would otherwise be double-counted into a pool's
+// delegated_stake and delegator_count at snapshot capture while collapsing to
+// a single row when the per-credential reward_stake_input is written, which
+// crashes the delayed reward application with a "reward stake input total
+// mismatch". Keeping only the highest-id row per credential matches the
+// last-writer-wins semantics of the RefreshLiveStakeAggregate upsert; any
+// residual value drift is corrected by the next RebuildLiveStake/backfill.
+//
+// The function is a no-op when the table does not exist or contains no
+// duplicates.
+func DedupeRewardLiveStake(db *gorm.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if !db.Migrator().HasTable(&RewardLiveStake{}) {
+		return nil
+	}
+
+	type dupGroup struct {
+		CredentialTag uint8
+		StakingKey    []byte
+		Cnt           int64
+	}
+	var dups []dupGroup
+	if err := db.Raw(`
+		SELECT credential_tag, staking_key, COUNT(*) AS cnt
+		FROM reward_live_stake
+		GROUP BY credential_tag, staking_key
+		HAVING COUNT(*) > 1
+	`).Scan(&dups).Error; err != nil {
+		return fmt.Errorf(
+			"query duplicate reward_live_stake groups: %w", err,
+		)
+	}
+	if len(dups) == 0 {
+		return nil
+	}
+
+	logger.Info(
+		"deduplicating reward_live_stake rows before creating unique index",
+		"duplicate_groups", len(dups),
+	)
+
+	// For each duplicate group, SELECT the MAX(id) to keep, then DELETE by id.
+	// This avoids the MySQL error 1093 ("can't specify target table for update
+	// in FROM clause") that occurs when a DELETE subquery references the same
+	// table.
+	for _, d := range dups {
+		var keepID uint
+		if err := db.Raw(`
+			SELECT MAX(id) FROM reward_live_stake
+			WHERE credential_tag = ?
+			  AND staking_key = ?
+		`, d.CredentialTag, d.StakingKey,
+		).Scan(&keepID).Error; err != nil {
+			return fmt.Errorf(
+				"select max id for reward_live_stake (tag=%d): %w",
+				d.CredentialTag, err,
+			)
+		}
+		if err := db.Exec(`
+			DELETE FROM reward_live_stake
+			WHERE credential_tag = ?
+			  AND staking_key = ?
+			  AND id != ?
+		`, d.CredentialTag, d.StakingKey, keepID,
+		).Error; err != nil {
+			return fmt.Errorf(
+				"delete duplicate reward_live_stake (tag=%d): %w",
+				d.CredentialTag, err,
+			)
+		}
+	}
+	return nil
+}
