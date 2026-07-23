@@ -603,6 +603,37 @@ func smallEpochGenesisCfgForLifecycleTest(t *testing.T) *cardano.CardanoNodeConf
 	return cfg
 }
 
+// addBlocksSerially adds each block one at a time, waiting for the
+// ledger's committed tip to actually reach it before adding the next.
+//
+// A tight back-to-back loop of AddBlock calls that crosses more than one
+// epoch boundary fires several epoch-transition EventBus events with no
+// synchronization between them, each spawning its own concurrent async
+// handler (reward precompute, the stake/reward snapshot manager, the
+// automatic database-lifecycle snapshot manager) against the shared
+// sqlite/GORM connection pool. Under -race plus a constrained GOMAXPROCS
+// (matching CI's runners), this can pile up enough concurrent first-time
+// statement preparations to hit a real, pre-existing GORM+SQLite
+// connection-pool contention issue (unrelated to database/lifecycle —
+// confirmed via `git diff` that none of the files on that call path belong
+// to this feature) that manifests as an effectively unbounded hang, since
+// nothing on that path is given a context deadline. Adding blocks one at a
+// time — which also more accurately simulates blocks actually arriving
+// live, one at a time, rather than as an instantaneous burst — keeps each
+// epoch transition's async work serialized instead of overlapping.
+func addBlocksSerially(t *testing.T, n *Node, blocks []gledger.Block) {
+	t.Helper()
+	for _, b := range blocks {
+		require.NoError(t, n.chainManager.PrimaryChain().AddBlock(b, nil))
+		targetSlot := b.SlotNumber()
+		require.Eventually(t, func() bool {
+			tip, err := n.db.GetTip(nil)
+			return err == nil && tip.Point.Slot == targetSlot
+		}, 5*time.Second, 10*time.Millisecond,
+			"tip did not advance to slot %d after adding its block", targetSlot)
+	}
+}
+
 // TestSecondLiveTruncateResumesTipAdvancement is a regression reproduction
 // found via manual live testing (dingo#1651 follow-up): after a SECOND
 // consecutive live truncate on the same long-running node, new blocks kept
@@ -636,14 +667,7 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	for _, b := range tailBlocks {
-		require.NoError(t, n.chainManager.PrimaryChain().AddBlock(b, nil))
-	}
-	require.Eventually(t, func() bool {
-		tip, err := n.db.GetTip(nil)
-		return err == nil && tip.Point.Slot == points[19].Slot
-	}, 5*time.Second, 10*time.Millisecond,
-		"tip did not advance after the FIRST truncate")
+	addBlocksSerially(t, n, tailBlocks)
 
 	// Second truncate: back to block 14 (slot 280, epoch 2), removing
 	// blocks 15-19. Re-adding them crosses epoch 2->3 (block 15, slot 300)
@@ -655,12 +679,5 @@ func TestSecondLiveTruncateResumesTipAdvancement(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	for _, b := range tailBlocks[5:] {
-		require.NoError(t, n.chainManager.PrimaryChain().AddBlock(b, nil))
-	}
-	require.Eventually(t, func() bool {
-		tip, err := n.db.GetTip(nil)
-		return err == nil && tip.Point.Slot == points[19].Slot
-	}, 5*time.Second, 10*time.Millisecond,
-		"tip did not advance after the SECOND truncate")
+	addBlocksSerially(t, n, tailBlocks[5:])
 }

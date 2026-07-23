@@ -212,22 +212,29 @@ func (n *Node) quiesceForLiveLifecycleOp(ctx context.Context) error {
 	// stale subscriber pointing at an object this function just tore down.
 	// See the Node struct field comments (node.go) for why only these three
 	// of Run()'s ~19 direct subscriptions need this.
+	//
+	// UnsubscribeAndWait, not Unsubscribe: closeStorageForLiveLifecycleOp
+	// (called right after this returns) nils out n.chainManager and
+	// n.chainsyncState with no synchronization of its own. Plain
+	// Unsubscribe only stops future deliveries, so a handler goroutine
+	// already dispatched before this loop runs could still be reading
+	// those fields concurrently with that teardown.
 	if n.chainManagerBlockProposedSubId != 0 {
-		n.eventBus.Unsubscribe(
+		n.eventBus.UnsubscribeAndWait(
 			chain.BlockProposedEventType,
 			n.chainManagerBlockProposedSubId,
 		)
 		n.chainManagerBlockProposedSubId = 0
 	}
 	if n.chainsyncClientRemoveSubId != 0 {
-		n.eventBus.Unsubscribe(
+		n.eventBus.UnsubscribeAndWait(
 			chainsync.ClientRemoveRequestedEventType,
 			n.chainsyncClientRemoveSubId,
 		)
 		n.chainsyncClientRemoveSubId = 0
 	}
 	if n.connManagerRecycleSubId != 0 {
-		n.eventBus.Unsubscribe(
+		n.eventBus.UnsubscribeAndWait(
 			connmanager.ConnectionRecycleRequestedEventType,
 			n.connManagerRecycleSubId,
 		)
