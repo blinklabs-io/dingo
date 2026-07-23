@@ -1363,8 +1363,13 @@ it. Dingo implements this as a **corroboration gate**
   the roll-forward handler, skipping the async `PeerTipUpdateEvent`), so the
   apply decision reflects the header currently being admitted rather than a tip
   update that has not been processed yet — an async observation could otherwise
-  let a header slip through in the window before it revoked corroboration. With
-  the gate disabled the async path is used unchanged.
+  let a header slip through in the window before it revoked corroboration. The
+  roll-**backward** path does the same via `OuroborosConfig.ChainsyncObserveRollback`
+  (wired to apply the rollback into chain selection, skipping the async
+  `PeerRollbackEvent`): a rollback trims the peer's observed frontier and can
+  change its corroboration status, so the rollback apply decision must reflect
+  the post-rollback state rather than pre-trim corroboration. With the gate
+  disabled both paths use the async path unchanged.
 - The gate **denies application but does not disconnect** the fast source. Genesis
   wants the fast source kept connected so it can serve blocks as soon as
   corroboration arrives; demoting or dropping it would defeat the accelerator.

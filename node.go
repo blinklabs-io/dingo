@@ -290,11 +290,12 @@ func (n *Node) Run(ctx context.Context) error {
 		// connection, so the fetch is gated on the txs offer, not the block
 		// offer. Best-effort: a fetch failure never tears down the shared
 		// connection.
-		EnableLeiosTxFetch:       enableLeiosNetworking,
-		LeiosTxFetchTailBudget:   leiosTxFetchTailBudget,
-		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
-		ChainsyncApplyEligible:   n.chainsyncApplyEligible,
-		ChainsyncObservePeerTip:  n.chainsyncObservePeerTip,
+		EnableLeiosTxFetch:           enableLeiosNetworking,
+		LeiosTxFetchTailBudget:       leiosTxFetchTailBudget,
+		ChainsyncIngressEligible:     n.isChainsyncIngressEligible,
+		ChainsyncApplyEligible:       n.chainsyncApplyEligible,
+		ChainsyncObservePeerTip:      n.chainsyncObservePeerTip,
+		ChainsyncObservePeerRollback: n.chainsyncObservePeerRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the
