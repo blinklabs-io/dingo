@@ -1299,6 +1299,56 @@ func (c *Chain) blockByIndex(
 	return tmpBlock, nil
 }
 
+func chainIteratorPreviousPoint(iter *ChainIterator) ocommon.Point {
+	if iter.lastPoint.Slot > 0 || len(iter.lastPoint.Hash) > 0 {
+		return iter.lastPoint
+	}
+	return iter.startPoint
+}
+
+func blockFollowsPoint(block models.Block, point ocommon.Point) bool {
+	if point.Slot == 0 && len(point.Hash) == 0 {
+		return len(block.PrevHash) == 0
+	}
+	return bytes.Equal(block.PrevHash, point.Hash)
+}
+
+func (c *Chain) nextPersistentBlockAfterSparseIndex(
+	iter *ChainIterator,
+) (models.Block, bool, error) {
+	if !c.persistent || iter.reverse ||
+		iter.nextBlockIndex > c.tipBlockIndex {
+		return models.Block{}, false, nil
+	}
+	previousPoint := chainIteratorPreviousPoint(iter)
+	for idx := iter.nextBlockIndex + 1; idx <= c.tipBlockIndex; idx++ {
+		block, err := c.blockByIndex(idx)
+		if errors.Is(err, models.ErrBlockNotFound) {
+			continue
+		}
+		if err != nil {
+			return models.Block{}, false, err
+		}
+		if blockFollowsPoint(block, previousPoint) {
+			return block, true, nil
+		}
+		return models.Block{}, false, fmt.Errorf(
+			"persistent chain index gap after index %d: block %d/%s at index %d has prev hash %s, expected %s",
+			iter.nextBlockIndex,
+			block.Slot,
+			hex.EncodeToString(block.Hash),
+			block.ID,
+			hex.EncodeToString(block.PrevHash),
+			hex.EncodeToString(previousPoint.Hash),
+		)
+	}
+	return models.Block{}, false, fmt.Errorf(
+		"persistent chain tip index %d is ahead of missing iterator index %d, but no later indexed block was found",
+		c.tipBlockIndex,
+		iter.nextBlockIndex,
+	)
+}
+
 func (c *Chain) iterNext(
 	iter *ChainIterator,
 	blocking bool,
@@ -1354,6 +1404,18 @@ func (c *Chain) iterNext(
 		ret := &ChainIteratorResult{}
 		// Lookup next block in metadata DB
 		tmpBlock, err := c.blockByIndex(iter.nextBlockIndex)
+		if errors.Is(err, models.ErrBlockNotFound) && !iter.reverse {
+			recoveredBlock, recovered, recoverErr := c.nextPersistentBlockAfterSparseIndex(
+				iter,
+			)
+			if recoverErr != nil {
+				err = recoverErr
+			} else if recovered {
+				tmpBlock = recoveredBlock
+				iter.nextBlockIndex = tmpBlock.ID
+				err = nil
+			}
+		}
 		// Return immedidately if a block is found
 		if err == nil {
 			ret.Point = ocommon.NewPoint(tmpBlock.Slot, tmpBlock.Hash)
