@@ -134,7 +134,9 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		finalProgress = statusResp.Msg.GetProgress()
 		return finalProgress.GetStatus() ==
 			databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
-	}, 5*time.Second, 20*time.Millisecond, "snapshot must complete over the wire")
+	}, databaseOperationTimeout, 20*time.Millisecond,
+		"snapshot must complete over the wire",
+	)
 	require.Equal(t, "completed", finalProgress.GetMessage())
 	require.Equal(t, createResp.Msg.GetOperationId(), finalProgress.GetOperationId())
 
@@ -161,7 +163,9 @@ func TestDatabaseServiceOverRealHTTP(t *testing.T) {
 		require.NoError(t, err)
 		return statusResp.Msg.GetProgress().GetStatus() ==
 			databasev1alpha1.OperationStatus_OPERATION_STATUS_COMPLETED
-	}, 5*time.Second, 20*time.Millisecond, "truncate must complete over the wire")
+	}, databaseOperationTimeout, 20*time.Millisecond,
+		"truncate must complete over the wire",
+	)
 
 	histResp, err := client.GetOperationHistory(
 		context.Background(),

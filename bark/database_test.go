@@ -35,6 +35,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// databaseOperationTimeout allows for real Badger and SQLite file operations
+// running under the race detector alongside every other package in CI.
+const databaseOperationTimeout = 30 * time.Second
+
 // newDiskTestDB builds a real on-disk database (badger + sqlite), unlike
 // blob_test.go's in-memory newTestDB: Snapshot/Restore need real files to
 // back up (VACUUM INTO refuses an in-memory sqlite database).
@@ -104,9 +108,6 @@ func waitForOperationStatus(
 ) *databasev1alpha1.OperationProgress {
 	t.Helper()
 	var progress *databasev1alpha1.OperationProgress
-	// Snapshot and restore exercise real Badger and SQLite files. In
-	// particular, SQLite's VACUUM INTO can take more than five seconds on a
-	// race-enabled CI runner when every package is tested concurrently.
 	require.Eventually(t, func() bool {
 		progress = get()
 		switch progress.GetStatus() {
@@ -117,7 +118,7 @@ func waitForOperationStatus(
 		default:
 			return false
 		}
-	}, 30*time.Second, 10*time.Millisecond,
+	}, databaseOperationTimeout, 10*time.Millisecond,
 		"operation must reach a terminal state",
 	)
 	return progress
@@ -583,7 +584,9 @@ func TestVerifySnapshotFailsForCorruptedSnapshot(t *testing.T) {
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "verify of a corrupted snapshot must fail")
+	}, databaseOperationTimeout, 10*time.Millisecond,
+		"verify of a corrupted snapshot must fail",
+	)
 }
 
 // tamperManifestChecksum rewrites the manifest at manifestPath so its
