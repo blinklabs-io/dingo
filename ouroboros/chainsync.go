@@ -711,30 +711,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 			"connection_id", ctx.ConnectionId.String(),
 			"ingress_eligible", ingressEligible,
 		)
-		// Update tracked client state and deduplicate headers.
-		// If this header has already been reported by another
-		// eligible client, skip publishing it into the ledger.
-		isNew := true
-		if o.ChainsyncState != nil {
-			if ingressEligible {
-				isNew = o.ChainsyncState.UpdateClientTip(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			} else {
-				o.ChainsyncState.UpdateClientTipWithoutDedup(
-					ctx.ConnectionId,
-					point,
-					tip,
-				)
-			}
-		}
-		// Publish peer tip update for chain selection only for
-		// ingress-eligible peers. Random inbound peers reporting
-		// ephemeral tips would cause spurious chain switches; peergov
-		// filters them via chainSelectionEligible so they fail the
-		// reconcile above and get skipped here.
+		// Observe the tip for chain selection FIRST, so the apply-eligibility
+		// decision below reflects this header. Only ingress-eligible peers are
+		// observed; random inbound peers reporting ephemeral tips are filtered
+		// by peergov and skipped here.
 		if ingressEligible {
 			observedTip := ochainsync.Tip{
 				Point:       point,
@@ -747,11 +727,10 @@ func (o *Ouroboros) chainsyncClientRollForward(
 				VRFOutput:    vrfOutput,
 				PraosView:    praosView,
 			}
-			// Observe the tip. If the hook handles it synchronously (Genesis
-			// corroboration active, so the apply gate below must reflect this
-			// header), skip the async publish to avoid a double update;
-			// otherwise publish for the async chain-selection and peergov
-			// subscribers.
+			// If the hook handles it synchronously (Genesis corroboration
+			// active, so the apply gate below must reflect this header), skip
+			// the async publish to avoid a double update; otherwise publish for
+			// the async chain-selection and peergov subscribers.
 			observedSync := false
 			if o.config.ChainsyncObservePeerTip != nil {
 				observedSync = o.config.ChainsyncObservePeerTip(peerTipUpdate)
@@ -763,6 +742,33 @@ func (o *Ouroboros) chainsyncClientRollForward(
 						chainselection.PeerTipUpdateEventType,
 						peerTipUpdate,
 					),
+				)
+			}
+		}
+		// Apply-eligibility, evaluated after observation so it reflects this
+		// header. A peer can be ingress-eligible yet not apply-eligible (an
+		// uncorroborated Genesis fast source): its tips are observed but its
+		// blocks are withheld from the ledger.
+		applyEligible := ingressEligible &&
+			o.shouldApplyChainsyncToLedger(ctx.ConnectionId)
+		// Update tracked client cursor/tip and deduplicate headers. Record the
+		// cross-peer dedup entry ONLY for headers we will actually apply, so a
+		// header withheld from an uncorroborated peer is not permanently
+		// deduplicated — a later corroborated, apply-eligible peer can still
+		// publish the point into the ledger.
+		isNew := true
+		if o.ChainsyncState != nil {
+			if applyEligible {
+				isNew = o.ChainsyncState.UpdateClientTip(
+					ctx.ConnectionId,
+					point,
+					tip,
+				)
+			} else {
+				o.ChainsyncState.UpdateClientTipWithoutDedup(
+					ctx.ConnectionId,
+					point,
+					tip,
 				)
 			}
 		}
@@ -817,10 +823,12 @@ func (o *Ouroboros) chainsyncClientRollForward(
 		}
 		// Apply gate: a peer's tips have already been observed for chain
 		// selection above, but its headers are applied to the ledger only when
-		// apply-eligible. This withholds blocks from an uncorroborated Genesis
-		// fast source (it is observed but cannot steer the ledger) while letting
-		// corroboration still form from the observed tips.
-		if !o.shouldApplyChainsyncToLedger(ctx.ConnectionId) {
+		// apply-eligible (computed above, after observation). This withholds
+		// blocks from an uncorroborated Genesis fast source (it is observed but
+		// cannot steer the ledger) while letting corroboration still form from
+		// the observed tips. The header was recorded WITHOUT dedup above, so a
+		// later corroborated peer can still publish this point.
+		if !applyEligible {
 			o.config.Logger.Debug(
 				"chainsync: header withheld (not apply eligible)",
 				"component", "ouroboros",
