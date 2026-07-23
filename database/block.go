@@ -542,11 +542,32 @@ func (d *Database) BlockAtOrAfterIndex(
 			it.Next()
 			continue
 		}
+		indexKey := item.Key()
+		if indexKey == nil {
+			it.Next()
+			continue
+		}
 		blockKey, err := item.ValueCopy(nil)
 		if err != nil {
 			return models.Block{}, err
 		}
-		return blockByKey(txn, blockKey)
+		block, err := blockByKey(txn, blockKey)
+		if err != nil {
+			if errors.Is(err, models.ErrBlockNotFound) {
+				it.Next()
+				continue
+			}
+			return models.Block{}, err
+		}
+		// The index value is an indirection to the block blob. A stale
+		// mapping may still resolve successfully but point at a block from
+		// an older index. Only accept the block when its metadata ID matches
+		// the ordered index key currently being visited.
+		if !bytes.Equal(indexKey, types.BlockBlobIndexKey(block.ID)) {
+			it.Next()
+			continue
+		}
+		return block, nil
 	}
 	if err := it.Err(); err != nil {
 		return models.Block{}, err
