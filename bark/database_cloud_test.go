@@ -447,7 +447,9 @@ func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 			}
 		}
 		return false
-	}, 5*time.Second, 10*time.Millisecond, "verify of a cloud-only snapshot must succeed")
+	}, databaseOperationTimeout, 10*time.Millisecond,
+		"verify of a cloud-only snapshot must succeed",
+	)
 }
 
 func TestDeleteSnapshotRemovesCloudOnlyCopy(t *testing.T) {
