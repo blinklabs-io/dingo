@@ -135,6 +135,15 @@ func (n *Node) shutdown() error {
 		}
 	}
 
+	if n.dbLifecycleMgr != nil {
+		if stopErr := n.dbLifecycleMgr.Stop(); stopErr != nil {
+			err = errors.Join(
+				err,
+				fmt.Errorf("database lifecycle manager shutdown: %w", stopErr),
+			)
+		}
+	}
+
 	if n.utxorpc != nil {
 		if stopErr := n.utxorpc.Stop(ctx); stopErr != nil {
 			err = errors.Join(err, fmt.Errorf("utxorpc shutdown: %w", stopErr))

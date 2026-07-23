@@ -198,6 +198,13 @@ var flagSpecs = []flagSpec{
 	intFlag("Mithril.DownloadMaxIdleRetries", "mithril-download-max-idle-retries", "Mithril snapshot download idle retries without progress"),
 	boolFlag("Mithril.CleanupAfterLoad", "mithril-cleanup-after-load", "cleanup Mithril files after load"),
 	boolFlag("Mithril.VerifyCertificates", "mithril-verify-certs", "verify Mithril certificate chains"),
+
+	// Database lifecycle (snapshot/restore/truncate)
+	boolFlag("DatabaseLifecycle.SnapshotEnabled", "db-snapshot-enabled", "capture automatic database snapshots at epoch boundaries"),
+	stringFlag("DatabaseLifecycle.SnapshotDir", "db-snapshot-dir", "", "local filesystem directory for automatic database snapshots"),
+	stringFlag("DatabaseLifecycle.SnapshotCloudDestination", "db-snapshot-cloud-destination", "", "optional cloud destination to additionally mirror every snapshot to (s3://bucket/prefix or gcs://bucket/prefix); requires the dingo_extra_plugins build tag"),
+	intFlag("DatabaseLifecycle.SnapshotRetention", "db-snapshot-retention", "number of automatic snapshots to retain (0 = keep all)"),
+	intFlag("DatabaseLifecycle.SnapshotEveryNEpochs", "db-snapshot-every-n-epochs", "capture an automatic snapshot every N epoch boundaries"),
 }
 
 // RegisterFlags registers persistent CLI flags for every Config field.

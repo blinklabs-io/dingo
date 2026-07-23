@@ -639,3 +639,39 @@ mithril:
 # Env: DINGO_DELEGATOR_INACTIVITY_ENABLED / DINGO_DELEGATOR_INACTIVITY
 # delegatorInactivityEnabled: false
 # delegatorInactivity: 90        # epochs; integer in [1, 10000]
+
+# ---
+# Database lifecycle: automatic epoch-boundary snapshots, config for the
+# `dingo database snapshot|restore|truncate` CLI commands, and — when
+# bark is enabled (barkPort > 0) — the base directory bark's
+# DatabaseService CreateSnapshot/Restore RPCs use.
+databaseLifecycle:
+  # Capture automatic database snapshots at epoch boundaries
+  # Default: false
+  # CLI: --db-snapshot-enabled
+  snapshotEnabled: false
+  # Local filesystem directory automatic and bark-triggered snapshots are
+  # written under (one subdirectory per snapshot). Required if
+  # snapshotEnabled is true, and required for bark's DatabaseService to be
+  # mounted at all (it's silently skipped, leaving only bark's Archive
+  # service, if this is empty). Every snapshot is always written here,
+  # regardless of whether snapshotCloudDestination is also set.
+  # CLI: --db-snapshot-dir
+  snapshotDir: ""
+  # Optional cloud destination to additionally mirror every snapshot to,
+  # as a URI: s3://bucket/prefix or gcs://bucket/prefix. The local copy
+  # under snapshotDir is always kept — this is a mirror, not a
+  # replacement — and requires the dingo_extra_plugins build tag.
+  # Credentials come from the AWS SDK default credential chain / Google
+  # Application Default Credentials; there is no explicit key/secret
+  # config here. Restore also accepts this same URI form as its source.
+  # CLI: --db-snapshot-cloud-destination
+  snapshotCloudDestination: ""
+  # Number of automatic snapshots to retain before pruning older ones
+  # 0 keeps all of them
+  # CLI: --db-snapshot-retention
+  snapshotRetention: 0
+  # Capture an automatic snapshot every N epoch boundaries instead of
+  # every single one
+  # CLI: --db-snapshot-every-n-epochs
+  snapshotEveryNEpochs: 1

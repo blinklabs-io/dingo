@@ -232,6 +232,13 @@ func (n *Node) runChainsyncStallRecycler(
 					return
 				case <-ticker.C:
 					n.runStallCheckerTick(func() {
+						// A live database restore/truncate briefly nils
+						// n.ledgerState while it swaps in a rebuilt one;
+						// skip this tick rather than dereference nil, and
+						// pick back up next tick once it's reassigned.
+						if n.ledgerState == nil {
+							return
+						}
 						now := time.Now()
 						localTip := n.ledgerState.Tip()
 						localTipSlot := localTip.Point.Slot

@@ -155,6 +155,7 @@ type Config struct {
 	startEra                 internalconfig.StartEra
 	shutdownTimeout          time.Duration
 	DatabaseWorkerPoolConfig ledger.DatabaseWorkerPoolConfig
+	databaseLifecycle        internalconfig.DatabaseLifecycleConfig
 	// Peer targets (0 = use default, -1 = unlimited)
 	targetNumberOfKnownPeers       int
 	targetNumberOfEstablishedPeers int
@@ -801,6 +802,16 @@ func WithDatabaseWorkerPoolConfig(
 ) ConfigOptionFunc {
 	return func(c *Config) {
 		c.DatabaseWorkerPoolConfig = cfg
+	}
+}
+
+// WithDatabaseLifecycle specifies configuration for automatic
+// epoch-boundary database snapshots (see dblifecycle.Manager).
+func WithDatabaseLifecycle(
+	cfg internalconfig.DatabaseLifecycleConfig,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.databaseLifecycle = cfg
 	}
 }
 

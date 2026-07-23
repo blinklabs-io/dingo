@@ -52,7 +52,7 @@ func (a *archiveServiceHandler) FetchBlock(
 		}
 
 		point := common.NewPoint(b.GetSlot(), hash)
-		signedURL, metadata, err := database.BlockURL(ctx, a.bark.config.DB, point)
+		signedURL, metadata, err := database.BlockURL(ctx, a.bark.DB(), point)
 		if err != nil {
 			return nil, fmt.Errorf("failed getting signed url for block [%d, %s]: %w", point.Slot, point.Hash, err)
 		}

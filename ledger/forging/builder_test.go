@@ -25,6 +25,7 @@ import (
 	dingoversion "github.com/blinklabs-io/dingo/internal/version"
 	"github.com/blinklabs-io/gouroboros/cbor"
 	"github.com/blinklabs-io/gouroboros/ledger"
+	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
@@ -776,6 +777,73 @@ func makeMinimalTxCbor(t *testing.T, txID byte, padding int) []byte {
 	require.NoError(t, err, "generated CBOR must decode as a valid Conway tx")
 
 	return txCbor
+}
+
+// TestComputeConwayBlockBodyHashProducesValidatingBlock exercises the
+// dev-mode forging path in ledger/state.go: a block assembled from typed
+// ConwayTransactionBody/ConwayTransactionWitnessSet values (rather than
+// through Builder) must carry a body hash that gouroboros's own decode
+// path accepts, or every dev-mode forged block fails immediately with a
+// body-hash mismatch.
+func TestComputeConwayBlockBodyHashProducesValidatingBlock(t *testing.T) {
+	txCbor1 := makeMinimalTxCbor(t, 0x01, 0)
+	txCbor2 := makeMinimalTxCbor(t, 0x02, 0)
+
+	tx1, err := conway.NewConwayTransactionFromCbor(txCbor1)
+	require.NoError(t, err)
+	tx2, err := conway.NewConwayTransactionFromCbor(txCbor2)
+	require.NoError(t, err)
+
+	txBodies := []conway.ConwayTransactionBody{tx1.Body, tx2.Body}
+	witnessSets := []conway.ConwayTransactionWitnessSet{
+		tx1.WitnessSet,
+		tx2.WitnessSet,
+	}
+	var metadataSet lcommon.TransactionMetadataSet
+
+	bodyHash, bodySize, err := ComputeConwayBlockBodyHash(
+		txBodies,
+		witnessSets,
+		metadataSet,
+	)
+	require.NoError(t, err)
+	assert.NotZero(t, bodySize)
+	assert.NotEqual(t, lcommon.Blake2b256{}, bodyHash, "must not be the zero placeholder")
+
+	header := &conway.ConwayBlockHeader{
+		BabbageBlockHeader: babbage.BabbageBlockHeader{
+			Body: babbage.BabbageBlockHeaderBody{
+				BlockNumber:   101,
+				Slot:          1001,
+				PrevHash:      lcommon.NewBlake2b256(make([]byte, 32)),
+				IssuerVkey:    lcommon.IssuerVkey{},
+				VrfKey:        []byte{},
+				VrfResult:     lcommon.VrfResult{Output: lcommon.Blake2b256{}.Bytes()},
+				BlockBodySize: bodySize,
+				BlockBodyHash: bodyHash,
+				OpCert:        babbage.BabbageOpCert{},
+				ProtoVersion:  babbage.BabbageProtoVersion{Major: 10},
+			},
+			Signature: []byte{},
+		},
+	}
+	block := &conway.ConwayBlock{
+		BlockHeader:            header,
+		TransactionBodies:      txBodies,
+		TransactionWitnessSets: witnessSets,
+		TransactionMetadataSet: metadataSet,
+		InvalidTransactions:    []uint{},
+	}
+
+	blockCbor, err := cbor.Encode(block)
+	require.NoError(t, err)
+
+	// This is exactly the round-trip that fails with "body hash
+	// mismatch" if BlockBodyHash is the zero placeholder instead of a
+	// real computed hash.
+	decoded, err := conway.NewConwayBlockFromCbor(blockCbor)
+	require.NoError(t, err)
+	assert.Equal(t, 2, len(decoded.Transactions()))
 }
 
 func TestBuildBlockBlockSizeLimit(t *testing.T) {

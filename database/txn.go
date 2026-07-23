@@ -60,10 +60,46 @@ type Txn struct {
 	readWrite   bool
 	afterCommit []func()
 	dispatching bool
+
+	// barrierHeld records whether this Txn holds the shared side of
+	// db.commitBarrier (see acquireCommitBarrier). Guarded by lock.
+	barrierHeld bool
+}
+
+// acquireCommitBarrier holds the shared (read) side of db.commitBarrier
+// for the lifetime of a read-write Txn, from construction through
+// Commit/Rollback/Release. It must be taken before the underlying
+// blob/metadata transactions are opened below, not just around the
+// eventual commit: the metadata plugin's write connection pool is sized
+// to exactly one connection (see sqlite.database.go), so an already-BEGUN
+// but not-yet-committed transaction holds that one connection regardless
+// of whether Commit() has been called yet. Database.PauseCommits (used by
+// database/lifecycle.Snapshot around its blob+metadata backup calls)
+// takes the exclusive side; if this barrier were only held during Commit,
+// PauseCommits could acquire its lock while such a transaction sits
+// BEGUN-but-uncommitted, and Snapshot's metadata backup (VACUUM INTO,
+// which needs that same one connection) would then deadlock against it —
+// the writer can't reach Commit's RLock to finish, and Snapshot can't
+// release its Lock until the backup call returns.
+func acquireCommitBarrier(t *Txn) {
+	if t.readWrite && t.db != nil {
+		t.db.commitBarrier.RLock()
+		t.barrierHeld = true
+	}
+}
+
+// releaseCommitBarrierLocked releases the barrier acquired by
+// acquireCommitBarrier, if held. Callers must hold t.lock.
+func (t *Txn) releaseCommitBarrierLocked() {
+	if t.barrierHeld {
+		t.barrierHeld = false
+		t.db.commitBarrier.RUnlock()
+	}
 }
 
 func NewTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
+	acquireCommitBarrier(t)
 	if bs := db.Blob(); bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -88,6 +124,7 @@ func NewTxn(db *Database, readWrite bool) *Txn {
 
 func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
+	acquireCommitBarrier(t)
 	if bs := db.Blob(); bs != nil {
 		t.blobTxn = bs.NewTransaction(readWrite)
 	}
@@ -96,6 +133,7 @@ func NewBlobOnlyTxn(db *Database, readWrite bool) *Txn {
 
 func NewMetadataOnlyTxn(db *Database, readWrite bool) *Txn {
 	t := &Txn{db: db, readWrite: readWrite}
+	acquireCommitBarrier(t)
 	if ms := db.Metadata(); ms != nil {
 		if readWrite {
 			t.metadataTxn = ms.Transaction()
@@ -277,6 +315,7 @@ func (t *Txn) Commit() error {
 	// Fail fast if neither store is available for a read-write transaction
 	if t.readWrite && t.blobTxn == nil && t.metadataTxn == nil {
 		t.finished = true
+		t.releaseCommitBarrierLocked()
 		t.lock.Unlock()
 		return types.ErrNoStoreAvailable
 	}
@@ -296,6 +335,7 @@ func (t *Txn) Commit() error {
 			_ = t.blobTxn.Rollback()
 			_ = t.metadataTxn.Rollback()
 			t.finished = true
+			t.releaseCommitBarrierLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("failed to update commit timestamp: %w", err)
 		}
@@ -309,6 +349,7 @@ func (t *Txn) Commit() error {
 				_ = t.metadataTxn.Rollback()
 			}
 			t.finished = true
+			t.releaseCommitBarrierLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("blob commit failed: %w", err)
 		}
@@ -333,9 +374,11 @@ func (t *Txn) Commit() error {
 					MetadataErr:     err,
 					CommitTimestamp: commitTimestamp,
 				}
+				t.releaseCommitBarrierLocked()
 				t.lock.Unlock()
 				return ret
 			}
+			t.releaseCommitBarrierLocked()
 			t.lock.Unlock()
 			return fmt.Errorf("metadata commit failed: %w", err)
 		}
@@ -343,6 +386,7 @@ func (t *Txn) Commit() error {
 	t.finished = true
 	t.committed = true
 	t.dispatching = true
+	t.releaseCommitBarrierLocked()
 	t.lock.Unlock()
 	t.dispatchAfterCommit()
 	return nil
@@ -370,6 +414,7 @@ func (t *Txn) rollback() error {
 		}
 	}
 	t.finished = true
+	t.releaseCommitBarrierLocked()
 	return errors.Join(errs...)
 }
 

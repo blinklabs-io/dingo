@@ -471,6 +471,25 @@ func (c *Config) validate(effectiveMode RunMode, minBindable uint) error {
 		))
 	}
 
+	if c.DatabaseLifecycle.SnapshotEnabled &&
+		c.DatabaseLifecycle.SnapshotDir == "" {
+		errs = append(errs, errors.New(
+			"databaseLifecycle.snapshotDir is required when databaseLifecycle.snapshotEnabled is true",
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotRetention < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotRetention: %d (must not be negative)",
+			c.DatabaseLifecycle.SnapshotRetention,
+		))
+	}
+	if c.DatabaseLifecycle.SnapshotEveryNEpochs < 0 {
+		errs = append(errs, fmt.Errorf(
+			"invalid databaseLifecycle.snapshotEveryNEpochs: %d (must not be negative)",
+			c.DatabaseLifecycle.SnapshotEveryNEpochs,
+		))
+	}
+
 	return errors.Join(errs...)
 }
 

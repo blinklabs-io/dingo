@@ -103,20 +103,23 @@ const (
 	RunModeDev   RunMode = "dev"   // Development mode (isolated, no outbound)
 	RunModeLeios RunMode = "leios" // Full node with experimental Leios capabilities
 
-	// RunModeSync and RunModeMithril are effective run modes used only for
-	// validation, not configurable runMode values (RunMode.Valid rejects
-	// them); cmd/dingo passes the one matching the invoked command to
-	// Config.Validate. Neither starts the relay/private serving listeners
-	// or the API listeners. They differ in their auxiliary-listener
-	// surface: RunModeSync is the Mithril snapshot sync operation (via
-	// `dingo sync --mithril` or `dingo mithril sync`), which starts a
-	// Prometheus metrics listener and an optional pprof debug listener;
-	// RunModeMithril is the read-only Mithril query subcommands (`list`,
-	// `show`, and bare `mithril`), which start no listeners at all.
-	// Keeping them distinct lets Validate check exactly the ports each
-	// invocation binds.
-	RunModeSync    RunMode = "sync"
-	RunModeMithril RunMode = "mithril"
+	// RunModeSync, RunModeMithril, and RunModeDatabase are effective run
+	// modes used only for validation, not configurable runMode values
+	// (RunMode.Valid rejects them); cmd/dingo passes the one matching the
+	// invoked command to Config.Validate. None of them starts the
+	// relay/private serving listeners or the API listeners. They differ
+	// in their auxiliary-listener surface: RunModeSync is the Mithril
+	// snapshot sync operation (via `dingo sync --mithril` or `dingo
+	// mithril sync`), which starts a Prometheus metrics listener and an
+	// optional pprof debug listener; RunModeMithril is the read-only
+	// Mithril query subcommands (`list`, `show`, and bare `mithril`),
+	// which start no listeners at all; RunModeDatabase is the offline
+	// `dingo database snapshot|restore|truncate` maintenance commands,
+	// which also start no listeners. Keeping them distinct lets Validate
+	// check exactly the ports each invocation binds.
+	RunModeSync     RunMode = "sync"
+	RunModeMithril  RunMode = "mithril"
+	RunModeDatabase RunMode = "database"
 )
 
 // StartEra controls experimental direct startup in a later ledger era.
@@ -132,7 +135,7 @@ func (m RunMode) Valid() bool {
 	switch m {
 	case RunModeServe, RunModeLoad, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeSync, RunModeMithril:
+	case RunModeSync, RunModeMithril, RunModeDatabase:
 		// Effective-only modes used for validation; never configurable runModes.
 		return false
 	default:
@@ -157,7 +160,7 @@ func (m RunMode) RequiresListeners() bool {
 	switch m {
 	case RunModeServe, RunModeDev, RunModeLeios, "":
 		return true
-	case RunModeLoad, RunModeSync, RunModeMithril:
+	case RunModeLoad, RunModeSync, RunModeMithril, RunModeDatabase:
 		return false
 	default:
 		return false
@@ -631,6 +634,9 @@ type Config struct {
 
 	// Mithril snapshot bootstrap configuration
 	Mithril MithrilConfig `yaml:"mithril"`
+
+	// Database lifecycle (snapshot/restore/truncate) configuration
+	DatabaseLifecycle DatabaseLifecycleConfig `yaml:"databaseLifecycle"`
 }
 
 // midnightNetworkDefaults holds per-network Midnight constants sourced from
@@ -775,6 +781,49 @@ type MithrilConfig struct {
 	VerifyCertificates bool `yaml:"verifyCertificates" envconfig:"DINGO_MITHRIL_VERIFY_CERTS"`
 }
 
+// DatabaseLifecycleConfig holds configuration for automatic epoch-boundary
+// database snapshots and the `dingo database` snapshot/restore/truncate
+// CLI surface. Every snapshot is always written locally under SnapshotDir;
+// if SnapshotCloudDestination is also set, it is additionally uploaded
+// there — the cloud copy is a mirror alongside the local one, not a
+// replacement for it.
+type DatabaseLifecycleConfig struct {
+	// SnapshotEnabled controls whether automatic epoch-boundary database
+	// snapshots are captured. Manual snapshots via the CLI are always
+	// available regardless of this setting.
+	SnapshotEnabled bool `yaml:"snapshotEnabled" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_ENABLED"`
+	// SnapshotDir is the local filesystem directory automatic snapshots
+	// are written under (one subdirectory per snapshot). Required if
+	// SnapshotEnabled is true.
+	SnapshotDir string `yaml:"snapshotDir" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_DIR"`
+	// SnapshotCloudDestination optionally mirrors every snapshot (manual
+	// or automatic) to an object-storage location in addition to
+	// SnapshotDir, as a URI: s3://<bucket>/<prefix> or
+	// gcs://<bucket>/<prefix> (matching the scheme
+	// database/plugin/blob/gcs already uses, not gs://). Requires dingo to
+	// be built with the dingo_extra_plugins tag. Empty disables cloud
+	// upload. Credentials are resolved from the ambient AWS/GCS SDK
+	// credential chain (env vars, IAM role, ADC, etc.) — there is no
+	// separate credential config here, matching how the existing s3/gcs
+	// blob store plugins work.
+	//
+	// Each snapshot is uploaded under its own sub-path — <this URI>/
+	// <snapshotID> — not flat directly under this URI, so more than one
+	// snapshot can exist at the same configured destination without
+	// overwriting each other. Restore accepts that same per-snapshot URI
+	// directly in place of a local snapshot directory: it downloads the
+	// snapshot into a local temp directory first, then proceeds exactly
+	// as a local restore. This is also how a snapshot created on one node
+	// can be restored onto another.
+	SnapshotCloudDestination string `yaml:"snapshotCloudDestination" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_CLOUD_DESTINATION"`
+	// SnapshotRetention is the number of most-recent automatic snapshots
+	// to keep before pruning older ones. Zero keeps all of them.
+	SnapshotRetention int `yaml:"snapshotRetention" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_RETENTION"`
+	// SnapshotEveryNEpochs captures an automatic snapshot every N epoch
+	// boundaries instead of every single one.
+	SnapshotEveryNEpochs int `yaml:"snapshotEveryNEpochs" envconfig:"DINGO_DB_LIFECYCLE_SNAPSHOT_EVERY_N_EPOCHS"`
+}
+
 func (c *Config) ParseCmdlineArgs(programName string, args []string) error {
 	fs := flag.NewFlagSet(programName, flag.ExitOnError)
 	fs.StringVar(
@@ -899,6 +948,10 @@ var globalConfig = &Config{
 		Backend:            "v2",
 		CleanupAfterLoad:   true,
 		VerifyCertificates: true,
+	},
+	// Database lifecycle defaults
+	DatabaseLifecycle: DatabaseLifecycleConfig{
+		SnapshotEveryNEpochs: 1,
 	},
 	// Forging defaults
 	ForgeSyncToleranceSlots:     DefaultForgeSyncToleranceSlots,

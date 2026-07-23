@@ -87,6 +87,7 @@ graph TB
         DB["Database<br/><i>database/</i>"]
         Blob["BlobStore<br/>badger / s3 / gcs"]
         Meta["MetadataStore<br/>sqlite / postgres / mysql"]
+        DBLC["DBLifecycleManager<br/><i>internal/dblifecycle/</i>"]
     end
 
     subgraph "External Interfaces"
@@ -103,7 +104,7 @@ graph TB
     EB["EventBus<br/><i>event/</i>"]
 
     Node --> CM & PG & OB & ChM & LS & MP & DB & EB
-    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & HExpiry
+    Node -.->|"optional"| BF & LE & URPC & BFA & Mesh & Bark & HExpiry & DBLC
 
     PG -->|"outbound conn requests"| CM
     CM -->|"connections"| OB
@@ -116,10 +117,11 @@ graph TB
     HExpiry --> LS & DB
     BF --> LE & MP & ChM
     SM -->|"stake snapshots"| DB
+    DBLC -->|"epoch-boundary DB snapshots"| DB
     CSel -->|"switch active peer"| CS
     CS -->|"stall detection"| CM
 
-    EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & OB & MP
+    EB -.->|"events"| LS & ChM & CS & CSel & PG & SM & DBLC & OB & MP
     URPC & BFA & Mesh -.-> LS & DB
     Bark -.-> DB
 ```
@@ -605,6 +607,7 @@ type Node struct {
     db             *database.Database             // Storage layer
     ledgerState    *ledger.LedgerState            // UTXO/state tracking
     snapshotMgr    *snapshot.Manager              // Stake snapshot capture
+    dbLifecycleMgr *dblifecycle.Manager           // Automatic epoch-boundary DB snapshots
     utxorpc        *utxorpc.Utxorpc               // UTxO RPC server
     bark           *bark.Bark                     // Bark C2/archive server
     historyExpiry  *historyexpiry.Pruner          // Local block history expiry
@@ -671,21 +674,29 @@ When `Node.Run()` is called, components are initialized in this order:
     start. The hook is installed before genesis capture and block sync so every
     subsequent epoch rollover stages its Mark snapshot inside the rollover
     transaction.
-11. Mempool setup and injection into LedgerState/Ouroboros
-12. ChainsyncState (multi-client tracking, stall detection)
-13. ChainSelector (genesis/Praos comparison) start
-14. ConnectionManager creation and event wiring
-15. PeerGovernor creation/start (topology + churn + ledger peers)
-16. ConnectionManager listener start
-17. Chainsync stall recycler (background goroutine)
-18. UTxO RPC server (if API storage mode and port configured)
-19. Bark C2/archive server (if port configured)
-20. Midnight gRPC server (if API storage mode and midnight port configured)
-21. Blockfrost API (if API storage mode and port configured)
-22. Mesh API (if API storage mode and port configured)
-23. Off-chain metadata fetcher (if API storage mode)
-24. Block forger + leader election (if block producer mode)
-25. Wait for shutdown signal
+11. Database lifecycle manager creation and start (`internal/dblifecycle.Manager`,
+    distinct from the stake-snapshot manager above): subscribes to
+    `epoch.transition` on the EventBus — the same async, decoupled pattern the
+    stake-snapshot manager uses, not the synchronous hook, since a
+    multi-gigabyte database backup must never run inside the ledger's write
+    transaction — and captures a point-in-time database snapshot
+    (`database/lifecycle.Snapshot`) at epoch boundaries when
+    `databaseLifecycle.snapshotEnabled` is configured.
+12. Mempool setup and injection into LedgerState/Ouroboros
+13. ChainsyncState (multi-client tracking, stall detection)
+14. ChainSelector (genesis/Praos comparison) start
+15. ConnectionManager creation and event wiring
+16. PeerGovernor creation/start (topology + churn + ledger peers)
+17. ConnectionManager listener start
+18. Chainsync stall recycler (background goroutine)
+19. UTxO RPC server (if API storage mode and port configured)
+20. Bark C2/archive server (if port configured)
+21. Midnight gRPC server (if API storage mode and midnight port configured)
+22. Blockfrost API (if API storage mode and port configured)
+23. Mesh API (if API storage mode and port configured)
+24. Off-chain metadata fetcher (if API storage mode)
+25. Block forger + leader election (if block producer mode)
+26. Wait for shutdown signal
 ```
 
 ### Shutdown Flow
@@ -699,7 +710,7 @@ Phase 1: Stop accepting new work
   ledger/database teardown begins),
   Midnight indexer (unsubscribes from BlockEventType),
   Block forger, leader election, chain selector,
-  peer governor, snapshot manager, UTxO RPC,
+  peer governor, snapshot manager, database lifecycle manager, UTxO RPC,
   Bark C2/archive server, Midnight gRPC server,
   Blockfrost API, Mesh API, off-chain metadata fetcher
 
@@ -1015,6 +1026,23 @@ plugin.SetPluginOption() -> plugin.GetPlugin() -> plugin.Start() -> Use interfac
 Interfaces:
 - `BlobStore` - Block/transaction storage operations
 - `MetadataStore` - Index and query operations
+
+### Database Lifecycle (Snapshot, Restore, Truncate)
+
+`database/lifecycle/` implements point-in-time database snapshots, restore from a snapshot, and truncation to an earlier chain point (see `DATABASE.md` for the manifest format, plugin-interface, and cloud-destination details). It is a pure library over `*database.Database` with no node-composition knowledge; `internal/dblifecycle` supplies the node-facing orchestration. Every snapshot is always written locally; if `databaseLifecycle.snapshotCloudDestination` is set (an `s3://` or `gcs://` URI), `lifecycle.SnapshotToCloud` additionally mirrors it there via a build-tag-gated (`dingo_extra_plugins`) `CloudDestination` implementation, and `lifecycle.Restore` accepts that same URI as its source, downloading into a temp directory first — this is also how a snapshot taken on one node can be restored onto another without sharing a filesystem.
+
+- `dblifecycle.Service` is the single entry point the `dingo database snapshot|restore|truncate` CLI commands (`cmd/dingo/database.go`) call. By default it opens its own `*database.Database` against the configured data directory the same way `load`/`mithril` do (offline mode) — this must not run against a data directory a `dingo serve` process currently has open. `Service.SetLiveNode` (`internal/dblifecycle/service.go`) optionally binds it to a running `*dingo.Node` instead (see below), for restore/truncate against a live node.
+- `dblifecycle.Manager` (constructed in `node.go` alongside, and distinct from, the stake-snapshot `snapshot.Manager`) captures automatic snapshots at epoch boundaries when `databaseLifecycle.snapshotEnabled` is configured. It subscribes to `epoch.transition` on the EventBus rather than the ledger's synchronous epoch-boundary hook, since a multi-gigabyte backup must never run inside the ledger's write transaction; both Badger's backup and SQLite's `VACUUM INTO` are non-blocking for concurrent writers, so no node quiesce is needed for a snapshot. The two backup calls are not, however, atomic with respect to each other: each is independently MVCC-consistent as of whenever it runs, but a commit landing between the blob backup and the metadata backup would write its commit timestamp to one store's backup and not the other's, and the restored copy would fail `Database.checkCommitTimestamp`'s cross-store validation. `database.Database.PauseCommits` closes that window — every read-write `Txn` holds the shared side from construction through `Commit`/`Rollback`/`Release` (not just around `Commit`: the metadata plugin's single-connection write pool means an open-but-uncommitted transaction already holds the resource `Snapshot`'s `VACUUM INTO` needs, so guarding only `Commit` could let `PauseCommits` acquire its lock mid-transaction and deadlock), `Snapshot` takes the exclusive side around just its two backup calls — pausing new read-write transactions (not reads, and not a quiesce: nothing is torn down or disconnected) for that brief span.
+
+Truncate reuses `database.TruncateAfterSlot`, the same metadata+blob-referenced-UTxO/tx sweep `ledger.LedgerState.rollback` uses for ordinary in-bounds rollback, extended with a bulk blob-block-delete path for ranges too large for the one-transaction-per-block pattern `Chain.Rollback` uses. Unlike `Chain.Rollback`, it does not reject a target beyond the configured security parameter, since an operator explicitly invoking it (the CIP-0135 disaster-recovery case) is the informed-consent replacement for that guard.
+
+**Live restore/truncate** (`node_lifecycle.go`, root `dingo` package): `(*Node).Restore`/`(*Node).Truncate` let an already-running node's database be replaced/truncated in-process, without a full process restart. `Run()` itself is deliberately left unmodified (only three EventBus subscriptions there additionally capture their subscriber ID, for reasons below); `node_lifecycle.go` is genuinely separate, parallel code that necessarily duplicates parts of `Run()`'s construction order, since a live restore/truncate must close `n.db`/`n.ledgerState` and every subsystem holding a *direct* (non-closure, non-late-binding-setter) reference to them — `chainManager`, `ledgerState`, `mempool`, `chainsyncState`, `peerGov`, `connManager`, the background managers, the optional API servers, and the block-producer path — then reconstruct all of them. `ouroboros`, `chainSelector`, the `EventBus`, and (deliberately, unlike the other API servers — see the Bark section above) `n.bark`'s own server are verified to hold no such stale reference and stay running throughout, with `ouroboros`'s exported dependency fields (`LedgerState`, `Mempool`, `ChainsyncState`, `ConnManager`, `PeerGov`) reassigned once their rebuilt counterparts exist. `n.ctx` is never cancelled or re-derived — every rebuilt component reuses the same, still-valid context `Run()` originally derived from the caller's context, so signal-driven shutdown keeps working across any number of live restore/truncate cycles. Because the EventBus has no general per-subscriber-unsubscribe usage anywhere in `Run()` (every `SubscribeFunc` call discards its returned ID), the three subscriptions whose handlers are bound to a rebuilt component (`chainManager`'s block-proposed handler, `chainsyncState`'s client-remove handler, `connManager`'s recycle handler) have their subscriber IDs captured in new `Node` fields so `node_lifecycle.go` can unsubscribe the stale handler before rebuilding — every other subscription is either a closure over `n` itself (reads the current field value at call time) or bound to a component that live restore/truncate leaves untouched. A failure partway through reinitialization leaves the node unable to safely keep serving, so it triggers `n.cancel()` for a supervised restart rather than continuing in a half-rebuilt state.
+
+`(*Node).Restore` specifically validates the incoming snapshot in a sibling staging directory (`<dataDir>.restore-staging`) — both via `lifecycle.Restore`'s own manifest/tip checks and an additional open against this node's actual configured network/storage-mode/plugins (`validateRestoredAgainstNodeConfig`, using a `nil` `PromRegistry` since the live `n.db` is still registered under the real one at this point) — entirely *before* quiescing or touching `n.config.dataDir`, with the node still serving normally throughout. Only once that validation passes does it quiesce, close storage, and atomically swap the directories in (`swapInRestoredDataDir`: rename the current data dir aside to `<dataDir>.pre-restore`, rename staging into place, remove the backup — rolling back the rename and resuming on the original data if activating the restored directory fails). This means a bad snapshot (corrupted, wrong network, wrong plugin) is rejected with the node's existing data and tip completely untouched and the node still usable, rather than the node being torn down; `n.cancel()` is now reserved for the rare case where the swap itself fails on both the primary attempt and its rollback (`errRestoreSwapUnrecoverable`), or where `reinitializeAndResume` itself fails after a successful swap. `Truncate` is unaffected by this staging — it has no separate snapshot to validate, so it still opens its resolution/mutation handle directly against the live data directory after quiesce/close, same as before. It does, however, make the equivalent distinction for its own failure modes: `dblifecycle.ResolveTarget` and `lifecycle.Truncate`'s own pre-delete validation (target ahead of tip, target before the Mithril trust boundary) are read-only and provably safe — a failure there (or a context cancellation caught before `DeleteBlocksAfter` starts) is wrapped in `lifecycle.ErrTruncateNotStarted`, and `Node.Truncate` resumes normally on it instead of calling `n.cancel()` (found via live testing: cancelling a live Truncate — e.g. Ctrl+C through dingoctl — used to bring the whole node down even though nothing had been deleted yet). A failure once `DeleteBlocksAfter` has been entered is still treated as unsafe and still brings the node down: it batches its deletes (`database/lifecycle/blob_bulk_delete.go`, `DefaultBlockDeleteBatchSize` per transaction) rather than wrapping the whole truncate in one top-level transaction, so a truncate spanning more than one batch can leave a partially-truncated, inconsistent database if interrupted mid-delete — recovering safely from *that* case is not implemented today and remains a real, narrower limitation.
+
+`Service.SetLiveNode` lets a caller reach this path through the same `Snapshot`/`Restore`/`Truncate` call shapes as the offline path; `*dingo.Node` satisfies `dblifecycle.LiveNode` structurally (the interface is defined in `internal/dblifecycle`, not `dingo`, so the dependency only goes one way). `node.go`'s `Run()` is the one place that actually does this today: when bark is enabled with a snapshot directory configured, it builds a `dblifecycle.Service`, binds it via `SetLiveNode(n)`, and hands it to `bark.BarkConfig.Lifecycle` for `bark/database.go`'s `DatabaseService` handler to call.
+
+Every rebuilt component (`database.New`'s cache metrics, `chain.NewManager`, `ledger.NewLedgerState`, the mempool/chainsync/connmanager/peerGov/snapshot managers, the block producer) registers Prometheus collectors under fixed names against `n.config.promRegistry` — re-registering the same names on a real (non-nil) registry panics. `New()` installs a `rebuildableRegisterer` (`metrics_registerer.go`) as `n.config.promRegistry` after the node's own one-time metrics (build info, RTS gauges, the EventBus's) are registered directly against the pre-wrap registerer, so those survive untouched; `closeStorageForLiveLifecycleOp` calls `n.rebuildableMetrics.unregisterAll()` before any rebuilt component (or `Truncate`'s own temporary target-resolution database) re-registers.
 
 ### Database Models
 
@@ -2137,6 +2165,77 @@ remote Bark archive and downloading the signed URL. Bark does not decide which
 local blocks expire; `internal/historyexpiry.Pruner` owns that lifecycle when
 `historyExpiry.enabled` is configured.
 
+**DatabaseService** (`bark/database.go`) mounts bark's full `DatabaseService`
+(from `github.com/blinklabs-io/bark`, generated from the proto that landed in
+bark#16/PR#28) alongside the Archive service, when `node.go`'s `Run()`
+constructs a `dblifecycle.Service` bound to the node via `SetLiveNode` and a
+`databaseLifecycle.snapshotDir` is configured — this is what a remote
+`dingoctl` (see dingoctl#5) drives to trigger a live Snapshot/Restore/Truncate
+without SSH access to the node. Every mutating RPC
+(CreateSnapshot/Restore/Truncate/VerifySnapshot) returns an `operation_id`
+immediately while the actual work runs in a detached goroutine; a single
+in-memory job tracker (`databaseServiceHandler`) enforces the service's
+documented "one operation at a time" invariant (a second call while one is
+running gets `FAILED_PRECONDITION`) and is the backing store for
+`GetOperationHistory` (in-memory only — does not survive a bark restart).
+
+There is no separate snapshot catalog store: a `CreateSnapshot`-generated
+`snapshot_id` is literally its directory name under `SnapshotDir`, and
+`ListSnapshots` scans that directory for `manifest.json` files
+(`lifecycle.ListSnapshots`) rather than tracking anything separately —
+which means automatic epoch-boundary snapshots
+(`internal/dblifecycle.Manager`) show up in the same catalog for free, since
+they live under the same directory. `ListAvailableSnapshots`
+(`mergedSnapshotCatalogPage`) additionally merges in whatever
+`lifecycle.ListCloudSnapshots` finds at `BarkConfig.SnapshotCloudDestination`
+(the same URI `databaseLifecycle.snapshotCloudDestination` configures),
+deduplicating by snapshot ID — a cloud entry whose ID already appears
+locally is dropped in favor of the local one, so the RPC's only real
+addition over `ListSnapshots` is surfacing a snapshot whose local copy is
+gone (deleted via `DeleteSnapshot`, which only ever removes the local
+copy, or otherwise pruned) but whose cloud mirror still exists. If no
+cloud destination is configured, or its scheme's `CloudDestination`
+doesn't implement `SnapshotLister`, this degrades to exactly
+`ListSnapshots`'s result. `DeleteSnapshot`/`VerifySnapshot` resolve `snapshot_id` through
+`resolveSnapshotDir`, which rejects anything but a bare directory name (no
+`/`, no `..`) before joining it under `SnapshotDir` — a path-traversal guard
+that also covers `Restore`, which takes the same untrusted `snapshot_id`
+input over the network. `VerifySnapshot` reuses `lifecycle.Restore` itself,
+restoring into a throwaway temp directory and deleting it afterward, rather
+than duplicating the manifest-checksum/consistency validation `Restore`
+already does.
+
+Every async operation's goroutine (CreateSnapshot/Restore/Truncate/
+VerifySnapshot) runs its work through `runProtected`, which recovers any
+panic into a regular error: Badger's `DB.Load` panics rather than returning
+an error on some malformed input, discovered while testing `VerifySnapshot`
+against a deliberately corrupted `blob.bak` — without this, an operator
+verifying or restoring a corrupted snapshot would crash the whole bark server
+process instead of getting a failed operation back.
+
+`CancelOperation` cancels the context passed to the operation's underlying
+`lifecycle.Snapshot`/`Restore`/`Truncate` call. Badger's native
+`DB.Backup`/`DB.Load` have no context parameter of their own and, once
+started, would otherwise run to completion regardless of cancellation;
+`database/plugin/blob/badger/backup.go` closes that gap by wrapping the
+`io.Writer`/`io.Reader` Badger streams through in a `contextWriter`/
+`contextReader` that re-checks `ctx.Err()` on every internal Write/Read
+call Badger makes, so cancellation takes effect within a chunk or two of
+being requested rather than only once the whole transfer already
+finished. `StreamOperationProgress` is a plain poll loop over the
+operation's in-memory state (no push notification from the goroutine to a
+concurrently open stream) — adequate given operations run for seconds to
+hours, far coarser than the poll interval.
+
+Because `GetRestoreStatus`/`GetTruncateStatus` need to stay pollable for the
+whole duration of a live Restore/Truncate — which quiesces everything else on
+the node — `bark.Bark`'s own server is deliberately excluded from that
+quiesce/rebuild cycle (see the "Database Lifecycle" section's live
+restore/truncate description). Only its Archive service's `DB` reference gets
+updated in place afterward, via `Bark.SetDB`/`Bark.DB()` (mutex-guarded,
+since a request can race a live rebuild), instead of the whole server
+restarting.
+
 ### Midnight Indexer (`midnight/indexer/`)
 
 An optional block scanner that indexes Midnight chain events into multiple
@@ -2422,7 +2521,15 @@ before any services start. Topology resolution
 (`config.LoadTopologyConfig`) runs last, only after the merged
 configuration is defaulted and valid, because it derives from the
 `network` and `topology` settings — resolving it earlier could reject a
-YAML or environment value that a CLI flag has since repaired. Validate
+YAML or environment value that a CLI flag has since repaired. This step is
+skipped entirely when the invocation's effective run mode is
+`RunModeDatabase` (`dingo database snapshot|restore|truncate`): those
+commands never open a peer connection, so resolving topology for them
+would spuriously fail for any network without a bundled static
+`topology.json` (devnet, or any other custom network name) even though the
+command never uses it — the offline database CLI was completely unusable
+against such a network before this check was added (dingo#1651 follow-up).
+Validate
 checks: mode enums, listener port ranges (privileged/out-of-range/duplicate),
 load-mode `immutableDbPath` requirement, path-traversal guards, TLS cert/key
 pairing, mempool implementation and watermarks, block-producer credential paths, and

@@ -73,7 +73,7 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 	return nil
 }
 
-// mithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
+// MithrilTrustBoundarySlot returns the recorded Mithril trust boundary slot,
 // or 0 if none is recorded (genesis sync, or a non-genesis chainsync
 // intersect point with no snapshot import). A failure to read the sync
 // state is logged and also treated as 0 (the caller cannot distinguish it
@@ -81,7 +81,7 @@ func (tx metadataOnlyTransaction) Produced() []lcommon.Utxo {
 // operator tell a transient storage problem apart from a genuinely
 // unrecoverable UTxO when StrictUtxoValidation turns the latter into an
 // ingest error.
-func (d *Database) mithrilTrustBoundarySlot(txn *Txn) uint64 {
+func (d *Database) MithrilTrustBoundarySlot(txn *Txn) uint64 {
 	val, err := d.GetSyncState(mithrilLedgerSlotSyncKey, txn)
 	if err != nil {
 		d.logger.Warn(
@@ -547,7 +547,7 @@ func (d *Database) ensureTransactionConsumedUtxos(
 			// is recorded and we did not sync from genesis) the UTxO may
 			// legitimately predate the data we imported.
 			if d.config.StrictUtxoValidation &&
-				point.Slot > d.mithrilTrustBoundarySlot(txn) {
+				point.Slot > d.MithrilTrustBoundarySlot(txn) {
 				return fmt.Errorf(
 					"consumed utxo %s not found at slot %d and could not be recovered: %w",
 					input.String(),

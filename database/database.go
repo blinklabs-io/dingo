@@ -70,11 +70,35 @@ type Database struct {
 	sizeMetricsDone chan struct{}
 	closeOnce       sync.Once
 	closeErr        error
+
+	// commitBarrier lets PauseCommits hold off every in-flight and new
+	// Txn.Commit call without a full quiesce, so database/lifecycle.Snapshot
+	// can back up the blob and metadata stores as of the same logical
+	// point. Txn.Commit holds the read side (many concurrent commits
+	// proceed normally); PauseCommits holds the write side.
+	commitBarrier sync.RWMutex
 }
 
 // Blob returns the underling blob store instance
 func (d *Database) Blob() blob.BlobStore {
 	return d.blob
+}
+
+// PauseCommits blocks until any Txn.Commit already in flight finishes,
+// then blocks every new one from starting until the returned resume func
+// is called. It does not stop reads, and it is not a quiesce — nothing is
+// torn down, no peers are disconnected, callers just see Commit block
+// briefly.
+//
+// database/lifecycle.Snapshot uses this to bracket its blob and metadata
+// backup calls: each backup is independently consistent as of whenever it
+// runs, but a commit landing between the two would write its timestamp to
+// one store's backup and not the other's, so the restored copy fails
+// checkCommitTimestamp's cross-check. Pausing commits for that window
+// keeps both backups describing the same set of committed writes.
+func (d *Database) PauseCommits() (resume func()) {
+	d.commitBarrier.Lock()
+	return d.commitBarrier.Unlock
 }
 
 // Config returns the config object used for the database instance

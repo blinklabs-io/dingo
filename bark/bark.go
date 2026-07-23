@@ -30,32 +30,91 @@ import (
 	"connectrpc.com/grpchealth"
 	"connectrpc.com/grpcreflect"
 	archiveconnect "github.com/blinklabs-io/bark/proto/v1alpha1/archive/archivev1alpha1connect"
+	databaseconnect "github.com/blinklabs-io/bark/proto/v1alpha1/database/databasev1alpha1connect"
 	"github.com/blinklabs-io/dingo/database"
+	"github.com/blinklabs-io/dingo/internal/dblifecycle"
 	"github.com/blinklabs-io/dingo/internal/httpcors"
 	"github.com/blinklabs-io/dingo/internal/tlsutil"
 )
 
 type Bark struct {
-	mu     sync.Mutex // protects server
-	server *http.Server
-	config BarkConfig
+	mu           sync.Mutex // protects server, config.DB, and listenerAddr
+	server       *http.Server
+	config       BarkConfig
+	listenerAddr net.Addr
 }
 
 type BarkConfig struct {
-	Logger          *slog.Logger
-	DB              *database.Database
-	TlsCertFilePath string
-	TlsKeyFilePath  string
-	Host            string
-	Port            uint
+	Logger    *slog.Logger
+	DB        *database.Database
+	Lifecycle *dblifecycle.Service
+	// SnapshotDir is the base directory the DatabaseService's CreateSnapshot/
+	// Restore RPCs write to and read from — required when Lifecycle is set.
+	// There is no separate snapshot catalog store (see database.go's doc
+	// comment); ListSnapshots/ListAvailableSnapshots scan this directory
+	// for manifest.json files instead, so each snapshot's generated ID is
+	// also its directory name directly under SnapshotDir.
+	SnapshotDir string
+	// SnapshotCloudDestination, if set, is the same cloud destination URI
+	// as databaseLifecycle.snapshotCloudDestination — passed through here
+	// so ListAvailableSnapshots can additionally list what's stored there
+	// (via database/lifecycle.ListCloudSnapshots), merged with the local
+	// catalog. Empty disables cloud listing; CreateSnapshot's own upload
+	// path doesn't need this field since it goes through Lifecycle, which
+	// already has its own copy of the same config value.
+	SnapshotCloudDestination string
+	TlsCertFilePath          string
+	TlsKeyFilePath           string
+	Host                     string
+	Port                     uint
 	// CORSAllowedOrigins configures Access-Control-Allow-Origin.
 	// Empty disables CORS.
 	CORSAllowedOrigins []string
 }
 
+// SetDB updates the database instance the Archive service reads from.
+// Unlike a live Restore/Truncate's other API servers, Bark's own server
+// is never stopped/rebuilt across such an operation — its DatabaseService
+// handler (database.go) is exactly what a caller uses to poll that
+// operation's progress, so the server must stay reachable throughout —
+// this just repoints the Archive service at the freshly rebuilt database
+// afterward.
+func (b *Bark) SetDB(db *database.Database) {
+	b.mu.Lock()
+	b.config.DB = db
+	b.mu.Unlock()
+}
+
+// DB returns the database instance the Archive service currently reads
+// from.
+func (b *Bark) DB() *database.Database {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.config.DB
+}
+
+// Addr returns the address the server is actually listening on (e.g.
+// "127.0.0.1:54321"), populated once Start has bound the listener — most
+// useful when Port was 0, letting a test or an operator discover the
+// OS-assigned port without a separate, racy net.Listen-then-close probe.
+// Returns "" before Start has been called.
+func (b *Bark) Addr() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.listenerAddr == nil {
+		return ""
+	}
+	return b.listenerAddr.String()
+}
+
 func NewBark(cfg BarkConfig) (*Bark, error) {
 	if cfg.DB == nil {
 		return nil, errors.New("bark: db is required")
+	}
+	if cfg.Lifecycle != nil && cfg.SnapshotDir == "" {
+		return nil, errors.New(
+			"bark: snapshot dir is required when lifecycle is set",
+		)
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.New(slog.NewJSONHandler(io.Discard, nil))
@@ -81,23 +140,32 @@ func (b *Bark) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	compress1KB := connect.WithCompressMinBytes(1024)
 
+	serviceNames := []string{archiveconnect.ArchiveServiceName}
+
 	archivePath, archiveHandler := archiveconnect.NewArchiveServiceHandler(
 		&archiveServiceHandler{bark: b},
 		compress1KB,
 	)
-
 	mux.Handle(archivePath, archiveHandler)
+
+	if b.config.Lifecycle != nil {
+		databasePath, databaseHandler := databaseconnect.NewDatabaseServiceHandler(
+			newDatabaseServiceHandler(b),
+			compress1KB,
+		)
+		mux.Handle(databasePath, databaseHandler)
+		serviceNames = append(serviceNames, databaseconnect.DatabaseServiceName)
+	}
+
 	mux.Handle(
 		grpchealth.NewHandler(
-			grpchealth.NewStaticChecker(archiveconnect.ArchiveServiceName),
+			grpchealth.NewStaticChecker(serviceNames...),
 			compress1KB,
 		),
 	)
 	mux.Handle(
 		grpcreflect.NewHandlerV1(
-			grpcreflect.NewStaticReflector(
-				archiveconnect.ArchiveServiceName,
-			),
+			grpcreflect.NewStaticReflector(serviceNames...),
 			compress1KB,
 		),
 	)
@@ -225,6 +293,9 @@ func (b *Bark) startServer(server *http.Server) error {
 		return fmt.Errorf("failed to start bark gRPC %s server: %w",
 			serverType, err)
 	}
+	b.mu.Lock()
+	b.listenerAddr = ln.Addr()
+	b.mu.Unlock()
 	go func() {
 		var serveErr error
 		if useTLS {

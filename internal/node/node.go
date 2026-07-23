@@ -466,6 +466,7 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 				cfg.DelegatorInactivityEnabled,
 				cfg.DelegatorInactivity,
 			),
+			dingo.WithDatabaseLifecycle(cfg.DatabaseLifecycle),
 			// Leios voting (experimental)
 			dingo.WithLeiosVoteSigningKeyFile(
 				cfg.LeiosVoteSigningKeyFile,

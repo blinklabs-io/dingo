@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/gouroboros/ledger"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
+	"github.com/blinklabs-io/gouroboros/ledger/conway"
 	"github.com/blinklabs-io/gouroboros/ledger/dijkstra"
 	ochainsync "github.com/blinklabs-io/gouroboros/protocol/chainsync"
 	"github.com/blinklabs-io/gouroboros/vrf"
@@ -968,6 +969,55 @@ func computeBlockBodyHash(
 	// Final hash of concatenated hashes
 	finalHash := blake2b.Sum256(bodyHashes)
 	return lcommon.NewBlake2b256(finalHash[:]), totalSize, nil
+}
+
+// ComputeConwayBlockBodyHash computes the block body hash for a Conway-era
+// block per the Cardano spec (see computeBlockBodyHash), given the typed
+// transaction bodies/witness sets that will be placed into the block. Each
+// element is CBOR-encoded individually before hashing, matching the byte
+// form the Conway block's own MarshalCBOR produces for that same element.
+//
+// Exported for the dev-mode forging path (ledger/state.go), which builds
+// blocks directly from typed mempool transactions rather than through
+// Builder.
+func ComputeConwayBlockBodyHash(
+	txBodies []conway.ConwayTransactionBody,
+	witnessSets []conway.ConwayTransactionWitnessSet,
+	metadataSet lcommon.TransactionMetadataSet,
+) (lcommon.Blake2b256, uint64, error) {
+	txBodiesCbor := make([]cbor.RawMessage, len(txBodies))
+	for i, body := range txBodies {
+		encoded, err := cbor.Encode(body)
+		if err != nil {
+			return lcommon.Blake2b256{}, 0, fmt.Errorf(
+				"failed to encode transaction body %d: %w",
+				i,
+				err,
+			)
+		}
+		txBodiesCbor[i] = encoded
+	}
+	witnessSetsCbor := make([]cbor.RawMessage, len(witnessSets))
+	for i, ws := range witnessSets {
+		encoded, err := cbor.Encode(ws)
+		if err != nil {
+			return lcommon.Blake2b256{}, 0, fmt.Errorf(
+				"failed to encode witness set %d: %w",
+				i,
+				err,
+			)
+		}
+		witnessSetsCbor[i] = encoded
+	}
+	return computeBlockBodyHash(
+		eraConway,
+		nil,
+		txBodiesCbor,
+		witnessSetsCbor,
+		metadataSet,
+		[]uint{},
+		nil,
+	)
 }
 
 // nullablePrevHashHeaderBody mirrors BabbageBlockHeaderBody but uses a
