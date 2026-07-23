@@ -398,6 +398,16 @@ func (ls *LedgerState) verifyDeferredBlockHeaderState(
 }
 
 func (ls *LedgerState) handleEventBlockfetch(evt event.Event) {
+	// chainsyncMutex outer, chainsyncBlockfetchMutex inner: the same
+	// nested-lock order handleChainSwitchEvent and others already use.
+	// handleEventBlockfetchBatchDone (below) can call clearQueuedHeaders,
+	// which mutates headerPipelineConnId -- state handleEventChainsync's
+	// discardBufferedPeerHeaders path also mutates while holding only
+	// chainsyncMutex. Without also taking chainsyncMutex here, those two
+	// EventBus dispatch goroutines (one per subscription) race on that
+	// field with no lock in common.
+	ls.chainsyncMutex.Lock()
+	defer ls.chainsyncMutex.Unlock()
 	ls.chainsyncBlockfetchMutex.Lock()
 	defer ls.chainsyncBlockfetchMutex.Unlock()
 	e, ok := evt.Data.(BlockfetchEvent)
