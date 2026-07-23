@@ -23,23 +23,40 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	koiosPageSize   = 1000
+	koiosPageSize = 1000
+	// koiosMaxRetries covers transport errors, 5xx, and burst 429s. Burst
+	// cooldowns are ~60s each (see koiosBurstCooldown), so three attempts already
+	// span a few minutes of waiting.
 	koiosMaxRetries = 3
 
-	// Koios publishes rate limiting as a daily request quota, not a
-	// per-second window (https://koios.rest/pricing/Pricing.html): the
-	// unauthenticated Public tier caps at 5,000 req/day and is shared across
-	// every anonymous caller, while an API key (Free tier and up) gets
-	// 50,000+ req/day on its own allotment. No per-second/burst figure is
-	// published for either tier, so these backoffs are a conservative
-	// heuristic — deliberately longer for the shared anonymous pool — not a
-	// value derived from a documented rate.
-	koiosRetryBackoffAnon  = 5 * time.Second
-	koiosRetryBackoffKeyed = 2 * time.Second
+	// Published Koios limits (https://koios.rest/tiers.html and the OpenAPI
+	// "Limits" section at https://api.koios.rest/koiosapi.yaml):
+	//
+	//   Burst:  Public/Free 100 req / 10s; Pro 250/10s; Premium 500/10s.
+	//           Crossing the burst window returns HTTP 429 and the monitoring
+	//           layer sleeps the client for ~60 seconds.
+	//   Daily:  Public 5,000; Free 50,000; Pro 500,000; Premium 1.2M.
+	//           Exhausting the daily allotment also returns 429, typically with
+	//           body text containing "Exceeded Tier Limit". Retrying cannot
+	//           help until Koios's daily reset (or a higher tier key).
+	//
+	// Successful responses do not currently advertise X-RateLimit-* /
+	// Retry-After headers in practice, so the client enforces the burst window
+	// itself and falls back to the documented 60s sleep on 429 when
+	// Retry-After is absent.
+	koiosBurstWindow      = 10 * time.Second
+	koiosBurstLimitPublic = 100
+	// Stay under the published Public/Free burst ceiling so concurrent
+	// epoch×pool workers don't trip the monitoring layer.
+	koiosBurstLimitSafe = 80
+	koiosBurstCooldown  = 60 * time.Second
+
+	koiosRetryBackoff5xx = 2 * time.Second
 )
 
 // koiosBaseURLs maps network name to Koios v1 base URL.
@@ -61,11 +78,20 @@ type KoiosEpochInfoResp struct {
 
 // KoiosPoolHistoryItem is one epoch entry from /pool_history.
 // pool_id_bech32 is excluded from the projection — the caller already knows the pool ID.
+//
+// Reward-related fields (margin, fixed_cost, pool_fees, deleg_rewards,
+// member_rewards) are part of the documented pool_history schema and are
+// stored so the cache holds a complete reward reference for each pool epoch.
 type KoiosPoolHistoryItem struct {
-	EpochNo      uint64 `json:"epoch_no"`
-	ActiveStake  string `json:"active_stake"`
-	BlockCnt     int    `json:"block_cnt"`
-	DelegatorCnt int    `json:"delegator_cnt"`
+	EpochNo       uint64   `json:"epoch_no"`
+	ActiveStake   string   `json:"active_stake"`
+	BlockCnt      int      `json:"block_cnt"`
+	DelegatorCnt  int      `json:"delegator_cnt"`
+	Margin        *float64 `json:"margin"`
+	FixedCost     string   `json:"fixed_cost"`
+	PoolFees      string   `json:"pool_fees"`
+	DelegRewards  string   `json:"deleg_rewards"`
+	MemberRewards *string  `json:"member_rewards"`
 }
 
 // KoiosTipResp is the shape of /tip.
@@ -78,6 +104,7 @@ type KoiosClient struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
+	limiter *burstLimiter
 }
 
 // NewKoiosClient creates a client for the given network.
@@ -92,18 +119,104 @@ func NewKoiosClient(network, apiKey string) (*KoiosClient, error) {
 		http: &http.Client{
 			Timeout: 60 * time.Second,
 		},
+		// Public and Free tiers share the 100/10s burst cap; Pro/Premium are
+		// higher, but we don't learn the tier from the key alone, so stay at
+		// the Free-safe ceiling for every client.
+		limiter: newBurstLimiter(koiosBurstLimitSafe, koiosBurstWindow),
 	}, nil
 }
 
-// retryBackoff returns the base retry backoff for this client's tier: longer
-// for the shared anonymous pool, shorter once an API key gives it its own
-// daily quota (see the koiosRetryBackoff* comment for why these aren't
-// derived from a published per-second rate).
-func (k *KoiosClient) retryBackoff() time.Duration {
-	if k.apiKey != "" {
-		return koiosRetryBackoffKeyed
+// burstLimiter enforces a sliding-window request budget matching Koios's
+// published burst window (N requests per 10s).
+type burstLimiter struct {
+	mu     sync.Mutex
+	limit  int
+	window time.Duration
+	times  []time.Time
+}
+
+func newBurstLimiter(limit int, window time.Duration) *burstLimiter {
+	return &burstLimiter{limit: limit, window: window}
+}
+
+func (b *burstLimiter) wait(ctx context.Context) error {
+	if b == nil || b.limit <= 0 {
+		return nil
 	}
-	return koiosRetryBackoffAnon
+	for {
+		b.mu.Lock()
+		now := time.Now()
+		cutoff := now.Add(-b.window)
+		i := 0
+		for i < len(b.times) && b.times[i].Before(cutoff) {
+			i++
+		}
+		if i > 0 {
+			b.times = append([]time.Time(nil), b.times[i:]...)
+		}
+		if len(b.times) < b.limit {
+			b.times = append(b.times, now)
+			b.mu.Unlock()
+			return nil
+		}
+		sleepUntil := b.times[0].Add(b.window)
+		b.mu.Unlock()
+		wait := time.Until(sleepUntil)
+		if wait < time.Millisecond {
+			wait = time.Millisecond
+		}
+		select {
+		case <-ctx.Done():
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			return context.Canceled
+		case <-time.After(wait):
+		}
+	}
+}
+
+// isDailyQuotaExceeded reports whether a 429 body indicates the tier's daily
+// request allotment is exhausted (as opposed to the short burst window).
+// Observed Koios monitoring-layer body: "Exceeded Tier Limit".
+func isDailyQuotaExceeded(body string) bool {
+	return strings.Contains(body, "Exceeded Tier Limit")
+}
+
+// retryAfterDelay returns how long to wait after a burst 429. Prefer the
+// Retry-After header when present; otherwise use the documented 60s cooldown.
+func retryAfterDelay(resp *http.Response) time.Duration {
+	if resp == nil {
+		return koiosBurstCooldown
+	}
+	ra := resp.Header.Get("Retry-After")
+	if ra == "" {
+		return koiosBurstCooldown
+	}
+	if secs, err := strconv.Atoi(strings.TrimSpace(ra)); err == nil && secs > 0 {
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(ra); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return koiosBurstCooldown
+}
+
+func waitCtx(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return context.Canceled
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // get executes a GET request against the Koios API with optional Range header.
@@ -126,19 +239,16 @@ func (k *KoiosClient) get(
 		req.Header.Set("Range", fmt.Sprintf("%d-%d", rangeStart, rangeEnd))
 	}
 
-	backoff := k.retryBackoff()
 	var resp *http.Response
 	for attempt := range koiosMaxRetries {
+		if err := k.limiter.wait(ctx); err != nil {
+			return nil, err
+		}
 		resp, err = k.http.Do(req.Clone(ctx))
 		if err != nil {
 			if attempt < koiosMaxRetries-1 {
-				select {
-				case <-ctx.Done():
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
-					return nil, context.Canceled
-				case <-time.After(backoff):
+				if waitErr := waitCtx(ctx, koiosRetryBackoff5xx*time.Duration(attempt+1)); waitErr != nil {
+					return nil, waitErr
 				}
 				continue
 			}
@@ -152,30 +262,28 @@ func (k *KoiosClient) get(
 		if resp.StatusCode == http.StatusTooManyRequests {
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			// Koios returns this exact message when the tier's request quota is
-			// exhausted (as opposed to a transient burst throttle). Retrying
-			// with backoff cannot help — the quota only resets on Koios's
-			// schedule or with a higher-tier API key — so fail immediately
-			// instead of burning the retry budget.
-			if strings.Contains(string(body), "Exceeded Tier Limit") {
+			bodyStr := strings.TrimSpace(string(body))
+			// Daily quota: retrying with the burst cooldown cannot help.
+			if isDailyQuotaExceeded(bodyStr) {
 				hint := "Public tier caps at 5,000 requests/day with no API key; set --api-key/KOIOS_API_KEY for the Free tier's 50,000/day or higher"
 				if k.apiKey != "" {
 					hint = "your API-keyed tier's daily quota is exhausted; wait for Koios's daily reset or move to a higher tier"
 				}
-				return nil, fmt.Errorf("koios tier quota exceeded on %s: %s (%s)", path, strings.TrimSpace(string(body)), hint)
+				return nil, fmt.Errorf("koios daily tier quota exceeded on %s: %s (%s)", path, bodyStr, hint)
 			}
+			// Burst 429: OpenAPI documents a ~60s sleep for the IP; honour
+			// Retry-After when the gateway sends it.
 			if attempt < koiosMaxRetries-1 {
-				select {
-				case <-ctx.Done():
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
-					return nil, context.Canceled
-				case <-time.After(backoff * time.Duration(attempt+1)):
+				delay := retryAfterDelay(resp)
+				if waitErr := waitCtx(ctx, delay); waitErr != nil {
+					return nil, waitErr
 				}
 				continue
 			}
-			return nil, fmt.Errorf("koios rate-limited after %d retries on %s: %s", koiosMaxRetries, path, strings.TrimSpace(string(body)))
+			return nil, fmt.Errorf(
+				"koios burst rate-limited after %d retries on %s (Public/Free = %d req/%s; wait ~%s between bursts): %s",
+				koiosMaxRetries, path, koiosBurstLimitPublic, koiosBurstWindow, koiosBurstCooldown, bodyStr,
+			)
 		}
 		if resp.StatusCode >= 500 {
 			// 5xx here is Koios's load balancer or backend having a transient
@@ -185,13 +293,8 @@ func (k *KoiosClient) get(
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 			if attempt < koiosMaxRetries-1 {
-				select {
-				case <-ctx.Done():
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, ctxErr
-					}
-					return nil, context.Canceled
-				case <-time.After(backoff * time.Duration(attempt+1)):
+				if waitErr := waitCtx(ctx, koiosRetryBackoff5xx*time.Duration(attempt+1)); waitErr != nil {
+					return nil, waitErr
 				}
 				continue
 			}
@@ -307,13 +410,18 @@ func (k *KoiosClient) GetAllHistoricalPoolIDs(ctx context.Context) ([]string, er
 // Returns nil, nil if the pool has no row for that epoch.
 // _pool_bech32 is a required Koios function parameter; _epoch_no filters
 // server-side so only one row is returned instead of the full pool history.
+//
+// The select list includes every reward-related column from the documented
+// pool_history schema (inputs: margin/fixed_cost; outputs: pool_fees/
+// deleg_rewards/member_rewards) plus the stake/block counts used for
+// reward-input parity.
 func (k *KoiosClient) GetPoolEpochHistory(
 	ctx context.Context,
 	poolBech32 string,
 	epoch uint64,
 ) (*KoiosPoolHistoryItem, error) {
 	path := fmt.Sprintf(
-		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=epoch_no,active_stake,block_cnt,delegator_cnt",
+		"/pool_history?_pool_bech32=%s&_epoch_no=%d&select=epoch_no,active_stake,block_cnt,delegator_cnt,margin,fixed_cost,pool_fees,deleg_rewards,member_rewards",
 		poolBech32, epoch,
 	)
 	resp, err := k.get(ctx, path, -1, -1)

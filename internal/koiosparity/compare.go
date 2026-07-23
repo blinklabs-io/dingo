@@ -16,6 +16,7 @@ package koiosparity
 
 import (
 	"fmt"
+	"math/big"
 	"strconv"
 	"time"
 )
@@ -144,6 +145,37 @@ func CompareEpochAggregates(
 		}
 	}
 
+	// total_rewards — Koios epoch_info.total_rewards vs reward_ada_pots.rewards.
+	// Skip when Koios has no reference (null → "") for early pre-reward epochs.
+	if koios.TotalRewards != "" {
+		if dingoEpoch.TotalRewards == "" {
+			cat := CategoryDBMissing
+			if graceHours > 0 && !koios.EpochEndTime.IsZero() &&
+				now.Sub(koios.EpochEndTime) < time.Duration(graceHours)*time.Hour {
+				cat = CategoryReferenceLag
+			}
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "epoch_total_rewards",
+				DingoValue: "",
+				KoiosValue: koios.TotalRewards,
+				Category:   cat,
+				CheckedAt:  now,
+			})
+		} else if dingoEpoch.TotalRewards != koios.TotalRewards {
+			out = append(out, CheckMismatch{
+				Network:    network,
+				Epoch:      epoch,
+				Field:      "epoch_total_rewards",
+				DingoValue: dingoEpoch.TotalRewards,
+				KoiosValue: koios.TotalRewards,
+				Category:   CategoryValueMismatch,
+				CheckedAt:  now,
+			})
+		}
+	}
+
 	return out
 }
 
@@ -232,7 +264,48 @@ func ComparePoolEpoch(
 		})
 	}
 
+	// fixed_cost — reward_pool_input.cost vs Koios pool_history.fixed_cost.
+	if koiosPool.FixedCost != "" && dingoPool.FixedCost != koiosPool.FixedCost {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			PoolBech32: koiosPool.PoolBech32,
+			Field:      "fixed_cost",
+			DingoValue: dingoPool.FixedCost,
+			KoiosValue: koiosPool.FixedCost,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
+	// margin — compare as rationals so Koios "0.1" matches Dingo "1/10".
+	if koiosPool.Margin != "" && dingoPool.Margin != "" && !rationalsEqual(dingoPool.Margin, koiosPool.Margin) {
+		out = append(out, CheckMismatch{
+			Network:    network,
+			Epoch:      epoch,
+			PoolBech32: koiosPool.PoolBech32,
+			Field:      "margin",
+			DingoValue: dingoPool.Margin,
+			KoiosValue: koiosPool.Margin,
+			Category:   CategoryValueMismatch,
+			CheckedAt:  now,
+		})
+	}
+
 	return out
+}
+
+// rationalsEqual reports whether two numeric strings represent the same
+// rational (e.g. "0.1" and "1/10"). Returns false if either fails to parse.
+func rationalsEqual(a, b string) bool {
+	var ra, rb big.Rat
+	if _, ok := ra.SetString(a); !ok {
+		return false
+	}
+	if _, ok := rb.SetString(b); !ok {
+		return false
+	}
+	return ra.Cmp(&rb) == 0
 }
 
 // DetermineStatus returns PASS, FAIL, or ERROR from a list of mismatches.

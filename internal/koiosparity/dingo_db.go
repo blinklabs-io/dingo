@@ -52,6 +52,7 @@ type DingoDBConfig struct {
 type DingoEpochData struct {
 	TotalActiveStake string // lovelace decimal string (matches Koios format)
 	Fees             string // lovelace decimal string; empty when reward_ada_pots row absent
+	TotalRewards     string // lovelace decimal string from reward_ada_pots.rewards; empty when absent
 }
 
 // DingoPoolEpochData holds per-pool reward-input data for one epoch,
@@ -60,6 +61,8 @@ type DingoPoolEpochData struct {
 	DelegatedStake string // lovelace decimal string
 	BlocksProduced uint64
 	DelegatorCount uint64
+	FixedCost      string // lovelace decimal string (reward_pool_input.cost)
+	Margin         string // rational string (e.g. "1/10"); empty when null
 }
 
 // DingoDB reads reward state directly from Dingo's metadata database.
@@ -177,9 +180,10 @@ func (d *DingoDB) GetEpochData(epoch uint64) (*DingoEpochData, error) {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, fmt.Errorf("reward_ada_pots epoch %d: %w", epoch, err)
 		}
-		// Pots absent for some epochs; leave Fees empty.
+		// Pots absent for some epochs; leave Fees/TotalRewards empty.
 	} else {
 		data.Fees = strconv.FormatUint(uint64(pots.Fees), 10)
+		data.TotalRewards = strconv.FormatUint(uint64(pots.Rewards), 10)
 	}
 
 	return data, nil
@@ -200,10 +204,16 @@ func (d *DingoDB) GetPoolEpochDataMap(epoch uint64) (map[string]*DingoPoolEpochD
 		if inp.BlocksProduced != nil {
 			blocks = *inp.BlocksProduced
 		}
+		var margin string
+		if inp.Margin != nil && inp.Margin.Rat != nil {
+			margin = inp.Margin.Rat.String()
+		}
 		m[hex.EncodeToString(inp.PoolKeyHash)] = &DingoPoolEpochData{
 			DelegatedStake: strconv.FormatUint(uint64(inp.DelegatedStake), 10),
 			BlocksProduced: blocks,
 			DelegatorCount: inp.DelegatorCount,
+			FixedCost:      strconv.FormatUint(uint64(inp.Cost), 10),
+			Margin:         margin,
 		}
 	}
 	return m, nil

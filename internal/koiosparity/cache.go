@@ -49,15 +49,24 @@ type KoiosEpochInfo struct {
 func (KoiosEpochInfo) TableName() string { return "koios_epoch_info" }
 
 // KoiosPoolEpoch holds per-pool Koios data for a closed epoch.
+//
+// Reward inputs (margin, fixed_cost) and reward outputs (pool_fees,
+// deleg_rewards, member_rewards) come from /pool_history. Outputs are stored
+// for reference even when Dingo has no matching aggregate to compare yet.
 type KoiosPoolEpoch struct {
-	ID          uint      `gorm:"primarykey;autoIncrement"`
-	Network     string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	Epoch       uint64    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	PoolBech32  string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
-	ActiveStake string    `gorm:"not null"`
-	BlockCnt    int       `gorm:"not null"`
-	Delegators  int       `gorm:"not null"`
-	FetchedAt   time.Time `gorm:"not null"`
+	ID            uint      `gorm:"primarykey;autoIncrement"`
+	Network       string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
+	Epoch         uint64    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
+	PoolBech32    string    `gorm:"uniqueIndex:idx_kpe_net_epoch_pool;not null"`
+	ActiveStake   string    `gorm:"not null"`
+	BlockCnt      int       `gorm:"not null"`
+	Delegators    int       `gorm:"not null"`
+	Margin        string    `gorm:"not null;default:''"` // decimal string from Koios (e.g. "0.1"); "" if absent
+	FixedCost     string    `gorm:"not null;default:''"` // lovelace decimal string
+	PoolFees      string    `gorm:"not null;default:''"` // owner fees earned that epoch
+	DelegRewards  string    `gorm:"not null;default:''"` // total delegator rewards that epoch
+	MemberRewards string    `gorm:"not null;default:''"` // member (non-owner) rewards; "" when Koios returns null
+	FetchedAt     time.Time `gorm:"not null"`
 }
 
 func (KoiosPoolEpoch) TableName() string { return "koios_pool_epoch" }
@@ -196,8 +205,8 @@ func (c *Cache) UpsertEpochInfo(info KoiosEpochInfo) error {
 }
 
 // sqlitePoolBatchSize caps rows per INSERT so the bound-parameter count stays
-// well under SQLite's 32766-parameter limit. KoiosPoolEpoch has 7 non-PK
-// columns, giving a per-statement max of ~4680 rows; 1000 is a safe margin.
+// well under SQLite's 32766-parameter limit. KoiosPoolEpoch has 12 non-PK
+// columns, giving a per-statement max of ~2730 rows; 1000 is a safe margin.
 const sqlitePoolBatchSize = 1000
 
 // CommitEpochData atomically replaces all pool rows for the epoch and upserts
@@ -249,7 +258,9 @@ func (c *Cache) UpsertPoolEpoch(pe KoiosPoolEpoch) error {
 			{Name: "pool_bech32"},
 		},
 		DoUpdates: clause.AssignmentColumns([]string{
-			"active_stake", "block_cnt", "delegators", "fetched_at",
+			"active_stake", "block_cnt", "delegators",
+			"margin", "fixed_cost", "pool_fees", "deleg_rewards", "member_rewards",
+			"fetched_at",
 		}),
 	}).Create(&pe).Error
 }
