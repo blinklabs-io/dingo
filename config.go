@@ -544,8 +544,7 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 			plugin.CapabilityStorageBlob:     {Provider: "badger", Config: map[string]any{}},
 			plugin.CapabilityStorageMetadata: {Provider: "sqlite", Config: map[string]any{}},
 			plugin.CapabilityMempool: {Provider: "default", Config: map[string]any{
-				"capacity": int64(1048576), "evictionWatermark": 0.90,
-				"rejectionWatermark": 0.95,
+				"evictionWatermark": 0.90, "rejectionWatermark": 0.95,
 			}},
 			plugin.CapabilityAPIBlockfrost: {Provider: "builtin", Config: map[string]any{"port": uint(3000)}},
 			plugin.CapabilityAPIMesh:       {Provider: "builtin", Config: map[string]any{"port": uint(8080)}},
@@ -555,6 +554,20 @@ func NewConfig(opts ...ConfigOptionFunc) Config {
 	// Apply options
 	for _, opt := range opts {
 		opt(&c)
+	}
+	mempoolSelection := c.pluginSelections[plugin.CapabilityMempool]
+	if mempoolSelection.Provider == "default" {
+		if mempoolSelection.Config == nil {
+			mempoolSelection.Config = make(map[string]any)
+		}
+		if _, ok := mempoolSelection.Config["capacity"]; !ok {
+			capacity := internalconfig.DefaultMempoolCapacityPraos
+			if c.runMode == runModeLeios {
+				capacity = internalconfig.DefaultMempoolCapacityLeios
+			}
+			mempoolSelection.Config["capacity"] = int64(capacity)
+			c.pluginSelections[plugin.CapabilityMempool] = mempoolSelection
+		}
 	}
 	return c
 }
@@ -568,7 +581,34 @@ func WithPluginSelection(
 		if c.pluginSelections == nil {
 			c.pluginSelections = make(map[plugin.Capability]plugin.Selection)
 		}
+		selection.Config = clonePluginConfig(selection.Config)
 		c.pluginSelections[capability] = selection
+	}
+}
+
+func clonePluginConfig(config map[string]any) map[string]any {
+	if config == nil {
+		return nil
+	}
+	result := make(map[string]any, len(config))
+	for key, value := range config {
+		result[key] = clonePluginConfigValue(value)
+	}
+	return result
+}
+
+func clonePluginConfigValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return clonePluginConfig(value)
+	case []any:
+		result := make([]any, len(value))
+		for i, item := range value {
+			result[i] = clonePluginConfigValue(item)
+		}
+		return result
+	default:
+		return value
 	}
 }
 

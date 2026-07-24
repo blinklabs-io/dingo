@@ -7,7 +7,9 @@ injected with `database.New(config, database.Stores{Blob: ..., Metadata: ...})`.
 The database drains only database-owned workers; the host closes providers
 after ledger/database shutdown. Selection and config live under
 `plugins.storage`. Schemas, relationships, blob keys, CBOR offsets, transaction
-behavior, and persisted formats are unchanged.
+behavior, and persisted formats are unchanged. Library callers of Mithril
+`Sync` or `NeedsSync` may leave `SyncConfig.StoragePlugins` unset to select the
+local `badger` blob and `sqlite` metadata providers.
 
 `databasePath` (including its `CARDANO_DATABASE_PATH` environment binding and
 the `--data-dir` flag) is the shared data-directory shortcut for both local

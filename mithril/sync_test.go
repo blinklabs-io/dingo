@@ -29,9 +29,8 @@ func TestNeedsSyncReflectsSyncStatus(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	dataDir := t.TempDir()
 	cfg := SyncConfig{
-		DataDir:        dataDir,
-		Logger:         logger,
-		StoragePlugins: testStoragePlugins(),
+		DataDir: dataDir,
+		Logger:  logger,
 	}
 
 	// setSyncStatus opens the database at dataDir, writes sync_status, and

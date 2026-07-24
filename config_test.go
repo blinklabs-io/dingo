@@ -22,6 +22,7 @@ import (
 
 	internalconfig "github.com/blinklabs-io/dingo/internal/config"
 	"github.com/blinklabs-io/dingo/internal/test/testutil"
+	"github.com/blinklabs-io/dingo/plugin"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	promtestutil "github.com/prometheus/client_golang/prometheus/testutil"
@@ -62,6 +63,89 @@ func TestWithStorageMode(t *testing.T) {
 	// Apply core mode
 	WithStorageMode(StorageModeCore)(cfg)
 	assert.Equal(t, StorageModeCore, cfg.storageMode)
+}
+
+func TestNewConfigMempoolCapacityDefaultsFromRunMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		runMode  string
+		expected int64
+	}{
+		{
+			name:     "default",
+			expected: int64(internalconfig.DefaultMempoolCapacityPraos),
+		},
+		{
+			name:     "serve",
+			runMode:  runModeServe,
+			expected: int64(internalconfig.DefaultMempoolCapacityPraos),
+		},
+		{
+			name:     "leios",
+			runMode:  runModeLeios,
+			expected: int64(internalconfig.DefaultMempoolCapacityLeios),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := NewConfig(WithRunMode(tt.runMode))
+			selection := cfg.pluginSelections[plugin.CapabilityMempool]
+			assert.Equal(t, tt.expected, selection.Config["capacity"])
+		})
+	}
+}
+
+func TestNewConfigPreservesExplicitMempoolCapacity(t *testing.T) {
+	const capacity = int64(42)
+	cfg := NewConfig(
+		WithRunMode(runModeLeios),
+		WithPluginSelection(plugin.CapabilityMempool, plugin.Selection{
+			Provider: "default",
+			Config:   map[string]any{"capacity": capacity},
+		}),
+	)
+
+	selection := cfg.pluginSelections[plugin.CapabilityMempool]
+	assert.Equal(t, capacity, selection.Config["capacity"])
+}
+
+func TestNewConfigDoesNotDefaultCustomMempoolConfig(t *testing.T) {
+	cfg := NewConfig(
+		WithRunMode(runModeLeios),
+		WithPluginSelection(plugin.CapabilityMempool, plugin.Selection{
+			Provider: "custom",
+			Config:   map[string]any{},
+		}),
+	)
+
+	selection := cfg.pluginSelections[plugin.CapabilityMempool]
+	assert.Empty(t, selection.Config)
+}
+
+func TestWithPluginSelectionSnapshotsConfig(t *testing.T) {
+	const originalCapacity = int64(2)
+	values := []any{"original"}
+	nested := map[string]any{"values": values}
+	config := map[string]any{
+		"capacity": originalCapacity,
+		"nested":   nested,
+	}
+	cfg := NewConfig(WithPluginSelection(
+		plugin.CapabilityMempool,
+		plugin.Selection{Provider: "default", Config: config},
+	))
+
+	config["capacity"] = int64(3)
+	config["extra"] = true
+	nested["extra"] = true
+	values[0] = "mutated"
+
+	selection := cfg.pluginSelections[plugin.CapabilityMempool]
+	assert.Equal(t, originalCapacity, selection.Config["capacity"])
+	assert.NotContains(t, selection.Config, "extra")
+	snapshotNested := selection.Config["nested"].(map[string]any)
+	assert.NotContains(t, snapshotNested, "extra")
+	assert.Equal(t, "original", snapshotNested["values"].([]any)[0])
 }
 
 func TestNewValidatesMinPoolMargin(t *testing.T) {

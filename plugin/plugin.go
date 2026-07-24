@@ -26,6 +26,7 @@ import (
 	"reflect"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 
 	"gopkg.in/yaml.v3"
@@ -153,6 +154,12 @@ func Register[S, C, D any](
 		return fmt.Errorf(
 			"plugin provider name is empty for capability %q",
 			descriptor.Capability,
+		)
+	}
+	if descriptor.Name != strings.ToLower(descriptor.Name) {
+		return fmt.Errorf(
+			"plugin provider name must be lowercase: %q",
+			descriptor.Name,
 		)
 	}
 	if factory == nil {
@@ -317,15 +324,26 @@ func Resolve[S, D any](
 }
 
 // isNilInstance reports whether instance is a nil interface or an interface
-// wrapping a typed nil pointer. An interface holding a nil pointer is not equal
-// to nil, so a factory that returns a typed nil would otherwise slip past the
-// plain == nil check and panic when Start is called.
+// wrapping a typed nil value. An interface holding a nil-able typed value is not
+// equal to nil, so a factory that returns one would otherwise slip past the
+// plain == nil check and may panic when Start is called.
 func isNilInstance(instance Instance) bool {
 	if instance == nil {
 		return true
 	}
 	v := reflect.ValueOf(instance)
-	return v.Kind() == reflect.Pointer && v.IsNil()
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
+		reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	case reflect.Invalid, reflect.Bool, reflect.Int, reflect.Int8,
+		reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint,
+		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uintptr, reflect.Float32, reflect.Float64, reflect.Complex64,
+		reflect.Complex128, reflect.Array, reflect.String, reflect.Struct:
+		return false
+	}
+	return false
 }
 
 // ResolveProvider constructs and starts a provider whose service has no

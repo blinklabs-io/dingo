@@ -262,7 +262,8 @@ type SyncConfig struct {
 }
 
 // StoragePlugins contains canonical storage provider selections used during
-// Mithril bootstrap.
+// Mithril bootstrap. Empty provider names select Badger blob storage and
+// SQLite metadata storage.
 type StoragePlugins struct {
 	Blob     plugin.Selection
 	Metadata plugin.Selection
@@ -1132,6 +1133,13 @@ func openDatabase(
 	logger *slog.Logger,
 	maxConnections int,
 ) (*internalplugins.DatabaseRuntime, error) {
+	storagePlugins := cfg.StoragePlugins
+	if storagePlugins.Blob.Provider == "" {
+		storagePlugins.Blob.Provider = "badger"
+	}
+	if storagePlugins.Metadata.Provider == "" {
+		storagePlugins.Metadata.Provider = "sqlite"
+	}
 	return internalplugins.OpenDatabase(
 		ctx,
 		&database.Config{
@@ -1139,8 +1147,8 @@ func openDatabase(
 			StorageMode: cfg.StorageMode, Network: cfg.Network,
 		},
 		internalplugins.StorageSelections{
-			Blob:     cfg.StoragePlugins.Blob,
-			Metadata: cfg.StoragePlugins.Metadata,
+			Blob:     storagePlugins.Blob,
+			Metadata: storagePlugins.Metadata,
 		},
 		internalplugins.StorageDependencies{
 			DataDir: cfg.DataDir, RunMode: cfg.RunMode,

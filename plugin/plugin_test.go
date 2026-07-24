@@ -37,6 +37,17 @@ type testInstance struct {
 	stopCount int
 }
 
+type nilMapInstance map[string]struct{}
+
+func (i nilMapInstance) Start(context.Context) error {
+	i["started"] = struct{}{}
+	return nil
+}
+
+func (nilMapInstance) Stop(context.Context) error {
+	return nil
+}
+
 func (i *testInstance) Start(context.Context) error {
 	*i.events = append(*i.events, "start:"+i.name)
 	return i.startErr
@@ -183,6 +194,20 @@ func TestUnknownCapabilityRejected(t *testing.T) {
 	}
 }
 
+func TestMixedCaseProviderNameRejected(t *testing.T) {
+	err := Register(
+		NewHost(),
+		Descriptor{Capability: CapabilityMempool, Name: "mixedCase"},
+		func() testConfig { return testConfig{} },
+		func(context.Context, testConfig, testDeps) (string, Instance, error) {
+			return "", Lifecycle{}, nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "must be lowercase") {
+		t.Fatalf("unexpected registration error: %v", err)
+	}
+}
+
 func TestDeterministicListingAndStartupCleanup(t *testing.T) {
 	host := NewHost()
 	var events []string
@@ -194,6 +219,7 @@ func TestDeterministicListingAndStartupCleanup(t *testing.T) {
 		&events,
 		nil,
 	)
+	registerTestProvider(t, host, CapabilityStorageBlob, "memory", &events, nil)
 	registerTestProvider(t, host, CapabilityStorageBlob, "badger", &events, nil)
 	registerTestProvider(
 		t,
@@ -205,23 +231,30 @@ func TestDeterministicListingAndStartupCleanup(t *testing.T) {
 	)
 
 	providers := host.Providers()
-	wantCaps := []Capability{
-		CapabilityMempool,
-		CapabilityStorageBlob,
-		CapabilityStorageMetadata,
+	wantProviders := []Descriptor{
+		{
+			Capability:  CapabilityMempool,
+			Name:        "default",
+			Description: "default",
+		},
+		{
+			Capability:  CapabilityStorageBlob,
+			Name:        "badger",
+			Description: "badger",
+		},
+		{
+			Capability:  CapabilityStorageBlob,
+			Name:        "memory",
+			Description: "memory",
+		},
+		{
+			Capability:  CapabilityStorageMetadata,
+			Name:        "sqlite",
+			Description: "sqlite",
+		},
 	}
-	if len(providers) != len(wantCaps) {
-		t.Fatalf("providers = %d, want %d", len(providers), len(wantCaps))
-	}
-	for i, want := range wantCaps {
-		if providers[i].Capability != want {
-			t.Fatalf(
-				"provider %d capability = %s, want %s",
-				i,
-				providers[i].Capability,
-				want,
-			)
-		}
+	if !reflect.DeepEqual(providers, wantProviders) {
+		t.Fatalf("providers = %#v, want %#v", providers, wantProviders)
 	}
 	if _, err := Resolve[string](context.Background(), host, CapabilityStorageBlob, "badger", nil, testDeps{}); err != nil {
 		t.Fatal(err)
@@ -345,6 +378,40 @@ func TestResolveRejectsTypedNilInstance(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("expected error for typed-nil instance, got nil")
+	}
+	if !strings.Contains(err.Error(), "nil lifecycle") {
+		t.Fatalf("error = %v, want nil lifecycle", err)
+	}
+}
+
+func TestResolveRejectsTypedNilMapInstance(t *testing.T) {
+	host := NewHost()
+	err := Register(
+		host,
+		Descriptor{
+			Capability:  CapabilityMempool,
+			Name:        "typednilmap",
+			Description: "typednilmap",
+		},
+		func() testConfig { return testConfig{} },
+		func(_ context.Context, _ testConfig, _ testDeps) (string, Instance, error) {
+			var inst nilMapInstance
+			return "svc", inst, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Resolve[string](
+		context.Background(),
+		host,
+		CapabilityMempool,
+		"typednilmap",
+		nil,
+		testDeps{},
+	)
+	if err == nil {
+		t.Fatal("expected error for typed-nil map instance, got nil")
 	}
 	if !strings.Contains(err.Error(), "nil lifecycle") {
 		t.Fatalf("error = %v, want nil lifecycle", err)
