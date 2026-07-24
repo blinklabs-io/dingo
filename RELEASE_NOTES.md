@@ -63,7 +63,7 @@ Thank you for trying!
 
 * 追加しました operator-controlled な設定ゲートの下で full pot reward distribution を有効にし、standard network では unsafe な設定を拒否します。
 * 拡張しました delegator inactivity expiry support を account expiration tracking、historical stake と reward の再構築、snapshot integration、Mithril compatibility limit、reward crediting safeguard とあわせて追加します。
-* 導入しました 設定と node interface を通じて backend を切り替えられる configurable FIFO mempool backend を追加します。
+* 導入しました 設定と node interface から backend を切り替えられる configurable FIFO mempool backend を用意します。
 * 改善しました Genesis fast source selection で、fast source を選ぶ前に corroboration を求めます。
 * 更新しました Antithesis analysis build を Antithesis Go build tag で実行します。
 * 刷新しました Mithril verification key の既定値を IntersectMBO のホスト先ファイルへ向けます。
@@ -75,15 +75,15 @@ Thank you for trying!
 
 ### 🔧 修正
 
-* 修正しました txsubmission consumer registration で connection が consumer を漏らさないようにします。
+* 修正しました txsubmission consumer registration で connection から consumer が漏れないようにします。
 * 安定化しました mempool read で transaction snapshot が read と cache boundary をまたいで immutable のまま保たれます。
 * 強化しました mempool validation で、validation と revalidation の間に pool lock を解放します。
 * 修復しました mempool shutdown 後に node が新しい work を拒否し、stopped state を返します。
 * 整合しました ledger rewind loop に hold at tip guard とより明確な warning output を追加します。
 * 終了しました reward stake input mismatch を startup 時とメモリ内で live stake data を deduplicate して防ぎます。
-* 有効化しました Mithril primary ledger drain を sparse index に合わせ、iteration を安定して続けます。
+* 有効化しました Mithril primary ledger drain が sparse index に沿って iteration を安定して続けられるようにします。
 * 返しました rollback sentinel で blockfetch batch を閉じ、無効な block の streaming を防ぎます。
-* 更新しました CBOR wrapped stake snapshot query を返し、wrapped request で delegation state も返します。
+* 更新しました CBOR wrapped stake snapshot query に対応し、wrapped request では delegation state も返します。
 
 ### 推奨ネットワーク互換性 ⚠️
 
