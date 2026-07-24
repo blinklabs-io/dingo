@@ -31,6 +31,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/accountwitness"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/certutil"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/collateralfee"
+	"github.com/blinklabs-io/dingo/database/plugin/metadata/internal/utxocond"
 	"github.com/blinklabs-io/dingo/database/plugin/metadata/labelcodec"
 	"github.com/blinklabs-io/dingo/database/types"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
@@ -1334,10 +1335,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 	}
 	// Add Collateral to Transaction
 	if len(tx.Collateral()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 
 		collateralRefs := make([]UtxoRef, 0, len(tx.Collateral()))
 		for _, input := range tx.Collateral() {
@@ -1365,33 +1363,29 @@ func (d *MetadataStoreMysql) SetTransaction(
 				)
 				continue
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			// Add it to the Transaction
 			tmpTx.Collateral = append(
 				tmpTx.Collateral,
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as collateral in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Every matched row is set to the same txHash, so the CASE the
+		// old code built was redundant. A fixed-shape, power-of-two-padded
+		// OR-list keeps the statement text stable across input counts so
+		// the prepared-statement cache can reuse it (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET collateral_by_tx_id = ? WHERE " + chunk.Condition
 			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf("batch update collateral: %w", result.Error)
@@ -1400,10 +1394,7 @@ func (d *MetadataStoreMysql) SetTransaction(
 	}
 	// Add ReferenceInputs to Transaction
 	if len(tx.ReferenceInputs()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 
 		refInputRefs := make([]UtxoRef, 0, len(tx.ReferenceInputs()))
 		for _, input := range tx.ReferenceInputs() {
@@ -1434,33 +1425,27 @@ func (d *MetadataStoreMysql) SetTransaction(
 				)
 				continue
 			}
-			// Found the Utxo, add it to the SQL UPDATE list
-			// First, add it to the CASE statement so it's selected
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			// Also add it to the WHERE clause in the SQL UPDATE
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			// Add it to the Transaction
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
-		// Update reference where this Utxo was used as a reference input in a Transaction
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// See the collateral update above: the per-row CASE was redundant
+		// (all rows set to txHash); use a fixed-shape padded OR-list (#2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET referenced_by_tx_id = ? WHERE " + chunk.Condition
 			result = db.Exec(sql, args...)
 			if result.Error != nil {
 				return fmt.Errorf(
@@ -1501,26 +1486,32 @@ func (d *MetadataStoreMysql) SetTransaction(
 			})
 		}
 		if len(consumedRefs) > 0 {
-			whereConditions := make([]string, 0, len(consumedRefs))
-			updateArgs := make([]any, 0, 2+(len(consumedRefs)*2))
-			updateArgs = append(updateArgs, point.Slot, txHash)
-			for _, ref := range consumedRefs {
-				whereConditions = append(
-					whereConditions,
-					"(tx_id = ? AND output_idx = ?)",
-				)
-				updateArgs = append(updateArgs, ref.txID, ref.idx)
+			// Fixed-shape, power-of-two-padded OR-list so the
+			// prepared-statement cache can reuse statements across
+			// varying input counts (issue #2943).
+			refs := make([]utxocond.Ref, len(consumedRefs))
+			for i, ref := range consumedRefs {
+				refs[i] = utxocond.Ref{TxID: ref.txID, Idx: ref.idx}
 			}
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET deleted_slot = ?, spent_at_tx_id = ? "+
-					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (%s)",
-				strings.Join(whereConditions, " OR "),
-			)
-			result = db.Exec(sql, updateArgs...)
-			if result.Error != nil {
-				return fmt.Errorf("batch consume utxos: %w", result.Error)
+			var totalAffected int64
+			for _, chunk := range utxocond.Chunks(
+				refs,
+				utxocond.DefaultMaxTerms,
+			) {
+				updateArgs := make([]any, 0, 2+len(chunk.Args))
+				updateArgs = append(updateArgs, point.Slot, txHash)
+				updateArgs = append(updateArgs, chunk.Args...)
+				sql := "UPDATE utxo" +
+					" SET deleted_slot = ?, spent_at_tx_id = ? " +
+					"WHERE deleted_slot = 0 AND spent_at_tx_id IS NULL AND (" +
+					chunk.Condition + ")"
+				result = db.Exec(sql, updateArgs...)
+				if result.Error != nil {
+					return fmt.Errorf("batch consume utxos: %w", result.Error)
+				}
+				totalAffected += result.RowsAffected
 			}
-			if result.RowsAffected != int64(len(consumedRefs)) {
+			if totalAffected != int64(len(consumedRefs)) {
 				for _, ref := range consumedRefs {
 					var existingUtxo models.Utxo
 					checkResult := db.Where(
@@ -3064,10 +3055,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	//    These update UTxOs that already exist from prior blocks.        //
 	// ------------------------------------------------------------------ //
 	if len(tx.Collateral()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 		for _, input := range tx.Collateral() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
@@ -3081,25 +3069,22 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			if utxo == nil {
 				continue
 			}
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.Collateral = append(tmpTx.Collateral, *utxo)
 		}
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET collateral_by_tx_id = CASE %s ELSE collateral_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Redundant CASE removed; fixed-shape padded OR-list (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET collateral_by_tx_id = ? WHERE " + chunk.Condition
 			if r := db.Exec(sql, args...); r.Error != nil {
 				return fmt.Errorf(
 					"batch update collateral (batched): %w",
@@ -3110,10 +3095,7 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 	}
 
 	if len(tx.ReferenceInputs()) > 0 {
-		var caseClauses []string
-		var whereConditions []string
-		var caseArgs []any
-		var whereArgs []any
+		var updateRefs []utxocond.Ref
 		for _, input := range tx.ReferenceInputs() {
 			inTxId := input.Id().Bytes()
 			inIdx := input.Index()
@@ -3127,28 +3109,25 @@ func (d *MetadataStoreMysql) SetTransactionBatched(
 			if utxo == nil {
 				continue
 			}
-			caseClauses = append(
-				caseClauses,
-				"WHEN tx_id = ? AND output_idx = ? THEN ?",
+			updateRefs = append(
+				updateRefs,
+				utxocond.Ref{TxID: inTxId, Idx: inIdx},
 			)
-			caseArgs = append(caseArgs, inTxId, inIdx, txHash)
-			whereConditions = append(
-				whereConditions,
-				"(tx_id = ? AND output_idx = ?)",
-			)
-			whereArgs = append(whereArgs, inTxId, inIdx)
 			tmpTx.ReferenceInputs = append(
 				tmpTx.ReferenceInputs,
 				*utxo,
 			)
 		}
-		if len(caseClauses) > 0 {
-			args := append(caseArgs, whereArgs...)
-			sql := fmt.Sprintf(
-				"UPDATE utxo SET referenced_by_tx_id = CASE %s ELSE referenced_by_tx_id END WHERE %s",
-				strings.Join(caseClauses, " "),
-				strings.Join(whereConditions, " OR "),
-			)
+		// Redundant CASE removed; fixed-shape padded OR-list (issue #2943).
+		for _, chunk := range utxocond.Chunks(
+			updateRefs,
+			utxocond.DefaultMaxTerms,
+		) {
+			args := make([]any, 0, 1+len(chunk.Args))
+			args = append(args, txHash)
+			args = append(args, chunk.Args...)
+			sql := "UPDATE utxo" +
+				" SET referenced_by_tx_id = ? WHERE " + chunk.Condition
 			if r := db.Exec(sql, args...); r.Error != nil {
 				return fmt.Errorf(
 					"batch update reference inputs (batched): %w",
