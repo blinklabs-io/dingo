@@ -16,6 +16,9 @@ package bark
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -89,8 +92,19 @@ func (d *barkFakeCloudDestination) ListSnapshots(_ context.Context) ([]lifecycle
 	return lifecycle.ListSnapshots(d.dir)
 }
 
+// FetchManifest mirrors the real S3/GCS destinations' contract: a missing
+// manifest is wrapped in lifecycle.ErrCloudSnapshotNotFound (confirmed
+// absent), distinct from any other error (a real fake-backing-dir I/O
+// problem, which this fake has no way to simulate distinctly but is
+// preserved unwrapped regardless).
 func (d *barkFakeCloudDestination) FetchManifest(_ context.Context) (lifecycle.Manifest, error) {
-	return lifecycle.ReadManifest(d.dir)
+	m, err := lifecycle.ReadManifest(d.dir)
+	if err != nil && errors.Is(err, fs.ErrNotExist) {
+		return lifecycle.Manifest{}, fmt.Errorf(
+			"%w: %w", lifecycle.ErrCloudSnapshotNotFound, err,
+		)
+	}
+	return m, err
 }
 
 func (d *barkFakeCloudDestination) Delete(_ context.Context) error {
@@ -127,6 +141,11 @@ func setBarkFakeCloudBackingDir(t *testing.T, dir string) {
 	barkFakeCloudMu.Lock()
 	barkFakeCloudDir = dir
 	barkFakeCloudMu.Unlock()
+	t.Cleanup(func() {
+		barkFakeCloudMu.Lock()
+		barkFakeCloudDir = ""
+		barkFakeCloudMu.Unlock()
+	})
 }
 
 // barkFakeCloudDestinationNoDelete is identical to barkFakeCloudDestination
@@ -179,6 +198,79 @@ func setBarkFakeCloudNoDeleteBackingDir(t *testing.T, dir string) {
 	barkFakeCloudNoDeleteMu.Lock()
 	barkFakeCloudNoDeleteDir = dir
 	barkFakeCloudNoDeleteMu.Unlock()
+	t.Cleanup(func() {
+		barkFakeCloudNoDeleteMu.Lock()
+		barkFakeCloudNoDeleteDir = ""
+		barkFakeCloudNoDeleteMu.Unlock()
+	})
+}
+
+// barkFakeCloudDestinationCommError simulates a real cloud communication
+// failure (auth, network, timeout) rather than a confirmed-absent
+// manifest: FetchManifest always returns a plain error, never wrapped in
+// lifecycle.ErrCloudSnapshotNotFound. Used to prove that a probe failure
+// distinct from "confirmed not there" is surfaced to the caller rather
+// than silently folded into "not found" (comment-20).
+type barkFakeCloudDestinationCommError struct{}
+
+func (d *barkFakeCloudDestinationCommError) UploadDir(context.Context, string) error {
+	return errors.New("simulated cloud communication failure")
+}
+
+func (d *barkFakeCloudDestinationCommError) DownloadDir(context.Context, string) error {
+	return errors.New("simulated cloud communication failure")
+}
+
+func (d *barkFakeCloudDestinationCommError) FetchManifest(
+	context.Context,
+) (lifecycle.Manifest, error) {
+	return lifecycle.Manifest{}, errors.New("simulated cloud communication failure")
+}
+
+var _ lifecycle.CloudManifestFetcher = &barkFakeCloudDestinationCommError{}
+
+func init() {
+	lifecycle.RegisterCloudDestinationScheme(
+		"barkfaketest-commerror",
+		func(*url.URL) (lifecycle.CloudDestination, error) {
+			return &barkFakeCloudDestinationCommError{}, nil
+		},
+	)
+}
+
+// TestBarkFakeCloudBackingDirsResetBetweenTests guards against a leaked
+// global (comment-45): setBarkFakeCloudBackingDir/
+// setBarkFakeCloudNoDeleteBackingDir used to set their package-level
+// backing-dir globals with no corresponding reset, so whichever test
+// happened to set one last left that directory in place for every
+// subsequent test in this package — a test that forgot to call the
+// setter (or was reordered/shuffled ahead of the one that used to set it
+// up) could silently resolve "barkfaketest://"/"barkfaketest-nodelete://"
+// against a leftover directory from an unrelated test instead of failing
+// loudly. Each subtest's t.Cleanup (registered by the respective setter)
+// runs synchronously before t.Run returns, so both globals must already
+// be reset by the time this checks them.
+func TestBarkFakeCloudBackingDirsResetBetweenTests(t *testing.T) {
+	t.Run("sets them", func(t *testing.T) {
+		setBarkFakeCloudBackingDir(t, t.TempDir())
+		setBarkFakeCloudNoDeleteBackingDir(t, t.TempDir())
+	})
+
+	barkFakeCloudMu.Lock()
+	gotCloud := barkFakeCloudDir
+	barkFakeCloudMu.Unlock()
+	require.Empty(
+		t, gotCloud,
+		"barkFakeCloudDir must be reset via t.Cleanup once the test that set it finishes",
+	)
+
+	barkFakeCloudNoDeleteMu.Lock()
+	gotNoDelete := barkFakeCloudNoDeleteDir
+	barkFakeCloudNoDeleteMu.Unlock()
+	require.Empty(
+		t, gotNoDelete,
+		"barkFakeCloudNoDeleteDir must be reset via t.Cleanup once the test that set it finishes",
+	)
 }
 
 // TestListAvailableSnapshotsMergesLocalAndCloud seeds three snapshots
@@ -408,6 +500,28 @@ func TestRestoreUnknownIDReturnsNotFound(t *testing.T) {
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
 }
 
+// TestRestoreReturnsUnavailableOnCloudCommunicationFailure guards against
+// comment-20's original bug: a real cloud communication failure (auth,
+// network, timeout — anything other than a confirmed-absent manifest)
+// while probing the configured cloud destination used to be silently
+// folded into "doesn't exist," so an operator restoring a snapshot whose
+// local copy had already been pruned (the exact case cloud fallback
+// exists for) could be told "not found" for a snapshot that may well
+// still be sitting in the cloud, indistinguishable from actual data loss.
+// It must instead be reported as CodeUnavailable, distinct from a
+// genuine CodeNotFound.
+func TestRestoreReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, filepath.Join(t.TempDir(), "target"))
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	_, err := h.Restore(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.RestoreRequest{SnapshotId: "some-snapshot"}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
+}
+
 func TestVerifySnapshotSucceedsForCloudOnlySnapshot(t *testing.T) {
 	dataDir := t.TempDir()
 	db := newDiskTestDB(t, dataDir)
@@ -531,6 +645,24 @@ func TestDeleteSnapshotNeitherLocalNorCloudReturnsNotFound(t *testing.T) {
 	)
 	require.Error(t, err)
 	require.Equal(t, connect.CodeNotFound, connect.CodeOf(err))
+}
+
+// TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure is
+// DeleteSnapshot's half of the comment-20 regression guard: a snapshot
+// with no local copy must not be reported (or treated) as "not found"
+// when the cloud probe itself failed to communicate — that could delete
+// nothing while telling the operator there was nothing to delete, when
+// the cloud copy may still be there.
+func TestDeleteSnapshotReturnsUnavailableOnCloudCommunicationFailure(t *testing.T) {
+	h := newTestDatabaseServiceHandler(t, nil, t.TempDir())
+	h.bark.config.SnapshotCloudDestination = "barkfaketest-commerror://bucket/prefix"
+
+	_, err := h.DeleteSnapshot(
+		context.Background(),
+		connect.NewRequest(&databasev1alpha1.DeleteSnapshotRequest{SnapshotId: "some-snapshot"}),
+	)
+	require.Error(t, err)
+	require.Equal(t, connect.CodeUnavailable, connect.CodeOf(err))
 }
 
 // TestDeleteSnapshotCloudDestinationWithoutDeleteSupportReturnsUnimplemented

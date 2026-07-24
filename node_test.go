@@ -1147,6 +1147,90 @@ func TestChainsyncStallRecyclerExitsOnCancel(t *testing.T) {
 	)
 }
 
+// TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds guards
+// against comment-22's original bug: the recycler's tick handler
+// dereferenced n.ledgerState/n.chainsyncState many times (well past its
+// own initial nil-check) without holding any lock, while a live
+// restore/truncate reassigns those exact fields concurrently under
+// n.liveLifecycleMu — a real, unsynchronized data race that could panic
+// on a nil or mid-swap value. The fix makes every tick TryLock
+// n.liveLifecycleMu (the same mutex Restore/Truncate/Snapshot hold for
+// their entire quiesce-through-reinitialize duration) and skip entirely
+// on contention.
+//
+// This holds that mutex on the test goroutine (simulating an in-progress
+// live lifecycle op) across several tick intervals and confirms the
+// recycler never calls chainsyncState.CheckStalledClients() during that
+// window — the only production caller of that method, so a tracked
+// client past its (deliberately very short) stall timeout staying
+// unmarked is direct proof every tick was skipped, not just a side effect
+// of the pre-existing nil-check (both n.ledgerState and n.chainsyncState
+// are real, non-nil objects here). Releasing the mutex must let ticks
+// resume normally.
+func TestChainsyncStallRecyclerSkipsTicksWhileLiveLifecycleOpHolds(t *testing.T) {
+	ledgerState, _, _, _ := newNodeTestDivergedLedger(t)
+
+	bus := event.NewEventBus(nil, nil)
+	t.Cleanup(func() { bus.Stop() })
+
+	const stallTimeout = 10 * time.Millisecond
+	state := chainsync.NewStateWithConfig(
+		bus,
+		nil,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+	)
+	conn := newNodeTestConnId(1)
+	require.True(t, state.AddClientConnId(conn))
+	state.SetClientConnId(conn)
+
+	n := &Node{
+		config: Config{
+			logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		},
+		ledgerState:    ledgerState,
+		chainsyncState: state,
+	}
+
+	isStalled := func() bool {
+		for _, tc := range state.GetTrackedClients() {
+			if tc.ConnId == conn {
+				return tc.Status == chainsync.ClientStatusStalled
+			}
+		}
+		return false
+	}
+
+	n.liveLifecycleMu.Lock()
+	ctx, cancel := context.WithCancel(context.Background())
+	recyclerCancel := n.startChainsyncStallRecycler(
+		ctx,
+		chainsync.Config{MaxClients: 1, StallTimeout: stallTimeout},
+		5*time.Millisecond,
+		time.Second,
+		time.Second,
+	)
+	t.Cleanup(func() {
+		recyclerCancel()
+		cancel()
+		n.chainsyncStallRecyclerWG.Wait()
+	})
+
+	// Well past stallTimeout, across many tick intervals: the client would
+	// certainly have been marked stalled by now if any tick had gone
+	// through while the mutex is held.
+	time.Sleep(150 * time.Millisecond)
+	require.False(
+		t, isStalled(),
+		"a tick must not reach CheckStalledClients while liveLifecycleMu is held",
+	)
+
+	n.liveLifecycleMu.Unlock()
+	require.Eventually(
+		t, isStalled, time.Second, 5*time.Millisecond,
+		"ticks must resume and mark the stalled client once the mutex is released",
+	)
+}
+
 // TestStopWaitsForChainsyncStallRecycler verifies shutdown blocks while the
 // recycler is still tracked as running and continues once it exits.
 func TestStopWaitsForChainsyncStallRecycler(t *testing.T) {

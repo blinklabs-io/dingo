@@ -67,7 +67,28 @@ func (d *Database) TruncateAfterSlot(
 		}()
 	}
 
-	// Delete certificates first (they reference transactions)
+	// Restore pool state before deleting any certificates: unlike account
+	// restoration (which reads the Account row's own denormalized
+	// AddedSlot field, independent of certificate rows),
+	// RestorePoolStateAtSlot detects which pools need their denormalized
+	// pledge/cost/margin/VRF/reward-account fields reverted by querying
+	// PoolRegistration rows with added_slot > slot -- the very rows
+	// DeleteCertificatesAfterSlot removes. Restoring first while those
+	// rows still exist lets it correctly identify affected pools and
+	// reload their fields from the surviving prior registration; deleting
+	// certificates first (as this used to) leaves that query finding
+	// nothing, silently keeping every re-registered pool's stale,
+	// discarded values.
+	if err := d.RestorePoolStateAtSlot(
+		point.Slot,
+		txn,
+	); err != nil {
+		return ochainsync.Tip{}, nil, fmt.Errorf(
+			"restore pool state after rollback: %w",
+			err,
+		)
+	}
+	// Delete certificates (they reference transactions)
 	if err := d.DeleteCertificatesAfterSlot(
 		point.Slot,
 		txn,
@@ -95,16 +116,6 @@ func (d *Database) TruncateAfterSlot(
 	); err != nil {
 		return ochainsync.Tip{}, nil, fmt.Errorf(
 			"restore account state after rollback: %w",
-			err,
-		)
-	}
-	// Restore pool state
-	if err := d.RestorePoolStateAtSlot(
-		point.Slot,
-		txn,
-	); err != nil {
-		return ochainsync.Tip{}, nil, fmt.Errorf(
-			"restore pool state after rollback: %w",
 			err,
 		)
 	}

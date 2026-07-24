@@ -7135,6 +7135,24 @@ func (ls *LedgerState) forgeBlock() {
 		)
 		return
 	}
+	// blockSize (checked per-transaction above while filling the mempool
+	// candidate list) is only a running sum of each included transaction's
+	// own raw CBOR length -- an underestimate of the real assembled block
+	// body, which wraps separate arrays of transaction bodies, witness
+	// sets, and a metadata map (see ledger/forging/builder.go's identical
+	// final actualBlockBodySize check). Without this check here too, this
+	// dev-mode path could forge and append a block whose real body size
+	// exceeds MaxBlockBodySize despite every individual transaction having
+	// passed the earlier, coarser check.
+	if bodySize > maxBlockSize {
+		ls.config.Logger.Error(
+			"forged block body size exceeds MaxBlockBodySize, discarding block",
+			"component", "ledger",
+			"body_size", bodySize,
+			"max_block_size", maxBlockSize,
+		)
+		return
+	}
 
 	// Create Babbage block header body
 	headerBody := babbage.BabbageBlockHeaderBody{

@@ -97,11 +97,22 @@ type subscriberEntry struct {
 type EventBus struct {
 	subscribers         map[EventType]map[EventSubscriberId]Subscriber
 	subscriberSnapshots map[EventType][]subscriberEntry
-	metrics             *eventMetrics
-	lastSubId           EventSubscriberId
-	mu                  sync.RWMutex
-	Logger              *slog.Logger
-	subscriberWg        sync.WaitGroup // Tracks SubscribeFunc goroutines
+	// channelSubsById tracks every channelSubscriber by its subscriber ID,
+	// independently of e.subscribers above (which unsubscribe removes the
+	// entry from as soon as any one caller processes it). See unsubscribe's
+	// doc comment for why this independent lookup is required: without it,
+	// a plain Unsubscribe racing a concurrent UnsubscribeAndWait for the
+	// same subId could make UnsubscribeAndWait return without ever
+	// waiting. Removed once a SubscribeFunc dispatch goroutine exits (or,
+	// for a subscriber with no such goroutine, directly inside
+	// unsubscribe) -- subIds are never reused, so a stale entry can never
+	// be confused with a later, different subscriber.
+	channelSubsById map[EventSubscriberId]*channelSubscriber
+	metrics         *eventMetrics
+	lastSubId       EventSubscriberId
+	mu              sync.RWMutex
+	Logger          *slog.Logger
+	subscriberWg    sync.WaitGroup // Tracks SubscribeFunc goroutines
 
 	// Async publishing infrastructure
 	asyncQueue chan asyncEvent
@@ -122,6 +133,7 @@ func NewEventBus(
 	e := &EventBus{
 		subscribers:         make(map[EventType]map[EventSubscriberId]Subscriber),
 		subscriberSnapshots: make(map[EventType][]subscriberEntry),
+		channelSubsById:     make(map[EventSubscriberId]*channelSubscriber),
 		Logger:              logger,
 		asyncQueue:          make(chan asyncEvent, AsyncQueueSize),
 		stopCh:              make(chan struct{}),
@@ -310,6 +322,7 @@ func (e *EventBus) subscribeInternal(
 	}
 	evtTypeSubs := e.subscribers[eventType]
 	evtTypeSubs[subId] = chSub
+	e.channelSubsById[subId] = chSub
 	e.refreshSubscriberSnapshotLocked(eventType)
 	if e.metrics != nil {
 		e.metrics.subscribers.WithLabelValues(string(eventType), "in-memory").
@@ -387,6 +400,17 @@ func (e *EventBus) SubscribeFuncWithBuffer(
 	go func(evtCh <-chan Event, handlerFunc EventHandlerFunc, done chan struct{}) {
 		defer close(done)
 		defer e.subscriberWg.Done()
+		// This dispatch goroutine is channelSubsById[subId]'s only owner
+		// once it's running, so it self-cleans its own entry here rather
+		// than relying on unsubscribe to do it — unsubscribe may run
+		// before, during, or after this goroutine's lifetime relative to
+		// any given caller, and subIds are never reused, so there is no
+		// risk of removing a later, different subscriber's entry.
+		defer func() {
+			e.mu.Lock()
+			delete(e.channelSubsById, subId)
+			e.mu.Unlock()
+		}()
 		for {
 			evt, ok := <-evtCh
 			if !ok {
@@ -440,6 +464,12 @@ func (e *EventBus) Unsubscribe(eventType EventType, subId EventSubscriberId) {
 // concurrently with that teardown. Do not call this from within the
 // subscriber's own handler: waiting for a goroutine to exit from inside
 // that same goroutine deadlocks forever.
+//
+// Safe to call concurrently with a plain Unsubscribe for the same subId
+// (e.g. from two different teardown paths racing each other): whichever
+// call actually removes the e.subscribers entry, this one still finds and
+// waits on the subscriber via channelSubsById, so the race cannot turn
+// this into a no-op.
 func (e *EventBus) UnsubscribeAndWait(eventType EventType, subId EventSubscriberId) {
 	e.unsubscribe(eventType, subId, true)
 }
@@ -471,14 +501,34 @@ func (e *EventBus) unsubscribe(
 			}
 		}
 	}
+	// Looked up independently of subToClose above: e.subscribers only
+	// ever holds one entry per subId, so whichever caller runs first
+	// (Unsubscribe or UnsubscribeAndWait) removes it -- leaving a second,
+	// concurrent caller for the same subId with subToClose == nil even
+	// though the subscriber itself hasn't finished tearing down yet.
+	// channelSubsById is keyed by subId and only cleaned up once the
+	// subscriber is fully done (its own dispatch goroutine, or right here
+	// for a subscriber with no such goroutine), so a second caller can
+	// still find and wait on it here regardless of who removed the
+	// e.subscribers entry.
+	chSub := e.channelSubsById[subId]
+	if chSub != nil && chSub.done == nil {
+		// No dispatch goroutine will ever clean this one up itself.
+		delete(e.channelSubsById, subId)
+	}
 	e.mu.Unlock()
 
 	if subToClose != nil {
-		subToClose.Close()
+		if _, isChannelSub := subToClose.(*channelSubscriber); !isChannelSub {
+			subToClose.Close()
+		}
+	}
+	if chSub != nil {
+		// Close is idempotent, so this is safe even if a concurrent
+		// caller already closed the same subscriber via subToClose above.
+		chSub.Close()
 		if wait {
-			if chSub, ok := subToClose.(*channelSubscriber); ok {
-				chSub.waitDone()
-			}
+			chSub.waitDone()
 		}
 	}
 }

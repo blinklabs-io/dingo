@@ -15,7 +15,9 @@
 package lifecycle
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,12 +39,21 @@ type SnapshotEntry struct {
 // written as ordinary subdirectories of the same configured snapshot
 // directory — there is no separate catalog store.
 //
-// A subdirectory that exists but has no valid manifest.json (a snapshot
-// still being written, or one that failed partway through) is silently
-// skipped rather than treated as a hard error, since that is an expected
-// transient state, not corruption of the catalog itself. baseDir not
-// existing yet (no snapshot has ever been taken) returns an empty result,
-// not an error.
+// A subdirectory that exists but has no manifest.json at all (a snapshot
+// still being written) is silently skipped rather than treated as a hard
+// error, since that is an expected transient state, not corruption of the
+// catalog itself. baseDir not existing yet (no snapshot has ever been
+// taken) returns an empty result, not an error.
+//
+// Any other ReadManifest failure for a given subdirectory — a malformed
+// manifest, a checksum mismatch (ErrManifestCorrupted), a permission
+// error — is a real problem, not the expected in-progress case, and is
+// not silently swallowed the same way: that subdirectory is still left
+// out of the returned entries (one broken snapshot must not hide every
+// other, otherwise-valid one from the catalog), but its error is
+// accumulated and returned via errors.Join alongside the entries found,
+// so a caller can log or surface it instead of the catalog silently
+// looking one snapshot smaller than it should.
 func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
 	entries, err := os.ReadDir(baseDir)
 	if err != nil {
@@ -53,6 +64,7 @@ func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
 	}
 
 	result := []SnapshotEntry{}
+	var problems []error
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -60,6 +72,13 @@ func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
 		dir := filepath.Join(baseDir, entry.Name())
 		m, err := ReadManifest(dir)
 		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			problems = append(
+				problems,
+				fmt.Errorf("snapshot %q: %w", entry.Name(), err),
+			)
 			continue
 		}
 		result = append(result, SnapshotEntry{ID: entry.Name(), Manifest: m})
@@ -68,5 +87,5 @@ func ListSnapshots(baseDir string) ([]SnapshotEntry, error) {
 	sort.Slice(result, func(i, j int) bool {
 		return result[i].Manifest.CreatedAt.After(result[j].Manifest.CreatedAt)
 	})
-	return result, nil
+	return result, errors.Join(problems...)
 }

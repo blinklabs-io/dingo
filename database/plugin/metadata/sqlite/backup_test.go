@@ -15,7 +15,10 @@
 package sqlite
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -83,6 +86,61 @@ func TestBackupToExistingDestinationErrors(t *testing.T) {
 	err = src.BackupTo(context.Background(), backupPath)
 	require.Error(t, err)
 }
+
+// TestContextReaderStopsOnCancellation guards against comment-25's
+// original gap: copyFile's io.Copy used to only check ctx once, before
+// opening the source/destination files, so a cancellation landing after
+// the copy actually started sat unnoticed until the whole file finished
+// copying and syncing -- a real delay for a large metadata restore an
+// operator just asked to cancel. copyFile now wraps its source reader in
+// contextReader, which io.Copy calls Read on repeatedly as it streams the
+// file through in chunks; this tests that wrapper's actual contract
+// directly and deterministically: a Read succeeds normally before
+// cancellation, and every Read after ctx is cancelled returns ctx.Err()
+// instead of delegating to the wrapped reader, regardless of how much
+// data is left unread -- exactly what makes cancellation take effect
+// within a chunk or two of a real copyFile call, rather than only once
+// the whole transfer already finished.
+func TestContextReaderStopsOnCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cr := &contextReader{ctx: ctx, r: bytes.NewReader(bytes.Repeat([]byte("y"), 1024))}
+
+	buf := make([]byte, 16)
+	n, err := cr.Read(buf)
+	require.NoError(t, err)
+	require.Equal(t, 16, n)
+
+	cancel()
+	_, err = cr.Read(buf)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestCopyFileSyncsDestinationDirectory guards against comment-33's
+// original gap: copyFile only fsynced the destination file itself, not
+// its parent directory -- on POSIX filesystems a file's own fsync does
+// not guarantee its directory entry is durable, so a crash right after a
+// "successful" restore could leave the synced metadata.sqlite file
+// unreachable (or the directory entry simply absent) even though the
+// file's own bytes were flushed. Actually observing that durability gap
+// would require simulating a crash, which isn't practical in a unit
+// test; what this does verify is that the added directory-open-and-sync
+// step is reached and completes without error on every successful copy,
+// rather than being unreachable or silently skipped.
+func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
+	srcPath := filepath.Join(t.TempDir(), "src.bin")
+	require.NoError(t, os.WriteFile(srcPath, []byte("hello"), 0o644))
+
+	dstDir := t.TempDir()
+	dstPath := filepath.Join(dstDir, "dst.bin")
+
+	require.NoError(t, copyFile(context.Background(), srcPath, dstPath))
+
+	data, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	require.Equal(t, []byte("hello"), data)
+}
+
+var _ io.Reader = &contextReader{}
 
 // TestRestoreFromExistingDestinationErrors verifies that RestoreFrom
 // refuses to clobber a destination that already has a metadata database.

@@ -221,7 +221,18 @@ func (n *Node) runChainsyncStallRecycler(
 			defer ticker.Stop()
 			recycleAt := make(map[string]time.Time)
 			lastRecycled := make(map[string]time.Time)
-			lastProgressSlot := n.ledgerState.Tip().Point.Slot
+			// n.ledgerState is a plain, unsynchronized field that a live
+			// restore/truncate reassigns while holding n.liveLifecycleMu
+			// (see the tick handler below) -- take the same lock here so
+			// this one-time read can't land on a nil or mid-swap value if
+			// this loop happens to (re)start during a live lifecycle op
+			// (e.g. after a caught panic restarts it).
+			n.liveLifecycleMu.Lock()
+			var lastProgressSlot uint64
+			if n.ledgerState != nil {
+				lastProgressSlot = n.ledgerState.Tip().Point.Slot
+			}
+			n.liveLifecycleMu.Unlock()
 			lastProgressAt := time.Now()
 			plateauRecoveryThreshold := plateauThreshold(
 				chainsyncCfg.StallTimeout,
@@ -233,10 +244,30 @@ func (n *Node) runChainsyncStallRecycler(
 				case <-ticker.C:
 					n.runStallCheckerTick(func() {
 						// A live database restore/truncate briefly nils
-						// n.ledgerState while it swaps in a rebuilt one;
-						// skip this tick rather than dereference nil, and
-						// pick back up next tick once it's reassigned.
-						if n.ledgerState == nil {
+						// n.ledgerState and n.chainsyncState while it swaps
+						// in rebuilt ones, and holds n.liveLifecycleMu for
+						// its entire quiesce-through-reinitialize duration.
+						// TryLock, not Lock: this is a best-effort periodic
+						// check, so it must skip a contended tick rather
+						// than block waiting behind a possibly long-running
+						// truncate. Holding the lock for this whole tick
+						// (not just the nil-check) matters because
+						// processChainsyncRecyclerTick below dereferences
+						// n.ledgerState/n.chainsyncState many more times
+						// after the initial check — without holding the
+						// lock across all of them, a restore/truncate
+						// starting mid-tick could still race a later
+						// dereference even though the check up front
+						// passed. The two fields are also not nilled/
+						// reassigned atomically together — reinitializeCoreStorage
+						// rebuilds n.ledgerState before reinitializeNetworkingCore
+						// rebuilds n.chainsyncState — so both are checked
+						// even under the lock.
+						if !n.liveLifecycleMu.TryLock() {
+							return
+						}
+						defer n.liveLifecycleMu.Unlock()
+						if n.ledgerState == nil || n.chainsyncState == nil {
 							return
 						}
 						now := time.Now()

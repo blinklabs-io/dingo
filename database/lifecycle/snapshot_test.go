@@ -16,6 +16,7 @@ package lifecycle_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -28,6 +29,82 @@ import (
 	ocommon "github.com/blinklabs-io/gouroboros/protocol/common"
 	"github.com/stretchr/testify/require"
 )
+
+// pluginDataDirDest returns the live *string backing pluginName's "data-dir"
+// option — plugin.GetPlugins copies PluginEntry/PluginOption structs, but
+// each PluginOption.Dest is the same *string pointer SetPluginOption writes
+// through, so dereferencing it always reflects the option's current,
+// actually-in-effect value, not just its registered default.
+func pluginDataDirDest(
+	t *testing.T,
+	pluginType plugin.PluginType,
+	pluginName string,
+) *string {
+	t.Helper()
+	for _, entry := range plugin.GetPlugins(pluginType) {
+		if entry.Name != pluginName {
+			continue
+		}
+		for _, opt := range entry.Options {
+			if opt.Name != "data-dir" {
+				continue
+			}
+			dest, ok := opt.Dest.(*string)
+			require.Truef(t, ok, "%s/%s data-dir option Dest must be *string", pluginType, pluginName)
+			return dest
+		}
+	}
+	t.Fatalf("no data-dir option registered for plugin %v/%s", pluginType, pluginName)
+	return nil
+}
+
+// setPluginDataDirForTest sets pluginName's "data-dir" option to dir and,
+// via t.Cleanup, restores it to whatever value was in effect before this
+// call once the test finishes. plugin.SetPluginOption mutates process-
+// global registry state (see its own doc comment) — left unrestored, the
+// last test in this package's binary to call it determines what every
+// later test silently gets for the default plugin's data directory,
+// instead of each test's own explicit setup being what actually takes
+// effect.
+func setPluginDataDirForTest(
+	t *testing.T,
+	pluginType plugin.PluginType,
+	pluginName string,
+	dir string,
+) {
+	t.Helper()
+	dest := pluginDataDirDest(t, pluginType, pluginName)
+	previous := *dest
+	require.NoError(t, plugin.SetPluginOption(pluginType, pluginName, "data-dir", dir))
+	t.Cleanup(func() {
+		require.NoError(
+			t,
+			plugin.SetPluginOption(pluginType, pluginName, "data-dir", previous),
+		)
+	})
+}
+
+// TestSetPluginDataDirForTestRestoresPreviousValue guards against the
+// leaked-global bug this helper exists to fix: a subtest that calls
+// setPluginDataDirForTest must not leave its value in place once it
+// finishes — the subtest's t.Cleanup runs synchronously before t.Run
+// returns, so the pre-existing value must already be back by the time
+// this checks it.
+func TestSetPluginDataDirForTestRestoresPreviousValue(t *testing.T) {
+	dest := pluginDataDirDest(t, plugin.PluginTypeBlob, config.DefaultBlobPlugin)
+	before := *dest
+
+	t.Run("mutate", func(t *testing.T) {
+		setPluginDataDirForTest(
+			t, plugin.PluginTypeBlob, config.DefaultBlobPlugin, t.TempDir(),
+		)
+	})
+
+	require.Equal(
+		t, before, *dest,
+		"data-dir must be restored to its pre-test value via t.Cleanup",
+	)
+}
 
 // TestSnapshotWritesManifestAndBackupFiles verifies that Snapshot writes
 // a manifest plus blob/metadata backup files with matching commit timestamps.
@@ -63,6 +140,92 @@ func TestSnapshotRefusesExistingDirectory(t *testing.T) {
 		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
 	)
 	require.Error(t, err)
+}
+
+// TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents guards
+// against a real data-loss bug (comment-15): two concurrent Snapshot
+// calls racing to the same dir used to both pass an initial
+// os.Stat-then-MkdirAll check (MkdirAll doesn't error on an existing
+// directory, and the Stat-then-MkdirAll gap is a TOCTOU race even if it
+// did), so the loser would proceed to open blob.bak with O_EXCL, fail
+// with "file exists", and then run its failure-cleanup os.RemoveAll(dir)
+// — deleting the winner's in-progress or already-completed backup files
+// out from under it. This simulates the loser's view directly: a dir
+// that already contains another caller's file when Snapshot is invoked
+// must be refused without that file being removed.
+func TestSnapshotRefusingExistingDirectoryDoesNotDeleteItsContents(t *testing.T) {
+	db := newTestDB(t)
+
+	dir := filepath.Join(t.TempDir(), "snap-contested")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	winnerFile := filepath.Join(dir, "blob.bak")
+	require.NoError(t, os.WriteFile(winnerFile, []byte("winner's data"), 0o644))
+
+	_, err := lifecycle.Snapshot(
+		context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+	)
+	require.Error(t, err)
+
+	require.DirExists(t, dir)
+	require.FileExists(t, winnerFile)
+	data, readErr := os.ReadFile(winnerFile)
+	require.NoError(t, readErr)
+	require.Equal(t, "winner's data", string(data))
+}
+
+// TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact is the
+// direct concurrency regression test for comment-15: several Snapshot
+// calls racing to create the exact same, not-yet-existing dir used to be
+// able to all pass an os.Stat-then-MkdirAll check (MkdirAll doesn't error
+// on an existing directory, and Stat-then-MkdirAll has a TOCTOU gap
+// between the two calls regardless), so more than one caller could
+// believe it owned dir; the loser(s) would then fail opening blob.bak
+// with O_EXCL and run their failure-cleanup os.RemoveAll(dir) — deleting
+// the winner's in-progress or already-completed backup files. Firing many
+// callers at the same dir simultaneously (released off a shared barrier
+// to maximize interleaving) must now yield exactly one success whose
+// output is a complete, valid, undamaged snapshot, with every other
+// caller failing immediately without touching dir's contents at all.
+func TestSnapshotConcurrentCallsToSameDirLeaveWinnersFilesIntact(t *testing.T) {
+	const attempts = 8
+
+	db := newTestDB(t)
+	require.NoError(t, db.BlockCreate(testBlock(1, 0x01), nil))
+
+	dir := filepath.Join(t.TempDir(), "snap-race")
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, attempts)
+	wg.Add(attempts)
+	for i := range attempts {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, err := lifecycle.Snapshot(
+				context.Background(), db, dir, lifecycle.TriggerManual, "test-version",
+			)
+			errs[i] = err
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	successes := 0
+	for _, err := range errs {
+		if err == nil {
+			successes++
+		}
+	}
+	require.Equal(t, 1, successes, "exactly one concurrent Snapshot call to the same dir must succeed")
+
+	require.DirExists(t, dir)
+	require.FileExists(t, filepath.Join(dir, lifecycle.BlobBackupFileName))
+	require.FileExists(t, filepath.Join(dir, lifecycle.MetadataBackupFileName))
+	m, err := lifecycle.ReadManifest(dir)
+	require.NoError(t, err, "the winner's manifest must be intact, not deleted by a losing caller")
+	require.NotZero(t, m.BlobBytes)
+	require.NotZero(t, m.MetadataBytes)
 }
 
 // TestSnapshotConsistentUnderConcurrentWrites is the end-to-end regression
@@ -116,12 +279,8 @@ func TestSnapshotConsistentUnderConcurrentWrites(t *testing.T) {
 	_, err = lifecycle.Restore(context.Background(), dir, restoredDir)
 	require.NoError(t, err)
 
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeBlob, config.DefaultBlobPlugin, "data-dir", restoredDir,
-	))
-	require.NoError(t, plugin.SetPluginOption(
-		plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, "data-dir", restoredDir,
-	))
+	setPluginDataDirForTest(t, plugin.PluginTypeBlob, config.DefaultBlobPlugin, restoredDir)
+	setPluginDataDirForTest(t, plugin.PluginTypeMetadata, config.DefaultMetadataPlugin, restoredDir)
 	restored, err := database.New(&database.Config{
 		DataDir:        restoredDir,
 		BlobPlugin:     config.DefaultBlobPlugin,

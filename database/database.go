@@ -15,6 +15,7 @@
 package database
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -71,11 +72,16 @@ type Database struct {
 	closeOnce       sync.Once
 	closeErr        error
 
-	// commitBarrier lets PauseCommits hold off every in-flight and new
-	// Txn.Commit call without a full quiesce, so database/lifecycle.Snapshot
+	// commitBarrier lets PauseCommits/PauseCommitsContext hold off every
+	// in-flight and new read-write Txn that opens a metadata write
+	// transaction, without a full quiesce, so database/lifecycle.Snapshot
 	// can back up the blob and metadata stores as of the same logical
-	// point. Txn.Commit holds the read side (many concurrent commits
-	// proceed normally); PauseCommits holds the write side.
+	// point. Only Txns holding the metadata store's single write
+	// connection participate (see acquireCommitBarrier) — a blob-only Txn
+	// never touches that connection and never writes the commit timestamp
+	// this guards, so it does not take part. Txn construction holds the
+	// read side (many concurrent read-write Txns proceed normally);
+	// PauseCommits/PauseCommitsContext hold the write side.
 	commitBarrier sync.RWMutex
 }
 
@@ -84,11 +90,15 @@ func (d *Database) Blob() blob.BlobStore {
 	return d.blob
 }
 
-// PauseCommits blocks until any Txn.Commit already in flight finishes,
-// then blocks every new one from starting until the returned resume func
-// is called. It does not stop reads, and it is not a quiesce — nothing is
-// torn down, no peers are disconnected, callers just see Commit block
-// briefly.
+// PauseCommits blocks until every currently open read-write Txn that
+// participates in this barrier (see acquireCommitBarrier) has reached
+// Commit, Rollback, or Release — not merely until one already inside its
+// Commit call finishes, but until every such Txn opened before this call,
+// however far along it currently is, concludes one way or another — then
+// blocks any new one from being constructed until the returned resume
+// func is called. It does not stop reads, and it is not a quiesce —
+// nothing is torn down, no peers are disconnected, callers just see a new
+// read-write Txn's construction (not its eventual Commit) block briefly.
 //
 // database/lifecycle.Snapshot uses this to bracket its blob and metadata
 // backup calls: each backup is independently consistent as of whenever it
@@ -99,6 +109,47 @@ func (d *Database) Blob() blob.BlobStore {
 func (d *Database) PauseCommits() (resume func()) {
 	d.commitBarrier.Lock()
 	return d.commitBarrier.Unlock
+}
+
+// PauseCommitsContext is PauseCommits, but the wait for the barrier can
+// be abandoned via ctx: if a long-running write transaction is currently
+// open, acquiring the exclusive side can block for as long as that
+// transaction takes to commit, and plain PauseCommits gives a caller like
+// lifecycle.Snapshot (which already accepts a ctx for the rest of its
+// work) no way to give up on that wait if its own operation is
+// cancelled.
+//
+// If ctx is cancelled before the barrier is acquired, this returns
+// ctx.Err() and a nil resume — but the in-flight acquisition attempt
+// itself is not abandoned, only this call's wait for it: sync.RWMutex
+// has no cancellable Lock, so the blocked Lock() call underneath keeps
+// running regardless, and if it eventually succeeds after this function
+// has already returned, that would leave the barrier permanently held
+// with no caller left to release it. To prevent that, a cancelled wait
+// hands the eventual lock straight back to Unlock the moment it's
+// acquired, so the barrier is never stranded held just because the
+// original caller stopped waiting for it.
+func (d *Database) PauseCommitsContext(
+	ctx context.Context,
+) (resume func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	acquired := make(chan struct{})
+	go func() {
+		d.commitBarrier.Lock()
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+		return d.commitBarrier.Unlock, nil
+	case <-ctx.Done():
+		go func() {
+			<-acquired
+			d.commitBarrier.Unlock()
+		}()
+		return nil, ctx.Err()
+	}
 }
 
 // Config returns the config object used for the database instance

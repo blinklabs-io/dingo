@@ -113,6 +113,55 @@ func TestManifestRejectsNewerFormatVersion(t *testing.T) {
 
 // TestCheckPluginMatch verifies that CheckPluginMatch passes for matching
 // blob/metadata plugins and errors on either mismatching.
+// TestWriteManifestLeavesNoLeftoverTempFile verifies that a successful
+// WriteManifest cleans up after itself: only the final manifest.json
+// remains, no stray same-directory temp file used for the atomic rename.
+func TestWriteManifestLeavesNoLeftoverTempFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, lifecycle.WriteManifest(dir, testManifest()))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, lifecycle.ManifestFileName, entries[0].Name())
+}
+
+// TestWriteManifestFailureLeavesExistingManifestUntouched guards against
+// comment-35's original gap: WriteManifest used to write directly to
+// manifest.json (truncating any existing content first), so an
+// interruption partway through could leave a corrupt, partially-written
+// file in its place -- most dangerous for LabelSnapshot, which rewrites
+// the manifest of an already-complete snapshot. This forces the failure
+// mode a truncating write can't ever produce cleanly: something already
+// occupies manifest.json's path in a way the final atomic rename cannot
+// replace (a non-empty directory, which os.Rename refuses to replace
+// with a regular file), after the new manifest's temp file has already
+// been fully written and synced. WriteManifest must fail without
+// touching whatever was already there, and without leaving its own temp
+// file behind.
+func TestWriteManifestFailureLeavesExistingManifestUntouched(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, lifecycle.ManifestFileName)
+	require.NoError(t, os.Mkdir(manifestPath, 0o755))
+	sentinelPath := filepath.Join(manifestPath, "sentinel")
+	require.NoError(t, os.WriteFile(sentinelPath, []byte("original"), 0o644))
+
+	err := lifecycle.WriteManifest(dir, testManifest())
+	require.Error(t, err)
+
+	require.DirExists(t, manifestPath)
+	data, readErr := os.ReadFile(sentinelPath)
+	require.NoError(t, readErr)
+	require.Equal(t, "original", string(data))
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(
+		t, entries, 1,
+		"a failed WriteManifest must not leave its temp file behind",
+	)
+}
+
 func TestCheckPluginMatch(t *testing.T) {
 	m := testManifest()
 	require.NoError(t, m.CheckPluginMatch("badger", "sqlite"))

@@ -44,6 +44,7 @@ func databaseSnapshotCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Capture a point-in-time snapshot of the database",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {
@@ -121,6 +122,7 @@ security parameter — it is intended for disaster recovery scenarios (see
 CIP-0135) where the chain must be rewound further than Ouroboros Praos's
 built-in rollback limit allows. The resulting database is resync-ready
 from the target point.`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := config.FromContext(cmd.Context())
 			if cfg == nil {

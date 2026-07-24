@@ -365,7 +365,18 @@ func (n *Node) reinitializeCoreStorage() error {
 			LeiosApplyEndorserBlockTxs:    !n.config.isMusashiNetwork(),
 			SkipLeaderStakeThresholdCheck: n.config.isMusashiNetwork(),
 			SkipDijkstraTxValidation:      n.config.isMusashiNetwork(),
-			BlockfetchRequestRangeFunc:    n.ouroboros.BlockfetchClientRequestRange,
+			// These four must mirror Run()'s construction exactly: they're
+			// operator-configured reward/pool-validation feature flags
+			// (CIP-23 min pool margin, CIP-50 pledge leverage, CIP-0163
+			// full-pot rewards), not derived from the network, and were
+			// previously omitted here entirely -- silently resetting them
+			// to their zero values (disabled) on every live restore/
+			// truncate regardless of what was actually configured.
+			MinPoolMargin:              n.config.minPoolMargin,
+			PledgeLeverageEnabled:      n.config.pledgeLeverageEnabled,
+			PledgeLeverage:             n.config.pledgeLeverage,
+			FullPotRewardsEnabled:      n.config.fullPotRewardsEnabled,
+			BlockfetchRequestRangeFunc: n.ouroboros.BlockfetchClientRequestRange,
 			PeersWithBlockFunc: func(
 				origin ouroboros.ConnectionId,
 				point ocommon.Point,
@@ -772,7 +783,8 @@ func (n *Node) reinitializeNetworkingCore() error {
 // bark itself is neither stopped nor rebuilt here — see
 // quiesceForLiveLifecycleOp's comment on why its server must stay
 // reachable — it just gets its Archive service's DB reference updated to
-// the freshly rebuilt n.db via SetDB.
+// the freshly rebuilt n.db via ResumeDB, which also releases the pause
+// PauseDB put in place before storage was closed (see Restore/Truncate).
 //
 // Note: the chainsync stall recycler is deliberately NOT restarted here —
 // it was never stopped (see quiesceForLiveLifecycleOp's comment) and reads
@@ -799,7 +811,7 @@ func (n *Node) reinitializeAPIServers() error {
 	}
 
 	if n.bark != nil {
-		n.bark.SetDB(n.db)
+		n.bark.ResumeDB(n.db)
 	}
 
 	if n.config.storageMode.IsAPI() && n.config.midnight.Port > 0 {
@@ -1099,12 +1111,47 @@ func (n *Node) Restore(
 	// this node's actual configuration — while this node's real data
 	// directory was never touched and the node kept serving normally
 	// throughout. Only the brief directory swap below requires quiescing.
+	//
+	// quiesceForLiveLifecycleOp attempts every one of its stop calls
+	// regardless of an earlier one failing (e.g. a Stop(ctx) call hitting
+	// ctx's deadline), so a non-nil err here still means the node is
+	// already substantially quiesced — leaving it there without
+	// attempting to resume would strand it running but silently
+	// unresponsive (no forging, no mempool, no APIs) with no indication
+	// to the caller that it needs a restart. The original data directory
+	// is still untouched at this point in both cases, so
+	// reinitializeAndResume can safely bring the node back up on it; only
+	// if that resume itself fails do we give up and bring the process
+	// down for a supervised restart, mirroring swapInRestoredDataDir's
+	// failure handling below.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"quiesce: %w (resume also failed: %w)", err, resumeErr,
+			)
+		}
 		return lifecycle.Manifest{}, fmt.Errorf("quiesce: %w", err)
+	}
+	// Pinned Bark request handlers (Archive.FetchBlock,
+	// DatabaseService.GetDatabaseInfo — see Bark.Acquire's doc comment) must
+	// stop being handed n.db before it's closed below, and must not resume
+	// until reinitializeAPIServers's ResumeDB call publishes the rebuilt
+	// n.db afterward. From here on, every exit path either reaches that
+	// ResumeDB call (success) or calls n.cancel() (process is coming down
+	// for a supervised restart, so a gate left paused is moot).
+	if n.bark != nil {
+		n.bark.PauseDB()
 	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
 		_ = os.RemoveAll(stagingDir)
+		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+			n.cancel()
+			return lifecycle.Manifest{}, fmt.Errorf(
+				"close storage: %w (resume also failed: %w)", err, resumeErr,
+			)
+		}
 		return lifecycle.Manifest{}, fmt.Errorf("close storage: %w", err)
 	}
 
@@ -1213,22 +1260,62 @@ func (n *Node) Truncate(
 	n.liveLifecycleMu.Lock()
 	defer n.liveLifecycleMu.Unlock()
 
+	// See Restore's identical handling for why a quiesce/close-storage
+	// failure must still attempt reinitializeAndResume rather than just
+	// returning: quiesceForLiveLifecycleOp attempts every stop call
+	// regardless of an earlier failure, so the node is already
+	// substantially quiesced by the time either call here returns a
+	// non-nil error, and nothing on disk has been touched yet — leaving
+	// it there would strand the node running but silently unresponsive
+	// with no indication a restart is needed.
 	if err := n.quiesceForLiveLifecycleOp(ctx); err != nil {
+		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+			n.cancel()
+			return 0, fmt.Errorf(
+				"quiesce: %w (resume also failed: %w)", err, resumeErr,
+			)
+		}
 		return 0, fmt.Errorf("quiesce: %w", err)
 	}
+	// See Restore's identical PauseDB placement for why this must happen
+	// here, before storage is closed, and why every exit path from here on
+	// is safe with the gate left paused.
+	if n.bark != nil {
+		n.bark.PauseDB()
+	}
 	if err := n.closeStorageForLiveLifecycleOp(ctx); err != nil {
+		if resumeErr := n.reinitializeAndResume(ctx); resumeErr != nil {
+			n.cancel()
+			return 0, fmt.Errorf(
+				"close storage: %w (resume also failed: %w)", err, resumeErr,
+			)
+		}
 		return 0, fmt.Errorf("close storage: %w", err)
 	}
 
 	blocksRemoved, truncateErr := func() (uint64, error) {
 		tmpDB, err := database.New(n.databaseConfig())
+		// database.New can return a non-nil db alongside a non-nil error
+		// (a recoverable CommitTimestampError — see its own doc comment,
+		// "database is available for recovery, so return it with error").
+		// The defer must be registered here, before the err check below,
+		// so that case still closes tmpDB rather than leaking its open
+		// badger/sqlite handles: an early return on err != nil before this
+		// line would skip the deferred Close entirely, leaving tmpDB's
+		// storage locks held. reinitializeAndResume's reinitializeCoreStorage
+		// then reopens the very same data directory a moment later (this
+		// error is classified as ErrTruncateNotStarted, so nothing on disk
+		// was touched and resume is expected to succeed) — reopening
+		// storage that a leaked tmpDB is still holding open.
+		if tmpDB != nil {
+			defer tmpDB.Close()
+		}
 		if err != nil {
 			return 0, fmt.Errorf(
 				"%w: open database for truncate: %w",
 				lifecycle.ErrTruncateNotStarted, err,
 			)
 		}
-		defer tmpDB.Close()
 
 		block, err := dblifecycle.ResolveTarget(tmpDB, target)
 		if err != nil {

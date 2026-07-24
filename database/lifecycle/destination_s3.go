@@ -30,6 +30,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 func init() {
@@ -105,7 +106,7 @@ func (d *s3Destination) UploadDir(ctx context.Context, localDir string) error {
 	// rather than done here to avoid pulling in a newer, less-established
 	// API right alongside this package's initial real-cloud test coverage.
 	uploader := manager.NewUploader(d.client) //nolint:staticcheck
-	for _, entry := range entries {
+	for _, entry := range orderEntriesManifestLast(entries) {
 		if !entry.Type().IsRegular() {
 			continue
 		}
@@ -156,7 +157,7 @@ func (d *s3Destination) DownloadDir(ctx context.Context, localDir string) error 
 			if d.prefix == "" {
 				fileName = *obj.Key
 			}
-			if fileName == "" || strings.Contains(fileName, "/") {
+			if !IsSafeCloudObjectFileName(fileName) {
 				continue
 			}
 			localPath := filepath.Join(localDir, fileName)
@@ -200,6 +201,7 @@ func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, err
 	}
 	paginator := s3.NewListObjectsV2Paginator(d.client, input)
 	var entries []SnapshotEntry
+	var problems []error
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
@@ -215,16 +217,30 @@ func (d *s3Destination) ListSnapshots(ctx context.Context) ([]SnapshotEntry, err
 			}
 			manifest, err := d.fetchManifest(ctx, snapshotID)
 			if err != nil {
-				// A sub-path without a valid manifest is a snapshot still
-				// being written, or one that failed partway through —
-				// skip it rather than failing the whole listing, same as
-				// the local lifecycle.ListSnapshots convention.
+				// A sub-path with no manifest.json object at all
+				// (ErrCloudSnapshotNotFound) is a snapshot still being
+				// written — skip it silently, same as the local
+				// lifecycle.ListSnapshots convention. Any other
+				// fetch/parse failure (corrupted manifest, checksum
+				// mismatch, a real storage error) is not that expected
+				// case and must not be swallowed the same way: it's
+				// accumulated and returned via errors.Join alongside
+				// whatever entries were found, so a caller can learn the
+				// catalog is missing something instead of it silently
+				// looking one snapshot smaller than it is.
+				if errors.Is(err, ErrCloudSnapshotNotFound) {
+					continue
+				}
+				problems = append(
+					problems,
+					fmt.Errorf("snapshot %q: %w", snapshotID, err),
+				)
 				continue
 			}
 			entries = append(entries, SnapshotEntry{ID: snapshotID, Manifest: manifest})
 		}
 	}
-	return entries, nil
+	return entries, errors.Join(problems...)
 }
 
 // fetchManifest downloads and parses just the manifest.json for
@@ -237,6 +253,14 @@ func (d *s3Destination) fetchManifest(ctx context.Context, snapshotID string) (M
 		Key:    &key,
 	})
 	if err != nil {
+		var noSuchKey *s3types.NoSuchKey
+		var notFound *s3types.NotFound
+		if errors.As(err, &noSuchKey) || errors.As(err, &notFound) {
+			return Manifest{}, fmt.Errorf(
+				"get s3://%s/%s: %w: %w",
+				d.bucket, key, ErrCloudSnapshotNotFound, err,
+			)
+		}
 		return Manifest{}, fmt.Errorf("get s3://%s/%s: %w", d.bucket, key, err)
 	}
 	defer out.Body.Close()

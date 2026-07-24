@@ -15,6 +15,7 @@
 package lifecycle_test
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,6 +55,48 @@ func TestListSnapshotsSkipsEntriesWithoutValidManifest(t *testing.T) {
 	entries, err := lifecycle.ListSnapshots(base)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
+	require.Equal(t, "snap-good", entries[0].ID)
+}
+
+// TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries guards
+// against a real bug (comment-41): the same blanket "continue" ListSnapshots
+// used for a snapshot still being written (no manifest.json yet — an
+// expected transient state, covered by
+// TestListSnapshotsSkipsEntriesWithoutValidManifest above) used to also
+// silently swallow a manifest.json that exists but is corrupted — a
+// checksum mismatch, here — with no way for a caller to ever learn about
+// it. ListSnapshots must still return every other, valid snapshot (one
+// broken directory must not hide the rest of the catalog), but it must
+// also report the corruption via its error return rather than pretending
+// the corrupted snapshot was simply never taken.
+func TestListSnapshotsSurfacesCorruptedManifestWithoutHidingGoodEntries(t *testing.T) {
+	base := t.TempDir()
+
+	good := testManifest()
+	good.CreatedAt = time.Unix(1700000100, 0).UTC()
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-good"), 0o755))
+	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-good"), good))
+
+	corrupted := testManifest()
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-corrupted"), 0o755))
+	require.NoError(t, lifecycle.WriteManifest(filepath.Join(base, "snap-corrupted"), corrupted))
+	// Tamper with the manifest after writing it so its checksum no longer
+	// matches — same class of on-disk corruption ErrManifestCorrupted
+	// exists to detect.
+	manifestPath := filepath.Join(base, "snap-corrupted", lifecycle.ManifestFileName)
+	data, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+	tampered := bytes.Replace(data, []byte(`"mainnet"`), []byte(`"testnet"`), 1)
+	require.NotEqual(t, data, tampered, "tamper must actually change the file")
+	require.NoError(t, os.WriteFile(manifestPath, tampered, 0o644))
+
+	// Still an expected in-progress snapshot: must remain silently skipped.
+	require.NoError(t, os.MkdirAll(filepath.Join(base, "snap-partial"), 0o755))
+
+	entries, err := lifecycle.ListSnapshots(base)
+	require.Error(t, err, "a corrupted manifest must be reported, not hidden")
+	require.ErrorIs(t, err, lifecycle.ErrManifestCorrupted)
+	require.Len(t, entries, 1, "the good snapshot must still be listed")
 	require.Equal(t, "snap-good", entries[0].ID)
 }
 

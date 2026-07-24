@@ -189,4 +189,12 @@ func TestDatabaseLifecycleTruncateRejectsBeyondMithrilBoundary(t *testing.T) {
 
 	_, err = lifecycle.Truncate(context.Background(), db, beforeBoundary, 0)
 	require.Error(t, err)
+	// Not just any error: specifically the Mithril-boundary rejection,
+	// wrapped in ErrTruncateNotStarted (nothing on disk was touched) --
+	// asserting only require.Error above would also pass if Truncate
+	// failed for a completely unrelated reason (e.g. a bug elsewhere that
+	// broke target resolution or the delete path), silently defeating the
+	// point of this test.
+	require.ErrorIs(t, err, lifecycle.ErrTruncateNotStarted)
+	require.ErrorContains(t, err, "before the Mithril trust boundary")
 }

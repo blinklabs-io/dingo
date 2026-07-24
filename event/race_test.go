@@ -6,8 +6,60 @@ import (
 	"testing"
 	"time"
 
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
+
+// TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe guards
+// against comment-28's original bug: unsubscribe only found the
+// subscriber to Close/wait on via e.subscribers, which holds exactly one
+// entry per subId -- so whichever of two concurrent calls for the same
+// subId ran first (here, a plain Unsubscribe) removed that entry, leaving
+// a second, concurrent UnsubscribeAndWait call for the identical subId
+// with nothing to find, and it returned immediately without ever calling
+// waitDone. This reproduces exactly that ordering (a completed plain
+// Unsubscribe for a subId whose handler is still in flight, immediately
+// followed by UnsubscribeAndWait for the same subId) and confirms
+// UnsubscribeAndWait still blocks until the handler actually finishes.
+func TestUnsubscribeAndWaitStillWaitsAfterConcurrentPlainUnsubscribe(t *testing.T) {
+	eb := NewEventBus(nil, nil)
+	typ := EventType("race.unsubscribe-and-wait")
+
+	handlerStarted := make(chan struct{})
+	proceed := make(chan struct{})
+	subId := eb.SubscribeFunc(typ, func(Event) {
+		close(handlerStarted)
+		<-proceed
+	})
+
+	eb.Publish(typ, NewEvent(typ, nil))
+	testutil.RequireReceive(
+		t, handlerStarted, time.Second, "handler must start",
+	)
+
+	// Plain Unsubscribe for this subId completes first (never waits), while
+	// the handler above is still blocked in-flight.
+	eb.Unsubscribe(typ, subId)
+
+	waitDone := make(chan struct{})
+	go func() {
+		eb.UnsubscribeAndWait(typ, subId)
+		close(waitDone)
+	}()
+
+	testutil.RequireNoReceive(
+		t, waitDone, 150*time.Millisecond,
+		"UnsubscribeAndWait must still block on the in-flight handler even "+
+			"though a concurrent plain Unsubscribe for the same subId "+
+			"already ran",
+	)
+
+	close(proceed)
+	testutil.RequireReceive(
+		t, waitDone, time.Second,
+		"UnsubscribeAndWait must return once the handler finishes",
+	)
+}
 
 // TestPublishUnsubscribeRace attempts to reproduce the race between Publish
 // and Unsubscribe/Stop where a send on a channel could hit a concurrently

@@ -86,9 +86,13 @@ func (d *MetadataStoreSqlite) RestoreFrom(ctx context.Context, srcPath string) e
 	return nil
 }
 
-// copyFile copies srcPath to dstPath, fsyncing the destination before
-// close so the restored file is durable on disk before the caller
-// proceeds to open it.
+// copyFile copies srcPath to dstPath, fsyncing the destination file (and
+// then its parent directory) before returning, so both the restored
+// file's content and its directory entry are durable on disk before the
+// caller proceeds to open it. A file's own fsync does not guarantee its
+// directory entry is persisted -- a power loss right after could leave
+// the synced file unreachable (or absent) after a crash without that
+// second, directory-level fsync.
 func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -107,13 +111,56 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	if err != nil {
 		return fmt.Errorf("create destination %q: %w", dstPath, err)
 	}
-	defer dst.Close()
+	dstClosed := false
+	defer func() {
+		if !dstClosed {
+			_ = dst.Close()
+		}
+	}()
 
-	if _, err := io.Copy(dst, src); err != nil {
+	// Wrapping src (not dst) is enough: io.Copy drives the loop by
+	// repeatedly calling Read on this reader, so wrapping it checks ctx on
+	// the same cadence as if io.Copy itself were ctx-aware -- cancellation
+	// during a large metadata restore takes effect within a chunk or two
+	// rather than only once the whole file has already been copied.
+	if _, err := io.Copy(dst, &contextReader{ctx: ctx, r: src}); err != nil {
 		return fmt.Errorf("copy %q to %q: %w", srcPath, dstPath, err)
 	}
 	if err := dst.Sync(); err != nil {
 		return fmt.Errorf("sync %q: %w", dstPath, err)
 	}
+	dstClosed = true
+	if err := dst.Close(); err != nil {
+		return fmt.Errorf("close %q: %w", dstPath, err)
+	}
+
+	// A file's own fsync does not guarantee its directory entry is
+	// persisted -- a power loss right after could leave the synced file
+	// unreachable (or absent) after a crash without also syncing the
+	// parent directory.
+	dstDir := filepath.Dir(dstPath)
+	dir, err := os.Open(dstDir)
+	if err != nil {
+		return fmt.Errorf("open %q for directory sync: %w", dstDir, err)
+	}
+	defer dir.Close()
+	if err := dir.Sync(); err != nil {
+		return fmt.Errorf("sync directory %q: %w", dstDir, err)
+	}
 	return nil
+}
+
+// contextReader wraps an io.Reader, checking ctx before each Read so a
+// long-running copy can be cancelled mid-transfer instead of only before
+// or after the whole thing runs.
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (cr *contextReader) Read(p []byte) (int, error) {
+	if err := cr.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return cr.r.Read(p)
 }

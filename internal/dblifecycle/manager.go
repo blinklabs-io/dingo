@@ -119,38 +119,60 @@ func (m *Manager) Start(ctx context.Context) error {
 	m.cancel = cancel
 	m.running = true
 
-	var evtCh <-chan event.Event
-	m.subscriptionId, evtCh = m.eventBus.Subscribe(
+	// SubscribeFunc (not the raw channel Subscribe) so a panic anywhere in
+	// handleEpochTransition's snapshot path — a multi-gigabyte badger
+	// Backup/sqlite VACUUM INTO, cloud upload, or manifest write — is
+	// caught by EventBus's own safeHandlerCall recover() and logged,
+	// instead of propagating out of a hand-rolled loop's goroutine and
+	// crashing the whole node.
+	m.subscriptionId = m.eventBus.SubscribeFunc(
 		event.EpochTransitionEventType,
+		func(evt event.Event) {
+			m.handleEpochTransitionEvent(childCtx, evt)
+		},
 	)
-	if evtCh == nil {
+	if m.subscriptionId == 0 {
 		m.logger.Warn(
 			"event bus not available, automatic database snapshots disabled",
 			"component", "dblifecycle",
 		)
 		m.running = false
+		cancel()
 		m.cancel = nil
 		return nil
 	}
 
+	// SubscribeFunc's dispatch goroutine (owned by EventBus, invisible to
+	// this package) only reacts to Unsubscribe, never to childCtx being
+	// cancelled directly — unlike the old hand-rolled loop, which noticed
+	// ctx.Done() itself. This goroutine preserves Start's existing
+	// contract that cancelling the context passed to Start, without a
+	// separate call to Stop, still cleans up (resets running/cancel and
+	// unsubscribes) instead of leaving a stale subscription in place.
+	// Guarded by "not stopping" the same way the old loop's wrapper was,
+	// so a normal Stop() (which cancels childCtx itself) leaves this
+	// cleanup to Stop() instead of racing it.
 	m.loopWg.Go(func() {
-		m.epochTransitionLoop(childCtx, evtCh)
+		<-childCtx.Done()
 		m.mu.Lock()
-		if !m.stopping {
-			m.running = false
-			if m.cancel != nil {
-				m.cancel()
-				m.cancel = nil
-			}
-			if m.subscriptionId != 0 {
-				m.eventBus.Unsubscribe(
-					event.EpochTransitionEventType,
-					m.subscriptionId,
-				)
-				m.subscriptionId = 0
-			}
+		if m.stopping {
+			m.mu.Unlock()
+			return
 		}
+		m.running = false
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
+		subId := m.subscriptionId
+		m.subscriptionId = 0
 		m.mu.Unlock()
+		if subId != 0 {
+			m.eventBus.UnsubscribeAndWait(
+				event.EpochTransitionEventType,
+				subId,
+			)
+		}
 	})
 
 	m.logger.Info(
@@ -173,15 +195,22 @@ func (m *Manager) Stop() error {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	if m.subscriptionId != 0 {
-		m.eventBus.Unsubscribe(
-			event.EpochTransitionEventType,
-			m.subscriptionId,
-		)
-		m.subscriptionId = 0
-	}
+	subId := m.subscriptionId
+	m.subscriptionId = 0
 	m.running = false
 	m.mu.Unlock()
+
+	if subId != 0 {
+		// UnsubscribeAndWait, not Unsubscribe: blocks until SubscribeFunc's
+		// dispatch goroutine has fully exited (including finishing any
+		// handleEpochTransitionEvent call already in flight), so Stop
+		// doesn't return while a snapshot it just asked to stop is still
+		// running.
+		m.eventBus.UnsubscribeAndWait(
+			event.EpochTransitionEventType,
+			subId,
+		)
+	}
 
 	m.loopWg.Wait()
 
@@ -197,38 +226,30 @@ func (m *Manager) Stop() error {
 	return nil
 }
 
-func (m *Manager) epochTransitionLoop(
+// handleEpochTransitionEvent is the SubscribeFunc handler for
+// event.EpochTransitionEventType: it validates evt's payload type, then
+// hands off to handleEpochTransition. Called synchronously from
+// EventBus's own dispatch goroutine (see Start's SubscribeFunc call),
+// under that goroutine's safeHandlerCall panic recovery.
+func (m *Manager) handleEpochTransitionEvent(
 	ctx context.Context,
-	evtCh <-chan event.Event,
+	evt event.Event,
 ) {
-	for {
-		var evt event.Event
-		var ok bool
-		select {
-		case <-ctx.Done():
-			return
-		case evt, ok = <-evtCh:
-			if !ok {
-				return
-			}
-		}
-
-		epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
-		if !ok {
-			m.logger.Error(
-				"invalid event data for epoch transition",
-				"component", "dblifecycle",
-			)
-			continue
-		}
-		if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
-			m.logger.Error(
-				"automatic database snapshot failed",
-				"component", "dblifecycle",
-				"epoch", epochEvent.NewEpoch,
-				"error", err,
-			)
-		}
+	epochEvent, ok := evt.Data.(event.EpochTransitionEvent)
+	if !ok {
+		m.logger.Error(
+			"invalid event data for epoch transition",
+			"component", "dblifecycle",
+		)
+		return
+	}
+	if err := m.handleEpochTransition(ctx, epochEvent); err != nil {
+		m.logger.Error(
+			"automatic database snapshot failed",
+			"component", "dblifecycle",
+			"epoch", epochEvent.NewEpoch,
+			"error", err,
+		)
 	}
 }
 
@@ -248,6 +269,25 @@ func (m *Manager) handleEpochTransition(
 		m.cfg.SnapshotDir,
 		fmt.Sprintf("%s%d", epochSnapshotDirPrefix, evt.NewEpoch),
 	)
+	// Checked before attempting anything, not after a failure: SnapshotToCloud
+	// writes destDir locally first and only then uploads to the cloud
+	// destination, so a failure partway through (e.g. the local write
+	// succeeding but the cloud upload failing) also leaves destDir
+	// existing. Checking only after an error, as this used to, couldn't
+	// tell that case apart from "this epoch's snapshot already exists
+	// from an earlier successful run" (e.g. a redelivered epoch-
+	// transition event) — it silently treated a genuine, undetected
+	// cloud-upload failure as routine idempotency. Checking first means
+	// any error from here on is always a real failure to report.
+	if _, statErr := os.Stat(destDir); statErr == nil {
+		m.logger.Debug(
+			"automatic snapshot for epoch already exists, skipping",
+			"component", "dblifecycle",
+			"epoch", evt.NewEpoch,
+			"dir", destDir,
+		)
+		return nil
+	}
 	_, err := lifecycle.SnapshotToCloud(
 		ctx,
 		m.db,
@@ -257,15 +297,6 @@ func (m *Manager) handleEpochTransition(
 		m.cfg.SnapshotCloudDestination,
 	)
 	if err != nil {
-		if _, statErr := os.Stat(destDir); statErr == nil {
-			m.logger.Debug(
-				"automatic snapshot for epoch already exists, skipping",
-				"component", "dblifecycle",
-				"epoch", evt.NewEpoch,
-				"dir", destDir,
-			)
-			return nil
-		}
 		return fmt.Errorf("capture epoch-boundary snapshot: %w", err)
 	}
 
@@ -277,16 +308,21 @@ func (m *Manager) handleEpochTransition(
 	)
 
 	if m.cfg.SnapshotRetention > 0 {
-		m.pruneOldSnapshots()
+		m.pruneOldSnapshots(ctx)
 	}
 	return nil
 }
 
 // pruneOldSnapshots removes automatic snapshot directories beyond the
-// configured retention count, oldest epoch first. Failures are logged,
-// not returned: pruning is best-effort and must never fail an otherwise
+// configured retention count, oldest epoch first, along with each pruned
+// epoch's mirrored cloud copy (if SnapshotCloudDestination is
+// configured) — without this, retention only bounds local disk usage
+// while every mirrored snapshot accumulates in object storage forever,
+// since nothing else ever deletes a cloud mirror once
+// SnapshotToCloud/UploadDir has written it. Failures are logged, not
+// returned: pruning is best-effort and must never fail an otherwise
 // successful snapshot.
-func (m *Manager) pruneOldSnapshots() {
+func (m *Manager) pruneOldSnapshots(ctx context.Context) {
 	entries, err := os.ReadDir(m.cfg.SnapshotDir)
 	if err != nil {
 		m.logger.Warn(
@@ -320,10 +356,8 @@ func (m *Manager) pruneOldSnapshots() {
 
 	toRemove := epochs[:len(epochs)-m.cfg.SnapshotRetention]
 	for _, epoch := range toRemove {
-		dir := filepath.Join(
-			m.cfg.SnapshotDir,
-			fmt.Sprintf("%s%d", epochSnapshotDirPrefix, epoch),
-		)
+		epochName := fmt.Sprintf("%s%d", epochSnapshotDirPrefix, epoch)
+		dir := filepath.Join(m.cfg.SnapshotDir, epochName)
 		if err := os.RemoveAll(dir); err != nil {
 			m.logger.Warn(
 				"failed to prune old automatic snapshot",
@@ -338,5 +372,30 @@ func (m *Manager) pruneOldSnapshots() {
 			"component", "dblifecycle",
 			"dir", dir,
 		)
+
+		if m.cfg.SnapshotCloudDestination == "" {
+			continue
+		}
+		// Best-effort, like the local removal above: logged, not
+		// propagated, since a cloud-delete failure must never be
+		// reported as a snapshot failure or retried by this same code
+		// path (the local copy is already gone either way).
+		cloudURI := lifecycle.JoinCloudURI(m.cfg.SnapshotCloudDestination, epochName)
+		ok, err := lifecycle.DeleteCloudSnapshot(ctx, cloudURI)
+		switch {
+		case err != nil:
+			m.logger.Warn(
+				"failed to prune old automatic snapshot's cloud mirror",
+				"component", "dblifecycle",
+				"cloud_uri", cloudURI,
+				"error", err,
+			)
+		case ok:
+			m.logger.Info(
+				"pruned old automatic database snapshot's cloud mirror",
+				"component", "dblifecycle",
+				"cloud_uri", cloudURI,
+			)
+		}
 	}
 }
