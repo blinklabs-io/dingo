@@ -87,20 +87,18 @@ func TestBackupToExistingDestinationErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestContextReaderStopsOnCancellation guards against comment-25's
-// original gap: copyFile's io.Copy used to only check ctx once, before
-// opening the source/destination files, so a cancellation landing after
-// the copy actually started sat unnoticed until the whole file finished
-// copying and syncing -- a real delay for a large metadata restore an
-// operator just asked to cancel. copyFile now wraps its source reader in
-// contextReader, which io.Copy calls Read on repeatedly as it streams the
-// file through in chunks; this tests that wrapper's actual contract
-// directly and deterministically: a Read succeeds normally before
-// cancellation, and every Read after ctx is cancelled returns ctx.Err()
-// instead of delegating to the wrapped reader, regardless of how much
-// data is left unread -- exactly what makes cancellation take effect
-// within a chunk or two of a real copyFile call, rather than only once
-// the whole transfer already finished.
+// TestContextReaderStopsOnCancellation verifies contextReader's actual
+// contract directly and deterministically: a Read succeeds normally
+// before cancellation, and every Read after ctx is cancelled returns
+// ctx.Err() instead of delegating to the wrapped reader, regardless of
+// how much data is left unread. copyFile wraps its source reader in
+// contextReader specifically so io.Copy -- which calls Read on it
+// repeatedly as it streams the file through in chunks -- notices
+// cancellation within a chunk or two of a real copy call, rather than
+// only once the whole transfer already finished (checking ctx just once,
+// before opening the files, would leave a cancellation landing mid-copy
+// unnoticed until the whole file finished copying and syncing -- a real
+// delay for a large metadata restore an operator just asked to cancel).
 func TestContextReaderStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cr := &contextReader{ctx: ctx, r: bytes.NewReader(bytes.Repeat([]byte("y"), 1024))}
@@ -115,17 +113,16 @@ func TestContextReaderStopsOnCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
-// TestCopyFileSyncsDestinationDirectory guards against comment-33's
-// original gap: copyFile only fsynced the destination file itself, not
-// its parent directory -- on POSIX filesystems a file's own fsync does
-// not guarantee its directory entry is durable, so a crash right after a
-// "successful" restore could leave the synced metadata.sqlite file
-// unreachable (or the directory entry simply absent) even though the
-// file's own bytes were flushed. Actually observing that durability gap
-// would require simulating a crash, which isn't practical in a unit
-// test; what this does verify is that the added directory-open-and-sync
-// step is reached and completes without error on every successful copy,
-// rather than being unreachable or silently skipped.
+// TestCopyFileSyncsDestinationDirectory verifies copyFile's
+// directory-sync step is actually reached and completes without error on
+// every successful copy, rather than being unreachable or silently
+// skipped: a file's own fsync does not guarantee its directory entry is
+// durable on POSIX filesystems, so without also syncing the destination's
+// parent directory, a crash right after a "successful" restore could
+// leave the synced metadata.sqlite file unreachable (or the directory
+// entry simply absent) even though the file's own bytes were flushed.
+// Actually observing that durability gap would require simulating a
+// crash, which isn't practical in a unit test.
 func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
 	srcPath := filepath.Join(t.TempDir(), "src.bin")
 	require.NoError(t, os.WriteFile(srcPath, []byte("hello"), 0o644))
@@ -140,20 +137,18 @@ func TestCopyFileSyncsDestinationDirectory(t *testing.T) {
 	require.Equal(t, []byte("hello"), data)
 }
 
-// TestCreateDirDurableCreatesNestedDirectories guards against comment-53's
-// original gap: RestoreFrom used to create its data directory via a plain
-// os.MkdirAll, whose own newly-created directory entries (not just the
-// files placed inside afterward) are not durable until their parent is
-// also fsynced -- a crash right after a "successful" restore into a
-// brand-new nested directory could leave that directory (and everything
-// restored into it) unreachable or entirely absent, even though
-// copyFile's own directory sync already made metadata.sqlite durable
-// within it. Actually observing that durability gap needs a simulated
-// crash, impractical in a unit test (see TestCopyFileSyncsDestinationDirectory's
-// identical caveat); what this verifies is that createDirDurable actually
-// creates every missing nested component, matching os.MkdirAll's own
-// behavior, so the added parent-sync walk runs over the right set of
-// directories rather than silently no-op'ing.
+// TestCreateDirDurableCreatesNestedDirectories verifies createDirDurable
+// actually creates every missing nested component, matching plain
+// os.MkdirAll's own behavior, so its parent-sync walk runs over the
+// right set of directories rather than silently no-op'ing. A newly
+// created directory's own entry in its parent is not durable until that
+// parent is fsynced -- a crash right after a "successful" restore into a
+// brand-new nested directory could otherwise leave that directory (and
+// everything restored into it) unreachable or entirely absent, even
+// though copyFile's own directory sync already made metadata.sqlite
+// durable within it. Actually observing that durability gap needs a
+// simulated crash, impractical in a unit test (see
+// TestCopyFileSyncsDestinationDirectory's identical caveat).
 func TestCreateDirDurableCreatesNestedDirectories(t *testing.T) {
 	base := t.TempDir()
 	nested := filepath.Join(base, "a", "b", "c")
@@ -177,7 +172,8 @@ func TestCreateDirDurableIsIdempotentOnExistingDirectory(t *testing.T) {
 // TestRestoreFromCreatesNestedTargetDirectory verifies the actual
 // RestoreFrom path (not just createDirDurable in isolation) succeeds when
 // its data directory requires creating more than one new nested
-// component -- the scenario comment-53 is about.
+// component, rather than a plain os.MkdirAll that leaves those newly
+// created directory entries' own durability unaddressed.
 func TestRestoreFromCreatesNestedTargetDirectory(t *testing.T) {
 	srcDir := t.TempDir()
 	src, err := New(srcDir, nil, nil)

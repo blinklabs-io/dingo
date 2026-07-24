@@ -23,6 +23,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+
+	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
 // BackupTo writes a standalone, defragmented copy of the store's current
@@ -119,7 +121,7 @@ func createDirDurable(dir string) error {
 	// Shallowest first: each level's own directory entry should be
 	// durable before its child's existence under it is relied upon.
 	for _, dir := range slices.Backward(created) {
-		if err := syncDir(filepath.Dir(dir)); err != nil {
+		if err := fsyncdir.Sync(filepath.Dir(dir)); err != nil {
 			return err
 		}
 	}
@@ -178,7 +180,7 @@ func copyFile(ctx context.Context, srcPath, dstPath string) error {
 	// persisted -- a power loss right after could leave the synced file
 	// unreachable (or absent) after a crash without also syncing the
 	// parent directory.
-	return syncDir(filepath.Dir(dstPath))
+	return fsyncdir.Sync(filepath.Dir(dstPath))
 }
 
 // contextReader wraps an io.Reader, checking ctx before each Read so a

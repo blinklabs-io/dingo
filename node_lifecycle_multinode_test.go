@@ -390,7 +390,11 @@ func TestLiveRestoreUnderRealForgingAndNetworking(t *testing.T) {
 
 	_, err = syncer.Restore(context.Background(), snapshotDir)
 	require.NoError(t, err)
-	require.Equal(t, manifest.TipSlot, tipBeforeRestore.Point.Slot)
+	// Forging and ingestion remain live while Snapshot runs, so the node can
+	// advance after the snapshot captures its manifest tip and before the
+	// later GetTip above. The snapshot must not be ahead of that observed
+	// live tip; equality is not guaranteed by this concurrent test.
+	require.LessOrEqual(t, manifest.TipSlot, tipBeforeRestore.Point.Slot)
 
 	waitForTipSlotAtLeast(t, syncer, tipBeforeRestore.Point.Slot+5)
 }

@@ -46,14 +46,14 @@ func TestPauseCommitsBlocksNewReadWriteTxns(t *testing.T) {
 	db := openTestDB(t)
 
 	resume := db.PauseCommits()
-	// resume is db.commitBarrier.Unlock directly, which panics if called
-	// twice -- this test also calls it explicitly below (to observe the
-	// paused-vs-resumed transition partway through, unlike
-	// TestPauseCommitsAllowsConcurrentReads' single deferred call), so
-	// sync.Once makes the two calls safe together: if an assertion above
-	// the explicit call fails and this defer becomes the only call to
-	// actually run, the barrier is still released instead of leaking
-	// commit-paused for the rest of the test binary.
+	// resume calls commitBarrier.Unlock with this acquisition's token,
+	// which panics if called twice -- this test also calls it explicitly
+	// below (to observe the paused-vs-resumed transition partway through,
+	// unlike TestPauseCommitsAllowsConcurrentReads' single deferred
+	// call), so sync.Once makes the two calls safe together: if an
+	// assertion above the explicit call fails and this defer becomes the
+	// only call to actually run, the barrier is still released instead of
+	// leaking commit-paused for the rest of the test binary.
 	var resumeOnce sync.Once
 	safeResume := func() { resumeOnce.Do(resume) }
 	defer safeResume()
@@ -297,6 +297,58 @@ func TestPauseCommitsContextSucceedsWhenUncontended(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resume)
 	resume()
+}
+
+// TestUnlockPanicsOnDoubleUnlock verifies that calling a resume func a
+// second time panics instead of silently succeeding as a no-op, matching
+// the one-shot contract PauseCommits/PauseCommitsContext document.
+func TestUnlockPanicsOnDoubleUnlock(t *testing.T) {
+	db := openTestDB(t)
+	resume := db.PauseCommits()
+	resume()
+	require.Panics(t, resume, "calling resume a second time must panic, "+
+		"not silently succeed as a no-op")
+}
+
+// TestUnlockRejectsStaleTokenAfterLaterAcquisition guards against
+// comment-66's original bug: Unlock unconditionally cleared the
+// barrier's held state regardless of which acquisition it was called
+// for, so a duplicate/stale resume call -- one whose own Lock/
+// LockContext call already released -- would silently release whatever
+// DIFFERENT, unrelated PauseCommits acquisition happens to be current by
+// the time the stale call runs, reopening that later holder's critical
+// section to new read-write Txns before its own resume was ever called.
+func TestUnlockRejectsStaleTokenAfterLaterAcquisition(t *testing.T) {
+	db := openTestDB(t)
+
+	resume1 := db.PauseCommits()
+	resume1()
+
+	resume2 := db.PauseCommits()
+	var resume2Once sync.Once
+	safeResume2 := func() { resume2Once.Do(resume2) }
+	defer safeResume2()
+
+	require.Panics(t, resume1, "a stale resume call must be rejected, not "+
+		"silently release a later, unrelated holder's lock")
+
+	done := make(chan *Txn, 1)
+	go func() {
+		done <- db.Transaction(true)
+	}()
+	testutil.RequireNoReceive(
+		t, done, 150*time.Millisecond,
+		"the later holder's lock must still be held after a stale "+
+			"duplicate Unlock call was rejected",
+	)
+
+	safeResume2()
+	txn := testutil.RequireReceive(
+		t, done, time.Second,
+		"a new read-write Txn must open once the later holder's own "+
+			"resume is called",
+	)
+	require.NoError(t, txn.Rollback())
 }
 
 // TestPauseCommitsAllowsConcurrentReads verifies PauseCommits only blocks

@@ -29,6 +29,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/blinklabs-io/dingo/internal/fsyncdir"
 )
 
 // ManifestFormatVersion is the current on-disk schema version of Manifest.
@@ -248,7 +250,7 @@ func WriteManifest(dir string, m Manifest) error {
 	// A file's own fsync does not guarantee its directory entry is
 	// persisted; sync dir itself so the rename above is durable too, not
 	// just atomic.
-	return syncDir(dir)
+	return fsyncdir.Sync(dir)
 }
 
 // ReadManifest reads and validates the manifest at dir/ManifestFileName,

@@ -125,6 +125,11 @@ func Snapshot(
 	if err != nil {
 		return Manifest{}, fmt.Errorf("create %q: %w", blobPath, err)
 	}
+	// Close before the failure-cleanup defer removes dir. This matters when
+	// an error occurs before the backup goroutine takes ownership below
+	// (for example, a pre-cancelled context rejected by PauseCommitsContext):
+	// Unix permits unlinking the still-open blob file, but Windows does not.
+	defer blobFile.Close() //nolint:errcheck // the backup path records its close error below
 
 	// Everything read or backed up between PauseCommits and resume()
 	// describes the same set of committed writes: no new commit can land

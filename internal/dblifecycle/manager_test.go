@@ -599,10 +599,23 @@ func TestManagerStopWaitsForInFlightHandlerAfterExternalContextCancellation(t *t
 		SnapshotCloudDestination: "faketestblocking://bucket/prefix",
 	}, nil)
 	require.NoError(t, m.Start(ctx))
+	// Registered immediately after Start succeeds (before any assertion
+	// that could fail): if this test fails before reaching the explicit
+	// cancel()/Stop() below, this still tears the manager down instead of
+	// leaving its watcher goroutine (and the blocked snapshot handler)
+	// running past the test. Redundant with, and safe alongside, the
+	// explicit calls further down and the standalone releaseDest defer
+	// above -- cancel/Stop are idempotent and releaseDest is
+	// sync.Once-guarded.
+	defer func() {
+		cancel()
+		releaseDest()
+		_ = m.Stop()
+	}()
 
 	publishEpochTransition(eb, 3)
 	testutil.RequireReceive(
-		t, dest.started, time.Second,
+		t, dest.started, 5*time.Second,
 		"the snapshot handler must have entered UploadDir",
 	)
 
