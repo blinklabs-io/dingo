@@ -80,7 +80,7 @@ Thank you for trying!
 * 強化しました mempool validation で、validation と revalidation の間に pool lock を解放します。
 * 修復しました mempool shutdown 後に node が新しい work を拒否し、stopped state を返します。
 * 整合しました ledger rewind loop に hold at tip guard とより明確な warning output を追加します。
-* 終了しました reward stake input mismatch を startup 時とメモリ内で live stake data を deduplicate して防ぎます。
+* 防止しました startup 時とメモリ内で live stake data を deduplicate し、reward stake input mismatch の発生を防ぎます。
 * 有効化しました Mithril primary ledger drain が sparse index に沿って iteration を安定して続けられるようにします。
 * 返しました rollback sentinel で blockfetch batch を閉じ、無効な block の streaming を防ぎます。
 * 更新しました CBOR wrapped stake snapshot query に対応し、wrapped request では delegation state も返します。
