@@ -22,6 +22,7 @@ import (
 	"time"
 
 	ouroboros "github.com/blinklabs-io/gouroboros"
+	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	olsq "github.com/blinklabs-io/gouroboros/protocol/localstatequery"
 )
 
@@ -107,4 +108,59 @@ func RewardAccountsByNtcForCreds(
 		}
 	}
 	return out, nil
+}
+
+// QueryStakeAddressInfoByNtc runs the same LocalStateQuery sequence used by
+// cardano-cli query stake-address-info. The credential need not be registered;
+// empty maps are valid and still exercise every request/response wire shape.
+func QueryStakeAddressInfoByNtc(
+	addr string,
+	magic uint32,
+	cred olsq.StakeCredential,
+) error {
+	conn, err := ouroboros.New(
+		ouroboros.WithNetworkMagic(magic),
+		ouroboros.WithNodeToNode(false),
+	)
+	if err != nil {
+		return fmt.Errorf("ouroboros.New: %w", err)
+	}
+	defer conn.Close() //nolint:errcheck
+
+	if err := conn.DialTimeout("tcp", addr, 10*time.Second); err != nil {
+		return fmt.Errorf("dial tcp %s: %w", addr, err)
+	}
+	lsq := conn.LocalStateQuery()
+	if lsq == nil || lsq.Client == nil {
+		return fmt.Errorf("LocalStateQuery client unavailable on %s", addr)
+	}
+	client := lsq.Client
+	if err := client.AcquireVolatileTip(); err != nil {
+		return fmt.Errorf("acquire tip on %s: %w", addr, err)
+	}
+	defer client.Release() //nolint:errcheck
+
+	if _, err := client.GetFilteredDelegationsAndRewardAccounts(
+		[]olsq.StakeCredential{cred},
+	); err != nil {
+		return fmt.Errorf("delegations and rewards on %s: %w", addr, err)
+	}
+	if _, err := client.GetStakeDelegDeposits(
+		[]olsq.StakeCredential{cred},
+	); err != nil {
+		return fmt.Errorf("stake delegation deposits on %s: %w", addr, err)
+	}
+	commonCred := lcommon.Credential{
+		CredType:   uint(cred.Tag),
+		Credential: cred.Bytes,
+	}
+	if _, err := client.GetFilteredVoteDelegatees(
+		[]lcommon.Credential{commonCred},
+	); err != nil {
+		return fmt.Errorf("vote delegatees on %s: %w", addr, err)
+	}
+	if _, err := client.GetProposals(); err != nil {
+		return fmt.Errorf("governance proposals on %s: %w", addr, err)
+	}
+	return nil
 }

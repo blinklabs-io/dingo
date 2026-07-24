@@ -443,6 +443,8 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyFilteredDelegationAndRewardAccounts(
 			q.Creds.Items(),
 		)
+	case *olocalstatequery.ShelleyStakeDelegDepositsQuery:
+		return ls.queryShelleyStakeDelegDeposits(q.Creds.Items())
 	case *olocalstatequery.ShelleyGetLedgerPeerSnapshotQuery:
 		return ls.queryLedgerPeerSnapshot(q.PeerKind)
 	case *olocalstatequery.ShelleyStakePoolsQuery:
@@ -453,6 +455,10 @@ func (ls *LedgerState) queryShelleyLeaf(query any) (any, error) {
 		return ls.queryShelleyAccountState()
 	case *olocalstatequery.ShelleyStakeSnapshotsQuery:
 		return ls.queryShelleyStakeSnapshots(q)
+	case *olocalstatequery.ShelleyFilteredVoteDelegateesQuery:
+		return ls.queryShelleyFilteredVoteDelegatees(q.Credentials.Items())
+	case *olocalstatequery.ShelleyGetProposalsQuery:
+		return ls.queryShelleyGetProposals(q.ActionIds.Items())
 	// TODO (#394)
 	/*
 		case *olocalstatequery.ShelleyLedgerTipQuery:
@@ -988,6 +994,204 @@ func (ls *LedgerState) queryShelleyFilteredDelegationAndRewardAccounts(
 		}
 	}
 	return []any{[]any{delegations, rewards}}, nil
+}
+
+// queryShelleyStakeDelegDeposits answers GetStakeDelegDeposits with the
+// registration deposit currently locked by each requested active stake
+// credential. The latest registration event carries the historical deposit
+// actually paid, which may differ from the current protocol parameter.
+func (ls *LedgerState) queryShelleyStakeDelegDeposits(
+	creds []olocalstatequery.StakeCredential,
+) (any, error) {
+	ret := make(olocalstatequery.StakeDelegDepositsResult)
+	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint64(cred.Tag)
+		if err != nil {
+			return nil, err
+		}
+		history, err := ls.db.GetAccountRegistrationHistoryByCredential(
+			credentialTag,
+			cred.Bytes[:],
+			1,
+			0,
+			"desc",
+			nil,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if len(history) == 0 || history[0].Action != "registered" {
+			continue
+		}
+		ret[cred] = history[0].Deposit
+	}
+	return []any{ret}, nil
+}
+
+// queryShelleyFilteredVoteDelegatees returns the current DRep delegation for
+// each requested active stake credential. Credentials without a vote
+// delegation are omitted.
+func (ls *LedgerState) queryShelleyFilteredVoteDelegatees(
+	creds []lcommon.Credential,
+) (any, error) {
+	ret := make(olocalstatequery.FilteredVoteDelegateesResult)
+	for _, cred := range creds {
+		credentialTag, err := models.CredentialTagFromUint(cred.CredType)
+		if err != nil {
+			return nil, err
+		}
+		account, err := ls.db.GetAccountByCredential(
+			credentialTag,
+			cred.Credential[:],
+			false,
+			nil,
+		)
+		if err != nil {
+			if errors.Is(err, models.ErrAccountNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if account == nil ||
+			(len(account.Drep) == 0 &&
+				account.DrepType == models.DrepTypeAddrKeyHash) {
+			continue
+		}
+		var drepType int
+		switch account.DrepType {
+		case models.DrepTypeAddrKeyHash:
+			drepType = lcommon.DrepTypeAddrKeyHash
+		case models.DrepTypeScriptHash:
+			drepType = lcommon.DrepTypeScriptHash
+		case models.DrepTypeAlwaysAbstain:
+			drepType = lcommon.DrepTypeAbstain
+		case models.DrepTypeAlwaysNoConfidence:
+			drepType = lcommon.DrepTypeNoConfidence
+		default:
+			return nil, fmt.Errorf(
+				"unsupported DRep delegation type: %d",
+				account.DrepType,
+			)
+		}
+		key := olocalstatequery.StakeCredential{
+			Tag:   uint64(credentialTag),
+			Bytes: ledger.NewBlake2b224(cred.Credential[:]),
+		}
+		ret[key] = lcommon.Drep{
+			Type:       drepType,
+			Credential: slices.Clone(account.Drep),
+		}
+	}
+	return []any{ret}, nil
+}
+
+// queryShelleyGetProposals returns the active Conway governance proposals,
+// optionally filtered by action ID.
+func (ls *LedgerState) queryShelleyGetProposals(
+	actionIds []lcommon.GovActionId,
+) (any, error) {
+	epoch := ls.loadConsensusSnapshot().currentEpoch.EpochId
+	proposals, err := ls.db.GetActiveGovernanceProposals(epoch, nil)
+	if err != nil {
+		return nil, err
+	}
+	filter := make(map[lcommon.GovActionId]struct{}, len(actionIds))
+	for _, id := range actionIds {
+		filter[id] = struct{}{}
+	}
+	ret := make(olocalstatequery.ProposalsResult, 0, len(proposals))
+	for _, proposal := range proposals {
+		if proposal == nil {
+			continue
+		}
+		id, err := lcommon.NewGovActionId(
+			proposal.TxHash,
+			proposal.ActionIndex,
+		)
+		if err != nil {
+			return nil, err
+		}
+		if len(filter) > 0 {
+			if _, ok := filter[id]; !ok {
+				continue
+			}
+		}
+		state, err := ls.governanceProposalState(proposal, id)
+		if err != nil {
+			return nil, err
+		}
+		ret = append(ret, state)
+	}
+	return []any{ret}, nil
+}
+
+func (ls *LedgerState) governanceProposalState(
+	proposal *models.GovernanceProposal,
+	id lcommon.GovActionId,
+) (olocalstatequery.GovActionState, error) {
+	rewardAccount, err := lcommon.NewAddressFromBytes(proposal.ReturnAddress)
+	if err != nil {
+		return olocalstatequery.GovActionState{}, fmt.Errorf(
+			"decode governance proposal return address: %w",
+			err,
+		)
+	}
+	anchor := lcommon.GovAnchor{Url: proposal.AnchorURL}
+	copy(anchor.DataHash[:], proposal.AnchorHash)
+	procedure, err := cbor.Encode([]any{
+		proposal.Deposit,
+		rewardAccount,
+		cbor.RawMessage(proposal.GovActionCbor),
+		anchor,
+	})
+	if err != nil {
+		return olocalstatequery.GovActionState{}, fmt.Errorf(
+			"encode governance proposal procedure: %w",
+			err,
+		)
+	}
+	state := olocalstatequery.GovActionState{
+		Id:                id,
+		CommitteeVotes:    make(map[olocalstatequery.StakeCredential]lcommon.Vote),
+		DRepVotes:         make(map[olocalstatequery.StakeCredential]lcommon.Vote),
+		SPOVotes:          make(map[ledger.Blake2b224]lcommon.Vote),
+		ProposalProcedure: cbor.RawMessage(procedure),
+		ProposedIn:        proposal.ProposedEpoch,
+		ExpiresAfter:      proposal.ExpiresEpoch,
+	}
+	votes, err := ls.db.GetGovernanceVotes(proposal.ID, nil)
+	if err != nil {
+		return olocalstatequery.GovActionState{}, err
+	}
+	for _, vote := range votes {
+		if vote == nil {
+			continue
+		}
+		choice := lcommon.Vote(vote.Vote)
+		switch vote.VoterType {
+		case models.VoterTypeCC:
+			state.CommitteeVotes[stakeCredentialFromVote(vote)] = choice
+		case models.VoterTypeDRep:
+			state.DRepVotes[stakeCredentialFromVote(vote)] = choice
+		case models.VoterTypeSPO:
+			state.SPOVotes[ledger.NewBlake2b224(vote.VoterCredential)] = choice
+		default:
+			return olocalstatequery.GovActionState{}, fmt.Errorf(
+				"unsupported governance voter type: %d",
+				vote.VoterType,
+			)
+		}
+	}
+	return state, nil
+}
+
+func stakeCredentialFromVote(
+	vote *models.GovernanceVote,
+) olocalstatequery.StakeCredential {
+	return olocalstatequery.StakeCredential{
+		Tag:   uint64(vote.VoterCredentialTag),
+		Bytes: ledger.NewBlake2b224(vote.VoterCredential),
+	}
 }
 
 func (ls *LedgerState) queryShelleyUtxoByTxIn(

@@ -1260,6 +1260,17 @@ The `LedgerView` interface provides query access to ledger state:
 - Stake distribution queries
 - Account registration checks
 
+### Local State Query
+
+The node-to-client LocalStateQuery server in `ouroboros/localstatequery.go`
+delegates decoded ledger queries to `LedgerState.Query`. Stake-address
+inspection combines several independently encoded queries: filtered pool
+delegations and rewards, the registration deposits locked by the requested
+stake credentials, current DRep vote delegatees, and active governance
+proposals. The handlers read current account state and registration history
+from the database; proposal results reconstruct the on-wire proposal procedure
+from the persisted action CBOR, return address, deposit, anchor, and votes.
+
 ## Chain Management
 
 The `ChainManager` (`chain/manager.go`) manages multiple chains:
