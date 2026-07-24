@@ -295,6 +295,7 @@ func (n *Node) Run(ctx context.Context) error {
 		ChainsyncIngressEligible: n.isChainsyncIngressEligible,
 		ChainsyncApplyEligible:   n.chainsyncApplyEligible,
 		ChainsyncObservePeerTip:  n.chainsyncObservePeerTip,
+		ChainsyncObserveRollback: n.chainsyncObserveRollback,
 		// On the Musashi prototype network every mini-protocol shares one muxer
 		// to a single relay; block/EB traffic can delay the relay's keep-alive
 		// pong past the tight 10s gouroboros default, making dingo drop the

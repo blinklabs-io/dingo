@@ -189,6 +189,16 @@ type OuroborosConfig struct {
 	// revokes corroboration is not yet processed). Returning false (or nil hook)
 	// falls back to the async PeerTipUpdateEvent path.
 	ChainsyncObservePeerTip func(chainselection.PeerTipUpdateEvent) bool
+	// ChainsyncObserveRollback observes a peer rollback. It returns true if it
+	// handled the observation synchronously, in which case the caller MUST NOT
+	// also publish the async PeerRollbackEvent (avoids a double update). It
+	// mirrors ChainsyncObservePeerTip for the roll-backward path: a rollback
+	// trims the peer's observed frontier (ApplyRollback) and can therefore
+	// change its corroboration status, so the node applies it to chain selection
+	// synchronously before the ChainsyncApplyEligible gate runs, so the rollback
+	// apply decision reflects the post-rollback state. Returning false (or nil
+	// hook) falls back to the async PeerRollbackEvent path.
+	ChainsyncObserveRollback func(chainselection.PeerRollbackEvent) bool
 	// Enable experimental Leios protocol support
 	EnableLeios bool
 	// LeiosClosureWaitTimeout optionally overrides how long the NtC chainsync

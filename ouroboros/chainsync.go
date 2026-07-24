@@ -683,22 +683,33 @@ func (o *Ouroboros) chainsyncClientRollBackward(
 	) {
 		return nil
 	}
-	// Observe the rollback for chain selection first (trims the peer's observed
-	// history) so corroboration tracking stays correct even for a peer whose
-	// blocks we are withholding via the apply gate below.
-	o.EventBus.Publish(
-		chainselection.PeerRollbackEventType,
-		event.NewEvent(
+	// Observe the rollback for chain selection FIRST — it trims the peer's
+	// observed frontier (ApplyRollback), which can change its corroboration
+	// status, so the apply gate below must reflect it. If the hook handles it
+	// synchronously (Genesis corroboration active), skip the async publish to
+	// avoid a double update; otherwise publish for the async subscriber. This
+	// mirrors the roll-forward ChainsyncObservePeerTip ordering.
+	rollbackEvent := chainselection.PeerRollbackEvent{
+		ConnectionId: ctx.ConnectionId,
+		Point:        point,
+		Tip:          tip,
+	}
+	observedSync := false
+	if o.config.ChainsyncObserveRollback != nil {
+		observedSync = o.config.ChainsyncObserveRollback(rollbackEvent)
+	}
+	if !observedSync {
+		o.EventBus.Publish(
 			chainselection.PeerRollbackEventType,
-			chainselection.PeerRollbackEvent{
-				ConnectionId: ctx.ConnectionId,
-				Point:        point,
-				Tip:          tip,
-			},
-		),
-	)
+			event.NewEvent(
+				chainselection.PeerRollbackEventType,
+				rollbackEvent,
+			),
+		)
+	}
 	// Apply gate: withhold an uncorroborated peer's rollback from the ledger,
-	// mirroring the roll-forward apply gate.
+	// mirroring the roll-forward apply gate. The observation above ran first, so
+	// this reflects the post-rollback corroboration state.
 	if !o.shouldApplyChainsyncToLedger(ctx.ConnectionId) {
 		o.config.Logger.Debug(
 			"chainsync: rollback withheld (not apply eligible)",
